@@ -1,0 +1,91 @@
+{
+  "belief_path_code_hash": "bde88fd6cd70f88b23d54791d85a26671b2d164b60cacdb888a21a4243f46c01",
+  "calibration_version": "2.1.0-managed-policy-2023.2",
+  "episode_manifest": "outputs/v2_1_managed_policy_calibration_2023_stream_v2/managed_policy_episodes.parquet.manifest.json",
+  "episode_manifest_hash": "a96b08c8178ec594c1083ff6ae346e3f758f8a3bbbae00f84233ff63a4650b3e",
+  "episode_table": "outputs/v2_1_managed_policy_calibration_2023_stream_v2/managed_policy_episodes.parquet",
+  "episode_table_hash": "10ca45101e22b2bd8d8c0226bee61d2525cb8e9a73cc00f3568acdad982af0a3",
+  "future_path_used": false,
+  "holdout_used": false,
+  "managed_policy_code_hash": "59d9f04d2bd44015d0a1637db2640ab040841fe0b07dabe51a53e248648fe77b",
+  "managed_policy_pipeline_hash": "019140fbbea74064c3221e03bd4dc2a8490696e0ce2423f6d94069eef1b5e36b",
+  "method": {
+    "bins": 8,
+    "extrapolation": "forbidden",
+    "grouping": "playbook with directions pooled only because long/short symmetry is preregistered",
+    "minimum_bin_episodes": 15,
+    "minimum_direction_episodes": 40,
+    "minimum_playbook_episodes": 120,
+    "name": "fixed_quantile_bins_weighted_pava_continuous_value",
+    "smoothing_prior_mean_R": 0.0,
+    "smoothing_prior_weight": 20,
+    "threshold_or_pnl_search": false
+  },
+  "model_config_hash": "ff6ffb1ad69434033634fb322230095692fee2c9f4deaea1a0753bd51d68d2dd",
+  "playbook_registry_hash": "2c4ee3ec355d162cf1b3571c6fa6cb8cc08f5e67350e3169a353fb6eff52e742",
+  "playbooks": {
+    "displacement_first_pullback": {
+      "direction_episodes": {
+        "long": 394,
+        "short": 234
+      },
+      "episodes": 628,
+      "points": [],
+      "reason": "monotone managed value has no usable discrimination: managed-policy calibration collapsed to one level",
+      "status": "unavailable"
+    },
+    "failed_auction_value_return": {
+      "direction_episodes": {
+        "long": 239,
+        "short": 298
+      },
+      "episodes": 537,
+      "points": [],
+      "reason": "monotone managed value has no usable discrimination: managed-policy calibration collapsed to one level",
+      "status": "unavailable"
+    },
+    "liquidity_sweep_reversal": {
+      "direction_episodes": {
+        "long": 73,
+        "short": 69
+      },
+      "episodes": 142,
+      "gross_R_mean": 0.013448825309146078,
+      "gross_R_median": -0.06413210445468509,
+      "in_sample_value_mae_R_descriptive_only": 0.9385529611332846,
+      "points": [
+        {
+          "episodes": 18,
+          "managed_gross_R": -0.06008080610762421,
+          "structural_score_R": 0.17025453060103968
+        },
+        {
+          "episodes": 72,
+          "managed_gross_R": 0.0024155023975531895,
+          "structural_score_R": 0.5324366505367164
+        },
+        {
+          "episodes": 52,
+          "managed_gross_R": 0.03522918197389889,
+          "structural_score_R": 1.2271062281906457
+        }
+      ],
+      "score_support_R": [
+        0.17025453060103968,
+        1.2271062281906457
+      ],
+      "status": "ready"
+    }
+  },
+  "policy_base_config_hash": "ff6ffb1ad69434033634fb322230095692fee2c9f4deaea1a0753bd51d68d2dd",
+  "policy_value_protocol_hash": "38102693405f277d405a85d9c4998a801efe4411de48e01d4983b9d9198f99ea",
+  "revealed_june_july_mbo_used_for_fit_or_selection": false,
+  "source_sha256": "0d425277b7fff2a40350958157f5aee72407ae06ab0bf6a760a324825e06010c",
+  "status": "ready",
+  "training_window": {
+    "end_exclusive": "2024-01-01T00:00:00-05:00",
+    "role": "managed_policy_calibration",
+    "start": "2023-01-01T00:00:00-05:00"
+  },
+  "validation_protocol_hash": "1c5ac8301b52f809238c56955ad72e105f6a1972909104dacad08527660a69cd"
+}

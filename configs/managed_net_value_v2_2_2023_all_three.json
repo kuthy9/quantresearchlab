@@ -1,0 +1,96 @@
+{
+  "action_equivalence_protocol_hash": "5c385d5d78a5f2a59120f5add0ba629df30fa77d4e7b3d707b7cad0558bab78b",
+  "calibration_pipeline_hash": "30c906737e7a575c797524036687d7a02e445470eb422d9d101cbba372354538",
+  "calibration_version": "2.2.0-managed-net-2023.1",
+  "disabled_playbooks": [],
+  "episode_builder_code_hash": "37827a82e7a83d70051377af1f2f4e3727e8d3b1d4e304b045fe1d7f8f35ea20",
+  "episode_table_sha256": "b5fe6a3bf6915ad23588598e9c5338cf85a8fc0915e9aa109b75380b9755f332",
+  "feature_names": [
+    "max_calibrated_belief",
+    "second_calibrated_belief",
+    "belief_dispersion",
+    "equivalent_hypothesis_count",
+    "representative_raw_probability",
+    "calibration_gap",
+    "primary_target_R_capped",
+    "remaining_path_R_capped",
+    "minutes_to_deadline_scaled",
+    "evidence_dfp",
+    "evidence_lsr",
+    "evidence_favr"
+  ],
+  "fit_method": {
+    "hyperparameter_search": false,
+    "model": "pooled fixed-feature ridge regression",
+    "ridge_lambda": 10.0,
+    "threshold_or_pnl_search": false
+  },
+  "future_path_used": false,
+  "gate_results": {
+    "minimum_each_fold_episodes": true,
+    "minimum_oof_episodes": true,
+    "mse_must_beat_training_mean_baseline": true,
+    "positive_value_bucket_must_have_positive_realized_mean": false,
+    "spearman_prediction_to_label_strictly_positive": true
+  },
+  "holdout_used": false,
+  "leave_one_playbook_out": {
+    "cross_variant_comparison_pending": true,
+    "current_variant": "all_three",
+    "method": "separate full decision-and-risk replay per preregistered policy variant; this artifact contains one variant only"
+  },
+  "managed_net_fit_code_hash": "772236658062ba2bc068e7c9a898d91d28a9a5b0e74dd33896b019e38907c59c",
+  "managed_net_value_code_hash": "313e2120d6b90c00403ccdfe1639df361f19fb2aa5c484217585c9813fe5106b",
+  "managed_net_value_protocol_hash": "284077d3fb2ef374dbb950006af930d1ec32d3036fde079df3e214bccdc3005f",
+  "oof_metrics": {
+    "baseline_mse": 1.0014005561228052,
+    "eligible_actions": 1316,
+    "episodes": 876,
+    "mse": 1.0010880964434323,
+    "positive_bucket_episodes": 86,
+    "positive_bucket_realized_mean_R": -0.10917896984605671,
+    "prediction_mean_R": -0.094517907591614,
+    "realized_mean_R": -0.10534405529378496,
+    "spearman": 0.1224879722285521,
+    "unique_action_keys": 879
+  },
+  "policy_base_config_hash": "d4e0aef1be9bc06a541cde71c28ad91bef0880a25509dc269659a00a666a6525",
+  "policy_variant": "all_three",
+  "reason": "one or more preregistered temporal out-of-sample gates failed; managed enter value remains unavailable",
+  "revealed_june_july_used_for_fit_or_selection": false,
+  "sealed_holdout_read": false,
+  "status": "unavailable",
+  "temporal_folds": [
+    {
+      "baseline_mse": 0.8712894375152666,
+      "fold": 1,
+      "mse": 0.8756039137326523,
+      "prediction_mean_R": -0.05400959567172677,
+      "realized_mean_R": -0.20425853334458016,
+      "status": "evaluated",
+      "train_episodes": 440,
+      "validation_episodes": 311
+    },
+    {
+      "baseline_mse": 0.9894047991769306,
+      "fold": 2,
+      "mse": 0.99136089013764,
+      "prediction_mean_R": -0.13414956775291947,
+      "realized_mean_R": -0.04703982152500251,
+      "status": "evaluated",
+      "train_episodes": 751,
+      "validation_episodes": 315
+    },
+    {
+      "baseline_mse": 1.1783734414223854,
+      "fold": 3,
+      "mse": 1.1694466996809412,
+      "prediction_mean_R": -0.09497435581670882,
+      "realized_mean_R": -0.0557577791472616,
+      "status": "evaluated",
+      "train_episodes": 1066,
+      "validation_episodes": 250
+    }
+  ],
+  "validation_protocol_hash": "c67b7fd29dacd1709ff08787263d8d54b4d3043c18b4d28216a63e62276565bf"
+}

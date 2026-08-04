@@ -1,0 +1,1949 @@
+"""Causal H1 dealing-range and completed-1m manipulation primitives."""
+from __future__ import annotations
+
+from collections import deque
+from copy import copy
+from dataclasses import dataclass, replace
+import hashlib
+import json
+import math
+from pathlib import Path
+from statistics import median
+from typing import Iterable, Sequence
+
+import pandas as pd
+
+from .model import (
+    Candle,
+    DealingRangeLifecycle,
+    DealingRangeState,
+    GROUP4_HARD_BOUNDARY_REASONS,
+    LiquidityInventoryItem,
+    LiquidityInventoryLifecycle,
+    LiquidityPoolState,
+    ManipulationLifecycle,
+    ManipulationState,
+    SupportResistanceLifecycle,
+    SupportResistanceState,
+    Timeframe,
+    aware_timestamp,
+    clamp,
+)
+
+
+@dataclass(frozen=True)
+class Group4Protocol:
+    """Executable mirror of the frozen Group 4 contract."""
+
+    protocol_hash: str
+    source_group12_protocol_hash: str
+    tick_size: float
+    h1_atr_period: int
+    m1_atr_period: int
+    manipulation_resolution_delay_real_1m_bars: int
+    minimum_candidate_real_h1_bars: int
+    maximum_forming_real_h1_bars: int
+    minimum_boundary_touches_each: int
+    minimum_midpoint_crossings: int
+    minimum_inside_close_fraction: float
+    maximum_width_atr_at_formation: float
+    compression_early_real_h1_bars: int
+    compression_late_real_h1_bars: int
+    maximum_compression_ratio: float
+    maximum_ranges: int
+    maximum_manipulations: int
+    protocol_version: str = "3.1.0-group4.0"
+
+    def __post_init__(self) -> None:
+        hashes = (
+            self.protocol_hash,
+            self.source_group12_protocol_hash,
+        )
+        if (
+            any(
+                len(value) != 64
+                or any(character not in "0123456789abcdef"
+                       for character in value)
+                for value in hashes
+            )
+            or self.protocol_version != "3.1.0-group4.0"
+            or not math.isclose(
+                self.tick_size,
+                0.25,
+                rel_tol=0.0,
+                abs_tol=0.0,
+            )
+            or self.h1_atr_period != 14
+            or self.m1_atr_period != 14
+            or self.manipulation_resolution_delay_real_1m_bars != 1
+            or self.minimum_candidate_real_h1_bars != 8
+            or self.maximum_forming_real_h1_bars != 24
+            or self.minimum_boundary_touches_each != 2
+            or self.minimum_midpoint_crossings != 2
+            or not math.isclose(
+                self.minimum_inside_close_fraction,
+                0.8,
+                rel_tol=0.0,
+                abs_tol=0.0,
+            )
+            or not math.isclose(
+                self.maximum_width_atr_at_formation,
+                4.0,
+                rel_tol=0.0,
+                abs_tol=0.0,
+            )
+            or self.compression_early_real_h1_bars != 4
+            or self.compression_late_real_h1_bars != 4
+            or not math.isclose(
+                self.maximum_compression_ratio,
+                0.8,
+                rel_tol=0.0,
+                abs_tol=0.0,
+            )
+            or self.maximum_ranges != 64
+            or self.maximum_manipulations != 256
+        ):
+            raise ValueError("Group 4 protocol differs from its frozen contract")
+
+    @classmethod
+    def from_file(cls, path: str | Path) -> "Group4Protocol":
+        source = Path(path)
+        if not source.is_absolute() and not source.exists():
+            source = Path(__file__).resolve().parents[1] / source
+        raw = source.read_bytes()
+        payload = json.loads(raw)
+        parameters = payload["engineering_parameters"]
+        return cls(
+            protocol_hash=hashlib.sha256(raw).hexdigest(),
+            source_group12_protocol_hash=payload["upstream"][
+                "group12_protocol_sha256"
+            ],
+            tick_size=float(payload["tick_size"]),
+            h1_atr_period=int(parameters["h1_atr_period"]),
+            m1_atr_period=int(parameters["m1_atr_period"]),
+            manipulation_resolution_delay_real_1m_bars=int(
+                parameters[
+                    "manipulation_resolution_delay_real_1m_bars"
+                ]
+            ),
+            minimum_candidate_real_h1_bars=int(
+                parameters["minimum_candidate_real_h1_bars"]
+            ),
+            maximum_forming_real_h1_bars=int(
+                parameters["maximum_forming_real_h1_bars"]
+            ),
+            minimum_boundary_touches_each=int(
+                parameters["minimum_boundary_touches_each"]
+            ),
+            minimum_midpoint_crossings=int(
+                parameters["minimum_midpoint_crossings"]
+            ),
+            minimum_inside_close_fraction=float(
+                parameters["minimum_inside_close_fraction"]
+            ),
+            maximum_width_atr_at_formation=float(
+                parameters["maximum_width_atr_at_formation"]
+            ),
+            compression_early_real_h1_bars=int(
+                parameters["compression_early_real_h1_bars"]
+            ),
+            compression_late_real_h1_bars=int(
+                parameters["compression_late_real_h1_bars"]
+            ),
+            maximum_compression_ratio=float(
+                parameters["maximum_compression_ratio"]
+            ),
+            maximum_ranges=int(
+                parameters["retained_dealing_range_states"]
+            ),
+            maximum_manipulations=int(
+                parameters["retained_manipulation_states"]
+            ),
+            protocol_version=payload["protocol_version"],
+        )
+
+
+@dataclass(frozen=True)
+class Group4Update:
+    dealing_ranges: tuple[DealingRangeState, ...]
+    manipulations: tuple[ManipulationState, ...]
+    range_boundary_inventory: tuple[LiquidityInventoryItem, ...]
+    range_transitions: tuple[DealingRangeState, ...] = ()
+    manipulation_transitions: tuple[ManipulationState, ...] = ()
+    ambiguous_sweep_item_ids: tuple[str, ...] = ()
+    atr_unready_sweep_item_ids: tuple[str, ...] = ()
+    boundary_reason: str | None = None
+
+    def __post_init__(self) -> None:
+        for name in (
+            "dealing_ranges",
+            "manipulations",
+            "range_boundary_inventory",
+            "range_transitions",
+            "manipulation_transitions",
+            "ambiguous_sweep_item_ids",
+            "atr_unready_sweep_item_ids",
+        ):
+            object.__setattr__(self, name, tuple(getattr(self, name)))
+        if (
+            self.boundary_reason is not None
+            and self.boundary_reason not in GROUP4_HARD_BOUNDARY_REASONS
+        ):
+            raise ValueError("Group 4 update has an unregistered boundary")
+        if (
+            len(self.ambiguous_sweep_item_ids)
+            != len(set(self.ambiguous_sweep_item_ids))
+            or len(self.atr_unready_sweep_item_ids)
+            != len(set(self.atr_unready_sweep_item_ids))
+            or set(self.ambiguous_sweep_item_ids)
+            & set(self.atr_unready_sweep_item_ids)
+        ):
+            raise ValueError("Group 4 unclassified sweep identities repeat")
+
+
+@dataclass
+class _RangeWork:
+    bars: deque[Candle]
+    true_ranges: deque[float]
+
+    def clone(self) -> "_RangeWork":
+        return _RangeWork(
+            deque(self.bars, maxlen=self.bars.maxlen),
+            deque(
+                self.true_ranges,
+                maxlen=self.true_ranges.maxlen,
+            ),
+        )
+
+
+@dataclass(frozen=True)
+class _ManipulationSource:
+    side: str
+    source_kind: str
+    source_id: str
+    source_protocol_hash: str
+    source_timeframe: Timeframe
+    inventory: LiquidityInventoryItem
+    formed_at: pd.Timestamp
+    eligible_at: pd.Timestamp
+    lower_bound: float
+    upper_bound: float
+    boundary_price: float
+
+
+def _identity(*parts: object) -> str:
+    payload = "|".join(
+        value.isoformat()
+        if isinstance(value, pd.Timestamp)
+        else str(value)
+        for value in parts
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _true_range(candle: Candle, prior_close: float | None) -> float:
+    if prior_close is None:
+        return float(candle.high - candle.low)
+    return float(
+        max(
+            candle.high - candle.low,
+            abs(candle.high - prior_close),
+            abs(candle.low - prior_close),
+        )
+    )
+
+
+class CausalGroup4Tracker:
+    """Incrementally describes range formation and sourced excursions."""
+
+    def __init__(self, protocol: Group4Protocol) -> None:
+        self.protocol = protocol
+        self._ranges: dict[str, DealingRangeState] = {}
+        self._range_order: deque[str] = deque()
+        self._range_work: dict[str, _RangeWork] = {}
+        self._range_inventory: dict[str, LiquidityInventoryItem] = {}
+        self._manipulations: dict[str, ManipulationState] = {}
+        self._manipulation_order: deque[str] = deque()
+        self._h1_true_ranges: deque[float] = deque(
+            maxlen=protocol.h1_atr_period
+        )
+        self._m1_true_ranges: deque[float] = deque(
+            maxlen=protocol.m1_atr_period
+        )
+        self._prior_h1_close: float | None = None
+        self._prior_m1_close: float | None = None
+        self._identity: tuple[str, int] | None = None
+        self._last_h1_end: pd.Timestamp | None = None
+        self._last_m1_end: pd.Timestamp | None = None
+        self._last_h1_raw_end: pd.Timestamp | None = None
+        self._last_m1_raw_end: pd.Timestamp | None = None
+        self._blocked_cold_pairs: set[tuple[str, str]] = set()
+        self._last_h1_input: tuple[object, ...] | None = None
+        self._last_m1_input: tuple[object, ...] | None = None
+        self._last_h1_output: Group4Update | None = None
+        self._last_m1_output: Group4Update | None = None
+        self._last_boundary_input: tuple[object, ...] | None = None
+        self._last_boundary_output: Group4Update | None = None
+
+    @property
+    def last_h1_end(self) -> pd.Timestamp | None:
+        return self._last_h1_end
+
+    @property
+    def last_m1_end(self) -> pd.Timestamp | None:
+        return self._last_m1_end
+
+    def _transaction_clone(self) -> "CausalGroup4Tracker":
+        candidate = copy(self)
+        candidate._ranges = dict(self._ranges)
+        candidate._range_order = deque(self._range_order)
+        candidate._range_work = {
+            key: value.clone()
+            for key, value in self._range_work.items()
+        }
+        candidate._range_inventory = dict(self._range_inventory)
+        candidate._manipulations = dict(self._manipulations)
+        candidate._manipulation_order = deque(
+            self._manipulation_order
+        )
+        candidate._h1_true_ranges = deque(
+            self._h1_true_ranges,
+            maxlen=self._h1_true_ranges.maxlen,
+        )
+        candidate._m1_true_ranges = deque(
+            self._m1_true_ranges,
+            maxlen=self._m1_true_ranges.maxlen,
+        )
+        candidate._blocked_cold_pairs = set(self._blocked_cold_pairs)
+        return candidate
+
+    def _commit(self, candidate: "CausalGroup4Tracker") -> None:
+        self.__dict__.update(candidate.__dict__)
+
+    def snapshot(self) -> Group4Update:
+        return Group4Update(
+            dealing_ranges=tuple(
+                self._ranges[key] for key in self._range_order
+            ),
+            manipulations=tuple(
+                self._manipulations[key]
+                for key in self._manipulation_order
+            ),
+            range_boundary_inventory=tuple(
+                sorted(
+                    self._range_inventory.values(),
+                    key=lambda item: (
+                        item.confirmed_at,
+                        item.item_id,
+                    ),
+                )
+            ),
+        )
+
+    def mark_existing_source_pairs_ineligible(
+        self,
+        support_resistance: Iterable[SupportResistanceState],
+    ) -> None:
+        """Fail closed when the retained prefix cannot prove pair history."""
+
+        zones = tuple(support_resistance)
+        if any(
+            not isinstance(zone, SupportResistanceState)
+            or zone.timeframe is not Timeframe.H1
+            for zone in zones
+        ):
+            raise ValueError("Group 4 cold pair source is not typed H1")
+        supports = tuple(
+            zone
+            for zone in zones
+            if zone.side == "support" and self._source_is_live(zone)
+        )
+        resistances = tuple(
+            zone
+            for zone in zones
+            if zone.side == "resistance" and self._source_is_live(zone)
+        )
+        self._blocked_cold_pairs.update(
+            (lower.zone_id, upper.zone_id)
+            for lower in supports
+            for upper in resistances
+        )
+        self._last_h1_input = None
+        self._last_h1_output = None
+        self._last_boundary_input = None
+        self._last_boundary_output = None
+
+    def _output(
+        self,
+        *,
+        range_transitions: Iterable[DealingRangeState] = (),
+        manipulation_transitions: Iterable[ManipulationState] = (),
+        ambiguous: Iterable[str] = (),
+        atr_unready: Iterable[str] = (),
+        boundary_reason: str | None = None,
+    ) -> Group4Update:
+        snapshot = self.snapshot()
+        return Group4Update(
+            dealing_ranges=snapshot.dealing_ranges,
+            manipulations=snapshot.manipulations,
+            range_boundary_inventory=(
+                snapshot.range_boundary_inventory
+            ),
+            range_transitions=tuple(range_transitions),
+            manipulation_transitions=tuple(
+                manipulation_transitions
+            ),
+            ambiguous_sweep_item_ids=tuple(sorted(set(ambiguous))),
+            atr_unready_sweep_item_ids=tuple(
+                sorted(set(atr_unready))
+            ),
+            boundary_reason=boundary_reason,
+        )
+
+    def _validate_contract(self, candle: Candle) -> None:
+        identity = (candle.symbol, int(candle.instrument_id))
+        if self._identity is not None and identity != self._identity:
+            raise ValueError(
+                "Group 4 contract changed without a hard boundary"
+            )
+        self._identity = identity
+
+    def _validate_h1(
+        self,
+        candle: Candle,
+        zones: Sequence[SupportResistanceState],
+    ) -> None:
+        if (
+            not isinstance(candle, Candle)
+            or candle.timeframe is not Timeframe.H1
+            or not candle.complete
+        ):
+            raise ValueError("Group 4 requires a completed H1 candle")
+        if any(
+            not isinstance(zone, SupportResistanceState)
+            or zone.timeframe is not Timeframe.H1
+            for zone in zones
+        ):
+            raise ValueError("Group 4 received a non-H1 range source")
+        zone_ids = tuple(zone.zone_id for zone in zones)
+        if (
+            len(zone_ids) != len(set(zone_ids))
+            or any(
+                value is not None and value > candle.end
+                for zone in zones
+                for value in (
+                    zone.confirmed_at,
+                    zone.tested_at,
+                    zone.broken_at,
+                    zone.reaccepted_at,
+                    zone.retired_at,
+                    *zone.touch_times,
+                )
+            )
+        ):
+            raise ValueError(
+                "Group 4 H1 source identity or knowledge clock is invalid"
+            )
+        self._validate_contract(candle)
+
+    @staticmethod
+    def _live_range(
+        ranges: Iterable[DealingRangeState],
+    ) -> DealingRangeState | None:
+        live = tuple(
+            state
+            for state in ranges
+            if state.lifecycle
+            in {
+                DealingRangeLifecycle.FORMING,
+                DealingRangeLifecycle.MATURE,
+            }
+        )
+        if len(live) > 1:
+            raise RuntimeError("Group 4 retained more than one live range")
+        return live[0] if live else None
+
+    def _range_statistics(
+        self,
+        state: DealingRangeState,
+        work: _RangeWork,
+        lower: SupportResistanceState | None,
+        upper: SupportResistanceState | None,
+    ) -> dict[str, object]:
+        bars = tuple(work.bars)
+        closes = tuple(float(candle.close) for candle in bars)
+        sides = tuple(
+            -1 if value < state.midpoint else 1
+            for value in closes
+            if value != state.midpoint
+        )
+        crossings = sum(
+            left != right for left, right in zip(sides, sides[1:])
+        )
+        inside_fraction = (
+            sum(
+                state.lower_bound <= value <= state.upper_bound
+                for value in closes
+            )
+            / len(closes)
+        )
+        ranges = tuple(work.true_ranges)
+        early_count = self.protocol.compression_early_real_h1_bars
+        late_count = self.protocol.compression_late_real_h1_bars
+        compression_ratio = (
+            median(ranges[-late_count:])
+            / max(median(ranges[:early_count]), self.protocol.tick_size)
+            if len(ranges) >= max(early_count, late_count)
+            else 1.0
+        )
+        lower_count = (
+            state.lower_touch_count
+            if lower is None
+            else int(lower.total_touch_count)
+        )
+        upper_count = (
+            state.upper_touch_count
+            if upper is None
+            else int(upper.total_touch_count)
+        )
+        narrowness = clamp(
+            1.0
+            - state.width_atr_at_formation
+            / self.protocol.maximum_width_atr_at_formation
+        )
+        compression = clamp(1.0 - compression_ratio)
+        boundary = clamp(min(lower_count, upper_count) / 3.0)
+        crossing = clamp(crossings / 4.0)
+        strength = (
+            narrowness
+            + compression
+            + boundary
+            + crossing
+            + inside_fraction
+        ) / 5.0
+        return {
+            "candidate_real_h1_bars": len(bars),
+            "lower_touch_count": lower_count,
+            "upper_touch_count": upper_count,
+            "midpoint_crossings": crossings,
+            "inside_close_fraction": inside_fraction,
+            "compression_ratio": compression_ratio,
+            "narrowness_strength": narrowness,
+            "compression_strength": compression,
+            "boundary_test_strength": boundary,
+            "crossing_strength": crossing,
+            "strength": strength,
+            "age_h1_bars": len(bars) - 1,
+        }
+
+    @staticmethod
+    def _source_is_live(
+        state: SupportResistanceState | None,
+    ) -> bool:
+        return (
+            state is not None
+            and state.lifecycle
+            in {
+                SupportResistanceLifecycle.ACTIVE,
+                SupportResistanceLifecycle.TESTED,
+            }
+        )
+
+    def _terminal_range(
+        self,
+        state: DealingRangeState,
+        observed_at: pd.Timestamp,
+        reason: str,
+        **changes: object,
+    ) -> DealingRangeState:
+        updates = dict(changes)
+        updates.update(
+            lifecycle=DealingRangeLifecycle.BROKEN,
+            broken_at=observed_at,
+            state_started_at=observed_at,
+            last_updated_at=observed_at,
+            transition_reason=reason,
+        )
+        terminal = replace(
+            state,
+            **updates,
+        )
+        self._ranges[state.range_id] = terminal
+        self._range_work.pop(state.range_id, None)
+        self._sync_range_inventory(terminal)
+        return terminal
+
+    def _advance_live_range(
+        self,
+        candle: Candle,
+        zones_by_id: dict[str, SupportResistanceState],
+        true_range: float,
+    ) -> DealingRangeState | None:
+        state = self._live_range(self._ranges.values())
+        if state is None:
+            return None
+        lower = zones_by_id.get(state.lower_source_zone_id)
+        upper = zones_by_id.get(state.upper_source_zone_id)
+        if state.lifecycle is DealingRangeLifecycle.MATURE:
+            updated = replace(
+                state,
+                last_updated_at=candle.end,
+                age_h1_bars=state.age_h1_bars + 1,
+            )
+            if (
+                candle.close < state.lower_bound
+                or candle.close > state.upper_bound
+            ):
+                return self._terminal_range(
+                    updated,
+                    candle.end,
+                    "close_beyond_frozen_range",
+                )
+            self._ranges[state.range_id] = updated
+            self._sync_range_inventory(updated)
+            return None
+        work = self._range_work[state.range_id]
+        if work.bars[-1].end < candle.end:
+            work.bars.append(candle)
+            work.true_ranges.append(float(true_range))
+        statistics = self._range_statistics(
+            state,
+            work,
+            lower,
+            upper,
+        )
+        update_fields = {
+            **statistics,
+            "lower_source_tested_at": (
+                state.lower_source_tested_at
+                if lower is None
+                else lower.tested_at
+            ),
+            "upper_source_tested_at": (
+                state.upper_source_tested_at
+                if upper is None
+                else upper.tested_at
+            ),
+            "lower_source_member_swing_ids": (
+                state.lower_source_member_swing_ids
+                if lower is None
+                else lower.member_swing_ids
+            ),
+            "upper_source_member_swing_ids": (
+                state.upper_source_member_swing_ids
+                if upper is None
+                else upper.member_swing_ids
+            ),
+            "last_updated_at": candle.end,
+        }
+        if (
+            candle.close < state.lower_bound
+            or candle.close > state.upper_bound
+        ):
+            return self._terminal_range(
+                state,
+                candle.end,
+                "close_beyond_frozen_range",
+                **update_fields,
+            )
+        if not self._source_is_live(lower) or not self._source_is_live(upper):
+            return self._terminal_range(
+                state,
+                candle.end,
+                "forming_source_invalidated",
+                **update_fields,
+            )
+        mature = (
+            statistics["candidate_real_h1_bars"]
+            >= self.protocol.minimum_candidate_real_h1_bars
+            and statistics["lower_touch_count"]
+            >= self.protocol.minimum_boundary_touches_each
+            and statistics["upper_touch_count"]
+            >= self.protocol.minimum_boundary_touches_each
+            and statistics["midpoint_crossings"]
+            >= self.protocol.minimum_midpoint_crossings
+            and statistics["inside_close_fraction"]
+            >= self.protocol.minimum_inside_close_fraction
+            and state.width_atr_at_formation
+            <= self.protocol.maximum_width_atr_at_formation
+            and statistics["compression_ratio"]
+            <= self.protocol.maximum_compression_ratio
+        )
+        if mature:
+            updated = replace(
+                state,
+                **update_fields,
+                lifecycle=DealingRangeLifecycle.MATURE,
+                mature_at=candle.end,
+                state_started_at=candle.end,
+                transition_reason="maturity_conditions_met",
+            )
+            self._ranges[state.range_id] = updated
+            self._range_work.pop(state.range_id, None)
+            self._create_range_inventory(updated)
+            return updated
+        if (
+            statistics["candidate_real_h1_bars"]
+            >= self.protocol.maximum_forming_real_h1_bars
+        ):
+            terminal = replace(
+                state,
+                **update_fields,
+                lifecycle=DealingRangeLifecycle.BROKEN,
+                broken_at=candle.end,
+                state_started_at=candle.end,
+                transition_reason="maturity_deadline_elapsed",
+            )
+            self._ranges[state.range_id] = terminal
+            self._range_work.pop(state.range_id, None)
+            return terminal
+        updated = replace(
+            state,
+            **update_fields,
+            transition_reason=None,
+        )
+        self._ranges[state.range_id] = updated
+        return None
+
+    def _eligible_pairs(
+        self,
+        candle: Candle,
+        zones: Sequence[SupportResistanceState],
+    ) -> tuple[
+        tuple[SupportResistanceState, SupportResistanceState],
+        ...,
+    ]:
+        supports = tuple(
+            zone
+            for zone in zones
+            if zone.side == "support" and self._source_is_live(zone)
+        )
+        resistances = tuple(
+            zone
+            for zone in zones
+            if zone.side == "resistance" and self._source_is_live(zone)
+        )
+        admitted = {
+            (
+                state.lower_source_zone_id,
+                state.upper_source_zone_id,
+            )
+            for state in self._ranges.values()
+        }
+        pairs = [
+            (lower, upper)
+            for lower in supports
+            for upper in resistances
+            if (
+                lower.upper_bound < upper.lower_bound
+                and lower.lower_bound
+                <= candle.close
+                <= upper.upper_bound
+                and (lower.zone_id, upper.zone_id) not in admitted
+                and (lower.zone_id, upper.zone_id)
+                not in self._blocked_cold_pairs
+            )
+        ]
+        return tuple(
+            sorted(
+                pairs,
+                key=lambda pair: (
+                    pair[1].upper_bound - pair[0].lower_bound,
+                    -max(
+                        pair[0].confirmed_at.value,
+                        pair[1].confirmed_at.value,
+                    ),
+                    pair[0].zone_id,
+                    pair[1].zone_id,
+                ),
+            )
+        )
+
+    def _create_range(
+        self,
+        candle: Candle,
+        zones: Sequence[SupportResistanceState],
+        true_range: float,
+    ) -> DealingRangeState | None:
+        if self._live_range(self._ranges.values()) is not None:
+            return None
+        if len(self._h1_true_ranges) < self.protocol.h1_atr_period:
+            return None
+        pairs = self._eligible_pairs(candle, zones)
+        if not pairs:
+            return None
+        lower, upper = pairs[0]
+        formation_atr = max(
+            sum(self._h1_true_ranges) / len(self._h1_true_ranges),
+            self.protocol.tick_size,
+        )
+        lower_bound = float(lower.lower_bound)
+        upper_bound = float(upper.upper_bound)
+        width = upper_bound - lower_bound
+        midpoint = (lower_bound + upper_bound) / 2.0
+        range_id = _identity(
+            self.protocol.protocol_hash,
+            candle.symbol,
+            candle.instrument_id,
+            lower.zone_id,
+            upper.zone_id,
+            candle.end,
+        )
+        narrowness_strength = clamp(
+            1.0
+            - (width / formation_atr)
+            / self.protocol.maximum_width_atr_at_formation
+        )
+        boundary_test_strength = clamp(
+            min(
+                int(lower.total_touch_count),
+                int(upper.total_touch_count),
+            )
+            / 3.0
+        )
+        inside_close_fraction = 1.0
+        strength = (
+            narrowness_strength
+            + boundary_test_strength
+            + inside_close_fraction
+        ) / 5.0
+        state = DealingRangeState(
+            range_id=range_id,
+            protocol_hash=self.protocol.protocol_hash,
+            source_group12_protocol_hash=(
+                self.protocol.source_group12_protocol_hash
+            ),
+            symbol=candle.symbol,
+            instrument_id=int(candle.instrument_id),
+            timeframe=Timeframe.H1,
+            lifecycle=DealingRangeLifecycle.FORMING,
+            lower_source_zone_id=lower.zone_id,
+            upper_source_zone_id=upper.zone_id,
+            lower_source_confirmed_at=lower.confirmed_at,
+            upper_source_confirmed_at=upper.confirmed_at,
+            lower_source_tested_at=lower.tested_at,
+            upper_source_tested_at=upper.tested_at,
+            lower_source_member_swing_ids=lower.member_swing_ids,
+            upper_source_member_swing_ids=upper.member_swing_ids,
+            lower_source_lower_bound=lower.lower_bound,
+            lower_source_upper_bound=lower.upper_bound,
+            upper_source_lower_bound=upper.lower_bound,
+            upper_source_upper_bound=upper.upper_bound,
+            formed_at=candle.end,
+            mature_at=None,
+            broken_at=None,
+            state_started_at=candle.end,
+            last_updated_at=candle.end,
+            lower_bound=lower_bound,
+            upper_bound=upper_bound,
+            midpoint=midpoint,
+            value_price=midpoint,
+            formation_atr=formation_atr,
+            width_points=width,
+            width_atr_at_formation=width / formation_atr,
+            candidate_real_h1_bars=1,
+            lower_touch_count=int(lower.total_touch_count),
+            upper_touch_count=int(upper.total_touch_count),
+            midpoint_crossings=0,
+            inside_close_fraction=inside_close_fraction,
+            compression_ratio=1.0,
+            narrowness_strength=narrowness_strength,
+            compression_strength=0.0,
+            boundary_test_strength=boundary_test_strength,
+            crossing_strength=0.0,
+            strength=strength,
+            age_h1_bars=0,
+            transition_reason="source_pair_selected",
+        )
+        self._ranges[range_id] = state
+        self._range_order.append(range_id)
+        self._range_work[range_id] = _RangeWork(
+            deque(
+                (candle,),
+                maxlen=self.protocol.maximum_forming_real_h1_bars,
+            ),
+            deque(
+                (float(true_range),),
+                maxlen=self.protocol.maximum_forming_real_h1_bars,
+            ),
+        )
+        self._ensure_range_capacity(
+            {zone.zone_id for zone in zones}
+        )
+        return state
+
+    def _range_item_id(
+        self,
+        state: DealingRangeState,
+        side: str,
+    ) -> str:
+        digest = _identity(
+            self.protocol.protocol_hash,
+            state.range_id,
+            side,
+            state.mature_at,
+        )
+        return f"range_boundary:{digest}"
+
+    def _create_range_inventory(
+        self,
+        state: DealingRangeState,
+    ) -> None:
+        if state.mature_at is None:
+            raise RuntimeError("forming range cannot create inventory")
+        for side, price, zone_id in (
+            (
+                "below",
+                state.lower_bound,
+                state.lower_source_zone_id,
+            ),
+            (
+                "above",
+                state.upper_bound,
+                state.upper_source_zone_id,
+            ),
+        ):
+            item = LiquidityInventoryItem(
+                item_id=self._range_item_id(state, side),
+                timeframe=Timeframe.H1,
+                side=side,
+                kind="range_boundary",
+                price=price,
+                lower_bound=price,
+                upper_bound=price,
+                formed_at=state.formed_at,
+                confirmed_at=state.mature_at,
+                lifecycle=LiquidityInventoryLifecycle.VISIBLE,
+                source_ids=(state.range_id, zone_id),
+                age_bars=state.age_h1_bars,
+                strength=state.strength,
+            )
+            self._range_inventory[item.item_id] = item
+
+    def _sync_range_inventory(
+        self,
+        state: DealingRangeState,
+    ) -> None:
+        for item_id, item in tuple(self._range_inventory.items()):
+            if state.range_id not in item.source_ids:
+                continue
+            self._range_inventory[item_id] = replace(
+                item,
+                age_bars=state.age_h1_bars,
+            )
+
+    def _ensure_range_capacity(
+        self,
+        current_zone_ids: set[str],
+    ) -> None:
+        while len(self._ranges) > self.protocol.maximum_ranges:
+            removable = next(
+                (
+                    range_id
+                    for range_id in self._range_order
+                    if (
+                        self._ranges[range_id].lifecycle
+                        is DealingRangeLifecycle.BROKEN
+                        and not {
+                            self._ranges[range_id].lower_source_zone_id,
+                            self._ranges[range_id].upper_source_zone_id,
+                        }.issubset(current_zone_ids)
+                        and all(
+                            item.lifecycle
+                            is LiquidityInventoryLifecycle.CONSUMED
+                            for item in self._range_inventory.values()
+                            if range_id in item.source_ids
+                        )
+                    )
+                ),
+                None,
+            )
+            if removable is None:
+                raise RuntimeError(
+                    "Group 4 range capacity has no safe terminal eviction"
+                )
+            self._ranges.pop(removable)
+            self._range_work.pop(removable, None)
+            self._range_order.remove(removable)
+            for item_id, item in tuple(
+                self._range_inventory.items()
+            ):
+                if removable in item.source_ids:
+                    self._range_inventory.pop(item_id)
+
+    def _apply_h1(
+        self,
+        candle: Candle,
+        zones: tuple[SupportResistanceState, ...],
+    ) -> Group4Update:
+        if (
+            self._last_h1_raw_end is not None
+            and candle.end <= self._last_h1_raw_end
+        ):
+            raise ValueError("duplicate or out-of-order Group 4 H1 candle")
+        self._last_h1_raw_end = candle.end
+        if not candle.real_completed:
+            return self._output()
+        true_range = _true_range(candle, self._prior_h1_close)
+        if self._prior_h1_close is not None and true_range > 0.0:
+            self._h1_true_ranges.append(
+                max(true_range, self.protocol.tick_size)
+            )
+        self._prior_h1_close = float(candle.close)
+        zones_by_id = {zone.zone_id: zone for zone in zones}
+        transition = self._advance_live_range(
+            candle,
+            zones_by_id,
+            true_range,
+        )
+        created = None
+        if transition is None or (
+            transition.lifecycle is not DealingRangeLifecycle.BROKEN
+        ):
+            created = self._create_range(
+                candle,
+                zones,
+                true_range,
+            )
+        self._ensure_range_capacity(set(zones_by_id))
+        self._last_h1_end = candle.end
+        return self._output(
+            range_transitions=tuple(
+                value
+                for value in (transition, created)
+                if value is not None
+            )
+        )
+
+    def on_completed_h1(
+        self,
+        candle: Candle,
+        support_resistance: Iterable[SupportResistanceState],
+    ) -> Group4Update:
+        zones = tuple(support_resistance)
+        input_value = (candle, zones)
+        if (
+            input_value == self._last_h1_input
+            and self._last_h1_output is not None
+        ):
+            return self._last_h1_output
+        candidate = self._transaction_clone()
+        try:
+            candidate._validate_h1(candle, zones)
+            output = candidate._apply_h1(candle, zones)
+            candidate._last_h1_input = input_value
+            candidate._last_h1_output = output
+            candidate._last_boundary_input = None
+            candidate._last_boundary_output = None
+        except Exception:
+            raise
+        self._commit(candidate)
+        return output
+
+    def _pool_by_inventory(
+        self,
+        item: LiquidityInventoryItem,
+        pools: Sequence[LiquidityPoolState],
+    ) -> LiquidityPoolState | None:
+        pool_id = (
+            item.item_id[len("pool:") :]
+            if item.item_id.startswith("pool:")
+            else None
+        )
+        matches = tuple(
+            pool
+            for pool in pools
+            if (
+                pool_id is not None
+                and pool.pool_id == pool_id
+                and pool.timeframe is item.timeframe
+            )
+        )
+        if len(matches) > 1:
+            raise ValueError("duplicate Group 4 pool source identity")
+        if not matches:
+            return None
+        pool = matches[0]
+        expected_kind = (
+            "equal_highs" if pool.side == "above" else "equal_lows"
+        )
+        expected_price = (
+            pool.upper_bound
+            if pool.side == "above"
+            else pool.lower_bound
+        )
+        if (
+            item.side != pool.side
+            or item.kind != expected_kind
+            or item.price != expected_price
+            or item.lower_bound != pool.lower_bound
+            or item.upper_bound != pool.upper_bound
+            or item.formed_at != pool.formed_at
+            or item.confirmed_at != pool.confirmed_at
+            or item.source_ids != pool.member_swing_ids
+        ):
+            raise ValueError(
+                "Group 4 pool inventory and source geometry disagree"
+            )
+        return pool
+
+    def _range_by_inventory(
+        self,
+        item: LiquidityInventoryItem,
+    ) -> DealingRangeState | None:
+        retained = self._range_inventory.get(item.item_id)
+        if retained is None:
+            return None
+        if retained != item:
+            raise ValueError(
+                "Group 4 range inventory differs from retained source"
+            )
+        matches = tuple(
+            self._ranges[source_id]
+            for source_id in item.source_ids
+            if source_id in self._ranges
+        )
+        if len(matches) > 1:
+            raise ValueError("range inventory maps to multiple ranges")
+        return matches[0] if matches else None
+
+    def _source_from_item(
+        self,
+        item: LiquidityInventoryItem,
+        pools: Sequence[LiquidityPoolState],
+        candle: Candle,
+        prior_close: float,
+    ) -> _ManipulationSource | None:
+        if (
+            item.lifecycle is not LiquidityInventoryLifecycle.VISIBLE
+            or item.confirmed_at > candle.start
+        ):
+            return None
+        if item.kind == "range_boundary":
+            state = self._range_by_inventory(item)
+            expected_zone_id = (
+                state.upper_source_zone_id
+                if state is not None and item.side == "above"
+                else state.lower_source_zone_id
+                if state is not None
+                else None
+            )
+            expected_price = (
+                state.upper_bound
+                if state is not None and item.side == "above"
+                else state.lower_bound
+                if state is not None
+                else None
+            )
+            if (
+                state is None
+                or state.mature_at is None
+                or item.timeframe is not Timeframe.H1
+                or item.price != expected_price
+                or item.lower_bound != expected_price
+                or item.upper_bound != expected_price
+                or item.formed_at != state.formed_at
+                or item.confirmed_at != state.mature_at
+                or len(item.source_ids) != 2
+                or set(item.source_ids)
+                != {state.range_id, expected_zone_id}
+                or state.mature_at > candle.start
+                or (
+                    state.broken_at is not None
+                    and state.broken_at <= candle.end
+                )
+                or not state.lower_bound
+                <= prior_close
+                <= state.upper_bound
+            ):
+                return None
+            return _ManipulationSource(
+                side=item.side,
+                source_kind="mature_range_boundary",
+                source_id=state.range_id,
+                source_protocol_hash=state.protocol_hash,
+                source_timeframe=Timeframe.H1,
+                inventory=item,
+                formed_at=state.formed_at,
+                eligible_at=state.mature_at,
+                lower_bound=state.lower_bound,
+                upper_bound=state.upper_bound,
+                boundary_price=item.price,
+            )
+        if item.kind not in {"equal_highs", "equal_lows"}:
+            return None
+        pool = self._pool_by_inventory(item, pools)
+        if pool is None or pool.confirmed_at > candle.start:
+            return None
+        if (
+            (item.side == "above" and prior_close > pool.upper_bound)
+            or (item.side == "below" and prior_close < pool.lower_bound)
+        ):
+            return None
+        return _ManipulationSource(
+            side=item.side,
+            source_kind="formed_liquidity_pool",
+            source_id=pool.pool_id,
+            source_protocol_hash=(
+                self.protocol.source_group12_protocol_hash
+            ),
+            source_timeframe=pool.timeframe,
+            inventory=item,
+            formed_at=pool.formed_at,
+            eligible_at=pool.confirmed_at,
+            lower_bound=pool.lower_bound,
+            upper_bound=pool.upper_bound,
+            boundary_price=item.price,
+        )
+
+    @staticmethod
+    def _crossed(
+        source: _ManipulationSource,
+        candle: Candle,
+    ) -> bool:
+        return (
+            candle.high > source.boundary_price
+            if source.side == "above"
+            else candle.low < source.boundary_price
+        )
+
+    @staticmethod
+    def _close_outside(
+        state_or_source: ManipulationState | _ManipulationSource,
+        close: float,
+    ) -> tuple[bool, str | None]:
+        lower_bound = (
+            state_or_source.source_lower_bound
+            if isinstance(state_or_source, ManipulationState)
+            else state_or_source.lower_bound
+        )
+        upper_bound = (
+            state_or_source.source_upper_bound
+            if isinstance(state_or_source, ManipulationState)
+            else state_or_source.upper_bound
+        )
+        if state_or_source.source_kind == "mature_range_boundary":
+            if close > upper_bound:
+                return True, "above"
+            if close < lower_bound:
+                return True, "below"
+            return False, None
+        if state_or_source.side == "above":
+            return close > upper_bound, (
+                "above"
+                if close > upper_bound
+                else None
+            )
+        return close < lower_bound, (
+            "below"
+            if close < lower_bound
+            else None
+        )
+
+    def _resolve_live_manipulation(
+        self,
+        candle: Candle,
+    ) -> ManipulationState | None:
+        live = tuple(
+            state
+            for state in self._manipulations.values()
+            if state.lifecycle is ManipulationLifecycle.SWEPT
+        )
+        if len(live) > 1:
+            raise RuntimeError(
+                "Group 4 retained more than one live manipulation"
+            )
+        if not live or candle.end <= live[0].swept_at:
+            return None
+        state = live[0]
+        outside, resolved_side = self._close_outside(
+            state,
+            float(candle.close),
+        )
+        age = state.age_1m_bars + 1
+        outside_bars = state.outside_completed_bars + int(outside)
+        if (
+            age
+            < self.protocol.manipulation_resolution_delay_real_1m_bars
+        ):
+            self._manipulations[state.manipulation_id] = replace(
+                state,
+                last_updated_at=candle.end,
+                outside_completed_bars=outside_bars,
+                age_1m_bars=age,
+            )
+            return None
+        if outside:
+            resolved = replace(
+                state,
+                lifecycle=ManipulationLifecycle.ACCEPTED_OUTSIDE,
+                accepted_outside_at=candle.end,
+                resolved_at=candle.end,
+                state_started_at=candle.end,
+                last_updated_at=candle.end,
+                resolved_side=resolved_side,
+                outside_completed_bars=outside_bars,
+                age_1m_bars=age,
+                transition_reason="close_held_outside",
+            )
+        else:
+            resolved = replace(
+                state,
+                lifecycle=ManipulationLifecycle.REACCEPTED,
+                reaccepted_at=candle.end,
+                resolved_at=candle.end,
+                state_started_at=candle.end,
+                last_updated_at=candle.end,
+                reentry_price=float(candle.close),
+                outside_completed_bars=outside_bars,
+                age_1m_bars=age,
+                transition_reason="close_returned_inside",
+            )
+        self._manipulations[state.manipulation_id] = resolved
+        return resolved
+
+    def _consume_range_crossings(
+        self,
+        items: Sequence[LiquidityInventoryItem],
+        candle: Candle,
+    ) -> None:
+        for item in items:
+            if item.kind != "range_boundary":
+                continue
+            retained = self._range_inventory.get(item.item_id)
+            if (
+                retained is None
+                or retained.lifecycle
+                is not LiquidityInventoryLifecycle.VISIBLE
+            ):
+                continue
+            self._range_inventory[item.item_id] = replace(
+                retained,
+                lifecycle=LiquidityInventoryLifecycle.CONSUMED,
+                consumed_at=candle.end,
+                lifecycle_reason="range_boundary_consumed",
+            )
+
+    def _create_manipulation(
+        self,
+        source: _ManipulationSource,
+        coincident_source_ids: tuple[str, ...],
+        candle: Candle,
+        prior_atr: float,
+    ) -> ManipulationState:
+        extreme = (
+            float(candle.high)
+            if source.side == "above"
+            else float(candle.low)
+        )
+        penetration = (
+            extreme - source.boundary_price
+            if source.side == "above"
+            else source.boundary_price - extreme
+        )
+        penetration_atr = penetration / max(
+            prior_atr,
+            self.protocol.tick_size,
+        )
+        outside, _ = self._close_outside(
+            source,
+            float(candle.close),
+        )
+        manipulation_id = _identity(
+            self.protocol.protocol_hash,
+            candle.symbol,
+            candle.instrument_id,
+            source.source_kind,
+            source.source_id,
+            source.side,
+            candle.end,
+        )
+        state = ManipulationState(
+            manipulation_id=manipulation_id,
+            protocol_hash=self.protocol.protocol_hash,
+            source_group12_protocol_hash=(
+                self.protocol.source_group12_protocol_hash
+            ),
+            symbol=candle.symbol,
+            instrument_id=int(candle.instrument_id),
+            timeframe=Timeframe.M1,
+            lifecycle=ManipulationLifecycle.SWEPT,
+            side=source.side,
+            source_kind=source.source_kind,
+            source_id=source.source_id,
+            source_protocol_hash=source.source_protocol_hash,
+            source_timeframe=source.source_timeframe,
+            source_inventory_item_id=source.inventory.item_id,
+            source_inventory_lifecycle=(
+                LiquidityInventoryLifecycle.VISIBLE
+            ),
+            coincident_source_ids=coincident_source_ids,
+            source_formed_at=source.formed_at,
+            source_eligible_at=source.eligible_at,
+            source_lower_bound=source.lower_bound,
+            source_upper_bound=source.upper_bound,
+            formed_at=candle.end,
+            confirmed_at=candle.end,
+            swept_at=candle.end,
+            reaccepted_at=None,
+            accepted_outside_at=None,
+            resolved_at=None,
+            state_started_at=candle.end,
+            last_updated_at=candle.end,
+            sweep_extreme=extreme,
+            close_outside_on_sweep=outside,
+            reentry_price=None,
+            resolved_side=None,
+            outside_completed_bars=int(outside),
+            penetration_atr=penetration_atr,
+            strength=clamp(penetration_atr),
+            age_1m_bars=0,
+            transition_reason="source_swept",
+            censored_at=None,
+        )
+        self._manipulations[manipulation_id] = state
+        self._manipulation_order.append(manipulation_id)
+        self._ensure_manipulation_capacity()
+        return state
+
+    def _ensure_manipulation_capacity(self) -> None:
+        while (
+            len(self._manipulations)
+            > self.protocol.maximum_manipulations
+        ):
+            removable = next(
+                (
+                    identity
+                    for identity in self._manipulation_order
+                    if self._manipulations[identity].lifecycle
+                    is not ManipulationLifecycle.SWEPT
+                ),
+                None,
+            )
+            if removable is None:
+                raise RuntimeError(
+                    "Group 4 manipulation capacity has no terminal eviction"
+                )
+            self._manipulations.pop(removable)
+            self._manipulation_order.remove(removable)
+
+    def _compact_terminal_manipulations_without_sources(
+        self,
+        pools: Sequence[LiquidityPoolState],
+        *,
+        current_end: pd.Timestamp,
+    ) -> None:
+        retained_source_ids = set(self._range_inventory)
+        retained_source_ids.update(
+            f"pool:{pool.pool_id}" for pool in pools
+        )
+        for manipulation_id in tuple(self._manipulation_order):
+            state = self._manipulations[manipulation_id]
+            if state.source_inventory_item_id in retained_source_ids:
+                continue
+            if (
+                state.lifecycle is ManipulationLifecycle.SWEPT
+                or state.last_updated_at >= current_end
+            ):
+                continue
+            self._manipulations.pop(manipulation_id)
+            self._manipulation_order.remove(manipulation_id)
+
+    def _apply_m1(
+        self,
+        candle: Candle,
+        prior_inventory: tuple[LiquidityInventoryItem, ...],
+        pools: tuple[LiquidityPoolState, ...],
+        completed_h1: Candle | None,
+        h1_zones: tuple[SupportResistanceState, ...],
+    ) -> Group4Update:
+        if (
+            self._last_m1_raw_end is not None
+            and candle.end <= self._last_m1_raw_end
+        ):
+            raise ValueError("duplicate or out-of-order Group 4 1m candle")
+        self._last_m1_raw_end = candle.end
+        if not candle.real_completed:
+            range_transitions: tuple[DealingRangeState, ...] = ()
+            if completed_h1 is not None:
+                h1_output = self._apply_h1(completed_h1, h1_zones)
+                range_transitions = h1_output.range_transitions
+            return self._output(range_transitions=range_transitions)
+        self._compact_terminal_manipulations_without_sources(
+            pools,
+            current_end=candle.end,
+        )
+        prior_close = self._prior_m1_close
+        prior_atr = (
+            sum(self._m1_true_ranges) / len(self._m1_true_ranges)
+            if (
+                len(self._m1_true_ranges)
+                == self.protocol.m1_atr_period
+            )
+            else None
+        )
+        resolved = self._resolve_live_manipulation(candle)
+        candidate_sources: list[_ManipulationSource] = []
+        crossed_items = tuple(
+            item
+            for item in prior_inventory
+            if (
+                item.lifecycle is LiquidityInventoryLifecycle.VISIBLE
+                and item.kind
+                in {"range_boundary", "equal_highs", "equal_lows"}
+                and item.confirmed_at <= candle.start
+                and (
+                    candle.high > item.upper_bound
+                    if item.side == "above"
+                    else candle.low < item.lower_bound
+                )
+            )
+        )
+        if crossed_items and prior_close is None:
+            raise ValueError(
+                "Group 4 source crossing lacks a real predecessor close"
+            )
+        if prior_close is not None:
+            for item in crossed_items:
+                source = self._source_from_item(
+                    item,
+                    pools,
+                    candle,
+                    prior_close,
+                )
+                if source is not None and self._crossed(source, candle):
+                    candidate_sources.append(source)
+        self._consume_range_crossings(crossed_items, candle)
+        range_transitions: tuple[DealingRangeState, ...] = ()
+        if completed_h1 is not None:
+            h1_output = self._apply_h1(completed_h1, h1_zones)
+            range_transitions = h1_output.range_transitions
+        candidate_sources = [
+            source
+            for source in candidate_sources
+            if (
+                source.source_kind != "mature_range_boundary"
+                or (
+                    (state := self._ranges.get(source.source_id))
+                    is not None
+                    and state.lifecycle is DealingRangeLifecycle.MATURE
+                )
+            )
+        ]
+        crossed_sides = {source.side for source in candidate_sources}
+        ambiguous = (
+            tuple(
+                source.inventory.item_id
+                for source in candidate_sources
+            )
+            if len(crossed_sides) > 1
+            else ()
+        )
+        # A cold causal prefix may encounter an already-visible liquidity
+        # source before fourteen real predecessor minutes exist.  The sweep
+        # cannot be normalized without its *prior* ATR, but that is a normal
+        # not-yet-ready condition rather than corrupt input.  Consume the
+        # observed crossing, expose its identity as unclassified, and keep
+        # warming the ATR; never backfill this event with a future ATR.
+        atr_unready = bool(
+            candidate_sources and prior_atr is None and not ambiguous
+        )
+        atr_unready_ids = (
+            tuple(
+                sorted(
+                    source.inventory.item_id
+                    for source in candidate_sources
+                )
+            )
+            if atr_unready
+            else ()
+        )
+        created = None
+        if (
+            resolved is None
+            and candidate_sources
+            and not ambiguous
+            and prior_atr is not None
+        ):
+            ordered = sorted(
+                candidate_sources,
+                key=lambda source: (
+                    abs(source.boundary_price - prior_close),
+                    (
+                        0
+                        if source.source_kind
+                        == "mature_range_boundary"
+                        else 1
+                    ),
+                    source.eligible_at,
+                    source.source_id,
+                ),
+            )
+            primary = ordered[0]
+            coincident = tuple(
+                source.source_id
+                for source in ordered[1:]
+                if math.isclose(
+                    source.boundary_price,
+                    primary.boundary_price,
+                    rel_tol=0.0,
+                    abs_tol=0.0,
+                )
+            )
+            created = self._create_manipulation(
+                primary,
+                coincident,
+                candle,
+                prior_atr,
+            )
+        true_range = _true_range(candle, self._prior_m1_close)
+        if self._prior_m1_close is not None and true_range > 0.0:
+            self._m1_true_ranges.append(
+                max(true_range, self.protocol.tick_size)
+            )
+        self._prior_m1_close = float(candle.close)
+        self._last_m1_end = candle.end
+        self._compact_terminal_manipulations_without_sources(
+            pools,
+            current_end=candle.end,
+        )
+        return self._output(
+            range_transitions=range_transitions,
+            manipulation_transitions=tuple(
+                value
+                for value in (resolved, created)
+                if value is not None
+            ),
+            ambiguous=ambiguous,
+            atr_unready=atr_unready_ids,
+        )
+
+    def on_completed_update(
+        self,
+        candle: Candle,
+        *,
+        prior_inventory: Iterable[LiquidityInventoryItem],
+        liquidity_pools: Iterable[LiquidityPoolState],
+        completed_h1: Candle | None = None,
+        h1_support_resistance: Iterable[
+            SupportResistanceState
+        ] = (),
+    ) -> Group4Update:
+        if (
+            not isinstance(candle, Candle)
+            or candle.timeframe is not Timeframe.M1
+            or not candle.complete
+            or candle.expected_minutes != 1
+        ):
+            raise ValueError("Group 4 requires a completed 1m candle")
+        inventory = tuple(prior_inventory)
+        pools = tuple(liquidity_pools)
+        zones = tuple(h1_support_resistance)
+        input_value = (
+            candle,
+            inventory,
+            pools,
+            completed_h1,
+            zones,
+        )
+        if (
+            input_value == self._last_m1_input
+            and self._last_m1_output is not None
+        ):
+            return self._last_m1_output
+        candidate = self._transaction_clone()
+        try:
+            candidate._validate_contract(candle)
+            if any(
+                not isinstance(item, LiquidityInventoryItem)
+                for item in inventory
+            ):
+                raise TypeError("Group 4 inventory source is not typed")
+            if any(
+                not isinstance(pool, LiquidityPoolState)
+                for pool in pools
+            ):
+                raise TypeError("Group 4 pool source is not typed")
+            if completed_h1 is not None:
+                candidate._validate_h1(completed_h1, zones)
+                if completed_h1.end != candle.end:
+                    raise ValueError(
+                        "Group 4 H1 and 1m completion clocks disagree"
+                    )
+                if (
+                    not candle.real_completed
+                    and completed_h1.real_completed
+                ):
+                    raise ValueError(
+                        "synthetic Group 4 1m cannot carry a real H1 bar"
+                    )
+            output = candidate._apply_m1(
+                candle,
+                inventory,
+                pools,
+                completed_h1,
+                zones,
+            )
+            candidate._last_m1_input = input_value
+            candidate._last_m1_output = output
+            candidate._last_boundary_input = None
+            candidate._last_boundary_output = None
+        except Exception:
+            raise
+        self._commit(candidate)
+        return output
+
+    def bootstrap_completed_1m_prefix(
+        self,
+        candles: Iterable[Candle],
+        *,
+        pool_inventory: Iterable[LiquidityInventoryItem],
+        liquidity_pools: Iterable[LiquidityPoolState],
+    ) -> Group4Update:
+        """Cold-reconstruct first crossings from one retained causal prefix."""
+
+        prefix = tuple(candles)
+        pool_items = tuple(
+            replace(
+                item,
+                lifecycle=LiquidityInventoryLifecycle.VISIBLE,
+                targeted_at=None,
+                consumed_at=None,
+                lifecycle_reason=None,
+            )
+            for item in pool_inventory
+            if item.kind in {"equal_highs", "equal_lows"}
+        )
+        pools = tuple(liquidity_pools)
+        sources = (
+            *pool_items,
+            *(
+                item
+                for item in self._range_inventory.values()
+                if item.lifecycle is LiquidityInventoryLifecycle.VISIBLE
+            ),
+        )
+        input_value = (
+            "cold_prefix",
+            prefix,
+            pool_items,
+            pools,
+        )
+        if (
+            input_value == self._last_m1_input
+            and self._last_m1_output is not None
+        ):
+            return self._last_m1_output
+        if not prefix:
+            if sources:
+                raise ValueError(
+                    "Group 4 cold attachment lacks a completed 1m prefix"
+                )
+            return self.snapshot()
+        real = tuple(
+            candle for candle in prefix if candle.real_completed
+        )
+        if sources and not real:
+            raise ValueError(
+                "Group 4 cold attachment has no real completed minute"
+            )
+        if any(
+            not isinstance(candle, Candle)
+            or candle.timeframe is not Timeframe.M1
+            or not candle.complete
+            or candle.expected_minutes != 1
+            for candle in prefix
+        ):
+            raise ValueError("Group 4 cold prefix is not completed 1m data")
+        identities = {
+            (candle.symbol, int(candle.instrument_id))
+            for candle in prefix
+        }
+        if (
+            len(identities) != 1
+            or (
+                self._identity is not None
+                and next(iter(identities)) != self._identity
+            )
+            or any(
+                later.end <= earlier.end
+                for earlier, later in zip(prefix, prefix[1:])
+            )
+        ):
+            raise ValueError(
+                "Group 4 cold prefix contract or clock is inconsistent"
+            )
+        candidate = self._transaction_clone()
+        candidate._identity = next(iter(identities))
+        for item in pool_items:
+            if candidate._pool_by_inventory(item, pools) is None:
+                raise ValueError(
+                    "Group 4 cold source lacks its exact pool state"
+                )
+        if any(
+            not any(
+                candle.real_completed
+                and candle.end <= item.confirmed_at
+                for candle in prefix
+            )
+            for item in sources
+        ):
+            raise ValueError(
+                "Group 4 cold prefix lacks a real source predecessor"
+            )
+        try:
+            consumed_pool_ids: set[str] = set()
+            output = candidate.snapshot()
+            transitions: list[ManipulationState] = []
+            ambiguous: list[str] = []
+            atr_unready: list[str] = []
+            for candle in prefix:
+                inventory = tuple(
+                    item
+                    for item in (
+                        *pool_items,
+                        *candidate._range_inventory.values(),
+                    )
+                    if (
+                        item.confirmed_at <= candle.start
+                        and item.item_id not in consumed_pool_ids
+                        and item.lifecycle
+                        is LiquidityInventoryLifecycle.VISIBLE
+                    )
+                )
+                output = candidate._apply_m1(
+                    candle,
+                    inventory,
+                    pools,
+                    None,
+                    (),
+                )
+                transitions.extend(output.manipulation_transitions)
+                ambiguous.extend(output.ambiguous_sweep_item_ids)
+                atr_unready.extend(output.atr_unready_sweep_item_ids)
+                for item in inventory:
+                    if (
+                        candle.real_completed
+                        and item.kind in {"equal_highs", "equal_lows"}
+                        and (
+                            candle.high > item.upper_bound
+                            if item.side == "above"
+                            else candle.low < item.lower_bound
+                        )
+                    ):
+                        consumed_pool_ids.add(item.item_id)
+            output = Group4Update(
+                dealing_ranges=output.dealing_ranges,
+                manipulations=output.manipulations,
+                range_boundary_inventory=(
+                    output.range_boundary_inventory
+                ),
+                manipulation_transitions=tuple(transitions),
+                ambiguous_sweep_item_ids=tuple(
+                    sorted(set(ambiguous))
+                ),
+                atr_unready_sweep_item_ids=tuple(
+                    sorted(set(atr_unready))
+                ),
+            )
+            candidate._last_m1_input = input_value
+            candidate._last_m1_output = output
+            candidate._last_boundary_input = None
+            candidate._last_boundary_output = None
+        except Exception:
+            raise
+        self._commit(candidate)
+        return output
+
+    def on_boundary(
+        self,
+        reason: str,
+        observed_at: pd.Timestamp,
+    ) -> Group4Update:
+        observed_at = aware_timestamp(
+            observed_at,
+            name="group4.boundary.observed_at",
+        )
+        input_value = (reason, observed_at)
+        if (
+            input_value == self._last_boundary_input
+            and self._last_boundary_output is not None
+        ):
+            return self._last_boundary_output
+        if reason not in GROUP4_HARD_BOUNDARY_REASONS:
+            raise ValueError("Group 4 boundary reason is not hard")
+        raw_ends = tuple(
+            value
+            for value in (
+                self._last_h1_raw_end,
+                self._last_m1_raw_end,
+            )
+            if value is not None
+        )
+        if raw_ends and observed_at <= max(raw_ends):
+            raise ValueError(
+                "Group 4 boundary is duplicate or out of order"
+            )
+        candidate = self._transaction_clone()
+        try:
+            range_transitions = tuple(
+                candidate._terminal_range(
+                    state,
+                    observed_at,
+                    reason,
+                )
+                for state in tuple(candidate._ranges.values())
+                if state.lifecycle
+                in {
+                    DealingRangeLifecycle.FORMING,
+                    DealingRangeLifecycle.MATURE,
+                }
+            )
+            manipulation_transitions = tuple(
+                replace(
+                    state,
+                    last_updated_at=observed_at,
+                    transition_reason=reason,
+                    censored_at=observed_at,
+                )
+                for state in candidate._manipulations.values()
+                if state.lifecycle is ManipulationLifecycle.SWEPT
+            )
+            candidate._ranges.clear()
+            candidate._range_order.clear()
+            candidate._range_work.clear()
+            candidate._range_inventory.clear()
+            candidate._manipulations.clear()
+            candidate._manipulation_order.clear()
+            candidate._h1_true_ranges.clear()
+            candidate._m1_true_ranges.clear()
+            candidate._prior_h1_close = None
+            candidate._prior_m1_close = None
+            candidate._identity = None
+            candidate._last_h1_end = None
+            candidate._last_m1_end = None
+            candidate._last_h1_raw_end = None
+            candidate._last_m1_raw_end = observed_at
+            candidate._blocked_cold_pairs.clear()
+            output = candidate._output(
+                range_transitions=range_transitions,
+                manipulation_transitions=manipulation_transitions,
+                boundary_reason=reason,
+            )
+            candidate._last_h1_input = None
+            candidate._last_h1_output = None
+            candidate._last_m1_input = None
+            candidate._last_m1_output = None
+            candidate._last_boundary_input = input_value
+            candidate._last_boundary_output = output
+        except Exception:
+            raise
+        self._commit(candidate)
+        return output
+
+
+__all__ = [
+    "CausalGroup4Tracker",
+    "Group4Protocol",
+    "Group4Update",
+]

@@ -1,0 +1,10 @@
+{
+  "version": "2.1.0-managed-policy.2",
+  "playbook_registry": "configs/playbooks_v2.json",
+  "belief_calibration_artifact": "configs/calibration_v2_1_2022.json",
+  "policy_value_protocol": "configs/policy_value_protocol_v2_1.json",
+  "validation_protocol": "configs/validation_protocol_v2_1.json",
+  "policy_base_config": "configs/model_v2_1_policy_base.json",
+  "policy_base_config_hash": "ff6ffb1ad69434033634fb322230095692fee2c9f4deaea1a0753bd51d68d2dd",
+  "managed_policy_artifact": "configs/policy_value_v2_1_2023_stream.json"
+}

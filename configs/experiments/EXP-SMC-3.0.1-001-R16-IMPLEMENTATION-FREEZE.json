@@ -1,0 +1,565 @@
+{
+  "format_version": 1,
+  "protocol_id": "EXP-SMC-3.0.1-001-REGISTERED-SUPPORT-LIFECYCLE-REACHABILITY-R16",
+  "freeze_id": "EXP-SMC-3.0.1-001-R16-IMPLEMENTATION-FREEZE-001",
+  "product_version": "3.0.1",
+  "issued_at": "2026-07-29T17:24:00-04:00",
+  "status": "implementation_frozen_tests_unauthorized",
+  "parent_ledger_sha256": "3daa7e5f5f44abee9cb65e4f15a02b5fd4be75c6fc595fa5f88dca72b8895c22",
+  "preregistration": "reports/validation_2026-07-29/v3_exp001_r3_registered_support_lifecycle_reachability_r16_preregistration.md",
+  "preregistration_sha256": "68904285f0cced00bb0c578e493f4a15edbda9a123675afbd25a5fce8b532107",
+  "r15_static_nogo_sha256": "5b0c984c1e694241b0b2d5a220077f3838014ad6db08825fa4459a8f82352c0f",
+  "prereg_static_go_sha256": "cbfb00aa37a89ea789834ab4b47802bc47927c03b795482660b633b0638d7fd8",
+  "single_changed_family": "registered_selection_support_and_causal_lifecycle_reachability",
+  "bindings": {
+    "harness_path": "scripts/diagnose_v3_structure_bos_reachability_r16.py",
+    "harness_sha256": "91aa6c95de9c93b043ed32c449f7c778393f23fdfe5e4c283e28fa9578cbaaeb",
+    "generator_sha256": "91aa6c95de9c93b043ed32c449f7c778393f23fdfe5e4c283e28fa9578cbaaeb",
+    "support_identity_sha256": "91aa6c95de9c93b043ed32c449f7c778393f23fdfe5e4c283e28fa9578cbaaeb",
+    "funnel_sha256": "91aa6c95de9c93b043ed32c449f7c778393f23fdfe5e4c283e28fa9578cbaaeb",
+    "serializer_sha256": "91aa6c95de9c93b043ed32c449f7c778393f23fdfe5e4c283e28fa9578cbaaeb",
+    "marker_sha256": "91aa6c95de9c93b043ed32c449f7c778393f23fdfe5e4c283e28fa9578cbaaeb",
+    "test_path": "tests/test_v3_structure_bos_reachability_r16.py",
+    "test_sha256": "dd29f578b559a6babfeeb26f76f609a91b37dcc716edd92b230593578ff79c07",
+    "structure_protocol_path": "configs/smc_primitives_v3_0_1_structure_bos_audit_closure_r3.json",
+    "structure_protocol_sha256": "d94c03b71ffdc099089767fe9dfe57668edfd8252e86db014ce3342115def76d",
+    "structure_code_path": "smc_trader/structure.py",
+    "structure_code_sha256": "40f4b5117b2b98ae1f5b98c3cb5b7d5e172682ed3a943a24d0fb3202c98caa2a",
+    "semantic_audit_code_path": "smc_trader/semantic_audit.py",
+    "semantic_audit_code_sha256": "0b2f147c4635c4e46ad7d0673d8fe8d127fec4bc57f8a36dcd355add721de1c6",
+    "causal_reader_code_path": "smc_trader/causal.py",
+    "causal_reader_code_sha256": "01b3ec12d8f95b780f0fefd2220ff57612fc938b776c3c68d3504d6b4b7bab9d",
+    "observer_code_path": "smc_trader/observation.py",
+    "observer_code_sha256": "8a1f28698c70dd1b46f31954d86a81de782085beb941a3230f41e7066de6b7f5",
+    "model_code_path": "smc_trader/model.py",
+    "model_code_sha256": "8674b6cf9ac8630630e951ce72a6c505cfc4cfd5967788f4432651994ac30adf",
+    "market_clock_code_path": "smc_trader/market_clock.py",
+    "market_clock_code_sha256": "5e43fe3be976ea8c6586f13bf21e5a1de86ec252a8590299d03aa8432f3561a1",
+    "canonical_template_source_path": "tests/test_v3_structure_bos.py",
+    "canonical_template_source_sha256": "900c9c10f3d721eee68b9defda5c730b627e738a9d37fb063a601454d9201097"
+  },
+  "runtime": {
+    "python_executable": "~/miniconda3/bin/python",
+    "python_executable_sha256": "3a80e322390c8df16971c26240781f2f881f25b09fb30a88c90908fe89df413b",
+    "python_version": "3.12.4"
+  },
+  "generator": {
+    "representation": "integer_ticks_ohlc",
+    "tick_size": 0.25,
+    "reference_price_ticks": 400,
+    "symbol": "NQH5",
+    "instrument_id": 1,
+    "volume_per_minute": 100,
+    "start": "2025-01-05T18:00:00-05:00",
+    "target_candle_count": 12,
+    "boundary_ordinal": 11,
+    "maximum_history": 4096,
+    "left_completed_bars": 2,
+    "right_completed_bars": 2,
+    "h1_target_durations_minutes": [
+      60,
+      60,
+      60,
+      60,
+      60,
+      60,
+      60,
+      60,
+      60,
+      60,
+      60,
+      60
+    ],
+    "h4_target_durations_minutes": [
+      240,
+      240,
+      240,
+      240,
+      240,
+      180,
+      240,
+      240,
+      240,
+      240,
+      240,
+      180
+    ],
+    "h4_scheduled_gap_after_ordinals": [
+      5
+    ],
+    "h4_scheduled_gap_minutes": 60,
+    "minute_expansion": "three integer-tick monotone segments open_to_high, high_to_low, low_to_close with lengths floor(N/3), floor(N/3), remainder",
+    "mirror": {
+      "open_ticks": "2R-O",
+      "close_ticks": "2R-C",
+      "high_ticks": "2R-L",
+      "low_ticks": "2R-H"
+    },
+    "canonical_template": {
+      "canonical_long_prefix": [
+        [
+          36,
+          40,
+          32,
+          36
+        ],
+        [
+          40,
+          44,
+          36,
+          40
+        ],
+        [
+          46,
+          52,
+          40,
+          46
+        ],
+        [
+          42,
+          48,
+          36,
+          42
+        ],
+        [
+          38,
+          44,
+          32,
+          38
+        ],
+        [
+          42,
+          48,
+          36,
+          42
+        ],
+        [
+          48,
+          56,
+          40,
+          48
+        ],
+        [
+          46,
+          52,
+          40,
+          46
+        ],
+        [
+          42,
+          48,
+          36,
+          42
+        ],
+        [
+          46,
+          52,
+          40,
+          46
+        ],
+        [
+          52,
+          60,
+          44,
+          52
+        ]
+      ],
+      "terminal_confirmed_long": [
+        55,
+        59,
+        52,
+        57
+      ],
+      "terminal_wick_long": [
+        52,
+        58,
+        50,
+        55
+      ],
+      "terminal_opposed_short": [
+        38,
+        40,
+        32,
+        35
+      ],
+      "canonical_sha256": "e69c79cdb0dd6d60f6efb2f2a0dbaa2e1727983ecf8010b9dcd1e192ba785aa7"
+    },
+    "target_specific_thresholds": false,
+    "target_specific_seeds": false,
+    "target_specific_waveforms": false
+  },
+  "support_rows": [
+    {
+      "target_id": "r16-4h-long-confirmed",
+      "timeframe": "4H",
+      "direction": "long",
+      "exact_bucket_enum": "confirmed_bos",
+      "exact_stage_vector": [
+        "bos_candidate_observed",
+        "selector_clock_eligible",
+        "semantic_class_resolved",
+        "semantic_context_complete",
+        "registered_bucket_admitted"
+      ],
+      "boundary_rule": "ordinal_11_confirmed_resolved_at_equals_asof",
+      "swing_template_role": "second_same_side_hh_target",
+      "pivot_ordinal": 6,
+      "swing_side": "high",
+      "target_price_ticks": 56,
+      "pivot_start": "2025-01-06T18:00:00-05:00",
+      "target_swing_id": "280bf46081961428cd9e719a",
+      "pending_ordinal": 8,
+      "pending_clock": "2025-01-07T06:00:00-05:00",
+      "target_bos_id": "a09828c3fa7292542766580f",
+      "expected_matching_swing_count": 1,
+      "expected_matching_bos_count": 1,
+      "expected_admission_count": 1
+    },
+    {
+      "target_id": "r16-4h-long-wick",
+      "timeframe": "4H",
+      "direction": "long",
+      "exact_bucket_enum": "wick_only_no_close",
+      "exact_stage_vector": [
+        "bos_candidate_observed",
+        "selector_clock_eligible",
+        "semantic_class_resolved",
+        "semantic_context_complete",
+        "registered_bucket_admitted"
+      ],
+      "boundary_rule": "ordinal_11_pending_last_attempt_at_equals_asof",
+      "swing_template_role": "second_same_side_hh_target",
+      "pivot_ordinal": 6,
+      "swing_side": "high",
+      "target_price_ticks": 56,
+      "pivot_start": "2025-01-06T18:00:00-05:00",
+      "target_swing_id": "280bf46081961428cd9e719a",
+      "pending_ordinal": 8,
+      "pending_clock": "2025-01-07T06:00:00-05:00",
+      "target_bos_id": "a09828c3fa7292542766580f",
+      "expected_matching_swing_count": 1,
+      "expected_matching_bos_count": 1,
+      "expected_admission_count": 1
+    },
+    {
+      "target_id": "r16-4h-long-opposed",
+      "timeframe": "4H",
+      "direction": "long",
+      "exact_bucket_enum": "broken_or_opposed",
+      "exact_stage_vector": [
+        "bos_candidate_observed",
+        "selector_clock_eligible",
+        "semantic_class_resolved",
+        "semantic_context_complete",
+        "registered_bucket_admitted"
+      ],
+      "boundary_rule": "ordinal_11_confirmed_resolved_at_equals_asof",
+      "swing_template_role": "mirrored_short_structure_protected_swing",
+      "pivot_ordinal": 8,
+      "swing_side": "high",
+      "target_price_ticks": 764,
+      "pivot_start": "2025-01-07T02:00:00-05:00",
+      "target_swing_id": "7efb9d7fcf4659de209b6e21",
+      "pending_ordinal": 10,
+      "pending_clock": "2025-01-07T14:00:00-05:00",
+      "target_bos_id": "abc268b7a6515c91b80ceaee",
+      "expected_matching_swing_count": 1,
+      "expected_matching_bos_count": 1,
+      "expected_admission_count": 1
+    },
+    {
+      "target_id": "r16-4h-short-confirmed",
+      "timeframe": "4H",
+      "direction": "short",
+      "exact_bucket_enum": "confirmed_bos",
+      "exact_stage_vector": [
+        "bos_candidate_observed",
+        "selector_clock_eligible",
+        "semantic_class_resolved",
+        "semantic_context_complete",
+        "registered_bucket_admitted"
+      ],
+      "boundary_rule": "ordinal_11_confirmed_resolved_at_equals_asof",
+      "swing_template_role": "mirrored_second_same_side_ll_target",
+      "pivot_ordinal": 6,
+      "swing_side": "low",
+      "target_price_ticks": 744,
+      "pivot_start": "2025-01-06T18:00:00-05:00",
+      "target_swing_id": "0bd3836b0c511775cd0ba3f9",
+      "pending_ordinal": 8,
+      "pending_clock": "2025-01-07T06:00:00-05:00",
+      "target_bos_id": "c0d94200460f1eba352b350d",
+      "expected_matching_swing_count": 1,
+      "expected_matching_bos_count": 1,
+      "expected_admission_count": 1
+    },
+    {
+      "target_id": "r16-4h-short-wick",
+      "timeframe": "4H",
+      "direction": "short",
+      "exact_bucket_enum": "wick_only_no_close",
+      "exact_stage_vector": [
+        "bos_candidate_observed",
+        "selector_clock_eligible",
+        "semantic_class_resolved",
+        "semantic_context_complete",
+        "registered_bucket_admitted"
+      ],
+      "boundary_rule": "ordinal_11_pending_last_attempt_at_equals_asof",
+      "swing_template_role": "mirrored_second_same_side_ll_target",
+      "pivot_ordinal": 6,
+      "swing_side": "low",
+      "target_price_ticks": 744,
+      "pivot_start": "2025-01-06T18:00:00-05:00",
+      "target_swing_id": "0bd3836b0c511775cd0ba3f9",
+      "pending_ordinal": 8,
+      "pending_clock": "2025-01-07T06:00:00-05:00",
+      "target_bos_id": "c0d94200460f1eba352b350d",
+      "expected_matching_swing_count": 1,
+      "expected_matching_bos_count": 1,
+      "expected_admission_count": 1
+    },
+    {
+      "target_id": "r16-4h-short-opposed",
+      "timeframe": "4H",
+      "direction": "short",
+      "exact_bucket_enum": "broken_or_opposed",
+      "exact_stage_vector": [
+        "bos_candidate_observed",
+        "selector_clock_eligible",
+        "semantic_class_resolved",
+        "semantic_context_complete",
+        "registered_bucket_admitted"
+      ],
+      "boundary_rule": "ordinal_11_confirmed_resolved_at_equals_asof",
+      "swing_template_role": "long_structure_protected_swing",
+      "pivot_ordinal": 8,
+      "swing_side": "low",
+      "target_price_ticks": 36,
+      "pivot_start": "2025-01-07T02:00:00-05:00",
+      "target_swing_id": "71731380e0ffb0aa66254f44",
+      "pending_ordinal": 10,
+      "pending_clock": "2025-01-07T14:00:00-05:00",
+      "target_bos_id": "908625edc1ba3893aa5d72d8",
+      "expected_matching_swing_count": 1,
+      "expected_matching_bos_count": 1,
+      "expected_admission_count": 1
+    },
+    {
+      "target_id": "r16-1h-long-opposed",
+      "timeframe": "1H",
+      "direction": "long",
+      "exact_bucket_enum": "broken_or_opposed",
+      "exact_stage_vector": [
+        "bos_candidate_observed",
+        "selector_clock_eligible",
+        "semantic_class_resolved",
+        "semantic_context_complete",
+        "registered_bucket_admitted"
+      ],
+      "boundary_rule": "ordinal_11_confirmed_resolved_at_equals_asof",
+      "swing_template_role": "mirrored_short_structure_protected_swing",
+      "pivot_ordinal": 8,
+      "swing_side": "high",
+      "target_price_ticks": 764,
+      "pivot_start": "2025-01-06T02:00:00-05:00",
+      "target_swing_id": "a1a68953689f359702be285a",
+      "pending_ordinal": 10,
+      "pending_clock": "2025-01-06T05:00:00-05:00",
+      "target_bos_id": "d528d5fd4c8ebdbc40308b58",
+      "expected_matching_swing_count": 1,
+      "expected_matching_bos_count": 1,
+      "expected_admission_count": 1
+    },
+    {
+      "target_id": "r16-1h-short-confirmed",
+      "timeframe": "1H",
+      "direction": "short",
+      "exact_bucket_enum": "confirmed_bos",
+      "exact_stage_vector": [
+        "bos_candidate_observed",
+        "selector_clock_eligible",
+        "semantic_class_resolved",
+        "semantic_context_complete",
+        "registered_bucket_admitted"
+      ],
+      "boundary_rule": "ordinal_11_confirmed_resolved_at_equals_asof",
+      "swing_template_role": "mirrored_second_same_side_ll_target",
+      "pivot_ordinal": 6,
+      "swing_side": "low",
+      "target_price_ticks": 744,
+      "pivot_start": "2025-01-06T00:00:00-05:00",
+      "target_swing_id": "cb7c1289dfe22f3c87b3c895",
+      "pending_ordinal": 8,
+      "pending_clock": "2025-01-06T03:00:00-05:00",
+      "target_bos_id": "7c8713be99a422b74e062805",
+      "expected_matching_swing_count": 1,
+      "expected_matching_bos_count": 1,
+      "expected_admission_count": 1
+    },
+    {
+      "target_id": "r16-1h-short-wick",
+      "timeframe": "1H",
+      "direction": "short",
+      "exact_bucket_enum": "wick_only_no_close",
+      "exact_stage_vector": [
+        "bos_candidate_observed",
+        "selector_clock_eligible",
+        "semantic_class_resolved",
+        "semantic_context_complete",
+        "registered_bucket_admitted"
+      ],
+      "boundary_rule": "ordinal_11_pending_last_attempt_at_equals_asof",
+      "swing_template_role": "mirrored_second_same_side_ll_target",
+      "pivot_ordinal": 6,
+      "swing_side": "low",
+      "target_price_ticks": 744,
+      "pivot_start": "2025-01-06T00:00:00-05:00",
+      "target_swing_id": "cb7c1289dfe22f3c87b3c895",
+      "pending_ordinal": 8,
+      "pending_clock": "2025-01-06T03:00:00-05:00",
+      "target_bos_id": "7c8713be99a422b74e062805",
+      "expected_matching_swing_count": 1,
+      "expected_matching_bos_count": 1,
+      "expected_admission_count": 1
+    },
+    {
+      "target_id": "r16-1h-short-opposed",
+      "timeframe": "1H",
+      "direction": "short",
+      "exact_bucket_enum": "broken_or_opposed",
+      "exact_stage_vector": [
+        "bos_candidate_observed",
+        "selector_clock_eligible",
+        "semantic_class_resolved",
+        "semantic_context_complete",
+        "registered_bucket_admitted"
+      ],
+      "boundary_rule": "ordinal_11_confirmed_resolved_at_equals_asof",
+      "swing_template_role": "long_structure_protected_swing",
+      "pivot_ordinal": 8,
+      "swing_side": "low",
+      "target_price_ticks": 36,
+      "pivot_start": "2025-01-06T02:00:00-05:00",
+      "target_swing_id": "02a225bb8cfbb2b71e6a00bd",
+      "pending_ordinal": 10,
+      "pending_clock": "2025-01-06T05:00:00-05:00",
+      "target_bos_id": "e1710c857d38f9b05b904f5b",
+      "expected_matching_swing_count": 1,
+      "expected_matching_bos_count": 1,
+      "expected_admission_count": 1
+    }
+  ],
+  "support_root_sha256": "e9cb43d66fb471c748259d3c3421c9417a503f1b4b1058a2e4fadf414119cfce",
+  "semantic_summary_schema": {
+    "top_level": [
+      "format_version",
+      "protocol_id",
+      "preregistration_sha256",
+      "implementation_manifest_sha256",
+      "support_root_sha256",
+      "target_count",
+      "admission_count",
+      "extra_admission_count",
+      "duplicate_admission_count",
+      "future_bars_read_for_resolution",
+      "targets",
+      "semantic_status"
+    ],
+    "target": [
+      "target_id",
+      "timeframe",
+      "direction",
+      "expected_bucket",
+      "target_swing_id",
+      "target_bos_id",
+      "matching_swing_count",
+      "matching_bos_count",
+      "boundary_ordinal",
+      "boundary_clock",
+      "stages",
+      "observed_bucket",
+      "admission_count",
+      "future_bars_read_for_resolution",
+      "prefix_commitment_sha256",
+      "rejection_reason",
+      "target_status"
+    ],
+    "stage": [
+      "name",
+      "reached",
+      "ordinal",
+      "clock",
+      "production_predicate"
+    ],
+    "encoding": {
+      "utf8": true,
+      "bom": false,
+      "indent": null,
+      "separators": [
+        ",",
+        ":"
+      ],
+      "ensure_ascii": false,
+      "allow_nan": false,
+      "order": "insertion_order_exact",
+      "final_lf": true
+    },
+    "schema_sha256": "70cf3e8c483ce5a5040d0a191e9329ede831068e59a87a6eb8c96003a6b9be67"
+  },
+  "runs": {
+    "diagnostic": {
+      "run_id": "EXP-SMC-3.0.1-001-R16-DIAGNOSTIC-ATTEMPT-001",
+      "output_root": "artifacts/synthetic_semantic_reachability/r16-diagnostic-attempt-001",
+      "attempt_marker": "ATTEMPT.json",
+      "terminal_marker": "RESULT.json"
+    },
+    "verification": {
+      "run_id": "EXP-SMC-3.0.1-001-R16-VERIFICATION-RUN-001",
+      "output_root": "artifacts/synthetic_semantic_reachability/r16-verification-run-001",
+      "attempt_marker": "ATTEMPT.json",
+      "terminal_marker": "RESULT.json",
+      "requires_diagnostic_success": true
+    }
+  },
+  "test_campaign": {
+    "campaign_id": "EXP-SMC-3.0.1-001-R16-TEST-CAMPAIGN-001",
+    "fail_stop": true,
+    "ordered_steps": [
+      "syntax_import",
+      "support_identity_and_serializer_units",
+      "mirror_expansion_and_stage_source_units",
+      "create_once_marker_unit",
+      "one_shot_ten_target_diagnostic",
+      "success_only_one_shot_byte_verification"
+    ],
+    "tests_authorized": false
+  },
+  "zero_execution_attestation": {
+    "generator_executed_before_freeze": false,
+    "engine_executed_before_freeze": false,
+    "harness_imported_before_freeze": false,
+    "syntax_or_unit_tests_executed_before_freeze": false,
+    "interactive_probe_executed_before_freeze": false,
+    "support_rows_materialized_by": "independent canonical identity calculation without importing or executing the R16 harness",
+    "diagnostic_output_root_absent": true,
+    "verification_output_root_absent": true
+  },
+  "authority": {
+    "implementation_frozen": true,
+    "static_self_review_authorized": true,
+    "three_reviewer_implementation_review_authorized": true,
+    "tests_authorized": false,
+    "diagnostic_execution_authorized": false,
+    "verification_execution_authorized": false,
+    "production_code_change_authorized": false,
+    "threshold_change_authorized": false,
+    "source_or_full_size_fixture_change_authorized": false,
+    "real_data_authorized": false,
+    "mbo_authorized": false,
+    "future_reveal_authorized": false,
+    "action_or_trade_authorized": false,
+    "pnl_or_economic_authorized": false,
+    "pass2_or_holdout_authorized": false
+  }
+}

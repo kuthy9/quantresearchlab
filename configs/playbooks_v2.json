@@ -1,0 +1,305 @@
+{
+  "registry_version": "2.0.0-preregistered.2",
+  "frozen_at": "2026-07-25T00:00:00-04:00",
+  "change_policy": {
+    "patch": "documentation or visualization changes that do not alter eligibility or outcomes",
+    "minor": "a preregistered calibration-method change using new validation data",
+    "major": "any change to required sequence, invalidation, target, deadline, outcome, or playbook set"
+  },
+  "playbooks": [
+    {
+      "id": "displacement_first_pullback",
+      "version": "1.0.1",
+      "status": "provisional_unvalidated",
+      "thesis": "Accepted higher-timeframe direction produces an efficient 5m displacement, an intact first pullback, and a 1m reacceptance trigger before delivery to visible external liquidity.",
+      "required_sequence": [
+        {
+          "id": "directional_context",
+          "description": "4H displacement and 1H swing progression support the same direction.",
+          "minimum_value": 0.1,
+          "required_inputs": [
+            "4H.directional_displacement",
+            "1H.swing_progression"
+          ]
+        },
+        {
+          "id": "m5_displacement",
+          "description": "A direction-aligned 5m impulse is strong enough to establish the setup clock.",
+          "minimum_value": 0.35,
+          "required_inputs": [
+            "5m.impulse_direction",
+            "5m.impulse_strength",
+            "5m.impulse_age_bars"
+          ]
+        },
+        {
+          "id": "m5_first_pullback",
+          "description": "The first pullback develops after the impulse without breaching the causal invalidation.",
+          "minimum_value": 0.2,
+          "required_inputs": [
+            "5m.pullback_depth",
+            "5m.pullback_completeness",
+            "plan.invalidation"
+          ]
+        },
+        {
+          "id": "m1_reacceptance_trigger",
+          "description": "The completed 1m path holds the trigger in the thesis direction after the pullback.",
+          "minimum_value": 1.0,
+          "required_inputs": [
+            "5m.reacceptance_direction",
+            "1m.trigger_hold_direction",
+            "1m.path_sequence"
+          ]
+        }
+      ],
+      "supporting_evidence": [
+        "h4_directional_displacement",
+        "h4_structure_progression",
+        "h1_swing_progression",
+        "m5_impulse_direction",
+        "m5_reacceptance",
+        "m1_path_sequence",
+        "m1_trigger_hold",
+        "m5_first_pullback_quality"
+      ],
+      "contradicting_evidence": [
+        "h4_directional_displacement_opposes",
+        "h4_structure_progression_opposes",
+        "h1_swing_progression_opposes",
+        "m5_impulse_direction_opposes",
+        "m5_reacceptance_opposes",
+        "m1_path_sequence_opposes",
+        "m1_trigger_hold_opposes",
+        "late_displacement_chase",
+        "near_path_obstruction"
+      ],
+      "phase_rules": {
+        "inactive": "No registered sequence has started, or support remains below the forming gate.",
+        "forming": "At least the directional context exists, but the plan or armed support is incomplete.",
+        "armed": "A causal plan exists and support is armed, while the registered trigger sequence is incomplete.",
+        "waiting_pullback": "An aligned displacement exists and the model is waiting for an intact first pullback or trigger.",
+        "executable": "All required sequence steps are causally ordered and the calibrated executable gate is met.",
+        "entered": "A risk-approved order filled after the decision clock.",
+        "weakening": "The frozen thesis remains open but calibrated support falls below its management gate.",
+        "delivering": "The open thesis has positive delivery progress without changing its original invalidation.",
+        "completed": "A registered target is delivered before invalidation and deadline; this terminal acknowledgement lasts one causal update before inactive unless a later setup starts.",
+        "invalidated": "The frozen structural invalidation is breached, the setup expires, or a terminal contradiction is registered; this terminal acknowledgement lasts one causal update before inactive unless a later setup starts."
+      },
+      "invalidation": {
+        "source": "nearest causally confirmed thesis-side swing",
+        "freeze_at": "risk_approved_entry",
+        "retrospective_rewrite": false
+      },
+      "targets": {
+        "source": "decision-time unswept external liquidity inventory",
+        "selection": "nearest reachable level in the thesis direction, with up to two further audit targets"
+      },
+      "deadline": {
+        "rule": "no later than the registered session deadline",
+        "expire_on": [
+          "deadline_elapsed",
+          "contract_change",
+          "frozen_invalidation_breach",
+          "target_consumed_before_entry"
+        ]
+      },
+      "path_test": {
+        "primary_outcome": "primary_target_before_frozen_invalidation_within_deadline",
+        "secondary_outcomes": [
+          "time_to_entry",
+          "time_to_delivery",
+          "maximum_favorable_excursion_R",
+          "maximum_adverse_excursion_R",
+          "ambiguous_same_bar"
+        ]
+      }
+    },
+    {
+      "id": "liquidity_sweep_reversal",
+      "version": "1.0.1",
+      "status": "provisional_unvalidated",
+      "thesis": "A visible external-liquidity sweep fails to continue, is reaccepted from on 5m, and establishes a 1m reversal trigger toward opposing visible liquidity.",
+      "required_sequence": [
+        {
+          "id": "external_liquidity_sweep",
+          "description": "A decision-time visible external level is swept on the thesis invalidation side.",
+          "minimum_value": 0.2,
+          "required_inputs": [
+            "events.liquidity_sweep",
+            "event.source_ids",
+            "event.observed_at"
+          ]
+        },
+        {
+          "id": "m5_reacceptance_from_sweep",
+          "description": "A completed 5m bar reaccepts away from the swept side.",
+          "minimum_value": 0.15,
+          "required_inputs": [
+            "5m.reacceptance_direction",
+            "5m.cutoff"
+          ]
+        },
+        {
+          "id": "m1_reversal_trigger",
+          "description": "The completed 1m path holds a reversal trigger after reacceptance.",
+          "minimum_value": 1.0,
+          "required_inputs": [
+            "1m.trigger_hold_direction",
+            "1m.acceleration",
+            "1m.counter_pressure"
+          ]
+        }
+      ],
+      "supporting_evidence": [
+        "recent_external_liquidity_sweep",
+        "h1_rejection",
+        "m5_reacceptance",
+        "m1_counter_pressure",
+        "m1_acceleration",
+        "m1_trigger_hold",
+        "dealing_range_extreme"
+      ],
+      "contradicting_evidence": [
+        "h1_rejection_opposes",
+        "m5_reacceptance_opposes",
+        "m1_counter_pressure_opposes",
+        "m1_acceleration_opposes",
+        "m1_trigger_hold_opposes",
+        "h4_opposing_displacement"
+      ],
+      "phase_rules": {
+        "inactive": "No qualifying external-liquidity sweep is active.",
+        "forming": "A qualifying sweep exists but reacceptance, plan provenance, or support is incomplete.",
+        "armed": "The swept level, structural invalidation, target and support are present while the trigger is incomplete.",
+        "waiting_pullback": "The sweep is active and the model waits for post-sweep reacceptance or the reversal trigger.",
+        "executable": "Sweep, reacceptance and trigger occur in causal order and the calibrated executable gate is met.",
+        "entered": "A risk-approved reversal order filled after the decision clock.",
+        "weakening": "The frozen reversal thesis remains open but reacceptance evidence weakens.",
+        "delivering": "Price progresses toward opposing liquidity without rewriting the sweep invalidation.",
+        "completed": "The registered opposing-liquidity target is delivered before invalidation and deadline; this terminal acknowledgement lasts one causal update before inactive unless a later sweep starts.",
+        "invalidated": "Price accepts beyond the frozen sweep extreme, the setup expires, or a terminal contradiction is registered; this terminal acknowledgement lasts one causal update before inactive unless a later sweep starts."
+      },
+      "invalidation": {
+        "source": "observed sweep extreme on the thesis invalidation side",
+        "freeze_at": "risk_approved_entry",
+        "retrospective_rewrite": false
+      },
+      "targets": {
+        "source": "decision-time unswept opposing liquidity inventory",
+        "selection": "nearest reachable opposing level, not the realized future touch"
+      },
+      "deadline": {
+        "rule": "no later than the registered session deadline",
+        "expire_on": [
+          "deadline_elapsed",
+          "contract_change",
+          "acceptance_beyond_sweep_extreme",
+          "target_consumed_before_entry"
+        ]
+      },
+      "path_test": {
+        "primary_outcome": "primary_target_before_frozen_sweep_invalidation_within_deadline",
+        "secondary_outcomes": [
+          "time_from_sweep_to_trigger",
+          "time_to_delivery",
+          "maximum_favorable_excursion_R",
+          "maximum_adverse_excursion_R",
+          "ambiguous_same_bar"
+        ]
+      }
+    },
+    {
+      "id": "failed_auction_value_return",
+      "version": "1.0.1",
+      "status": "provisional_unvalidated",
+      "thesis": "An auction beyond a dealing-range side fails to gain acceptance, returns into value on completed bars, and establishes a 1m path toward a causal value or opposing-liquidity target.",
+      "required_sequence": [
+        {
+          "id": "failed_auction_event",
+          "description": "A rejection or sweep identifies an attempted auction beyond the relevant range side.",
+          "minimum_value": 0.2,
+          "required_inputs": [
+            "events.rejection",
+            "events.liquidity_sweep",
+            "1H.dealing_range_position"
+          ]
+        },
+        {
+          "id": "acceptance_back_to_value",
+          "description": "Completed 1H/5m evidence points back into the prior dealing range.",
+          "minimum_value": 0.1,
+          "required_inputs": [
+            "1H.acceptance_direction",
+            "1H.rejection_direction",
+            "5m.reacceptance_direction"
+          ]
+        },
+        {
+          "id": "m1_path_toward_value",
+          "description": "The completed 1m structural path orders toward value after reacceptance.",
+          "minimum_value": 1.0,
+          "required_inputs": [
+            "1m.path_sequence",
+            "1m.cutoff"
+          ]
+        }
+      ],
+      "supporting_evidence": [
+        "failed_auction_event",
+        "h1_rejection_direction",
+        "h1_acceptance_back_to_value",
+        "m5_reacceptance",
+        "m1_path_sequence",
+        "value_return_space"
+      ],
+      "contradicting_evidence": [
+        "h1_rejection_direction_opposes",
+        "h1_acceptance_back_to_value_opposes",
+        "m5_reacceptance_opposes",
+        "m1_path_sequence_opposes",
+        "auction_accepted_beyond_failure"
+      ],
+      "phase_rules": {
+        "inactive": "No qualifying failed-auction event is active.",
+        "forming": "A failed-auction candidate exists but return-to-value evidence or a causal plan is incomplete.",
+        "armed": "The failure, plan and support are present while the path trigger is incomplete.",
+        "waiting_pullback": "The failed auction is active and the model waits for acceptance back to value or the 1m path trigger.",
+        "executable": "Failure, acceptance and 1m path occur in causal order and the calibrated executable gate is met.",
+        "entered": "A risk-approved value-return order filled after the decision clock.",
+        "weakening": "The frozen value-return thesis remains open but acceptance back to value weakens.",
+        "delivering": "Price progresses toward the registered value/liquidity target without rewriting invalidation.",
+        "completed": "The registered value/liquidity target is delivered before invalidation and deadline; this terminal acknowledgement lasts one causal update before inactive unless a later failure starts.",
+        "invalidated": "Price gains acceptance beyond the frozen failure extreme, the setup expires, or a terminal contradiction is registered; this terminal acknowledgement lasts one causal update before inactive unless a later failure starts."
+      },
+      "invalidation": {
+        "source": "observed failure or sweep extreme on the thesis invalidation side",
+        "freeze_at": "risk_approved_entry",
+        "retrospective_rewrite": false
+      },
+      "targets": {
+        "source": "decision-time unswept opposing-liquidity inventory; dealing-range value remains context until represented by a registered causal level",
+        "selection": "nearest reachable registered liquidity destination, not the realized future touch"
+      },
+      "deadline": {
+        "rule": "no later than the registered session deadline",
+        "expire_on": [
+          "deadline_elapsed",
+          "contract_change",
+          "acceptance_beyond_failure_extreme",
+          "target_consumed_before_entry"
+        ]
+      },
+      "path_test": {
+        "primary_outcome": "primary_registered_liquidity_target_before_frozen_failure_invalidation_within_deadline",
+        "secondary_outcomes": [
+          "time_from_failure_to_reacceptance",
+          "time_to_delivery",
+          "maximum_favorable_excursion_R",
+          "maximum_adverse_excursion_R",
+          "ambiguous_same_bar"
+        ]
+      }
+    }
+  ]
+}

@@ -1,0 +1,701 @@
+{
+  "format_version": 1,
+  "schema_id": "exp006-frozen-experiment-config-v1",
+  "closed_object": true,
+  "protocol_id": "EXP-SMC-3.0.2-006-CAUSAL-5M-DISPLACEMENT-TYPED-EPOCH-CLOSURE",
+  "product_version": "3.0.2",
+  "protocol_version": "3.0.2-displacement-typed-epoch-closure.1",
+  "frozen_at": "2026-07-29T21:47:51-04:00",
+  "status": "gate0_unanimous_go_gate1_file_creation_and_static_review_only",
+  "single_changed_family": "typed_physical_source_delivery_continuity_epoch_handoff_synthetic_interruption_and_strict_knowledge_clock_validation",
+  "command_line_overrides_allowed": false,
+  "bindings": {
+    "pre_gate0_parent_authority_ledger_sha256": "c0df7490b2fd6c2a4d539e1e29a1b22071beb309c28c6754d1372f29d49f43c7",
+    "gate0_authority_ledger_head_sha256": "eb235d0d49948cf870d203a0b0c2b499342e3c62c66f30638131a21207003b53",
+    "preregistration_path": "reports/validation_2026-07-29/v3_exp006_causal_5m_displacement_typed_epoch_closure_preregistration.md",
+    "preregistration_sha256": "8d54b2e01dde9bea00db9a5ede4f4c822c129d0ff9352b42cb67f43a674f7958",
+    "prereg_static_go_path": "reports/validation_2026-07-29/v3_exp006_causal_5m_displacement_typed_epoch_closure_prereg_static_go.md",
+    "prereg_static_go_sha256": "4a63b2f7be456ff31452093e3b1821b82a4e5004fc5dd816485d5531551f490b",
+    "exp005_preregistration_path": "reports/validation_2026-07-29/v3_exp005_causal_5m_displacement_validation_closure_preregistration.md",
+    "exp005_preregistration_sha256": "b43f908f2dece99272b67a55c30b5d1bb48ceb03471e291b0059a4b764762d0e",
+    "exp005_terminal_path": "reports/validation_2026-07-29/v3_exp005_causal_5m_displacement_validation_closure_prereg_static_nogo.md",
+    "exp005_terminal_sha256": "1013e715f711e9d396574d2b9a106e48f5e29b04474595455348856be47f425f",
+    "exp004_preregistration_path": "reports/validation_2026-07-29/v3_exp004_causal_5m_displacement_dual_clock_preregistration.md",
+    "exp004_preregistration_sha256": "d982897de08e85dad7b66d471cf895664bf513839bd5d6c357be32d226158c9b",
+    "exp004_gate0_path": "reports/validation_2026-07-29/v3_exp004_causal_5m_displacement_dual_clock_prereg_static_go.md",
+    "exp004_gate0_sha256": "c13717f196d88ca6ff756c3afae5de8734738591bd6f88277a7c05e8972a3ed4",
+    "exp004_terminal_path": "reports/validation_2026-07-29/v3_exp004_causal_5m_displacement_dual_clock_pretest_self_review_static_nogo.md",
+    "exp004_terminal_sha256": "9667f142df79fa721dcdb147442358c1ab68253f025b98143035092eccb8a8d4",
+    "exp004_baseline_fingerprint": "3029f48c169872fee1dbbc2a552d79ca24c36b468c84367eec7589027219c2b2",
+    "causal_reader_path": "smc_trader/causal.py",
+    "causal_reader_sha256": "01b3ec12d8f95b780f0fefd2220ff57612fc938b776c3c68d3504d6b4b7bab9d",
+    "market_clock_path": "smc_trader/market_clock.py",
+    "market_clock_sha256": "5e43fe3be976ea8c6586f13bf21e5a1de86ec252a8590299d03aa8432f3561a1",
+    "ohlcv_path": "data/processed/nq_1m_previous_session_front_v2_3_pre_holdout_2017_20260331.parquet",
+    "ohlcv_sha256": "6d2f0b36097e779867277a070073bc157bf58891769478d41f4efc8763ba0204"
+  },
+  "archive_hard_parents": {
+    "root": "archive/experiments/EXP-SMC-3.0.2-006-exp004-baseline-001/",
+    "transaction_id": "EXP-SMC-3.0.2-006-EXP004-PROVENANCE-ARCHIVE-001",
+    "reserved_old_root": "archive/experiments/EXP-SMC-3.0.2-004-static-nogo/",
+    "reserved_old_root_must_remain_absent": true,
+    "archive_retry_or_repair_allowed": false,
+    "archive_import_compile_test_or_execution_allowed": false,
+    "required_by_gate1_and_every_later_attempt": true,
+    "receipts": [
+      {
+        "path": "archive/experiments/EXP-SMC-3.0.2-006-exp004-baseline-001/ARCHIVE_ATTEMPT.json",
+        "schema_id": "exp006-archive-attempt-v1",
+        "sha256": "f59bf0c2c6ddf0a06b0b2efbf4c233eb5f103152759fb2608d36a261e153b1b6"
+      },
+      {
+        "path": "archive/experiments/EXP-SMC-3.0.2-006-exp004-baseline-001/MANIFEST.json",
+        "schema_id": "exp006-archive-manifest-v1",
+        "sha256": "c541083100c4c742c5747d09d09bc6acc542110cc2969559be0f734c0f277aaf"
+      },
+      {
+        "path": "archive/experiments/EXP-SMC-3.0.2-006-exp004-baseline-001/LINEAGE.json",
+        "schema_id": "exp006-archive-lineage-v1",
+        "sha256": "43689009b419f0cb617e85a306d5d7bd41248b9ec20949362677ef1104a25eff"
+      },
+      {
+        "path": "archive/experiments/EXP-SMC-3.0.2-006-exp004-baseline-001/CONTROL_PLANE_RECEIPT.json",
+        "schema_id": "exp006-archive-control-v1",
+        "sha256": "be7540438355046a25f3f4f1b8cfc928f2f65a4456866cbe8c26ec2ddd8cb621"
+      },
+      {
+        "path": "archive/experiments/EXP-SMC-3.0.2-006-exp004-baseline-001/COMPLETED.json",
+        "schema_id": "exp006-archive-completed-v1",
+        "sha256": "5d0cad98a4b5cc629271f961a0f725e8a5b83942937fa65d3c8b9f7e8839d3aa"
+      }
+    ]
+  },
+  "unchanged_displacement_contract": {
+    "tick_size": 0.25,
+    "input_contract": {
+      "timeframe": "5m",
+      "source_bar_interval": "1m_half_open",
+      "completed_real_same_contract_only": true,
+      "strict_previous_completed_session_contract": true,
+      "current_session_or_future_volume_contract_selection": false,
+      "unfinished_5m_read": false,
+      "tick_size": 0.25
+    },
+    "thresholds": {
+      "strictly_prior_baseline_observations": 14,
+      "seed_excluded_from_baseline": true,
+      "seed_body_fraction_min": 0.6,
+      "seed_directional_clv_min": 0.75,
+      "seed_tr_over_atr0_min": 0.8,
+      "activation_episode_bar_min": 2,
+      "activation_episode_bar_max": 4,
+      "activation_relative_atr_min": 1.0,
+      "activation_efficiency_min": 0.7,
+      "activation_speed_atr_per_bar_min": 0.3,
+      "activation_mean_body_fraction_min": 0.6,
+      "activation_min_directional_clv_min": 0.7,
+      "continuation_close_progress_ticks_min": 1,
+      "path_reveal_real_5m_bars_max": 12,
+      "volume_lifecycle_gate": false,
+      "aggregate_quality_score": false,
+      "threshold_search": false
+    },
+    "lifecycle": {
+      "market_states": [
+        "IDLE",
+        "STARTED",
+        "ACTIVE",
+        "EXHAUSTED"
+      ],
+      "technical_terminal_state": "CENSORED",
+      "one_open_entity_per_instrument_timeframe": true,
+      "terminal_state_revives": false,
+      "same_direction_reseed_mutates_entity": false,
+      "same_clock_opposite_reseed_after_terminal_commit": true
+    },
+    "dual_clock_required_fields": [
+      "prefix_last_admitted_at",
+      "observed_at",
+      "last_updated_at",
+      "state_started_at",
+      "started_at",
+      "active_at",
+      "terminal_at",
+      "terminal_evidence_candle_id"
+    ],
+    "no_clock_backfill": true,
+    "intermediate_1m_entity_bytes_reused": true,
+    "display_age_outside_entity_state": true,
+    "forbidden_output_fields": [
+      "action",
+      "entry",
+      "stop",
+      "target",
+      "outcome",
+      "pnl",
+      "mfe",
+      "mae",
+      "future"
+    ],
+    "coverage_gates": {
+      "started_entities_min": 240,
+      "long_entities_min": 80,
+      "short_entities_min": 80,
+      "active_entities_min": 40,
+      "activation_window_terminal_min": 20,
+      "calendar_months_min": 12,
+      "insufficient_coverage": "UNAVAILABLE"
+    },
+    "blind_sample": {
+      "transition_packets": 72,
+      "transition_rule": "first_qualifying_per_direction_x_transition_x_calendar_month_at_cutoff",
+      "transitions": [
+        "STARTED",
+        "ACTIVE",
+        "EXHAUSTED"
+      ],
+      "ordinary_packets": 24,
+      "ordinary_rule": "first_eligible_nontransition_cutoff_per_month_and_new_york_bucket",
+      "ordinary_new_york_buckets": [
+        "[10:00,11:00)",
+        "[14:00,15:00)"
+      ],
+      "missing_cell": "GATE3_UNAVAILABLE_NO_SUBSTITUTION",
+      "packet_sealed_before_scanner_advances": true,
+      "total_packets": 96
+    }
+  },
+  "knowledge_clock_contract": {
+    "timezone": "America/New_York",
+    "role_windows_are_knowledge_clock_not_utc_or_session_windows": true,
+    "calendar_day_increment_before_timezone_localization": true,
+    "fixed_24_hour_utc_end_derivation_forbidden": true,
+    "naive_ambiguous_or_nonexistent_clock_fails_closed": true,
+    "config_or_command_line_window_override_allowed": false,
+    "roles": [
+      {
+        "role": "discovery",
+        "inclusive_local_first_date": "2017-01-03",
+        "inclusive_local_last_date": "2021-12-31",
+        "window_start": "2017-01-03T00:00:00-05:00",
+        "window_end_exclusive": "2022-01-01T00:00:00-05:00",
+        "window_start_exp006_cj": "utc_ns:1483419600000000000",
+        "window_end_exclusive_exp006_cj": "utc_ns:1641013200000000000"
+      },
+      {
+        "role": "blind_semantic_oof_and_every_stage_c_case",
+        "inclusive_local_first_date": "2022-01-01",
+        "inclusive_local_last_date": "2022-12-31",
+        "window_start": "2022-01-01T00:00:00-05:00",
+        "window_end_exclusive": "2023-01-01T00:00:00-05:00",
+        "window_start_exp006_cj": "utc_ns:1641013200000000000",
+        "window_end_exclusive_exp006_cj": "utc_ns:1672549200000000000",
+        "economic_claim_authorized": false
+      }
+    ],
+    "delivery_predicates": [
+      "source_start_gte_window_start",
+      "observed_at_equals_source_start_plus_one_elapsed_minute",
+      "observed_at_lt_window_end_exclusive"
+    ],
+    "horizon_equal_or_later_non_timestamp_read_allowed": false,
+    "horizon_equal_or_later_receipt_or_derived_evidence_allowed": false,
+    "required_terminal_inequalities": [
+      "maximum_source_observed_at_delivered_lt_window_end_exclusive",
+      "maximum_candle_completion_clock_delivered_lt_window_end_exclusive"
+    ],
+    "filtering_after_delivery_is_future_read_violation": true,
+    "forbidden_data": [
+      "2023_and_later",
+      "2024_through_2026Q1_economic_oof",
+      "ohlcv_from_2026-04-01",
+      "all_mbo",
+      "action",
+      "pnl",
+      "sealed_data"
+    ]
+  },
+  "canonical_identity_contract": {
+    "algorithm": "EXP006-CJ",
+    "hash": "SHA256_UTF8",
+    "mapping_keys": "strings_sorted_lexicographically",
+    "arrays": "ordered",
+    "booleans_and_null": "json_lowercase",
+    "integers": "base10_no_leading_plus_or_zero_padding",
+    "finite_float": "f64_colon_plus_python_float_hex",
+    "negative_zero_preserved": true,
+    "aware_clock": "utc_ns_colon_plus_signed_unix_epoch_nanoseconds",
+    "naive_clock_allowed": false,
+    "nan_infinity_bytes_or_unsupported_type_allowed": false,
+    "object_repr_local_display_or_insertion_order_allowed": false,
+    "new_identity_hex_case": "lowercase"
+  },
+  "typed_source_and_epoch_contract": {
+    "physical_source_receipt_variants": [
+      "ValidCompletedRow",
+      "ValidClockInvalidRow"
+    ],
+    "stage_c_receipt_variants": [
+      "valid_completed_row",
+      "valid_clock_invalid_row"
+    ],
+    "source_position_tag": "source-position-v1",
+    "source_chain_genesis_tag": "source-chain-genesis-v1",
+    "source_chain_step_tag": "source-chain-step-v1",
+    "synthetic_slot_tag": "synthetic-slot-v1",
+    "physical_group_tag": "physical-arrival-group-v1",
+    "unscoped_m5_evidence_tag": "m5-slot-evidence-v1",
+    "scoped_m5_strip_tag": "m5-slot-strip-v1",
+    "epoch_genesis_tag": "continuity-epoch-genesis-v1",
+    "boundary_tag": "continuity-boundary-v2",
+    "epoch_successor_tag": "continuity-epoch-successor-v1",
+    "reader_evidence_tag": "reader-boundary-evidence-v1",
+    "synthetic_evidence_tag": "synthetic-boundary-evidence-v1",
+    "one_physical_group_max_logical_events": 6,
+    "synthetic_logical_events_max": 5,
+    "real_logical_events_exact": 1,
+    "real_logical_event_is_last": true,
+    "reader_is_sole_m1_to_m5_aggregation_authority": true,
+    "runner_resampling_or_second_aggregation_allowed": false,
+    "group_commit_mid_group_allowed": false,
+    "valid_clock_invalid_terminal_reason": "data_anomaly",
+    "valid_clock_invalid_forms_boundary_or_successor_epoch": false,
+    "genesis": {
+      "both_reader_last_asof_and_prior_source_contract_must_be_null": true,
+      "group_contains_exactly_one_real_and_no_synthetic_or_gap": true,
+      "scheduled_gap_scan_with_null_endpoint_allowed": false,
+      "reader_last_asof_verified_null_at_event_zero": true,
+      "epoch_zero_uses_first_source_position": true,
+      "asymmetric_null_or_synthetic_or_gap_fails_before_first_reader_mutation": true,
+      "unexpected_event_zero_reader_reset_fails_before_durable_commit": true
+    },
+    "pending_slot_identity_and_epoch_tags_checkpointed": true,
+    "cross_epoch_completed_m5_admitted": false,
+    "completed_m5_requires_five_real_slots_one_contract_one_epoch": true
+  },
+  "boundary_contract": {
+    "reason_priority": [
+      "contract_change_history_reset",
+      "data_gap_history_reset",
+      "registered_exchange_closure",
+      "registered_special_session_closure",
+      "registered_abbreviated_good_friday_closure",
+      "registered_full_session_closure",
+      "historical_settlement_pause",
+      "scheduled_weekend_closure",
+      "scheduled_market_closure",
+      "synthetic_interruption"
+    ],
+    "closure_reasons": [
+      "registered_exchange_closure",
+      "registered_special_session_closure",
+      "registered_abbreviated_good_friday_closure",
+      "registered_full_session_closure",
+      "historical_settlement_pause",
+      "scheduled_weekend_closure",
+      "scheduled_market_closure"
+    ],
+    "reachable_reason_sets": [
+      [
+        "contract_change_history_reset"
+      ],
+      [
+        "data_gap_history_reset"
+      ],
+      [
+        "one_exact_closure_reason"
+      ],
+      [
+        "synthetic_interruption"
+      ],
+      [
+        "contract_change_history_reset",
+        "one_exact_closure_reason"
+      ],
+      [
+        "one_exact_closure_reason",
+        "synthetic_interruption"
+      ]
+    ],
+    "unknown_or_unreachable_reason_set_fails_before_boundary": true,
+    "pre_reader_plan_states": [
+      "pre_real_internal_reader_reset",
+      "pre_logical_event_explicit_closure_reset",
+      "pending_synthetic_only"
+    ],
+    "committed_boundary_modes": [
+      "pre_real_internal_reader_reset",
+      "pre_logical_event_explicit_closure_reset",
+      "post_group_explicit_synthetic_reset"
+    ],
+    "mode_precedence": [
+      "pre_real_internal_reader_reset",
+      "pre_logical_event_explicit_closure_reset",
+      "post_group_explicit_synthetic_reset"
+    ],
+    "full_group_buffered_and_plan_frozen_before_first_reader_call": true,
+    "pending_synthetic_only_resolution": [
+      "no_boundary",
+      "post_group_explicit_synthetic_reset"
+    ],
+    "pre_real_internal_cut": "proving_real_index",
+    "explicit_closure_cut": "first_logical_event_after_registered_closure",
+    "synthetic_only_post_group_cut": "logical_count",
+    "synthetic_plus_internal_group_fails_before_first_reader_call": true,
+    "tracker_boundary_handler_calls_per_boundary": 1,
+    "tracker_boundary_observed_at": "proving_real_row_end",
+    "tracker_reset_twice_allowed": false,
+    "epoch_advance_count_per_boundary": 1,
+    "staged_steps_before_checkpoint_are_unreferenced": true,
+    "interrupted_staged_tail_silently_adopted": false
+  },
+  "stage_c_contract": {
+    "role_window": "blind_semantic_oof_and_every_stage_c_case",
+    "eligible_real_m5_limit": 12,
+    "delivery_genesis_tag": "stage-c-delivery-genesis-v1",
+    "delivery_step_tag": "stage-c-delivery-step-v1",
+    "delivery_counter_one_based": true,
+    "next_request_counter_increments_before_source_request": true,
+    "timestamp_only_horizon_probe_is_delivery": false,
+    "stop_latch_events": [
+      "twelfth_real_m5_committed",
+      "boundary",
+      "exhaustion",
+      "exclusive_end"
+    ],
+    "next_after_stop": "hard_invariant_failure",
+    "reading_then_discarding_thirteenth_receipt_allowed": false,
+    "terminal_receipt_fields": [
+      "case_id",
+      "restored_cutoff_source_commitment",
+      "first_delivered_physical_ordinal_or_null",
+      "last_delivered_physical_ordinal_or_null",
+      "delivery_count",
+      "final_delivery_chain_commitment",
+      "next_request_count_at_stop",
+      "next_request_count_at_terminal",
+      "maximum_delivered_source_observed_at",
+      "maximum_delivered_candle_completion_clock",
+      "timestamp_only_exclusive_probe_flag",
+      "stop_reason",
+      "next_called_after_stop_derived_false"
+    ],
+    "producer_gateway_and_auditor_reconciliation_required": true,
+    "future_panel_separate": true,
+    "future_panel_clock_basis": "proving_physical_knowledge",
+    "reviewer_absolute_date_price_symbol_action_plan_or_economic_result_allowed": false,
+    "private_receipt_retains_full_ordinals_positions_and_hashes": true,
+    "synthetic_boundary_backdating_allowed": false
+  },
+  "known_answer_tests": {
+    "expected_values_source": "literal_preregistration_appendix_a",
+    "candidate_derived_expected_values_allowed": false,
+    "literal_mismatch": "synthetic_failure",
+    "ordered_sha256": [
+      {
+        "id": "canonical_mapping",
+        "sha256": "269b3ee2f3611b67e635c554e2a830abc0319b9a37c824f1af7f467d9c2098b6"
+      },
+      {
+        "id": "source_position_R0",
+        "sha256": "7694d36020d0d925507b2714c4de4a0a8f19ef577fdd87dcf3745f03844c0c33"
+      },
+      {
+        "id": "source_position_R1",
+        "sha256": "47e25be7e857ce2a5f5162656510d361ff7534153ded4707000514a3e9cfe637"
+      },
+      {
+        "id": "source_position_R2",
+        "sha256": "6534ab1f0ed324cac9038d7f1209c9cf494147bd7d50c29d8e7ff115d5faef66"
+      },
+      {
+        "id": "source_position_R3",
+        "sha256": "02997b06148840a050bcecc62ed3e61f525c29f1fe1b3b509221db82eeef0e5c"
+      },
+      {
+        "id": "source_position_R4",
+        "sha256": "75dd87d4040328646dd29c6769a3381fa730cf09e167c276b71a668ac9fb88ae"
+      },
+      {
+        "id": "source_chain_genesis",
+        "sha256": "a96eb0b6915777afe6b8330fd872ff67a977cca0e3ad482362b737a2537256fe"
+      },
+      {
+        "id": "source_chain_after_R0",
+        "sha256": "de517571a058fddd5a8d79c1479caa9892158529a37990e3ee40af83233b0ef1"
+      },
+      {
+        "id": "source_chain_after_R1",
+        "sha256": "86f697fffcdf1007d0308614e52dfec74785581e2b5185f8b441a892ee30b73b"
+      },
+      {
+        "id": "source_chain_after_R2",
+        "sha256": "694da56b65e318aeb49f961f76a27d480ceb86db3a0c211d6f849ad299ef36ae"
+      },
+      {
+        "id": "source_chain_after_R3",
+        "sha256": "837a4fae586fd58595a3b01aa09f7f3375e4e9f6c36e820de3bfb89a7ad9e0aa"
+      },
+      {
+        "id": "source_chain_after_R4",
+        "sha256": "4cf31dee543e1d92bb57127a23f30db53f81fdb2224fbac22fcf1d72f6eb56ea"
+      },
+      {
+        "id": "synthetic_slot_S24",
+        "sha256": "9b8afc747586180ebcc8a6db2245111946b78e58f4a0a5e172eddcb587a3a46d"
+      },
+      {
+        "id": "synthetic_slot_S25",
+        "sha256": "ef3cce859e97dff0036160935229460c6d7b37b5c9e17e60ee6141ae75cb743a"
+      },
+      {
+        "id": "synthetic_slot_S26",
+        "sha256": "172a560a461d45322e2728f613225aacffab5e5a006e6274612dd761bcbccfce"
+      },
+      {
+        "id": "synthetic_slot_S27",
+        "sha256": "83068c0f18b3ae706ad553496d054ad843dbf8c6a83ee4eba5cbd36e20659668"
+      },
+      {
+        "id": "synthetic_slot_S28",
+        "sha256": "8aa30b9bbbe2713ea8abfe08f27071f067fd2c1d52945258a8313742b724d3da"
+      },
+      {
+        "id": "physical_arrival_group",
+        "sha256": "1b27d5d08257f1d89a2339773ec252cd8ce3aae9e27073eabe9b97f2f21fb108"
+      },
+      {
+        "id": "epoch_0",
+        "sha256": "edca811524276bdd1698179ec94bf8431e0badbdc3b0ce446454a678b037d979"
+      },
+      {
+        "id": "unscoped_m5_0920",
+        "sha256": "90dfa86cb5f3558dbe1fde7e96f47bbe39bc5298016a466bb0840c0b4fc8e132"
+      },
+      {
+        "id": "scoped_m5_0920",
+        "sha256": "df7d077146eaa60358d431cd423855e4d38576a8bc6c5b535cc7d87eeb06f89b"
+      },
+      {
+        "id": "unscoped_m5_0925",
+        "sha256": "c0e2984357763a142de19f3d7fb3e555271cbab6574059e99bb26d319c378e1f"
+      },
+      {
+        "id": "scoped_m5_0925",
+        "sha256": "2119bdc36930ed5ac15052b8a879b678ea26b6e290329ef49d4e538df3857b9b"
+      },
+      {
+        "id": "synthetic_boundary_evidence",
+        "sha256": "0f187a8ed9c1b77b970e3464f0be8dd074a1167c39a2f9ee4a8a1eeb5cda64da"
+      },
+      {
+        "id": "empty_reader_boundary_evidence",
+        "sha256": "6d511e420733fb3df823148bcd02fa72fb72adf43bdd622036a2155d691d3f95"
+      },
+      {
+        "id": "closure_reader_boundary_evidence",
+        "sha256": "2192eda4c1db959bf16b8d8aef951b05cf17ac8fa0c4f6352f13187eedeadbe7"
+      },
+      {
+        "id": "synthetic_only_boundary",
+        "sha256": "33860232eb8cee59ca0ebb4aeaea3c0519ee20468635ed27a53b3889be42f325"
+      },
+      {
+        "id": "synthetic_only_successor_epoch",
+        "sha256": "7b6453afd6c0840e1e6523abf4a62a2bd2d4b5d41fc87e0f418f9c8d41e0ac78"
+      },
+      {
+        "id": "closure_plus_synthetic_boundary",
+        "sha256": "3754aabea584c57ec00f29b6a9fc1aa7b14f3114d46e3b024a0218a684f90212"
+      },
+      {
+        "id": "closure_plus_synthetic_successor_epoch",
+        "sha256": "6701854bd0a809eb6d90a7b769ed2eaa4462cc8bb631e97c7b675e380749510b"
+      },
+      {
+        "id": "stage_c_delivery_genesis",
+        "sha256": "952b33417df64b526359e9d1ea93b5576ecb7211c4d9ee7394b96721ab916218"
+      },
+      {
+        "id": "stage_c_delivery_after_R4",
+        "sha256": "21d5c2db4cf8ce1035666394c890f1c7bb342b0437b2aebfd7826edfe85922a7"
+      }
+    ]
+  },
+  "attempts": [
+    {
+      "order": 1,
+      "purpose": "synthetic",
+      "id": "EXP-SMC-3.0.2-006-SYNTHETIC-001",
+      "root": "artifacts/v3_exp006_displacement/synthetic-001"
+    },
+    {
+      "order": 2,
+      "purpose": "discovery",
+      "id": "EXP-SMC-3.0.2-006-DISCOVERY-001",
+      "root": "outputs/v3_exp006_displacement/discovery-2017-2021-attempt001"
+    },
+    {
+      "order": 3,
+      "purpose": "oof_packets",
+      "id": "EXP-SMC-3.0.2-006-OOF-PACKETS-001",
+      "root": "artifacts/v3_exp006_displacement/oof-2022/packet-pass-001"
+    },
+    {
+      "order": 4,
+      "purpose": "stage_a",
+      "id": "EXP-SMC-3.0.2-006-STAGE-A-REVIEW-001",
+      "root": "artifacts/v3_exp006_displacement/oof-2022/stage-a-review-001"
+    },
+    {
+      "order": 5,
+      "purpose": "stage_b",
+      "id": "EXP-SMC-3.0.2-006-STAGE-B-OVERLAY-001",
+      "root": "artifacts/v3_exp006_displacement/oof-2022/stage-b-overlay-001"
+    },
+    {
+      "order": 6,
+      "purpose": "stage_c",
+      "id": "EXP-SMC-3.0.2-006-STAGE-C-REVEAL-001",
+      "root": "artifacts/v3_exp006_displacement/oof-2022/stage-c-reveal-001"
+    }
+  ],
+  "attempt_contract": {
+    "purpose_dependency_chain": [
+      "synthetic_COMPLETED_PASS",
+      "discovery_COMPLETED_GO",
+      "oof_packets_COMPLETED_96_packets",
+      "stage_a_PREPARED_REVIEW_COMMITTED_COMPLETED",
+      "stage_b_PREPARED_REVIEW_COMMITTED_COMPLETED",
+      "stage_c_COMPLETED"
+    ],
+    "attempt_json_binds": [
+      "format_and_experiment_version",
+      "purpose_attempt_id_and_exact_root",
+      "intended_argv_arrays",
+      "exp006_preregistration_gate0_and_gate1_receipt_hashes",
+      "exp004_terminal_and_baseline_bundle_hashes",
+      "all_five_archive_hard_parent_hashes",
+      "exp006_config_and_sorted_bundle_manifest_hashes",
+      "release_authority_hash",
+      "purpose_dependency_terminal_hash",
+      "source_path_sha_role_and_exact_knowledge_window_or_synthetic_null_source_and_exact_test_node_manifest"
+    ],
+    "missing_failed_unavailable_or_hash_mismatched_parent_forbids_child_root": true,
+    "create_once": true,
+    "attempt_json_first_exclusive_immutable_and_fsynced": true,
+    "success_and_failure_terminal_records_separate": true,
+    "first_synthetic_command_freezes_code_hash": true,
+    "failed_or_completed_attempt_resume": false,
+    "resume_only_same_in_progress_attempt_verified_checkpoint": true,
+    "root_rename_reuse_or_migration": false,
+    "evidence_journal_checkpoint_progress_and_resume_required": true,
+    "ordinary_unregistered_pytest_authorized": false
+  },
+  "implementation_budget": {
+    "active_edit_or_create_paths": [
+      "smc_trader/displacement_audit.py",
+      "smc_trader/displacement_source.py",
+      "scripts/run_v3_displacement_semantic.py",
+      "tests/test_v3_displacement.py",
+      "tests/test_v3_displacement_replay.py",
+      "configs/experiments/EXP-SMC-3.0.2-006-CAUSAL-5M-DISPLACEMENT-TYPED-EPOCH-CLOSURE.json"
+    ],
+    "read_only_dependency": {
+      "path": "smc_trader/displacement.py",
+      "sha256": "35f8bde64ff0f3633f9fdc3a61b9ae7b3aab4ec5f2d8e470d597fa7e3c55a3e2"
+    },
+    "counted_python_paths": [
+      "smc_trader/displacement.py",
+      "smc_trader/displacement_audit.py",
+      "smc_trader/displacement_source.py",
+      "scripts/run_v3_displacement_semantic.py",
+      "tests/test_v3_displacement.py",
+      "tests/test_v3_displacement_replay.py"
+    ],
+    "loc_algorithm_id": "exp006-effective-python-loc-v1",
+    "loc_algorithm": {
+      "encoding": "exact_utf8",
+      "tokenizer": "standard_python_tokenize",
+      "ignored_token_types": [
+        "ENCODING",
+        "NL",
+        "NEWLINE",
+        "INDENT",
+        "DEDENT",
+        "COMMENT",
+        "ENDMARKER"
+      ],
+      "count": "cardinality_of_union_of_all_physical_lines_covered_by_every_nonignored_token",
+      "multiline_strings_and_docstrings_count_every_occupied_line": true
+    },
+    "frozen_five_file_exp004_baseline_loc": 1198,
+    "complete_six_path_loc_hard_max": 1800,
+    "maximum_net_increase": 602,
+    "only_numeric_hard_gate": "complete_six_path_loc_hard_max",
+    "allocation_is_nonbinding_forecast": {
+      "frozen_semantic_kernel": 331,
+      "typed_source_group_adapter": 220,
+      "independent_audit": 360,
+      "six_purpose_runner": 480,
+      "two_test_files_combined": 380,
+      "unallocated_formatting_contingency": 29
+    },
+    "line_origin_diff_algorithm_id": "exp006-line-origin-v1",
+    "line_origin_diff": {
+      "decode": "exact_utf8",
+      "split": "line_endings_retained",
+      "algorithm": "difflib.SequenceMatcher",
+      "autojunk": false,
+      "grandfather_candidate_opcodes": [
+        "equal"
+      ],
+      "record_both_indices_and_line_byte_sha256": true,
+      "moved_or_copied_block_exempt": false
+    },
+    "new_displacement_source_grandfathered_lines": 0,
+    "semicolon_statements_or_one_line_compound_suites_on_new_or_modified_lines": false,
+    "generated_or_evaluated_python_exec_eval_or_runtime_compile": false,
+    "executable_python_outside_counted_set": false,
+    "fixture_merge_dynamic_invention_or_silent_skip": false,
+    "forbidden_architecture": [
+      "workflow_engine",
+      "dag",
+      "database",
+      "queue",
+      "service",
+      "plugin",
+      "strategy_dsl",
+      "second_aggregator",
+      "neural_model",
+      "ui_framework"
+    ]
+  },
+  "gate_and_permissions": {
+    "gate0_unanimous_go": true,
+    "archive_transaction_complete": true,
+    "exact_active_path_edit_or_creation_authorized": true,
+    "written_pretest_self_review_authorized": true,
+    "gate1_static_reviews_authorized": 3,
+    "gate1_static_revisions_max": 2,
+    "third_gate1_failure_terminates_exp006": true,
+    "candidate_import_authorized": false,
+    "candidate_compile_authorized": false,
+    "candidate_syntax_check_authorized": false,
+    "candidate_test_execution_authorized": false,
+    "candidate_execution_authorized": false,
+    "attempt_root_creation_authorized": false,
+    "synthetic_fixture_execution_authorized": false,
+    "real_ohlcv_read_authorized": false,
+    "review_commit_authorized": false,
+    "future_reveal_authorized": false,
+    "production_integration_authorized": false,
+    "action_authorized": false,
+    "pnl_authorized": false,
+    "mbo_authorized": false,
+    "economic_test_authorized": false,
+    "sealed_data_authorized": false,
+    "strongest_later_conclusion": "causal 5m displacement dual-clock lifecycle semantic GO",
+    "prediction_decision_quality_cost_survival_or_profitability_claim_authorized": false
+  }
+}

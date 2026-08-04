@@ -1,0 +1,117 @@
+{
+  "runner_id": "EXP-SMC-3.0.0-001-SEMANTIC-DISCOVERY-RUNNER",
+  "audit_id": "EXP-SMC-3.0.0-001-BLIND-SEMANTIC-AUDIT",
+  "status": "implementation_contract_frozen",
+  "authorization": "implementation and synthetic tests only; real discovery execution is forbidden until a later governance release",
+  "registered_at": "2026-07-28T00:00:00-04:00",
+  "bindings": {
+    "blind_audit_contract_sha256": "62a2a4a76fbe5cff91ff023e4b19fccbc3a1c3c2e7464ed4a3cdaadf38724836",
+    "model_config_sha256": "e953af3ccc5ec74ede0cd12694a1f712d584a4d8c3f4c6e6c6205c582691698d",
+    "primitive_protocol_sha256": "2b7b05cbc65352e9ae2501fcd2988032b3bbfe732d665ba3228732acfd1ed615",
+    "io_code_sha256": "7f3f78b9066d7e4dfac4a374d474ba2acdfa6121cbd5b551fbb2897d02f3c0b5",
+    "causal_reader_code_sha256": "d6bc65b6ee9793ba69b10dc2ca24639cf874ddb42191a4bf28c99ed9da754d2e",
+    "market_clock_code_sha256": "5564589f35e48621f8fdec17a467046525fb799eb80c01ba579d8d22954d1bc2",
+    "semantic_audit_code_sha256": "4d91d565017b1383826351242c3228ae360d6c49cf45db3a2f56e6c1963ef845"
+  },
+  "threat_model": {
+    "guarantee": "logical row admission: no source row at or after a case clock may be passed to the causal reader or observer before that case packet is committed",
+    "not_claimed": "Parquet and operating-system readers may decode or cache bytes from a row group containing later rows; this runner does not claim byte-level physical isolation",
+    "trusted_boundary": "the runner derives provenance, row hashes, row and produced-bar rolling roots internally; packet callers may not supply them"
+  },
+  "source_iterator": {
+    "format": "parquet",
+    "timestamp_column": "ts",
+    "batch_rows": 65536,
+    "maximum_no_trade_gap_minutes": 5,
+    "allow_data_gap_reset": true,
+    "completed_bar_source": "smc_trader.io.iter_completed_bars",
+    "checkpoint_boundary": "after a complete real source bar, or after every case transaction sharing that bar clock is complete"
+  },
+  "implementation_hashes_required": [
+    "semantic_discovery_runner_sha256",
+    "semantic_audit_sha256",
+    "io_sha256",
+    "causal_sha256",
+    "market_clock_sha256",
+    "observation_sha256",
+    "structure_sha256"
+  ],
+  "provenance": {
+    "kinds": [
+      "real_source_bar",
+      "synthetic_backfill"
+    ],
+    "required_fields": [
+      "source_row_start",
+      "source_row_ordinal",
+      "source_row_sha256",
+      "bar_sha256",
+      "max_source_row_admitted"
+    ],
+    "observer_policy": "reader and observer process every real and synthetic completed bar in exact iterator order",
+    "selector_policy": "only a real_source_bar transition may anchor a case; a synthetic transition may change state but may never enter the selector or be moved to an adjacent real clock",
+    "shortage_policy": "unavailable; no bucket backfill"
+  },
+  "pass1": {
+    "inputs": [
+      "causal reader",
+      "causal observer",
+      "frozen structure/BOS semantic state"
+    ],
+    "forbidden": [
+      "brain",
+      "decision",
+      "risk",
+      "execution outcome",
+      "shadow replay",
+      "future path",
+      "PnL",
+      "MBO"
+    ],
+    "selector_memory": "bounded by registered bucket_count * cases_per_bucket; event-clock uniqueness is checked per observation and no unbounded global seen set is retained",
+    "output": "create-once selection authority manifest with real-row provenance and prefix commitments",
+    "completion": "all registered buckets contain exactly two cases; otherwise status unavailable and pass2 is forbidden"
+  },
+  "pass2": {
+    "input": "only the immutable complete pass1 selection authority manifest",
+    "replay": "one fresh chronological reader/observer replay from the same frozen source start; packets are committed before admitting the next source row",
+    "reproduction": [
+      "semantic_event_id",
+      "case_clock",
+      "semantic_state_hash",
+      "case_source_row_start",
+      "case_source_row_sha256",
+      "case_bar_sha256",
+      "source_prefix_root",
+      "produced_bar_prefix_root",
+      "reset_epoch"
+    ],
+    "transaction": "authority and blind roots are built under one staging case directory, all hashes are fsynced into COMPLETED.json, then the directory is atomically renamed; a complete orphan is adopted, a partial orphan fails closed",
+    "global_manifest": "create once only after every selected case transaction is committed"
+  },
+  "checkpoint": {
+    "format": "content-addressed trusted-local pickle behind a hash-bound JSON manifest",
+    "reject": [
+      "symlink manifest",
+      "symlink state",
+      "non-regular state",
+      "state hash mismatch",
+      "binding mismatch",
+      "phase mismatch",
+      "selection manifest mismatch"
+    ],
+    "state": [
+      "phase",
+      "last committed real source cursor and row",
+      "real and synthetic counts",
+      "reader, observer, tracker and event-memory state",
+      "bounded selector state",
+      "selection manifest hash in pass2",
+      "committed cases",
+      "source-row and produced-bar rolling roots",
+      "source, interval, gap, history and implementation bindings"
+    ],
+    "progress": "durable checkpoint state only; percentage and ETA never include uncommitted in-memory work"
+  },
+  "release_gate": "a new Agent5 static approval is required before pass1 may read the registered discovery source"
+}

@@ -1,0 +1,130 @@
+{
+  "protocol_version": "2.2.0-managed-net-value-preregistered.1",
+  "status": "preregistered_before_v2_2_episode_generation",
+  "frozen_at": "2026-07-26T00:00:00-04:00",
+  "playbook_registry": "configs/playbooks_v2.json",
+  "action_equivalence_protocol": "configs/action_equivalence_v2_2.json",
+  "revealed_design_evidence": [
+    "outputs/v2_1_managed_policy_calibration_2023_stream_v2",
+    "outputs/v2_1_mbo_diagnostic_202406_managed_v1",
+    "outputs/v2_1_mbo_diagnostic_202407_managed_v1"
+  ],
+  "revealed_design_evidence_may_fit_or_select_parameters": false,
+  "belief_contract": {
+    "label": "primary_target_before_original_invalidation_within_deadline",
+    "authority": "playbook thesis strength only",
+    "may_be_used_as_managed_trade_return": false
+  },
+  "episode_contract": {
+    "unit": "one unique risk-approved action identity at its actual action clock",
+    "equivalent_playbook_evidence": "stored as contributing hypothesis keys and fixed causal features",
+    "entry_plan_freeze": "entry, original structural invalidation, primary target and deadline freeze at risk approval",
+    "fill_or_expiry": "next-bar causal execution; unfilled or expired approval resolves to 0R gross action value",
+    "management": [
+      "hold",
+      "protect only to a later confirmed structural level without widening original risk",
+      "model or risk exit on a later bar",
+      "hard deadline exit",
+      "contract-change exit",
+      "same-bar stop before target"
+    ],
+    "gross_label": "realized frozen-policy gross_R for a filled-and-closed action, 0R for next-bar unfilled or expired action",
+    "gross_label_clip_R": [
+      -1.5,
+      3.0
+    ],
+    "right_censoring": "pending entries and positions open at the registered boundary are excluded from fitting and reported separately",
+    "cost_decomposition": "2023 has no causal MBO cost label; the fitted component is managed gross action value. Runtime managed net value subtracts the current causal MBO round-trip cost_R and the preregistered fillability shift penalty.",
+    "constant_cost_may_claim_execution_reality": false
+  },
+  "causal_features": {
+    "fixed_order": [
+      "max_calibrated_belief",
+      "second_calibrated_belief",
+      "belief_dispersion",
+      "equivalent_hypothesis_count",
+      "representative_raw_probability",
+      "calibration_gap",
+      "primary_target_R_capped",
+      "remaining_path_R_capped",
+      "minutes_to_deadline_scaled",
+      "evidence_dfp",
+      "evidence_lsr",
+      "evidence_favr"
+    ],
+    "caps": {
+      "primary_target_R_capped": [
+        0.0,
+        3.0
+      ],
+      "remaining_path_R_capped": [
+        0.0,
+        3.0
+      ],
+      "minutes_to_deadline_scaled": [
+        0.0,
+        1.0
+      ],
+      "minutes_to_deadline_denominator": 120
+    },
+    "future_or_outcome_features": false,
+    "market_regime_interactions": false,
+    "feature_selection_search": false
+  },
+  "fit": {
+    "model": "pooled fixed-feature ridge regression",
+    "ridge_lambda": 10.0,
+    "intercept": true,
+    "standardization": "fit on each training fold only",
+    "playbook_specific_models": false,
+    "neural_network": false,
+    "hyperparameter_search": false,
+    "temporal_folds": [
+      {
+        "train_end_exclusive": "2023-04-01T00:00:00-04:00",
+        "validate_start": "2023-04-01T00:00:00-04:00",
+        "validate_end_exclusive": "2023-07-01T00:00:00-04:00"
+      },
+      {
+        "train_end_exclusive": "2023-07-01T00:00:00-04:00",
+        "validate_start": "2023-07-01T00:00:00-04:00",
+        "validate_end_exclusive": "2023-10-01T00:00:00-04:00"
+      },
+      {
+        "train_end_exclusive": "2023-10-01T00:00:00-04:00",
+        "validate_start": "2023-10-01T00:00:00-04:00",
+        "validate_end_exclusive": "2024-01-01T00:00:00-05:00"
+      }
+    ],
+    "support": "all standardized continuous features within the full-fit training min/max expanded by no more than 0.25 standard deviations; all evidence indicators registered",
+    "prediction": "mean managed gross_R",
+    "uncertainty": "training residual RMSE; runtime uses mean minus one residual RMSE before observed execution deductions"
+  },
+  "time_out_of_sample_gates": {
+    "minimum_oof_episodes": 300,
+    "minimum_each_fold_episodes": 60,
+    "spearman_prediction_to_label_strictly_positive": true,
+    "mse_must_beat_training_mean_baseline": true,
+    "positive_value_bucket_must_have_positive_realized_mean": true,
+    "all_gates_required": true,
+    "failure_behavior": "artifact status unavailable; enter cannot outrank abstain"
+  },
+  "runtime_net_utility": {
+    "formula": "lower_confidence_managed_gross_R - observed_round_trip_cost_R - 0.35 * (1 - observed_fillability)",
+    "minimum_advantage": "unchanged from the frozen decision configuration; no threshold search before objective alignment",
+    "data_quality": "unknown, stale, constant-assumption or anomalous execution remains a hard risk veto"
+  },
+  "leave_one_playbook_out": {
+    "required_variants": [
+      "all_three",
+      "without_failed_auction_value_return",
+      "without_liquidity_sweep_reversal"
+    ],
+    "fit_and_oof_metrics_recomputed": true,
+    "June_July_MBO_role": "post-fit falsification only; may not select model features, ridge lambda, support or action threshold"
+  },
+  "sealed_holdouts": {
+    "MBO_2024_08_02_to_2024_12_02": "unread",
+    "OHLCV_2026_04_01_to_2026_07_14": "unread"
+  }
+}

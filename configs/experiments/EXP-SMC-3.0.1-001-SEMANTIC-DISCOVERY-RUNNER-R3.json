@@ -1,0 +1,118 @@
+{
+  "runner_id": "EXP-SMC-3.0.1-001-SEMANTIC-DISCOVERY-RUNNER-R3",
+  "audit_id": "EXP-SMC-3.0.1-001-BLIND-SEMANTIC-AUDIT-R3",
+  "failed_predecessor_runner_id": "EXP-SMC-3.0.1-001-SEMANTIC-DISCOVERY-RUNNER-R2",
+  "status": "implementation_contract_frozen",
+  "authorization": "implementation and synthetic tests only; real discovery execution is forbidden until a later governance release",
+  "registered_at": "2026-07-29T12:00:00-04:00",
+  "bindings": {
+    "blind_audit_contract_sha256": "9678c8017a1cd8defb24923837de1f3ddc951ad0841d6b4f3a4b91e629794b95",
+    "model_config_sha256": "9b480ab34a6b052a200ea0d683fcdeda18a1ea68512b773e244e0141f30e1e0b",
+    "primitive_protocol_sha256": "d94c03b71ffdc099089767fe9dfe57668edfd8252e86db014ce3342115def76d",
+    "io_code_sha256": "7f3f78b9066d7e4dfac4a374d474ba2acdfa6121cbd5b551fbb2897d02f3c0b5",
+    "causal_reader_code_sha256": "01b3ec12d8f95b780f0fefd2220ff57612fc938b776c3c68d3504d6b4b7bab9d",
+    "market_clock_code_sha256": "5e43fe3be976ea8c6586f13bf21e5a1de86ec252a8590299d03aa8432f3561a1",
+    "semantic_audit_code_sha256": "0b2f147c4635c4e46ad7d0673d8fe8d127fec4bc57f8a36dcd355add721de1c6"
+  },
+  "bound_files": {
+    "blind_audit_contract_sha256": "configs/experiments/EXP-SMC-3.0.1-001-BLIND-SEMANTIC-AUDIT-R3.json",
+    "model_config_sha256": "configs/model_v3_0_1_exp001_structure_bos_identity_r3.json",
+    "primitive_protocol_sha256": "configs/smc_primitives_v3_0_1_structure_bos_audit_closure_r3.json",
+    "io_code_sha256": "smc_trader/io.py",
+    "causal_reader_code_sha256": "smc_trader/causal.py",
+    "market_clock_code_sha256": "smc_trader/market_clock.py",
+    "semantic_audit_code_sha256": "smc_trader/semantic_audit.py"
+  },
+  "threat_model": {
+    "guarantee": "logical row admission: no source row at or after a case clock may be passed to the causal reader or observer before every selected case sharing that clock is committed",
+    "review_guarantee": "selection and Pass2 bind their original absolute engine root; reviewer export is random-rekeyed outside that root and exposes no event-specific commitment, while an engine-only mapping binds every reviewer unit to the exact registered Pass2 commitment",
+    "not_claimed": "Parquet and operating-system readers may decode or cache bytes from a row group containing later rows; this runner does not claim byte-level physical isolation",
+    "trusted_boundary": "the runner derives provenance, row hashes, rolling roots, reset provenance and context-complete case eligibility internally"
+  },
+  "source_iterator": {
+    "format": "parquet",
+    "timestamp_column": "ts",
+    "batch_rows": 65536,
+    "maximum_no_trade_gap_minutes": 5,
+    "allow_data_gap_reset": true,
+    "completed_bar_source": "smc_trader.io.iter_completed_bars",
+    "checkpoint_boundary": "after a complete real source bar, and only after every case transaction sharing that bar clock is complete"
+  },
+  "implementation_hashes_required": [
+    "semantic_discovery_runner_sha256",
+    "semantic_audit_sha256",
+    "io_sha256",
+    "causal_sha256",
+    "market_clock_sha256",
+    "observation_sha256",
+    "structure_sha256"
+  ],
+  "provenance": {
+    "kinds": [
+      "real_source_bar",
+      "synthetic_backfill"
+    ],
+    "selector_policy": "only a real-source transition with complete four-timeframe review context may anchor a case",
+    "boundary_policy": "simultaneous data-gap and contract-change anomalies produce one observer reset epoch and typed terminal BOS publication"
+  },
+  "pass1": {
+    "inputs": [
+      "causal reader",
+      "causal observer",
+      "frozen structure/BOS semantic state",
+      "causal retained histories for reviewability eligibility"
+    ],
+    "forbidden": [
+      "brain",
+      "decision",
+      "risk",
+      "execution outcome",
+      "future path",
+      "PnL",
+      "MBO"
+    ],
+    "selector_memory": "bounded by registered bucket_count times cases_per_bucket",
+    "output": "create-once exact selection authority with real-row provenance and prefix commitments",
+    "completion": "all 120 registered buckets contain exactly two materializable cases; otherwise unavailable and Pass2 is forbidden"
+  },
+  "pass2": {
+    "input": "the immutable complete selection_authority.json only",
+    "replay": "one fresh chronological reader/observer replay; all selected cases sharing a clock are committed before the next receipt",
+    "reproduction": [
+      "semantic_event_id",
+      "bos_id",
+      "timeframe",
+      "direction",
+      "case_class",
+      "target_swing_id",
+      "source_structure_id",
+      "semantic_state_hash",
+      "case source identity",
+      "source and produced-bar prefix roots",
+      "reset epoch",
+      "full materializable context"
+    ],
+    "transaction": "authority and blind roots are fsynced under one staging case directory, committed by exact COMPLETED.json hashes, then atomically renamed",
+    "reviewer_export": "requires the original physically bound packets root and an explicit outside destination; it rewrites deterministic internal identities to cryptographically random reviewer identities, creates unit directories only in random-identity order rather than event order, leaves the mapping only in the engine root and copies no semantic_event_id, case-completion commitment or authority data"
+  },
+  "review_and_truth": {
+    "global_lock": "requires exactly 240 unique, semantically valid review transactions and derives the count from the frozen selection dimensions",
+    "truth": "revalidates all 240 actual review documents, exact selection/Pass2 identities, authority commitment and complete categorical visual marker map before reveal",
+    "scorecard": "requires exactly 240 immutable truth overlays and computes the 216/240 strict agreement gate"
+  },
+  "checkpoint": {
+    "format": "content-addressed trusted-local pickle behind a hash-bound JSON manifest",
+    "progress": "durable checkpoint state only; percentage and ETA never include uncommitted in-memory work"
+  },
+  "release_gate": "new independent static approval, full-size synthetic confirmatory pass and separate data release are required before real Pass1",
+  "permissions": {
+    "real_pass1_authorized": false,
+    "real_pass2_authorized": false,
+    "case_materialization_authorized": false,
+    "blind_review_authorized": false,
+    "truth_overlay_authorized": false,
+    "future_reveal_authorized": false,
+    "economic_tests_authorized": false,
+    "mbo_authorized": false
+  }
+}

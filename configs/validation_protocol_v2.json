@@ -1,0 +1,47 @@
+{
+  "protocol_version": "2.0.0-preregistered.1",
+  "frozen_at": "2026-07-25T00:00:00-04:00",
+  "causal_front_sha256": "5057fe574b82b26e3fe8a7798607a177b847876fee7f5ef41a938c7c87499bfc",
+  "ohlcv_windows": {
+    "development": {
+      "start": "2017-01-03T18:00:00-05:00",
+      "end_exclusive": "2022-01-01T00:00:00-05:00",
+      "purpose": "primitive and episode discovery; exploratory results cannot be reported as confirmation"
+    },
+    "calibration": {
+      "start": "2022-01-01T00:00:00-05:00",
+      "end_exclusive": "2024-01-01T00:00:00-05:00",
+      "purpose": "belief reliability mapping and frozen decision-utility calibration"
+    },
+    "rolling_validation": {
+      "start": "2024-01-01T00:00:00-05:00",
+      "end_exclusive": "2026-04-01T00:00:00-04:00",
+      "purpose": "walk-forward component and end-to-end validation without parameter selection"
+    },
+    "sealed_holdout": {
+      "start": "2026-04-01T00:00:00-04:00",
+      "end_exclusive": "2026-07-14T00:00:00-04:00",
+      "purpose": "single final v2 reveal after registry, calibration and code fingerprints are frozen"
+    }
+  },
+  "ohlcv_access_note": "Earlier model generations may have inspected historical periods. Only the sealed_holdout is treated as prospective-equivalent for v2, and even that is not claimed to be institutionally pristine without an external access log.",
+  "mbo_windows": {
+    "development": {
+      "start": "2024-06-02T00:00:00Z",
+      "end_exclusive": "2024-08-02T00:00:00Z",
+      "purpose": "causal book reconstruction and execution-reality calibration"
+    },
+    "sealed_holdout": {
+      "start": "2024-08-02T00:00:00Z",
+      "end_exclusive": "2024-12-02T00:00:00Z",
+      "purpose": "independent execution and path-order validation"
+    }
+  },
+  "leakage_rules": [
+    "No post-decision OHLCV or MBO event enters Observation_t, Belief_t, action utility, or risk approval.",
+    "A decision snapshot, protocol hash, config hash and code fingerprint must be sealed before future-path reveal.",
+    "AI review may produce only registered primitive proposals and never an action or realized-profit label.",
+    "A holdout result cannot select a threshold; any change creates a new protocol and requires later data.",
+    "Same-bar OHLCV ambiguity remains conservative unless causally aligned MBO resolves event order."
+  ]
+}

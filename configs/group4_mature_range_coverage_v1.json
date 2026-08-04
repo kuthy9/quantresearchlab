@@ -1,0 +1,47 @@
+{
+  "protocol_version": "group4-mature-range-coverage.1",
+  "purpose": "Outcome-blind descriptive coverage of natural H1 dealing ranges and range-boundary manipulations.",
+  "source": "data/processed/nq_1m_previous_session_front_2017_2026.parquet",
+  "validation_protocol": "configs/validation_protocol_v2.json",
+  "group12_protocol": "configs/smc_primitives_v3_group12.json",
+  "group4_protocol": "configs/smc_primitives_v3_group4.json",
+  "warmup_calendar_days": 7,
+  "allow_data_gap_reset": true,
+  "threshold_search": false,
+  "forbidden_inputs": [
+    "future bars",
+    "future path",
+    "PnL",
+    "MFE or MAE",
+    "action labels",
+    "Brain outputs",
+    "MBO"
+  ],
+  "windows": [
+    {
+      "id": "2017-june",
+      "start": "2017-06-01T18:00:00-04:00",
+      "end_exclusive": "2017-07-01T18:00:00-04:00"
+    },
+    {
+      "id": "2018-june",
+      "start": "2018-06-01T18:00:00-04:00",
+      "end_exclusive": "2018-07-01T18:00:00-04:00"
+    },
+    {
+      "id": "2019-june",
+      "start": "2019-06-01T18:00:00-04:00",
+      "end_exclusive": "2019-07-01T18:00:00-04:00"
+    },
+    {
+      "id": "2020-june",
+      "start": "2020-06-01T18:00:00-04:00",
+      "end_exclusive": "2020-07-01T18:00:00-04:00"
+    },
+    {
+      "id": "2021-june",
+      "start": "2021-06-01T18:00:00-04:00",
+      "end_exclusive": "2021-07-01T18:00:00-04:00"
+    }
+  ]
+}

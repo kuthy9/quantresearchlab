@@ -1,0 +1,74 @@
+{
+  "protocol_version": "3.0.1-EXP-SMC-3.0.1-001-audit-closure.1",
+  "experiment_id": "EXP-SMC-3.0.1-001-STRUCTURE-BOS-AUDIT-CLOSURE",
+  "parent_experiment_id": "EXP-SMC-3.0.0-001-SWING-BOS",
+  "frozen_at": "2026-07-29T00:00:00-04:00",
+  "authorization": "implementation and synthetic semantic-audit tests only",
+  "causal_front_source": "data/processed/nq_1m_previous_session_front_v2_3_pre_holdout_2017_20260331.parquet",
+  "causal_front_sha256": "6d2f0b36097e779867277a070073bc157bf58891769478d41f4efc8763ba0204",
+  "playbook_registry": "configs/playbooks_v3.json",
+  "belief_calibration_artifact": null,
+  "belief_calibration_valid_from": "2023-01-01T00:00:00-05:00",
+  "action_equivalence_protocol": "configs/action_equivalence_v2_2.json",
+  "action_clock_value_protocol": null,
+  "ohlcv_windows": {
+    "semantic_discovery": {
+      "start": "2017-01-03T18:00:00-05:00",
+      "end_exclusive": "2022-01-01T00:00:00-05:00",
+      "purpose": "unchanged registered window; access remains forbidden until a later release"
+    },
+    "belief_calibration": {
+      "start": "2022-01-01T00:00:00-05:00",
+      "end_exclusive": "2023-01-01T00:00:00-05:00",
+      "purpose": "unchanged and unauthorized by this patch"
+    },
+    "action_clock_development": {
+      "start": "2023-01-01T00:00:00-05:00",
+      "end_exclusive": "2024-01-01T00:00:00-05:00",
+      "purpose": "unchanged and unauthorized by this patch"
+    },
+    "rolling_validation": {
+      "start": "2024-01-01T00:00:00-05:00",
+      "end_exclusive": "2026-04-01T00:00:00-04:00",
+      "purpose": "unchanged and unauthorized by this patch"
+    },
+    "sealed_holdout": {
+      "start": "2026-04-01T00:00:00-04:00",
+      "end_exclusive": "2026-07-14T00:00:00-04:00",
+      "purpose": "sealed and unauthorized"
+    }
+  },
+  "mbo_windows": {
+    "revealed_execution_development": {
+      "start": "2024-06-02T00:00:00Z",
+      "end_exclusive": "2024-08-02T00:00:00Z",
+      "purpose": "unauthorized by this patch"
+    },
+    "sealed_holdout": {
+      "start": "2024-08-02T00:00:00Z",
+      "end_exclusive": "2024-12-02T00:00:00Z",
+      "purpose": "sealed and unauthorized"
+    }
+  },
+  "semantic_closure_gates": [
+    "complete candle coverage invariants",
+    "synthetic candle clock-only admission",
+    "pending BOS terminal state before gap or contract reset",
+    "immutable case transaction after separate review",
+    "same-clock full candidate enumeration",
+    "exact Pass2 blind review set",
+    "blind-only reviewer export",
+    "truth overlay only after exact review lock",
+    "zero future, action, outcome or PnL fields"
+  ],
+  "leakage_rules": [
+    "No source row at or after a case clock is admitted before its case packet is committed.",
+    "No future bar, PnL, MFE, MAE, action label or realized best entry may affect swing, structure, BOS, selection or blind review.",
+    "A lower-timeframe close cannot confirm a higher-timeframe BOS.",
+    "Synthetic no-trade candles cannot change typed structure semantics.",
+    "Unknown data gaps and contract changes terminalize pending BOS before clearing state.",
+    "Every review is written outside its immutable Pass2 case transaction.",
+    "Every truth overlay revalidates the exact Pass2 set and actual locked review bytes.",
+    "AI review may emit registered sequence primitives only and has no action or profit-label authority."
+  ]
+}

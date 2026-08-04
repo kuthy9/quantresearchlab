@@ -1,0 +1,138 @@
+{
+  "runner_id": "EXP-SMC-3.0.1-001-SEMANTIC-DISCOVERY-RUNNER",
+  "audit_id": "EXP-SMC-3.0.1-001-BLIND-SEMANTIC-AUDIT",
+  "status": "implementation_contract_frozen",
+  "authorization": "implementation and synthetic tests only; real discovery execution is forbidden until a later governance release",
+  "registered_at": "2026-07-29T00:00:00-04:00",
+  "bindings": {
+    "blind_audit_contract_sha256": "52a9354ea95dc9159b15d768fc5acdedb7a53bfb175ac7a4e2586f34a1c57368",
+    "model_config_sha256": "0f43458875a15a528aeca3d26630afa63e179c81ce2fe72cfcd83d7759bc81cd",
+    "primitive_protocol_sha256": "f975c428255b42ffdc8bd1d75fe4fd4077ab6e1068ce968192183d112e6e0c3b",
+    "io_code_sha256": "7f3f78b9066d7e4dfac4a374d474ba2acdfa6121cbd5b551fbb2897d02f3c0b5",
+    "causal_reader_code_sha256": "9cb90b25244fc7dd303188baf5935c6af8bbcd6b7b1d04dfb33807b4ee548333",
+    "market_clock_code_sha256": "5e43fe3be976ea8c6586f13bf21e5a1de86ec252a8590299d03aa8432f3561a1",
+    "semantic_audit_code_sha256": "457844e9b6be886d91542ad85707b7cf8f9287140132ab4ba5164564f5d4cb50"
+  },
+  "bound_files": {
+    "blind_audit_contract_sha256": "configs/experiments/EXP-SMC-3.0.1-001-BLIND-SEMANTIC-AUDIT.json",
+    "model_config_sha256": "configs/model_v3_0_1_exp001_structure_bos_identity.json",
+    "primitive_protocol_sha256": "configs/smc_primitives_v3_0_1_structure_bos_audit_closure.json",
+    "io_code_sha256": "smc_trader/io.py",
+    "causal_reader_code_sha256": "smc_trader/causal.py",
+    "market_clock_code_sha256": "smc_trader/market_clock.py",
+    "semantic_audit_code_sha256": "smc_trader/semantic_audit.py"
+  },
+  "threat_model": {
+    "guarantee": "logical row admission: no source row at or after a case clock may be passed to the causal reader or observer before every selected case sharing that clock is committed",
+    "not_claimed": "Parquet and operating-system readers may decode or cache bytes from a row group containing later rows; this runner does not claim byte-level physical isolation",
+    "trusted_boundary": "the runner derives provenance, row hashes, row and produced-bar rolling roots internally; packet callers may not supply them"
+  },
+  "source_iterator": {
+    "format": "parquet",
+    "timestamp_column": "ts",
+    "batch_rows": 65536,
+    "maximum_no_trade_gap_minutes": 5,
+    "allow_data_gap_reset": true,
+    "completed_bar_source": "smc_trader.io.iter_completed_bars",
+    "checkpoint_boundary": "after a complete real source bar, or after every case transaction sharing that bar clock is complete"
+  },
+  "implementation_hashes_required": [
+    "semantic_discovery_runner_sha256",
+    "semantic_audit_sha256",
+    "io_sha256",
+    "causal_sha256",
+    "market_clock_sha256",
+    "observation_sha256",
+    "structure_sha256"
+  ],
+  "provenance": {
+    "kinds": [
+      "real_source_bar",
+      "synthetic_backfill"
+    ],
+    "required_fields": [
+      "source_row_start",
+      "source_row_ordinal",
+      "source_row_sha256",
+      "bar_sha256",
+      "max_source_row_admitted"
+    ],
+    "observer_policy": "reader and observer process every real and synthetic completed bar in exact iterator order; synthetic candles are clock-only for typed structure",
+    "selector_policy": "only a real_source_bar transition may anchor a case; a synthetic transition can advance the clock but cannot change typed structure or enter the selector",
+    "shortage_policy": "unavailable; no bucket backfill"
+  },
+  "pass1": {
+    "inputs": [
+      "causal reader",
+      "causal observer",
+      "frozen structure/BOS semantic state"
+    ],
+    "forbidden": [
+      "brain",
+      "decision",
+      "risk",
+      "execution outcome",
+      "shadow replay",
+      "future path",
+      "PnL",
+      "MBO"
+    ],
+    "selector_memory": "bounded by registered bucket_count times cases_per_bucket",
+    "output": "create-once selection authority manifest with real-row provenance and prefix commitments",
+    "completion": "all registered buckets contain exactly two cases; otherwise status unavailable and pass2 is forbidden"
+  },
+  "pass2": {
+    "input": "only the immutable complete pass1 selection authority manifest",
+    "replay": "one fresh chronological reader/observer replay from the same frozen source start; all cases sharing a clock are committed before admitting the next source row",
+    "reproduction": [
+      "semantic_event_id",
+      "case_clock",
+      "semantic_state_hash",
+      "case_source_row_start",
+      "case_source_row_sha256",
+      "case_bar_sha256",
+      "source_prefix_root",
+      "produced_bar_prefix_root",
+      "reset_epoch"
+    ],
+    "transaction": "authority and blind roots are built under one staging case directory; the exact six files are fsynced into COMPLETED.json and atomically renamed",
+    "global_manifest": "create once only after every selected case transaction is committed",
+    "reviewer_export": "after completed Pass2, copy only exact blind files into a separate immutable blind-set root bound to every case completion hash"
+  },
+  "checkpoint": {
+    "format": "content-addressed trusted-local pickle behind a hash-bound JSON manifest",
+    "reject": [
+      "symlink manifest",
+      "symlink state",
+      "non-regular state",
+      "state hash mismatch",
+      "binding mismatch",
+      "phase mismatch",
+      "selection manifest mismatch"
+    ],
+    "state": [
+      "phase",
+      "last committed real source cursor and row",
+      "real and synthetic counts",
+      "reader, observer, tracker and event-memory state",
+      "bounded selector state",
+      "selection manifest hash in pass2",
+      "committed cases",
+      "source-row and produced-bar rolling roots",
+      "reset epoch and last reset identity",
+      "source, interval, gap, history and implementation bindings"
+    ],
+    "progress": "durable checkpoint state only; percentage and ETA never include uncommitted in-memory work"
+  },
+  "release_gate": "a new Agent5 static approval, full-size synthetic confirmatory pass and separate data release are required before real Pass1",
+  "permissions": {
+    "real_pass1_authorized": false,
+    "real_pass2_authorized": false,
+    "case_materialization_authorized": false,
+    "blind_review_authorized": false,
+    "truth_overlay_authorized": false,
+    "future_reveal_authorized": false,
+    "economic_tests_authorized": false,
+    "mbo_authorized": false
+  }
+}

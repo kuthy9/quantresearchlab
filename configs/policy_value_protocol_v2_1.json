@@ -1,0 +1,129 @@
+{
+  "protocol_version": "2.1.0-managed-policy-preregistered.1",
+  "status": "preregistered_not_fitted",
+  "frozen_at": "2026-07-25T12:00:00-04:00",
+  "playbook_registry": "configs/playbooks_v2.json",
+  "playbook_semantics_changed": false,
+  "revealed_design_evidence": [
+    "outputs/v2_mbo_profitability_202406_calibrated_v1",
+    "outputs/v2_mbo_profitability_202407_calibrated_v2"
+  ],
+  "revealed_design_evidence_may_fit_or_select_parameters": false,
+  "windows": {
+    "belief_calibration": {
+      "start": "2022-01-01T00:00:00-05:00",
+      "end_exclusive": "2023-01-01T00:00:00-05:00",
+      "purpose": "fit target-before-original-invalidation reliability only"
+    },
+    "managed_policy_calibration": {
+      "start": "2023-01-01T00:00:00-05:00",
+      "end_exclusive": "2024-01-01T00:00:00-05:00",
+      "purpose": "fit managed structural gross value under frozen sequential policy"
+    },
+    "revealed_development_diagnostic": {
+      "start": "2024-06-02T00:00:00Z",
+      "end_exclusive": "2024-08-02T00:00:00Z",
+      "purpose": "falsification and diagnostics only; excluded from fitting and parameter selection"
+    },
+    "mbo_sealed_holdout": {
+      "start": "2024-08-02T00:00:00Z",
+      "end_exclusive": "2024-12-02T00:00:00Z",
+      "purpose": "single final execution-realistic reveal after all v2.1 identities and gates pass"
+    },
+    "ohlcv_sealed_holdout": {
+      "start": "2026-04-01T00:00:00-04:00",
+      "end_exclusive": "2026-07-14T00:00:00-04:00",
+      "purpose": "remain unread until a separately frozen final structural candidate exists"
+    }
+  },
+  "belief_contract": {
+    "label": "primary_target_before_original_invalidation_within_deadline",
+    "clock": "first complete registered sequence",
+    "authority": "playbook thesis strength only",
+    "may_be_used_as_managed_trade_return": false
+  },
+  "action_variant_contract": {
+    "identity_fields": [
+      "verb",
+      "playbook",
+      "direction",
+      "planned_entry",
+      "invalidation.source_level_id",
+      "primary_target.level_id",
+      "deadline"
+    ],
+    "same_direction_different_invalidation_is_same_action": false,
+    "same_direction_different_invalidation_interpretation": "distinct risk plan variants",
+    "margin_comparison": "best complete action variant versus second-best complete action variant",
+    "close_same_direction_variants": "abstain as plan uncertainty; do not aggregate after observing outcome",
+    "future_revision_requires_new_hash": true
+  },
+  "managed_policy_episode": {
+    "registration_clock": "risk-approved enter action clock",
+    "fill_rule": "next completed 1m bar conservative limit execution",
+    "unfilled_rule": "a next-bar unfilled or expired approved order is a resolved enter action with 0 gross_R",
+    "entry_plan_freeze": "entry, original invalidation, targets and deadline freeze at approval",
+    "right_censor_rule": "a filled position still open at the registered window boundary is recorded but excluded from value fitting",
+    "management_policy": [
+      "hold",
+      "protect only to a later confirmed structural level and never widen risk",
+      "model_or_risk exit on next bar open",
+      "hard deadline exit",
+      "contract change gap exit",
+      "same-bar stop before target"
+    ],
+    "label": "approval-level realized gross_R: actual frozen-policy gross_R when filled and closed, 0R when the next-bar order is unfilled or expires",
+    "label_clip_R": [
+      -1.5,
+      3.0
+    ],
+    "execution_cost_in_label": false,
+    "reason_execution_cost_excluded": "2023 has no causally aligned MBO; live observed MBO cost is deducted after gross policy value",
+    "constant_spread_or_slippage_claimed_as_execution_reality": false
+  },
+  "structural_score": {
+    "formula": "path_probability * capped_target_R - (1 - path_probability) - uncertainty_penalty - deadline_penalty - phase_penalty",
+    "maximum_target_R": 3.0,
+    "uses_spread_cost_or_fillability": false
+  },
+  "fit": {
+    "unit": "one resolved risk-approved enter action (filled-and-closed trade or next-bar unfilled/expired order)",
+    "grouping": "playbook with directions pooled only because long/short symmetry is preregistered",
+    "method": "fixed_quantile_bins_weighted_pava_continuous_value",
+    "bins": 8,
+    "minimum_bin_episodes": 15,
+    "minimum_playbook_episodes": 120,
+    "minimum_direction_episodes": 40,
+    "smoothing_prior_mean_R": 0.0,
+    "smoothing_prior_weight": 20,
+    "extrapolation": "forbidden; an enter variant outside its playbook's observed structural-score support is unavailable",
+    "threshold_or_pnl_search": false,
+    "insufficient_evidence_rule": "sample-minimum failure or a one-level/non-distinct monotone fit makes managed value unavailable; enter variants for that playbook cannot outrank abstain"
+  },
+  "runtime_enter_utility": {
+    "formula": "calibrated_managed_gross_R - observed_round_trip_cost_R - 0.35 * (1 - observed_fillability)",
+    "policy_shift_control": "conservative filter only: managed value may accept or reject the exact enter variant selected by the frozen behavior policy; it cannot promote an unselected counterfactual variant",
+    "execution_source": "causal MBO observation only for MBO validation and final reveal",
+    "unknown_or_stale_execution": "risk hard veto",
+    "deadline_and_structural_risk": "remain independent hard vetoes"
+  },
+  "required_artifact_bindings": [
+    "playbook_registry_hash",
+    "belief_path_code_hash",
+    "managed_policy_code_hash",
+    "managed_policy_pipeline_hash",
+    "model_config_hash",
+    "source_hash",
+    "window",
+    "episode_table_hash"
+  ],
+  "pre_reveal_gates": [
+    "all software tests pass after static trading-logic review",
+    "each playbook satisfies episode minima or is explicitly unavailable",
+    "calibration episode ledger conserves approved, filled, expired and closed states",
+    "gross value map is monotone and no threshold was selected on June-July PnL",
+    "2017-2026 unresolved source gaps remain excluded or repaired from authoritative source data",
+    "decision and future reveal artifacts remain separated",
+    "MBO and OHLCV sealed holdouts remain unread"
+  ]
+}

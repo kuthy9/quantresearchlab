@@ -1,0 +1,100 @@
+{
+  "release_id": "EXP-SMC-3.0.0-001-PASS1-R1",
+  "parent_experiment_id": "EXP-SMC-3.0.0-001-SWING-BOS",
+  "status": "draft_no_execution_authority",
+  "authorization": "draft only",
+  "execution_authorized": false,
+  "authorized_phases": [
+    "pass1"
+  ],
+  "registered_at": "2026-07-28T00:00:00-04:00",
+  "expires_at": "2026-08-04T23:59:59-04:00",
+  "bindings": {
+    "audit_contract_sha256": "62a2a4a76fbe5cff91ff023e4b19fccbc3a1c3c2e7464ed4a3cdaadf38724836",
+    "engineering_runner_contract_sha256": "6146bab02f53579c7efda4518729cd00d229d14f64d64ea9537a5304b1247a0e",
+    "semantic_discovery_runner_sha256": "3e3df02882ca4d154a28af7b1ca80f06754dba57ad0ee6932cd50cde2bea7884",
+    "pass1_cli_sha256": "cbcb190fe85a1877527549a098226ec824b7ecc80c23c407ccb0fe5fa10ea841",
+    "engineering_cli_sha256": "480ae74253ed2d915084a447a19b9a19c9f02efe848b105215a63c15f9c210d4",
+    "causal_source_sha256": "6d2f0b36097e779867277a070073bc157bf58891769478d41f4efc8763ba0204",
+    "model_config_sha256": "e953af3ccc5ec74ede0cd12694a1f712d584a4d8c3f4c6e6c6205c582691698d",
+    "primitive_protocol_sha256": "2b7b05cbc65352e9ae2501fcd2988032b3bbfe732d665ba3228732acfd1ed615",
+    "io_code_sha256": "7f3f78b9066d7e4dfac4a374d474ba2acdfa6121cbd5b551fbb2897d02f3c0b5",
+    "causal_reader_code_sha256": "d6bc65b6ee9793ba69b10dc2ca24639cf874ddb42191a4bf28c99ed9da754d2e",
+    "market_clock_code_sha256": "5564589f35e48621f8fdec17a467046525fb799eb80c01ba579d8d22954d1bc2",
+    "semantic_audit_code_sha256": "4d91d565017b1383826351242c3228ae360d6c49cf45db3a2f56e6c1963ef845",
+    "observer_code_sha256": "4838ebd36e2aee70fd6ec6ee4f3740b8e6f7a601937b901ae15c59d056bb7e85",
+    "structure_code_sha256": "f86104cca8315c6c8a8677f507e84c67c2471bf751d2df45d36939b1bd5b150c",
+    "pyproject_sha256": "06cb25464e143158990a5b1d2beeddeb0d3de1a257789b4a854739dae44bfca7",
+    "previous_runner_validation_report_sha256": "b61a01e0b64d2a60b45f228d0e213bb03592e05472702982b2936bb9df9a4df0"
+  },
+  "bound_files": {
+    "audit_contract_sha256": "configs/experiments/EXP-SMC-3.0.0-001-BLIND-SEMANTIC-AUDIT.json",
+    "engineering_runner_contract_sha256": "configs/experiments/EXP-SMC-3.0.0-001-SEMANTIC-DISCOVERY-RUNNER.json",
+    "semantic_discovery_runner_sha256": "smc_trader/semantic_discovery_runner.py",
+    "pass1_cli_sha256": "scripts/run_v3_exp001_semantic_discovery_pass1.py",
+    "engineering_cli_sha256": "scripts/run_v3_exp001_semantic_discovery.py",
+    "model_config_sha256": "configs/model_v3_0_exp001_structure_bos_identity.json",
+    "primitive_protocol_sha256": "configs/smc_primitives_v3_0_structure_bos.json",
+    "io_code_sha256": "smc_trader/io.py",
+    "causal_reader_code_sha256": "smc_trader/causal.py",
+    "market_clock_code_sha256": "smc_trader/market_clock.py",
+    "semantic_audit_code_sha256": "smc_trader/semantic_audit.py",
+    "observer_code_sha256": "smc_trader/observation.py",
+    "structure_code_sha256": "smc_trader/structure.py",
+    "pyproject_sha256": "pyproject.toml",
+    "previous_runner_validation_report_sha256": "reports/validation_2026-07-28/v3_exp001_pass1_release_posttest_validation_r2.md"
+  },
+  "source": {
+    "path": "data/processed/nq_1m_previous_session_front_v2_3_pre_holdout_2017_20260331.parquet",
+    "start": "2017-01-03T18:00:00-05:00",
+    "end_exclusive": "2022-01-01T00:00:00-05:00",
+    "window_role": "semantic_discovery"
+  },
+  "runtime": {
+    "python_implementation": "CPython",
+    "python_version": "3.12.4",
+    "pandas_version": "2.1.3",
+    "pyarrow_version": "14.0.1",
+    "tzdata_version": "2025.1",
+    "psutil_version": "7.0.0"
+  },
+  "run": {
+    "batch_rows": 65536,
+    "maximum_history": 1024,
+    "maximum_no_trade_gap_minutes": 5,
+    "allow_data_gap_reset": true,
+    "checkpoint_source_rows": 25000,
+    "real_only_case_anchors": true,
+    "diagnostic_stop_allowed": false
+  },
+  "resources": {
+    "rss_hard_ceiling_bytes": 4294967296,
+    "disk_free_floor_bytes": 10737418240,
+    "checkpoint_stall_timeout_seconds": 1800,
+    "resource_check_source_rows": 100
+  },
+  "output": {
+    "path": "artifacts/semantic_discovery/EXP-SMC-3.0.0-001/pass1/EXP-SMC-3.0.0-001-PASS1-R1",
+    "new_run_requires_absent_non_symlink_path": true,
+    "allowed_top_level_entries": [
+      "_checkpoint",
+      "progress.json",
+      "selection_authority.json"
+    ]
+  },
+  "terminal_rules": {
+    "success": "complete chronological source scan and exactly 120 buckets x 2 cases = 240 frozen selections",
+    "shortage": "status unavailable with explicit missing buckets; no case materialization and no retry with changed parameters",
+    "failure": "fail closed with the last durable checkpoint; no automatic retry or parameter substitution"
+  },
+  "permissions": {
+    "real_pass1_authorized": false,
+    "real_pass2_authorized": false,
+    "case_materialization_authorized": false,
+    "discovery_data_authorized": false,
+    "sealed_data_authorized": false,
+    "future_reveal_authorized": false,
+    "economic_tests_authorized": false,
+    "mbo_authorized": false
+  }
+}

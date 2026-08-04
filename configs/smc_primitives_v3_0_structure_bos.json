@@ -1,0 +1,142 @@
+{
+  "protocol_version": "3.0.0-structure-bos.1",
+  "experiment_id": "EXP-SMC-3.0.0-001-SWING-BOS",
+  "frozen_at": "2026-07-28T00:00:00-04:00",
+  "scope": [
+    "confirmed swing HH/HL/LH/LL relations",
+    "locked directional structure lifecycle",
+    "same-timeframe close-confirmed BOS lifecycle"
+  ],
+  "prohibited_inputs": [
+    "PnL",
+    "future path",
+    "future high or low",
+    "MFE or MAE",
+    "action label",
+    "realized best entry"
+  ],
+  "swing": {
+    "left_completed_bars": 2,
+    "right_completed_bars": 2,
+    "candidate_rule": {
+      "high": "the candidate high is strictly greater in integer ticks than both completed left bars",
+      "low": "the candidate low is strictly lower in integer ticks than both completed left bars"
+    },
+    "confirmation_rule": {
+      "high": "the following two real completed same-timeframe candles must each have high strictly below the candidate high",
+      "low": "the following two real completed same-timeframe candles must each have low strictly above the candidate low",
+      "observed_at": "end timestamp of the second completed right candle",
+      "no_backfill": true
+    },
+    "relation_rule": {
+      "price_comparison": "round price to integer ticks before comparison",
+      "high": {
+        "greater": "HH",
+        "less": "LH",
+        "equal": "EH"
+      },
+      "low": {
+        "greater": "HL",
+        "less": "LL",
+        "equal": "EL"
+      },
+      "observed_at": "current swing confirmed_at",
+      "atr_use": "description only; ATR cannot change the relation class"
+    },
+    "lifecycle": [
+      "forming",
+      "confirmed",
+      "broken",
+      "formation_failed"
+    ],
+    "minimum_information": [
+      "stable swing id",
+      "timeframe",
+      "contract identity",
+      "side",
+      "price and integer ticks",
+      "pivot start and end",
+      "confirmed_at",
+      "relation and prior same-side swing id",
+      "delta ticks and points",
+      "causal ATR at confirmation",
+      "age in completed same-timeframe bars",
+      "broken_at when applicable"
+    ]
+  },
+  "structure": {
+    "bull_forming": "the latest confirmed relation contains HH or HL but the current latest high/low pair is not yet HH plus HL",
+    "bull_confirmed": "latest confirmed high relation is HH and latest confirmed low relation is HL",
+    "bear_forming": "the latest confirmed relation contains LH or LL but the current latest high/low pair is not yet LH plus LL",
+    "bear_confirmed": "latest confirmed high relation is LH and latest confirmed low relation is LL",
+    "mixed_pair": "HH plus LL or LH plus HL cannot confirm a new directional structure",
+    "locking": "once confirmed, one later LH in a bull structure or one later HL in a bear structure reduces run consistency but does not revert the structure to forming",
+    "sequence_count": "minimum of the current same-direction high-relation run and low-relation run",
+    "bull_protected_swing": "latest confirmed HL supporting the locked bull structure",
+    "bear_protected_swing": "latest confirmed LH supporting the locked bear structure",
+    "protected_level_update": "only a later causally confirmed supporting HL or LH may advance the protected level",
+    "broken_rule": "a real completed candle of the same timeframe must close strictly through the frozen protected level in integer ticks",
+    "no_retrospective_rewrite": true,
+    "lifecycle": [
+      "inactive",
+      "forming",
+      "confirmed",
+      "broken"
+    ]
+  },
+  "bos": {
+    "pending_rule": "an eligible already-confirmed structural swing creates a pending same-timeframe close-break candidate",
+    "pending_at": "target swing confirmed_at; historical candles are never replayed against a newly confirmed target",
+    "up_confirmation": "a later real completed candle of the target timeframe closes at an integer tick strictly above the confirmed structural swing high",
+    "down_confirmation": "a later real completed candle of the target timeframe closes at an integer tick strictly below the confirmed structural swing low",
+    "wick_rule": "wick-only penetration remains pending and is recorded separately as an attempt; it cannot consume BOS eligibility",
+    "failure_rules": {
+      "superseded": "a newer same-side confirmed structural target replaces the pending target",
+      "opposite_structure_break": "an opposite BOS invalidates the source structure",
+      "data_gap_reset": "an explicit unknown data gap clears the active structure state",
+      "contract_change_reset": "symbol or instrument identity change clears the active structure state"
+    },
+    "timeout": null,
+    "minimum_delay": "the target must be confirmed before the resolving candle ends; a target cannot be created and resolved from the same completed candle",
+    "scope": {
+      "continuation": "BOS direction agrees with the locked confirmed structure",
+      "opposed": "BOS crosses the protected swing of the locked confirmed structure",
+      "local": "no locked confirmed structure existed at the break clock"
+    },
+    "lifecycle": [
+      "pending",
+      "confirmed",
+      "failed"
+    ]
+  },
+  "clock_and_reset": {
+    "scheduled_maintenance_or_weekend": "preserve structure; age advances only on completed same-timeframe candles",
+    "unknown_data_gap": "hard reset forming, confirmed structure and pending BOS; no cross-gap relation or break",
+    "contract_change": "hard reset; no cross-contract price relation or break",
+    "cross_timeframe_confirmation": "forbidden; 1m close cannot confirm 5m, 1H or 4H BOS"
+  },
+  "playbook_interfaces": {
+    "displacement_first_pullback": {
+      "context": "4H locked confirmed HH/HL or LH/LL structure with an explicit directional draw",
+      "hard_gate": "a later 1H same-direction continuation BOS is required",
+      "replaces": [
+        "scalar 4H structure progression",
+        "scalar 1H swing progression as a BOS substitute"
+      ]
+    },
+    "liquidity_sweep_reversal": {
+      "hard_order": [
+        "pre-existing confirmed liquidity/structure target",
+        "sweep",
+        "reverse displacement",
+        "opposed 1m BOS"
+      ],
+      "contradiction": "continuation BOS in the sweep direction",
+      "note": "this round does not redefine liquidity-pool or displacement semantics"
+    },
+    "failed_auction_value_return": {
+      "status": "diagnostic_only_for_structure_bos",
+      "hard_gate": "BOS cannot replace the not-yet-implemented mature accumulation, range value and re-entry primitives"
+    }
+  }
+}

@@ -1,0 +1,100 @@
+{
+  "protocol_version": "3.1.0-group12.4",
+  "role": "causal_descriptive_development_contract",
+  "prohibited_inputs": [
+    "future bars",
+    "future path",
+    "PnL",
+    "MFE or MAE",
+    "action labels",
+    "MBO"
+  ],
+  "clock": {
+    "input": "completed bars from the primitive timeframe",
+    "synthetic": "advances cutoff only; semantic state, reference price, event clock and age remain real-completed-bar only",
+    "boundary": "contract changes and unknown data gaps terminate pending BOS then reset state",
+    "failed_pair_update": "discard the terminal observer and resume from the last checkpoint",
+    "exact_retry": "same clock plus same completed-bar provenance is idempotent",
+    "cold_event_memory": "a persistent prefix start rejects every current or later event whose age or duration origin is not covered"
+  },
+  "liquidity_parameters": {
+    "cluster_tolerance_atr": 0.1,
+    "cluster_tolerance_ticks": 1,
+    "retained_zones": 128,
+    "retained_pools": 128,
+    "retained_touches": 128,
+    "retention_exhaustion": "fail_closed_when_capacity_has_neither_a_previously_observed_terminal_candidate_nor_a_same_bar_terminal_exposure",
+    "terminal_exposure_buffer": "overflow_is_bounded_by_same_bar_terminal_zone_or_pool_count_and_is_compacted_on_the_next_real_completed_bar",
+    "zone_visibility": "admit_a_matching_newly_confirmed_swing_then_retire_after_all_member_swings_leave_the_current_authoritative_structure_snapshot_unless_an_unresolved_pool_pins_the_zone",
+    "retirement_reason": "source_evidence_retired"
+  },
+  "swing": {
+    "left_completed_bars": 2,
+    "right_completed_bars": 2,
+    "lifecycle": [
+      "forming",
+      "confirmed",
+      "formation_failed",
+      "broken"
+    ],
+    "break_rule": "a later same-timeframe completed close strictly beyond the confirmed swing"
+  },
+  "structure": {
+    "identity": "direction plus the first aligned confirmed-swing clock; frozen through its lifecycle",
+    "lifecycle": [
+      "inactive",
+      "forming",
+      "formation_failed",
+      "confirmed",
+      "broken"
+    ],
+    "formation_failure_reason": "alignment_lost_before_confirmation",
+    "break_reason": "protected_level_close_break"
+  },
+  "bos": {
+    "confirmation": "a later same-timeframe completed close strictly beyond an already-confirmed target swing",
+    "confirmation_reason": "close_beyond_confirmed_swing",
+    "identity": "one BOS identity represents one pending attempt and is terminal after confirmed or failed",
+    "lifecycle": [
+      "pending",
+      "confirmed",
+      "failed"
+    ],
+    "same_target_rearm": "a later confirmed-evidence refresh may create a new pending generation for the same target; pending_at is the refresh completed-bar clock and the terminal identity is never reused",
+    "wick_only": "records an attempt and never confirms BOS"
+  },
+  "support_resistance": {
+    "frozen_tolerance": "max(1 tick, 0.10 causal ATR at first confirmed swing)",
+    "touch_history": "formation touches plus newest bounded history are retained while total_touch_count remains exact",
+    "lifecycle": [
+      "active",
+      "tested",
+      "broken",
+      "reaccepted",
+      "retired"
+    ],
+    "reaccepted_semantics": "descriptive_zone_recapture_only_not_a_qualified_entry_trigger",
+    "retired_semantics": "terminal_realtime_visibility_state_with_final_clock_and_reason_preserved_in_event_memory"
+  },
+  "equal_liquidity": {
+    "formation": "two confirmed same-side swings inside one frozen active/tested zone",
+    "touch_history": "formation touches plus newest bounded history are retained while total_touch_count remains exact",
+    "lifecycle": [
+      "formed",
+      "swept",
+      "accepted",
+      "rejected"
+    ],
+    "generation": "after terminal resolution, two later confirmed swings are required for a new pool identity"
+  },
+  "inventory": {
+    "eye_lifecycle": [
+      "visible",
+      "consumed"
+    ],
+    "targeted_owner": "belief and plan only",
+    "projection": "each real completed 1m bar may advance an already-visible higher-timeframe pool without rewriting the higher-timeframe frame cutoff",
+    "authority": "explicit top-level inventory remains authoritative when empty; top-level pool states hold current lifecycle and event memory holds ordered transitions",
+    "late_attach": "reconstruct every swing or pool first crossing and each pool next-real-1m resolution from a prefix covering draw confirmation plus one predecessor and the ATR window; fail closed on missing history, uncovered event-clock history, a swallowed post-resolution generation touch, or any partially applied multi-draw projection"
+  }
+}

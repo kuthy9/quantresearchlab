@@ -1,0 +1,341 @@
+{
+  "protocol_version": "3.1.0-group3.3",
+  "tick_size": 0.25,
+  "timeframe": "5m",
+  "fvg_source_bars": 3,
+  "ob_anchor_history_bars": 64,
+  "maximum_fvg_states": 256,
+  "maximum_order_block_states": 128,
+  "role": "causal_descriptive_development_contract",
+  "status": "formalized_implementation_pending",
+  "scope": [
+    "5m fair value gap",
+    "5m order block"
+  ],
+  "prohibited_inputs": [
+    "forming or incomplete bars",
+    "synthetic bars as semantic evidence",
+    "future bars or future path",
+    "later displacement or BOS state used to backfill an entity",
+    "PnL, MFE or MAE",
+    "action or trade labels",
+    "MBO",
+    "playbook probability or utility"
+  ],
+  "dependencies": {
+    "timeframe": "5m",
+    "price_grid": "integer ticks at the top-level 0.25 tick_size",
+    "tick_size_consistency": "group3, displacement and structure/BOS must all use the exact top-level tick_size",
+    "displacement": {
+      "required_lifecycle": "active",
+      "identity_source": "the exact upstream DisplacementState.entity_id and protocol_hash",
+      "qualification_source": "the frozen upstream displacement protocol; group3 adds no displacement thresholds"
+    },
+    "bos": {
+      "required_lifecycle": "confirmed",
+      "required_timeframe": "5m",
+      "identity_source": "the exact upstream BreakOfStructureState.bos_id",
+      "protocol_source": "the exact frozen structure/BOS protocol SHA carried by a same-contract, same-tick-grid source envelope",
+      "scope_filter": "none; local, continuation and opposed are retained descriptively"
+    }
+  },
+  "clock": {
+    "input": "ordered real_completed 5m candles only",
+    "decision_update": "one group3 update after each newly completed real 5m candle",
+    "formation_clock": "the completed bar on which all required evidence first coexists",
+    "no_backfill": "formed_at and confirmed_at are never moved to a source candle, displacement seed or BOS target clock",
+    "synthetic": "advances the outer market cutoff only; clears unfinished formation/search windows and cannot create, touch, age, mitigate or fail an entity",
+    "registered_session_boundary": "clears unfinished formation/search windows; already-created same-contract entities remain frozen and do not age at the boundary",
+    "unknown_gap_or_contract_change": "terminalizes every nonterminal entity with its registered invalidation/failure reason, emits the terminal states, then clears group3 windows",
+    "paired_boundary_identity": {
+      "censored_source": "a censored displacement transition must belong to the retained pre-boundary group3 symbol and instrument_id",
+      "contract_change_reset": "requires a retained prior group3 identity and a boundary candle whose symbol or instrument_id differs from that identity",
+      "all_other_candle_boundary_reasons": "require the boundary candle symbol and instrument_id to equal the retained group3 identity; a foreign candle cannot be treated as a gap, data anomaly, registered closure or synthetic interruption",
+      "unknown_prior_identity": "contract_change_reset fails closed when no retained prior group3 identity exists"
+    },
+    "cold_attach": "does not reconstruct an entity unless the retained causal prefix contains every required source bar and upstream transition; otherwise wait for a fresh fully observed setup",
+    "exact_retry": "same clock plus identical completed-bar and upstream provenance is idempotent",
+    "failed_integrated_update": "discard the partially advanced observer and resume from the last checkpoint"
+  },
+  "processing_order": [
+    "validate the completed 5m candle, contract, tick grid and boundary provenance",
+    "admit the same candle to the frozen displacement and structure/BOS reducers",
+    "apply the candle once to FVG and order-block entities created before this candle, using terminal priority before mitigation",
+    "form new FVG and order-block entities from evidence first complete at this candle",
+    "emit one immutable current snapshot and its ordered lifecycle transitions"
+  ],
+  "fvg": {
+    "timeframe": "5m",
+    "formation_window": {
+      "bars": 3,
+      "names": [
+        "c1",
+        "c2",
+        "c3"
+      ],
+      "continuity": "three consecutive real_completed 5m candles from the same symbol, instrument_id and uninterrupted semantic epoch",
+      "formation_clock": "c3.end",
+      "formed_at": "c3.end",
+      "confirmed_at": "c3.end",
+      "creation_bar_self_processing": false
+    },
+    "geometry": {
+      "bullish": {
+        "direction": "long",
+        "strict_gap": "c3.low_ticks > c1.high_ticks",
+        "lower_bound_ticks": "c1.high_ticks",
+        "upper_bound_ticks": "c3.low_ticks",
+        "near_edge_ticks": "c3.low_ticks",
+        "far_edge_ticks": "c1.high_ticks"
+      },
+      "bearish": {
+        "direction": "short",
+        "strict_gap": "c3.high_ticks < c1.low_ticks",
+        "lower_bound_ticks": "c3.high_ticks",
+        "upper_bound_ticks": "c1.low_ticks",
+        "near_edge_ticks": "c3.high_ticks",
+        "far_edge_ticks": "c1.low_ticks"
+      },
+      "equality": "touching outer candles do not form an FVG",
+      "midpoint": "(lower_bound + upper_bound) / 2",
+      "frozen": "direction, bounds, edges, midpoint, source candle identities and source displacement identity never change"
+    },
+    "qualified_displacement": {
+      "evaluation_clock": "after c3 has been admitted to the upstream displacement reducer",
+      "lifecycle": "active",
+      "direction": "must equal the FVG direction",
+      "central_bar_membership": "c2.candle_id must be proven as an admitted candle in the same displacement episode; a clock interval alone is insufficient",
+      "clock_bounds": "displacement.started_at <= c2.end <= c3.end <= displacement.prefix_last_admitted_at",
+      "activation_clock": "displacement.active_at <= c3.end; activation on c3 is allowed",
+      "late_activation": "an episode that becomes active after c3 cannot qualify or backfill the earlier gap",
+      "stored_source_fields": [
+        "source_displacement_id",
+        "source_displacement_protocol_hash",
+        "source_displacement_started_at",
+        "source_displacement_active_at",
+        "source_displacement_prefix_commitment"
+      ]
+    },
+    "identity_fields": [
+      "group3 protocol hash",
+      "symbol",
+      "instrument_id",
+      "timeframe",
+      "direction",
+      "c1 candle_id",
+      "c2 candle_id",
+      "c3 candle_id",
+      "source_displacement_id"
+    ],
+    "lifecycle": {
+      "states": [
+        "open",
+        "partial",
+        "mitigated",
+        "invalidated"
+      ],
+      "initial": "open",
+      "terminal": [
+        "mitigated",
+        "invalidated"
+      ],
+      "allowed_transitions": {
+        "open": [
+          "partial",
+          "mitigated",
+          "invalidated"
+        ],
+        "partial": [
+          "mitigated",
+          "invalidated"
+        ],
+        "mitigated": [],
+        "invalidated": []
+      }
+    },
+    "later_bar_rules": {
+      "eligibility": "only a real_completed 5m candle with end strictly after confirmed_at",
+      "bullish": {
+        "invalidated": "close_ticks < far_edge_ticks",
+        "mitigated": "low_ticks <= far_edge_ticks and close_ticks >= far_edge_ticks",
+        "partial": "far_edge_ticks < low_ticks < near_edge_ticks"
+      },
+      "bearish": {
+        "invalidated": "close_ticks > far_edge_ticks",
+        "mitigated": "high_ticks >= far_edge_ticks and close_ticks <= far_edge_ticks",
+        "partial": "near_edge_ticks < high_ticks < far_edge_ticks"
+      },
+      "near_edge_equality": "a wick that only equals the near edge does not enter the gap and leaves it open",
+      "far_edge_equality": "a wick or close that equals the far edge is mitigated, not invalidated",
+      "partial_revisions": "retain the maximum causal penetration fraction and the first partial_at clock without moving any frozen boundary",
+      "transition_priority": [
+        "invalidated",
+        "mitigated",
+        "partial",
+        "no_change"
+      ],
+      "one_transition_per_entity_per_bar": true
+    },
+    "boundary_terminal_reasons": [
+      "data_gap_reset",
+      "contract_change_reset",
+      "data_anomaly",
+      "tick_size_mismatch"
+    ]
+  },
+  "order_block": {
+    "timeframe": "5m",
+    "formation": {
+      "required_displacement": "one same-direction active displacement episode",
+      "required_bos": "one newly observed same-direction confirmed 5m BOS",
+      "clock_relation": "displacement.started_at <= bos.resolved_at <= displacement.prefix_last_admitted_at",
+      "displacement_state_clock": "the displacement episode must still be active after the BOS resolution candle is admitted",
+      "created_at": "bos.resolved_at",
+      "formed_at": "bos.resolved_at",
+      "confirmed_at": "bos.resolved_at",
+      "creation_bar_self_processing": false,
+      "missing_or_ambiguous_evidence": "emit no order-block entity and no failed placeholder"
+    },
+    "source_search": {
+      "freeze_clock": "the displacement seed completion clock",
+      "lookback_real_completed_bars": 64,
+      "window": "up to 64 immediately preceding, contiguous, same-contract real_completed 5m candles ending no later than the displacement seed start",
+      "future_expansion": "the frozen window is never enlarged after the seed",
+      "long_displacement_candidate": "close_ticks < open_ticks",
+      "short_displacement_candidate": "close_ticks > open_ticks",
+      "doji": "excluded",
+      "selection": "the candidate with the latest unique end clock",
+      "missing": "no order block is generated",
+      "non_unique": "no order block is generated",
+      "frozen_zone": "the selected candle full low-to-high range, including wicks"
+    },
+    "geometry": {
+      "long": {
+        "direction": "long",
+        "lower_bound_ticks": "source_candle.low_ticks",
+        "upper_bound_ticks": "source_candle.high_ticks",
+        "near_edge_ticks": "source_candle.high_ticks",
+        "distal_edge_ticks": "source_candle.low_ticks"
+      },
+      "short": {
+        "direction": "short",
+        "lower_bound_ticks": "source_candle.low_ticks",
+        "upper_bound_ticks": "source_candle.high_ticks",
+        "near_edge_ticks": "source_candle.low_ticks",
+        "distal_edge_ticks": "source_candle.high_ticks"
+      },
+      "midpoint": "(lower_bound + upper_bound) / 2",
+      "frozen": "source candle, full-range bounds, midpoint, displacement identity, BOS identity and all source clocks never change"
+    },
+    "association": {
+      "direction": "order block, displacement and BOS directions must match",
+      "displacement": "store exact entity_id, protocol_hash, seed_candle_id, started_at, active_at and prefix_commitment",
+      "bos": "store exact protocol_hash, bos_id, target_swing_id, source_structure_id, scope and resolved_at",
+      "uniqueness": "exactly one displacement episode, one BOS generation and one selected source candle must satisfy the frozen relation"
+    },
+    "identity_fields": [
+      "group3 protocol hash",
+      "symbol",
+      "instrument_id",
+      "timeframe",
+      "direction",
+      "source candle_id",
+      "source_displacement_id",
+      "source_bos_id"
+    ],
+    "lifecycle": {
+      "states": [
+        "created",
+        "untested",
+        "mitigated",
+        "failed"
+      ],
+      "initial": "created",
+      "terminal": [
+        "mitigated",
+        "failed"
+      ],
+      "allowed_transitions": {
+        "created": [
+          "untested",
+          "mitigated",
+          "failed"
+        ],
+        "untested": [
+          "mitigated",
+          "failed"
+        ],
+        "mitigated": [],
+        "failed": []
+      }
+    },
+    "later_bar_rules": {
+      "eligibility": "only a real_completed 5m candle with end strictly after created_at",
+      "long": {
+        "failed": "close_ticks < distal_edge_ticks",
+        "mitigated": "bar.low_ticks <= upper_bound_ticks and bar.high_ticks >= lower_bound_ticks"
+      },
+      "short": {
+        "failed": "close_ticks > distal_edge_ticks",
+        "mitigated": "bar.high_ticks >= lower_bound_ticks and bar.low_ticks <= upper_bound_ticks"
+      },
+      "first_later_bar_without_touch": "created transitions to untested",
+      "untested_without_touch": "remains untested",
+      "distal_edge_equality": "a close equal to the distal edge is not failure; an intersecting bar is mitigated",
+      "transition_priority": [
+        "failed",
+        "mitigated",
+        "untested_or_no_change"
+      ],
+      "one_transition_per_entity_per_bar": true
+    },
+    "boundary_failure_reasons": [
+      "data_gap_reset",
+      "contract_change_reset",
+      "data_anomaly",
+      "tick_size_mismatch"
+    ]
+  },
+  "capacity": {
+    "maximum_fvg_states": 256,
+    "maximum_order_block_states": 128,
+    "state_limit_scope": "each top-level maximum covers the complete retained realtime collection, including live and terminal states",
+    "maximum_transitions_per_fvg": 4,
+    "maximum_transitions_per_order_block": 4,
+    "maximum_frozen_ob_candidates_per_live_displacement": 1,
+    "live_eviction": "forbidden",
+    "terminal_eviction": "only a terminal entity already exposed in an earlier successful observation may be removed, oldest terminal clock then identity first",
+    "same_bar_terminal_exposure": "new terminal transitions remain visible through the successful observation that produced them",
+    "exhaustion": "if compaction cannot admit the new entity, reject the entire completed-bar update and fail closed without partial clock, lifecycle or history mutation"
+  },
+  "required_output": {
+    "common": [
+      "stable entity identity and protocol identity",
+      "symbol, instrument_id, timeframe and direction",
+      "lifecycle",
+      "formed_at, confirmed_at, last_updated_at and terminal clock",
+      "age_bars and lifecycle duration",
+      "frozen lower_bound, upper_bound and midpoint",
+      "transition reason",
+      "exact source identities"
+    ],
+    "fvg_specific": [
+      "near_edge, far_edge, width_ticks and maximum penetration fraction",
+      "c1, c2 and c3 candle identities",
+      "source displacement identity and clocks"
+    ],
+    "order_block_specific": [
+      "near_edge, distal_edge and width_ticks",
+      "source candle identity and strict body direction",
+      "source displacement identity and clocks",
+      "source BOS identity, target swing, scope and resolution clock"
+    ],
+    "consumers": "typed observation, event memory, brain and visualization consume these fields directly; hard-boundary terminal transitions are isolated in typed observation boundary fields and replay rows rather than inserted into the new epoch's ordinary event memory; no consumer reconstructs geometry from prose or legacy impulse proxies"
+  },
+  "change_control": {
+    "not_strategy_logic": "this protocol describes causal location entities and does not authorize entry, stop, target, belief weight or action utility changes",
+    "threshold_search": "prohibited",
+    "semantic_change": "any geometry operator, search-window length, source gate, lifecycle rule, priority, boundary behavior or capacity change requires a new protocol version",
+    "validation_before_freeze": "one implementation, one static self-review, one unified synthetic/boundary/causal suite, one finite real OHLCV replay, one stratified blind review and at most one concept-level repair"
+  }
+}

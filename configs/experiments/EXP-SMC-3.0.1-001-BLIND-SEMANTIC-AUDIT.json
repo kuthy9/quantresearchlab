@@ -1,0 +1,228 @@
+{
+  "audit_id": "EXP-SMC-3.0.1-001-BLIND-SEMANTIC-AUDIT",
+  "parent_experiment_id": "EXP-SMC-3.0.1-001-STRUCTURE-BOS-AUDIT-CLOSURE",
+  "status": "implementation_contract_frozen",
+  "registered_at": "2026-07-29T00:00:00-04:00",
+  "scope": "structure/BOS blind semantic audit infrastructure and synthetic tests only; no real case materialization, future reveal, action value, PnL or MBO",
+  "bindings": {
+    "parent_experiment_sha256": "f2020a0150acc54849e88792aee997cb8e04523067d28a094208ac2cacaf7769",
+    "primitive_protocol_sha256": "f975c428255b42ffdc8bd1d75fe4fd4077ab6e1068ce968192183d112e6e0c3b",
+    "playbook_registry_sha256": "8d1f3e3358cc581f215511941242b21e36395ea834b32dcf1ca8d214424b1b48",
+    "validation_protocol_sha256": "9c0e59638bb43be17e1551bf5c6b31f44da00d2ec33e980e912d910e3f942957",
+    "model_config_sha256": "0f43458875a15a528aeca3d26630afa63e179c81ce2fe72cfcd83d7759bc81cd",
+    "structure_code_sha256": "282cde3f212de01eeba0857ce108339013fa7fb16c4e6c8c5c102a30909a9c74",
+    "model_contracts_sha256": "98ad1ce069cab5d9176d7e45f7319109beb35ad5e597dddeef9dae1195c3c37d",
+    "observer_code_sha256": "5a0970cc788e4486e93881e7248826d3ed6ba836c7e7eace08885f9e85a8496c",
+    "playbook_code_sha256": "368e0505d71cfe6fe71f197063c33e17ed5c56927561d31e9762780c52dfabbe",
+    "causal_source_sha256": "6d2f0b36097e779867277a070073bc157bf58891769478d41f4efc8763ba0204"
+  },
+  "bound_files": {
+    "parent_experiment_sha256": "configs/experiments/EXP-SMC-3.0.1-001-STRUCTURE-BOS-AUDIT-CLOSURE.json",
+    "primitive_protocol_sha256": "configs/smc_primitives_v3_0_1_structure_bos_audit_closure.json",
+    "playbook_registry_sha256": "configs/playbooks_v3.json",
+    "validation_protocol_sha256": "configs/validation_protocol_v3_0_1_exp001.json",
+    "model_config_sha256": "configs/model_v3_0_1_exp001_structure_bos_identity.json",
+    "structure_code_sha256": "smc_trader/structure.py",
+    "model_contracts_sha256": "smc_trader/model.py",
+    "observer_code_sha256": "smc_trader/observation.py",
+    "playbook_code_sha256": "smc_trader/playbooks.py"
+  },
+  "source": {
+    "path": "data/processed/nq_1m_previous_session_front_v2_3_pre_holdout_2017_20260331.parquet",
+    "start": "2017-01-03T18:00:00-05:00",
+    "end_exclusive": "2022-01-01T00:00:00-05:00",
+    "window_role": "semantic_discovery",
+    "sealed_data_allowed": false,
+    "access_authorized": false
+  },
+  "completed_candle_interpretation": {
+    "policy": "real_completed_only_with_registered_synthetic_clock",
+    "real_completed": "complete and synthetic_minutes equals zero",
+    "synthetic_rule": "a complete candle containing a registered synthetic minute advances causal market time but cannot change typed structure state or semantic age",
+    "unknown_gap": "terminalize pending BOS at the first known boundary, then hard reset",
+    "contract_change": "terminalize pending BOS at the first known boundary, then hard reset"
+  },
+  "selection": {
+    "passes": [
+      "pass1 scans only reader and observer semantic state and atomically freezes the selection authority manifest",
+      "pass2 replays each frozen case from the same source prefix and requires the same event id, case clock and semantic state hash before rendering"
+    ],
+    "bucket_dimensions": [
+      "timeframe",
+      "direction",
+      "case_class",
+      "calendar_year"
+    ],
+    "timeframes": [
+      "4H",
+      "1H",
+      "5m",
+      "1m"
+    ],
+    "directions": [
+      "long",
+      "short"
+    ],
+    "case_classes": [
+      "confirmed_bos",
+      "wick_only_no_close",
+      "broken_or_opposed"
+    ],
+    "calendar_years": [
+      2017,
+      2018,
+      2019,
+      2020,
+      2021
+    ],
+    "cases_per_bucket": 2,
+    "bucket_count": 120,
+    "total_cases": 240,
+    "score_bytes": "UTF-8 primitive_protocol_sha256 plus '|' plus semantic_event_id",
+    "score": "SHA-256 of score_bytes; retain the two lexicographically smallest scores in each bucket",
+    "shortage_policy": "unavailable; no cross-year, cross-direction or cross-class backfill",
+    "class_precedence": [
+      "confirmed BOS with scope opposed is broken_or_opposed",
+      "other confirmed BOS is confirmed_bos",
+      "pending BOS whose last_attempt_at equals case_clock is wick_only_no_close"
+    ],
+    "case_anchor": "real source bar only",
+    "forbidden_inputs": [
+      "future path",
+      "outcome",
+      "PnL",
+      "MFE",
+      "MAE",
+      "action",
+      "best entry"
+    ]
+  },
+  "artifact_separation": {
+    "case_transaction": "immutable authority and blind source files plus one completion marker; reviews can never be written here",
+    "authority_manifest": "contains selected semantic identity and truth; reviewer access forbidden",
+    "blind_manifest": "contains opaque identity, case clock and exact packet digests only",
+    "blind_raw_evidence": "all retained causal candle values, integer ticks, stable indices, source-prefix commitment and reset provenance; no selected truth",
+    "blind_image": "raw completed four-timeframe candles, integer-tick grid, stable indices, synthetic hatching and case-clock boundary only",
+    "review_transaction": "separate create-once root containing review.json and LOCKED_REVIEW.json",
+    "reviewer_export": "contains exactly the Pass2 blind units and blind-set manifest; no authority file or link",
+    "truth_overlay": "may be produced only after every actual review transaction in the exact Pass2 set is revalidated",
+    "future_reveal": "not authorized by this contract"
+  },
+  "review_schema": {
+    "required_identity": [
+      "review_unit_id",
+      "opaque_case_id",
+      "case_clock",
+      "blind_image_sha256",
+      "blind_manifest_sha256",
+      "blind_raw_evidence_sha256",
+      "reviewer_id",
+      "reviewed_at",
+      "no_future_attestation"
+    ],
+    "judgment_fields": [
+      "swings",
+      "bos_candidates",
+      "confidence",
+      "issue_codes"
+    ],
+    "swing_candidate_fields": [
+      "timeframe",
+      "side",
+      "pivot_index",
+      "prior_same_side_index",
+      "relation",
+      "confirmation_index",
+      "broken_index"
+    ],
+    "bos_candidate_fields": [
+      "timeframe",
+      "direction",
+      "target_pivot_index",
+      "target_price_ticks",
+      "pending_index",
+      "wick_attempt_indices",
+      "resolved_index",
+      "lifecycle",
+      "scope"
+    ],
+    "enumeration_rule": "enumerate every swing and BOS candidate recoverable from the raw evidence; there is no hidden focal judgment",
+    "issue_codes": [
+      "SWING_PIVOT_CONFIRMATION_MISMATCH",
+      "SWING_RELATION_MISMATCH",
+      "STRUCTURE_DIRECTION_MISMATCH",
+      "PROTECTED_SWING_MISMATCH",
+      "BOS_TARGET_NOT_PRECONFIRMED",
+      "BOS_WICK_ONLY_FALSE_CONFIRMATION",
+      "BOS_SCOPE_MISMATCH",
+      "BOS_CLOCK_ORDER_MISMATCH",
+      "POSTHOC_STRUCTURE_REWRITE",
+      "SOURCE_CUTOFF_MISMATCH",
+      "SYNTHETIC_PROVENANCE_MISMATCH",
+      "RAW_EVIDENCE_INDEX_MISMATCH",
+      "MULTIPLE_CANDIDATES_OMITTED",
+      "CONTEXT_TRUNCATED",
+      "VISUAL_PROVENANCE_MISSING",
+      "AXIS_COMPRESSION"
+    ],
+    "forbidden_judgments": [
+      "action",
+      "buy",
+      "sell",
+      "enter",
+      "wait",
+      "abstain",
+      "hold",
+      "protect",
+      "exit",
+      "profit",
+      "best entry",
+      "best action"
+    ],
+    "lock_policy": "review roots are create-once and outside case packets; exact packet and review hashes are revalidated before truth"
+  },
+  "pre_reveal_forbidden_fields": [
+    "future_path",
+    "future_bars",
+    "post_decision_high",
+    "post_decision_low",
+    "outcome",
+    "success",
+    "winner",
+    "profit",
+    "pnl",
+    "gross_R",
+    "net_R",
+    "realized_cost_R",
+    "mfe",
+    "mae",
+    "entry_touched",
+    "target_touched",
+    "stop_touched",
+    "closed_trade",
+    "closed_at",
+    "exit_price",
+    "exit_reason",
+    "realized_fill_price",
+    "realized_slippage",
+    "best_entry",
+    "best_action",
+    "optimal_action",
+    "recommended_action",
+    "trade_label",
+    "buy_label",
+    "sell_label",
+    "should_enter",
+    "should_exit"
+  ],
+  "release_gates": {
+    "formula_and_causal_agreement": "240/240",
+    "blind_strict_case_agreement": "at least 216/240; missing and uncertain count as disagreement",
+    "maximum_market_time_not_after_case_clock": true,
+    "maximum_semantic_known_at_not_after_case_clock": true,
+    "all_exact_review_transactions_revalidated_before_truth_overlay": true,
+    "real_data_authority": false,
+    "future_authority": false,
+    "economic_authority": false
+  }
+}

@@ -1,0 +1,15 @@
+.DS_Store
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv*/
+*.egg-info/
+
+# Market data and generated/release artifacts are governed by their own
+# manifests and must never be copied into source control.
+data/
+inputs/
+outputs/
+reports/
+artifacts/
+archive/

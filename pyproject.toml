@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "smc-continuous-trader"
+version = "3.0.0"
+description = "Causal multitimeframe SMC observation, belief, decision, and risk engine"
+requires-python = ">=3.10"
+dependencies = [
+  "numpy>=1.24",
+  "pandas>=2.0,<3.0",
+  "pyarrow>=12",
+  "matplotlib>=3.7",
+  "exchange-calendars==4.11",
+  "psutil>=5.9",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=8"]
+dbn = ["databento>=0.64"]
+
+[tool.setuptools.packages.find]
+include = ["smc_trader*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q -m 'not historical_frozen'"
+markers = [
+  "historical_frozen: immutable historical release/governance checks that require their archived runtime",
+]

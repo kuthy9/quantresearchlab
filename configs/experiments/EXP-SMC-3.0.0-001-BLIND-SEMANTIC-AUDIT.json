@@ -1,0 +1,186 @@
+{
+  "audit_id": "EXP-SMC-3.0.0-001-BLIND-SEMANTIC-AUDIT",
+  "parent_experiment_id": "EXP-SMC-3.0.0-001-SWING-BOS",
+  "status": "implementation_contract_frozen",
+  "registered_at": "2026-07-28T00:00:00-04:00",
+  "scope": "blind semantic audit infrastructure only; no case materialization, future reveal, action value, PnL or MBO",
+  "bindings": {
+    "parent_experiment_sha256": "2c2f5cf43531918a394d93820cec30964f161a079292e954291038529d510f63",
+    "primitive_protocol_sha256": "2b7b05cbc65352e9ae2501fcd2988032b3bbfe732d665ba3228732acfd1ed615",
+    "playbook_registry_sha256": "8d1f3e3358cc581f215511941242b21e36395ea834b32dcf1ca8d214424b1b48",
+    "validation_protocol_sha256": "501cd5ecbf9f4228e567c366a84d5fb74b21bf137c19024580e19caf0b8eab60",
+    "model_config_sha256": "e953af3ccc5ec74ede0cd12694a1f712d584a4d8c3f4c6e6c6205c582691698d",
+    "structure_code_sha256": "f86104cca8315c6c8a8677f507e84c67c2471bf751d2df45d36939b1bd5b150c",
+    "model_contracts_sha256": "6e4f4e5e00e609e8c59addcc0b48594df7717ba5cd7187c0ae1cc57293fda019",
+    "observer_code_sha256": "4838ebd36e2aee70fd6ec6ee4f3740b8e6f7a601937b901ae15c59d056bb7e85",
+    "playbook_code_sha256": "368e0505d71cfe6fe71f197063c33e17ed5c56927561d31e9762780c52dfabbe",
+    "causal_source_sha256": "6d2f0b36097e779867277a070073bc157bf58891769478d41f4efc8763ba0204"
+  },
+  "source": {
+    "path": "data/processed/nq_1m_previous_session_front_v2_3_pre_holdout_2017_20260331.parquet",
+    "start": "2017-01-03T18:00:00-05:00",
+    "end_exclusive": "2022-01-01T00:00:00-05:00",
+    "window_role": "semantic_discovery",
+    "sealed_data_allowed": false
+  },
+  "completed_candle_interpretation": {
+    "policy": "registered_market_time",
+    "rule": "a no-trade minute causally synthesized by the registered exchange clock is a completed market-time candle and participates in the frozen structure protocol",
+    "unknown_gap": "an unregistered or over-limit missing interval is not synthesized and causes the existing hard history reset",
+    "reason": "this freezes the already-implemented behavior before sample counts are observed and does not change the parent primitive or structure code hash"
+  },
+  "selection": {
+    "passes": [
+      "pass1 scans only reader and observer semantic state and atomically freezes the selection authority manifest",
+      "pass2 replays each frozen case from the same source prefix and requires the same event id, case clock and semantic state hash before rendering"
+    ],
+    "bucket_dimensions": [
+      "timeframe",
+      "direction",
+      "case_class",
+      "calendar_year"
+    ],
+    "timeframes": [
+      "4H",
+      "1H",
+      "5m",
+      "1m"
+    ],
+    "directions": [
+      "long",
+      "short"
+    ],
+    "case_classes": [
+      "confirmed_bos",
+      "wick_only_no_close",
+      "broken_or_opposed"
+    ],
+    "calendar_years": [
+      2017,
+      2018,
+      2019,
+      2020,
+      2021
+    ],
+    "cases_per_bucket": 2,
+    "bucket_count": 120,
+    "total_cases": 240,
+    "score_bytes": "UTF-8 primitive_protocol_sha256 + '|' + semantic_event_id",
+    "score": "SHA-256 of score_bytes; retain the two lexicographically smallest scores in each bucket",
+    "shortage_policy": "unavailable; no cross-year, cross-direction or cross-class backfill",
+    "class_precedence": [
+      "confirmed BOS with scope opposed is broken_or_opposed",
+      "other confirmed BOS is confirmed_bos",
+      "pending BOS whose last_attempt_at equals case_clock is wick_only_no_close"
+    ],
+    "forbidden_inputs": [
+      "future path",
+      "outcome",
+      "PnL",
+      "MFE",
+      "MAE",
+      "action",
+      "best entry"
+    ]
+  },
+  "artifact_separation": {
+    "authority_manifest": "contains semantic event ids, object ids, class, direction, timeframe and state hashes; reviewer access forbidden",
+    "blind_manifest": "contains only opaque case id, case clock, image hash and review-template identity",
+    "blind_image": "raw completed four-timeframe candles, axes, timeframe and case-clock boundary only",
+    "truth_overlay": "may be produced only after all blind reviews are content-hash locked; it still may not read any post-case future path",
+    "future_reveal": "not authorized by this contract"
+  },
+  "review_schema": {
+    "required_identity": [
+      "review_unit_id",
+      "opaque_case_id",
+      "case_clock",
+      "blind_image_sha256",
+      "blind_manifest_sha256",
+      "reviewer_id",
+      "reviewed_at",
+      "no_future_attestation"
+    ],
+    "allowed_judgments": [
+      "timeframe",
+      "direction",
+      "case_class",
+      "reference_swing_pivot_clock",
+      "reference_swing_price",
+      "bos_lifecycle",
+      "confidence",
+      "issue_codes"
+    ],
+    "issue_codes": [
+      "SWING_PIVOT_CONFIRMATION_MISMATCH",
+      "SWING_RELATION_MISMATCH",
+      "STRUCTURE_DIRECTION_MISMATCH",
+      "PROTECTED_SWING_MISMATCH",
+      "BOS_TARGET_NOT_PRECONFIRMED",
+      "BOS_WICK_ONLY_FALSE_CONFIRMATION",
+      "BOS_SCOPE_MISMATCH",
+      "BOS_CLOCK_ORDER_MISMATCH",
+      "POSTHOC_STRUCTURE_REWRITE",
+      "SOURCE_CUTOFF_MISMATCH",
+      "VISUAL_PROVENANCE_MISSING",
+      "AXIS_COMPRESSION"
+    ],
+    "forbidden_judgments": [
+      "action",
+      "buy",
+      "sell",
+      "enter",
+      "wait",
+      "abstain",
+      "hold",
+      "protect",
+      "exit",
+      "profit",
+      "best entry",
+      "best action"
+    ],
+    "lock_policy": "review and lock files are create-once; every authority, blind, image and review hash is revalidated before evaluation"
+  },
+  "pre_reveal_forbidden_fields": [
+    "future_path",
+    "future_bars",
+    "post_decision_high",
+    "post_decision_low",
+    "outcome",
+    "success",
+    "winner",
+    "profit",
+    "pnl",
+    "gross_R",
+    "net_R",
+    "realized_cost_R",
+    "mfe",
+    "mae",
+    "entry_touched",
+    "target_touched",
+    "stop_touched",
+    "closed_trade",
+    "closed_at",
+    "exit_price",
+    "exit_reason",
+    "realized_fill_price",
+    "realized_slippage",
+    "best_entry",
+    "best_action",
+    "optimal_action",
+    "recommended_action",
+    "trade_label",
+    "buy_label",
+    "sell_label",
+    "should_enter",
+    "should_exit"
+  ],
+  "release_gates": {
+    "formula_and_causal_agreement": "240/240",
+    "blind_strict_case_agreement": "at least 216/240; missing and uncertain count as disagreement",
+    "maximum_market_time_not_after_case_clock": true,
+    "maximum_semantic_known_at_not_after_case_clock": true,
+    "all_reviews_locked_before_truth_overlay": true,
+    "economic_authority": false
+  }
+}

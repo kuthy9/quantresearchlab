@@ -1,0 +1,56 @@
+{
+  "protocol_version": "2.1.0-preregistered.1",
+  "frozen_at": "2026-07-25T12:00:00-04:00",
+  "causal_front_source": "data/processed/nq_1m_previous_session_front_pre_holdout_2017_20260331.parquet",
+  "causal_front_sha256": "0d425277b7fff2a40350958157f5aee72407ae06ab0bf6a760a324825e06010c",
+  "playbook_registry": "configs/playbooks_v2.json",
+  "policy_value_protocol": "configs/policy_value_protocol_v2_1.json",
+  "ohlcv_windows": {
+    "development": {
+      "start": "2017-01-03T18:00:00-05:00",
+      "end_exclusive": "2022-01-01T00:00:00-05:00",
+      "purpose": "primitive discovery and source repair only"
+    },
+    "belief_calibration": {
+      "start": "2022-01-01T00:00:00-05:00",
+      "end_exclusive": "2023-01-01T00:00:00-05:00",
+      "purpose": "target-before-invalidation belief reliability"
+    },
+    "managed_policy_calibration": {
+      "start": "2023-01-01T00:00:00-05:00",
+      "end_exclusive": "2024-01-01T00:00:00-05:00",
+      "purpose": "gross managed-policy value calibration without execution-cost claims"
+    },
+    "rolling_validation": {
+      "start": "2024-01-01T00:00:00-05:00",
+      "end_exclusive": "2026-04-01T00:00:00-04:00",
+      "purpose": "walk-forward component falsification; previously revealed slices are descriptive only"
+    },
+    "sealed_holdout": {
+      "start": "2026-04-01T00:00:00-04:00",
+      "end_exclusive": "2026-07-14T00:00:00-04:00",
+      "purpose": "single final structural reveal after all v2.1 fingerprints are frozen"
+    }
+  },
+  "mbo_windows": {
+    "revealed_development_diagnostic": {
+      "start": "2024-06-02T00:00:00Z",
+      "end_exclusive": "2024-08-02T00:00:00Z",
+      "purpose": "source and component diagnostics only; excluded from v2.1 fitting and parameter selection"
+    },
+    "sealed_holdout": {
+      "start": "2024-08-02T00:00:00Z",
+      "end_exclusive": "2024-12-02T00:00:00Z",
+      "purpose": "single final execution-realistic reveal"
+    }
+  },
+  "leakage_rules": [
+    "The three playbook semantics and ordered path protocols remain unchanged.",
+    "June-July 2024 MBO outcomes cannot fit or select v2.1 parameters.",
+    "Belief probability cannot be represented as managed-policy expected return.",
+    "Managed-policy calibration uses only 2023 gross structural episodes and subtracts observed MBO cost only at runtime.",
+    "A decision snapshot and all code, config, belief and policy-value hashes must be sealed before future reveal.",
+    "AI review may propose only registered sequence primitives and has no action, outcome or profit-label authority.",
+    "Any post-reveal model change creates a new protocol and requires later untouched data."
+  ]
+}

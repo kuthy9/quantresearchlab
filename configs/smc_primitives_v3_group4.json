@@ -1,0 +1,444 @@
+{
+  "protocol_version": "3.1.0-group4.0",
+  "status": "formalized_implementation_pending",
+  "role": "causal_descriptive_development_contract",
+  "tick_size": 0.25,
+  "upstream": {
+    "group12_protocol_version": "3.1.0-group12.4",
+    "group12_protocol_sha256": "189b6af3bff631c3985fa37bcf9f5f82528296800886d9c9bd4cbe123ea4c701",
+    "required_typed_sources": [
+      "H1 SupportResistanceState",
+      "LiquidityPoolState formation and lifecycle",
+      "LiquidityInventoryItem",
+      "ordered real_completed H1 candles",
+      "ordered real_completed 1m candles"
+    ],
+    "source_authority": "exact typed upstream identities and clocks; legacy dealing_range metrics, range_position, rejection scores and natural-language annotations are not sources"
+  },
+  "prohibited_inputs": [
+    "future bars",
+    "future path",
+    "PnL",
+    "MFE or MAE",
+    "action labels",
+    "MBO",
+    "legacy H1 dealing_range_low or dealing_range_high",
+    "legacy H1 dealing_range_position",
+    "legacy 4H range_position",
+    "legacy 5m compression",
+    "legacy rejection or reacceptance scores"
+  ],
+  "engineering_parameters": {
+    "h1_atr_period": 14,
+    "m1_atr_period": 14,
+    "minimum_candidate_real_h1_bars": 8,
+    "maximum_forming_real_h1_bars": 24,
+    "minimum_boundary_touches_each": 2,
+    "minimum_midpoint_crossings": 2,
+    "minimum_inside_close_fraction": 0.8,
+    "maximum_width_atr_at_formation": 4.0,
+    "compression_early_real_h1_bars": 4,
+    "compression_late_real_h1_bars": 4,
+    "maximum_compression_ratio": 0.8,
+    "manipulation_resolution_delay_real_1m_bars": 1,
+    "retained_dealing_range_states": 64,
+    "retained_manipulation_states": 256
+  },
+  "parameter_basis": {
+    "threshold_origin": "one-time outcome-blind descriptive engineering thresholds; none was selected from PnL, future delivery, action labels, MFE or MAE",
+    "atr_periods": "14 matches the existing causal observer scale and supplies dimensionless H1 width and 1m penetration without a new market-specific unit",
+    "minimum_candidate_real_h1_bars": "eight bars permit two non-overlapping four-bar range samples and require persistence beyond a short oscillation",
+    "maximum_forming_real_h1_bars": "twenty-four H1 bars bound one forming attempt to approximately one full electronic-session cycle and prevent stale candidates from blocking new source pairs",
+    "minimum_boundary_touches_each": "two distinct confirmed swings are the minimum repeat test already represented by the typed tested-zone lifecycle",
+    "minimum_midpoint_crossings": "two close-side changes demonstrate a two-sided internal auction rather than one pass through the interval",
+    "minimum_inside_close_fraction": "eighty percent requires persistent containment while allowing one descriptive excursion in the minimum eight-bar sample",
+    "maximum_width_atr_at_formation": "four formation-time H1 ATRs excludes broad directional areas while allowing a multi-hour balance to form",
+    "compression_windows": "the first four and most recent four candidate bars are non-overlapping at first eligibility and remain bounded thereafter",
+    "maximum_compression_ratio": "a late-to-early median true-range ratio no greater than 0.80 records a material twenty-percent contraction rather than minor bar noise",
+    "manipulation_resolution_delay": "one later real completed 1m bar is the minimum causal delay that prevents a sweep bar from resolving itself and matches the frozen upstream pool timing",
+    "retention_limits": "memory-safety limits only; they never qualify price structure or trading authority"
+  },
+  "clock": {
+    "decision_update": "one update per newly completed 1m bar",
+    "range_semantic_clock": "only ordered real_completed H1 candles may form, mature, age or break a dealing range",
+    "manipulation_semantic_clock": "only ordered real_completed 1m candles may sweep, age or resolve a manipulation",
+    "knowledge_time": "every formed_at, mature_at, swept_at, reaccepted_at, accepted_outside_at and broken_at is the completed-bar end when the full evidence first became knowable; no clock is backfilled to a pivot or intrabar extreme",
+    "source_visibility": "a source is eligible for a completed 1m bar only when its mature_at or confirmed_at is no later than that bar.start and the source was present in the prior successful observation",
+    "synthetic": "synthetic or partially synthetic candles may advance the raw cutoff but cannot change semantic state, source selection, ATR, strength, age or duration",
+    "scheduled_closure": "preserve all state; the first later real completed bar continues the lifecycle without charging missing market minutes to semantic age",
+    "exact_retry": "the same asof, completed-bar provenance and typed-source envelopes return the exact prior committed update; a non-identical input at the same clock is rejected before mutation",
+    "out_of_order": "a clock earlier than the last committed clock is rejected before mutation"
+  },
+  "dealing_range": {
+    "state_name": "DealingRangeState",
+    "timeframe": "1H",
+    "maximum_live_states_per_contract": 1,
+    "lifecycle": [
+      "forming",
+      "mature",
+      "broken"
+    ],
+    "allowed_transitions": {
+      "forming": [
+        "mature",
+        "broken"
+      ],
+      "mature": [
+        "broken"
+      ],
+      "broken": []
+    },
+    "candidate_sources": {
+      "lower": "one H1 SupportResistanceState whose side is support and lifecycle is active or tested",
+      "upper": "one H1 SupportResistanceState whose side is resistance and lifecycle is active or tested",
+      "geometry": "support.upper_bound < resistance.lower_bound and the selecting completed H1 close lies inside [support.lower_bound, resistance.upper_bound]",
+      "contract": "both sources come from the same H1 frame, symbol, instrument_id, uninterrupted epoch, exact Group1-2 protocol hash and tick-size binding",
+      "source_pair_reuse": "one ordered support-zone/resistance-zone identity pair is admitted at most once; a terminal range remains source-pinned and ineligible for compaction while both source IDs remain in the authoritative upstream snapshot"
+    },
+    "candidate_selection": {
+      "when": "only after updating an existing live range; no replacement is allowed while a forming or mature state remains live, and no new candidate is selected on the same H1 bar that terminalizes the prior range",
+      "eligible_pair_order": [
+        "smallest frozen outer width upper_bound minus lower_bound",
+        "most recent pair eligibility clock max(lower.confirmed_at, upper.confirmed_at)",
+        "lexicographically smallest lower zone_id",
+        "lexicographically smallest upper zone_id"
+      ],
+      "selection_clock": "the current real completed H1 candle end",
+      "formed_at": "the selection clock, never an earlier source clock",
+      "identity": "hash(protocol_hash, symbol, instrument_id, lower_zone_id, upper_zone_id, formed_at)"
+    },
+    "frozen_geometry": {
+      "lower_bound": "selected support.lower_bound",
+      "upper_bound": "selected resistance.upper_bound",
+      "midpoint": "(lower_bound + upper_bound) / 2",
+      "value_price": "the same frozen midpoint",
+      "value_semantics": "value becomes authoritative only while lifecycle is mature; a forming midpoint is candidate geometry and a broken midpoint is retained historical provenance",
+      "width_points": "upper_bound - lower_bound",
+      "formation_atr": "arithmetic mean of the last 14 positive real-completed H1 true ranges through formed_at, with one real predecessor close and tick_size as the positive floor",
+      "width_atr_at_formation": "width_points / formation_atr",
+      "immutability": "source IDs, source clocks, source bounds, range bounds, midpoint, value_price, formation_atr and width_atr_at_formation never change after formed_at"
+    },
+    "incremental_statistics": {
+      "candidate_bar_set": "real completed H1 candles with end from formed_at through the current H1 end, retained up to maximum_forming_real_h1_bars",
+      "boundary_touch_counts": "the exact total_touch_count of each frozen source zone as known at the current H1 clock; counts freeze at mature_at",
+      "inside_close_fraction": "count(lower_bound <= close <= upper_bound) divided by candidate real H1 bar count",
+      "midpoint_crossings": "remove closes exactly equal to midpoint, encode remaining closes below as -1 and above as +1, then count adjacent sign changes",
+      "early_true_range": "median true range of the first four candidate real H1 bars",
+      "late_true_range": "median true range of the most recent four candidate real H1 bars",
+      "compression_ratio": "late_true_range / max(early_true_range, tick_size)",
+      "compression_strength": "clamp(1 - compression_ratio, 0, 1)",
+      "narrowness_strength": "clamp(1 - width_atr_at_formation / maximum_width_atr_at_formation, 0, 1)",
+      "boundary_test_strength": "clamp(min(lower_touch_count, upper_touch_count) / 3, 0, 1)",
+      "crossing_strength": "clamp(midpoint_crossings / 4, 0, 1)",
+      "strength": "unweighted mean of narrowness_strength, compression_strength, boundary_test_strength, crossing_strength and inside_close_fraction; descriptive only"
+    },
+    "maturity": {
+      "clock": "the first real completed H1 end at which every condition is simultaneously true",
+      "conditions": [
+        "candidate_real_h1_bars >= 8",
+        "candidate_real_h1_bars <= 24",
+        "lower source total_touch_count >= 2",
+        "upper source total_touch_count >= 2",
+        "midpoint_crossings >= 2",
+        "inside_close_fraction >= 0.80",
+        "width_atr_at_formation <= 4.0",
+        "compression_ratio <= 0.80",
+        "both source zones remain active or tested at the maturity clock",
+        "the current completed H1 close remains inside the frozen outer bounds"
+      ],
+      "freeze_at_maturity": "mature_at, exact source touch counts and IDs, midpoint crossings, inside fraction, compression ratio, component strengths and aggregate strength",
+      "not_strategy_gate": "maturity authorizes only a descriptive dealing-range/value source"
+    },
+    "break": {
+      "forming_price_break": "a later real completed H1 close strictly below lower_bound or strictly above upper_bound",
+      "forming_source_break": "before maturity, either frozen source zone ceases to be active or tested",
+      "forming_deadline": "after evaluating price break, source validity and maturity on candidate bar 24, a still-forming candidate becomes broken with reason maturity_deadline_elapsed",
+      "mature_break": "a later real completed H1 close strictly below lower_bound or strictly above upper_bound",
+      "equality": "a close equal to either frozen bound remains inside",
+      "wick_only": "a high or low outside the range with a completed H1 close inside does not break the range",
+      "post_maturity_source_retirement": "source-zone retirement alone does not rewrite or break a mature range; only its frozen close rule or a hard epoch boundary does",
+      "terminal": "broken is terminal and preserves all frozen geometry and maturity evidence"
+    },
+    "same_h1_bar_priority": [
+      "hard epoch boundary",
+      "strict close break",
+      "forming source invalidation",
+      "maturity",
+      "forming deadline",
+      "unchanged lifecycle with age/statistic update"
+    ],
+    "required_output": [
+      "range_id",
+      "protocol_hash",
+      "source_group12_protocol_hash",
+      "symbol",
+      "instrument_id",
+      "timeframe",
+      "lifecycle",
+      "lower_source_zone_id",
+      "upper_source_zone_id",
+      "source confirmation and tested clocks",
+      "source member swing IDs",
+      "formed_at",
+      "mature_at",
+      "broken_at",
+      "state_started_at",
+      "last_updated_at",
+      "lower_bound",
+      "upper_bound",
+      "midpoint",
+      "value_price",
+      "formation_atr",
+      "width_points",
+      "width_atr_at_formation",
+      "candidate_real_h1_bars",
+      "lower_touch_count",
+      "upper_touch_count",
+      "midpoint_crossings",
+      "inside_close_fraction",
+      "compression_ratio",
+      "strength",
+      "age_h1_bars",
+      "transition_reason"
+    ]
+  },
+  "manipulation": {
+    "state_name": "ManipulationState",
+    "timeframe": "1m",
+    "maximum_live_states_per_contract": 1,
+    "lifecycle": [
+      "swept",
+      "reaccepted",
+      "accepted_outside"
+    ],
+    "allowed_transitions": {
+      "swept": [
+        "reaccepted",
+        "accepted_outside"
+      ],
+      "reaccepted": [],
+      "accepted_outside": []
+    },
+    "eligible_source_kinds": {
+      "mature_range_boundary": {
+        "state": "a DealingRangeState that was mature in the prior successful observation and remains mature after any current H1 update",
+        "boundary": "upper_bound for side above or lower_bound for side below",
+        "prior_close": "the prior real completed 1m close must lie inside the full frozen range",
+        "inventory": "the exact matching range_boundary inventory item must be visible at bar.start"
+      },
+      "formed_liquidity_pool": {
+        "state": "the exact Group1-2 LiquidityPoolState formation source was formed in the prior successful observation",
+        "boundary": "upper_bound for an above pool or lower_bound for a below pool",
+        "prior_close": "for above, prior close <= upper_bound; for below, prior close >= lower_bound",
+        "inventory": "the exact matching equal_highs or equal_lows inventory item must be visible at bar.start"
+      }
+    },
+    "source_provenance": {
+      "required": [
+        "source_kind",
+        "source_id",
+        "source protocol hash",
+        "source timeframe",
+        "source formed_at",
+        "source confirmed_at or mature_at",
+        "source side",
+        "source lower_bound",
+        "source upper_bound",
+        "source inventory item_id and lifecycle",
+        "source symbol and instrument_id"
+      ],
+      "immutability": "all source provenance and geometry freeze at swept_at",
+      "ordinary_wick_rule": "a wick without one eligible pre-existing typed source emits no ManipulationState and remains only a candle or generic liquidity description"
+    },
+    "sweep": {
+      "above": "current real completed 1m high is strictly greater than source upper_bound",
+      "below": "current real completed 1m low is strictly less than source lower_bound",
+      "equality": "equality is not a sweep",
+      "source_clock_rule": "source mature_at or confirmed_at <= current 1m bar.start; a source created at current bar.end cannot be swept by that bar",
+      "prior_close_rule": "the immediately preceding real completed 1m close must satisfy the source-specific inside rule",
+      "formed_at": "current completed 1m end",
+      "confirmed_at": "current completed 1m end",
+      "swept_at": "current completed 1m end",
+      "sweep_extreme": "current high for above or current low for below, frozen from the first sweep bar and never replaced by a later extreme",
+      "close_outside_on_sweep": "whether the sweep bar close remains beyond the swept-side boundary",
+      "penetration_atr": "strict penetration distance divided by the frozen 14-real-1m ATR known at bar.start",
+      "strength": "clamp(penetration_atr, 0, 1), descriptive only",
+      "identity": "hash(protocol_hash, symbol, instrument_id, source_kind, source_id, side, swept_at)"
+    },
+    "multiple_source_selection": {
+      "one_side_only": "if eligible candidates are crossed on both above and below in the same 1m bar, emit no ManipulationState, consume every crossed inventory item, and emit ambiguous_dual_side_sweep because OHLC cannot prove event order",
+      "primary_source": "when one side has multiple crossed eligible sources, select the boundary with the smallest nonnegative distance from the prior real 1m close",
+      "tie_order": [
+        "lexicographically smallest source_kind",
+        "earliest source confirmed_at or mature_at",
+        "lexicographically smallest source_id"
+      ],
+      "coincident_sources": "store the IDs of exact same-price tied eligible sources as coincident_source_ids, but emit one manipulation identity and never double-count their evidence"
+    },
+    "resolution": {
+      "earliest": "the first later real completed 1m bar; the sweep bar cannot resolve itself",
+      "mature_range_reaccepted": "the resolution close lies inside the full frozen range, including equality at either bound",
+      "mature_range_accepted_outside": "the resolution close lies strictly outside the full frozen range; resolved_side records above or below",
+      "above_pool_reaccepted": "resolution close <= frozen pool upper_bound",
+      "above_pool_accepted_outside": "resolution close > frozen pool upper_bound",
+      "below_pool_reaccepted": "resolution close >= frozen pool lower_bound",
+      "below_pool_accepted_outside": "resolution close < frozen pool lower_bound",
+      "reentry_price": "the completed resolution close for reaccepted; null for accepted_outside",
+      "outside_completed_bars": "count of the sweep bar and later real completed 1m bars whose closes satisfy the source-specific outside rule through resolution",
+      "duration": "real completed 1m bars and event-memory market minutes from swept_at through resolved_at; synthetic and scheduled-closure minutes are excluded",
+      "terminal": "reaccepted and accepted_outside are terminal; later extrema and closes cannot rewrite the result"
+    },
+    "same_1m_bar_priority": [
+      "hard epoch boundary",
+      "resolve an already-swept manipulation from the completed close",
+      "project every prior-visible inventory crossing",
+      "apply any current real completed H1 range transition",
+      "if an older manipulation resolved on this bar, do not create another manipulation",
+      "select at most one new manipulation from prior-visible sources that remain eligible",
+      "create new range-boundary inventory after maturity, with no same-bar sweep"
+    ],
+    "source_generation": "one source inventory identity may create at most one manipulation; the source inventory becomes consumed on its first crossing, so a later attempt requires a new range identity, range-boundary identity or liquidity-pool generation rather than a separate tombstone",
+    "required_output": [
+      "manipulation_id",
+      "protocol_hash",
+      "source_group12_protocol_hash when applicable",
+      "symbol",
+      "instrument_id",
+      "timeframe",
+      "lifecycle",
+      "side",
+      "source_kind",
+      "source_id",
+      "source inventory item_id",
+      "coincident_source_ids",
+      "source formed and eligibility clocks",
+      "source lower_bound",
+      "source upper_bound",
+      "formed_at",
+      "confirmed_at",
+      "swept_at",
+      "reaccepted_at",
+      "accepted_outside_at",
+      "resolved_at",
+      "state_started_at",
+      "last_updated_at",
+      "sweep_extreme",
+      "close_outside_on_sweep",
+      "reentry_price",
+      "resolved_side",
+      "outside_completed_bars",
+      "penetration_atr",
+      "strength",
+      "age_1m_bars",
+      "transition_reason",
+      "censored_at"
+    ]
+  },
+  "range_boundary_inventory": {
+    "creation": "a mature range emits exactly two LiquidityInventoryItem values after the maturity transition commits",
+    "lower_item": {
+      "side": "below",
+      "kind": "range_boundary",
+      "price": "range.lower_bound",
+      "lower_bound": "range.lower_bound",
+      "upper_bound": "range.lower_bound"
+    },
+    "upper_item": {
+      "side": "above",
+      "kind": "range_boundary",
+      "price": "range.upper_bound",
+      "lower_bound": "range.upper_bound",
+      "upper_bound": "range.upper_bound"
+    },
+    "identity": "hash(protocol_hash, range_id, side, confirmed_at)",
+    "formed_at": "range.formed_at",
+    "confirmed_at": "range.mature_at",
+    "source_ids": "range_id plus the corresponding source zone_id",
+    "eye_lifecycle": [
+      "visible",
+      "consumed"
+    ],
+    "targeted_owner": "belief and plan only",
+    "crossing": "a prior-visible above item is consumed by high > price; a prior-visible below item is consumed by low < price; equality does not consume",
+    "consumed_at": "the first crossing real completed 1m end",
+    "lifecycle_reason": "range_boundary_consumed",
+    "independence": "range break does not retrospectively remove or consume the opposite unswept boundary; its inventory lifecycle remains a separate record of visible versus consumed liquidity",
+    "current_bar_rule": "confirmed_at <= current 1m bar.start is required, so maturity and consumption cannot occur from the same completed bar"
+  },
+  "cold_attach": {
+    "dealing_range": "never infer a current range from one current S/R snapshot. Replay ordered real H1 candles with their exact Group1-2 typed zone snapshots from no later than the candidate selection clock, plus one predecessor and the 14-real-H1 ATR prefix. If unavailable, mark already-present source pairs ineligible until at least one source ID changes and wait for a fresh pair",
+    "manipulation": "for every eligible mature range boundary or formed pool, the retained real completed 1m prefix must begin no later than source eligibility and include one predecessor plus the 14-real-1m ATR prefix; reconstruct the first strict crossing and first later real-bar resolution",
+    "inventory": "the same prefix reconstructs each range boundary's first crossing. A prefix beginning after confirmed_at cannot prove visibility and fails closed rather than declaring the boundary unswept",
+    "checkpoint": "a hash-bound checkpoint containing the exact Group4 state and last committed source envelope resumes directly without rediscovery",
+    "partial_recovery": "failure to reconstruct any one retained source rejects the entire cold attachment; partial range, manipulation or inventory projection is forbidden"
+  },
+  "boundaries": {
+    "soft": {
+      "scheduled_maintenance_or_weekend": "preserve forming, mature and swept states; do not change semantic age, duration, ATR, compression or source selection",
+      "synthetic_or_partially_synthetic_candle": "advance raw cutoff only; do not form, mature, break, sweep, resolve, compact or age state"
+    },
+    "hard_reasons": [
+      "data_gap_reset",
+      "contract_change_reset",
+      "data_anomaly",
+      "tick_size_mismatch"
+    ],
+    "dealing_range_terminalization": "forming or mature becomes broken at the boundary clock with the exact hard reason; frozen geometry and source provenance remain unchanged",
+    "manipulation_censorship": "a swept manipulation is not relabeled as market acceptance. It remains lifecycle swept in a dedicated typed boundary transition, sets censored_at to the boundary clock and transition_reason to the exact hard reason, then leaves the new epoch",
+    "event_memory": "ordinary old-epoch Group4 transitions do not enter the new epoch's EventMemory; same-clock hard-boundary range terminals and manipulation censorship are exposed in dedicated typed boundary fields and persisted in the replay row",
+    "contract_isolation": "new-epoch frames and ordinary state contain only the new symbol and instrument_id; no source identity crosses the boundary"
+  },
+  "incremental_state_capacity_and_transaction": {
+    "minimum_state": [
+      "one live H1 range candidate and at most 24 candidate H1 bars",
+      "bounded retained range states",
+      "one live 1m manipulation",
+      "bounded retained manipulation states",
+      "the prior real completed 1m close and two 14-bar ATR windows",
+      "bounded per-entity lifecycle transitions"
+    ],
+    "no_full_history_scan": "normal updates use only prior committed state, the current completed 1m bar, optional newly completed H1 candle and exact upstream transition envelopes",
+    "capacity": {
+      "dealing_ranges": 64,
+      "manipulations": 256,
+      "range_lifecycle_transitions_per_entity": 3,
+      "manipulation_lifecycle_transitions_per_entity": 2
+    },
+    "eviction": "live state is never evicted. Only terminal state whose terminal transition appeared in an earlier successful observation may be compacted; a terminal range remains pinned while both frozen source zone IDs remain in the authoritative upstream snapshot, and manipulation reuse is prevented by its consumed source-inventory identity",
+    "same_bar_terminal_exposure": "a same-bar terminal transition remains visible in that successful observation; bounded overflow equals at most the number of same-bar terminals and is compacted before the next real semantic update",
+    "capacity_exhaustion": "if safe compaction cannot admit required new state, reject the entire completed-bar update rather than changing thresholds, evicting live state or growing without bound",
+    "transaction": "range state, manipulation state, source-eligibility bookkeeping and range-boundary inventory additions/consumptions are updated in one shadow copy and committed once. Any exception leaves the prior clock, state, ATR, candidate window, ages, inventory and histories unchanged",
+    "paired_observer_failure": "if a later observer or EventMemory projection fails after upstream or Group4 state committed, discard that observer and resume from the last checkpoint; never reuse partially paired state"
+  },
+  "event_memory_and_consumers": {
+    "range_timeline": "range:<range_id> records forming, mature and broken with event time, duration, age, strength, frozen geometry, source IDs and transition reason",
+    "manipulation_timeline": "manipulation:<manipulation_id> records swept then reaccepted or accepted_outside; hard-boundary censorship uses only the typed boundary channel",
+    "observation": "H1 exposes typed dealing-range state; top-level current state exposes completed-1m manipulations and authoritative range-boundary inventory without rewriting the H1 cutoff",
+    "visualization": "draw frozen H1 bounds and midpoint/value, manipulation sweep extreme, outside duration, reentry price and source IDs without expanding the price axis",
+    "brain": "Group4 outputs are descriptive inputs only. Consumers must require typed identity and lifecycle and may not reconstruct them from legacy metrics",
+    "future_reveal": "future candles remain physically separate and cannot change any Group4 identity, clock, geometry or lifecycle"
+  },
+  "playbook_authority": {
+    "failed_auction_value_return": "remains shadow and inactive",
+    "no_trade_authority": "Group4 does not change playbook evidence, probability, phase, plan, action utility, invalidation, target, risk or execution",
+    "later_requirement": "FAVR may be reconsidered only after Group4 passes its primitive stopping conditions and Group5 supplies qualified reacceptance, entry location, micro BOS and path sequence"
+  },
+  "formalization_gate": {
+    "completed_scope": "one formal definition only",
+    "pending": [
+      "implementation",
+      "static self-review",
+      "unified synthetic and boundary tests",
+      "finite real OHLCV replay",
+      "stratified blind review",
+      "primitive freeze or park"
+    ],
+    "repair_limit": "after implementation, at most one concept-level repair; a second systematic semantic failure parks Group4 or the affected primitive instead of tuning thresholds",
+    "not_required": [
+      "primitive profitability",
+      "MBO stability",
+      "rolling OOF",
+      "sealed holdout"
+    ]
+  }
+}

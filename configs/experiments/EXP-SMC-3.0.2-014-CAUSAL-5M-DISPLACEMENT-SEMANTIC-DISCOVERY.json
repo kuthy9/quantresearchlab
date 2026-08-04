@@ -1,0 +1,377 @@
+{
+  "schema_id": "exp014-causal-5m-displacement-semantic-discovery-v1",
+  "experiment_id": "EXP-SMC-3.0.2-014-CAUSAL-5M-DISPLACEMENT-SEMANTIC-DISCOVERY",
+  "product_version": "3.0.2",
+  "purpose": "causal_completed_5m_displacement_semantic_discovery",
+  "status": "gate0_implementation_only_gate1_not_authorized",
+  "claim_boundary": {
+    "role": "development_discovery_not_oof",
+    "allowed": [
+      "continuous_semantic_description",
+      "causal_clock_integrity",
+      "lossless_transition_integrity",
+      "checkpoint_resume_integrity",
+      "bounded_artifact_integrity"
+    ],
+    "denied": [
+      "predictive_performance",
+      "action_quality",
+      "economic_edge",
+      "profitability",
+      "formula_change",
+      "threshold_search"
+    ]
+  },
+  "bindings": {
+    "preregistration_path": "reports/validation_2026-07-30/v3_exp014_causal_5m_displacement_semantic_discovery_preregistration.md",
+    "preregistration_sha256": "fe78a31de697eab6a27cbf6630b8475f0c1bede9d26c6231fc73a440536b42f1",
+    "gate0_consensus_path": "reports/validation_2026-07-30/v3_exp014_causal_5m_displacement_semantic_discovery_gate0_consensus.md",
+    "gate0_consensus_sha256": "970fccbdd2ca1cda840d7cd0f4b67e4d45cda87855a2b393260a29bf5b1d0d18",
+    "predecessor_synthetic_result_path": "reports/validation_2026-07-30/v3_exp013_causal_5m_displacement_recovery_identity_closure_synthetic_result.md",
+    "predecessor_synthetic_result_sha256": "6c1f4648fc1cd524045f8ad2a867885ad6feb781813a6726d86900f1d3978148",
+    "predecessor_candidate_bundle_sha256": "010b8fc543035539a8d7726f11a0282856d2ec2907845cb7c9d10fb1acebc32c",
+    "protocol_path": "configs/experiments/EXP-SMC-3.0.2-004-CAUSAL-5M-DISPLACEMENT-DUAL-CLOCK.json",
+    "protocol_sha256": "850a97998feda2e2c2556fd79da0bf5b5f1975feb63543824f5a3a218f8e47a5",
+    "validation_protocol_path": "configs/validation_protocol_v3_0_1_exp001.json",
+    "validation_protocol_sha256": "9c0e59638bb43be17e1551bf5c6b31f44da00d2ec33e980e912d910e3f942957",
+    "upstream_source_sha256": "6d2f0b36097e779867277a070073bc157bf58891769478d41f4efc8763ba0204",
+    "materializer_sha256": "82cd593ca7fa8b6659316634e6eadeb872a7be582e24edfed0815d8d63c43fbe",
+    "runtime_dependency_sha256": {
+      "smc_trader/__init__.py": "3280af6ded756533bc5d1cf789908d40f4ba01e3a77f08938fc1e05b1c83aab4",
+      "smc_trader/displacement.py": "35f8bde64ff0f3633f9fdc3a61b9ae7b3aab4ec5f2d8e470d597fa7e3c55a3e2",
+      "smc_trader/model.py": "cab45ee03529da6e87c25a92da3b23e430f4aaada8993f4802d59e1d016de223",
+      "smc_trader/observation.py": "50d30af07d8bdc26cf1ff1bf92de5c8de9df4cc8a48b5a1d8e335a884fb2f320",
+      "smc_trader/engine.py": "e426886880a0011d86dfce472e97d2296fdf5a77176012483e19c6dffb330235",
+      "smc_trader/causal.py": "01b3ec12d8f95b780f0fefd2220ff57612fc938b776c3c68d3504d6b4b7bab9d",
+      "smc_trader/io.py": "7f3f78b9066d7e4dfac4a374d474ba2acdfa6121cbd5b551fbb2897d02f3c0b5",
+      "smc_trader/market_clock.py": "5e43fe3be976ea8c6586f13bf21e5a1de86ec252a8590299d03aa8432f3561a1",
+      "smc_trader/artifact_stream.py": "db8bebde94cad5d71feea05d7fdba99477b341d45f69808eee2ab9b26d028f4a",
+      "smc_trader/calibration_replay.py": "537565d0482bd4fee1ec9f99623f55e5159859de8b0a0b1376974791917f916e",
+      "smc_trader/calibration.py": "803278f373e4738d4ec96ea785ef45d999dc5ac1dff401dccd9a6a7285dada43",
+      "smc_trader/simulation.py": "fd040e0d459cec33705769ba5a01c60ff9529c26b7a535ae329f5dd62260e7d6",
+      "smc_trader/decision.py": "6dfd980a0d293a3a21da5e12831bad9fe8e967b16e72a4bbd4934fbb59f94dc0",
+      "smc_trader/playbooks.py": "368e0505d71cfe6fe71f197063c33e17ed5c56927561d31e9762780c52dfabbe",
+      "smc_trader/playbook_registry.py": "ee7880326c5b6210805a3418493ea80c4c42f59e83e7b28ed8f4088ea233aed9",
+      "smc_trader/risk.py": "af5eef8fde71efdce97196f8f28d94c86f0d4a24b2d7cf9c65bfd26fe43e47f5",
+      "smc_trader/structure.py": "40f4b5117b2b98ae1f5b98c3cb5b7d5e172682ed3a943a24d0fb3202c98caa2a",
+      "configs/experiments/EXP-SMC-3.0.2-004-CAUSAL-5M-DISPLACEMENT-DUAL-CLOCK.json": "850a97998feda2e2c2556fd79da0bf5b5f1975feb63543824f5a3a218f8e47a5",
+      "configs/validation_protocol_v3_0_1_exp001.json": "9c0e59638bb43be17e1551bf5c6b31f44da00d2ec33e980e912d910e3f942957"
+    }
+  },
+  "discovery_window": {
+    "timezone": "America/New_York",
+    "start": "2017-01-03T18:00:00-05:00",
+    "end_exclusive": "2022-01-01T00:00:00-05:00",
+    "knowledge_clock": "completed_only",
+    "source_partitioning": "calendar_year"
+  },
+  "data_roles": {
+    "upstream_multi_role": {
+      "path": "data/processed/nq_1m_previous_session_front_v2_3_pre_holdout_2017_20260331.parquet",
+      "runner_access": "denied",
+      "custody_gate2_access": "one_create_once_attempt"
+    },
+    "physical_discovery": {
+      "path": "data/processed/nq_1m_previous_session_front_v3_exp014_discovery_2017_2021.parquet",
+      "manifest_path": "data/processed/nq_1m_previous_session_front_v3_exp014_discovery_2017_2021.parquet.manifest.json",
+      "runner_access": "gate3_only",
+      "ordinary_non_symlink_required": true
+    },
+    "denied": {
+      "belief_calibration_2022": true,
+      "action_clock_development_2023": true,
+      "rolling_temporal_oof_2024_to_2026q1": true,
+      "sealed_ohlcv_from_2026_04_01": true,
+      "mbo_development": true,
+      "sealed_mbo": true
+    }
+  },
+  "custody": {
+    "gate": 2,
+    "materializer_path": "scripts/materialize_ohlcv_preholdout.py",
+    "projection": "all_upstream_rows_in_registered_interval_in_source_order",
+    "preserve": [
+      "column_order",
+      "arrow_logical_types",
+      "ts_ohlcv_symbol_instrument_values",
+      "null_markers"
+    ],
+    "required_equalities": [
+      "upstream_interval_rows_equals_output_rows",
+      "upstream_first_timestamp_equals_output_first_timestamp",
+      "upstream_last_timestamp_equals_output_last_timestamp",
+      "upstream_typed_row_commitment_equals_output_typed_row_commitment"
+    ],
+    "required_zero_counts": [
+      "omitted_rows",
+      "extra_rows",
+      "altered_rows",
+      "mbo_accesses",
+      "current_session_volume_uses"
+    ],
+    "row_commitment": {
+      "algorithm": "sha256",
+      "batch_independent": true,
+      "ordered": true,
+      "encoding": "length_prefixed_type_tagged_scalar_bytes",
+      "timestamp": "signed_epoch_nanoseconds",
+      "float": "struct_pack_big_endian_double",
+      "integer": "signed_big_endian",
+      "string": "utf8",
+      "null": "distinct_null_tag"
+    }
+  },
+  "runner": {
+    "module": "smc_trader.displacement_discovery",
+    "cli": "python -m smc_trader.displacement_discovery",
+    "discovery_source_path": "data/processed/nq_1m_previous_session_front_v3_exp014_discovery_2017_2021.parquet",
+    "discovery_manifest_path": "data/processed/nq_1m_previous_session_front_v3_exp014_discovery_2017_2021.parquet.manifest.json",
+    "custody_receipt_path": null,
+    "custody_receipt_runtime_source": "gate3_release_only",
+    "output_root": "outputs/v3_exp014_displacement/discovery-2017-2021-attempt001",
+    "checkpoint_interval_rows": 25000,
+    "maximum_shard_rows": 4096,
+    "maximum_audit_candidates": 40,
+    "call_order": [
+      "CausalMarketReader.on_bar",
+      "CausalDisplacementEye.on_update",
+      "CausalDisplacementEye.last_update"
+    ],
+    "source_loader": "load_ohlcv",
+    "source_checkpoint_filter": "iter_after_source_checkpoint",
+    "reader_eye_calls_per_completed_m1": 1,
+    "maximum_resident_calendar_year_frames": 1,
+    "forbidden_pipelines": [
+      "legacy_observer",
+      "brain",
+      "playbook",
+      "decision",
+      "risk",
+      "portfolio",
+      "execution",
+      "mbo",
+      "visualization"
+    ],
+    "forbidden_fields": [
+      "entry",
+      "stop",
+      "target",
+      "action",
+      "outcome",
+      "pnl",
+      "mfe",
+      "mae",
+      "future"
+    ]
+  },
+  "semantic_stream": {
+    "directory": "semantic_shards",
+    "pattern": "part-NNNNN.parquet",
+    "tags": [
+      "transition",
+      "continuation"
+    ],
+    "maximum_shard_rows": 4096,
+    "provenance": "observer_raw_update",
+    "state_hash_timing": "semantic_row_only",
+    "full_snapshot_hash_per_m1": false
+  },
+  "census": {
+    "minimum_started": 240,
+    "minimum_long_started": 80,
+    "minimum_short_started": 80,
+    "minimum_active": 40,
+    "minimum_activation_window_elapsed": 20,
+    "minimum_distinct_event_calendar_months": 12,
+    "maximum_integrity_violations": 0
+  },
+  "audit_selection": {
+    "role": "prefix_only_development_not_oof",
+    "salt": "EXP014-PREFIX-DEVELOPMENT-AUDIT-v1",
+    "maximum_candidates": 40,
+    "required_cells": 40,
+    "selection": "lowest_sha256_per_stratum",
+    "transition_cells": {
+      "count": 30,
+      "dimensions": {
+        "calendar_year": 5,
+        "direction": [
+          "long",
+          "short"
+        ],
+        "lifecycle": [
+          "started",
+          "active",
+          "exhausted"
+        ]
+      }
+    },
+    "ordinary_cells": {
+      "count": 10,
+      "dimensions": {
+        "calendar_year": 5,
+        "new_york_windows": [
+          "[10:00,11:00)",
+          "[14:00,15:00)"
+        ]
+      },
+      "minimum_completed_m5_prefix": 24,
+      "minimum_completed_m1_prefix": 30
+    },
+    "transition_prefix": {
+      "prior_close_seed_m5": 1,
+      "strictly_prior_atr_baseline_m5": 14,
+      "include_seed_through_last_admitted": true,
+      "include_distinct_terminal_evidence": true,
+      "maximum_reader_history_m5": 1024,
+      "prior_close_seed_counted_in_atr_baseline": false
+    },
+    "selection_denied_inputs": [
+      "geometry",
+      "volume",
+      "later_bar",
+      "future_path",
+      "action",
+      "outcome",
+      "pnl"
+    ],
+    "missing_cell_status": "complete_semantic_unavailable",
+    "substitution_allowed": false
+  },
+  "checkpoint": {
+    "store": "ReplayCheckpointStore",
+    "interval_real_source_rows": 25000,
+    "safe_cursor": "complete_real_source_row_only",
+    "progress_may_lead_checkpoint": false,
+    "resume": "same_create_once_in_progress_attempt_only",
+    "terminal_marker_resume_denied": true
+  },
+  "resources": {
+    "maximum_transition_memory": 64,
+    "maximum_audit_candidates": 40,
+    "maximum_shard_buffer_rows": 4096,
+    "maximum_resident_calendar_year_frames": 1,
+    "displacement_discovery_effective_line_ceiling": 400,
+    "test_effective_line_ceiling": 180,
+    "observer_accessor_effective_line_change_ceiling": 15,
+    "total_changed_effective_python_line_ceiling": 595
+  },
+  "attempt": {
+    "synthetic_root": "artifacts/v3_exp014_displacement_discovery/synthetic-001",
+    "real_root": "outputs/v3_exp014_displacement/discovery-2017-2021-attempt001",
+    "create_once": true,
+    "rerun_after_terminal": false,
+    "completion_marker": "COMPLETED.json",
+    "failure_marker": "FAILED.json",
+    "completion_marker_written_last": true
+  },
+  "synthetic": {
+    "gate": 1,
+    "invocations": 1,
+    "attempt_root": "artifacts/v3_exp014_displacement_discovery/synthetic-001",
+    "create_once": true,
+    "permanent_on_success_or_failure": true,
+    "rerun_authorized": false,
+    "node_count": 50,
+    "predecessor_node_count": 37,
+    "node_manifest_sha256": "fde2457f2e463ae38626fc09c5a71a90fb9cde5dc432dc3775f1e24a2ae5949f",
+    "pytest_config_bytes": 19,
+    "pytest_config_sha256": "713f986ee48be06ad4bff2a700d39514a9f69e34b3547af52366c0a274e30e5b",
+    "exact_command_sha256": "b4cc9d85271a98fb819a69d59eb386f3cb480aebebfcbd1adf2b411f37dcc972",
+    "tool_sha256": {
+      "/bin/zsh": "1f473d234dd65157f530b4f676686517ec97fe9aa64c76d82f2611674cc44314",
+      "/usr/bin/env": "6e506aec3c0cff703ac1e66cedc6f1945354ad41339a38db4425c7c88227128f",
+      "~/miniconda3/bin/python3.12": "3a80e322390c8df16971c26240781f2f881f25b09fb30a88c90908fe89df413b"
+    },
+    "frozen_exp014_nodes": [
+      "tests/test_v3_displacement_discovery.py::test_exp014_contract_is_single_role_and_data_locked",
+      "tests/test_v3_displacement_discovery.py::test_exp014_eye_exposes_exact_lossless_raw_update",
+      "tests/test_v3_displacement_discovery.py::test_exp014_activation_timeout_terminal_metrics_are_observer_emitted",
+      "tests/test_v3_displacement_discovery.py::test_exp014_same_clock_transition_order_is_lossless",
+      "tests/test_v3_displacement_discovery.py::test_exp014_intermediate_m1_is_continuous_without_state_drift",
+      "tests/test_v3_displacement_discovery.py::test_exp014_semantic_stream_is_fixed_bounded_and_future_free",
+      "tests/test_v3_displacement_discovery.py::test_exp014_selector_is_deterministic_prefix_only_and_bounded",
+      "tests/test_v3_displacement_discovery.py::test_exp014_missing_stratum_is_unavailable_without_substitution",
+      "tests/test_v3_displacement_discovery.py::test_exp014_year_partition_and_end_exclusive_are_causal",
+      "tests/test_v3_displacement_discovery.py::test_exp014_checkpoint_resume_matches_uninterrupted",
+      "tests/test_v3_displacement_discovery.py::test_exp014_resume_rejects_binding_or_shard_tamper",
+      "tests/test_v3_displacement_discovery.py::test_exp014_progress_and_completion_follow_durable_order",
+      "tests/test_v3_displacement_discovery.py::test_exp014_forbidden_import_fields_and_loc_budget"
+    ],
+    "pytest_nodes": [
+      "tests/test_v3_displacement.py::test_exp013_protocol_constants",
+      "tests/test_v3_displacement.py::test_exp013_first_m5_seeds_prior_close_only",
+      "tests/test_v3_displacement.py::test_exp013_strict_prior_baseline_excludes_candidate",
+      "tests/test_v3_displacement.py::test_exp013_seed_equal_boundaries",
+      "tests/test_v3_displacement.py::test_exp013_seed_just_below[body-fraction]",
+      "tests/test_v3_displacement.py::test_exp013_seed_just_below[directional-clv]",
+      "tests/test_v3_displacement.py::test_exp013_seed_just_below[tr-atr]",
+      "tests/test_v3_displacement.py::test_exp013_volume_unready_is_not_gate",
+      "tests/test_v3_displacement.py::test_exp013_started_fields_and_clocks",
+      "tests/test_v3_displacement.py::test_exp013_activation_equal_boundary[bar-2]",
+      "tests/test_v3_displacement.py::test_exp013_activation_equal_boundary[bar-4]",
+      "tests/test_v3_displacement.py::test_exp013_activation_window_elapsed",
+      "tests/test_v3_displacement.py::test_exp013_continuation_progress[one-tick]",
+      "tests/test_v3_displacement.py::test_exp013_continuation_progress[zero-progress]",
+      "tests/test_v3_displacement.py::test_exp013_terminal_reason[doji]",
+      "tests/test_v3_displacement.py::test_exp013_terminal_reason[opposite-body]",
+      "tests/test_v3_displacement.py::test_exp013_terminal_reason[no-progress]",
+      "tests/test_v3_displacement.py::test_exp013_terminal_evidence_does_not_rewrite_geometry",
+      "tests/test_v3_displacement.py::test_exp013_nested_seed_retains_entity",
+      "tests/test_v3_displacement.py::test_exp013_opposite_reseed_order_and_single_baseline_append",
+      "tests/test_v3_displacement.py::test_exp013_censorship[synthetic]",
+      "tests/test_v3_displacement.py::test_exp013_censorship[boundary]",
+      "tests/test_v3_displacement.py::test_exp013_censorship[data-anomaly]",
+      "tests/test_v3_displacement_replay.py::test_exp013_no_advance_before_completed_m5",
+      "tests/test_v3_displacement_replay.py::test_exp013_exactly_once_per_completed_m5",
+      "tests/test_v3_displacement_replay.py::test_exp013_boundary_priority[data-gap]",
+      "tests/test_v3_displacement_replay.py::test_exp013_boundary_priority[contract]",
+      "tests/test_v3_displacement_replay.py::test_exp013_boundary_priority[session]",
+      "tests/test_v3_displacement_replay.py::test_exp013_unknown_anomaly_fails_before_mutation",
+      "tests/test_v3_displacement_replay.py::test_exp013_boundary_m5_xor",
+      "tests/test_v3_displacement_replay.py::test_exp013_terminal_projection_keeps_current_and_history_separate",
+      "tests/test_v3_displacement_replay.py::test_exp013_same_clock_exhausted_then_started_projection",
+      "tests/test_v3_displacement_replay.py::test_exp013_continuous_view_freezes_state_clocks",
+      "tests/test_v3_displacement_replay.py::test_exp013_isolated_transition_capacity_noninterference",
+      "tests/test_v3_displacement_replay.py::test_exp013_prefix_invariance_under_different_future_suffixes",
+      "tests/test_v3_displacement_replay.py::test_exp013_checkpoint_resume_observation_equivalence",
+      "tests/test_v3_displacement_replay.py::test_exp013_visualization_and_legacy_pipeline_noninterference",
+      "tests/test_v3_displacement_discovery.py::test_exp014_contract_is_single_role_and_data_locked",
+      "tests/test_v3_displacement_discovery.py::test_exp014_eye_exposes_exact_lossless_raw_update",
+      "tests/test_v3_displacement_discovery.py::test_exp014_activation_timeout_terminal_metrics_are_observer_emitted",
+      "tests/test_v3_displacement_discovery.py::test_exp014_same_clock_transition_order_is_lossless",
+      "tests/test_v3_displacement_discovery.py::test_exp014_intermediate_m1_is_continuous_without_state_drift",
+      "tests/test_v3_displacement_discovery.py::test_exp014_semantic_stream_is_fixed_bounded_and_future_free",
+      "tests/test_v3_displacement_discovery.py::test_exp014_selector_is_deterministic_prefix_only_and_bounded",
+      "tests/test_v3_displacement_discovery.py::test_exp014_missing_stratum_is_unavailable_without_substitution",
+      "tests/test_v3_displacement_discovery.py::test_exp014_year_partition_and_end_exclusive_are_causal",
+      "tests/test_v3_displacement_discovery.py::test_exp014_checkpoint_resume_matches_uninterrupted",
+      "tests/test_v3_displacement_discovery.py::test_exp014_resume_rejects_binding_or_shard_tamper",
+      "tests/test_v3_displacement_discovery.py::test_exp014_progress_and_completion_follow_durable_order",
+      "tests/test_v3_displacement_discovery.py::test_exp014_forbidden_import_fields_and_loc_budget"
+    ]
+  },
+  "authorized_paths": [
+    "smc_trader/displacement_observer.py",
+    "smc_trader/displacement_discovery.py",
+    "tests/test_v3_displacement_discovery.py",
+    "configs/experiments/EXP-SMC-3.0.2-014-CAUSAL-5M-DISPLACEMENT-SEMANTIC-DISCOVERY.json"
+  ],
+  "authority": {
+    "implementation_authorized": true,
+    "gate1_authorized": false,
+    "candidate_import_authorized": false,
+    "candidate_compile_authorized": false,
+    "candidate_test_authorized": false,
+    "synthetic_execution_authorized": false,
+    "custody_materialization_authorized": false,
+    "real_discovery_authorized": false,
+    "ohlcv_authorized": false,
+    "mbo_authorized": false,
+    "sealed_data_authorized": false,
+    "future_reveal_authorized": false,
+    "action_authorized": false,
+    "economic_evaluation_authorized": false,
+    "production_release_authorized": false
+  }
+}
