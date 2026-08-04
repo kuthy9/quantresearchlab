@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import replace
-import json
 
 import pandas as pd
 
@@ -17,12 +16,11 @@ from smc_trader.model import (
     Playbook,
     PlaybookPhase,
     Timeframe,
-    content_hash,
 )
 from smc_trader.playbook_registry import load_playbook_registry
 from smc_trader.playbooks import PlaybookBrain
 from smc_trader.risk import StructuralRiskEngine
-from smc_trader.visualization import DecisionVisualizer, SealedVisualAudit
+from smc_trader.visualization import DecisionVisualizer
 
 from .helpers import market_observation
 from .test_v3_group4_primitives import (
@@ -349,7 +347,7 @@ def test_favr_missing_frozen_sources_closes_episode_instead_of_resetting() -> No
     assert first.episode_id in terminal.terminal_source_ids
 
 
-def test_favr_sealed_decision_visual_keeps_identity_and_future_hidden(
+def test_favr_decision_visual_keeps_frozen_geometry_visible(
     tmp_path,
 ) -> None:
     observation, mature, manipulation = _favr_observation()
@@ -366,41 +364,24 @@ def test_favr_sealed_decision_visual_keeps_identity_and_future_hidden(
         belief=belief,
         decision=decision,
         risk=risk,
-        snapshot_hash=content_hash(
-            ("favr-visual-smoke", observation.asof, plan.setup_id)
-        ),
     )
 
-    audit = SealedVisualAudit.seal(
-        DecisionVisualizer(),
+    artifact = DecisionVisualizer().render_decision(
         snapshot,
         _favr_causal_histories(observation),
-        tmp_path / "favr-sealed",
-        hypothesis_key=key,
+        tmp_path / "favr-decision.png",
     )
 
-    assert audit.decision_artifact.path.is_file()
-    assert audit.decision_artifact.path.stat().st_size > 0
-    assert audit.decision_packet_path.is_file()
-    assert not (audit.directory / "future_reveal.png").exists()
-    assert audit.future_1m == []
-    assert audit.decision_artifact.maximum_market_time <= observation.asof
-    assert audit.permit.hypothesis_key == key
-    assert audit.permit.setup_id == plan.setup_id
-    assert audit.permit.entry_location_id == plan.entry_location_id
-    assert audit.permit.entry_path_id == plan.entry_path_id
-
-    packet = json.loads(
-        audit.decision_packet_path.read_text(encoding="utf-8")
-    )
-    frozen = packet["belief_t"]["hypotheses"][key]["plan"]
-    assert frozen["range_auction"]["range_id"] == mature.range_id
-    assert (
-        frozen["range_auction"]["manipulation_id"]
-        == manipulation.manipulation_id
-    )
-    assert (
-        frozen["invalidation"]["source_level_id"]
-        == manipulation.manipulation_id
-    )
-    assert frozen["draw_selection"]["draw_id"] == plan.selected_draw_id
+    assert artifact.path.is_file()
+    assert artifact.path.stat().st_size > 0
+    assert artifact.maximum_market_time <= observation.asof
+    assert artifact.hypothesis_key == key
+    assert artifact.setup_id == plan.setup_id
+    assert artifact.entry_location_id == plan.entry_location_id
+    assert artifact.entry_path_id == plan.entry_path_id
+    assert plan.range_auction is not None
+    assert plan.range_auction.range_id == mature.range_id
+    assert plan.range_auction.manipulation_id == manipulation.manipulation_id
+    assert plan.invalidation.source_level_id == manipulation.manipulation_id
+    assert plan.draw_selection is not None
+    assert plan.draw_selection.draw_id == plan.selected_draw_id

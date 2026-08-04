@@ -10,17 +10,26 @@ from smc_trader.model import (
     EngineSnapshot,
     RiskAssessment,
 )
+from smc_trader.decision import UtilityDecisionLayer
+from smc_trader.risk import StructuralRiskEngine
 from smc_trader.simulation import SequentialPortfolio
 from smc_trader.observation import ExecutionRealityInput
 
-from .test_v4_typed_vertical import _brain, _dfp_fixture, _snapshot
+from .test_v4_typed_vertical import _brain, _dfp_fixture
 
 
 def _approved_entry_snapshot() -> EngineSnapshot:
     _, _, _, forming, triggered = _dfp_fixture()
     brain = _brain()
     brain.update(forming)
-    snapshot = _snapshot(triggered, brain.update(triggered), "a")
+    belief = brain.update(triggered)
+    decision = UtilityDecisionLayer().decide(triggered, belief)
+    snapshot = EngineSnapshot(
+        observation=triggered,
+        belief=belief,
+        decision=decision,
+        risk=StructuralRiskEngine().review(decision, triggered),
+    )
     assert snapshot.risk.passed and snapshot.risk.frozen_thesis is not None
     return snapshot
 

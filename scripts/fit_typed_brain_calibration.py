@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fit the v4 typed Brain maps from resolved causal recorder rows.
+"""Fit typed Brain maps from resolved causal recorder rows.
 
 This is intentionally a small, one-purpose fitter.  It does not inspect
 actions, PnL, MFE/MAE, MBO, or holdout data, and it does not search thresholds.
@@ -11,7 +11,6 @@ formula, represented by an explicit ready identity map for artifact loading.
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 from pathlib import Path
 import sys
@@ -28,16 +27,10 @@ from smc_trader.calibration import (  # noqa: E402
     CalibrationError,
     TYPED_ACTIVE_PLAYBOOKS,
     TYPED_PARKED_PLAYBOOKS,
-    model_code_fingerprint,
     monotone_reliability_points,
 )
-from smc_trader.engine import _configured_primitive_protocol_hashes  # noqa: E402
 from smc_trader.model import Playbook  # noqa: E402
 from smc_trader.playbook_registry import load_playbook_registry  # noqa: E402
-from smc_trader.scene_graph import (  # noqa: E402
-    brain_input_contract_hash,
-    parse_scale_specs,
-)
 from smc_trader.validation import load_validation_protocol  # noqa: E402
 
 
@@ -90,11 +83,6 @@ REQUIRED_COLUMNS = frozenset(
         "fit_eligible",
         "protocol_version",
         "protocol_hash",
-        "registry_hash",
-        "model_code_hash",
-        "config_hash",
-        "primitive_protocol_hashes",
-        "brain_input_contract_hash",
         "liquidity_route_id",
         "context_draw_id",
         "intermediate_liquidity_ids",
@@ -104,10 +92,6 @@ REQUIRED_COLUMNS = frozenset(
         "source_path_ids",
     }
 )
-
-
-def _sha256(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 def _resolve(path: str | Path) -> Path:
@@ -221,7 +205,7 @@ def _aware_utc(series: pd.Series, field: str, *, nullable: bool) -> pd.Series:
 
 
 def resolve_model_bindings(model_config: str | Path) -> dict[str, Any]:
-    """Resolve the exact registry, code, config, and primitive identities."""
+    """Resolve the current typed playbook registry and schema versions."""
 
     config_path = _resolve(model_config)
     raw = config_path.read_bytes()
@@ -239,47 +223,23 @@ def resolve_model_bindings(model_config: str | Path) -> dict[str, Any]:
     for playbook in TYPED_PARKED_PLAYBOOKS:
         if "parked" not in registry.for_playbook(playbook).status:
             raise ValueError(f"{playbook.value} must remain parked during calibration")
-    observer = payload.get("observer")
-    if not isinstance(observer, Mapping):
-        raise ValueError("model config omits observer protocol bindings")
     return {
         "config_path": config_path,
-        "config_hash": hashlib.sha256(raw).hexdigest(),
         "registry_hash": registry.fingerprint,
         "registry_schema_version": registry.schema_version,
         "playbook_schema_versions": {
             playbook.value: registry.for_playbook(playbook).schema_version
             for playbook in TYPED_ACTIVE_PLAYBOOKS
         },
-        "model_code_hash": model_code_fingerprint(),
-        "primitive_protocol_hashes": _configured_primitive_protocol_hashes(observer),
-        "brain_input_contract_hash": brain_input_contract_hash(
-            parse_scale_specs(payload.get("scales"))
-        ),
     }
 
 
 def _validate_bindings(frame: pd.DataFrame, bindings: Mapping[str, Any]) -> dict[str, Any]:
     observed = {
-        "registry_hash": _unique_text(frame, "registry_hash"),
-        "model_code_hash": _unique_text(frame, "model_code_hash"),
-        "config_hash": _unique_text(frame, "config_hash"),
         "protocol_hash": _unique_text(frame, "protocol_hash"),
-        "brain_input_contract_hash": _unique_text(
-            frame,
-            "brain_input_contract_hash",
-        ),
     }
-    for field in ("registry_hash", "model_code_hash", "config_hash"):
-        if observed[field] != bindings[field]:
-            raise ValueError(f"Brain calibration row {field} is stale")
     if observed["protocol_hash"] != bindings["registry_hash"]:
         raise ValueError("Brain calibration row protocol_hash is stale")
-    if (
-        observed["brain_input_contract_hash"]
-        != bindings["brain_input_contract_hash"]
-    ):
-        raise ValueError("Brain calibration row input contract hash is stale")
 
     protocol_versions: dict[str, str] = {}
     for playbook, expected in bindings["playbook_schema_versions"].items():
@@ -295,28 +255,6 @@ def _validate_bindings(frame: pd.DataFrame, bindings: Mapping[str, Any]) -> dict
             )
         protocol_versions[playbook] = expected_text
 
-    raw_values = frame["primitive_protocol_hashes"].dropna()
-    if len(raw_values) != len(frame):
-        raise ValueError("primitive_protocol_hashes cannot be null")
-    normalized: set[str] = set()
-    for raw in raw_values:
-        value = json.loads(raw) if isinstance(raw, str) else raw
-        if not isinstance(value, Mapping):
-            raise ValueError("primitive_protocol_hashes must be a mapping or JSON")
-        normalized.add(
-            json.dumps(
-                {str(key): str(item) for key, item in value.items()},
-                sort_keys=True,
-                separators=(",", ":"),
-            )
-        )
-    expected = json.dumps(
-        dict(bindings["primitive_protocol_hashes"]),
-        sort_keys=True,
-        separators=(",", ":"),
-    )
-    if normalized != {expected}:
-        raise ValueError("Brain calibration row primitive protocol hashes are stale")
     observed["protocol_versions"] = protocol_versions
     return observed
 
@@ -380,7 +318,7 @@ def _uncertainty_payload(episodes: int) -> dict[str, Any]:
     return {
         "status": "authorized_formula_passthrough",
         "formula_version": UNCERTAINTY_FORMULA_VERSION,
-        "formula_hash": hashlib.sha256(UNCERTAINTY_FORMULA.encode()).hexdigest(),
+        "formula": UNCERTAINTY_FORMULA,
         "episodes": count,
         "points": [
             {"raw_value": 0.0, "calibrated_value": 0.0, "episodes": count},
@@ -398,7 +336,7 @@ def fit_typed_brain_calibration(
     bins: int = 10,
     minimum_bin_samples: int = 20,
     minimum_dimension_samples: int = 200,
-    calibration_version: str = "4.0.0-typed-isotonic.4-scene-contract",
+    calibration_version: str = "typed-isotonic",
 ) -> dict[str, Any]:
     if bins < 2 or minimum_bin_samples < 1 or minimum_dimension_samples < 2:
         raise ValueError("calibration sample and bin limits are invalid")
@@ -513,9 +451,7 @@ def fit_typed_brain_calibration(
             "sequence_progress": "deterministic_passthrough_not_fitted",
             "uncertainty": "authorized_contemporaneous_formula_passthrough",
             "uncertainty_formula_version": UNCERTAINTY_FORMULA_VERSION,
-            "uncertainty_formula_hash": hashlib.sha256(
-                UNCERTAINTY_FORMULA.encode()
-            ).hexdigest(),
+            "uncertainty_formula": UNCERTAINTY_FORMULA,
             "bins": bins,
             "minimum_bin_samples": minimum_bin_samples,
             "minimum_dimension_samples": minimum_dimension_samples,
@@ -525,20 +461,12 @@ def fit_typed_brain_calibration(
             "mbo_used": False,
         },
         "validation_schema_version": protocol.schema_version,
-        "validation_protocol_hash": protocol.fingerprint,
         "training_window_role": window.role,
         "training_start": frame["sampled_at"].min().isoformat(),
         "training_end": latest_resolution.isoformat(),
         "brain_target_protocol_versions": row_identity["protocol_versions"],
-        "brain_target_protocol_hash": row_identity["protocol_hash"],
         "playbook_registry_hash": bindings["registry_hash"],
-        "model_code_hash": bindings["model_code_hash"],
-        "training_config_hash": bindings["config_hash"],
-        "primitive_protocol_hashes": dict(bindings["primitive_protocol_hashes"]),
-        "brain_input_contract_hash": bindings["brain_input_contract_hash"],
-        "source_files": [
-            {"path": str(path), "sha256": _sha256(path)} for path in files
-        ],
+        "source_files": [str(path) for path in files],
         "playbooks": playbooks,
         "favr_parked": True,
         "holdout_used": False,
@@ -566,7 +494,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--minimum-dimension-samples", type=int, default=200)
     parser.add_argument(
         "--calibration-version",
-        default="4.0.0-typed-isotonic.4-scene-contract",
+        default="typed-isotonic",
     )
     return parser.parse_args()
 

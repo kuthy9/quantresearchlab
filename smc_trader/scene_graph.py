@@ -2753,18 +2753,6 @@ def build_hypothesis_states(
     return output
 
 
-def brain_input_contract_hash(scale_specs: Sequence[ScaleSpec]) -> str:
-    payload = {
-        "contract_version": "temporal-scene-focus-v1",
-        "scales": [to_primitive(item) for item in scale_specs],
-        "evidence_statuses": [item.value for item in EvidenceStatus],
-        "edge_kinds": [item.value for item in SceneEdgeKind],
-        "liquidity_roles": [item.value for item in LiquidityRole],
-        "maximum_contexts_per_playbook_direction": 2,
-    }
-    return content_hash(payload)
-
-
 __all__ = [
     "EvidenceStatus",
     "FocusState",
@@ -2779,7 +2767,6 @@ __all__ = [
     "SceneNode",
     "StructuralScale",
     "TemporalMarketSceneGraph",
-    "brain_input_contract_hash",
     "build_hypothesis_states",
     "development_scale_specs",
     "legacy_scale_specs",

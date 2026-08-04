@@ -1,13 +1,6 @@
-"""Memory-bounded, resumable sequential replay primitives for calibration.
-
-This module deliberately preserves the production causal order while replacing
-the expensive full-object snapshot hash with a small rolling state commitment.
-The hash has calibration lineage authority only; it is not a substitute for a
-full visual/audit snapshot hash.
-"""
+"""Memory-bounded, resumable sequential replay primitives for calibration."""
 from __future__ import annotations
 
-from dataclasses import replace
 import hashlib
 import json
 import os
@@ -20,68 +13,24 @@ import pandas as pd
 
 from .engine import ContinuousSMCEngine
 from .io import iter_completed_bars
-from .model import AccountState, Bar, EngineSnapshot
+from .model import AccountState, Bar
 from .observation import ExecutionRealityInput
 from .simulation import ReplayStep, SequentialPortfolio
 
 
 CHECKPOINT_FORMAT_VERSION = 1
-HASH_MODE = "rolling_causal_state_commitment_v2"
-
-
-def _rolling_commitment(previous: str, snapshot: EngineSnapshot) -> str:
-    """Commit to the small action/risk identity that matters to calibration."""
-
-    thesis_hash = (
-        ""
-        if snapshot.risk.frozen_thesis is None
-        else snapshot.risk.frozen_thesis.thesis_hash
-    )
-    hypothesis = (
-        None
-        if snapshot.decision.best_hypothesis_key is None
-        else snapshot.belief.resolve_hypothesis(
-            snapshot.decision.best_hypothesis_key
-        )
-    )
-    focus = snapshot.belief.focus_state
-    plan = snapshot.decision.plan
-    fields = (
-        previous,
-        snapshot.observation.asof.isoformat(),
-        snapshot.observation.symbol,
-        str(snapshot.observation.instrument_id),
-        snapshot.decision.selected_action.value,
-        snapshot.risk.final_action.value,
-        snapshot.decision.best_hypothesis_key or "",
-        thesis_hash,
-        snapshot.belief.scene_revision_id or "",
-        "" if focus is None else focus.focus_revision_id,
-        "" if hypothesis is None else hypothesis.evidence_revision_id or "",
-        "" if plan is None else plan.setup_id or "",
-        "" if plan is None else plan.entry_path_id or "",
-    )
-    digest = hashlib.sha256()
-    for field in fields:
-        encoded = field.encode("utf-8")
-        digest.update(len(encoded).to_bytes(8, "big"))
-        digest.update(encoded)
-    return digest.hexdigest()
 
 
 class CalibrationSequentialReplay:
-    """Exact sequential semantics with a lightweight rolling snapshot hash."""
+    """Exact sequential semantics through the production engine entry point."""
 
     def __init__(
         self,
         engine: ContinuousSMCEngine | None = None,
         portfolio: SequentialPortfolio | None = None,
         *,
-        rolling_commitment: str = "0" * 64,
         simulate_execution: bool = True,
     ) -> None:
-        if len(rolling_commitment) != 64:
-            raise ValueError("rolling commitment must be a 64-character digest")
         if not simulate_execution and portfolio is not None:
             raise ValueError(
                 "a portfolio cannot be supplied when execution simulation is disabled"
@@ -93,7 +42,6 @@ class CalibrationSequentialReplay:
             if self.simulate_execution
             else None
         )
-        self.rolling_commitment = rolling_commitment
 
     def on_bar(
         self,
@@ -116,22 +64,12 @@ class CalibrationSequentialReplay:
                 else account.position
             )
 
-        provisional = self.engine.on_bar(
+        snapshot = self.engine.on_bar(
             bar,
             execution=execution,
             account=account,
             belief_position=belief_position,
-            compute_snapshot_hash=False,
         )
-        self.rolling_commitment = _rolling_commitment(
-            self.rolling_commitment,
-            provisional,
-        )
-        snapshot = replace(
-            provisional,
-            snapshot_hash=self.rolling_commitment,
-        )
-        self.engine._last_snapshot = snapshot
 
         if self.portfolio is None:
             position = None
@@ -320,7 +258,6 @@ class ReplayCheckpointStore:
 __all__ = [
     "CHECKPOINT_FORMAT_VERSION",
     "CalibrationSequentialReplay",
-    "HASH_MODE",
     "ReplayCheckpointStore",
     "iter_after_source_checkpoint",
 ]

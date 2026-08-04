@@ -45,14 +45,15 @@ governance artifacts during ordinary development.
   reality.
 - [ ] Checkpoint, shards, progress, resume and portfolio before-bar /
   after-decision ordering remain intact.
-- [ ] Daily replay writes light decisions/summary only; full trace, images and
-  future reveal are enabled only for a fixed stratified sample.
+- [ ] Daily replay writes light decisions/summary only; it does not emit full
+  traces, audit packets, images or future-path artifacts.
 
 ## Test scope
 
 - [ ] Run syntax plus the unified synthetic/boundary/causal suite first.
-- [ ] For a primitive change, run one bounded real OHLCV replay and one small
-  blind review; allow at most one concept-level repair.
+- [ ] For a primitive change, run one bounded real OHLCV replay. If a stable
+  chain later needs case inspection, use one small sampled diagnostic and allow
+  at most one concept-level repair.
 - [ ] Do not use PnL to repair primitive semantics or inspect the same OOF/
   holdout window repeatedly.
 - [ ] Run Brain calibration only after primitives are frozen or parked.

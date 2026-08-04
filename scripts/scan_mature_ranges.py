@@ -107,14 +107,6 @@ def _write_json(path: Path, payload: Any) -> None:
     atomic_bytes(path, encoded)
 
 
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as source:
-        while chunk := source.read(1024 * 1024):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
 def _aware(value: Any, *, name: str) -> pd.Timestamp:
     result = pd.Timestamp(value)
     if result.tzinfo is None:
@@ -600,7 +592,6 @@ def _scan_window(
     *,
     window: Mapping[str, Any],
     payload: Mapping[str, Any],
-    config_hash: str,
     output: Path,
     force: bool,
 ) -> dict[str, Any]:
@@ -608,7 +599,11 @@ def _scan_window(
     destination = _window_result_path(output, window_id)
     if destination.is_file() and not force:
         prior = _json(destination)
-        if prior.get("bindings", {}).get("data_splits_sha256") == config_hash:
+        if (
+            prior.get("window_id") == window_id
+            and prior.get("start") == str(window["start"])
+            and prior.get("end_exclusive") == str(window["end_exclusive"])
+        ):
             print(f"[{window_id}] resume: using completed window result", flush=True)
             return prior
 
@@ -746,26 +741,6 @@ def _scan_window(
         source_rows=len(loaded.frame),
         observed_updates=observed_updates,
     )
-    result["bindings"] = {
-        "data_splits_sha256": config_hash,
-        "source": str(source.relative_to(ROOT)),
-        "source_role": loaded.source_role,
-        "contract_selection_causal": loaded.contract_selection_causal,
-        "replay_mode": "causal_reader_group12_h1_and_group4_reducers_only",
-        "range_semantics_authoritative": True,
-        "range_boundary_manipulation_requires_targeted_full_observer_confirmation": True,
-        "validation_protocol_hash": validation.fingerprint,
-        "validation_window_role": role.role,
-        "group12_protocol_sha256": _sha256(
-            group12_path
-        ),
-        "group4_protocol_sha256": protocol.protocol_hash,
-        "threshold_search": False,
-        "future_or_outcome_fields_used": False,
-        "brain_used": False,
-        "mbo_used": False,
-        "data_gap_policy": "hard_reset_without_synthetic_fill",
-    }
     _write_json(destination, result)
     return result
 
@@ -776,8 +751,6 @@ def _add_counts(target: Counter[str], values: Mapping[str, Any]) -> None:
 
 def aggregate_results(
     results: Sequence[Mapping[str, Any]],
-    *,
-    config_hash: str,
 ) -> dict[str, Any]:
     pairs = Counter()
     ranges = Counter()
@@ -833,8 +806,7 @@ def aggregate_results(
         candidates.extend(dict(item) for item in result["case_candidates"])
     return {
         "schema_version": 1,
-        "bindings": {
-            "data_splits_sha256": config_hash,
+        "run_context": {
             "window_count": len(results),
             "threshold_search": False,
             "future_or_outcome_fields_used": False,
@@ -899,19 +871,17 @@ def main() -> None:
     output = args.output if args.output.is_absolute() else ROOT / args.output
     payload = _coverage_payload(_json(config), config)
     _validate_config(payload)
-    config_hash = _sha256(config)
     output.mkdir(parents=True, exist_ok=True)
     results = [
         _scan_window(
             window=window,
             payload=payload,
-            config_hash=config_hash,
             output=output,
             force=args.force,
         )
         for window in payload["windows"]
     ]
-    summary = aggregate_results(results, config_hash=config_hash)
+    summary = aggregate_results(results)
     _write_json(output / "summary.json", summary)
     print(json.dumps(to_primitive(summary), indent=2, sort_keys=True), flush=True)
 

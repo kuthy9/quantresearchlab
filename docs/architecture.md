@@ -112,14 +112,13 @@ update.
 
 Normal historical replay emits only light decision rows, aggregate summaries,
 progress, checkpoints and resumable shards. Brain calibration mode adds typed
-calibration rows. Full traces, charts and future-path tests are opt-in for one
-fixed stratified batch, not per-minute annual output.
+calibration rows. The prior frozen-packet, sealing, full-trace and audit-record
+stack is intentionally absent from the current runtime.
 
-The sampled decision view contains no future candles. It shows all four frames,
-event identities and order, scene focus, typed dimensions/phases, selected
-draw, planned entry, invalidation, targets, utilities and risk vetoes. Future
-path is revealed separately only after the blind review is frozen. AI comments
-must map to computable sequence primitives and cannot become action labels.
+Once the longitudinal chain is stable, case-level diagnostics may be rebuilt as
+a bounded sampled minute trace plus a separate future view. Any AI comment must
+still be translated into a computable sequence primitive and can never become
+an action label.
 
 [`../configs/data_splits.json`](../configs/data_splits.json) separates
 development, calibration, rolling OOF and sealed OHLCV, plus MBO development

@@ -1,28 +1,16 @@
-"""Scale-registry decision views with physically separate future reveals."""
+"""Causal scale-registry decision views and price/structure overlays."""
 from __future__ import annotations
 
 from dataclasses import dataclass
-import hashlib
 import html
-import json
-import math
 from pathlib import Path
 import textwrap
-from typing import Any, Mapping, Sequence, TYPE_CHECKING
+from typing import Any, Mapping, Sequence
 
 import pandas as pd
 
-from .decision_trace import (
-    active_causal_timeframes,
-    decision_packet_sha256,
-    read_verified_decision_packet,
-    sealed_path_audit_context,
-    validate_causal_histories,
-    write_frozen_decision_packet,
-)
 from .model import (
     Action,
-    Bar,
     Candle,
     DealingRangeLifecycle,
     EngineSnapshot,
@@ -32,269 +20,20 @@ from .model import (
     OrderBlockLifecycle,
     PlaybookPhase,
     Timeframe,
-    to_primitive,
 )
 from .market_clock import scheduled_gap_kind
-
-if TYPE_CHECKING:
-    from .ai_review import PrimitiveProposal
-    from .validation import PathTestResult
 
 
 @dataclass(frozen=True)
 class VisualArtifact:
     path: Path
-    sha256: str
     kind: str
-    decision_hash: str
+    decision_id: str
     maximum_market_time: pd.Timestamp
     hypothesis_key: str | None
     setup_id: str | None
     entry_location_id: str | None
     entry_path_id: str | None
-
-
-@dataclass(frozen=True)
-class RevealPermit:
-    decision_hash: str
-    decision_asof: pd.Timestamp
-    hypothesis_key: str | None
-    setup_id: str | None
-    entry_location_id: str | None
-    entry_path_id: str | None
-    permit_hash: str
-
-
-@dataclass
-class SealedVisualAudit:
-    """Two-step audit: seal a decision first, then feed later bars and reveal."""
-
-    visualizer: "DecisionVisualizer"
-    snapshot: EngineSnapshot
-    permit: RevealPermit
-    decision_artifact: VisualArtifact
-    directory: Path
-    ai_proposals: tuple["PrimitiveProposal", ...]
-    hypothesis_key: str | None
-    decision_packet_path: Path
-    decision_packet_sha256: str
-    decision_packet_hash: str
-    future_1m: list[Candle]
-
-    @classmethod
-    def seal(
-        cls,
-        visualizer: "DecisionVisualizer",
-        snapshot: EngineSnapshot,
-        histories: Mapping[Timeframe, Sequence[Candle]],
-        directory: str | Path,
-        *,
-        ai_proposals: Sequence["PrimitiveProposal"] = (),
-        hypothesis_key: str | None = None,
-        previous_snapshot: EngineSnapshot | None = None,
-        source_bar: Bar | None = None,
-        account_state: Any | None = None,
-        belief_position_input: Any | None = None,
-        expected_decision_packet_hash: str | None = None,
-        expected_decision_packet_sha256: str | None = None,
-    ) -> "SealedVisualAudit":
-        if hypothesis_key is None:
-            raise ValueError(
-                "sealed visual audit requires an explicit hypothesis"
-            )
-        belief = _audit_hypothesis(snapshot, hypothesis_key)
-        if (
-            belief is None
-            or belief.plan is None
-            or belief.sequence is None
-            or belief.sequence.setup_id is None
-        ):
-            raise ValueError(
-                "sealed visual audit requires a frozen plan and sequence"
-            )
-        root = Path(directory)
-        root.mkdir(parents=True, exist_ok=True)
-        audit_context = sealed_path_audit_context(
-            belief.sequence.setup_id
-        )
-        packet_path = write_frozen_decision_packet(
-            snapshot,
-            histories,
-            root / "decision_packet.json",
-            previous_snapshot,
-            hypothesis_key=hypothesis_key,
-            audit_context=audit_context,
-            source_bar=source_bar,
-            account_state=account_state,
-            belief_position_input=belief_position_input,
-        )
-        packet = read_verified_decision_packet(packet_path)
-        packet_sha256 = decision_packet_sha256(packet_path)
-        if (
-            expected_decision_packet_hash is None
-        ) != (
-            expected_decision_packet_sha256 is None
-        ):
-            raise ValueError(
-                "sealed audit requires both expected packet hashes or neither"
-            )
-        if (
-            expected_decision_packet_hash is not None
-            and (
-                packet["packet_hash"] != expected_decision_packet_hash
-                or packet_sha256 != expected_decision_packet_sha256
-            )
-        ):
-            raise ValueError(
-                "sealed audit packet differs from the reviewed candidate"
-            )
-        if ai_proposals and expected_decision_packet_hash is None:
-            raise ValueError(
-                "AI proposals require their reviewed candidate packet"
-            )
-        _validate_ai_proposal_packet(
-            ai_proposals,
-            packet_hash=packet["packet_hash"],
-            packet_sha256=packet_sha256,
-        )
-        decision = visualizer.render_decision(
-            snapshot,
-            histories,
-            root / "decision.png",
-            ai_proposals=ai_proposals,
-            audit_hypothesis_key=hypothesis_key,
-            audit_context=audit_context,
-        )
-        permit = visualizer.seal_reveal(
-            snapshot,
-            hypothesis_key=hypothesis_key,
-        )
-        expected_identity = (
-            permit.hypothesis_key,
-            permit.setup_id,
-            permit.entry_location_id,
-            permit.entry_path_id,
-        )
-        if (
-            (
-                decision.hypothesis_key,
-                decision.setup_id,
-                decision.entry_location_id,
-                decision.entry_path_id,
-            )
-            != expected_identity
-            or _decision_packet_identity(packet) != expected_identity
-        ):
-            raise ValueError(
-                "sealed visual artifacts do not share one setup identity"
-            )
-        return cls(
-            visualizer=visualizer,
-            snapshot=snapshot,
-            permit=permit,
-            decision_artifact=decision,
-            directory=root,
-            ai_proposals=tuple(ai_proposals),
-            hypothesis_key=hypothesis_key,
-            decision_packet_path=packet_path,
-            decision_packet_sha256=packet_sha256,
-            decision_packet_hash=packet["packet_hash"],
-            future_1m=[],
-        )
-
-    def on_bar(self, bar: Bar) -> None:
-        if bar.start < self.permit.decision_asof:
-            raise ValueError("visual audit cannot receive a pre-decision bar")
-        if (bar.symbol, bar.instrument_id) != (
-            self.snapshot.observation.symbol,
-            self.snapshot.observation.instrument_id,
-        ):
-            # The sealed setup ends at a contract boundary. A new contract's
-            # OHLC belongs to another causal path and cannot enter this buffer.
-            return
-        if (
-            self.future_1m
-            and bar.start != self.future_1m[-1].end
-            and scheduled_gap_kind(self.future_1m[-1].end, bar.start) is None
-        ):
-            raise ValueError("visual audit future bars must be contiguous")
-        self.future_1m.append(
-            Candle(
-                timeframe=Timeframe.M1,
-                start=bar.start,
-                end=bar.end,
-                open=bar.open,
-                high=bar.high,
-                low=bar.low,
-                close=bar.close,
-                volume=bar.volume,
-                symbol=bar.symbol,
-                instrument_id=bar.instrument_id,
-                observed_minutes=1,
-                expected_minutes=1,
-                complete=True,
-            )
-        )
-
-    def reveal(self, path_result: "PathTestResult") -> tuple[VisualArtifact, Path]:
-        packet = read_verified_decision_packet(self.decision_packet_path)
-        if (
-            decision_packet_sha256(self.decision_packet_path)
-            != self.decision_packet_sha256
-            or packet["packet_hash"] != self.decision_packet_hash
-        ):
-            raise ValueError(
-                "sealed decision packet changed before future reveal"
-            )
-        if path_result.decision_hash != self.snapshot.snapshot_hash:
-            raise ValueError("path result belongs to another decision")
-        if (
-            self.hypothesis_key is None
-            or path_result.hypothesis_key != self.hypothesis_key
-        ):
-            raise ValueError("path result belongs to another hypothesis")
-        belief = _audit_hypothesis(self.snapshot, self.hypothesis_key)
-        if (
-            belief is None
-            or belief.plan is None
-            or belief.sequence is None
-            or path_result.setup_id != belief.sequence.setup_id
-            or path_result.entry_location_id
-            != belief.plan.entry_location_id
-            or path_result.entry_path_id != belief.plan.entry_path_id
-        ):
-            raise ValueError("path result belongs to another causal setup")
-        visible = tuple(
-            candle
-            for candle in self.future_1m
-            if candle.end <= path_result.resolved_at
-        )
-        reveal = self.visualizer.render_reveal(
-            self.snapshot,
-            self.permit,
-            visible,
-            self.directory / "future_reveal.png",
-            revealed_at=path_result.resolved_at,
-            path_result=path_result,
-            ai_proposals=self.ai_proposals,
-            audit_hypothesis_key=self.hypothesis_key,
-        )
-        record = self.visualizer.write_audit_record(
-            self.snapshot,
-            self.permit,
-            self.decision_artifact,
-            reveal,
-            self.directory / "audit.json",
-            path_result=path_result,
-            ai_proposals=self.ai_proposals,
-            audit_hypothesis_key=self.hypothesis_key,
-            decision_packet_path=self.decision_packet_path,
-            expected_decision_packet_sha256=(
-                self.decision_packet_sha256
-            ),
-            expected_decision_packet_hash=self.decision_packet_hash,
-        )
-        return reveal, record
 
 
 def _candles(axis, candles: Sequence[Candle]) -> None:
@@ -329,147 +68,94 @@ def _candles(axis, candles: Sequence[Candle]) -> None:
     axis.grid(True, color="#dbe4ee", linewidth=0.4, alpha=0.7)
 
 
-class BlindCandlePanelRenderer:
-    """Reusable causal candle panels for small blind-review scripts."""
+def active_causal_timeframes(observation: Any) -> tuple[Timeframe, ...]:
+    """Return the ordered scale registry bound to this observation."""
 
-    PANEL_BARS = {
-        Timeframe.H4: 20,
-        Timeframe.H1: 48,
-        Timeframe.M5: 48,
-        Timeframe.M1: 80,
-    }
-
-    @classmethod
-    def panels(
-        cls,
-        histories: Mapping[Timeframe, Sequence[Candle]],
-        case_clock: pd.Timestamp,
-    ) -> dict[Timeframe, tuple[int, tuple[Candle, ...]]]:
-        clock = pd.Timestamp(case_clock)
-        if clock.tzinfo is None:
-            raise ValueError("blind panel clock must be timezone aware")
-        output: dict[Timeframe, tuple[int, tuple[Candle, ...]]] = {}
-        for timeframe, count in cls.PANEL_BARS.items():
-            values = tuple(histories.get(timeframe, ()))
-            if not values or any(
-                candle.timeframe is not timeframe
-                or not candle.complete
-                or candle.end > clock
-                for candle in values
-            ):
-                raise ValueError(
-                    "blind renderer requires causal complete histories"
-                )
-            panel = values[-count:]
-            output[timeframe] = (len(values) - len(panel), panel)
-        return output
-
-    @staticmethod
-    def draw_candles(
-        axis: Any,
-        candles: Sequence[Candle],
-        *,
-        first_history_index: int,
-        tick_size: float,
-    ) -> None:
-        from matplotlib.patches import Rectangle
-        from matplotlib.ticker import MultipleLocator
-
-        values = tuple(candles)
-        if not values:
-            raise ValueError("blind candle panel cannot be empty")
-        if not math.isfinite(float(tick_size)) or tick_size <= 0:
-            raise ValueError("blind chart tick size is invalid")
-        for index, candle in enumerate(values):
-            up = candle.close >= candle.open
-            synthetic = candle.synthetic_minutes > 0
-            color = (
-                "#64748b"
-                if synthetic
-                else "#0f766e"
-                if up
-                else "#b91c1c"
-            )
-            axis.vlines(
-                index,
-                candle.low,
-                candle.high,
-                color="#334155",
-                linewidth=0.7,
-            )
-            bottom = min(candle.open, candle.close)
-            height = abs(candle.close - candle.open)
-            if height < 1e-12:
-                axis.hlines(
-                    candle.open,
-                    index - 0.30,
-                    index + 0.30,
-                    color=color,
-                    linewidth=1,
-                )
-            else:
-                axis.add_patch(
-                    Rectangle(
-                        (index - 0.30, bottom),
-                        0.60,
-                        height,
-                        facecolor=color,
-                        edgecolor=color,
-                        linewidth=0.4,
-                        hatch="///" if synthetic else None,
-                    )
-                )
-        tick_count = min(8, len(values))
-        ticks = (
-            [0]
-            if tick_count == 1
-            else sorted(
-                {
-                    int(round(index * (len(values) - 1) / (tick_count - 1)))
-                    for index in range(tick_count)
-                }
-            )
-        )
-        axis.set_xticks(ticks)
-        axis.set_xticklabels(
-            [
-                (
-                    f"#{first_history_index + index}\n"
-                    f"{values[index].start:%m-%d %H:%M}"
-                )
-                for index in ticks
-            ],
-            fontsize=7,
-        )
-        span_ticks = max(
-            1,
-            int(
-                math.ceil(
-                    (
-                        max(candle.high for candle in values)
-                        - min(candle.low for candle in values)
-                    )
-                    / tick_size
-                )
-            ),
-        )
-        grid_step_ticks = max(1, int(math.ceil(span_ticks / 12)))
-        axis.yaxis.set_major_locator(
-            MultipleLocator(grid_step_ticks * tick_size)
-        )
-        axis.grid(True, color="#dbe4ee", linewidth=0.4, alpha=0.7)
-
-
-def _audit_hypothesis(snapshot: EngineSnapshot, key: str | None = None):
-    selected_key = (
-        key if key is not None else snapshot.decision.best_hypothesis_key
+    active = tuple(
+        getattr(observation, "active_timeframes", ())
+        or tuple(observation.frames)
     )
-    if selected_key is None:
-        return None
-    belief = snapshot.belief.hypotheses.get(selected_key)
-    if belief is None:
-        raise ValueError("visual audit hypothesis identity is absent")
-    return belief
+    if (
+        not active
+        or len(active) != len(set(active))
+        or set(active) != set(observation.frames)
+        or Timeframe.M1 not in active
+    ):
+        raise ValueError(
+            "observation active timeframes disagree with its frame mapping"
+        )
+    return active
+
+
+def validate_causal_histories(
+    snapshot: EngineSnapshot,
+    histories: Mapping[Timeframe, Sequence[Any]],
+) -> dict[Timeframe, tuple[Candle, ...]]:
+    """Reject incomplete, future, wrong-contract or discontinuous panels."""
+
+    active = active_causal_timeframes(snapshot.observation)
+    if set(histories) != set(active):
+        expected = ", ".join(timeframe.value for timeframe in active)
+        raise ValueError(
+            "causal history must match the enabled scale registry: "
+            f"{expected}"
+        )
+    output: dict[Timeframe, tuple[Candle, ...]] = {}
+    for timeframe in active:
+        values = tuple(histories[timeframe])
+        frame = snapshot.observation.frame(timeframe)
+        if any(
+            not isinstance(item, Candle)
+            or item.timeframe is not timeframe
+            or not item.complete
+            or item.end > snapshot.observation.asof
+            or (item.symbol, item.instrument_id)
+            != (
+                snapshot.observation.symbol,
+                snapshot.observation.instrument_id,
+            )
+            for item in values
+        ):
+            raise ValueError(
+                "causal history contains a wrong, incomplete or future candle"
+            )
+        if (
+            len({(item.start, item.end) for item in values}) != len(values)
+            or tuple(sorted(values, key=lambda item: (item.start, item.end)))
+            != values
+            or any(
+                right.start < left.end
+                for left, right in zip(values[:-1], values[1:])
+            )
+            or any(
+                right.start != left.end
+                and scheduled_gap_kind(left.end, right.start) is None
+                for left, right in zip(values[:-1], values[1:])
+            )
+        ):
+            raise ValueError(
+                "causal history is duplicated, unordered or has an "
+                "unexplained gap"
+            )
+        if not values or values[-1].end != frame.cutoff:
+            raise ValueError(
+                "causal history cutoff disagrees with observation"
+            )
+        output[timeframe] = values
+    if output[Timeframe.M1][-1].end != snapshot.observation.asof:
+        raise ValueError("causal M1 history does not reach the decision clock")
+    return output
+
+
+def _selected_hypothesis(snapshot: EngineSnapshot):
+    selected_key = snapshot.decision.best_hypothesis_key
+    if selected_key is not None:
+        belief = snapshot.belief.hypotheses.get(selected_key)
+        if belief is None:
+            raise ValueError("selected visual hypothesis identity is absent")
+        return belief
+    ranked = snapshot.belief.ranked()
+    return None if not ranked else ranked[0]
 
 
 def _belief_identity(
@@ -505,105 +191,14 @@ def _belief_identity(
     )
 
 
-def _decision_packet_identity(
-    packet: Mapping[str, Any],
-) -> tuple[str | None, str | None, str | None, str | None]:
-    hypothesis_key = packet.get("audit_hypothesis_key")
-    belief_payload = (
-        packet.get("belief_t", {})
-        .get("hypotheses", {})
-        .get(hypothesis_key)
-        if hypothesis_key is not None
-        else None
-    )
-    sequence_payload = (
-        None if belief_payload is None else belief_payload.get("sequence")
-    )
-    plan_payload = (
-        None if belief_payload is None else belief_payload.get("plan")
-    )
-    return (
-        hypothesis_key,
-        (
-            None
-            if sequence_payload is None
-            else sequence_payload.get("setup_id")
-        ),
-        (
-            None
-            if plan_payload is None
-            else plan_payload.get("entry_location_id")
-        ),
-        (
-            None
-            if plan_payload is None
-            else plan_payload.get("entry_path_id")
-        ),
-    )
-
-
-def _validate_ai_proposals(
-    snapshot: EngineSnapshot,
-    belief: Any,
-    proposals: Sequence["PrimitiveProposal"],
-) -> None:
-    setup_id, entry_location_id, entry_path_id = _belief_identity(
-        belief
-    )
-    expected = (
-        snapshot.snapshot_hash,
-        None if belief is None else belief.key,
-        setup_id,
-        entry_location_id,
-        entry_path_id,
-    )
-    if any(
-        (
-            proposal.decision_hash,
-            proposal.hypothesis_key,
-            proposal.setup_id,
-            proposal.entry_location_id,
-            proposal.entry_path_id,
-        )
-        != expected
-        for proposal in proposals
-    ):
-        raise ValueError(
-            "AI primitive proposal belongs to another frozen setup"
-        )
-
-
-def _validate_ai_proposal_packet(
-    proposals: Sequence["PrimitiveProposal"],
-    *,
-    packet_hash: str,
-    packet_sha256: str,
-) -> None:
-    if any(
-        proposal.decision_packet_hash != packet_hash
-        or proposal.decision_packet_sha256 != packet_sha256
-        for proposal in proposals
-    ):
-        raise ValueError(
-            "AI primitive proposal belongs to another decision packet"
-        )
-
-
 def _plan_display_context(
     snapshot: EngineSnapshot,
     belief: Any,
-    *,
-    explicit_audit_key: str | None,
 ) -> tuple[str, bool]:
     """Describe plan actionability and whether price panels may show its levels."""
 
     if belief is None or belief.plan is None:
         return "NO COMPLETE CAUSAL PLAN", False
-    if explicit_audit_key is not None:
-        return (
-            f"SEALED PATH-TEST PLAN — DIAGNOSTIC ONLY ({belief.phase.value})",
-            True,
-        )
     if belief.phase in {
         PlaybookPhase.COMPLETED,
         PlaybookPhase.INVALIDATED,
@@ -639,9 +234,8 @@ def _plan_display_context(
 
 def _format_evidence(
     snapshot: EngineSnapshot,
-    key: str | None = None,
 ) -> str:
-    belief = _audit_hypothesis(snapshot, key)
+    belief = _selected_hypothesis(snapshot)
     if belief is None:
         return "No selected playbook hypothesis"
     supporting = "\n".join(
@@ -2152,7 +1746,6 @@ def _plan_overlay(
     plan: Any,
     candles: Sequence[Candle],
     *,
-    protected_stop: float | None = None,
     direct_labels: bool = False,
 ) -> None:
     if plan is None:
@@ -2245,10 +1838,6 @@ def _plan_overlay(
                 ":",
             )
         )
-    if protected_stop is not None:
-        levels.append(
-            ("protected stop", float(protected_stop), "#ea580c", "-.")
-        )
     _level_overlay(
         axis,
         candles,
@@ -2296,139 +1885,6 @@ def _belief_geometry_overlay(
         candles,
         levels,
         direct_labels=direct_labels,
-    )
-
-
-def _closed_trade_context(
-    context: Mapping[str, Any] | None,
-) -> Mapping[str, Any] | None:
-    if not context:
-        return None
-    value = context.get("closed_trade")
-    return value if isinstance(value, Mapping) else None
-
-
-def _protected_stop_context(
-    context: Mapping[str, Any] | None,
-) -> float | None:
-    if not context or context.get("protected_stop") is None:
-        return None
-    value = float(context["protected_stop"])
-    if value <= 0:
-        raise ValueError("visual audit protected stop must be positive")
-    return value
-
-
-def _protected_stop_overlay(
-    axis: Any,
-    protected_stop: float,
-    candles: Sequence[Candle],
-    *,
-    direct_labels: bool,
-) -> None:
-    _level_overlay(
-        axis,
-        candles,
-        (("protected stop", float(protected_stop), "#ea580c", "-."),),
-        direct_labels=direct_labels,
-    )
-
-
-def _closed_trade_levels(
-    trade: Mapping[str, Any],
-) -> tuple[tuple[str, float, str, str], ...]:
-    raw = (
-        ("entry", float(trade["entry_price"]), "#111827", "--"),
-        (
-            "original invalidation",
-            float(trade["original_invalidation"]),
-            "#dc2626",
-            "--",
-        ),
-        ("final stop", float(trade["final_stop"]), "#ea580c", ":"),
-        ("target", float(trade["target"]), "#16a34a", "--"),
-        ("exit", float(trade["exit_price"]), "#7c3aed", "-"),
-    )
-    grouped: list[list[Any]] = []
-    for label, price, color, style in raw:
-        existing = next(
-            (item for item in grouped if abs(float(item[1]) - price) <= 1e-9),
-            None,
-        )
-        if existing is None:
-            grouped.append([label, price, color, style])
-        else:
-            existing[0] = f"{existing[0]} / {label}"
-    return tuple(
-        (str(label), float(price), str(color), str(style))
-        for label, price, color, style in grouped
-    )
-
-
-def _closed_trade_overlay(
-    axis: Any,
-    trade: Mapping[str, Any],
-    candles: Sequence[Candle],
-    *,
-    direct_labels: bool,
-) -> None:
-    _level_overlay(
-        axis,
-        candles,
-        _closed_trade_levels(trade),
-        direct_labels=direct_labels,
-    )
-    if not candles or not direct_labels:
-        return
-    markers = (
-        ("opened", pd.Timestamp(trade["opened_at"]), "#111827", "--"),
-        ("closed", pd.Timestamp(trade["closed_at"]), "#7c3aed", "-"),
-    )
-    for label, timestamp, color, style in markers:
-        if timestamp < candles[0].start or timestamp > candles[-1].end:
-            continue
-        index = next(
-            (
-                number
-                for number, candle in enumerate(candles)
-                if candle.start <= timestamp <= candle.end
-            ),
-            None,
-        )
-        if index is None:
-            continue
-        axis.axvline(index, color=color, linestyle=style, linewidth=0.7)
-        axis.text(
-            index,
-            0.01,
-            label,
-            ha="center",
-            va="bottom",
-            fontsize=5.5,
-            color=color,
-            rotation=90,
-            transform=axis.get_xaxis_transform(),
-        )
-
-
-def _closed_trade_text(trade: Mapping[str, Any]) -> str:
-    return (
-        f"{trade['playbook']} / {trade['direction']}\n"
-        f"setup {trade.get('setup_id') or 'legacy/untyped'}\n"
-        f"location {trade.get('entry_location_id') or 'legacy/untyped'}\n"
-        f"path {trade.get('entry_path_id') or 'legacy/untyped'}\n"
-        f"decision {pd.Timestamp(trade['decision_time']):%Y-%m-%d %H:%M %Z}\n"
-        f"opened {pd.Timestamp(trade['opened_at']):%Y-%m-%d %H:%M %Z}\n"
-        f"closed {pd.Timestamp(trade['closed_at']):%Y-%m-%d %H:%M %Z}\n"
-        f"entry {float(trade['entry_price']):.2f}\n"
-        f"original invalidation {float(trade['original_invalidation']):.2f}\n"
-        f"final stop {float(trade['final_stop']):.2f}\n"
-        f"target {float(trade['target']):.2f}\n"
-        f"exit {float(trade['exit_price']):.2f} ({trade['exit_reason']})\n"
-        f"gross {float(trade['gross_R']):+.3f}R, "
-        f"cost {float(trade['cost_R']):.3f}R, "
-        f"net {float(trade['net_R']):+.3f}R\n"
-        f"same-bar ambiguity {bool(trade['ambiguous_same_bar'])}"
     )
 
 
@@ -2601,9 +2057,8 @@ def _event_timeline(snapshot: EngineSnapshot) -> str:
 
 def _sequence_text(
     snapshot: EngineSnapshot,
-    key: str | None = None,
 ) -> str:
-    belief = _audit_hypothesis(snapshot, key)
+    belief = _selected_hypothesis(snapshot)
     if belief is None or belief.sequence is None:
         return "none"
     sequence = belief.sequence
@@ -2622,50 +2077,6 @@ def _sequence_text(
             f"{'✓' if step.satisfied else '·'} {step.step_id} "
             f"{step.value:.2f} {clock}"
         )
-    return "\n".join(rows)
-
-
-def _review_text(proposals: Sequence["PrimitiveProposal"]) -> str:
-    if not proposals:
-        return "none"
-    rows = [
-        f"{proposal.issue.value} ({proposal.confidence:.2f})\n"
-        f"→ {proposal.primitive_name} [{proposal.status}]\n"
-        f"  definition: v{proposal.formula_version} "
-        f"{proposal.definition_hash[:12]}\n"
-        f"  origin computation: "
-        f"{'evaluable' if proposal.origin_value.evaluable else 'not evaluable'}"
-        f" ({proposal.origin_value.reason})\n"
-        f"  packet: {proposal.decision_packet_hash[:12]}\n"
-        f"  setup: {proposal.hypothesis_key} / "
-        f"{proposal.setup_id or 'unstarted'}\n"
-        f"  formula: {proposal.formula}\n"
-        f"  clock: {proposal.clock_rule}\n"
-        f"  path test: {proposal.path_test}"
-        for proposal in proposals[:2]
-    ]
-    if len(proposals) > 2:
-        rows.append(
-            f"+ {len(proposals) - 2} additional proposal(s) in packet"
-        )
-    return "\n".join(rows)
-
-
-def _audit_context_text(context: Mapping[str, Any] | None) -> str:
-    if not context:
-        return "periodic decision sample"
-    rows = []
-    for key, value in context.items():
-        if key == "closed_trade":
-            rows.append("closed trade: frozen geometry shown below")
-            continue
-        name = str(key).replace("_", " ")
-        rendered = json.dumps(
-            to_primitive(value),
-            ensure_ascii=False,
-            sort_keys=True,
-        )
-        rows.append(f"{name}: {rendered}")
     return "\n".join(rows)
 
 
@@ -2882,11 +2293,6 @@ class DecisionVisualizer:
         snapshot: EngineSnapshot,
         histories: Mapping[Timeframe, Sequence[Candle]],
         destination: str | Path,
-        *,
-        ai_proposals: Sequence["PrimitiveProposal"] = (),
-        audit_hypothesis_key: str | None = None,
-        audit_context: Mapping[str, Any] | None = None,
-        suppress_audit_hypothesis: bool = False,
     ) -> VisualArtifact:
         import matplotlib
 
@@ -2961,28 +2367,12 @@ class DecisionVisualizer:
             ]
             reading_info = None
             info = figure.add_subplot(grid[:, 1])
-        closed_trade = _closed_trade_context(audit_context)
-        protected_stop = _protected_stop_context(audit_context)
-        audit_belief = (
-            None
-            if suppress_audit_hypothesis
-            else _audit_hypothesis(snapshot, audit_hypothesis_key)
-        )
-        _validate_ai_proposals(
+        selected_belief = _selected_hypothesis(snapshot)
+        plan = None if selected_belief is None else selected_belief.plan
+        plan_heading, show_plan_overlay = _plan_display_context(
             snapshot,
-            audit_belief,
-            ai_proposals,
+            selected_belief,
         )
-        plan = None if audit_belief is None else audit_belief.plan
-        if closed_trade is None:
-            plan_heading, show_plan_overlay = _plan_display_context(
-                snapshot,
-                audit_belief,
-                explicit_audit_key=audit_hypothesis_key,
-            )
-        else:
-            plan_heading = "FROZEN CLOSED-TRADE GEOMETRY — AUDIT ONLY"
-            show_plan_overlay = False
         typed_model = any(
             item.thesis_strength is not None
             for item in snapshot.belief.hypotheses.values()
@@ -3032,7 +2422,7 @@ class DecisionVisualizer:
                     axis,
                     snapshot,
                     values,
-                    audit_belief,
+                    selected_belief,
                 )
             _event_markers(axis, snapshot, timeframe, values)
             focus_label = (
@@ -3088,31 +2478,16 @@ class DecisionVisualizer:
                     axis,
                     plan,
                     values,
-                    protected_stop=protected_stop,
                     direct_labels=timeframe
                     in {Timeframe.M5, Timeframe.M1},
                 )
             else:
                 _belief_geometry_overlay(
                     axis,
-                    audit_belief,
+                    selected_belief,
                     values,
                     direct_labels=timeframe
                     in {Timeframe.M5, Timeframe.M1},
-                )
-                if protected_stop is not None:
-                    _protected_stop_overlay(
-                        axis,
-                        protected_stop,
-                        values,
-                        direct_labels=timeframe in {Timeframe.M5, Timeframe.M1},
-                    )
-            if closed_trade is not None:
-                _closed_trade_overlay(
-                    axis,
-                    closed_trade,
-                    values,
-                    direct_labels=timeframe in {Timeframe.M5, Timeframe.M1},
                 )
             omitted_labels = int(
                 getattr(axis, "_smc_annotation_omitted", 0)
@@ -3123,7 +2498,7 @@ class DecisionVisualizer:
                     0.015,
                     (
                         f"+{omitted_labels} labels omitted; "
-                        "identities remain in packet/event memory"
+                        "identities remain in event memory"
                     ),
                     ha="right",
                     va="bottom",
@@ -3141,7 +2516,7 @@ class DecisionVisualizer:
             axis.text(
                 0.005,
                 0.98,
-                _metric_text(snapshot, timeframe, audit_belief),
+                _metric_text(snapshot, timeframe, selected_belief),
                 ha="left",
                 va="top",
                 fontsize=6,
@@ -3177,10 +2552,8 @@ class DecisionVisualizer:
             )
             for item in ranked
         )
-        plan_text = _partial_geometry_text(snapshot, audit_belief)
-        if closed_trade is not None:
-            plan_text = _closed_trade_text(closed_trade)
-        elif plan is not None:
+        plan_text = _partial_geometry_text(snapshot, selected_belief)
+        if plan is not None:
             targets = ", ".join(f"{level.price:.2f}" for level in plan.targets)
             plan_text = (
                 f"setup {plan.setup_id or 'legacy/untyped'}\n"
@@ -3230,8 +2603,6 @@ class DecisionVisualizer:
                 plan_text += "\n" + _liquidity_route_text(
                     plan.liquidity_route
                 )
-            if protected_stop is not None:
-                plan_text += f"\nprotected stop {protected_stop:.2f}"
         best_utility_by_action: dict[Action, Any] = {}
         for item in snapshot.decision.utilities:
             prior = best_utility_by_action.get(item.action)
@@ -3259,52 +2630,10 @@ class DecisionVisualizer:
             if not snapshot.risk.vetoes
             else ", ".join(value.value for value in snapshot.risk.vetoes)
         )
-        sequence_heading = (
-            "CURRENT MARKET STATE AT CLOSE (NOT FROZEN THESIS EVIDENCE)"
-            if closed_trade is not None
-            else "AUDITED SETUP SEQUENCE"
-        )
-        evidence_heading = (
-            "CURRENT EVIDENCE AT CLOSE (NOT FROZEN THESIS EVIDENCE)"
-            if closed_trade is not None
-            else "AUDITED EVIDENCE"
-        )
-        evidence_text = (
-            (
-                "not shown — no close-time hypothesis is substituted "
-                "for the original frozen thesis"
-                if closed_trade is not None
-                else "not shown — no exact audit hypothesis identity "
-                "is available at this decision clock"
-            )
-            if suppress_audit_hypothesis
-            else _format_evidence(snapshot, audit_hypothesis_key)
-        )
-        sequence_text = (
-            (
-                "not shown — post-outcome view uses frozen trade geometry"
-                if closed_trade is not None
-                else "not shown — no exact audit hypothesis identity "
-                "is available at this decision clock"
-            )
-            if suppress_audit_hypothesis
-            else _sequence_text(snapshot, audit_hypothesis_key)
-        )
-        clock_heading = (
-            "POST-OUTCOME VIEW CLOCK"
-            if closed_trade is not None
-            else "DECISION CLOCK"
-        )
-        action_heading = (
-            "CURRENT CLOSE-TIME MODEL / RISK ACTION"
-            if closed_trade is not None
-            else "MODEL / RISK ACTION"
-        )
-        belief_heading = (
-            "CURRENT CLOSE-TIME BELIEFS — NOT ORIGINAL THESIS"
-            if closed_trade is not None
-            else "PLAYBOOK BELIEFS"
-        )
+        sequence_heading = "SELECTED SETUP SEQUENCE"
+        evidence_heading = "SELECTED EVIDENCE"
+        evidence_text = _format_evidence(snapshot)
+        sequence_text = _sequence_text(snapshot)
         if reading_info is not None:
             reading_body = _wrap_panel_text(
                 _temporal_market_reading_text(snapshot),
@@ -3327,14 +2656,13 @@ class DecisionVisualizer:
             )
         info_body = _wrap_panel_text(
             (
-                f"{clock_heading}\n{asof:%Y-%m-%d %H:%M %Z}\n\n"
-                f"SCENARIO AUDIT\n{_audit_context_text(audit_context)}\n\n"
-                f"{action_heading}\n"
+                f"DECISION CLOCK\n{asof:%Y-%m-%d %H:%M %Z}\n\n"
+                f"MODEL / RISK ACTION\n"
                 f"{snapshot.decision.selected_action.value} / "
                 f"{snapshot.risk.final_action.value}\n"
                 f"advantage {snapshot.decision.advantage:.3f}R\n"
                 f"veto: {veto}\n\n"
-                f"{belief_heading}\n{probabilities}\n\n"
+                f"PLAYBOOK BELIEFS\n{probabilities}\n\n"
                 f"{sequence_heading}\n"
                 f"{sequence_text}\n\n"
                 f"{evidence_heading}\n"
@@ -3345,7 +2673,7 @@ class DecisionVisualizer:
                 f"H1 RANGE / 1M MANIPULATION\n"
                 f"{_group4_text(snapshot)}\n\n"
                 f"EXACT ENTRY / 1M PATH\n"
-                f"{_group5_text(snapshot, audit_belief)}\n\n"
+                f"{_group5_text(snapshot, selected_belief)}\n\n"
                 f"EXECUTION REALITY\n"
                 f"source {snapshot.observation.execution.source}\n"
                 f"spread {snapshot.observation.execution.spread_points:.2f}, "
@@ -3357,7 +2685,6 @@ class DecisionVisualizer:
                 f"size {snapshot.observation.execution.bid_size} / "
                 f"{snapshot.observation.execution.ask_size}, "
                 f"depth imbalance {snapshot.observation.execution.depth_imbalance}\n\n"
-                f"AI AUDIT → SEQUENCE PRIMITIVE\n{_review_text(ai_proposals)}\n\n"
                 f"ACTION UTILITIES\n{utilities}\n\n"
                 f"MODEL WHY\n"
                 + "\n".join(snapshot.decision.reasons[:3])
@@ -3382,11 +2709,7 @@ class DecisionVisualizer:
             clip_on=True,
         )
         figure.suptitle(
-            (
-                "POST-OUTCOME AUDIT VIEW — original-trade outcome is present"
-                if closed_trade is not None
-                else "CAUSAL DECISION VIEW — future path is not present"
-            ),
+            "CAUSAL DECISION VIEW — COMPLETED DATA ONLY",
             fontsize=13,
             weight="bold",
         )
@@ -3400,575 +2723,24 @@ class DecisionVisualizer:
         if maximum > asof:
             raise AssertionError("saved decision artifact contains a future candle")
         setup_id, entry_location_id, entry_path_id = _belief_identity(
-            audit_belief
+            selected_belief
         )
         return VisualArtifact(
             path=destination,
-            sha256=hashlib.sha256(destination.read_bytes()).hexdigest(),
             kind="decision",
-            decision_hash=snapshot.snapshot_hash,
+            decision_id=(
+                f"{snapshot.observation.symbol}:"
+                f"{snapshot.observation.instrument_id}:"
+                f"{snapshot.observation.asof.isoformat()}"
+            ),
             maximum_market_time=maximum,
             hypothesis_key=(
-                None if audit_belief is None else audit_belief.key
+                None if selected_belief is None else selected_belief.key
             ),
             setup_id=setup_id,
             entry_location_id=entry_location_id,
             entry_path_id=entry_path_id,
         )
-
-    @staticmethod
-    def seal_reveal(
-        snapshot: EngineSnapshot,
-        hypothesis_key: str | None = None,
-    ) -> RevealPermit:
-        belief = _audit_hypothesis(snapshot, hypothesis_key)
-        setup_id, entry_location_id, entry_path_id = _belief_identity(
-            belief
-        )
-        selected_key = None if belief is None else belief.key
-        raw = (
-            f"{snapshot.snapshot_hash}|"
-            f"{snapshot.observation.asof.isoformat()}|{selected_key}|"
-            f"{setup_id}|{entry_location_id}|{entry_path_id}|"
-            "future-separate"
-        )
-        return RevealPermit(
-            decision_hash=snapshot.snapshot_hash,
-            decision_asof=snapshot.observation.asof,
-            hypothesis_key=selected_key,
-            setup_id=setup_id,
-            entry_location_id=entry_location_id,
-            entry_path_id=entry_path_id,
-            permit_hash=hashlib.sha256(raw.encode("utf-8")).hexdigest(),
-        )
-
-    def render_reveal(
-        self,
-        snapshot: EngineSnapshot,
-        permit: RevealPermit,
-        future_1m: Sequence[Candle],
-        destination: str | Path,
-        *,
-        revealed_at: pd.Timestamp,
-        path_result: "PathTestResult | None" = None,
-        ai_proposals: Sequence["PrimitiveProposal"] = (),
-        audit_hypothesis_key: str | None = None,
-    ) -> VisualArtifact:
-        import matplotlib
-
-        matplotlib.use("Agg")
-        import matplotlib.pyplot as plt
-
-        revealed_at = pd.Timestamp(revealed_at)
-        if revealed_at.tzinfo is None:
-            raise ValueError("reveal clock must be timezone aware")
-        if permit.decision_hash != snapshot.snapshot_hash:
-            raise ValueError("reveal permit is not bound to this decision")
-        expected_permit = self.seal_reveal(
-            snapshot,
-            hypothesis_key=permit.hypothesis_key,
-        )
-        if permit != expected_permit:
-            raise ValueError("reveal permit integrity check failed")
-        if (
-            audit_hypothesis_key is not None
-            and audit_hypothesis_key != permit.hypothesis_key
-        ):
-            raise ValueError(
-                "future reveal hypothesis differs from its permit"
-            )
-        values = tuple(future_1m)
-        if any(
-            candle.timeframe is not Timeframe.M1
-            or not candle.complete
-            or (candle.symbol, candle.instrument_id)
-            != (
-                snapshot.observation.symbol,
-                snapshot.observation.instrument_id,
-            )
-            for candle in values
-        ):
-            raise ValueError(
-                "future reveal requires completed 1m bars for the sealed contract"
-            )
-        if any(candle.start < permit.decision_asof for candle in values):
-            raise ValueError("reveal path overlaps the decision information set")
-        if values and (
-            values[0].start != permit.decision_asof
-            and scheduled_gap_kind(
-                permit.decision_asof,
-                values[0].start,
-            )
-            is None
-        ):
-            raise ValueError("future reveal begins after an unexplained gap")
-        if any(
-            right.start != left.end
-            and scheduled_gap_kind(left.end, right.start) is None
-            for left, right in zip(values[:-1], values[1:])
-        ):
-            raise ValueError("future reveal path is not causally contiguous")
-        path_resolved_at = (
-            None
-            if path_result is None
-            else pd.Timestamp(path_result.resolved_at)
-        )
-        if not values:
-            boundary_outcomes = {"contract_change", "deadline", "right_censored"}
-            if (
-                path_result is None
-                or path_result.outcome not in boundary_outcomes
-                or path_resolved_at is None
-                or path_resolved_at < permit.decision_asof
-                or (
-                    path_resolved_at != permit.decision_asof
-                    and scheduled_gap_kind(
-                        permit.decision_asof,
-                        path_resolved_at,
-                    )
-                    is None
-                )
-                or path_resolved_at > revealed_at
-            ):
-                raise ValueError(
-                    "empty future reveal requires a terminal decision-boundary result"
-                )
-        if values and revealed_at < max(candle.end for candle in values):
-            raise ValueError("future path cannot be revealed before it has completed")
-        if path_result is not None and (
-            path_resolved_at < permit.decision_asof
-            or path_resolved_at > revealed_at
-            or (
-                values
-                and max(candle.end for candle in values)
-                > path_resolved_at
-            )
-        ):
-            raise ValueError(
-                "future reveal extends beyond the frozen path resolution"
-            )
-        if path_result is not None and values:
-            last_end = values[-1].end
-            boundary_outcomes = {
-                "contract_change",
-                "deadline",
-                "right_censored",
-            }
-            if (
-                last_end != path_resolved_at
-                and (
-                    path_result.outcome not in boundary_outcomes
-                    or scheduled_gap_kind(last_end, path_resolved_at)
-                    is None
-                )
-            ):
-                raise ValueError(
-                    "future reveal does not reach the frozen path resolution"
-                )
-
-        long_path = len(values) > 180
-        if long_path:
-            figure = plt.figure(
-                figsize=(18, 11),
-                dpi=110,
-                constrained_layout=True,
-            )
-            grid = figure.add_gridspec(
-                3,
-                2,
-                width_ratios=(3.5, 1.5),
-                height_ratios=(1.0, 1.5, 1.5),
-            )
-            axis = figure.add_subplot(grid[0, 0])
-            entry_axis = figure.add_subplot(grid[1, 0])
-            resolution_axis = figure.add_subplot(grid[2, 0])
-            audit = figure.add_subplot(grid[:, 1])
-            axis.plot(
-                range(len(values)),
-                [candle.close for candle in values],
-                color="#0f172a",
-                linewidth=0.8,
-            )
-            axis.grid(
-                True,
-                color="#dbe4ee",
-                linewidth=0.4,
-                alpha=0.7,
-            )
-            ticks = sorted(
-                set((0, len(values) // 2, len(values) - 1))
-            )
-            axis.set_xticks(ticks)
-            axis.set_xticklabels(
-                [
-                    values[index].start.strftime("%m-%d\n%H:%M")
-                    for index in ticks
-                ],
-                fontsize=7,
-            )
-            entry_clock = (
-                None
-                if path_result is None
-                else getattr(path_result, "entry_touched_at", None)
-            )
-            entry_index = next(
-                (
-                    index
-                    for index, candle in enumerate(values)
-                    if entry_clock is not None
-                    and candle.end >= pd.Timestamp(entry_clock)
-                ),
-                0,
-            )
-            entry_start = max(0, entry_index - 40)
-            entry_end = min(len(values), entry_index + 81)
-            resolution_start = max(0, len(values) - 121)
-            entry_values = values[entry_start:entry_end]
-            resolution_values = values[resolution_start:]
-            _candles(entry_axis, entry_values)
-            _candles(resolution_axis, resolution_values)
-            entry_axis.set_title(
-                "ENTRY-TOUCH DETAIL"
-                if entry_clock is not None
-                else "EARLY PATH DETAIL — entry not touched",
-                loc="left",
-                fontsize=9,
-                weight="bold",
-            )
-            resolution_axis.set_title(
-                "RESOLUTION DETAIL",
-                loc="left",
-                fontsize=9,
-                weight="bold",
-            )
-            price_axes = (
-                (axis, values, 0),
-                (entry_axis, entry_values, entry_start),
-                (
-                    resolution_axis,
-                    resolution_values,
-                    resolution_start,
-                ),
-            )
-        else:
-            figure, (axis, audit) = plt.subplots(
-                1,
-                2,
-                figsize=(17, 6),
-                dpi=110,
-                constrained_layout=True,
-                gridspec_kw={"width_ratios": (3.4, 1.6)},
-            )
-            _candles(axis, values)
-            price_axes = ((axis, values, 0),)
-        if not values:
-            axis.text(
-                0.5,
-                0.5,
-                "No completed post-decision 1m bar\n"
-                "Path terminated at the decision boundary",
-                ha="center",
-                va="center",
-                transform=axis.transAxes,
-                fontsize=11,
-                color="#991b1b",
-            )
-            axis.set_xticks([])
-            axis.set_yticks([])
-        audit_belief = _audit_hypothesis(
-            snapshot,
-            permit.hypothesis_key,
-        )
-        _validate_ai_proposals(
-            snapshot,
-            audit_belief,
-            ai_proposals,
-        )
-        plan = None if audit_belief is None else audit_belief.plan
-        if plan is not None:
-            for price_axis, shown_values, _ in price_axes:
-                _plan_overlay(price_axis, plan, shown_values)
-        if values:
-            entry_clock = (
-                None
-                if path_result is None
-                else getattr(path_result, "entry_touched_at", None)
-            )
-            entry_global_index = (
-                None
-                if entry_clock is None
-                else next(
-                    (
-                        index
-                        for index, candle in enumerate(values)
-                        if candle.end >= pd.Timestamp(entry_clock)
-                    ),
-                    None,
-                )
-            )
-            resolution_global_index = (
-                len(values) - 1
-                if (
-                    path_resolved_at is not None
-                    and values[-1].end == path_resolved_at
-                )
-                else None
-            )
-            for price_axis, shown_values, offset in price_axes:
-                if not shown_values:
-                    continue
-                if entry_global_index is not None and (
-                    offset
-                    <= entry_global_index
-                    < offset + len(shown_values)
-                ):
-                    price_axis.axvline(
-                        entry_global_index - offset,
-                        color="#2563eb",
-                        linestyle=":",
-                        linewidth=1.0,
-                        label="entry touch",
-                    )
-                if (
-                    resolution_global_index is not None
-                    and
-                    offset
-                    <= resolution_global_index
-                    < offset + len(shown_values)
-                ):
-                    price_axis.axvline(
-                        resolution_global_index - offset,
-                        color="#991b1b",
-                        linestyle="-.",
-                        linewidth=1.0,
-                        label="resolution",
-                    )
-            axis.axvline(
-                0,
-                color="#7c3aed",
-                linestyle="--",
-                linewidth=0.9,
-                label="decision boundary",
-            )
-        handles, labels = axis.get_legend_handles_labels()
-        if handles:
-            axis.legend(loc="best", fontsize=8)
-        audit.axis("off")
-        result_text = "No registered path-test result supplied"
-        if path_result is not None:
-            if path_result.decision_hash != snapshot.snapshot_hash:
-                raise ValueError("path result is not bound to the sealed decision")
-            expected_setup_id = (
-                None
-                if audit_belief is None
-                or audit_belief.sequence is None
-                else audit_belief.sequence.setup_id
-            )
-            if (
-                plan is None
-                or audit_belief is None
-                or audit_belief.sequence is None
-                or expected_setup_id is None
-                or path_result.hypothesis_key != audit_belief.key
-                or path_result.setup_id != expected_setup_id
-                or path_result.entry_location_id != plan.entry_location_id
-                or path_result.entry_path_id != plan.entry_path_id
-                or path_result.playbook != audit_belief.playbook.value
-                or path_result.direction != audit_belief.direction.value
-                or pd.Timestamp(path_result.decision_time)
-                != snapshot.observation.asof
-                or path_result.invalidation_source_id
-                != plan.invalidation.source_level_id
-                or path_result.target_source_id != plan.targets[0].level_id
-                or path_result.protocol_version
-                != audit_belief.sequence.protocol_version
-                or path_result.protocol_hash
-                != audit_belief.sequence.protocol_hash
-                or not all(
-                    (
-                        abs(plan.planned_entry - path_result.entry) <= 1e-9,
-                        abs(plan.invalidation.price - path_result.invalidation) <= 1e-9,
-                        abs(plan.targets[0].price - path_result.target) <= 1e-9,
-                    )
-                )
-            ):
-                raise ValueError("path result does not match the displayed frozen plan")
-            result_text = (
-                f"outcome {path_result.outcome}\n"
-                f"success {path_result.success}\n"
-                f"resolved {path_result.resolved_at:%Y-%m-%d %H:%M %Z}\n"
-                f"MFE {path_result.mfe_R:.2f}R\n"
-                f"MAE {path_result.mae_R:.2f}R\n"
-                f"formation {path_result.formation_minutes}m\n"
-                f"entry touched {path_result.entry_touched} "
-                f"({path_result.time_to_entry_minutes}m)\n"
-                f"elapsed {path_result.elapsed_minutes}m\n"
-                f"same-bar ambiguity {path_result.ambiguous_same_bar}\n"
-                f"protocol {path_result.protocol_hash[:12]}\n"
-                f"config {path_result.config_hash[:12]}\n"
-                f"code {path_result.code_hash[:12]}"
-            )
-        audit.text(
-            0.0,
-            1.0,
-            (
-                "SEALED PATH TEST\n"
-                f"{result_text}\n\n"
-                "PRE-REVEAL AI AUDIT\n"
-                f"{_review_text(ai_proposals)}\n\n"
-                "The AI issue is diagnostic only. Its mapped primitive remains "
-                "unvalidated until a separately registered path test passes."
-            ),
-            ha="left",
-            va="top",
-            fontsize=8,
-            family="monospace",
-            wrap=True,
-            transform=audit.transAxes,
-        )
-        axis.set_title(
-            f"FUTURE REVEAL — sealed decision {snapshot.snapshot_hash[:12]} "
-            f"at {permit.decision_asof:%Y-%m-%d %H:%M %Z}",
-            loc="left",
-            color="#991b1b",
-            weight="bold",
-        )
-        destination = Path(destination)
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        figure.savefig(destination, bbox_inches="tight")
-        plt.close(figure)
-        maximum = max(
-            (candle.end for candle in values),
-            default=permit.decision_asof,
-        )
-        setup_id, entry_location_id, entry_path_id = _belief_identity(
-            audit_belief
-        )
-        return VisualArtifact(
-            path=destination,
-            sha256=hashlib.sha256(destination.read_bytes()).hexdigest(),
-            kind="future_reveal",
-            decision_hash=snapshot.snapshot_hash,
-            maximum_market_time=maximum,
-            hypothesis_key=permit.hypothesis_key,
-            setup_id=setup_id,
-            entry_location_id=entry_location_id,
-            entry_path_id=entry_path_id,
-        )
-
-    @staticmethod
-    def write_audit_record(
-        snapshot: EngineSnapshot,
-        permit: RevealPermit,
-        decision_artifact: VisualArtifact,
-        reveal_artifact: VisualArtifact,
-        destination: str | Path,
-        *,
-        path_result: "PathTestResult | None" = None,
-        ai_proposals: Sequence["PrimitiveProposal"] = (),
-        audit_hypothesis_key: str | None = None,
-        decision_packet_path: str | Path | None = None,
-        expected_decision_packet_sha256: str | None = None,
-        expected_decision_packet_hash: str | None = None,
-    ) -> Path:
-        if decision_artifact.kind != "decision":
-            raise ValueError("audit record requires a decision artifact")
-        if reveal_artifact.kind != "future_reveal":
-            raise ValueError("audit record requires a separate reveal artifact")
-        if {
-            snapshot.snapshot_hash,
-            permit.decision_hash,
-            decision_artifact.decision_hash,
-            reveal_artifact.decision_hash,
-        } != {snapshot.snapshot_hash}:
-            raise ValueError("audit artifacts do not share one sealed decision")
-        expected_identity = (
-            permit.hypothesis_key,
-            permit.setup_id,
-            permit.entry_location_id,
-            permit.entry_path_id,
-        )
-        if (
-            (
-                decision_artifact.hypothesis_key,
-                decision_artifact.setup_id,
-                decision_artifact.entry_location_id,
-                decision_artifact.entry_path_id,
-            )
-            != expected_identity
-            or (
-                reveal_artifact.hypothesis_key,
-                reveal_artifact.setup_id,
-                reveal_artifact.entry_location_id,
-                reveal_artifact.entry_path_id,
-            )
-            != expected_identity
-            or audit_hypothesis_key != permit.hypothesis_key
-        ):
-            raise ValueError(
-                "audit artifacts do not share one frozen setup identity"
-            )
-        packet_record = None
-        if decision_packet_path is not None:
-            packet_path = Path(decision_packet_path)
-            packet = read_verified_decision_packet(packet_path)
-            packet_sha256 = decision_packet_sha256(packet_path)
-            packet_identity = _decision_packet_identity(packet)
-            if (
-                packet.get("decision_hash") != snapshot.snapshot_hash
-                or packet.get("future_path", {}).get("included") is not False
-                or packet_identity != expected_identity
-                or (
-                    expected_decision_packet_sha256 is not None
-                    and packet_sha256
-                    != expected_decision_packet_sha256
-                )
-                or (
-                    expected_decision_packet_hash is not None
-                    and packet.get("packet_hash")
-                    != expected_decision_packet_hash
-                )
-            ):
-                raise ValueError(
-                    "pre-reveal decision packet is not bound to the audit"
-                )
-            packet_record = {
-                "path": str(packet_path),
-                "sha256": packet_sha256,
-                "packet_hash": packet.get("packet_hash"),
-            }
-            _validate_ai_proposal_packet(
-                ai_proposals,
-                packet_hash=packet["packet_hash"],
-                packet_sha256=packet_sha256,
-            )
-        elif ai_proposals:
-            raise ValueError(
-                "AI proposals require a verified pre-reveal decision packet"
-            )
-        payload = {
-            "decision_hash": snapshot.snapshot_hash,
-            "decision_asof": snapshot.observation.asof,
-            "permit_hash": permit.permit_hash,
-            "decision_artifact": to_primitive(decision_artifact),
-            "future_reveal_artifact": to_primitive(reveal_artifact),
-            "path_result": (
-                None if path_result is None else to_primitive(path_result)
-            ),
-            "ai_primitive_proposals": [
-                to_primitive(proposal) for proposal in ai_proposals
-            ],
-            "audit_hypothesis_key": audit_hypothesis_key,
-            "pre_reveal_decision_packet": packet_record,
-            "future_was_separate_from_decision": True,
-        }
-        output = Path(destination)
-        output.parent.mkdir(parents=True, exist_ok=True)
-        output.write_text(
-            json.dumps(to_primitive(payload), indent=2, ensure_ascii=False),
-            encoding="utf-8",
-        )
-        return output
 
     @staticmethod
     def build_index(
@@ -3978,7 +2750,7 @@ class DecisionVisualizer:
         rows = "\n".join(
             "<tr>"
             f"<td>{html.escape(item.kind)}</td>"
-            f"<td>{html.escape(item.decision_hash[:16])}</td>"
+            f"<td>{html.escape(item.decision_id)}</td>"
             f"<td>{html.escape(item.maximum_market_time.isoformat())}</td>"
             f"<td><a href=\"{html.escape(item.path.name)}\">open</a></td>"
             "</tr>"
@@ -3987,23 +2759,22 @@ class DecisionVisualizer:
         document = f"""<!doctype html>
 <html lang="zh"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>SMC v2 causal decision review</title>
+<title>SMC causal decision views</title>
 <style>
 body{{font-family:-apple-system,BlinkMacSystemFont,sans-serif;max-width:1100px;margin:2rem auto;padding:0 1rem}}
 table{{border-collapse:collapse;width:100%}}th,td{{border:1px solid #cbd5e1;padding:.55rem;text-align:left}}
 th{{background:#f1f5f9}}code{{font-size:.85rem}}
 </style></head><body>
-<h1>SMC v2 causal decision review</h1>
-<p>Decision views and future reveals are separate rows and separate files.</p>
-<table><thead><tr><th>kind</th><th>decision hash</th><th>maximum market time</th><th>artifact</th></tr></thead>
+<h1>SMC causal decision views</h1>
+<p>Each image contains only completed market data available at its decision.</p>
+<table><thead><tr><th>kind</th><th>decision id</th><th>maximum market time</th><th>artifact</th></tr></thead>
 <tbody>{rows}</tbody></table></body></html>"""
         Path(destination).write_text(document, encoding="utf-8")
 
 
 __all__ = [
-    "BlindCandlePanelRenderer",
     "DecisionVisualizer",
-    "RevealPermit",
-    "SealedVisualAudit",
     "VisualArtifact",
+    "active_causal_timeframes",
+    "validate_causal_histories",
 ]

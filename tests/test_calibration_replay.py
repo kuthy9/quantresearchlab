@@ -9,18 +9,19 @@ import pytest
 import smc_trader.calibration_replay as calibration_replay
 from smc_trader.calibration_replay import (
     CalibrationSequentialReplay,
-    HASH_MODE,
     ReplayCheckpointStore,
     iter_after_source_checkpoint,
 )
+from smc_trader.decision import UtilityDecisionLayer
 from smc_trader.engine import ContinuousSMCEngine
 from smc_trader.io import iter_completed_bars
-from smc_trader.model import Bar, to_primitive
+from smc_trader.model import Bar, EngineSnapshot, to_primitive
 from smc_trader.observation import ExecutionRealityInput
 from smc_trader.simulation import SequentialPortfolio, SequentialReplay
+from smc_trader.risk import StructuralRiskEngine
 
 from .helpers import flat_account, session_bars
-from .test_v4_typed_vertical import _brain, _dfp_fixture, _snapshot
+from .test_v4_typed_vertical import _brain, _dfp_fixture
 
 
 def _execution(asof: pd.Timestamp) -> ExecutionRealityInput:
@@ -33,10 +34,8 @@ def _execution(asof: pd.Timestamp) -> ExecutionRealityInput:
     )
 
 
-def _snapshot_without_hash(snapshot) -> dict:
-    payload = to_primitive(snapshot)
-    payload.pop("snapshot_hash")
-    return payload
+def _snapshot_payload(snapshot) -> dict:
+    return to_primitive(snapshot)
 
 
 def _on_grid_session_bars(count: int) -> list[Bar]:
@@ -68,7 +67,7 @@ def test_lightweight_replay_preserves_causal_decisions_risk_and_execution() -> N
         execution = _execution(bar.end)
         expected = standard.on_bar(bar, execution=execution)
         actual = lightweight.on_bar(bar, execution=execution)
-        assert _snapshot_without_hash(actual.snapshot) == _snapshot_without_hash(
+        assert _snapshot_payload(actual.snapshot) == _snapshot_payload(
             expected.snapshot
         )
         assert to_primitive(actual.closed_trades) == to_primitive(
@@ -81,8 +80,7 @@ def test_lightweight_replay_preserves_causal_decisions_risk_and_execution() -> N
         assert to_primitive(actual.belief_position_input) == to_primitive(
             expected.belief_position_input
         )
-    assert len(lightweight.rolling_commitment) == 64
-    assert lightweight.rolling_commitment != standard.engine.last_snapshot.snapshot_hash
+    assert lightweight.engine.last_snapshot is actual.snapshot
 
 
 def test_non_simulating_replay_preserves_flat_causal_model_without_portfolio() -> None:
@@ -103,7 +101,7 @@ def test_non_simulating_replay_preserves_flat_causal_model_without_portfolio() -
         actual = replay.on_bar(bar, execution=execution)
         assert actual.closed_trades == ()
         assert actual.position is None
-        assert _snapshot_without_hash(actual.snapshot) == _snapshot_without_hash(
+        assert _snapshot_payload(actual.snapshot) == _snapshot_payload(
             expected
         )
 
@@ -120,7 +118,10 @@ def test_lightweight_replay_passes_open_position_to_brain() -> None:
     _, _, _, forming, triggered = _dfp_fixture()
     brain = _brain()
     brain.update(forming)
-    approved = _snapshot(triggered, brain.update(triggered), "a")
+    belief = brain.update(triggered)
+    decision = UtilityDecisionLayer().decide(triggered, belief)
+    risk = StructuralRiskEngine().review(decision, triggered)
+    approved = EngineSnapshot(triggered, belief, decision, risk)
     assert approved.risk.passed
     standard_portfolio = SequentialPortfolio()
     lightweight_portfolio = SequentialPortfolio()
@@ -145,7 +146,7 @@ def test_lightweight_replay_passes_open_position_to_brain() -> None:
     assert actual.position is not None
     assert expected.belief_position_input is not None
     assert actual.belief_position_input == expected.belief_position_input
-    assert _snapshot_without_hash(actual.snapshot) == _snapshot_without_hash(
+    assert _snapshot_payload(actual.snapshot) == _snapshot_payload(
         expected.snapshot
     )
 
@@ -162,11 +163,9 @@ def test_lightweight_replay_pickle_resume_is_bitwise_deterministic() -> None:
                 pickle.dumps(resumed, protocol=pickle.HIGHEST_PROTOCOL)
             )
         actual = resumed.on_bar(bar, execution=execution)
-        assert actual.snapshot.snapshot_hash == expected.snapshot.snapshot_hash
-        assert _snapshot_without_hash(actual.snapshot) == _snapshot_without_hash(
+        assert _snapshot_payload(actual.snapshot) == _snapshot_payload(
             expected.snapshot
         )
-    assert resumed.rolling_commitment == uninterrupted.rolling_commitment
     assert to_primitive(resumed.portfolio.records) == to_primitive(
         uninterrupted.portfolio.records
     )
@@ -258,7 +257,7 @@ def test_checkpoint_store_binds_state_and_rejects_different_run(
             tz="America/New_York",
         ),
     }
-    bindings = {"source_sha256": "a" * 64, "hash_mode": HASH_MODE}
+    bindings = {"run_manifest": "run_manifest.json"}
     store.save(state, bindings=bindings)
     restored = store.load(expected_bindings=bindings)
     assert restored["processed_bars"] == 12
@@ -290,7 +289,6 @@ def test_checkpoint_store_binds_state_and_rejects_different_run(
     with pytest.raises(ValueError, match="bindings differ"):
         store.load(
             expected_bindings={
-                "source_sha256": "b" * 64,
-                "hash_mode": HASH_MODE,
+                "run_manifest": "different-run-manifest.json",
             }
         )

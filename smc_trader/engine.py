@@ -1,15 +1,12 @@
 """Layered one-minute orchestration with no hidden execution side effects."""
 from __future__ import annotations
 
-import hashlib
 import json
 from pathlib import Path
 from typing import Any, Mapping
 
 from .calibration import (
-    CalibrationError,
     TypedBrainCalibrator,
-    model_code_fingerprint,
 )
 from .causal import CausalMarketReader
 from .decision import DecisionConfig, UtilityDecisionLayer
@@ -19,7 +16,6 @@ from .model import (
     EngineSnapshot,
     PositionSnapshot,
     Timeframe,
-    content_hash,
 )
 from .observation import (
     CausalObserver,
@@ -29,10 +25,10 @@ from .observation import (
 from .playbooks import BrainConfig, PlaybookBrain
 from .playbook_registry import load_playbook_registry
 from .risk import RiskLimits, StructuralRiskEngine
-from .scene_graph import brain_input_contract_hash, parse_scale_specs
+from .scene_graph import parse_scale_specs
 
 
-_PRIMITIVE_PROTOCOL_FIELDS = (
+_REQUIRED_PRIMITIVE_PROTOCOLS = (
     "structure_protocol",
     "liquidity_protocol",
     "displacement_protocol",
@@ -40,32 +36,6 @@ _PRIMITIVE_PROTOCOL_FIELDS = (
     "group4_protocol",
     "group5_protocol",
 )
-
-
-def _configured_primitive_protocol_hashes(
-    observer: Mapping[str, Any],
-) -> dict[str, str]:
-    """Resolve and hash the exact primitive files bound by the model config."""
-
-    hashes: dict[str, str] = {}
-    repository = Path(__file__).resolve().parents[1]
-    for field in _PRIMITIVE_PROTOCOL_FIELDS:
-        value = observer.get(field)
-        if not isinstance(value, (str, Path)) or not str(value).strip():
-            raise CalibrationError(
-                f"typed calibration requires observer.{field}"
-            )
-        source = Path(value)
-        if not source.is_absolute() and not source.exists():
-            source = repository / source
-        try:
-            raw = source.read_bytes()
-        except OSError as error:
-            raise CalibrationError(
-                f"cannot read typed calibration protocol observer.{field}: {source}"
-            ) from error
-        hashes[field] = hashlib.sha256(raw).hexdigest()
-    return hashes
 
 
 class ContinuousSMCEngine:
@@ -106,7 +76,17 @@ class ContinuousSMCEngine:
         observer_raw = payload.get("observer")
         if not isinstance(observer_raw, Mapping):
             raise ValueError("model.observer must bind all typed primitive protocols")
-        primitive_protocol_hashes = _configured_primitive_protocol_hashes(observer_raw)
+        missing_protocols = [
+            field
+            for field in _REQUIRED_PRIMITIVE_PROTOCOLS
+            if not isinstance(observer_raw.get(field), (str, Path))
+            or not str(observer_raw.get(field)).strip()
+        ]
+        if missing_protocols:
+            raise ValueError(
+                "model.observer must bind typed primitive protocols: "
+                + ", ".join(missing_protocols)
+            )
         minimum = observer_raw.get("minimum_bars", {})
         observer = CausalObserver(
             ObserverConfig(
@@ -154,11 +134,6 @@ class ContinuousSMCEngine:
             TypedBrainCalibrator.from_file(
                 calibration_path,
                 expected_registry_hash=registry.fingerprint,
-                expected_code_hash=model_code_fingerprint(),
-                expected_primitive_protocol_hashes=primitive_protocol_hashes,
-                expected_brain_input_contract_hash=(
-                    brain_input_contract_hash(scale_specs)
-                ),
             )
             if calibration_path
             else TypedBrainCalibrator.identity()
@@ -231,7 +206,6 @@ class ContinuousSMCEngine:
         execution: ExecutionRealityInput | None = None,
         account: AccountState | None = None,
         belief_position: PositionSnapshot | None = None,
-        compute_snapshot_hash: bool = True,
     ) -> EngineSnapshot:
         account = account or AccountState(equity=100_000.0)
         update = self.reader.on_bar(bar)
@@ -249,24 +223,11 @@ class ContinuousSMCEngine:
         )
         decision = self.decision.decide(observation, belief, account)
         risk = self.risk.review(decision, observation, account)
-        snapshot_hash = (
-            content_hash(
-                {
-                    "observation": observation,
-                    "belief": belief,
-                    "decision": decision,
-                    "risk": risk,
-                }
-            )
-            if compute_snapshot_hash
-            else ""
-        )
         snapshot = EngineSnapshot(
             observation=observation,
             belief=belief,
             decision=decision,
             risk=risk,
-            snapshot_hash=snapshot_hash,
         )
         self._last_snapshot = snapshot
         return snapshot

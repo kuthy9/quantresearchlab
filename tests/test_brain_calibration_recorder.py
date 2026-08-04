@@ -21,25 +21,8 @@ from smc_trader.model import (
 
 
 TZ = "America/New_York"
-HASHES = {
-    "group12": "1" * 64,
-    "displacement": "2" * 64,
-    "group3": "3" * 64,
-    "group4": "4" * 64,
-    "group5": "5" * 64,
-    "liquidity": "6" * 64,
-}
-BRAIN_INPUT_CONTRACT_HASH = "7" * 64
-
-
 def _recorder() -> BrainCalibrationRecorder:
-    return BrainCalibrationRecorder(
-        registry_hash="a" * 64,
-        model_code_hash="b" * 64,
-        config_hash="c" * 64,
-        primitive_protocol_hashes=HASHES,
-        brain_input_contract_hash=BRAIN_INPUT_CONTRACT_HASH,
-    )
+    return BrainCalibrationRecorder()
 
 
 def _clock(minute: int = 0) -> pd.Timestamp:
@@ -188,7 +171,6 @@ def _snapshot(
     return SimpleNamespace(
         observation=observation,
         belief=belief,
-        snapshot_hash="f" * 64,
     )
 
 
@@ -241,7 +223,7 @@ def test_registers_four_targets_and_two_descriptive_rows_once() -> None:
     }
     assert all(row.liquidity_route_id == "route-1" for row in immediate)
     assert all(
-        row.brain_input_contract_hash == BRAIN_INPUT_CONTRACT_HASH
+        json.loads(row.sample_id)["dimension"] == row.dimension
         for row in immediate
     )
 
@@ -968,11 +950,11 @@ def test_checkpoint_roundtrip_and_data_boundary_censor() -> None:
     assert all(row.resolution == "data_gap_boundary" for row in rows)
 
 
-def test_legacy_checkpoint_without_brain_input_contract_fails_closed() -> None:
+def test_checkpoint_with_unknown_recorder_schema_fails_closed() -> None:
     state = _recorder().state_dict()
-    state.pop("brain_input_contract_hash")
+    state["schema_version"] = 999
 
-    with pytest.raises(ValueError, match="brain_input_contract_hash"):
+    with pytest.raises(ValueError, match="unsupported brain calibration recorder"):
         BrainCalibrationRecorder.from_state(state)
 
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import fields
+import hashlib
 import json
 from pathlib import Path
 import pickle
@@ -27,6 +28,18 @@ def test_stream_schemas_match_the_lightweight_contract() -> None:
     assert DECISION_FIELD_TYPES["model_action"] == "large_string"
     assert DECISION_FIELD_TYPES["invalidation_source_id"] == "large_string"
     assert DECISION_FIELD_TYPES["target_ids"] == "large_string"
+    assert DECISION_FIELD_TYPES["top_episode_id"] == "large_string"
+    assert "snapshot_hash" not in DECISION_FIELD_TYPES
+    assert "group3_boundary_transitions" not in DECISION_FIELD_TYPES
+    assert "group4_state" not in DECISION_FIELD_TYPES
+    for repeated_identity in (
+        "registry_hash",
+        "model_code_hash",
+        "config_hash",
+        "primitive_protocol_hashes",
+        "brain_input_contract_hash",
+    ):
+        assert repeated_identity not in BRAIN_CALIBRATION_FIELD_TYPES
 
 
 def _write_source(tmp_path: Path) -> Path:
@@ -106,6 +119,16 @@ def _run(command: list[str]) -> subprocess.CompletedProcess[str]:
     )
 
 
+def _decision_rows(output: Path) -> pd.DataFrame:
+    manifest = json.loads(
+        (output / "decision_shards.manifest.json").read_text()
+    )
+    return pd.concat(
+        [pd.read_parquet(output / item["path"]) for item in manifest["shards"]],
+        ignore_index=True,
+    )
+
+
 def test_default_replay_is_lightweight_resumable_and_deterministic(
     tmp_path: Path,
 ) -> None:
@@ -142,12 +165,22 @@ def test_default_replay_is_lightweight_resumable_and_deterministic(
         (uninterrupted_output / "summary.json").read_text()
     )
     assert resumed_summary["decision_rows"] == uninterrupted_summary["decision_rows"]
-    assert resumed_summary["rolling_state_commitment"] == (
-        uninterrupted_summary["rolling_state_commitment"]
+    pd.testing.assert_frame_equal(
+        _decision_rows(resumed_output),
+        _decision_rows(uninterrupted_output),
     )
     assert resumed_summary["resume_count"] == 1
-    assert resumed_summary["full_snapshot_hash_per_minute"] is False
     assert max(resumed_summary["peak_buffer_rows"].values()) <= 7
+
+    run_manifest = json.loads((resumed_output / "run_manifest.json").read_text())
+    assert len(run_manifest["source"]["sha256"]) == 64
+    assert run_manifest["model_config"]["identity"] == hashlib.sha256(
+        (ROOT / "configs/model.json").read_bytes()
+    ).hexdigest()
+    assert run_manifest["execution"]["mbo_source_sha256"] is None
+    completed_marker = json.loads((resumed_output / "COMPLETED.json").read_text())
+    assert completed_marker["status"] == "complete"
+    assert all("sha" not in key for key in completed_marker)
 
     assert (resumed_output / "decision_shards.manifest.json").is_file()
     for retired in (

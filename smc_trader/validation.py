@@ -1,4 +1,4 @@
-"""Causal data splits plus opt-in sampled-audit helpers."""
+"""Causal development, calibration, OOF, MBO and holdout data splits."""
 
 from __future__ import annotations
 
@@ -410,52 +410,10 @@ def load_validation_protocol(
     )
 
 
-@dataclass(frozen=True)
-class PathTestResult:
-    setup_id: str
-    hypothesis_key: str
-    entry_location_id: str | None
-    entry_path_id: str | None
-    playbook: str
-    direction: str
-    setup_started_at: pd.Timestamp
-    sequence_completed_at: pd.Timestamp
-    decision_time: pd.Timestamp
-    resolved_at: pd.Timestamp
-    outcome: str
-    success: bool
-    entry: float
-    invalidation: float
-    invalidation_source_id: str
-    target: float
-    target_source_id: str
-    deadline: pd.Timestamp
-    probability: float
-    raw_probability: float
-    uncertainty: float
-    phase: str
-    calibration_version: str
-    calibration_hash: str
-    mfe_R: float
-    mae_R: float
-    elapsed_minutes: int
-    formation_minutes: int
-    entry_touched: bool
-    entry_touched_at: pd.Timestamp | None
-    time_to_entry_minutes: int | None
-    ambiguous_same_bar: bool
-    decision_hash: str
-    protocol_version: str
-    protocol_hash: str
-    config_hash: str
-    code_hash: str
-
-
 __all__ = [
     "CausalSourceIdentity",
     "MBOExecutionArtifactIdentity",
     "MBOManifestIdentity",
-    "PathTestResult",
     "ValidationProtocol",
     "ValidationProtocolError",
     "ValidationWindow",

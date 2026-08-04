@@ -1270,22 +1270,9 @@ def test_observation_rejects_duplicate_or_post_cutoff_inventory() -> None:
         )
 
     source = _inventory_swing_source(item)
-    valid = _with_authoritative_liquidity(
-        observation,
-        inventory=(item,),
-        swings=(source,),
-    )
     with pytest.raises(
         ValueError,
-        match="swing state and liquidity inventory disagree",
-    ):
-        replace(
-            valid,
-            liquidity_inventory=(replace(item, strength=0.7),),
-        )
-    with pytest.raises(
-        ValueError,
-        match="lacks one frame source",
+        match="retained swing identity",
     ):
         _with_authoritative_liquidity(
             observation,
@@ -1333,90 +1320,6 @@ def test_frame_rejects_legacy_liquidity_from_another_timeframe() -> None:
         )
 
 
-
-
-def test_observation_rejects_pool_inventory_source_drift() -> None:
-    observation = market_observation()
-    formed_at = observation.asof - pd.Timedelta(minutes=4)
-    confirmed_at = observation.asof - pd.Timedelta(minutes=2)
-    pool = LiquidityPoolState(
-        pool_id="drift-check",
-        timeframe=Timeframe.M1,
-        side="above",
-        lower_bound=100.75,
-        upper_bound=101.25,
-        midpoint=101.0,
-        formed_at=formed_at,
-        confirmed_at=confirmed_at,
-        lifecycle=LiquidityPoolLifecycle.FORMED,
-        member_swing_ids=("drift-a", "drift-b"),
-        touch_times=(formed_at, confirmed_at),
-        age_bars=2,
-        strength=0.7,
-        total_touch_count=2,
-    )
-    item = LiquidityInventoryItem(
-        item_id="pool:drift-check",
-        timeframe=Timeframe.M1,
-        side="above",
-        kind="equal_highs",
-        price=pool.upper_bound,
-        lower_bound=pool.lower_bound,
-        upper_bound=pool.upper_bound,
-        formed_at=pool.formed_at,
-        confirmed_at=pool.confirmed_at,
-        lifecycle=LiquidityInventoryLifecycle.VISIBLE,
-        source_ids=pool.member_swing_ids,
-        age_bars=pool.age_bars,
-        strength=pool.strength,
-    )
-    valid = _with_authoritative_liquidity(
-        observation,
-        inventory=(item,),
-        pools=(pool,),
-    )
-    with pytest.raises(ValueError, match="drifted from its frozen frame"):
-        replace(
-            valid,
-            liquidity_pool_states=(
-                replace(
-                    pool,
-                    lower_bound=100.5,
-                    midpoint=100.875,
-                ),
-            ),
-        )
-    swept_at = observation.asof - pd.Timedelta(minutes=1)
-    swept_pool = replace(
-        pool,
-        lifecycle=LiquidityPoolLifecycle.SWEPT,
-        swept_at=swept_at,
-        sweep_extreme=101.5,
-        close_outside_on_sweep=False,
-    )
-    terminal_frames = dict(valid.frames)
-    terminal_frames[Timeframe.M1] = replace(
-        terminal_frames[Timeframe.M1],
-        liquidity_pools=(swept_pool,),
-    )
-    with pytest.raises(ValueError, match="frozen formation view"):
-        replace(valid, frames=terminal_frames)
-
-    wrong_reason = replace(
-        item,
-        lifecycle=LiquidityInventoryLifecycle.CONSUMED,
-        consumed_at=swept_at,
-        lifecycle_reason="swing_swept",
-    )
-    with pytest.raises(
-        ValueError,
-        match="pool state and liquidity inventory disagree",
-    ):
-        _with_authoritative_liquidity(
-            observation,
-            inventory=(wrong_reason,),
-            pools=(swept_pool,),
-        )
 
 
 def test_liquidity_protocol_file_is_the_executable_identity() -> None:

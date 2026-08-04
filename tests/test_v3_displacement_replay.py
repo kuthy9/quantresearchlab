@@ -4,7 +4,6 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from smc_trader.calibration import model_code_fingerprint
 from smc_trader.calibration_replay import ReplayCheckpointStore
 from smc_trader.causal import CausalMarketReader, ReaderUpdate
 from smc_trader.displacement import DisplacementLifecycle, DisplacementProtocol
@@ -406,7 +405,6 @@ def _bindings() -> dict[str, str]:
         "semantic_base_sha256": SEMANTIC_BASE_SHA,
         "preregistration_sha256": PREREGISTRATION_SHA,
         "protocol_sha256": _protocol().protocol_hash,
-        "model_code_fingerprint": model_code_fingerprint(),
     }
 
 

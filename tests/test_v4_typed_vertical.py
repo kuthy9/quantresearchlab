@@ -12,10 +12,6 @@ from smc_trader.calibration import (
     TYPED_CALIBRATION_DIMENSIONS,
     TypedBrainCalibrator,
 )
-from smc_trader.decision_trace import (
-    build_decision_trace,
-    build_frozen_decision_packet,
-)
 from smc_trader.decision import UtilityDecisionLayer
 from smc_trader.group5 import CausalGroup5Reducer, Group5Protocol
 from smc_trader.model import (
@@ -24,7 +20,6 @@ from smc_trader.model import (
     BOSScope,
     BreakOfStructureState,
     Candle,
-    EngineSnapshot,
     Direction,
     ExecutionObservation,
     FairValueGapLifecycle,
@@ -44,7 +39,6 @@ from smc_trader.model import (
     SwingPoint,
     SwingSide,
     Timeframe,
-    content_hash,
 )
 from smc_trader.playbook_registry import load_playbook_registry
 from smc_trader.playbooks import PlaybookBrain
@@ -111,12 +105,9 @@ def _mapped_brain() -> PlaybookBrain:
         registry=registry,
         calibrator=TypedBrainCalibrator(
             version="typed-test-ready",
-            fingerprint="f" * 64,
             registry_hash=registry.fingerprint,
             maps=maps,
             status="ready",
-            primitive_protocol_hashes={},
-            brain_input_contract_hash="e" * 64,
         ),
     )
 
@@ -453,19 +444,6 @@ def _advance_observation(
     )
 
 
-def _snapshot(
-    observation: MarketObservation,
-    belief,
-    marker: str,
-) -> EngineSnapshot:
-    decision = UtilityDecisionLayer().decide(observation, belief)
-    return EngineSnapshot(
-        observation=observation,
-        belief=belief,
-        decision=decision,
-        risk=StructuralRiskEngine().review(decision, observation),
-        snapshot_hash=marker * 64,
-    )
 
 
 def test_dfp_vertical_chain_uses_exact_group5_plan_and_risk_binding() -> None:
@@ -535,254 +513,6 @@ def test_dfp_vertical_chain_uses_exact_group5_plan_and_risk_binding() -> None:
     assert vetoed.final_action.value == "abstain"
 
 
-def test_typed_decision_trace_and_frozen_packet_are_causal_and_complete() -> None:
-    _, _, _, forming, triggered = _dfp_fixture()
-    brain = _brain()
-    prior_belief = brain.update(forming)
-    current_belief = brain.update(triggered)
-    decision_layer = UtilityDecisionLayer()
-    risk_engine = StructuralRiskEngine()
-    prior_decision = decision_layer.decide(forming, prior_belief)
-    current_decision = decision_layer.decide(triggered, current_belief)
-    prior = EngineSnapshot(
-        observation=forming,
-        belief=prior_belief,
-        decision=prior_decision,
-        risk=risk_engine.review(prior_decision, forming),
-        snapshot_hash="1" * 64,
-    )
-    current = EngineSnapshot(
-        observation=triggered,
-        belief=current_belief,
-        decision=current_decision,
-        risk=risk_engine.review(current_decision, triggered),
-        snapshot_hash="2" * 64,
-    )
-    source_bar = _m1(
-        1,
-        open_=100.5,
-        high=100.75,
-        low=99.5,
-        close=100.5,
-    )
-    account = AccountState(equity=100_000.0)
-    trace = build_decision_trace(
-        current,
-        prior,
-        source_bar=source_bar,
-        account_state=account,
-    )
-
-    key = "displacement_first_pullback:long"
-    assert trace["future_path_included"] is False
-    assert trace["prior_belief_asof"] == forming.asof.isoformat()
-    assert trace["observation"]["source_bar"]["end"] == (
-        triggered.asof.isoformat()
-    )
-    assert trace["belief_delta"][key]["phase_from"] == "waiting_location"
-    assert trace["belief_delta"][key]["phase_to"] == "executable"
-    assert set(trace["belief_t"][key]["qualities"]) == {
-        "thesis_strength",
-        "sequence_progress",
-        "location_quality",
-        "entry_readiness",
-        "delivery_quality",
-        "uncertainty",
-    }
-    assert set(trace["belief_t"][key]["raw_qualities"]) == {
-        "thesis_strength",
-        "sequence_progress",
-        "location_quality",
-        "entry_readiness",
-        "delivery_quality",
-        "uncertainty",
-    }
-    assert set(trace["belief_t"][key]["evidence_groups"]) == {
-        "structure",
-        "displacement",
-        "location",
-        "liquidity",
-        "trigger",
-        "execution",
-    }
-    summary = trace["belief_t"][key]
-    hypothesis = current_belief.hypotheses[key]
-    assert summary["context_id"] == hypothesis.context_id
-    assert summary["episode_id"] == hypothesis.episode_id
-    assert (
-        summary["initiating_event_id"]
-        == hypothesis.initiating_event_id
-    )
-    assert (
-        summary["evidence_revision_id"]
-        == hypothesis.evidence_revision_id
-    )
-    assert summary["terminal_at"] is None
-    assert summary["terminal_reason"] is None
-    assert summary["terminal_source_ids"] == []
-    assert summary["eligible"] is hypothesis.eligible
-    assert (
-        summary["effective_probability"]
-        == hypothesis.effective_probability
-    )
-    assert trace["belief_delta"][key]["episode_id_from"] == (
-        prior_belief.hypotheses[key].episode_id
-    )
-    assert trace["belief_delta"][key]["episode_id_to"] == (
-        hypothesis.episode_id
-    )
-    assert trace["belief_t"][key]["hard_gates"]
-    evidence_rows = (
-        trace["belief_t"][key]["supporting"]
-        + trace["belief_t"][key]["contradicting"]
-    )
-    assert evidence_rows
-    assert all(
-        item["reason"]
-        for item in evidence_rows
-    )
-    assert trace["decision"]["selected_action"] == "enter"
-    assert trace["risk"]["final_action"] == "enter"
-    assert {
-        item["family"] for item in trace["typed_state_transitions"]
-    }.intersection({"entry_location", "entry_path"})
-    path_transitions = [
-        item
-        for item in trace["typed_state_transitions"]
-        if item["family"] == "entry_path"
-    ]
-    assert path_transitions
-    assert all(
-        item["state"]["sequence_id"] == item["entity_id"]
-        for item in path_transitions
-    )
-    assert not any(
-        item.get("lifecycle") == "closed"
-        and item.get("transition_reason")
-        in {
-            "micro_bos_aligned",
-            "pool_reversal_sequence_observed",
-            "qualified_reacceptance_held",
-            "zone_rejection_observed",
-        }
-        for item in trace["events_invalidated"]
-    )
-
-    histories = {
-        Timeframe.H4: (
-            Candle(
-                timeframe=Timeframe.H4,
-                start=triggered.asof - pd.Timedelta(hours=4),
-                end=triggered.asof,
-                open=100.0,
-                high=101.0,
-                low=99.0,
-                close=100.5,
-                volume=400.0,
-                symbol="NQH5",
-                instrument_id=1,
-                observed_minutes=240,
-                expected_minutes=240,
-                complete=True,
-            ),
-        ),
-        Timeframe.H1: (
-            Candle(
-                timeframe=Timeframe.H1,
-                start=triggered.asof - pd.Timedelta(hours=1),
-                end=triggered.asof,
-                open=100.0,
-                high=101.0,
-                low=99.0,
-                close=100.5,
-                volume=200.0,
-                symbol="NQH5",
-                instrument_id=1,
-                observed_minutes=60,
-                expected_minutes=60,
-                complete=True,
-            ),
-        ),
-        Timeframe.M5: (
-            Candle(
-                timeframe=Timeframe.M5,
-                start=triggered.asof - pd.Timedelta(minutes=5),
-                end=triggered.asof,
-                open=100.0,
-                high=101.0,
-                low=99.0,
-                close=100.5,
-                volume=150.0,
-                symbol="NQH5",
-                instrument_id=1,
-                observed_minutes=5,
-                expected_minutes=5,
-                complete=True,
-            ),
-        ),
-        Timeframe.M1: (source_bar,),
-    }
-    packet = build_frozen_decision_packet(
-        current,
-        histories,
-        prior,
-        hypothesis_key=key,
-        source_bar=source_bar,
-        account_state=account,
-    )
-    claimed_hash = packet["packet_hash"]
-    payload = dict(packet)
-    payload.pop("packet_hash")
-    assert claimed_hash == content_hash(payload)
-    assert packet["maximum_market_time"] == triggered.asof.isoformat()
-    assert packet["future_path"] == {
-        "included": False,
-        "revealed": False,
-        "storage": "physically_separate_artifact",
-    }
-    assert packet["decision_trace"]["decision_hash"] == current.snapshot_hash
-
-    reset_observation = replace(
-        triggered,
-        anomalies=tuple(
-            sorted(
-                {
-                    *triggered.anomalies,
-                    "data_gap_history_reset",
-                }
-            )
-        ),
-    )
-    reset_current = replace(current, observation=reset_observation)
-    reset_trace = build_decision_trace(
-        reset_current,
-        prior,
-        source_bar=source_bar,
-        account_state=account,
-    )
-    assert reset_trace["brain_reset_before_update"] is True
-    assert reset_trace["belief_t_minus_1"] is None
-    assert reset_trace["prior_belief_asof"] is None
-    assert reset_trace["discarded_pre_reset_belief_asof"] == (
-        forming.asof.isoformat()
-    )
-    assert all(
-        item["initialized"]
-        for item in reset_trace["belief_delta"].values()
-    )
-    reset_packet = build_frozen_decision_packet(
-        reset_current,
-        histories,
-        prior,
-        hypothesis_key=key,
-        source_bar=source_bar,
-        account_state=account,
-    )
-    assert reset_packet["brain_reset_before_update"] is True
-    assert reset_packet["belief_t_minus_1"] is None
-    assert reset_packet["belief_discarded_before_reset"]["asof"] == (
-        forming.asof.isoformat()
-    )
 
 
 def test_dfp_freezes_draw_and_does_not_retarget_after_setup() -> None:
@@ -1018,7 +748,6 @@ def test_typed_calibration_maps_outputs_without_feeding_back_into_raw_belief() -
     assert calibrated.raw_probability == raw_thesis
     assert calibrated.probability == calibrated.thesis_strength
     assert calibrated.calibration_version == "typed-test-ready"
-    assert calibrated.calibration_hash == "f" * 64
     assert calibrated.phase is PlaybookPhase.EXECUTABLE
 
     repeated = brain.update(
@@ -1066,29 +795,6 @@ def test_terminal_episode_is_immutable_and_a_newer_episode_can_rearm() -> None:
     assert not terminal.eligible
     assert terminal.effective_probability == 0.0
 
-    terminal_trace = build_decision_trace(
-        _snapshot(terminal_observation, terminal_belief, "t"),
-        _snapshot(triggered, active_belief, "a"),
-        hypothesis_key=key,
-    )
-    terminal_summary = terminal_trace["belief_t"][key]
-    terminal_delta = terminal_trace["belief_delta"][key]
-    assert terminal_summary["episode_id"] == active.episode_id
-    assert terminal_summary["eligible"] is False
-    assert terminal_summary["effective_probability"] == 0.0
-    assert terminal_summary["terminal_at"] == (
-        terminal_observation.asof.isoformat()
-    )
-    assert terminal_summary["terminal_reason"] == (
-        "frozen_invalidation_breached"
-    )
-    assert terminal_delta["episode_changed"] is False
-    assert terminal_delta["terminal_from"] is None
-    assert terminal_delta["terminal_to"]["reason"] == (
-        "frozen_invalidation_breached"
-    )
-    assert terminal_delta["terminal_changed"] is True
-
     unchanged_observation = _advance_observation(
         triggered,
         terminal_observation.asof + pd.Timedelta(minutes=5),
@@ -1134,21 +840,6 @@ def test_terminal_episode_is_immutable_and_a_newer_episode_can_rearm() -> None:
     assert rearmed.context_id == terminal.context_id
     assert rearmed.terminal_at is None
     assert rearmed.eligible
-
-    rearm_trace = build_decision_trace(
-        _snapshot(rearmed_observation, rearmed_belief, "r"),
-        _snapshot(unchanged_observation, unchanged_belief, "u"),
-        hypothesis_key=key,
-    )
-    rearm_delta = rearm_trace["belief_delta"][key]
-    assert rearm_delta["episode_id_from"] == terminal.episode_id
-    assert rearm_delta["episode_id_to"] == rearmed.episode_id
-    assert rearm_delta["episode_changed"] is True
-    assert rearm_delta["terminal_from"]["reason"] == (
-        "frozen_invalidation_breached"
-    )
-    assert rearm_delta["terminal_to"] is None
-    assert rearm_delta["terminal_changed"] is True
 
 
 def test_historical_entry_trigger_does_not_weaken_a_filled_dfp() -> None:
@@ -1709,16 +1400,6 @@ def test_pre_entry_episode_freezes_invalidation_and_closes_on_breach() -> None:
     assert terminal.invalidation == active.invalidation
     assert active.invalidation.source_level_id in terminal.terminal_source_ids
     assert not terminal.eligible
-
-    trace = build_decision_trace(
-        _snapshot(breached_observation, terminal_belief, "e"),
-        _snapshot(observation, active_belief, "d"),
-        hypothesis_key=key,
-    )
-    assert trace["belief_t"][key]["episode_deadline"] == (
-        active.episode_deadline.isoformat()
-    )
-    assert trace["belief_delta"][key]["episode_deadline_changed"] is False
 
     reclaimed = brain.update(
         _advance_observation(

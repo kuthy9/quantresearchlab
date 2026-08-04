@@ -538,7 +538,7 @@ def test_pool_source_must_exist_before_bar_then_sweep_resolves_next_bar() -> Non
     assert same_bar_observation.manipulations == (resolved,)
     with pytest.raises(
         ValueError,
-        match="first-crossed inventory source",
+        match="retained inventory identity",
     ):
         replace(
             market_observation(

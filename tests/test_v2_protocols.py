@@ -14,7 +14,6 @@ from scripts.materialize_mbo_execution import (
 )
 from smc_trader.calibration import (
     CalibrationError,
-    model_code_fingerprint,
     monotone_reliability_points,
 )
 from smc_trader.execution import TopOfBook, TopOfBookExecutionProvider
@@ -463,13 +462,6 @@ def test_validation_protocol_protects_sealed_holdout_boundary() -> None:
             pd.Timestamp("2026-03-31", tz=TZ),
             pd.Timestamp("2026-04-02", tz=TZ),
         )
-
-
-def test_model_code_fingerprint_is_stable_and_sha256_shaped() -> None:
-    first = model_code_fingerprint()
-    assert first == model_code_fingerprint()
-    assert len(first) == 64
-    int(first, 16)
 
 
 def test_constant_execution_assumption_cannot_pass_entry_risk() -> None:

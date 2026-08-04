@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-import hashlib
 import json
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -14,14 +13,6 @@ from .model import Playbook, clamp
 
 class CalibrationError(ValueError):
     """Raised when a probability calibration artifact is unusable."""
-
-
-def _valid_sha256(value: Any) -> bool:
-    return bool(
-        isinstance(value, str)
-        and len(value) == 64
-        and all(character in "0123456789abcdef" for character in value)
-    )
 
 
 TYPED_CALIBRATION_DIMENSIONS = (
@@ -37,47 +28,6 @@ TYPED_ACTIVE_PLAYBOOKS = (
     Playbook.LIQUIDITY_SWEEP_REVERSAL,
 )
 TYPED_PARKED_PLAYBOOKS = (Playbook.FAILED_AUCTION_VALUE_RETURN,)
-
-
-MODEL_CODE_FILES = (
-    "calibration.py",
-    "causal.py",
-    "decision.py",
-    "displacement.py",
-    "displacement_observer.py",
-    "engine.py",
-    "execution.py",
-    "group3.py",
-    "group4.py",
-    "group5.py",
-    "io.py",
-    "liquidity.py",
-    "market_clock.py",
-    "mbo.py",
-    "model.py",
-    "observation.py",
-    "playbook_registry.py",
-    "playbooks.py",
-    "risk.py",
-    "scene_graph.py",
-    "simulation.py",
-    "structure.py",
-    "validation.py",
-)
-
-
-def model_code_fingerprint() -> str:
-    """Hash the code that can change beliefs, actions, risk, or fills."""
-
-    package = Path(__file__).resolve().parent
-    digest = hashlib.sha256()
-    for name in MODEL_CODE_FILES:
-        source = package / name
-        digest.update(name.encode("utf-8"))
-        digest.update(b"\0")
-        digest.update(source.read_bytes())
-        digest.update(b"\0")
-    return digest.hexdigest()
 
 
 @dataclass(frozen=True)
@@ -199,7 +149,7 @@ def _load_dimension_map(
 
 @dataclass(frozen=True)
 class TypedBrainCalibrator:
-    """Strict v4 maps for typed causal belief dimensions.
+    """Maps for typed causal belief dimensions.
 
     ``sequence_progress`` is a deterministic state-machine projection and is
     deliberately not calibrated.  FAVR remains observable but parked, so a
@@ -207,31 +157,17 @@ class TypedBrainCalibrator:
     """
 
     version: str
-    fingerprint: str
     registry_hash: str | None
     maps: Mapping[Playbook, Mapping[str, DimensionReliabilityMap]]
     status: str
-    primitive_protocol_hashes: Mapping[str, str]
-    brain_input_contract_hash: str | None = None
-
-    def __post_init__(self) -> None:
-        if self.status == "ready" and not _valid_sha256(
-            self.brain_input_contract_hash
-        ):
-            raise CalibrationError(
-                "ready typed calibration requires a Brain input contract hash"
-            )
 
     @classmethod
     def identity(cls) -> "TypedBrainCalibrator":
         return cls(
             version="identity-unvalidated",
-            fingerprint="identity-unvalidated",
             registry_hash=None,
             maps={},
             status="identity_unvalidated",
-            primitive_protocol_hashes={},
-            brain_input_contract_hash=None,
         )
 
     @classmethod
@@ -240,9 +176,6 @@ class TypedBrainCalibrator:
         path: str | Path,
         *,
         expected_registry_hash: str | None,
-        expected_code_hash: str | None,
-        expected_primitive_protocol_hashes: Mapping[str, str] | None,
-        expected_brain_input_contract_hash: str | None,
     ) -> "TypedBrainCalibrator":
         source = Path(path)
         if not source.is_absolute() and not source.exists():
@@ -265,47 +198,6 @@ class TypedBrainCalibrator:
         registry_hash = str(payload.get("playbook_registry_hash", ""))
         if registry_hash != expected_registry_hash:
             raise CalibrationError("typed calibration artifact registry hash is stale")
-        if not expected_code_hash:
-            raise CalibrationError("expected model-code hash is required")
-        code_hash = str(payload.get("model_code_hash", ""))
-        if code_hash != expected_code_hash:
-            raise CalibrationError("typed calibration artifact model-code hash is stale")
-
-        expected_protocols = dict(expected_primitive_protocol_hashes or {})
-        if not expected_protocols or any(
-            not isinstance(name, str)
-            or not name
-            or not isinstance(digest, str)
-            or not digest
-            for name, digest in expected_protocols.items()
-        ):
-            raise CalibrationError(
-                "expected primitive protocol hashes are required"
-            )
-        artifact_protocols = payload.get("primitive_protocol_hashes")
-        if not isinstance(artifact_protocols, Mapping):
-            raise CalibrationError(
-                "typed calibration artifact has no primitive protocol hashes"
-            )
-        normalized_protocols = {
-            str(name): str(digest)
-            for name, digest in artifact_protocols.items()
-        }
-        if normalized_protocols != expected_protocols:
-            raise CalibrationError(
-                "typed calibration artifact primitive protocol hashes are stale"
-            )
-
-        if not _valid_sha256(expected_brain_input_contract_hash):
-            raise CalibrationError("expected Brain input contract hash is required")
-        artifact_input_contract_hash = str(
-            payload.get("brain_input_contract_hash", "")
-        )
-        if artifact_input_contract_hash != expected_brain_input_contract_hash:
-            raise CalibrationError(
-                "typed calibration artifact Brain input contract hash is stale"
-            )
-
         raw_playbooks = payload.get("playbooks")
         if not isinstance(raw_playbooks, Mapping):
             raise CalibrationError("typed calibration artifact has no playbook maps")
@@ -355,12 +247,9 @@ class TypedBrainCalibrator:
 
         return cls(
             version=version,
-            fingerprint=hashlib.sha256(raw).hexdigest(),
             registry_hash=registry_hash,
             maps=maps,
             status=status,
-            primitive_protocol_hashes=normalized_protocols,
-            brain_input_contract_hash=artifact_input_contract_hash,
         )
 
     def apply(
@@ -526,13 +415,11 @@ __all__ = [
     "CalibrationError",
     "DimensionReliabilityMap",
     "DimensionReliabilityPoint",
-    "MODEL_CODE_FILES",
     "ReliabilityPoint",
     "TYPED_ACTIVE_PLAYBOOKS",
     "TYPED_CALIBRATION_DIMENSIONS",
     "TYPED_PARKED_PLAYBOOKS",
     "TYPED_SEQUENCE_DIMENSION",
     "TypedBrainCalibrator",
-    "model_code_fingerprint",
     "monotone_reliability_points",
 ]

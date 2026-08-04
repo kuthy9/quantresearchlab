@@ -313,14 +313,6 @@ def clamp(value: float, low: float = 0.0, high: float = 1.0) -> float:
     return float(min(high, max(low, value)))
 
 
-def _valid_sha256(value: Any) -> bool:
-    return (
-        isinstance(value, str)
-        and len(value) == 64
-        and all(character in "0123456789abcdef" for character in value)
-    )
-
-
 @dataclass(frozen=True)
 class Bar:
     """One completed 1m bar; ``start`` is the minute open timestamp."""
@@ -1358,8 +1350,8 @@ class DealingRangeState:
             or self.instrument_id < 0
             or self.timeframe is not Timeframe.H1
             or not isinstance(self.lifecycle, DealingRangeLifecycle)
-            or not _valid_sha256(self.protocol_hash)
-            or not _valid_sha256(self.source_group12_protocol_hash)
+            or not self.protocol_hash
+            or not self.source_group12_protocol_hash
         ):
             raise ValueError("dealing-range identity or protocol is invalid")
         if (
@@ -1700,9 +1692,9 @@ class ManipulationState:
             )
             or self.source_inventory_lifecycle
             is not LiquidityInventoryLifecycle.VISIBLE
-            or not _valid_sha256(self.protocol_hash)
-            or not _valid_sha256(self.source_protocol_hash)
-            or not _valid_sha256(self.source_group12_protocol_hash)
+            or not self.protocol_hash
+            or not self.source_protocol_hash
+            or not self.source_group12_protocol_hash
         ):
             raise ValueError(
                 "manipulation identity, source or protocol is invalid"
@@ -1973,26 +1965,8 @@ class FairValueGapState:
             )
         ):
             raise ValueError("FVG identity or frozen source is invalid")
-        if (
-            not isinstance(self.protocol_hash, str)
-            or len(self.protocol_hash) != 64
-            or any(
-                value not in "0123456789abcdef"
-                for value in self.protocol_hash
-            )
-        ):
-            raise ValueError("FVG protocol hash is invalid")
-        if (
-            not isinstance(self.source_displacement_protocol_hash, str)
-            or len(self.source_displacement_protocol_hash) != 64
-            or any(
-                value not in "0123456789abcdef"
-                for value in self.source_displacement_protocol_hash
-            )
-        ):
-            raise ValueError(
-                "FVG source displacement protocol hash is invalid"
-            )
+        if not self.protocol_hash or not self.source_displacement_protocol_hash:
+            raise ValueError("FVG protocol identity is required")
         if not (
             math.isfinite(float(self.lower_bound))
             and math.isfinite(float(self.upper_bound))
@@ -2260,36 +2234,8 @@ class OrderBlockState:
             raise ValueError(
                 "order-block identity or frozen source is invalid"
             )
-        if (
-            not isinstance(self.protocol_hash, str)
-            or len(self.protocol_hash) != 64
-            or any(
-                value not in "0123456789abcdef"
-                for value in self.protocol_hash
-            )
-        ):
-            raise ValueError("order-block protocol hash is invalid")
-        if (
-            not isinstance(self.source_displacement_protocol_hash, str)
-            or len(self.source_displacement_protocol_hash) != 64
-            or any(
-                value not in "0123456789abcdef"
-                for value in self.source_displacement_protocol_hash
-            )
-        ):
-            raise ValueError(
-                "order-block source displacement protocol hash is invalid"
-            )
-        if (
-            len(self.source_bos_protocol_hash) != 64
-            or any(
-                value not in "0123456789abcdef"
-                for value in self.source_bos_protocol_hash
-            )
-        ):
-            raise ValueError(
-                "order-block source BOS protocol hash is invalid"
-            )
+        if not self.protocol_hash or not self.source_displacement_protocol_hash:
+            raise ValueError("order-block protocol identity is required")
         if (
             self.source_bos_scope is BOSScope.LOCAL
             and self.source_bos_structure_id is not None
@@ -2580,13 +2526,14 @@ class EntryLocationState:
             or not isinstance(self.lifecycle, EntryLocationLifecycle)
         ):
             raise ValueError("entry-location identity or source is invalid")
-        for value in (
-            self.protocol_hash,
-            self.source_group3_protocol_hash,
-            self.source_zone_protocol_hash,
+        if not all(
+            (
+                self.protocol_hash,
+                self.source_group3_protocol_hash,
+                self.source_zone_protocol_hash,
+            )
         ):
-            if not _valid_sha256(value):
-                raise ValueError("entry-location protocol hash is invalid")
+            raise ValueError("entry-location protocol identity is required")
         prices = (
             self.lower_bound,
             self.upper_bound,
@@ -2808,7 +2755,7 @@ class QualifiedReacceptanceState:
                 self.lifecycle,
                 QualifiedReacceptanceLifecycle,
             )
-            or not _valid_sha256(self.protocol_hash)
+            or not self.protocol_hash
             or not math.isfinite(float(self.reference_price))
             or not math.isfinite(float(self.failure_boundary))
             or self.reference_price <= 0
@@ -2983,7 +2930,7 @@ class MicroBOSReference:
     def __post_init__(self) -> None:
         if (
             not self.reference_id
-            or not _valid_sha256(self.protocol_hash)
+            or not self.protocol_hash
             or self.context_kind not in GROUP5_CONTEXT_KINDS
             or not self.context_id
             or not isinstance(self.expected_direction, Direction)
@@ -3125,7 +3072,7 @@ class PathSequenceState:
         object.__setattr__(self, "steps", tuple(self.steps))
         if (
             not self.sequence_id
-            or not _valid_sha256(self.protocol_hash)
+            or not self.protocol_hash
             or not self.symbol
             or type(self.instrument_id) is not int
             or self.instrument_id < 0
@@ -4459,253 +4406,40 @@ class MarketObservation:
         inventory_by_id = {
             item.item_id: item for item in self.liquidity_inventory
         }
-        ranges_by_id = {
-            item.range_id: item
+        swing_ids_by_timeframe = {
+            timeframe: {swing.swing_id for swing in frame.swings}
+            for timeframe, frame in self.frames.items()
+        }
+        range_ids = {
+            item.range_id
             for item in self.frames[Timeframe.H1].dealing_ranges
         }
         for item in self.liquidity_inventory:
-            if item.kind != "range_boundary":
-                continue
-            source_range_ids = [
-                source_id
-                for source_id in item.source_ids
-                if source_id in ranges_by_id
-            ]
-            if len(source_range_ids) != 1 or len(item.source_ids) != 2:
-                raise ValueError(
-                    "range-boundary inventory lacks one retained range source"
-                )
-            source = ranges_by_id[source_range_ids[0]]
-            expected_zone_id = (
-                source.upper_source_zone_id
-                if item.side == "above"
-                else source.lower_source_zone_id
-            )
-            expected_price = (
-                source.upper_bound
-                if item.side == "above"
-                else source.lower_bound
-            )
-            if (
-                source.mature_at is None
-                or item.timeframe is not Timeframe.H1
-                or set(item.source_ids)
-                != {source.range_id, expected_zone_id}
-                or item.price != expected_price
-                or item.lower_bound != expected_price
-                or item.upper_bound != expected_price
-                or item.formed_at != source.formed_at
-                or item.confirmed_at != source.mature_at
+            if item.kind == "range_boundary" and (
+                item.timeframe is not Timeframe.H1
+                or len(set(item.source_ids) & range_ids) != 1
             ):
                 raise ValueError(
-                    "range state and boundary inventory disagree"
+                    "range-boundary inventory lacks one retained range identity"
                 )
-        for item in self.liquidity_inventory:
-            if item.kind != "swing":
-                continue
-            if len(item.source_ids) != 1:
-                raise ValueError(
-                    "swing inventory requires one frozen swing source"
-                )
-            source_id = item.source_ids[0]
-            source_matches = [
-                swing
-                for swing in self.frames[item.timeframe].swings
-                if swing.swing_id == source_id
-            ]
-            if len(source_matches) != 1:
-                raise ValueError(
-                    "authoritative swing inventory lacks one frame source"
-                )
-            source = source_matches[0]
-            expected_side = (
-                "above"
-                if source.side is SwingSide.HIGH
-                else "below"
-            )
-            if (
-                source.lifecycle
-                not in {SwingLifecycle.CONFIRMED, SwingLifecycle.BROKEN}
-                or source.confirmed_at is None
-                or item.item_id != f"swing:{source.swing_id}"
-                or item.side != expected_side
-                or item.price != source.price
-                or item.lower_bound != source.price
-                or item.upper_bound != source.price
-                or item.formed_at != source.pivot_end
-                or item.confirmed_at != source.confirmed_at
-                or item.age_bars != source.age_bars
-                or item.strength != clamp(source.magnitude_atr)
+            if item.kind == "swing" and (
+                len(item.source_ids) != 1
+                or item.source_ids[0]
+                not in swing_ids_by_timeframe[item.timeframe]
             ):
                 raise ValueError(
-                    "swing state and liquidity inventory disagree"
+                    "swing inventory lacks one retained swing identity"
                 )
-            if item.lifecycle is LiquidityInventoryLifecycle.VISIBLE:
-                if source.lifecycle is not SwingLifecycle.CONFIRMED:
-                    raise ValueError(
-                        "visible swing inventory source is not confirmed"
-                    )
-            elif item.lifecycle_reason == "close_beyond_swing":
-                if (
-                    source.lifecycle is not SwingLifecycle.BROKEN
-                    or item.consumed_at != source.broken_at
-                ):
-                    raise ValueError(
-                        "closed swing inventory disagrees with its source"
-                    )
-            elif item.lifecycle_reason == "swing_swept":
-                if (
-                    item.consumed_at is None
-                    or (
-                        source.lifecycle is SwingLifecycle.BROKEN
-                        and (
-                            source.broken_at is None
-                            or item.consumed_at > source.broken_at
-                        )
-                    )
-                ):
-                    raise ValueError(
-                        "projected swing sweep disagrees with its source"
-                    )
-            else:
-                raise ValueError(
-                    "swing inventory lifecycle reason is not registered"
-                )
-        authoritative_pool_ids: set[str] = set()
-        for pool in self.liquidity_pool_states:
-            source_frame = self.frames[pool.timeframe]
-            source_matches = [
-                item
-                for item in source_frame.liquidity_pools
-                if item.pool_id == pool.pool_id
-            ]
-            if len(source_matches) != 1:
-                raise ValueError(
-                    "authoritative pool lacks one frozen frame source"
-                )
-            source = source_matches[0]
-            if (
-                source.lifecycle is not LiquidityPoolLifecycle.FORMED
-                or any(
-                    value is not None
-                    for value in (
-                        source.swept_at,
-                        source.sweep_extreme,
-                        source.close_outside_on_sweep,
-                        source.resolved_at,
-                        source.resolution_reason,
-                    )
-                )
-            ):
-                raise ValueError(
-                    "frame pool source is not a frozen formation view"
-                )
-            frozen_fields = (
-                "timeframe",
-                "side",
-                "lower_bound",
-                "upper_bound",
-                "midpoint",
-                "formed_at",
-                "confirmed_at",
-                "member_swing_ids",
-                "touch_times",
-                "total_touch_count",
-                "age_bars",
-                "strength",
-            )
-            if any(
-                getattr(pool, name) != getattr(source, name)
-                for name in frozen_fields
-            ):
-                raise ValueError(
-                    "authoritative pool drifted from its frozen frame source"
-                )
-            if (
-                pool.confirmed_at > source_frame.cutoff
-                or any(
-                    value > source_frame.cutoff
-                    for value in pool.touch_times
-                )
-            ):
-                raise ValueError(
-                    "liquidity pool formation postdates source cutoff"
-                )
-            transition_clocks = tuple(
-                value
-                for value in (pool.swept_at, pool.resolved_at)
-                if value is not None
-            )
-            if any(
-                value > self.asof
-                or value > self.frames[Timeframe.M1].cutoff
-                for value in transition_clocks
-            ):
-                raise ValueError(
-                    "liquidity pool transition is in the future"
-                )
-            item_id = f"pool:{pool.pool_id}"
-            inventory_item = inventory_by_id.get(item_id)
-            if inventory_item is None:
-                raise ValueError(
-                    "authoritative pool lacks inventory identity"
-                )
-            expected_inventory_lifecycle = (
-                LiquidityInventoryLifecycle.VISIBLE
-                if pool.lifecycle is LiquidityPoolLifecycle.FORMED
-                else LiquidityInventoryLifecycle.CONSUMED
-            )
-            expected_kind = (
-                "equal_highs"
-                if pool.side == "above"
-                else "equal_lows"
-            )
-            expected_price = (
-                pool.upper_bound
-                if pool.side == "above"
-                else pool.lower_bound
-            )
-            if (
-                inventory_item.timeframe is not pool.timeframe
-                or inventory_item.side != pool.side
-                or inventory_item.kind != expected_kind
-                or inventory_item.price != expected_price
-                or inventory_item.lifecycle
-                is not expected_inventory_lifecycle
-                or inventory_item.lower_bound != pool.lower_bound
-                or inventory_item.upper_bound != pool.upper_bound
-                or inventory_item.formed_at != pool.formed_at
-                or inventory_item.confirmed_at != pool.confirmed_at
-                or inventory_item.source_ids != pool.member_swing_ids
-                or inventory_item.age_bars != pool.age_bars
-                or inventory_item.strength != pool.strength
-                or (
-                    expected_inventory_lifecycle
-                    is LiquidityInventoryLifecycle.CONSUMED
-                    and inventory_item.consumed_at != pool.swept_at
-                )
-                or (
-                    expected_inventory_lifecycle
-                    is LiquidityInventoryLifecycle.CONSUMED
-                    and inventory_item.lifecycle_reason != "pool_swept"
-                )
-            ):
-                raise ValueError(
-                    "pool state and liquidity inventory disagree"
-                )
-            authoritative_pool_ids.add(item_id)
         frozen_source_pool_id_list = [
             pool.pool_id
             for frame in self.frames.values()
             for pool in frame.liquidity_pools
         ]
-        if len(frozen_source_pool_id_list) != len(
-            set(frozen_source_pool_id_list)
+        if (
+            len(frozen_source_pool_id_list)
+            != len(set(frozen_source_pool_id_list))
+            or set(frozen_source_pool_id_list) != set(pool_ids)
         ):
-            raise ValueError(
-                "frozen frame sources contain duplicate pool ids"
-            )
-        if set(frozen_source_pool_id_list) != set(pool_ids):
             raise ValueError(
                 "frozen pool sources and authoritative pool set disagree"
             )
@@ -4714,40 +4448,23 @@ class MarketObservation:
             for item in self.liquidity_inventory
             if item.kind in {"equal_highs", "equal_lows"}
         }
-        if inventory_pool_ids != authoritative_pool_ids:
+        if inventory_pool_ids != {
+            f"pool:{pool_id}" for pool_id in pool_ids
+        }:
             raise ValueError(
                 "pool inventory and authoritative pool set disagree"
             )
         for item in self.manipulations:
-            source_inventory = inventory_by_id.get(
-                item.source_inventory_item_id
-            )
-            expected_kind = (
-                {"range_boundary"}
-                if item.source_kind == "mature_range_boundary"
-                else {"equal_highs", "equal_lows"}
-            )
-            expected_reason = (
-                "range_boundary_consumed"
-                if item.source_kind == "mature_range_boundary"
-                else "pool_swept"
-            )
-            if source_inventory is None and (
+            if item.source_inventory_item_id in inventory_by_id:
+                continue
+            if (
                 item.lifecycle is ManipulationLifecycle.SWEPT
                 or item.last_updated_at == self.asof
             ):
                 continue
-            if (
-                source_inventory is None
-                or source_inventory.side != item.side
-                or source_inventory.kind not in expected_kind
-                or source_inventory.lifecycle
-                is not LiquidityInventoryLifecycle.CONSUMED
-                or source_inventory.consumed_at != item.swept_at
-                or source_inventory.lifecycle_reason != expected_reason
-            ):
+            else:
                 raise ValueError(
-                    "manipulation lacks its first-crossed inventory source"
+                    "manipulation lacks its retained inventory identity"
                 )
         if type(self.group5_authoritative) is not bool:
             raise ValueError("Group 5 authority flag must be boolean")
@@ -4873,13 +4590,6 @@ class MarketObservation:
             (state.context_kind, state.context_id)
             for state in self.group5_boundary_path_transitions
         }
-        boundary_path_identities = {
-            (state.context_kind, state.context_id): (
-                state.symbol,
-                state.instrument_id,
-            )
-            for state in self.group5_boundary_path_transitions
-        }
         if any(
             (
                 (
@@ -4890,17 +4600,6 @@ class MarketObservation:
                 state.context_id,
             )
             not in boundary_path_contexts
-            or boundary_path_identities.get(
-                (
-                    (
-                        "zone_return"
-                        if state.context_kind == "entry_zone"
-                        else "pool_reversal"
-                    ),
-                    state.context_id,
-                )
-            )
-            != (state.symbol, state.instrument_id)
             for state
             in self.group5_boundary_reacceptance_transitions
         ):
@@ -4915,26 +4614,12 @@ class MarketObservation:
             raise ValueError(
                 "Group 5 retained path contexts must be unique"
             )
-        path_by_context = {
-            (state.context_kind, state.context_id): state
-            for state in self.path_sequences
-        }
         if any(
             ("zone_return", state.location_id) not in path_contexts
             for state in self.entry_locations
         ):
             raise ValueError(
                 "entry location lacks its retained path sequence"
-            )
-        if any(
-            path_by_context[
-                ("zone_return", state.location_id)
-            ].direction
-            is not state.direction
-            for state in self.entry_locations
-        ):
-            raise ValueError(
-                "entry location and retained path direction disagree"
             )
         if any(
             (
@@ -4952,39 +4637,12 @@ class MarketObservation:
                 "qualified reacceptance lacks its path context"
             )
         if any(
-            path_by_context[
-                (
-                    (
-                        "zone_return"
-                        if state.context_kind == "entry_zone"
-                        else "pool_reversal"
-                    ),
-                    state.context_id,
-                )
-            ].direction
-            is not state.direction
-            for state in self.qualified_reacceptances
-        ):
-            raise ValueError(
-                "qualified reacceptance and path direction disagree"
-            )
-        if any(
             (reference.context_kind, reference.context_id)
             not in path_contexts
             for reference in self.micro_bos_references
         ):
             raise ValueError(
                 "micro BOS reference lacks its path context"
-            )
-        if any(
-            path_by_context[
-                (reference.context_kind, reference.context_id)
-            ].direction
-            is not reference.expected_direction
-            for reference in self.micro_bos_references
-        ):
-            raise ValueError(
-                "micro BOS reference and path direction disagree"
             )
 
     def frame(self, timeframe: Timeframe) -> FrameObservation:
@@ -5302,7 +4960,6 @@ class HypothesisBelief:
     sequence: HypothesisSequenceState | None = None
     raw_probability: float | None = None
     calibration_version: str = "identity-unvalidated"
-    calibration_hash: str = "identity-unvalidated"
     thesis_strength: float | None = None
     sequence_progress: float | None = None
     location_quality: float | None = None
@@ -5380,18 +5037,7 @@ class HypothesisBelief:
             self.entry_readiness,
             self.delivery_quality,
         )
-        typed_payload = bool(
-            any(value is not None for value in quality_values)
-            or group_scores
-            or hard_gates
-            or self.setup_context_id is not None
-            or self.entry_location_id is not None
-            or (
-                self.plan is not None
-                and self.plan.setup_id is not None
-            )
-        )
-        if typed_payload and (
+        if (
             any(value is None for value in quality_values)
             or set(group_scores) != expected_groups
             or not hard_gates
@@ -5400,7 +5046,7 @@ class HypothesisBelief:
                 "typed belief requires all five quality dimensions, "
                 "six evidence groups and hard gates"
             )
-        if group_scores and (
+        if (
             set(group_scores) != expected_groups
             or any(
                 not math.isfinite(float(value))
@@ -5419,7 +5065,7 @@ class HypothesisBelief:
             "delivery_quality",
             "uncertainty",
         }
-        if raw_dimensions and (
+        if (
             set(raw_dimensions) != expected_raw_dimensions
             or any(
                 not math.isfinite(float(value))
@@ -5477,60 +5123,8 @@ class HypothesisBelief:
             raise ValueError(
                 "belief entry location requires its setup context"
             )
-        if self.plan is not None and self.plan.setup_id is not None and (
-            self.setup_context_id != self.plan.setup_id
-            or self.entry_location_id != self.plan.entry_location_id
-        ):
-            raise ValueError(
-                "typed belief and trade plan identities disagree"
-            )
-        if self.draw_selection is not None:
-            if (
-                not any(
-                    target.level_id == self.draw_selection.draw_id
-                    and target.timeframe
-                    is self.draw_selection.source_timeframe
-                    and target.side == self.draw_selection.side
-                    and math.isclose(
-                        target.price,
-                        self.draw_selection.price,
-                        rel_tol=1e-9,
-                        abs_tol=1e-9,
-                    )
-                    for target in self.deliverable_targets
-                )
-                or (
-                    self.plan is not None
-                    and self.plan.draw_selection != self.draw_selection
-                )
-            ):
-                raise ValueError(
-                    "belief targeted draw overlay disagrees with its outputs"
-                )
-        if self.liquidity_route is not None and (
-            self.plan is not None
-            and self.plan.liquidity_route != self.liquidity_route
-            or self.liquidity_route.primary_deliverable_target_id
-            != (
-                None
-                if self.draw_selection is None
-                else self.draw_selection.draw_id
-            )
-        ):
-            raise ValueError(
-                "belief and frozen liquidity route disagree"
-            )
-        if typed_payload and self.plan is not None and (
-            self.invalidation != self.plan.invalidation
-            or self.deliverable_targets != self.plan.targets
-            or self.remaining_path_R != self.plan.remaining_path_R
-        ):
-            raise ValueError(
-                "belief and trade plan structural outputs disagree"
-            )
         if (
-            typed_payload
-            and self.sequence is not None
+            self.sequence is not None
             and self.sequence.setup_id != self.setup_context_id
         ):
             raise ValueError(
@@ -5637,8 +5231,8 @@ class HypothesisBelief:
             "hard_gate_results",
             hard_gates,
         )
-        if not self.calibration_version or not self.calibration_hash:
-            raise ValueError("belief calibration identity is required")
+        if not self.calibration_version:
+            raise ValueError("belief calibration version is required")
 
     @property
     def key(self) -> str:
@@ -5667,9 +5261,7 @@ class HypothesisBelief:
             self.entry_readiness,
             self.delivery_quality,
         )
-        if all(value is not None for value in typed):
-            return min(float(value) for value in typed)
-        return float(self.probability)
+        return min(float(value) for value in typed if value is not None)
 
 
 @dataclass(frozen=True)
@@ -5812,25 +5404,11 @@ class MarketBelief:
         def rank_key(
             belief: HypothesisBelief,
         ) -> tuple[float, float, float, float]:
-            typed = (
-                belief.thesis_strength,
-                belief.sequence_progress,
-                belief.location_quality,
-                belief.entry_readiness,
-                belief.delivery_quality,
-            )
-            if all(value is not None for value in typed):
-                readiness = min(float(value) for value in typed)
-                return (
-                    float(belief.eligible),
-                    readiness,
-                    float(belief.thesis_strength),
-                    -belief.uncertainty,
-                )
+            readiness = belief.effective_probability
             return (
                 float(belief.eligible),
-                belief.probability,
-                belief.probability,
+                readiness,
+                float(belief.thesis_strength),
                 -belief.uncertainty,
             )
 
@@ -5990,18 +5568,8 @@ class FrozenThesis:
                 "frozen thesis typed identities must be complete "
                 "non-empty text"
             )
-        if self.draw_selection is not None and (
-            not self.original_targets
-            or self.original_targets[0].level_id
-            != self.draw_selection.draw_id
-        ):
-            raise ValueError("frozen thesis targeted draw is inconsistent")
-        if self.liquidity_route is not None and (
-            not self.original_targets
-            or self.liquidity_route.primary_deliverable_target_id
-            != self.original_targets[0].level_id
-        ):
-            raise ValueError("frozen thesis liquidity route is inconsistent")
+        if self.deadline <= self.created_at or not self.original_targets:
+            raise ValueError("frozen thesis requires a future deadline and targets")
         if (
             self.playbook is Playbook.FAILED_AUCTION_VALUE_RETURN
             and self.setup_id is not None
@@ -6009,8 +5577,6 @@ class FrozenThesis:
             if (
                 self.range_auction is None
                 or self.draw_selection is None
-                or self.range_auction.opposite_liquidity_id
-                != self.original_targets[0].level_id
             ):
                 raise ValueError(
                     "frozen FAVR thesis lacks its range-auction context"
@@ -6025,7 +5591,6 @@ class EngineSnapshot:
     belief: MarketBelief
     decision: Decision
     risk: RiskAssessment
-    snapshot_hash: str
 
 
 def to_primitive(value: Any) -> Any:

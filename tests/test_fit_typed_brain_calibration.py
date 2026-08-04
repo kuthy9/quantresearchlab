@@ -30,7 +30,7 @@ LSR = Playbook.LIQUIDITY_SWEEP_REVERSAL
 FAVR = Playbook.FAILED_AUCTION_VALUE_RETURN
 
 
-def _identity_fields(bindings: dict[str, object], token: str) -> dict[str, object]:
+def _identity_fields(token: str) -> dict[str, object]:
     return {
         "hypothesis_key": token,
         "scene_hypothesis_id": f"scene:{token}",
@@ -47,19 +47,11 @@ def _identity_fields(bindings: dict[str, object], token: str) -> dict[str, objec
             [f"target:{token}"],
             separators=(",", ":"),
         ),
-        "brain_input_contract_hash": bindings[
-            "brain_input_contract_hash"
-        ],
     }
 
 
 def _rows() -> pd.DataFrame:
     bindings = resolve_model_bindings(MODEL_CONFIG)
-    primitive_json = json.dumps(
-        bindings["primitive_protocol_hashes"],
-        sort_keys=True,
-        separators=(",", ":"),
-    )
     rows: list[dict[str, object]] = []
     start = pd.Timestamp("2022-02-01T09:31:00-05:00")
     for playbook in (DFP, LSR):
@@ -72,10 +64,7 @@ def _rows() -> pd.DataFrame:
                 )
                 rows.append(
                     {
-                        **_identity_fields(
-                            bindings,
-                            f"{playbook.value}:{dimension}:{index}",
-                        ),
+                        **_identity_fields(f"{playbook.value}:{dimension}:{index}"),
                         "sample_id": f"{playbook.value}:{dimension}:{index}",
                         "playbook": playbook.value,
                         "direction": "long" if index % 2 == 0 else "short",
@@ -89,20 +78,13 @@ def _rows() -> pd.DataFrame:
                         "fit_eligible": True,
                         "protocol_version": version,
                         "protocol_hash": bindings["registry_hash"],
-                        "registry_hash": bindings["registry_hash"],
-                        "model_code_hash": bindings["model_code_hash"],
-                        "config_hash": bindings["config_hash"],
-                        "primitive_protocol_hashes": primitive_json,
                     }
                 )
             # This future-unresolved row proves censorship is excluded instead
             # of being silently treated as a zero outcome.
             rows.append(
                 {
-                    **_identity_fields(
-                        bindings,
-                        f"{playbook.value}:{dimension}:censored",
-                    ),
+                    **_identity_fields(f"{playbook.value}:{dimension}:censored"),
                     "sample_id": f"{playbook.value}:{dimension}:censored",
                     "playbook": playbook.value,
                     "direction": "long",
@@ -116,19 +98,12 @@ def _rows() -> pd.DataFrame:
                     "fit_eligible": False,
                     "protocol_version": version,
                     "protocol_hash": bindings["registry_hash"],
-                    "registry_hash": bindings["registry_hash"],
-                    "model_code_hash": bindings["model_code_hash"],
-                    "config_hash": bindings["config_hash"],
-                    "primitive_protocol_hashes": primitive_json,
                 }
             )
         for dimension in ("sequence_progress", "uncertainty"):
             rows.append(
                 {
-                    **_identity_fields(
-                        bindings,
-                        f"{playbook.value}:{dimension}:observed",
-                    ),
+                    **_identity_fields(f"{playbook.value}:{dimension}:observed"),
                     "sample_id": f"{playbook.value}:{dimension}:observed",
                     "playbook": playbook.value,
                     "direction": "short",
@@ -142,10 +117,6 @@ def _rows() -> pd.DataFrame:
                     "fit_eligible": False,
                     "protocol_version": version,
                     "protocol_hash": bindings["registry_hash"],
-                    "registry_hash": bindings["registry_hash"],
-                    "model_code_hash": bindings["model_code_hash"],
-                    "config_hash": bindings["config_hash"],
-                    "primitive_protocol_hashes": primitive_json,
                 }
             )
     return pd.DataFrame(rows)
@@ -163,7 +134,7 @@ def _fit(tmp_path: Path, frame: pd.DataFrame) -> tuple[Path, dict[str, object]]:
         bins=4,
         minimum_bin_samples=2,
         minimum_dimension_samples=8,
-        calibration_version="4.0.0-typed-test-fit.1",
+        calibration_version="typed-test-fit",
     )
     return output, payload
 
@@ -175,11 +146,6 @@ def test_fitter_builds_loader_valid_typed_artifact_without_pnl(tmp_path: Path) -
     calibrator = TypedBrainCalibrator.from_file(
         output,
         expected_registry_hash=bindings["registry_hash"],
-        expected_code_hash=bindings["model_code_hash"],
-        expected_primitive_protocol_hashes=bindings["primitive_protocol_hashes"],
-        expected_brain_input_contract_hash=bindings[
-            "brain_input_contract_hash"
-        ],
     )
 
     assert calibrator.status == "ready"
@@ -297,19 +263,13 @@ def test_weighted_pava_preserves_a_flat_map_across_pooled_bins() -> None:
     assert mapping.apply(0.3) == pytest.approx(points[1].calibrated_probability)
 
 
-def test_fitter_rejects_stale_primitive_binding(tmp_path: Path) -> None:
+def test_fitter_rejects_stale_playbook_protocol(tmp_path: Path) -> None:
     frame = _rows()
-    stale = json.loads(frame.loc[0, "primitive_protocol_hashes"])
-    stale["group5_protocol"] = "0" * 64
-    frame.loc[0, "primitive_protocol_hashes"] = json.dumps(
-        stale,
-        sort_keys=True,
-        separators=(",", ":"),
-    )
+    frame["protocol_hash"] = "0" * 64
     rows = tmp_path / "rows.parquet"
     frame.to_parquet(rows, index=False)
 
-    with pytest.raises(ValueError, match="primitive protocol hashes are stale"):
+    with pytest.raises(ValueError, match="protocol_hash is stale"):
         fit_typed_brain_calibration(
             row_paths=[rows],
             output=tmp_path / "artifact.json",
@@ -321,30 +281,12 @@ def test_fitter_rejects_stale_primitive_binding(tmp_path: Path) -> None:
         )
 
 
-def test_fitter_rejects_legacy_rows_without_input_contract(tmp_path: Path) -> None:
-    frame = _rows().drop(columns=["brain_input_contract_hash"])
-    rows = tmp_path / "legacy-rows.parquet"
+def test_fitter_rejects_rows_without_playbook_protocol(tmp_path: Path) -> None:
+    frame = _rows().drop(columns=["protocol_hash"])
+    rows = tmp_path / "missing-protocol-rows.parquet"
     frame.to_parquet(rows, index=False)
 
     with pytest.raises(ValueError, match="omit fields"):
-        fit_typed_brain_calibration(
-            row_paths=[rows],
-            output=tmp_path / "artifact.json",
-            model_config=MODEL_CONFIG,
-            validation_protocol=VALIDATION_PROTOCOL,
-            bins=4,
-            minimum_bin_samples=2,
-            minimum_dimension_samples=8,
-        )
-
-
-def test_fitter_rejects_stale_brain_input_contract(tmp_path: Path) -> None:
-    frame = _rows()
-    frame.loc[0, "brain_input_contract_hash"] = "0" * 64
-    rows = tmp_path / "stale-contract.parquet"
-    frame.to_parquet(rows, index=False)
-
-    with pytest.raises(ValueError, match="mix or omit brain_input_contract_hash"):
         fit_typed_brain_calibration(
             row_paths=[rows],
             output=tmp_path / "artifact.json",

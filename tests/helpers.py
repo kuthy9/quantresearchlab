@@ -353,7 +353,7 @@ def engine_snapshot() -> EngineSnapshot:
         plan,
     )
     risk = RiskAssessment(Action.ENTER, Action.ENTER, True, (), ("passed",))
-    return EngineSnapshot(observation, belief, decision, risk, "a" * 64)
+    return EngineSnapshot(observation, belief, decision, risk)
 
 
 def flat_account() -> AccountState:

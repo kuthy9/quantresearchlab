@@ -162,7 +162,7 @@ def test_engine_runs_all_layers_once_per_completed_minute() -> None:
         )
     assert snapshot is not None
     assert len(snapshot.belief.hypotheses) == 6
-    assert snapshot.snapshot_hash == engine.last_snapshot.snapshot_hash
+    assert engine.last_snapshot is snapshot
     assert all(
         frame.cutoff <= snapshot.observation.asof
         for frame in snapshot.observation.frames.values()

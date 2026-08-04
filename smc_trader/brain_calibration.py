@@ -15,7 +15,6 @@ future outcomes suitable for a separate, simple calibration fitter.
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
-import hashlib
 import json
 import math
 from typing import Any, Mapping
@@ -37,7 +36,7 @@ from .model import (
 )
 
 
-RECORDER_VERSION = "typed-brain-targets-v5-scene-contract"
+RECORDER_SCHEMA_VERSION = 1
 
 SUPPORTED_PLAYBOOKS = frozenset(
     {
@@ -128,14 +127,6 @@ _INVALID_TRIGGER_TERMINAL_REASONS = (
 )
 
 
-def _canonical_json(value: Mapping[str, str]) -> str:
-    return json.dumps(
-        dict(sorted((str(key), str(item)) for key, item in value.items())),
-        sort_keys=True,
-        separators=(",", ":"),
-    )
-
-
 def _canonical_identities(values: Any) -> str:
     identities = tuple(dict.fromkeys(str(item) for item in values))
     if any(not item for item in identities):
@@ -155,15 +146,6 @@ def _validate_canonical_identities(value: str, *, name: str) -> None:
         or _canonical_identities(parsed) != value
     ):
         raise ValueError(f"{name} identities are invalid")
-
-
-def _validate_hash(value: str, *, name: str) -> None:
-    if (
-        not isinstance(value, str)
-        or len(value) != 64
-        or any(character not in "0123456789abcdef" for character in value)
-    ):
-        raise ValueError(f"{name} must be a lowercase SHA-256 digest")
 
 
 def _iso(value: pd.Timestamp | None) -> str | None:
@@ -232,11 +214,6 @@ class BrainCalibrationRecord:
     instrument_id: int
     protocol_version: str
     protocol_hash: str
-    registry_hash: str
-    model_code_hash: str
-    config_hash: str
-    primitive_protocol_hashes: str
-    brain_input_contract_hash: str
 
     def __post_init__(self) -> None:
         for name in (
@@ -288,10 +265,6 @@ class BrainCalibrationRecord:
             value = getattr(self, name)
             if value is not None and (not isinstance(value, str) or not value):
                 raise ValueError(f"{name} is invalid")
-        _validate_hash(
-            self.brain_input_contract_hash,
-            name="brain_input_contract_hash",
-        )
         _clamped(self.raw_value, name="record.raw_value")
         if self.outcome_value is not None:
             _clamped(self.outcome_value, name="record.outcome_value")
@@ -328,17 +301,6 @@ class BrainCalibrationRecord:
             self.outcome_value is not None or self.censored
         ):
             raise ValueError("descriptive dimensions cannot carry future labels")
-        try:
-            primitive_hashes = json.loads(self.primitive_protocol_hashes)
-        except (TypeError, json.JSONDecodeError) as exc:
-            raise ValueError("primitive protocol hashes must be canonical JSON") from exc
-        if (
-            not isinstance(primitive_hashes, dict)
-            or not primitive_hashes
-            or _canonical_json(primitive_hashes) != self.primitive_protocol_hashes
-        ):
-            raise ValueError("primitive protocol hashes are invalid")
-
     def to_dict(self) -> dict[str, Any]:
         """Return a parquet/jsonl-friendly mapping without changing clocks."""
 
@@ -439,35 +401,7 @@ class _CandidateIdentity:
 class BrainCalibrationRecorder:
     """Incrementally freeze and causally resolve typed Brain dimensions."""
 
-    def __init__(
-        self,
-        *,
-        registry_hash: str,
-        model_code_hash: str,
-        config_hash: str,
-        primitive_protocol_hashes: Mapping[str, str],
-        brain_input_contract_hash: str,
-    ) -> None:
-        for name, value in (
-            ("registry_hash", registry_hash),
-            ("model_code_hash", model_code_hash),
-            ("config_hash", config_hash),
-        ):
-            if not isinstance(value, str) or not value:
-                raise ValueError(f"{name} is required")
-        if not primitive_protocol_hashes:
-            raise ValueError("primitive protocol hashes are required")
-        _validate_hash(
-            brain_input_contract_hash,
-            name="brain_input_contract_hash",
-        )
-        self.registry_hash = registry_hash
-        self.model_code_hash = model_code_hash
-        self.config_hash = config_hash
-        self.primitive_protocol_hashes = _canonical_json(
-            primitive_protocol_hashes
-        )
-        self.brain_input_contract_hash = brain_input_contract_hash
+    def __init__(self) -> None:
         self._open: dict[str, _OpenSample] = {}
         self._rows: list[BrainCalibrationRecord] = []
         self._seen: set[str] = set()
@@ -640,12 +574,7 @@ class BrainCalibrationRecorder:
         """Serialize enough state for exact checkpoint/resume."""
 
         return {
-            "version": RECORDER_VERSION,
-            "registry_hash": self.registry_hash,
-            "model_code_hash": self.model_code_hash,
-            "config_hash": self.config_hash,
-            "primitive_protocol_hashes": self.primitive_protocol_hashes,
-            "brain_input_contract_hash": self.brain_input_contract_hash,
+            "schema_version": RECORDER_SCHEMA_VERSION,
             "open_samples": [
                 self._serialize_open(sample)
                 for sample in self.open_samples
@@ -663,22 +592,9 @@ class BrainCalibrationRecorder:
     def from_state(cls, state: Mapping[str, Any]) -> "BrainCalibrationRecorder":
         """Restore a recorder produced by :meth:`state_dict`."""
 
-        if state.get("version") != RECORDER_VERSION:
+        if state.get("schema_version") != RECORDER_SCHEMA_VERSION:
             raise ValueError("unsupported brain calibration recorder state")
-        primitive_json = str(state.get("primitive_protocol_hashes", ""))
-        try:
-            primitive_hashes = json.loads(primitive_json)
-        except json.JSONDecodeError as exc:
-            raise ValueError("invalid primitive hashes in recorder state") from exc
-        recorder = cls(
-            registry_hash=str(state.get("registry_hash", "")),
-            model_code_hash=str(state.get("model_code_hash", "")),
-            config_hash=str(state.get("config_hash", "")),
-            primitive_protocol_hashes=primitive_hashes,
-            brain_input_contract_hash=str(
-                state.get("brain_input_contract_hash", "")
-            ),
-        )
+        recorder = cls()
         recorder._seen = {str(item) for item in state.get("seen_sample_ids", ())}
         recorder._seen_location_ids = {
             (str(item[0]), str(item[1]))
@@ -1390,22 +1306,18 @@ class BrainCalibrationRecorder:
                 f"{dimension} calibration sample lacks an owner identity"
             )
         identity_payload = {
-            "version": RECORDER_VERSION,
             "playbook": hypothesis.playbook.value,
             "direction": hypothesis.direction.value,
             "dimension": dimension,
             "setup_id": owner_id,
             "revision_key": str(revision_key),
             "scene_hypothesis_id": identity.scene_hypothesis_id,
-            "brain_input_contract_hash": self.brain_input_contract_hash,
         }
-        sample_id = hashlib.sha256(
-            json.dumps(
-                identity_payload,
-                sort_keys=True,
-                separators=(",", ":"),
-            ).encode("utf-8")
-        ).hexdigest()
+        sample_id = json.dumps(
+            identity_payload,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
         return _OpenSample(
             sample_id=sample_id,
             hypothesis_key=identity.hypothesis_key,
@@ -1632,11 +1544,6 @@ class BrainCalibrationRecorder:
             instrument_id=sample.instrument_id,
             protocol_version=sample.protocol_version,
             protocol_hash=sample.protocol_hash,
-            registry_hash=self.registry_hash,
-            model_code_hash=self.model_code_hash,
-            config_hash=self.config_hash,
-            primitive_protocol_hashes=self.primitive_protocol_hashes,
-            brain_input_contract_hash=self.brain_input_contract_hash,
         )
         self._rows.append(record)
 
@@ -1711,6 +1618,6 @@ __all__ = [
     "BrainCalibrationRecorder",
     "DESCRIPTIVE_DIMENSIONS",
     "FITTED_DIMENSIONS",
-    "RECORDER_VERSION",
+    "RECORDER_SCHEMA_VERSION",
     "SUPPORTED_PLAYBOOKS",
 ]

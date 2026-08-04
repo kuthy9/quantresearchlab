@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import asdict
-import hashlib
 import json
 from pathlib import Path
 import sys
@@ -29,27 +28,21 @@ from smc_trader.artifact_stream import (  # noqa: E402
 )
 from smc_trader.calibration_replay import (  # noqa: E402
     CalibrationSequentialReplay,
-    HASH_MODE,
     ReplayCheckpointStore,
     iter_after_source_checkpoint,
 )
 from smc_trader.brain_calibration import (  # noqa: E402
     BrainCalibrationRecord,
     BrainCalibrationRecorder,
-    RECORDER_VERSION as BRAIN_CALIBRATION_RECORDER_VERSION,
+    RECORDER_SCHEMA_VERSION as BRAIN_CALIBRATION_RECORDER_SCHEMA_VERSION,
 )
-from smc_trader.engine import (  # noqa: E402
-    ContinuousSMCEngine,
-    _configured_primitive_protocol_hashes,
-)
-from smc_trader.calibration import model_code_fingerprint  # noqa: E402
+from smc_trader.engine import ContinuousSMCEngine  # noqa: E402
 from smc_trader.io import load_ohlcv  # noqa: E402
 from smc_trader.model import (  # noqa: E402
     Action,
     Timeframe,
     to_primitive,
 )
-from smc_trader.scene_graph import brain_input_contract_hash  # noqa: E402
 from smc_trader.mbo import (  # noqa: E402
     MinuteExecutionRealityStore,
     assert_mbo_source_allowed,
@@ -84,11 +77,12 @@ TRADE_COLUMNS = [
 
 ENTRY_ATTEMPT_COLUMNS = [
     "thesis_hash",
-    "action_variant_hash",
+    "entry_attempt_id",
     "decision_time",
     "playbook",
     "direction",
     "setup_id",
+    "episode_id",
     "entry_location_id",
     "entry_path_id",
     "planned_entry",
@@ -132,11 +126,12 @@ TRADE_FIELD_TYPES = {
 
 ENTRY_ATTEMPT_FIELD_TYPES = {
     "thesis_hash": "large_string",
-    "action_variant_hash": "large_string",
+    "entry_attempt_id": "large_string",
     "decision_time": "timestamp_ny",
     "playbook": "large_string",
     "direction": "large_string",
     "setup_id": "large_string",
+    "episode_id": "large_string",
     "entry_location_id": "large_string",
     "entry_path_id": "large_string",
     "planned_entry": "float64",
@@ -157,81 +152,62 @@ ENTRY_ATTEMPT_FIELD_TYPES = {
 }
 
 BASE_STREAM_KEYS = {
-    "decision_shards": "snapshot_hash",
+    "decision_shards": "decision_id",
 }
 
 DECISION_FIELD_TYPES = {
+    "decision_id": "large_string",
     "asof": "timestamp_ny",
-    "snapshot_hash": "large_string",
+    "symbol": "large_string",
+    "instrument_id": "int64",
+    "price": "float64",
     "model_action": "large_string",
     "risk_action": "large_string",
     "utility_advantage_R": "float64",
+    "action_utilities": "large_string",
     "best_variant_action": "large_string",
     "best_variant_utility_R": "float64",
     "best_variant_hypothesis_key": "large_string",
-    "best_variant_components": "large_string",
+    "model_reasons": "large_string",
     "top_playbook": "large_string",
     "top_direction": "large_string",
     "top_probability": "float64",
     "top_raw_probability": "float64",
-    "top_raw_location_quality": "float64",
-    "top_raw_entry_readiness": "float64",
-    "top_raw_delivery_quality": "float64",
-    "top_raw_uncertainty": "float64",
-    "calibration_version": "large_string",
-    "calibration_hash": "large_string",
+    "top_thesis_strength": "float64",
+    "top_sequence_progress": "float64",
+    "top_location_quality": "float64",
+    "top_entry_readiness": "float64",
+    "top_delivery_quality": "float64",
+    "top_uncertainty": "float64",
     "top_phase": "large_string",
     "top_terminal_reason": "large_string",
     "top_failed_hard_gate_ids": "large_string",
-    "uncertainty": "float64",
     "top_setup_id": "large_string",
-    "top_protocol_version": "large_string",
-    "top_protocol_hash": "large_string",
-    "top_sequence_completed_steps": "int64",
-    "top_sequence_total_steps": "int64",
-    "top_sequence_complete": "bool",
+    "top_episode_id": "large_string",
+    "top_entry_location_id": "large_string",
     "decision_hypothesis_key": "large_string",
     "decision_playbook": "large_string",
     "decision_direction": "large_string",
-    "decision_probability": "float64",
-    "decision_raw_probability": "float64",
     "decision_phase": "large_string",
     "decision_setup_id": "large_string",
+    "decision_episode_id": "large_string",
     "decision_entry_location_id": "large_string",
     "decision_entry_path_id": "large_string",
-    "scale_registry_id": "large_string",
-    "scene_revision_id": "large_string",
-    "focus_revision_id": "large_string",
-    "focus_primary_timeframes": "large_string",
-    "focus_supplemental_timeframes": "large_string",
-    "focus_resolution_status": "large_string",
-    "dominant_scene_hypothesis_id": "large_string",
-    "competing_scene_hypothesis_ids": "large_string",
     "h4_regime": "large_string",
     "position_open": "bool",
     "position_thesis_hash": "large_string",
     "position_setup_id": "large_string",
     "position_playbook": "large_string",
     "position_direction": "large_string",
-    "hypothesis_phase_counts": "large_string",
-    "active_setup_count": "int64",
-    "complete_sequence_count": "int64",
-    "hypothesis_plan_count": "int64",
-    "4H_ready": "bool",
-    "1H_ready": "bool",
-    "15m_ready": "bool",
-    "5m_ready": "bool",
-    "1m_ready": "bool",
     "observation_anomalies": "large_string",
-    "group3_boundary_transitions": "large_string",
-    "group4_state": "large_string",
-    "group4_boundary_transitions": "large_string",
     "planned_entry": "float64",
+    "entry_zone_lower": "float64",
+    "entry_zone_upper": "float64",
     "invalidation": "float64",
     "invalidation_source_id": "large_string",
-    "invalidation_source": "large_string",
     "primary_target": "float64",
     "primary_target_id": "large_string",
+    "selected_draw_id": "large_string",
     "liquidity_route_id": "large_string",
     "context_draw_id": "large_string",
     "intermediate_liquidity_ids": "large_string",
@@ -240,8 +216,9 @@ DECISION_FIELD_TYPES = {
     "path_blocker_ids": "large_string",
     "source_path_ids": "large_string",
     "target_ids": "large_string",
-    "targets": "large_string",
     "primary_target_R": "float64",
+    "remaining_path_R": "float64",
+    "deadline": "timestamp_ny",
     "spread_points": "float64",
     "cost_points": "float64",
     "fillability": "float64",
@@ -252,7 +229,7 @@ DECISION_FIELD_TYPES = {
     "book_ask_size": "float64",
     "book_depth_imbalance": "float64",
     "vetoes": "large_string",
-    "reasons": "large_string",
+    "risk_reasons": "large_string",
 }
 
 BRAIN_CALIBRATION_FIELD_TYPES = {
@@ -301,11 +278,6 @@ BRAIN_CALIBRATION_FIELD_TYPES = {
     "instrument_id": "int64",
     "protocol_version": "large_string",
     "protocol_hash": "large_string",
-    "registry_hash": "large_string",
-    "model_code_hash": "large_string",
-    "config_hash": "large_string",
-    "primitive_protocol_hashes": "large_string",
-    "brain_input_contract_hash": "large_string",
 }
 
 STREAM_FIELD_TYPES = {
@@ -323,23 +295,6 @@ def _deadline(timestamp: pd.Timestamp) -> pd.Timestamp:
         "America/New_York", ambiguous=True, nonexistent="shift_forward"
     )
     return deadline
-
-
-def _sha256_file(path: str | Path) -> str:
-    digest = hashlib.sha256()
-    with Path(path).open("rb") as handle:
-        while block := handle.read(8 * 1024 * 1024):
-            digest.update(block)
-    return digest.hexdigest()
-
-
-def _optional_protocol_sha256(path: str | Path | None) -> str | None:
-    if path is None:
-        return None
-    source = Path(path)
-    if not source.is_absolute() and not source.exists():
-        source = ROOT / source
-    return sha256_file(source)
 
 
 def _source_provenance(observation, source_id: str) -> dict[str, Any] | None:
@@ -523,9 +478,9 @@ def _load_mbo_execution(
         registered_manifest_path = ROOT / registered_manifest_path
     if registered_manifest_path.resolve(strict=False) != manifest_path:
         raise RuntimeError("MBO execution manifest path is not the registered manifest")
-    if _sha256_file(manifest_path) != registered.manifest_sha256:
+    if sha256_file(manifest_path) != registered.manifest_sha256:
         raise RuntimeError("MBO execution manifest does not match data_splits.json")
-    actual_hash = _sha256_file(source)
+    actual_hash = sha256_file(source)
     if actual_hash != registered.sha256 or manifest.get("output_sha256") != actual_hash:
         raise RuntimeError("MBO execution parquet does not match its manifest hash")
     requested_window = validation.classify_mbo(
@@ -572,11 +527,7 @@ def _row(
             snapshot.decision.best_hypothesis_key
         )
     )
-    decision_sequence = (
-        None if decision_hypothesis is None else decision_hypothesis.sequence
-    )
     summary_hypothesis = decision_hypothesis or top
-    focus = snapshot.belief.focus_state
     plan = snapshot.decision.plan
     liquidity_route = (
         None
@@ -590,13 +541,7 @@ def _row(
         if snapshot.decision.utilities
         else None
     )
-    best_components = (
-        {} if best_variant is None else dict(best_variant.components)
-    )
     sequence = None if top is None else top.sequence
-    top_raw_dimensions = (
-        {} if top is None else dict(top.raw_quality_dimensions)
-    )
     top_failed_hard_gate_ids = (
         None
         if top is None
@@ -620,10 +565,6 @@ def _row(
             h4_regime = "h4_down"
         else:
             h4_regime = "h4_flat"
-    # ``belief_position_input`` may be a one-bar terminal lifecycle record
-    # after the portfolio has already closed.  Light replay fields describe
-    # actual open exposure, so prefer the account snapshot and never label a
-    # terminal acknowledgement as an open position.
     position = (
         getattr(account_state, "position", None)
         if account_state is not None
@@ -631,17 +572,33 @@ def _row(
     )
     if position is not None and getattr(position, "status", "open") != "open":
         position = None
-    phase_counts: dict[str, int] = {}
-    for hypothesis in snapshot.belief.hypotheses.values():
-        phase_counts[hypothesis.phase.value] = (
-            phase_counts.get(hypothesis.phase.value, 0) + 1
-        )
+    action_utilities: dict[str, dict[str, Any]] = {}
+    for utility in snapshot.decision.utilities:
+        existing = action_utilities.get(utility.action.value)
+        if existing is None or float(utility.utility) > float(existing["utility_R"]):
+            action_utilities[utility.action.value] = {
+                "utility_R": float(utility.utility),
+                "hypothesis_key": utility.hypothesis_key,
+                "reason": utility.reason,
+            }
+    asof = snapshot.observation.asof
     return {
-        "asof": snapshot.observation.asof,
-        "snapshot_hash": snapshot.snapshot_hash,
+        "decision_id": (
+            f"{snapshot.observation.symbol}:"
+            f"{snapshot.observation.instrument_id}:{asof.isoformat()}"
+        ),
+        "asof": asof,
+        "symbol": snapshot.observation.symbol,
+        "instrument_id": snapshot.observation.instrument_id,
+        "price": snapshot.observation.price,
         "model_action": snapshot.decision.selected_action.value,
         "risk_action": snapshot.risk.final_action.value,
         "utility_advantage_R": snapshot.decision.advantage,
+        "action_utilities": json.dumps(
+            action_utilities,
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
         "best_variant_action": (
             None if best_variant is None else best_variant.action.value
         ),
@@ -651,9 +608,9 @@ def _row(
         "best_variant_hypothesis_key": (
             None if best_variant is None else best_variant.hypothesis_key
         ),
-        "best_variant_components": json.dumps(
-            best_components,
-            sort_keys=True,
+        "model_reasons": json.dumps(
+            list(snapshot.decision.reasons),
+            ensure_ascii=False,
         ),
         "top_playbook": None if top is None else top.playbook.value,
         "top_direction": None if top is None else top.direction.value,
@@ -661,38 +618,25 @@ def _row(
         "top_raw_probability": (
             None if top is None else top.raw_probability
         ),
-        "top_raw_location_quality": top_raw_dimensions.get(
-            "location_quality"
-        ),
-        "top_raw_entry_readiness": top_raw_dimensions.get(
-            "entry_readiness"
-        ),
-        "top_raw_delivery_quality": top_raw_dimensions.get(
-            "delivery_quality"
-        ),
-        "top_raw_uncertainty": top_raw_dimensions.get("uncertainty"),
-        "calibration_version": (
-            None if top is None else top.calibration_version
-        ),
-        "calibration_hash": None if top is None else top.calibration_hash,
+        "top_thesis_strength": None if top is None else top.thesis_strength,
+        "top_sequence_progress": None if top is None else top.sequence_progress,
+        "top_location_quality": None if top is None else top.location_quality,
+        "top_entry_readiness": None if top is None else top.entry_readiness,
+        "top_delivery_quality": None if top is None else top.delivery_quality,
+        "top_uncertainty": None if top is None else top.uncertainty,
         "top_phase": None if top is None else top.phase.value,
         "top_terminal_reason": (
             None if top is None else top.terminal_reason
         ),
         "top_failed_hard_gate_ids": top_failed_hard_gate_ids,
-        "uncertainty": None if top is None else top.uncertainty,
-        "top_setup_id": None if sequence is None else sequence.setup_id,
-        "top_protocol_version": (
-            None if sequence is None else sequence.protocol_version
+        "top_setup_id": (
+            None
+            if top is None
+            else (None if sequence is None else sequence.setup_id)
+            or top.setup_context_id
         ),
-        "top_protocol_hash": None if sequence is None else sequence.protocol_hash,
-        "top_sequence_completed_steps": (
-            None if sequence is None else sequence.completed_steps
-        ),
-        "top_sequence_total_steps": (
-            None if sequence is None else len(sequence.steps)
-        ),
-        "top_sequence_complete": None if sequence is None else sequence.complete,
+        "top_episode_id": None if top is None else top.episode_id,
+        "top_entry_location_id": None if top is None else top.entry_location_id,
         "decision_hypothesis_key": snapshot.decision.best_hypothesis_key,
         "decision_playbook": (
             None
@@ -704,61 +648,22 @@ def _row(
             if decision_hypothesis is None
             else decision_hypothesis.direction.value
         ),
-        "decision_probability": (
-            None if decision_hypothesis is None else decision_hypothesis.probability
-        ),
-        "decision_raw_probability": (
-            None
-            if decision_hypothesis is None
-            else decision_hypothesis.raw_probability
-        ),
         "decision_phase": (
             None
             if decision_hypothesis is None
             else decision_hypothesis.phase.value
         ),
         "decision_setup_id": (
-            None if decision_sequence is None else decision_sequence.setup_id
+            None if decision_hypothesis is None else decision_hypothesis.setup_context_id
+        ),
+        "decision_episode_id": (
+            None if decision_hypothesis is None else decision_hypothesis.episode_id
         ),
         "decision_entry_location_id": (
             None if plan is None else plan.entry_location_id
         ),
         "decision_entry_path_id": (
             None if plan is None else plan.entry_path_id
-        ),
-        "scale_registry_id": snapshot.observation.scale_registry_id,
-        "scene_revision_id": (
-            snapshot.belief.scene_revision_id
-            or snapshot.observation.scene_revision_id
-        ),
-        "focus_revision_id": (
-            None if focus is None else focus.focus_revision_id
-        ),
-        "focus_primary_timeframes": (
-            None
-            if focus is None
-            else json.dumps(
-                list(focus.primary_timeframes),
-                ensure_ascii=False,
-            )
-        ),
-        "focus_supplemental_timeframes": (
-            None
-            if focus is None
-            else json.dumps(
-                list(focus.supplemental_timeframes),
-                ensure_ascii=False,
-            )
-        ),
-        "focus_resolution_status": (
-            None if focus is None else focus.resolution_status.value
-        ),
-        "dominant_scene_hypothesis_id": (
-            snapshot.belief.dominant_hypothesis_id
-        ),
-        "competing_scene_hypothesis_ids": json.dumps(
-            list(snapshot.belief.competing_hypothesis_ids),
-            ensure_ascii=False,
         ),
         "h4_regime": h4_regime,
         "position_open": position is not None,
@@ -774,132 +679,20 @@ def _row(
         "position_direction": (
             None if position is None else position.direction.value
         ),
-        "hypothesis_phase_counts": json.dumps(
-            phase_counts,
-            sort_keys=True,
-        ),
-        "active_setup_count": sum(
-            hypothesis.eligible
-            and hypothesis.sequence is not None
-            and hypothesis.sequence.setup_id is not None
-            for hypothesis in snapshot.belief.hypotheses.values()
-        ),
-        "complete_sequence_count": sum(
-            hypothesis.sequence is not None
-            and hypothesis.sequence.complete
-            for hypothesis in snapshot.belief.hypotheses.values()
-        ),
-        "hypothesis_plan_count": sum(
-            hypothesis.plan is not None
-            for hypothesis in snapshot.belief.hypotheses.values()
-        ),
-        "4H_ready": snapshot.observation.frame(Timeframe.H4).ready,
-        "1H_ready": snapshot.observation.frame(Timeframe.H1).ready,
-        "15m_ready": (
-            snapshot.observation.frame(Timeframe.M15).ready
-            if Timeframe.M15 in snapshot.observation.active_timeframes
-            else None
-        ),
-        "5m_ready": snapshot.observation.frame(Timeframe.M5).ready,
-        "1m_ready": snapshot.observation.frame(Timeframe.M1).ready,
         "observation_anomalies": json.dumps(
             list(snapshot.observation.anomalies),
             ensure_ascii=False,
         ),
-        "group3_boundary_transitions": (
-            None
-            if not (
-                snapshot.observation.group3_boundary_fvg_transitions
-                or snapshot.observation
-                .group3_boundary_order_block_transitions
-            )
-            else json.dumps(
-                {
-                    "fair_value_gaps": to_primitive(
-                        snapshot.observation
-                        .group3_boundary_fvg_transitions
-                    ),
-                    "order_blocks": to_primitive(
-                        snapshot.observation
-                        .group3_boundary_order_block_transitions
-                    ),
-                },
-                sort_keys=True,
-                ensure_ascii=False,
-            )
-        ),
-        "group4_state": json.dumps(
-            {
-                "dealing_ranges": to_primitive(
-                    tuple(
-                        state
-                        for state in snapshot.observation
-                        .frame(Timeframe.H1).dealing_ranges
-                        if state.lifecycle.value != "broken"
-                    )
-                    or snapshot.observation
-                    .frame(Timeframe.H1).dealing_ranges[-1:]
-                ),
-                "manipulations": to_primitive(
-                    tuple(
-                        state
-                        for state in snapshot.observation.manipulations
-                        if state.lifecycle.value == "swept"
-                    )
-                    or snapshot.observation.manipulations[-1:]
-                ),
-                "range_boundary_inventory": to_primitive(
-                    tuple(
-                        item
-                        for item in snapshot.observation.liquidity_inventory
-                        if item.kind == "range_boundary"
-                    )[-4:]
-                ),
-                "ambiguous_sweep_item_ids": list(
-                    snapshot.observation
-                    .group4_ambiguous_sweep_item_ids
-                ),
-                "atr_unready_sweep_item_ids": list(
-                    snapshot.observation
-                    .group4_atr_unready_sweep_item_ids
-                ),
-            },
-            sort_keys=True,
-            ensure_ascii=False,
-        ),
-        "group4_boundary_transitions": (
-            None
-            if not (
-                snapshot.observation.group4_boundary_range_transitions
-                or snapshot.observation
-                .group4_boundary_manipulation_transitions
-            )
-            else json.dumps(
-                {
-                    "dealing_ranges": to_primitive(
-                        snapshot.observation
-                        .group4_boundary_range_transitions
-                    ),
-                    "manipulations": to_primitive(
-                        snapshot.observation
-                        .group4_boundary_manipulation_transitions
-                    ),
-                },
-                sort_keys=True,
-                ensure_ascii=False,
-            )
-        ),
         "planned_entry": None if plan is None else plan.planned_entry,
+        "entry_zone_lower": None if plan is None else plan.entry_zone_lower,
+        "entry_zone_upper": None if plan is None else plan.entry_zone_upper,
         "invalidation": None if plan is None else plan.invalidation.price,
         "invalidation_source_id": (
             None if plan is None else plan.invalidation.source_level_id
         ),
-        "invalidation_source": _invalidation_provenance(
-            snapshot.observation,
-            plan,
-        ),
         "primary_target": None if plan is None else plan.targets[0].price,
         "primary_target_id": None if plan is None else plan.targets[0].level_id,
+        "selected_draw_id": None if plan is None else plan.selected_draw_id,
         "liquidity_route_id": (
             None if liquidity_route is None else liquidity_route.route_id
         ),
@@ -946,8 +739,9 @@ def _row(
                 ensure_ascii=False,
             )
         ),
-        "targets": _targets_provenance(snapshot.observation, plan),
         "primary_target_R": None if plan is None else plan.primary_target_R,
+        "remaining_path_R": None if plan is None else plan.remaining_path_R,
+        "deadline": None if plan is None else plan.deadline,
         "spread_points": snapshot.observation.execution.spread_points,
         "cost_points": snapshot.observation.execution.expected_round_trip_cost_points,
         "fillability": snapshot.observation.execution.fillability,
@@ -958,7 +752,10 @@ def _row(
         "book_ask_size": snapshot.observation.execution.ask_size,
         "book_depth_imbalance": snapshot.observation.execution.depth_imbalance,
         "vetoes": json.dumps([item.value for item in snapshot.risk.vetoes]),
-        "reasons": json.dumps(list(snapshot.risk.reasons), ensure_ascii=False),
+        "risk_reasons": json.dumps(
+            list(snapshot.risk.reasons),
+            ensure_ascii=False,
+        ),
     }
 
 
@@ -1098,35 +895,25 @@ def _approval_row(snapshot) -> dict[str, Any]:
     plan = snapshot.decision.plan
     if plan is None:
         raise AssertionError("approved entry is missing its structural plan")
-    variant_payload = {
-        "verb": Action.ENTER.value,
-        "playbook": thesis.playbook.value,
-        "direction": thesis.direction.value,
-        "setup_id": thesis.setup_id,
-        "entry_location_id": thesis.entry_location_id,
-        "entry_path_id": thesis.entry_path_id,
-        "planned_entry": plan.planned_entry,
-        "invalidation_source_id": plan.invalidation.source_level_id,
-        "primary_target_id": plan.targets[0].level_id,
-        "deadline": plan.deadline.isoformat(),
-    }
-    action_variant_hash = hashlib.sha256(
-        json.dumps(
-            variant_payload,
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-    ).hexdigest()
     selected = snapshot.belief.hypotheses.get(
         best_variant.hypothesis_key or ""
     )
+    entry_attempt_id = "|".join(
+        (
+            str(thesis.setup_id or ""),
+            str(thesis.entry_location_id or ""),
+            str(thesis.entry_path_id or ""),
+            snapshot.observation.asof.isoformat(),
+        )
+    )
     return {
         "thesis_hash": thesis.thesis_hash,
-        "action_variant_hash": action_variant_hash,
+        "entry_attempt_id": entry_attempt_id,
         "decision_time": snapshot.observation.asof,
         "playbook": thesis.playbook.value,
         "direction": thesis.direction.value,
         "setup_id": thesis.setup_id,
+        "episode_id": None if selected is None else selected.episode_id,
         "entry_location_id": thesis.entry_location_id,
         "entry_path_id": thesis.entry_path_id,
         "planned_entry": thesis.entry,
@@ -1190,7 +977,7 @@ def _streamed_main(args: argparse.Namespace) -> None:
             "for a frozen final-validation candidate"
         )
     source = Path(args.source)
-    source_hash = _sha256_file(source)
+    source_hash = sha256_file(source)
     if (
         source_hash != validation.causal_source.sha256
         and not args.acknowledge_research_roll_lineage
@@ -1218,8 +1005,7 @@ def _streamed_main(args: argparse.Namespace) -> None:
     config_source = Path(args.config)
     config_payload = json.loads(config_source.read_text(encoding="utf-8"))
     engine = ContinuousSMCEngine.from_config(config_source)
-    code_hash = model_code_fingerprint()
-    config_hash = sha256_file(config_source)
+    config_identity = sha256_file(config_source)
     brain_calibration_enabled = bool(args.brain_calibration)
     if brain_calibration_enabled and window.role not in {
         "calibration",
@@ -1228,20 +1014,8 @@ def _streamed_main(args: argparse.Namespace) -> None:
         raise RuntimeError(
             "--brain-calibration requires a registered calibration window"
         )
-    primitive_protocol_hashes = _configured_primitive_protocol_hashes(
-        config_payload.get("observer", {})
-    )
-    brain_calibration_protocol_hashes = (
-        primitive_protocol_hashes if brain_calibration_enabled else {}
-    )
-    brain_calibration_input_contract_hash = (
-        brain_input_contract_hash(engine.reader.scale_specs)
-        if brain_calibration_enabled
-        else None
-    )
-
     if args.mbo_execution:
-        execution_store, _ = _load_mbo_execution(
+        execution_store, mbo_manifest = _load_mbo_execution(
             args.mbo_execution,
             validation=validation,
             start=start,
@@ -1251,6 +1025,7 @@ def _streamed_main(args: argparse.Namespace) -> None:
         execution_mode = "mbo_causal_execution"
     else:
         execution_store = None
+        mbo_manifest = None
         execution_mode = (
             "ohlcv_only_execution_unavailable"
             if args.spread_points is None
@@ -1260,6 +1035,7 @@ def _streamed_main(args: argparse.Namespace) -> None:
     destination = Path(args.output)
     completed_path = destination / "COMPLETED.json"
     progress_path = destination / "progress.json"
+    run_manifest_path = destination / "run_manifest.json"
     if args.resume:
         if completed_path.exists():
             raise FileExistsError("development replay is already complete")
@@ -1273,89 +1049,65 @@ def _streamed_main(args: argparse.Namespace) -> None:
     if brain_calibration_enabled:
         stream_keys["brain_calibration_shards"] = "sample_id"
 
-    bindings = {
-        "runner": "continuous_replay_v1",
-        "source_sha256": source_hash,
-        "source_rows": total_source_rows,
-        "source_first": replay_frame.index[0].isoformat(),
-        "source_last": replay_frame.index[-1].isoformat(),
-        "source_role": loaded.source_role,
-        "start": start.isoformat(),
-        "end_exclusive": end.isoformat(),
-        "warmup_days": int(args.warmup_days),
-        "config_sha256": config_hash,
-        "model_code_hash": code_hash,
-        "playbook_registry_hash": engine.brain.registry.fingerprint,
-        "belief_calibration_hash": engine.brain.calibrator.fingerprint,
-        "brain_calibration_capture": brain_calibration_enabled,
-        "brain_calibration_recorder_version": (
-            BRAIN_CALIBRATION_RECORDER_VERSION
-            if brain_calibration_enabled
-            else None
-        ),
-        "brain_input_contract_hash": (
-            brain_calibration_input_contract_hash
-        ),
-        "primitive_protocol_hashes": primitive_protocol_hashes,
-        "validation_protocol_hash": validation.fingerprint,
-        "validation_window_role": window.role,
-        "simulate_execution": bool(args.simulate_execution),
-        "execution_mode": execution_mode,
-        "constant_spread_points": args.spread_points,
-        "constant_slippage_points": streamed_slippage_points,
-        "mbo_execution_sha256": (
-            None
-            if args.mbo_execution is None
-            else sha256_file(args.mbo_execution)
-        ),
-        "mbo_execution_manifest_sha256": (
-            None
-            if args.mbo_execution is None
-            else sha256_file(
-                Path(args.mbo_execution).with_suffix(
-                    Path(args.mbo_execution).suffix + ".manifest.json"
-                )
-            )
-        ),
-        "shard_rows": effective_shard_rows,
-        "checkpoint_bars": int(args.checkpoint_bars),
-        "hash_mode": HASH_MODE,
-        "allow_data_gap_reset": False,
-        "stream_families": sorted(stream_keys),
+    run_manifest = {
+        "schema_version": 1,
+        "runner": "continuous_replay",
+        "source": {
+            "path": str(source.resolve()),
+            "sha256": source_hash,
+            "rows": total_source_rows,
+            "first": replay_frame.index[0].isoformat(),
+            "last": replay_frame.index[-1].isoformat(),
+            "role": loaded.source_role,
+        },
+        "model_config": {
+            "path": str(config_source.resolve()),
+            "identity": config_identity,
+            "schema_version": config_payload.get("schema_version"),
+        },
+        "window": {
+            "start": start.isoformat(),
+            "end_exclusive": end.isoformat(),
+            "role": window.role,
+            "warmup_days": int(args.warmup_days),
+        },
+        "execution": {
+            "simulate": bool(args.simulate_execution),
+            "mode": execution_mode,
+            "constant_spread_points": args.spread_points,
+            "constant_slippage_points": streamed_slippage_points,
+            "mbo_execution": (
+                None
+                if args.mbo_execution is None
+                else str(Path(args.mbo_execution).resolve())
+            ),
+            "mbo_source_sha256": (
+                None
+                if mbo_manifest is None
+                else str(mbo_manifest["output_sha256"])
+            ),
+        },
+        "output": {
+            "brain_calibration": brain_calibration_enabled,
+            "brain_calibration_schema_version": (
+                BRAIN_CALIBRATION_RECORDER_SCHEMA_VERSION
+                if brain_calibration_enabled
+                else None
+            ),
+            "shard_rows": effective_shard_rows,
+            "checkpoint_bars": int(args.checkpoint_bars),
+            "stream_families": sorted(stream_keys),
+        },
     }
-
-    brain_lineage_path = destination / "brain_calibration_lineage.json"
-    if brain_calibration_enabled:
-        brain_lineage = canonical_json(
-            {
-                "format_version": 1,
-                "lineage_contract": "brain-calibration-input-v1",
-                "recorder_version": BRAIN_CALIBRATION_RECORDER_VERSION,
-                "source_sha256": source_hash,
-                "source_rows": total_source_rows,
-                "start": start.isoformat(),
-                "end_exclusive": end.isoformat(),
-                "brain_input_contract_hash": (
-                    brain_calibration_input_contract_hash
-                ),
-                "playbook_registry_hash": engine.brain.registry.fingerprint,
-                "model_code_hash": code_hash,
-                "config_hash": config_hash,
-                "primitive_protocol_hashes": (
-                    brain_calibration_protocol_hashes
-                ),
-                "legacy_rows_or_checkpoints_accepted": False,
-            }
-        )
-        if brain_lineage_path.exists():
-            if brain_lineage_path.read_bytes() != brain_lineage:
-                raise ValueError("Brain calibration lineage sidecar is stale")
-        elif args.resume:
-            raise FileNotFoundError(
-                "resume requires the bound Brain calibration lineage sidecar"
-            )
-        else:
-            atomic_bytes(brain_lineage_path, brain_lineage)
+    run_manifest_bytes = canonical_json(to_primitive(run_manifest))
+    if args.resume:
+        if not run_manifest_path.is_file():
+            raise FileNotFoundError("resume requires run_manifest.json")
+        if run_manifest_path.read_bytes() != run_manifest_bytes:
+            raise ValueError("run manifest differs from the requested replay")
+    else:
+        atomic_bytes(run_manifest_path, run_manifest_bytes)
+    bindings = {"run_manifest": run_manifest_path.name}
 
     checkpoint = ReplayCheckpointStore(destination / "_checkpoint")
     total_fields = {
@@ -1412,17 +1164,7 @@ def _streamed_main(args: argparse.Namespace) -> None:
                 simulate_execution=bool(args.simulate_execution),
             ),
             "brain_calibration": (
-                BrainCalibrationRecorder(
-                    registry_hash=engine.brain.registry.fingerprint,
-                    model_code_hash=code_hash,
-                    config_hash=config_hash,
-                    primitive_protocol_hashes=(
-                        brain_calibration_protocol_hashes
-                    ),
-                    brain_input_contract_hash=str(
-                        brain_calibration_input_contract_hash
-                    ),
-                )
+                BrainCalibrationRecorder()
                 if brain_calibration_enabled
                 else None
             ),
@@ -1730,7 +1472,7 @@ def _streamed_main(args: argparse.Namespace) -> None:
     commit_checkpoint(final=True)
     verify_state_streams(state)
 
-    manifest_hashes: dict[str, str] = {}
+    stream_manifests: dict[str, str] = {}
     for name in stream_keys:
         manifest_path = write_stream_manifest(
             destination,
@@ -1739,7 +1481,7 @@ def _streamed_main(args: argparse.Namespace) -> None:
             artifact=f"continuous_development_{name}",
             bindings=bindings,
         )
-        manifest_hashes[name] = sha256_file(manifest_path)
+        stream_manifests[name] = str(manifest_path.relative_to(destination))
 
     trade_rows: list[dict[str, Any]] = []
     entry_attempt_rows: list[dict[str, Any]] = []
@@ -1783,16 +1525,12 @@ def _streamed_main(args: argparse.Namespace) -> None:
     summary = {
         "schema_version": config_payload.get("schema_version"),
         "source": str(loaded.source),
-        "source_sha256": source_hash,
         "source_matches_preregistered_causal_front": (
             source_hash == validation.causal_source.sha256
         ),
         "source_role": loaded.source_role,
         "validation_schema_version": validation.schema_version,
-        "validation_protocol_hash": validation.fingerprint,
         "validation_window_role": window.role,
-        "config_hash": config_hash,
-        "model_code_hash": code_hash,
         "execution_reality_source": execution_mode,
         "execution_authority": bool(execution_store is not None),
         "contract_selection_causal": loaded.contract_selection_causal,
@@ -1804,9 +1542,6 @@ def _streamed_main(args: argparse.Namespace) -> None:
         "brain_calibration_capture": brain_calibration_enabled,
         "brain_calibration_rows": int(
             state["brain_calibration_rows"]
-        ),
-        "brain_input_contract_hash": (
-            brain_calibration_input_contract_hash
         ),
         "model_action_counts": dict(
             sorted(state["model_action_counts"].items())
@@ -1824,11 +1559,8 @@ def _streamed_main(args: argparse.Namespace) -> None:
             row["outcome"] == "pending_right_censored"
             for row in entry_attempt_rows
         ),
-        "snapshot_hash_mode": HASH_MODE,
-        "rolling_state_commitment": replay.rolling_commitment,
-        "full_snapshot_hash_per_minute": False,
         "checkpoint_resume_supported": True,
-        "output_contract": "manifest_first_shards_v1",
+        "output_contract": "lightweight_shards",
         "resume_count": int(state["resume_count"]),
         "shard_rows": effective_shard_rows,
         "checkpoint_bars": int(args.checkpoint_bars),
@@ -1863,33 +1595,19 @@ def _streamed_main(args: argparse.Namespace) -> None:
         "resume_supported": False,
     }
     atomic_bytes(progress_path, canonical_json(final_progress))
-    auxiliary_hashes: dict[str, str] = {}
-    if brain_calibration_enabled:
-        auxiliary_hashes["brain_calibration_lineage.json"] = sha256_file(
-            brain_lineage_path
-        )
-    if args.simulate_execution:
-        auxiliary_hashes.update(
-            {
-                "trades.parquet": sha256_file(destination / "trades.parquet"),
-                "entry_attempts.parquet": sha256_file(
-                    destination / "entry_attempts.parquet"
-                ),
-            }
-        )
     atomic_bytes(
         completed_path,
         canonical_json(
             {
-                "format_version": 1,
+                "schema_version": 1,
                 "status": "complete",
-                "bindings": bindings,
-                "stream_manifest_sha256": manifest_hashes,
-                "summary_sha256": sha256_file(summary_path),
-                "progress_sha256": sha256_file(progress_path),
-                "auxiliary_artifact_sha256": auxiliary_hashes,
-                "checkpoint_manifest_sha256": sha256_file(
-                    checkpoint.manifest_path
+                "run_manifest": run_manifest_path.name,
+                "summary": summary_path.name,
+                "progress": progress_path.name,
+                "stream_manifests": stream_manifests,
+                "trades": "trades.parquet" if args.simulate_execution else None,
+                "entry_attempts": (
+                    "entry_attempts.parquet" if args.simulate_execution else None
                 ),
             }
         ),

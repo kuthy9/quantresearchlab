@@ -91,14 +91,16 @@ observed spread/depth/fillability to Observation, Decision and Risk;
 Pending fills remain conservatively OHLCV-bar based until the MBO queue/depth
 fill simulator is completed.
 
-Full minute traces, charts, path tests and future reveal are generated only for
-a fixed stratified batch of roughly 20–40 enter/wait/abstain trajectories. They
-are not annual replay defaults. AI review may propose computable sequence
-primitives; it has no authority to emit action or profit labels.
+The former frozen-packet, sealed-reveal and identity-bound AI audit stack has
+been retired from the development runtime. After the vertical chain is stable,
+a small sampled diagnostic can be rebuilt around only three things: a bounded
+minute trace, an independent future view, and AI comments translated into
+computable sequence primitives. It will not be part of annual replay output.
 
 Replay stores bounded Parquet shards and checkpoint state so an interrupted run
-can continue with `--resume`. Source, time window, warm-up, model, code, data
-split and execution bindings must match the checkpoint.
+can continue with `--resume`. Source, time window, warm-up, current model
+configuration and execution mode must match the checkpoint. Input and current
+configuration identities are recorded once per run, not repeated in every row.
 
 ## Development order
 
@@ -107,7 +109,8 @@ split and execution bindings must match the checkpoint.
 3. Calibrate typed Brain dimensions on the calibration split.
 4. Obtain natural ENTER decisions, then stream only their MBO windows through
    risk, fill and position feedback.
-5. Audit one stratified batch with blind images and later future reveal.
+5. Rebuild one simple stratified trace/future-view diagnostic if the stable
+   vertical chain still needs case-level investigation.
 6. Run rolling OOF, MBO stability and the sealed holdout once the vertical chain
    is stable.
 

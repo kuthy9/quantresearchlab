@@ -4141,7 +4141,6 @@ class PlaybookBrain:
                     sequence=sequence,
                     raw_probability=raw_probability,
                     calibration_version=self.calibrator.version,
-                    calibration_hash=self.calibrator.fingerprint,
                     thesis_strength=thesis_strength,
                     sequence_progress=sequence_progress,
                     location_quality=calibrated_dimensions[
