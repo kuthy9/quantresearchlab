@@ -5,7 +5,6 @@ from dataclasses import replace
 import pandas as pd
 import pytest
 
-from smc_trader.action_clock import build_action_clock_engine
 from smc_trader.causal import CausalMarketReader
 from smc_trader.model import (
     Bar,
@@ -23,14 +22,10 @@ from smc_trader.model import (
 )
 from smc_trader.observation import CausalObserver, ObserverConfig
 from smc_trader.structure import StructureConfig, StructureTracker
-from smc_trader.validation import load_validation_protocol
 
 
 BASE = pd.Timestamp("2020-01-06 09:30:00", tz="America/New_York")
-STRUCTURE_PROTOCOL = (
-    "configs/"
-    "smc_primitives_v3_0_1_structure_bos_audit_closure_r3.json"
-)
+STRUCTURE_PROTOCOL = "configs/primitives_structure_liquidity.json"
 
 
 def _candle(
@@ -285,7 +280,7 @@ def test_failed_bos_rearm_of_same_target_starts_new_generation() -> None:
     tracker = StructureTracker(
         Timeframe.M1,
         StructureConfig.from_file(
-            "configs/smc_primitives_v3_group12.json"
+            "configs/primitives_structure_liquidity.json"
         ),
     )
     for candle in _bull_structure_prefix():
@@ -666,15 +661,3 @@ def test_boundary_terminal_state_survives_observation_retry(
         match="successfully committed update",
     ):
         observer.observe(update)
-
-
-def test_v3_identity_config_is_semantic_only_and_loadable() -> None:
-    validation = load_validation_protocol(
-        "configs/validation_protocol_v3_0_1_exp001.json"
-    )
-    assert validation.version.startswith("3.0.1-EXP-SMC-3.0.1-001")
-    engine = build_action_clock_engine(
-        "configs/model_v3_0_1_exp001_structure_bos_identity_r3.json"
-    )
-    assert engine.observer.config.structure_protocol is not None
-    assert engine.brain.calibrator.status == "identity_unvalidated"

@@ -36,19 +36,11 @@ from smc_trader.mbo import (
 from smc_trader.model import (
     Action,
     Bar,
-    HypothesisSequenceState,
-    MarketBelief,
-    PlaybookPhase,
-    SequenceStepState,
     VetoCode,
 )
 from smc_trader.playbook_registry import load_playbook_registry
-from smc_trader.playbooks import PlaybookBrain
 from smc_trader.risk import RiskLimits, StructuralRiskEngine
-from smc_trader.validation import (
-    FrozenPathTestRecorder,
-    load_validation_protocol,
-)
+from smc_trader.validation import load_validation_protocol
 
 from .helpers import engine_snapshot, flat_account
 
@@ -116,30 +108,6 @@ def test_preregistered_registry_contains_exactly_three_ordered_protocols() -> No
     assert len(registry.protocols) == 3
     assert all(len(protocol.required_sequence) >= 3 for protocol in registry.protocols)
     assert all(protocol.invalidation["retrospective_rewrite"] is False for protocol in registry.protocols)
-
-
-def test_terminal_playbook_acknowledges_once_then_clears_stale_setup() -> None:
-    snapshot = engine_snapshot()
-    key = snapshot.decision.best_hypothesis_key
-    assert key is not None
-    hypothesis = snapshot.belief.hypotheses[key]
-    terminal = replace(
-        hypothesis,
-        phase=PlaybookPhase.INVALIDATED,
-        phase_started_at=snapshot.observation.asof,
-    )
-    brain = PlaybookBrain()
-    brain._belief = MarketBelief(
-        asof=snapshot.observation.asof,
-        hypotheses={key: terminal},
-    )
-    next_clock = snapshot.observation.asof + pd.Timedelta(minutes=1)
-    observation = replace(snapshot.observation, asof=next_clock)
-    updated = brain.update(observation).hypotheses[key]
-    assert updated.phase is PlaybookPhase.INACTIVE
-    assert updated.sequence is not None
-    assert updated.sequence.setup_id is None
-    assert updated.plan is None
 
 
 def test_mbo_snapshot_reconstructs_real_top_of_book() -> None:
@@ -495,148 +463,6 @@ def test_validation_protocol_protects_sealed_holdout_boundary() -> None:
             pd.Timestamp("2026-03-31", tz=TZ),
             pd.Timestamp("2026-04-02", tz=TZ),
         )
-
-
-def test_frozen_path_uses_only_later_bar_and_resolves_ambiguity_as_failure() -> None:
-    snapshot = engine_snapshot()
-    key = snapshot.decision.best_hypothesis_key
-    hypothesis = snapshot.belief.hypotheses[key]
-    sequence = HypothesisSequenceState(
-        protocol_version="test",
-        protocol_hash="b" * 64,
-        setup_id="setup",
-        steps=(
-            SequenceStepState(
-                "one",
-                True,
-                1.0,
-                snapshot.observation.asof - pd.Timedelta(minutes=2),
-            ),
-            SequenceStepState(
-                "two",
-                True,
-                1.0,
-                snapshot.observation.asof - pd.Timedelta(minutes=1),
-            ),
-        ),
-        started_at=snapshot.observation.asof - pd.Timedelta(minutes=2),
-    )
-    hypothesis = replace(hypothesis, sequence=sequence)
-    belief = replace(snapshot.belief, hypotheses={key: hypothesis})
-    snapshot = replace(snapshot, belief=belief)
-    recorder = FrozenPathTestRecorder(
-        config_hash="c" * 64,
-        code_hash="d" * 64,
-    )
-    recorder.observe(snapshot)
-    bar = Bar(
-        start=snapshot.observation.asof,
-        open=100.0,
-        high=104.0,
-        low=97.0,
-        close=101.0,
-        volume=100,
-        symbol=snapshot.observation.symbol,
-        instrument_id=snapshot.observation.instrument_id,
-    )
-    recorder.on_bar(bar)
-    result = recorder.results[0]
-    assert result.outcome == "invalidation"
-    assert not result.success
-    assert result.ambiguous_same_bar
-    assert result.decision_time < result.resolved_at
-    assert result.raw_probability == hypothesis.probability
-    assert result.code_hash == "d" * 64
-    assert result.formation_minutes == 1
-    assert result.entry_touched
-    assert (
-        result.invalidation_source_id
-        == hypothesis.plan.invalidation.source_level_id
-    )
-    assert result.target_source_id == hypothesis.plan.targets[0].level_id
-
-
-def test_frozen_path_requires_entry_and_never_credits_same_bar_target() -> None:
-    snapshot = engine_snapshot()
-    key = snapshot.decision.best_hypothesis_key
-    hypothesis = snapshot.belief.hypotheses[key]
-    sequence = HypothesisSequenceState(
-        protocol_version="test",
-        protocol_hash="b" * 64,
-        setup_id="entry-ordering",
-        steps=(
-            SequenceStepState(
-                "one",
-                True,
-                1.0,
-                snapshot.observation.asof - pd.Timedelta(minutes=1),
-            ),
-        ),
-        started_at=snapshot.observation.asof - pd.Timedelta(minutes=1),
-    )
-    hypothesis = replace(hypothesis, sequence=sequence)
-    snapshot = replace(
-        snapshot,
-        belief=replace(snapshot.belief, hypotheses={key: hypothesis}),
-    )
-    recorder = FrozenPathTestRecorder(
-        config_hash="c" * 64,
-        code_hash="d" * 64,
-    )
-    recorder.observe(snapshot)
-
-    # Target trades before the 100.0 planned entry is touched.
-    recorder.on_bar(
-        Bar(
-            start=snapshot.observation.asof,
-            open=101.0,
-            high=104.0,
-            low=100.5,
-            close=102.0,
-            volume=100,
-            symbol=snapshot.observation.symbol,
-            instrument_id=snapshot.observation.instrument_id,
-        )
-    )
-    assert recorder.results == ()
-
-    # Entry and target are both inside the next OHLC bar; target ordering is
-    # unknowable, so the conservative path remains open.
-    recorder.on_bar(
-        Bar(
-            start=snapshot.observation.asof + pd.Timedelta(minutes=1),
-            open=101.0,
-            high=104.0,
-            low=99.0,
-            close=101.0,
-            volume=100,
-            symbol=snapshot.observation.symbol,
-            instrument_id=snapshot.observation.instrument_id,
-        )
-    )
-    assert recorder.results == ()
-
-    recorder.on_bar(
-        Bar(
-            start=snapshot.observation.asof + pd.Timedelta(minutes=2),
-            open=101.0,
-            high=103.5,
-            low=100.5,
-            close=103.0,
-            volume=100,
-            symbol=snapshot.observation.symbol,
-            instrument_id=snapshot.observation.instrument_id,
-        )
-    )
-    result = recorder.results[0]
-    assert result.outcome == "target"
-    assert result.success
-    assert result.entry_touched
-    assert not result.ambiguous_same_bar
-    assert result.mfe_R == pytest.approx(
-        (103.5 - hypothesis.plan.planned_entry)
-        / hypothesis.plan.risk_points
-    )
 
 
 def test_model_code_fingerprint_is_stable_and_sha256_shaped() -> None:

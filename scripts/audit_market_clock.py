@@ -15,7 +15,7 @@ if str(ROOT) not in sys.path:
 
 from smc_trader.causal import CausalMarketReader  # noqa: E402
 from smc_trader.io import iter_completed_bars, load_ohlcv  # noqa: E402
-from smc_trader.model import CORE_TIMEFRAMES, Timeframe  # noqa: E402
+from smc_trader.model import CORE_TIMEFRAMES  # noqa: E402
 from smc_trader.validation import load_validation_protocol  # noqa: E402
 
 
@@ -23,11 +23,11 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--source",
-        default="data/processed/nq_1m_previous_session_front_2017_2026.parquet",
+        default="data/processed/nq_1m_previous_session_front_v2_3_2017_2026.parquet",
     )
     parser.add_argument(
         "--validation-protocol",
-        default="configs/validation_protocol_v2.json",
+        default="configs/data_splits.json",
     )
     parser.add_argument("--output", required=True)
     return parser.parse_args()
@@ -48,7 +48,7 @@ def main() -> None:
         raise FileExistsError(f"refusing to overwrite clock audit: {destination}")
     protocol = load_validation_protocol(args.validation_protocol)
     source_hash = _sha256_file(args.source)
-    if source_hash != protocol.causal_front_sha256:
+    if source_hash != protocol.causal_source.sha256:
         raise RuntimeError("clock audit source is not the preregistered causal front")
     loaded = load_ohlcv(args.source)
     reader = CausalMarketReader()

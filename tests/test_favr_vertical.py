@@ -31,7 +31,6 @@ from .test_v3_group4_primitives import (
     _protocol as _group4_protocol,
 )
 from .test_v4_typed_vertical import (
-    BASE,
     ROOT,
     _execution,
     _fvg,
@@ -42,7 +41,7 @@ from .test_v4_typed_vertical import (
 
 def _unparked_favr_brain() -> PlaybookBrain:
     registry = load_playbook_registry(
-        ROOT / "configs/playbooks_v4.json"
+        ROOT / "configs/playbooks.json"
     )
     protocols = tuple(
         replace(
@@ -242,7 +241,7 @@ def test_favr_full_causal_chain_is_implemented_but_runtime_parked() -> None:
     observation, mature, manipulation = _favr_observation()
     belief = PlaybookBrain(
         registry=load_playbook_registry(
-            ROOT / "configs/playbooks_v4.json"
+            ROOT / "configs/playbooks.json"
         )
     ).update(observation)
     hypothesis = belief.hypotheses[

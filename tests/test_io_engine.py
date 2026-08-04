@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import pandas as pd
 import pytest
 
@@ -11,9 +12,8 @@ from smc_trader.io import (
     iter_completed_bars,
     load_ohlcv,
 )
-from smc_trader.model import AccountState, Direction, Timeframe
-from smc_trader.observation import CausalObserver, ExecutionRealityInput, ObserverConfig
-from smc_trader.playbooks import BrainConfig, PlaybookBrain
+from smc_trader.model import AccountState, Direction
+from smc_trader.observation import ExecutionRealityInput
 
 from .helpers import session_bars
 
@@ -139,22 +139,18 @@ def test_large_same_contract_gap_can_be_marked_for_causal_reset() -> None:
 
 
 def test_engine_runs_all_layers_once_per_completed_minute() -> None:
-    observer = CausalObserver(
-        ObserverConfig(
-            minimum_bars={
-                Timeframe.H4: 1,
-                Timeframe.H1: 1,
-                Timeframe.M5: 1,
-                Timeframe.M1: 5,
-            }
-        )
-    )
-    engine = ContinuousSMCEngine(
-        observer=observer,
-        brain=PlaybookBrain(BrainConfig(prior_decay=0.0)),
-    )
+    engine = ContinuousSMCEngine.from_config("configs/model.json")
     snapshot = None
     for bar in session_bars(1)[:300]:
+        open_price = round(bar.open / 0.25) * 0.25
+        close = round(bar.close / 0.25) * 0.25
+        bar = replace(
+            bar,
+            open=open_price,
+            high=max(open_price, close) + 0.5,
+            low=min(open_price, close) - 0.5,
+            close=close,
+        )
         snapshot = engine.on_bar(
             bar,
             execution=ExecutionRealityInput(

@@ -24,10 +24,12 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--source", action="append", required=True)
     parser.add_argument(
-        "--out", default="data/processed/nq_1m_previous_session_front_2017_2026.parquet"
+        "--out",
+        default="data/processed/nq_1m_previous_session_front_v2_3_2017_2026.parquet",
     )
     parser.add_argument(
-        "--roll-out", default="data/processed/nq_previous_session_front_roll_map.parquet"
+        "--roll-out",
+        default="data/processed/nq_previous_session_front_roll_map_v2_3.parquet",
     )
     args = parser.parse_args()
     out = Path(args.out)

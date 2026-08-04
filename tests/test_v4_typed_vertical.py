@@ -69,21 +69,21 @@ BASE = pd.Timestamp("2025-01-07T09:30:00-05:00")
 
 def _group5_protocol() -> Group5Protocol:
     return Group5Protocol.from_file(
-        ROOT / "configs/smc_primitives_v3_group5.json"
+        ROOT / "configs/primitives_entry.json"
     )
 
 
 def _brain() -> PlaybookBrain:
     return PlaybookBrain(
         registry=load_playbook_registry(
-            ROOT / "configs/playbooks_v4.json"
+            ROOT / "configs/playbooks.json"
         )
     )
 
 
 def _mapped_brain() -> PlaybookBrain:
     registry = load_playbook_registry(
-        ROOT / "configs/playbooks_v4.json"
+        ROOT / "configs/playbooks.json"
     )
     maps = {}
     for playbook in (

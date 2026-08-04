@@ -1,112 +1,61 @@
 # SMC Continuous Trader
 
-Version: **2.1.0-managed-policy.2**
+Version: **1.0.0**
 
-This repository now implements an event-driven SMC decision process rather
-than optimizing static labels on a frozen candidate table.
+This repository implements a causal, continuously updated multi-timeframe SMC
+trading model. It does not predict a complete future path and then choose a
+strategy. Each newly completed 1m bar advances one shared vertical chain:
 
 ```text
-completed 1m bar
+causal 4H / 1H / 5m / 1m observation + ordered event memory
     ↓
-causal 4H / 1H / 5m / 1m observer + event memory + execution reality
-    ↓
-playbook-specific beliefs and continuous phase machines
+Temporal Market Scene Graph + typed DFP / LSR / FAVR beliefs
     ↓
 enter / wait / hold / protect / exit / abstain utility comparison
     ↓
-independent structural-risk, liquidity-target, cost and data vetoes
+structural invalidation, liquidity target, cost and execution vetoes
+    ↓
+next-bar execution and position feedback
 ```
 
-The observer only describes the market. It cannot place trades. The brain
-maintains a belief for three preregistered playbooks in both directions. The
-decision layer compares net utilities, and acts only when the best action has a
-clear advantage. The risk layer can veto any optimistic model output.
+The eyes describe what has happened. The Brain maintains typed causal
+hypotheses and continuous stages. The Decision layer acts only when one action
+has a clear utility advantage, and Risk can veto any optimistic output.
 
-Current status is research-only. The 2022 belief calibration improves the
-registered target-before-invalidation proposition, while the separate 2023
-managed-policy calibration fails closed for two playbooks and exposes only a
-small gross-value map for liquidity-sweep reversal. In June-July 2024
-reconstructed-MBO diagnostics, the behavior policy proposed 1,676 entries, but
-the managed layer approved none: every supported LSR value was negative after
-observed costs, and DFP/FAVR had no usable managed-value discrimination. The
-eyes→brain→decision link and real MBO observation path are active, but the
-entry→risk→fill→position-management chain is not empirically validated because
-no v2.1 entry reached it. This is underfit/overconstrained rather than evidence
-of profitability, and the model is not ready for capital. See
-[`reports/validation_2026-07-25/v2_1_june_july_mbo_diagnostic.md`](reports/validation_2026-07-25/v2_1_june_july_mbo_diagnostic.md)
-for the evidence and claim boundary.
+This is research software. A connected software path is not evidence of market
+edge. Brain calibration, rolling OOF, MBO stability and the sealed holdout are
+separate later stages defined in [`configs/data_splits.json`](configs/data_splits.json).
 
-The complete earlier research lineage is preserved under
-[`archive/versions/1.0.0`](archive/versions/1.0.0/README.md). Its original
-experiment identifiers remain intact, but none of its fixed candidate tables
-are an input to v2.
+## Current configuration
 
-## Data
+Only schema version 1 is active:
 
-All source data remains under `data/`:
+- [`configs/model.json`](configs/model.json): runtime wiring and risk/decision settings;
+- [`configs/playbooks.json`](configs/playbooks.json): typed DFP, LSR and FAVR definitions;
+- [`configs/primitives_structure_liquidity.json`](configs/primitives_structure_liquidity.json): candle, swing, BOS and liquidity inventory;
+- [`configs/primitives_displacement.json`](configs/primitives_displacement.json): incremental displacement episodes;
+- [`configs/primitives_zones.json`](configs/primitives_zones.json): FVG and order-block zones;
+- [`configs/primitives_range.json`](configs/primitives_range.json): accumulation, dealing range and manipulation;
+- [`configs/primitives_entry.json`](configs/primitives_entry.json): entry location, first pullback, reacceptance, micro BOS and path sequence.
 
-- NQ OHLCV-1m raw sources cover 2017-2026.
-- The strict previous-session continuous-front parquet covers
-  2017-01-03 through 2026-07-13.
-- June-July 2024 MBO parquet is materialized.
-- August-December 2024 MBO DBN files are physically present but remain behind
-  `.HOLDOUT_SEALED`; loaders reject them before content access unless the final
-  reveal is explicitly acknowledged.
+Internal semantic event identities remain version/hash bound where needed, but
+the runtime does not select between historical product generations.
 
-## Runtime
+## Data boundaries
 
-The production API is `smc_trader.engine.ContinuousSMCEngine.on_bar`. It accepts
-one newly completed 1m bar and returns a complete, auditable decision snapshot.
+All market data stays under `data/`:
 
-The historical replay CLI is:
+- OHLCV-1m covers 2017–2026 through the strict previous-session contract front;
+- June–July 2024 MBO supplies observed spread, depth, fillability and costs;
+- August–December 2024 MBO remains behind `.HOLDOUT_SEALED` until the one final
+  execution reveal is explicitly authorized.
 
-```bash
-python3 scripts/run_continuous_replay.py \
-  --source data/processed/nq_1m_previous_session_front_2017_2026.parquet \
-  --start 2025-01-02 --end 2025-01-03 \
-  --simulate-execution \
-  --output outputs/v2_replay
-```
+`configs/data_splits.json` binds the causal OHLCV artifact and manifest, the MBO
+development partition manifest and execution artifacts, and the sealed DBN and
+vendor manifest by exact SHA-256. MBO is execution reality only; it cannot
+define SMC primitives or become a buy/sell label.
 
-Replay materializes observations, beliefs, decisions, vetoes, and separated
-decision/reveal charts. With `--simulate-execution`, an approved entry is first
-eligible on the following bar and the resulting position is fed back to the
-brain for hold/protect/exit decisions. The trade ledger is evidence only after
-a separate validation protocol; running the CLI is not itself a profitability
-claim.
-
-Use this general runner for bounded research/visual diagnostics only. Its
-retired `--gross-policy-calibration` flag fails before source or output access.
-
-The registered 2023 managed-policy calibration uses a separate bounded-memory
-runner:
-
-```bash
-python3 scripts/run_managed_policy_calibration.py \
-  --source data/processed/nq_1m_previous_session_front_pre_holdout_2017_20260331.parquet \
-  --output outputs/v2_1_managed_policy_calibration_2023
-
-python3 scripts/run_managed_net_calibration.py ...
-python3 scripts/run_action_clock_calibration.py ...
-```
-
-Managed-policy, managed-net, and action-clock are the canonical annual runners.
-
-Decision rows are atomically streamed to bounded Parquet shards. Immutable
-content-addressed checkpoints include the causal reader, observer, brain,
-portfolio, pending/open execution state, counters, last committed source row,
-and shard inventory. With `--resume`, the same binding-identical command resumes an incomplete run,
-verifies all committed hashes, reports completion/throughput/ETA, and writes
-`COMPLETED.json` only after every final artifact is committed. It does not
-calculate a full serialized snapshot hash every minute; visual/path-audit
-replays retain that stronger per-decision hash.
-
-Resume is explicit: repeat the exact command with `--resume`. Source, window,
-warm-up, config, code, protocol, execution input, and storage parameters are
-hash-bound. If any binding changes, start a fresh output rather than reusing
-stale checkpoint state.
-
-For roll-sensitive causal research, first build the previous-session front:
+For roll-sensitive research, materialize the previous-session front with:
 
 ```bash
 python3 scripts/prepare_causal_front.py \
@@ -115,12 +64,53 @@ python3 scripts/prepare_causal_front.py \
   --source data/raw/nq_ohlcv_1m/glbx-mdp3-20260101-20260714.ohlcv-1m.dbn.zst
 ```
 
-Selection for each Globex session uses only the highest-volume outright from
-the strictly prior completed session. The first source session is omitted and
-there is no current-session fallback.
+Each Globex session uses only the highest-volume outright contract from the
+strictly prior completed session. The first source session is omitted; there is
+no current-session fallback.
 
-See [`docs/architecture.md`](docs/architecture.md) for the contracts and
-[`docs/playbook_preregistration.md`](docs/playbook_preregistration.md) for
-playbook admission rules. See
-[`docs/self_review_checklist.md`](docs/self_review_checklist.md) for the
-mandatory pre-test review gate.
+## Runtime and replay
+
+The runtime API is `ContinuousSMCEngine.from_config("configs/model.json")`,
+followed by one `on_bar` call per newly completed 1m bar. Its fixed causal order
+is reader → observer/scene graph → Brain → Decision → Risk.
+
+A bounded development replay can be run with:
+
+```bash
+python3 scripts/run_continuous_replay.py \
+  --source data/processed/nq_1m_previous_session_front_v2_3_2017_2026.parquet \
+  --start 2022-01-03 --end 2022-02-01 \
+  --output outputs/development_replay
+```
+
+Normal replay writes light decision rows, an aggregate summary, progress,
+checkpoints and resumable shards. `--brain-calibration` adds typed calibration
+rows only inside the registered calibration window. `--mbo-execution` supplies
+observed spread/depth/fillability to Observation, Decision and Risk;
+`--simulate-execution` enables the existing next-bar position feedback path.
+Pending fills remain conservatively OHLCV-bar based until the MBO queue/depth
+fill simulator is completed.
+
+Full minute traces, charts, path tests and future reveal are generated only for
+a fixed stratified batch of roughly 20–40 enter/wait/abstain trajectories. They
+are not annual replay defaults. AI review may propose computable sequence
+primitives; it has no authority to emit action or profit labels.
+
+Replay stores bounded Parquet shards and checkpoint state so an interrupted run
+can continue with `--resume`. Source, time window, warm-up, model, code, data
+split and execution bindings must match the checkpoint.
+
+## Development order
+
+1. Freeze or park semantic primitives without PnL-driven threshold search.
+2. Establish natural mature-range/FAVR authority or keep FAVR parked.
+3. Calibrate typed Brain dimensions on the calibration split.
+4. Obtain natural ENTER decisions, then stream only their MBO windows through
+   risk, fill and position feedback.
+5. Audit one stratified batch with blind images and later future reveal.
+6. Run rolling OOF, MBO stability and the sealed holdout once the vertical chain
+   is stable.
+
+See [`docs/architecture.md`](docs/architecture.md),
+[`docs/playbook_preregistration.md`](docs/playbook_preregistration.md), and
+[`docs/self_review_checklist.md`](docs/self_review_checklist.md).

@@ -10,22 +10,19 @@ from smc_trader.model import (
     EngineSnapshot,
     RiskAssessment,
 )
-from smc_trader.risk import RiskLimits, StructuralRiskEngine
 from smc_trader.simulation import SequentialPortfolio
 from smc_trader.observation import ExecutionRealityInput
 
-from .helpers import engine_snapshot, flat_account
+from .test_v4_typed_vertical import _brain, _dfp_fixture, _snapshot
 
 
 def _approved_entry_snapshot() -> EngineSnapshot:
-    base = engine_snapshot()
-    risk = StructuralRiskEngine(RiskLimits(maximum_cost_R=0.50)).review(
-        base.decision,
-        base.observation,
-        flat_account(),
-    )
-    assert risk.passed and risk.frozen_thesis is not None
-    return replace(base, risk=risk)
+    _, _, _, forming, triggered = _dfp_fixture()
+    brain = _brain()
+    brain.update(forming)
+    snapshot = _snapshot(triggered, brain.update(triggered), "a")
+    assert snapshot.risk.passed and snapshot.risk.frozen_thesis is not None
+    return snapshot
 
 
 def test_sequential_entry_waits_for_next_bar_and_preserves_original_stop() -> None:
@@ -51,12 +48,15 @@ def test_sequential_entry_waits_for_next_bar_and_preserves_original_stop() -> No
     assert position is not None
     assert position.opened_at == entry_bar.end
     assert position.entry_price == snapshot.decision.plan.planned_entry
-    assert position.original_invalidation.price == 98.0
-    assert position.current_stop == 98.0
+    assert position.original_invalidation.price == (
+        snapshot.decision.plan.invalidation.price
+    )
+    assert position.current_stop == snapshot.decision.plan.invalidation.price
     assert position.mfe_R == 0.0
-    assert position.mae_R == (
-        entry_bar.low - position.entry_price
-    ) / snapshot.decision.plan.risk_points
+    assert (
+        position.mae_R
+        == (entry_bar.low - position.entry_price) / snapshot.decision.plan.risk_points
+    )
 
     protect = replace(
         snapshot,
@@ -66,13 +66,15 @@ def test_sequential_entry_waits_for_next_bar_and_preserves_original_stop() -> No
             True,
             (),
             ("confirmed structure",),
-            protected_stop=99.0,
+            protected_stop=99.5,
         ),
     )
     portfolio.after_decision(protect)
     position = portfolio.account(entry_bar.end).position
-    assert position.original_invalidation.price == 98.0
-    assert position.current_stop == 99.0
+    assert position.original_invalidation.price == (
+        snapshot.decision.plan.invalidation.price
+    )
+    assert position.current_stop == 99.5
 
 
 def test_pending_limit_cannot_fill_at_frozen_deadline() -> None:
@@ -141,8 +143,10 @@ def test_sequential_target_closes_only_on_a_later_bar() -> None:
     closed = portfolio.before_bar(target_bar, execution)
     assert len(closed) == 1
     assert closed[0].exit_reason == "target"
-    assert closed[0].gross_R == 1.5
-    assert closed[0].original_invalidation == 98.0
+    assert closed[0].gross_R == snapshot.decision.plan.primary_target_R
+    assert closed[0].original_invalidation == (
+        snapshot.decision.plan.invalidation.price
+    )
     lifecycle = portfolio.lifecycle_position
     assert lifecycle is not None
     assert lifecycle.status == "completed"

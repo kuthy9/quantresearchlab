@@ -6,7 +6,7 @@ import math
 
 import pandas as pd
 
-from .model import Direction, aware_timestamp, clamp
+from .model import Direction, aware_timestamp
 from .observation import ExecutionRealityInput
 
 
@@ -64,7 +64,6 @@ class TopOfBookExecutionProvider:
             if direction is Direction.LONG
             else book.bid_size
         )
-        size_ratio = clamp(near_size / quantity)
         # For a one-level BBO observation, price impact beyond the best quote is
         # unknowable. Do not invent a constant slippage charge: record zero
         # additional impact only when displayed best-side size covers the order,

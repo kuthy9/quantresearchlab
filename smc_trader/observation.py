@@ -45,6 +45,7 @@ from .liquidity import (
 from .model import (
     BOS_CONFIRMATION_REASON,
     BOSLifecycle,
+    BreakOfStructureState,
     Candle,
     CandleStructureState,
     CORE_TIMEFRAMES,
@@ -54,7 +55,6 @@ from .model import (
     EventKind,
     ExecutionObservation,
     FairValueGapLifecycle,
-    FairValueGapState,
     FrameObservation,
     GROUP4_HARD_BOUNDARY_REASONS,
     LiquidityInventoryItem,
@@ -67,7 +67,6 @@ from .model import (
     MarketEvent,
     MarketObservation,
     OrderBlockLifecycle,
-    OrderBlockState,
     PathSequenceLifecycle,
     PathSequenceState,
     StructureLifecycle,
@@ -2314,7 +2313,7 @@ class CausalObserver:
                         self._group4_bootstrap_range_transitions.extend(
                             group4_update.range_transitions
                         )
-            except Exception as error:
+            except Exception:
                 self._terminal_failure = (
                     f"{timeframe.value} structure/liquidity update failed "
                     f"at {candle.end.isoformat()}; discard this observer "

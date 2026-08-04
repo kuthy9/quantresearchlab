@@ -236,8 +236,6 @@ def resolve_model_bindings(model_config: str | Path) -> dict[str, Any]:
     if not isinstance(registry_path, str) or not registry_path.strip():
         raise ValueError("model config omits playbook_registry")
     registry = load_playbook_registry(registry_path)
-    if not registry.registry_version.startswith("4."):
-        raise ValueError("typed Brain calibration requires a v4 playbook registry")
     for playbook in TYPED_PARKED_PLAYBOOKS:
         if "parked" not in registry.for_playbook(playbook).status:
             raise ValueError(f"{playbook.value} must remain parked during calibration")
@@ -248,9 +246,9 @@ def resolve_model_bindings(model_config: str | Path) -> dict[str, Any]:
         "config_path": config_path,
         "config_hash": hashlib.sha256(raw).hexdigest(),
         "registry_hash": registry.fingerprint,
-        "registry_version": registry.registry_version,
-        "playbook_protocol_versions": {
-            playbook.value: registry.for_playbook(playbook).version
+        "registry_schema_version": registry.schema_version,
+        "playbook_schema_versions": {
+            playbook.value: registry.for_playbook(playbook).schema_version
             for playbook in TYPED_ACTIVE_PLAYBOOKS
         },
         "model_code_hash": model_code_fingerprint(),
@@ -284,17 +282,18 @@ def _validate_bindings(frame: pd.DataFrame, bindings: Mapping[str, Any]) -> dict
         raise ValueError("Brain calibration row input contract hash is stale")
 
     protocol_versions: dict[str, str] = {}
-    for playbook, expected in bindings["playbook_protocol_versions"].items():
+    for playbook, expected in bindings["playbook_schema_versions"].items():
+        expected_text = str(expected)
         values = set(
             frame.loc[frame["playbook"].eq(playbook), "protocol_version"]
             .dropna()
             .astype(str)
         )
-        if values != {expected}:
+        if values != {expected_text}:
             raise ValueError(
                 f"Brain calibration row protocol_version is stale for {playbook}"
             )
-        protocol_versions[playbook] = expected
+        protocol_versions[playbook] = expected_text
 
     raw_values = frame["primitive_protocol_hashes"].dropna()
     if len(raw_values) != len(frame):
@@ -394,8 +393,8 @@ def fit_typed_brain_calibration(
     *,
     row_paths: Sequence[str | Path],
     output: str | Path,
-    model_config: str | Path = "configs/model_v3_development.json",
-    validation_protocol: str | Path = "configs/validation_protocol_v2.json",
+    model_config: str | Path = "configs/model.json",
+    validation_protocol: str | Path = "configs/data_splits.json",
     bins: int = 10,
     minimum_bin_samples: int = 20,
     minimum_dimension_samples: int = 200,
@@ -525,7 +524,7 @@ def fit_typed_brain_calibration(
             "pnl_labels_used": False,
             "mbo_used": False,
         },
-        "validation_protocol_version": protocol.version,
+        "validation_schema_version": protocol.schema_version,
         "validation_protocol_hash": protocol.fingerprint,
         "training_window_role": window.role,
         "training_start": frame["sampled_at"].min().isoformat(),
@@ -557,10 +556,10 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--rows", nargs="+", required=True)
     parser.add_argument("--output", required=True)
-    parser.add_argument("--model-config", default="configs/model_v3_development.json")
+    parser.add_argument("--model-config", default="configs/model.json")
     parser.add_argument(
         "--validation-protocol",
-        default="configs/validation_protocol_v2.json",
+        default="configs/data_splits.json",
     )
     parser.add_argument("--bins", type=int, default=10)
     parser.add_argument("--minimum-bin-samples", type=int, default=20)

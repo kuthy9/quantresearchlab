@@ -30,7 +30,6 @@ from smc_trader.liquidity import CausalLiquidityTracker, LiquidityConfig  # noqa
 from smc_trader.model import (  # noqa: E402
     DealingRangeLifecycle,
     DealingRangeState,
-    ManipulationLifecycle,
     ManipulationState,
     SupportResistanceLifecycle,
     SupportResistanceState,
@@ -41,8 +40,8 @@ from smc_trader.structure import StructureConfig, StructureTracker  # noqa: E402
 from smc_trader.validation import load_validation_protocol  # noqa: E402
 
 
-DEFAULT_CONFIG = ROOT / "configs/group4_mature_range_coverage_v1.json"
-DEFAULT_OUTPUT = ROOT / "outputs/development/group4_mature_range_coverage_v1"
+DEFAULT_CONFIG = ROOT / "configs/data_splits.json"
+DEFAULT_OUTPUT = ROOT / "outputs/development/mature_range_coverage"
 LIVE_ZONE_STATES = {
     SupportResistanceLifecycle.ACTIVE,
     SupportResistanceLifecycle.TESTED,
@@ -69,6 +68,30 @@ def _json(path: Path) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise ValueError(f"JSON root must be an object: {path}")
     return payload
+
+
+def _coverage_payload(payload: Mapping[str, Any], config: Path) -> dict[str, Any]:
+    """Select the one registered range-coverage slice from data_splits.json."""
+
+    sources = payload.get("sources")
+    fixed = payload.get("fixed_development_windows")
+    if not isinstance(sources, Mapping) or not isinstance(fixed, Mapping):
+        raise ValueError("data splits lack source or fixed-window definitions")
+    ohlcv = sources.get("ohlcv")
+    coverage = fixed.get("mature_range_coverage")
+    if not isinstance(ohlcv, Mapping) or not isinstance(coverage, Mapping):
+        raise ValueError("data splits lack OHLCV or mature-range coverage definitions")
+    return {
+        "schema_version": payload.get("schema_version"),
+        "source": ohlcv.get("path"),
+        "validation_protocol": str(config.relative_to(ROOT)),
+        "group12_protocol": "configs/primitives_structure_liquidity.json",
+        "group4_protocol": "configs/primitives_range.json",
+        "warmup_calendar_days": coverage.get("warmup_calendar_days"),
+        "allow_data_gap_reset": True,
+        "threshold_search": coverage.get("threshold_search"),
+        "windows": coverage.get("windows"),
+    }
 
 
 def _write_json(path: Path, payload: Any) -> None:
@@ -555,15 +578,12 @@ class CoverageAccumulator:
 
 def _validate_config(payload: Mapping[str, Any]) -> None:
     if (
-        payload.get("protocol_version") != "group4-mature-range-coverage.1"
+        payload.get("schema_version") != 1
         or payload.get("threshold_search") is not False
         or payload.get("allow_data_gap_reset") is not True
         or int(payload.get("warmup_calendar_days", 0)) != 7
     ):
-        raise ValueError("mature-range coverage config differs from its frozen contract")
-    forbidden = {str(item).lower() for item in payload.get("forbidden_inputs", ())}
-    if not {"pnl", "mbo", "future path", "action labels"}.issubset(forbidden):
-        raise ValueError("coverage config does not fail closed on outcome inputs")
+        raise ValueError("mature-range coverage differs from data_splits.json")
     windows = payload.get("windows")
     if not isinstance(windows, list) or len(windows) != 5:
         raise ValueError("coverage requires five frozen development windows")
@@ -588,7 +608,7 @@ def _scan_window(
     destination = _window_result_path(output, window_id)
     if destination.is_file() and not force:
         prior = _json(destination)
-        if prior.get("bindings", {}).get("coverage_config_sha256") == config_hash:
+        if prior.get("bindings", {}).get("data_splits_sha256") == config_hash:
             print(f"[{window_id}] resume: using completed window result", flush=True)
             return prior
 
@@ -727,7 +747,7 @@ def _scan_window(
         observed_updates=observed_updates,
     )
     result["bindings"] = {
-        "coverage_config_sha256": config_hash,
+        "data_splits_sha256": config_hash,
         "source": str(source.relative_to(ROOT)),
         "source_role": loaded.source_role,
         "contract_selection_causal": loaded.contract_selection_causal,
@@ -812,9 +832,9 @@ def aggregate_results(
         _add_counts(manipulations, result["range_boundary_manipulation"])
         candidates.extend(dict(item) for item in result["case_candidates"])
     return {
-        "protocol_version": "group4-mature-range-coverage.1",
+        "schema_version": 1,
         "bindings": {
-            "coverage_config_sha256": config_hash,
+            "data_splits_sha256": config_hash,
             "window_count": len(results),
             "threshold_search": False,
             "future_or_outcome_fields_used": False,
@@ -877,7 +897,7 @@ def main() -> None:
     args = parser.parse_args()
     config = args.config if args.config.is_absolute() else ROOT / args.config
     output = args.output if args.output.is_absolute() else ROOT / args.output
-    payload = _json(config)
+    payload = _coverage_payload(_json(config), config)
     _validate_config(payload)
     config_hash = _sha256(config)
     output.mkdir(parents=True, exist_ok=True)

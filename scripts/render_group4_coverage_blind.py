@@ -18,14 +18,14 @@ from smc_trader.artifact_stream import atomic_bytes, sha256_file  # noqa: E402
 from smc_trader.causal import CausalMarketReader  # noqa: E402
 from smc_trader.io import iter_completed_bars, load_ohlcv  # noqa: E402
 from smc_trader.model import CORE_TIMEFRAMES, Timeframe  # noqa: E402
-from smc_trader.semantic_audit import SemanticCaseVisualizer  # noqa: E402
+from smc_trader.visualization import BlindCandlePanelRenderer  # noqa: E402
 
 
 DEFAULT_SUMMARY = (
     ROOT
-    / "outputs/development/group4_mature_range_coverage_v1/summary.json"
+    / "outputs/development/mature_range_coverage/summary.json"
 )
-DEFAULT_CONFIG = ROOT / "configs/group4_mature_range_coverage_v1.json"
+DEFAULT_CONFIG = ROOT / "configs/data_splits.json"
 
 
 def _json(path: Path) -> dict[str, Any]:
@@ -61,7 +61,7 @@ def _render(
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    panels = SemanticCaseVisualizer._panels(histories, focus_clock)
+    panels = BlindCandlePanelRenderer.panels(histories, focus_clock)
     figure, axes = plt.subplots(
         4,
         1,
@@ -71,7 +71,7 @@ def _render(
     )
     for axis, timeframe in zip(axes, CORE_TIMEFRAMES):
         first_index, candles = panels[timeframe]
-        SemanticCaseVisualizer._candles(
+        BlindCandlePanelRenderer.draw_candles(
             axis,
             candles,
             first_history_index=first_index,
@@ -114,7 +114,8 @@ def main() -> None:
     summary_path = Path(args.summary)
     config_path = Path(args.config)
     summary = _json(summary_path)
-    config = _json(config_path)
+    data_splits = _json(config_path)
+    coverage = data_splits["fixed_development_windows"]["mature_range_coverage"]
     selected = summary.get("selected_cases")
     if not isinstance(selected, dict):
         raise ValueError("summary lacks selected_cases")
@@ -135,10 +136,10 @@ def main() -> None:
     if any(case["focus_clock"].tzinfo is None for case in cases):
         raise ValueError("case clocks must be timezone aware")
 
-    windows = {str(item["id"]): item for item in config["windows"]}
-    source = ROOT / str(config["source"])
+    windows = {str(item["id"]): item for item in coverage["windows"]}
+    source = ROOT / str(data_splits["sources"]["ohlcv"]["path"])
     output = summary_path.parent / "blind"
-    warmup_days = int(config["warmup_calendar_days"])
+    warmup_days = int(coverage["warmup_calendar_days"])
     tick_size = 0.25
     artifacts: list[dict[str, str]] = []
 
@@ -166,7 +167,7 @@ def main() -> None:
                 histories = {
                     timeframe: reader.window(
                         timeframe,
-                        SemanticCaseVisualizer.PANEL_BARS[timeframe],
+                        BlindCandlePanelRenderer.PANEL_BARS[timeframe],
                     )
                     for timeframe in CORE_TIMEFRAMES
                 }

@@ -1,10 +1,18 @@
 #!/usr/bin/env python3
-"""Causal scenario audit and two-pass AI-primitive review workflow."""
+"""Sample 20–40 causal decision traces, then reveal their future separately.
+
+This is a development diagnostic, not a release-governance runner.  It keeps
+the useful boundaries—completed bars, frozen model state, stratified actions,
+separate future views and outcome-free AI primitives—without create-once
+custody trees or parallel policy engines.
+"""
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass, field
 import hashlib
 import json
+import math
 from pathlib import Path
 import sys
 from typing import Any, Mapping
@@ -18,55 +26,34 @@ if str(ROOT) not in sys.path:
 from scripts.run_continuous_replay import (  # noqa: E402
     _deadline,
     _load_mbo_execution,
-    _optional_protocol_sha256,
     _sha256_file,
 )
 from smc_trader.ai_review import (  # noqa: E402
     AIReviewAdapter,
     CausalPrimitiveRegistry,
     ai_review_identity,
+    path_evidence_query_from_proposal,
 )
-from smc_trader.action_equivalence import (  # noqa: E402
-    action_equivalence_code_fingerprint,
-)
-from smc_trader.calibration import model_code_fingerprint  # noqa: E402
-from smc_trader.engine import ContinuousSMCEngine  # noqa: E402
 from smc_trader.decision_trace import (  # noqa: E402
+    PrimitivePathEvidenceRecorder,
     build_decision_trace,
     build_frozen_decision_packet,
     decision_packet_payload_sha256,
-    decision_packet_sha256,
-    read_verified_decision_packet,
-    sealed_path_audit_context,
-    write_frozen_decision_packet,
 )
+from smc_trader.engine import ContinuousSMCEngine  # noqa: E402
 from smc_trader.io import iter_completed_bars, load_ohlcv  # noqa: E402
-from smc_trader.managed_net_value import (  # noqa: E402
-    build_v2_2_policy_base_engine,
-)
-from smc_trader.model import AccountState, Timeframe, to_primitive  # noqa: E402
+from smc_trader.model import Action, Bar, Candle, Timeframe, to_primitive  # noqa: E402
 from smc_trader.observation import ExecutionRealityInput  # noqa: E402
-from smc_trader.path_evidence import (  # noqa: E402
-    PrimitivePathEvidenceQuery,
-    PrimitivePathEvidenceRecorder,
-)
 from smc_trader.simulation import SequentialReplay  # noqa: E402
-from smc_trader.validation import (  # noqa: E402
-    FrozenPathTestRecorder,
-    PathTestResult,
-    evaluate_primitive_implementation_case,
-    finalize_primitive_evaluation,
-    load_validation_protocol,
-    records_frame,
-)
-from smc_trader.visual_audit import (  # noqa: E402
-    ScenarioVisualAuditSampler,
-    visual_audit_code_fingerprint,
-)
+from smc_trader.validation import load_validation_protocol  # noqa: E402
 from smc_trader.visualization import (  # noqa: E402
     DecisionVisualizer,
-    SealedVisualAudit,
+    RevealPermit,
+    VisualArtifact,
 )
+
+
+AUDIT_ACTIONS = frozenset({Action.ENTER, Action.WAIT, Action.ABSTAIN})
 
 
 def _aware(value: str) -> pd.Timestamp:
@@ -84,101 +71,46 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--start", required=True)
     parser.add_argument("--end", required=True)
     parser.add_argument("--output", required=True)
-    parser.add_argument(
-        "--config",
-        default="configs/model_v3_development.json",
-    )
+    parser.add_argument("--config", default="configs/model.json")
     parser.add_argument(
         "--validation-protocol",
-        default="configs/validation_protocol_v2.json",
+        default="configs/data_splits.json",
     )
     parser.add_argument("--mbo-execution")
     parser.add_argument("--warmup-days", type=int, default=45)
-    parser.add_argument("--quota-per-scenario", type=int, default=3)
+    parser.add_argument("--sample-count", type=int, default=30)
+    parser.add_argument("--future-minutes", type=int, default=120)
     parser.add_argument("--ai-review-directory")
-    parser.add_argument(
-        "--primitive-evaluation-directory",
-        help=(
-            "optional directory of verified frozen decision packets from a "
-            "different registered window for proposal implementation checks; "
-            "this does not approve semantic path validity"
-        ),
-    )
-    parser.add_argument(
-        "--candidate-only",
-        type=int,
-        default=0,
-        help=(
-            "seal exactly one complete-sequence decision packet and stop "
-            "at its decision clock; repeat in an isolated output for each "
-            "additional blind case"
-        ),
-    )
     return parser.parse_args()
 
 
-def _review_template(
-    snapshot: Any,
-    hypothesis_key: str | None,
-    *,
-    decision_packet_hash: str,
-    decision_packet_sha256: str,
-) -> dict[str, Any]:
-    return {
-        **ai_review_identity(snapshot, hypothesis_key),
-        "decision_packet_hash": decision_packet_hash,
-        "decision_packet_sha256": decision_packet_sha256,
-        "reviewer_id": "pending_ai_reviewer",
-        "issues": [],
-    }
-
-
-def _review_filename(identity: dict[str, str | None]) -> str:
+def _review_filename(identity: Mapping[str, str | None]) -> str:
     suffix = hashlib.sha256(
-        json.dumps(identity, sort_keys=True).encode("utf-8")
+        json.dumps(dict(identity), sort_keys=True).encode("utf-8")
     ).hexdigest()[:16]
     return f"{identity['decision_hash']}--{suffix}.json"
 
 
-def _audit_model_code_hash() -> str:
-    digest = hashlib.sha256()
-    for value in (
-        model_code_fingerprint(),
-        action_equivalence_code_fingerprint(),
-        visual_audit_code_fingerprint(),
-    ):
-        digest.update(value.encode("ascii"))
-        digest.update(b"\0")
-    return digest.hexdigest()
+def _bar_candle(bar: Bar) -> Candle:
+    return Candle(
+        timeframe=Timeframe.M1,
+        start=bar.start,
+        end=bar.end,
+        open=bar.open,
+        high=bar.high,
+        low=bar.low,
+        close=bar.close,
+        volume=bar.volume,
+        symbol=bar.symbol,
+        instrument_id=bar.instrument_id,
+        observed_minutes=1,
+        expected_minutes=1,
+        complete=True,
+        synthetic_minutes=1 if bar.synthetic_no_trade else 0,
+    )
 
 
-def _proposal_entity_ids(proposal: Any) -> tuple[str, ...]:
-    """Collect explicit typed identities already frozen in the proposal."""
-
-    identities = {
-        value
-        for value in (
-            proposal.setup_id,
-            proposal.entry_location_id,
-            proposal.entry_path_id,
-        )
-        if isinstance(value, str) and value
-    }
-    values = proposal.origin_value.values
-    if isinstance(values, Mapping):
-        for name, value in values.items():
-            if name.endswith("_id") and isinstance(value, str) and value:
-                identities.add(value)
-            elif name.endswith("_ids") and isinstance(value, (tuple, list)):
-                identities.update(
-                    item
-                    for item in value
-                    if isinstance(item, str) and item
-                )
-    return tuple(sorted(identities))
-
-
-def _path_boundary_reason(anomalies: Any) -> str | None:
+def _boundary_reason(anomalies: Any) -> str | None:
     values = set(anomalies)
     if "contract_change_history_reset" in values:
         return "contract_change_reset"
@@ -191,31 +123,367 @@ def _path_boundary_reason(anomalies: Any) -> str | None:
     return None
 
 
-def _development_output_directory(requested: str | Path) -> Path:
-    """Return a writable run directory without deleting prior development work."""
+def _sample_stratum(snapshot: Any) -> tuple[str, ...]:
+    key = snapshot.decision.best_hypothesis_key
+    hypothesis = (
+        None if key is None else snapshot.belief.hypotheses.get(key)
+    )
+    h4_direction = float(
+        snapshot.observation.frame(Timeframe.H4).metrics.get(
+            "structure_direction",
+            0.0,
+        )
+    )
+    regime = (
+        "h4_up"
+        if h4_direction > 0
+        else "h4_down"
+        if h4_direction < 0
+        else "h4_flat"
+    )
+    hour = snapshot.observation.asof.tz_convert("America/New_York").hour
+    session = "overnight" if hour < 8 else "morning" if hour < 12 else "afternoon"
+    return (
+        snapshot.risk.final_action.value,
+        "none" if hypothesis is None else hypothesis.playbook.value,
+        "none" if hypothesis is None else hypothesis.direction.value,
+        regime,
+        session,
+    )
 
-    root = Path(requested)
-    if root.exists() and not root.is_dir():
-        raise NotADirectoryError("visual audit output exists and is not a directory")
-    if not root.exists() or not any(root.iterdir()):
-        return root
-    reruns = root / "development-runs"
-    index = 1
-    while (reruns / f"run-{index:04d}").exists():
-        index += 1
-    return reruns / f"run-{index:04d}"
+
+@dataclass
+class _OpenAudit:
+    sample_id: str
+    snapshot: Any
+    hypothesis_key: str | None
+    permit: RevealPermit
+    decision_artifact: VisualArtifact
+    directory: Path
+    reveal_at: pd.Timestamp
+    proposals: tuple[Any, ...]
+    recorders: list[tuple[Any, PrimitivePathEvidenceRecorder, Path]]
+    stratum: tuple[str, ...]
+    future_1m: list[Candle] = field(default_factory=list)
+
+
+class _StratifiedAuditBatch:
+    def __init__(
+        self,
+        root: Path,
+        *,
+        sample_count: int,
+        future_minutes: int,
+        visualizer: DecisionVisualizer,
+        review_root: Path | None,
+    ) -> None:
+        self.root = root
+        self.sample_count = sample_count
+        self.future_minutes = future_minutes
+        self.visualizer = visualizer
+        self.review_root = review_root
+        self.ai_adapter = AIReviewAdapter()
+        self.ai_registry = CausalPrimitiveRegistry()
+        self.open: list[_OpenAudit] = []
+        self.rows: list[dict[str, Any]] = []
+        self._stratum_counts: dict[tuple[str, ...], int] = {}
+        self._action_counts: dict[str, int] = {}
+        self._last_action_clock: dict[str, pd.Timestamp] = {}
+
+    def _accepts(self, snapshot: Any) -> bool:
+        action = snapshot.risk.final_action
+        if action not in AUDIT_ACTIONS or len(self.rows) + len(self.open) >= self.sample_count:
+            return False
+        action_name = action.value
+        action_cap = max(1, int(math.ceil(self.sample_count * 0.60)))
+        if self._action_counts.get(action_name, 0) >= action_cap:
+            return False
+        previous = self._last_action_clock.get(action_name)
+        if previous is not None and snapshot.observation.asof - previous < pd.Timedelta(minutes=5):
+            return False
+        stratum = _sample_stratum(snapshot)
+        return self._stratum_counts.get(stratum, 0) < 3
+
+    def _review_proposals(
+        self,
+        snapshot: Any,
+        histories: Mapping[Timeframe, Any],
+        previous_snapshot: Any,
+        source_bar: Bar,
+        account_state: Any,
+        belief_position_input: Any,
+        sample_root: Path,
+    ) -> tuple[Any, ...]:
+        key = snapshot.decision.best_hypothesis_key
+        identity = ai_review_identity(snapshot, key)
+        packet = build_frozen_decision_packet(
+            snapshot,
+            histories,
+            previous_snapshot,
+            hypothesis_key=key,
+            source_bar=source_bar,
+            account_state=account_state,
+            belief_position_input=belief_position_input,
+        )
+        packet_sha = decision_packet_payload_sha256(packet)
+        template = {
+            **identity,
+            "decision_packet_hash": packet["packet_hash"],
+            "decision_packet_sha256": packet_sha,
+            "reviewer_id": "pending_ai_reviewer",
+            "issues": [],
+        }
+        template_path = sample_root / "ai_review_template.json"
+        template_path.write_text(
+            json.dumps(to_primitive(template), indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        if self.review_root is None:
+            return ()
+        source = self.review_root / _review_filename(identity)
+        if not source.exists():
+            return ()
+        proposals = self.ai_adapter.convert(
+            json.loads(source.read_text(encoding="utf-8")),
+            snapshot,
+            hypothesis_key=key,
+            decision_packet_hash=packet["packet_hash"],
+            decision_packet_sha256=packet_sha,
+            decision_packet=packet,
+        )
+        self.ai_registry.register(proposals)
+        return proposals
+
+    def maybe_open(
+        self,
+        snapshot: Any,
+        histories: Mapping[Timeframe, Any],
+        previous_snapshot: Any,
+        source_bar: Bar,
+        account_state: Any,
+        belief_position_input: Any,
+    ) -> None:
+        if not self._accepts(snapshot):
+            return
+        action = snapshot.risk.final_action.value
+        stratum = _sample_stratum(snapshot)
+        index = len(self.rows) + len(self.open) + 1
+        sample_id = (
+            f"{index:02d}-{snapshot.observation.asof:%Y%m%d-%H%M}-"
+            f"{action}"
+        )
+        sample_root = self.root / "samples" / sample_id
+        sample_root.mkdir(parents=True, exist_ok=True)
+        key = snapshot.decision.best_hypothesis_key
+        trace = build_decision_trace(
+            snapshot,
+            previous_snapshot,
+            hypothesis_key=key,
+            source_bar=source_bar,
+            account_state=account_state,
+            belief_position_input=belief_position_input,
+        )
+        (sample_root / "decision_trace.json").write_text(
+            json.dumps(trace, indent=2, ensure_ascii=False, sort_keys=True),
+            encoding="utf-8",
+        )
+        proposals = self._review_proposals(
+            snapshot,
+            histories,
+            previous_snapshot,
+            source_bar,
+            account_state,
+            belief_position_input,
+            sample_root,
+        )
+        artifact = self.visualizer.render_decision(
+            snapshot,
+            histories,
+            sample_root / "decision.png",
+            ai_proposals=proposals,
+            audit_hypothesis_key=key,
+            audit_context={
+                "scenario": "stratified_decision_trace",
+                "future_present": False,
+                "stratum": stratum,
+            },
+        )
+        reveal_at = snapshot.observation.asof + pd.Timedelta(
+            minutes=self.future_minutes
+        )
+        recorders: list[tuple[Any, PrimitivePathEvidenceRecorder, Path]] = []
+        for proposal in proposals:
+            try:
+                recorder = PrimitivePathEvidenceRecorder.from_snapshot(
+                    snapshot,
+                    hypothesis_key=str(key),
+                    query=path_evidence_query_from_proposal(proposal),
+                )
+            except ValueError:
+                continue
+            recorders.append(
+                (
+                    proposal,
+                    recorder,
+                    sample_root / f"future-{proposal.proposal_id}.json",
+                )
+            )
+            reveal_at = min(reveal_at, recorder.identity.deadline)
+        self.open.append(
+            _OpenAudit(
+                sample_id=sample_id,
+                snapshot=snapshot,
+                hypothesis_key=key,
+                permit=self.visualizer.seal_reveal(snapshot, key),
+                decision_artifact=artifact,
+                directory=sample_root,
+                reveal_at=reveal_at,
+                proposals=proposals,
+                recorders=recorders,
+                stratum=stratum,
+            )
+        )
+        self._stratum_counts[stratum] = self._stratum_counts.get(stratum, 0) + 1
+        self._action_counts[action] = self._action_counts.get(action, 0) + 1
+        self._last_action_clock[action] = snapshot.observation.asof
+
+    def _finalize(self, audit: _OpenAudit, at: pd.Timestamp) -> None:
+        evidence_rows = []
+        for proposal, recorder, output in audit.recorders:
+            if not recorder.finalized:
+                recorder.close_right_boundary(
+                    min(at, recorder.identity.deadline)
+                )
+            recorder.write(output)
+            evidence_rows.append(
+                {
+                    "proposal_id": proposal.proposal_id,
+                    "path": str(output),
+                    "points": len(recorder.evidence.points),
+                    "finalized_at": recorder.evidence.finalized_at,
+                    "finalization_reason": recorder.evidence.finalization_reason,
+                }
+            )
+        reveal_path = None
+        reveal_maximum = audit.snapshot.observation.asof
+        if audit.future_1m:
+            reveal = self.visualizer.render_reveal(
+                audit.snapshot,
+                audit.permit,
+                audit.future_1m,
+                audit.directory / "future_reveal.png",
+                revealed_at=max(at, audit.future_1m[-1].end),
+                ai_proposals=audit.proposals,
+                audit_hypothesis_key=audit.hypothesis_key,
+            )
+            reveal_path = str(reveal.path)
+            reveal_maximum = reveal.maximum_market_time
+        row = {
+            "sample_id": audit.sample_id,
+            "decision_hash": audit.snapshot.snapshot_hash,
+            "decision_asof": audit.snapshot.observation.asof,
+            "action": audit.snapshot.risk.final_action.value,
+            "stratum": audit.stratum,
+            "decision_trace": str(audit.directory / "decision_trace.json"),
+            "decision_image": str(audit.decision_artifact.path),
+            "future_reveal": reveal_path,
+            "future_maximum_market_time": reveal_maximum,
+            "future_physically_separate": True,
+            "ai_proposals": len(audit.proposals),
+            "primitive_future_paths": evidence_rows,
+        }
+        (audit.directory / "audit.json").write_text(
+            json.dumps(to_primitive(row), indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        self.rows.append(row)
+        self.open.remove(audit)
+
+    def advance(
+        self,
+        bar: Bar,
+        snapshot: Any,
+        previous_snapshot: Any,
+        account_state: Any,
+        belief_position_input: Any,
+    ) -> None:
+        if not self.open:
+            return
+        trace = build_decision_trace(
+            snapshot,
+            previous_snapshot,
+            source_bar=bar,
+            account_state=account_state,
+            belief_position_input=belief_position_input,
+        )
+        boundary = _boundary_reason(snapshot.observation.anomalies)
+        for audit in tuple(self.open):
+            if bar.start < audit.snapshot.observation.asof:
+                continue
+            same_contract = (bar.symbol, bar.instrument_id) == (
+                audit.snapshot.observation.symbol,
+                audit.snapshot.observation.instrument_id,
+            )
+            if same_contract and bar.start < audit.reveal_at:
+                audit.future_1m.append(_bar_candle(bar))
+            for _, recorder, _ in audit.recorders:
+                if not recorder.finalized:
+                    recorder.observe(
+                        bar,
+                        events_added=trace["events_added"],
+                        events_ended=trace["events_ended"],
+                        events_invalidated=trace["events_invalidated"],
+                        typed_state_transitions=trace[
+                            "typed_state_transitions"
+                        ],
+                        hard_boundary_reason=boundary,
+                    )
+            if not same_contract or boundary is not None or bar.end >= audit.reveal_at:
+                self._finalize(audit, min(bar.end, audit.reveal_at))
+
+    def close(self, at: pd.Timestamp) -> None:
+        for audit in tuple(self.open):
+            self._finalize(audit, min(at, audit.reveal_at))
+
+    def write_manifest(self, bindings: Mapping[str, Any]) -> Path:
+        manifest = {
+            "schema_version": 1,
+            "artifact": "stratified_decision_trace_audit",
+            "requested_samples": self.sample_count,
+            "captured_samples": len(self.rows),
+            "action_counts": self._action_counts,
+            "sampling": (
+                "causal first-observed strata; ENTER/WAIT/ABSTAIN; maximum "
+                "three per playbook-direction-regime-session stratum"
+            ),
+            "future_reveal_is_separate": True,
+            "ai_has_action_authority": False,
+            "rows": self.rows,
+            "ai_primitive_proposals": [
+                to_primitive(item) for item in self.ai_registry.pending()
+            ],
+            "bindings": dict(bindings),
+        }
+        output = self.root / "manifest.json"
+        output.write_text(
+            json.dumps(
+                to_primitive(manifest),
+                indent=2,
+                ensure_ascii=False,
+                sort_keys=True,
+            ),
+            encoding="utf-8",
+        )
+        return output
 
 
 def main() -> None:
     args = parse_args()
-    if args.warmup_days < 1 or args.quota_per_scenario < 1:
-        raise ValueError("warmup and scenario quota must be positive")
-    if args.candidate_only not in {0, 1}:
-        raise ValueError(
-            "candidate-only must be 0 or 1 to prevent cross-case future leakage"
-        )
-    start = _aware(args.start)
-    end = _aware(args.end)
+    if args.warmup_days < 1 or not 20 <= args.sample_count <= 40:
+        raise ValueError("warmup must be positive and sample-count must be 20–40")
+    if args.future_minutes < 1:
+        raise ValueError("future-minutes must be positive")
+    start, end = _aware(args.start), _aware(args.end)
     if end <= start:
         raise ValueError("visual audit interval must be positive")
     validation = load_validation_protocol(args.validation_protocol)
@@ -223,8 +491,8 @@ def main() -> None:
     if window.role == "sealed_holdout":
         raise RuntimeError("scenario audit refuses the sealed OHLCV holdout")
     source_hash = _sha256_file(args.source)
-    if source_hash != validation.causal_front_sha256:
-        raise RuntimeError("scenario audit source differs from frozen front")
+    if source_hash != validation.causal_source.sha256:
+        raise RuntimeError("scenario audit source differs from the causal front")
     loaded = load_ohlcv(
         args.source,
         start=start - pd.Timedelta(days=args.warmup_days),
@@ -232,7 +500,6 @@ def main() -> None:
     )
     if not loaded.contract_selection_causal:
         raise RuntimeError("scenario audit requires causal contract selection")
-    execution_manifest: dict[str, Any] = {}
     if args.mbo_execution:
         execution_store, execution_manifest = _load_mbo_execution(
             args.mbo_execution,
@@ -241,36 +508,10 @@ def main() -> None:
             end=end,
             reveal_sealed_holdout=False,
         )
-        if execution_manifest.get("validation_window_role") == "sealed_holdout":
-            raise RuntimeError("scenario audit refuses the sealed MBO holdout")
     else:
-        execution_store = None
-    requested_destination = Path(args.output)
-    destination = _development_output_directory(requested_destination)
+        execution_store, execution_manifest = None, {}
+    destination = Path(args.output)
     destination.mkdir(parents=True, exist_ok=True)
-
-    config = Path(args.config)
-    config_payload = json.loads(config.read_text(encoding="utf-8"))
-    version = str(config_payload.get("version", ""))
-    if version.startswith("2.2."):
-        if config_payload.get("managed_net_value_artifact") is not None:
-            raise ValueError(
-                "fitted v2.2 visual audit engine is not available until its "
-                "temporal gates pass"
-            )
-        engine = build_v2_2_policy_base_engine(config)
-    elif version.startswith(("3.", "4.")):
-        engine = ContinuousSMCEngine.from_config(config)
-    else:
-        raise ValueError("scenario audit requires a v2.2, v3, or v4 config")
-    sequential = SequentialReplay(engine=engine)
-    visualizer = DecisionVisualizer()
-    sampler = ScenarioVisualAuditSampler(
-        destination / "scenarios",
-        quota_per_scenario=args.quota_per_scenario,
-    )
-    ai_adapter = AIReviewAdapter()
-    ai_registry = CausalPrimitiveRegistry()
     review_root = (
         None
         if args.ai_review_directory is None
@@ -278,624 +519,71 @@ def main() -> None:
     )
     if review_root is not None and not review_root.is_dir():
         raise NotADirectoryError("AI review directory does not exist")
-    path_tests = FrozenPathTestRecorder(
-        config_hash=_sha256_file(config),
-        code_hash=_audit_model_code_hash(),
+
+    engine = ContinuousSMCEngine.from_config(args.config)
+    sequential = SequentialReplay(engine=engine)
+    batch = _StratifiedAuditBatch(
+        destination,
+        sample_count=args.sample_count,
+        future_minutes=args.future_minutes,
+        visualizer=DecisionVisualizer(),
+        review_root=review_root,
     )
-    visual_audits: dict[str, SealedVisualAudit] = {}
-    path_evidence_recorders: dict[
-        str,
-        tuple[Any, PrimitivePathEvidenceRecorder, Path],
-    ] = {}
-    path_evidence_records: list[dict[str, Any]] = []
-    audit_records: list[str] = []
-    review_files_used: list[str] = []
-    proposals_by_identity: dict[
-        tuple[str | None, ...],
-        tuple[
-            bool,
-            str | None,
-            str | None,
-            tuple[Any, ...],
-        ],
-    ] = {}
-    candidates: list[dict[str, Any]] = []
     last_asof = start
-
-    def proposals_for(
-        snapshot: Any,
-        hypothesis_key: str | None,
-        histories: Any,
-        previous_snapshot: Any,
-        source_bar: Any,
-        account_state: Any,
-        belief_position_input: Any,
-    ) -> tuple[bool, str | None, str | None, tuple[Any, ...]]:
-        identity = ai_review_identity(snapshot, hypothesis_key)
-        proposals: tuple[Any, ...] = ()
-        review_present = False
-        packet_hash: str | None = None
-        packet_sha256: str | None = None
-        if review_root is not None:
-            source = review_root / _review_filename(identity)
-            if source.exists():
-                review_present = True
-                setup_id = identity["setup_id"]
-                if setup_id is None:
-                    raise ValueError(
-                        "reviewed decision lacks a frozen setup identity"
-                    )
-                packet = build_frozen_decision_packet(
-                    snapshot,
-                    histories,
-                    previous_snapshot,
-                    hypothesis_key=hypothesis_key,
-                    audit_context=sealed_path_audit_context(setup_id),
-                    source_bar=source_bar,
-                    account_state=account_state,
-                    belief_position_input=belief_position_input,
-                )
-                packet_hash = packet["packet_hash"]
-                packet_sha256 = decision_packet_payload_sha256(packet)
-                cache_key = (
-                    *tuple(identity.values()),
-                    packet_hash,
-                    packet_sha256,
-                )
-                cached = proposals_by_identity.get(cache_key)
-                if cached is not None:
-                    return cached
-                review = json.loads(source.read_text(encoding="utf-8"))
-                proposals = ai_adapter.convert(
-                    review,
-                    snapshot,
-                    hypothesis_key=hypothesis_key,
-                    decision_packet_hash=packet_hash,
-                    decision_packet_sha256=packet_sha256,
-                    decision_packet=packet,
-                )
-                ai_registry.register(proposals)
-                review_files_used.append(str(source))
-                output = (
-                    review_present,
-                    packet_hash,
-                    packet_sha256,
-                    proposals,
-                )
-                proposals_by_identity[cache_key] = output
-                return output
-        output = (review_present, packet_hash, packet_sha256, proposals)
-        return output
-
-    def reveal_new(results: Any) -> None:
-        for result in results:
-            audit = visual_audits.pop(result.setup_id, None)
-            if audit is None:
-                continue
-            _, record = audit.reveal(result)
-            audit_records.append(str(record))
-
-    def write_finalized_path_evidence() -> None:
-        for proposal_id, (
-            proposal,
-            recorder,
-            output,
-        ) in tuple(path_evidence_recorders.items()):
-            if not recorder.finalized:
-                continue
-            recorder.write(output)
-            evidence = recorder.evidence
-            if (
-                evidence.identity.query.query_id
-                != proposal.proposal_id
-                or evidence.identity.query.issue
-                != proposal.issue.value
-                or evidence.identity.query.primitive_name
-                != proposal.primitive_name
-                or evidence.identity.query.formula_version
-                != proposal.formula_version
-                or evidence.identity.query.definition_hash
-                != proposal.definition_hash
-            ):
-                raise ValueError(
-                    "typed future evidence differs from its AI proposal"
-                )
-            path_evidence_records.append(
-                {
-                    "proposal_id": proposal.proposal_id,
-                    "issue": proposal.issue.value,
-                    "hypothesis_key": evidence.identity.hypothesis_key,
-                    "setup_id": evidence.identity.setup_id,
-                    "entry_location_id": (
-                        evidence.identity.entry_location_id
-                    ),
-                    "entry_path_id": evidence.identity.entry_path_id,
-                    "decision_hash": evidence.identity.decision_hash,
-                    "decision_packet_hash": (
-                        evidence.identity.decision_packet_hash
-                    ),
-                    "decision_packet_sha256": (
-                        evidence.identity.decision_packet_sha256
-                    ),
-                    "evidence_hash": evidence.evidence_hash,
-                    "finalized_at": evidence.finalized_at,
-                    "finalization_reason": (
-                        evidence.finalization_reason
-                    ),
-                    "points": len(evidence.points),
-                    "path": str(output),
-                    "semantic_path_property_assessed": False,
-                    "used_action_or_pnl_label": False,
-                }
-            )
-            path_evidence_recorders.pop(proposal_id)
-
-    stopped_for_candidates = False
-    for bar in iter_completed_bars(loaded.frame):
+    for bar in iter_completed_bars(loaded.frame, allow_data_gap_reset=True):
         if bar.end >= end:
             break
-        if bar.end < start:
-            execution = ExecutionRealityInput(
+        execution = (
+            execution_store.for_bar(bar, deadline=_deadline(bar.end))
+            if execution_store is not None
+            else ExecutionRealityInput(
                 spread_points=None,
                 expected_slippage_points=0.0,
                 commission_per_contract_per_side=0.0,
                 deadline=_deadline(bar.end),
                 source="ohlcv_only_execution_unavailable",
             )
-        elif execution_store is not None:
-            execution = execution_store.for_bar(
-                bar,
-                deadline=_deadline(bar.end),
-            )
-        else:
-            execution = ExecutionRealityInput(
-                spread_points=None,
-                expected_slippage_points=0.0,
-                commission_per_contract_per_side=0.0,
-                deadline=_deadline(bar.end),
-                source="ohlcv_only_execution_unavailable",
-            )
+        )
         previous_snapshot = engine.last_snapshot
         step = sequential.on_bar(bar, execution=execution)
         snapshot = step.snapshot
-        prior_result_count = len(path_tests.results)
-        path_tests.on_bar(bar)
-        newly_resolved_paths = path_tests.results[
-            prior_result_count:
-        ]
-        for audit in visual_audits.values():
-            audit.on_bar(bar)
-        if path_evidence_recorders:
-            trace = build_decision_trace(
-                snapshot,
-                previous_snapshot,
-                source_bar=bar,
-                account_state=step.account_state,
-                belief_position_input=step.belief_position_input,
-            )
-            boundary_reason = _path_boundary_reason(
-                snapshot.observation.anomalies
-            )
-            for _, recorder, _ in tuple(
-                path_evidence_recorders.values()
-            ):
-                recorder.observe(
-                    bar,
-                    events_added=trace["events_added"],
-                    events_ended=trace["events_ended"],
-                    events_invalidated=trace[
-                        "events_invalidated"
-                    ],
-                    typed_state_transitions=trace[
-                        "typed_state_transitions"
-                    ],
-                    hard_boundary_reason=boundary_reason,
-                )
-            write_finalized_path_evidence()
-        reveal_new(newly_resolved_paths)
+        batch.advance(
+            bar,
+            snapshot,
+            previous_snapshot,
+            step.account_state,
+            step.belief_position_input,
+        )
         if snapshot.observation.asof < start:
             continue
         last_asof = snapshot.observation.asof
-        histories = engine.histories(80)
-        open_before = {item.setup_id for item in path_tests.open_tests}
-        path_tests.observe(snapshot)
-        newly_frozen = [
-            item
-            for item in path_tests.open_tests
-            if item.setup_id not in open_before
-        ]
-        if args.candidate_only:
-            for frozen in newly_frozen:
-                if len(candidates) >= args.candidate_only:
-                    break
-                candidate_root = (
-                    destination / "ai_candidates" / frozen.setup_id
-                )
-                audit_context = sealed_path_audit_context(
-                    frozen.setup_id
-                )
-                packet_path = write_frozen_decision_packet(
-                    snapshot,
-                    histories,
-                    candidate_root / "decision_packet.json",
-                    previous_snapshot,
-                    hypothesis_key=frozen.hypothesis_key,
-                    audit_context=audit_context,
-                    source_bar=bar,
-                    account_state=step.account_state,
-                    belief_position_input=step.belief_position_input,
-                )
-                packet = read_verified_decision_packet(packet_path)
-                packet_hash = packet["packet_hash"]
-                packet_sha256 = decision_packet_sha256(packet_path)
-                artifact = visualizer.render_decision(
-                    snapshot,
-                    histories,
-                    candidate_root / "decision.png",
-                    audit_hypothesis_key=frozen.hypothesis_key,
-                    audit_context=audit_context,
-                )
-                template_path = (
-                    destination
-                    / "review_templates"
-                    / _review_filename(
-                        ai_review_identity(
-                            snapshot,
-                            frozen.hypothesis_key,
-                        )
-                    )
-                )
-                template_path.parent.mkdir(parents=True, exist_ok=True)
-                template_path.write_text(
-                    json.dumps(
-                        _review_template(
-                            snapshot,
-                            frozen.hypothesis_key,
-                            decision_packet_hash=packet_hash,
-                            decision_packet_sha256=packet_sha256,
-                        ),
-                        indent=2,
-                        ensure_ascii=False,
-                    ),
-                    encoding="utf-8",
-                )
-                candidates.append(
-                    {
-                        "setup_id": frozen.setup_id,
-                        "hypothesis_key": frozen.hypothesis_key,
-                        "entry_location_id": frozen.entry_location_id,
-                        "entry_path_id": frozen.entry_path_id,
-                        "decision_hash": snapshot.snapshot_hash,
-                        "decision_asof": snapshot.observation.asof,
-                        "decision_image": str(artifact.path),
-                        "decision_image_sha256": artifact.sha256,
-                        "review_template": str(template_path),
-                        "maximum_market_time": artifact.maximum_market_time,
-                        "decision_packet": str(packet_path),
-                        "decision_packet_hash": packet_hash,
-                        "decision_packet_sha256": packet_sha256,
-                        "future_after_this_candidate_exposed": False,
-                        "candidate_loop_stopped_at_decision_clock": True,
-                    }
-                )
-            if len(candidates) >= args.candidate_only:
-                stopped_for_candidates = True
-                break
-            continue
-
-        sampler.observe(
+        batch.maybe_open(
             snapshot,
-            histories,
-            visualizer,
-            closed_trades=step.closed_trades,
-            ai_proposals=(),
-            previous_snapshot=previous_snapshot,
-            source_bar=bar,
-            account_state=step.account_state,
-            belief_position_input=step.belief_position_input,
+            engine.histories(80),
+            previous_snapshot,
+            bar,
+            step.account_state,
+            step.belief_position_input,
         )
-        for frozen in newly_frozen:
-            (
-                review_present,
-                reviewed_packet_hash,
-                reviewed_packet_sha256,
-                setup_proposals,
-            ) = proposals_for(
-                snapshot,
-                frozen.hypothesis_key,
-                histories,
-                previous_snapshot,
-                bar,
-                step.account_state,
-                step.belief_position_input,
-            )
-            if review_present:
-                audit = SealedVisualAudit.seal(
-                    visualizer,
-                    snapshot,
-                    histories,
-                    destination / "ai_path_audits" / frozen.setup_id,
-                    ai_proposals=setup_proposals,
-                    hypothesis_key=frozen.hypothesis_key,
-                    previous_snapshot=previous_snapshot,
-                    source_bar=bar,
-                    account_state=step.account_state,
-                    belief_position_input=step.belief_position_input,
-                    expected_decision_packet_hash=reviewed_packet_hash,
-                    expected_decision_packet_sha256=(
-                        reviewed_packet_sha256
-                    ),
-                )
-                visual_audits[frozen.setup_id] = audit
-                for proposal in setup_proposals:
-                    if proposal.proposal_id in path_evidence_recorders:
-                        raise ValueError(
-                            "one primitive proposal cannot open two path recorders"
-                        )
-                    query = PrimitivePathEvidenceQuery.from_proposal(
-                        proposal,
-                        relevant_entity_ids=_proposal_entity_ids(
-                            proposal
-                        ),
-                    )
-                    recorder = (
-                        PrimitivePathEvidenceRecorder.from_decision_packet(
-                            audit.decision_packet_path,
-                            hypothesis_key=frozen.hypothesis_key,
-                            query=query,
-                        )
-                    )
-                    path_evidence_recorders[proposal.proposal_id] = (
-                        proposal,
-                        recorder,
-                        destination
-                        / "primitive_path_evidence"
-                        / f"{proposal.proposal_id}.json",
-                    )
-
-    bindings = {
-        "source": str(loaded.source),
-        "source_sha256": source_hash,
-        "config": str(config),
-        "config_sha256": _sha256_file(config),
-        "model_code_hash": _audit_model_code_hash(),
-        "structure_protocol_sha256": _optional_protocol_sha256(
-            getattr(engine.observer.config, "structure_protocol", None)
-        ),
-        "liquidity_protocol_sha256": _optional_protocol_sha256(
-            getattr(engine.observer.config, "liquidity_protocol", None)
-        ),
-        "displacement_protocol_sha256": _optional_protocol_sha256(
-            getattr(engine.observer.config, "displacement_protocol", None)
-        ),
-        "group3_protocol_sha256": _optional_protocol_sha256(
-            getattr(engine.observer.config, "group3_protocol", None)
-        ),
-        "group4_protocol_sha256": _optional_protocol_sha256(
-            getattr(engine.observer.config, "group4_protocol", None)
-        ),
-        "group5_protocol_sha256": _optional_protocol_sha256(
-            getattr(engine.observer.config, "group5_protocol", None)
-        ),
-        "validation_protocol_hash": validation.fingerprint,
-        "window_role": window.role,
-        "start": start,
-        "end": end,
-        "mbo_execution": args.mbo_execution,
-        "primitive_evaluation_directory": (
-            args.primitive_evaluation_directory
-        ),
-        "mbo_manifest_hash": (
-            hashlib.sha256(
-                json.dumps(
-                    execution_manifest,
-                    sort_keys=True,
-                ).encode("utf-8")
-            ).hexdigest()
-            if execution_manifest
-            else None
-        ),
-        "visual_audit_code_hash": visual_audit_code_fingerprint(),
-        "requested_output": str(requested_destination),
-        "actual_output": str(destination),
-    }
-    if args.candidate_only:
-        if candidates and (
-            len(candidates) != 1
-            or last_asof
-            != pd.Timestamp(candidates[0]["decision_asof"])
-            or pd.Timestamp(candidates[0]["maximum_market_time"])
-            > pd.Timestamp(candidates[0]["decision_asof"])
-        ):
-            raise AssertionError(
-                "blind candidate artifacts include data beyond the decision"
-            )
-        payload = {
-            "format_version": 1,
-            "artifact": "pre_reveal_ai_audit_candidates",
-            "status": (
-                "candidate_quota_sealed"
-                if stopped_for_candidates
-                else "interval_exhausted_before_candidate_quota"
-            ),
-            "candidate_quota": args.candidate_only,
-            "candidates": candidates,
-            "last_market_time_processed": last_asof,
-            "source_frame_loaded_in_process": True,
-            "future_after_last_candidate_exposed": False,
-            "future_path_revealed": False,
-            "bindings": bindings,
+    batch.close(last_asof)
+    manifest = batch.write_manifest(
+        {
+            "source": str(loaded.source),
+            "source_sha256": source_hash,
+            "config": str(args.config),
+            "config_sha256": _sha256_file(args.config),
+            "window_role": window.role,
+            "start": start,
+            "end": end,
+            "mbo_execution": args.mbo_execution,
+            "mbo_manifest": execution_manifest,
         }
-        (destination / "CANDIDATES_SEALED.json").write_text(
-            json.dumps(
-                to_primitive(payload),
-                indent=2,
-                ensure_ascii=False,
-                sort_keys=True,
-            ),
-            encoding="utf-8",
-        )
-        print(
-            json.dumps(
-                {
-                    "candidates": len(candidates),
-                    "output": str(destination),
-                },
-                sort_keys=True,
-            )
-        )
-        return
-
-    result_count = len(path_tests.results)
-    path_tests.close_unresolved(last_asof)
-    reveal_new(path_tests.results[result_count:])
-    for _, recorder, _ in path_evidence_recorders.values():
-        if not recorder.finalized:
-            recorder.close_right_boundary(last_asof)
-    write_finalized_path_evidence()
-    scenario_manifest = sampler.write_manifest(
-        source_bindings=bindings,
-    )
-    records_frame(
-        path_tests.results,
-        record_type=PathTestResult,
-    ).to_parquet(
-        destination / "path_tests.parquet",
-        index=False,
-    )
-    (destination / "ai_primitive_proposals.json").write_text(
-        json.dumps(
-            [to_primitive(item) for item in ai_registry.pending()],
-            indent=2,
-            ensure_ascii=False,
-        ),
-        encoding="utf-8",
-    )
-    (
-        destination / "ai_primitive_typed_path_evidence.json"
-    ).write_text(
-        json.dumps(
-            to_primitive(path_evidence_records),
-            indent=2,
-            ensure_ascii=False,
-            sort_keys=True,
-        ),
-        encoding="utf-8",
-    )
-    primitive_cases = []
-    primitive_evaluations = []
-    if args.primitive_evaluation_directory:
-        evaluation_root = Path(args.primitive_evaluation_directory)
-        if not evaluation_root.is_dir():
-            raise NotADirectoryError(
-                "primitive evaluation directory does not exist"
-            )
-        evaluation_packets = []
-        for source in sorted(evaluation_root.rglob("*.json")):
-            try:
-                packet = read_verified_decision_packet(source)
-            except (ValueError, json.JSONDecodeError):
-                continue
-            if packet.get("artifact") == "frozen_causal_decision_packet":
-                evaluation_packets.append(packet)
-        for proposal in ai_registry.pending():
-            origin_clock = pd.Timestamp(proposal.origin_value.decision_asof)
-            origin_window = validation.classify_ohlcv(
-                origin_clock,
-                origin_clock + pd.Timedelta(minutes=1),
-            )
-            proposal_cases = []
-            for packet in evaluation_packets:
-                hypothesis_key = packet.get("audit_hypothesis_key")
-                if not isinstance(hypothesis_key, str):
-                    continue
-                evaluation_clock = pd.Timestamp(packet["decision_asof"])
-                evaluation_window = validation.classify_ohlcv(
-                    evaluation_clock,
-                    evaluation_clock + pd.Timedelta(minutes=1),
-                )
-                case = evaluate_primitive_implementation_case(
-                    proposal,
-                    packet,
-                    evaluation_hypothesis_key=hypothesis_key,
-                    origin_window=origin_window,
-                    evaluation_window=evaluation_window,
-                )
-                proposal_cases.append(case)
-                primitive_cases.append(case)
-            primitive_evaluations.append(
-                finalize_primitive_evaluation(
-                    proposal,
-                    proposal_cases,
-                )
-            )
-    (
-        destination / "ai_primitive_implementation_checks.json"
-    ).write_text(
-        json.dumps(
-            [to_primitive(item) for item in primitive_cases],
-            indent=2,
-            ensure_ascii=False,
-        ),
-        encoding="utf-8",
-    )
-    (destination / "ai_primitive_evaluations.json").write_text(
-        json.dumps(
-            [to_primitive(item) for item in primitive_evaluations],
-            indent=2,
-            ensure_ascii=False,
-        ),
-        encoding="utf-8",
-    )
-    summary = {
-        "format_version": 1,
-        "artifact": "scenario_visual_and_ai_primitive_audit",
-        "bindings": bindings,
-        "scenario_manifest": str(scenario_manifest),
-        "scenario_manifest_sha256": _sha256_file(scenario_manifest),
-        "AI_review_files_used": review_files_used,
-        "AI_primitive_proposals": len(ai_registry.pending()),
-        "AI_primitive_implementation_checks": len(primitive_cases),
-        "AI_primitive_path_acceptance_available": False,
-        "AI_primitive_typed_future_evidence": len(
-            path_evidence_records
-        ),
-        "AI_primitive_typed_future_evidence_index": str(
-            destination / "ai_primitive_typed_path_evidence.json"
-        ),
-        "AI_primitive_typed_future_evidence_index_sha256": (
-            _sha256_file(
-                destination
-                / "ai_primitive_typed_path_evidence.json"
-            )
-        ),
-        "AI_primitive_semantic_path_assessment_pending": bool(
-            path_evidence_records
-        ),
-        "AI_primitive_evaluations": [
-            to_primitive(item) for item in primitive_evaluations
-        ],
-        "AI_has_model_action_authority": False,
-        "AI_path_audit_records": audit_records,
-        "path_tests": len(path_tests.results),
-        "blind_pre_reveal_images_exclude_future": True,
-        "post_outcome_views_are_explicit": True,
-    }
-    (destination / "summary.json").write_text(
-        json.dumps(
-            to_primitive(summary),
-            indent=2,
-            ensure_ascii=False,
-            sort_keys=True,
-        ),
-        encoding="utf-8",
     )
     print(
         json.dumps(
             {
-                "scenario_captures": len(sampler.captures),
-                "AI_proposals": len(ai_registry.pending()),
-                "output": str(destination),
+                "samples": len(batch.rows),
+                "manifest": str(manifest),
             },
             sort_keys=True,
         )

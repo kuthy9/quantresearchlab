@@ -29,9 +29,9 @@ from smc_trader.observation import CausalObserver, ObserverConfig
 
 
 ROOT = Path(__file__).resolve().parents[1]
-PROTOCOL_PATH = ROOT / "configs/smc_primitives_v3_displacement_episode.json"
-GROUP12_PATH = ROOT / "configs/smc_primitives_v3_group12.json"
-GROUP3_PATH = ROOT / "configs/smc_primitives_v3_group3.json"
+PROTOCOL_PATH = ROOT / "configs/primitives_displacement.json"
+GROUP12_PATH = ROOT / "configs/primitives_structure_liquidity.json"
+GROUP3_PATH = ROOT / "configs/primitives_zones.json"
 BASE = pd.Timestamp("2025-01-06T09:30:00-05:00")
 STRUCTURE_HASH = "1" * 64
 

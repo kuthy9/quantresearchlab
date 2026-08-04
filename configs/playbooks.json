@@ -1,0 +1,485 @@
+{
+  "schema_version": 1,
+  "frozen_at": "2026-07-30T00:00:00-04:00",
+  "change_policy": {
+    "patch": "implementation correction before economic validation with a new full registry hash",
+    "minor": "documentation or visualization that cannot alter eligibility",
+    "major": "any playbook mechanism, ordered step, entry, invalidation, draw, target, or deadline change"
+  },
+  "single_changed_concept_family": "typed playbook belief, location and trigger linkage",
+  "quality_dimensions": [
+    "thesis_strength",
+    "sequence_progress",
+    "location_quality",
+    "entry_readiness",
+    "delivery_quality",
+    "uncertainty"
+  ],
+  "playbooks": [
+    {
+      "id": "displacement_first_pullback",
+      "schema_version": 1,
+      "status": "typed_causal_development_no_economic_authority",
+      "thesis": "A confirmed 4H directional structure with a visible same-direction external draw is followed by a later 1H continuation BOS, a qualified 5m displacement-created FVG or OB, the first return to that frozen zone, and an exact 1m rejection, held reacceptance, or aligned micro BOS.",
+      "required_sequence": [
+        {
+          "id": "h4_structure_and_draw",
+          "description": "A confirmed 4H HH/HL or LH/LL structure and a visible 4H draw support the same direction.",
+          "minimum_value": 1.0,
+          "required_inputs": [
+            "4H.structures",
+            "liquidity_inventory.visible",
+            "structure.confirmed_at",
+            "draw.item_id"
+          ]
+        },
+        {
+          "id": "h1_continuation_bos",
+          "description": "A later completed 1H close confirms a same-direction continuation BOS.",
+          "minimum_value": 1.0,
+          "required_inputs": [
+            "1H.structure_breaks",
+            "bos.target_swing_id",
+            "bos.resolved_at",
+            "bos.scope"
+          ]
+        },
+        {
+          "id": "m5_displacement_zone",
+          "description": "A later qualified 5m displacement leaves an exact typed FVG or OB and Group5 registers its frozen entry location.",
+          "minimum_value": 1.0,
+          "required_inputs": [
+            "5m.fair_value_gaps",
+            "5m.order_blocks",
+            "entry_locations.source_displacement_id",
+            "entry_locations.formed_at"
+          ]
+        },
+        {
+          "id": "first_pullback_to_frozen_zone",
+          "description": "The first completed 1m return is bound to that exact frozen FVG or OB after departure.",
+          "minimum_value": 1.0,
+          "required_inputs": [
+            "entry_locations.first_entered_at",
+            "entry_locations.departure_confirmed_at",
+            "path_sequences.first_pullback"
+          ]
+        },
+        {
+          "id": "typed_entry_trigger",
+          "description": "The same zone-return path records wick rejection, held reacceptance, or an aligned strictly-later micro BOS without a terminal contradiction.",
+          "minimum_value": 1.0,
+          "required_inputs": [
+            "path_sequences.steps",
+            "qualified_reacceptances",
+            "micro_bos_references"
+          ]
+        }
+      ],
+      "hard_gates": [
+        "h4_structure_and_draw",
+        "h1_continuation_bos",
+        "m5_displacement_zone",
+        "first_pullback_to_frozen_zone",
+        "typed_entry_trigger"
+      ],
+      "supporting_evidence": [
+        "h4_structure_direction",
+        "h1_continuation_bos",
+        "m5_displacement_zone",
+        "directional_draw_visible",
+        "first_pullback_to_frozen_zone",
+        "typed_entry_trigger",
+        "remaining_path_available",
+        "execution_fillability"
+      ],
+      "contradicting_evidence": [
+        "opposed_structure",
+        "zone_left_or_failed",
+        "trigger_opposed_or_ambiguous",
+        "draw_consumed_or_missing",
+        "remaining_path_consumed",
+        "execution_unavailable"
+      ],
+      "evidence_groups": {
+        "structure": [
+          "h4_structure_direction",
+          "h1_continuation_bos",
+          "opposed_structure"
+        ],
+        "displacement": [
+          "m5_displacement_zone"
+        ],
+        "location": [
+          "first_pullback_to_frozen_zone",
+          "zone_left_or_failed"
+        ],
+        "liquidity": [
+          "directional_draw_visible",
+          "draw_consumed_or_missing"
+        ],
+        "trigger": [
+          "typed_entry_trigger",
+          "trigger_opposed_or_ambiguous"
+        ],
+        "execution": [
+          "remaining_path_available",
+          "execution_fillability",
+          "remaining_path_consumed",
+          "execution_unavailable"
+        ]
+      },
+      "phase_rules": {
+        "inactive": "No typed directional setup is active.",
+        "forming": "The directional structure and later continuation BOS are incomplete.",
+        "armed": "Structure, draw and continuation BOS exist while a qualified displacement zone is still forming.",
+        "waiting_location": "The exact 5m FVG or OB is frozen and has not yet received its first completed 1m return.",
+        "waiting_trigger": "The first pullback is registered and the exact 1m trigger is still absent.",
+        "executable": "All ordered market gates, frozen plan, draw and remaining-path gates are true.",
+        "entered": "The independent risk engine approved and the later-bar order filled.",
+        "weakening": "The frozen entered thesis remains open while delivery evidence weakens.",
+        "delivering": "Price progresses toward the frozen visible draw.",
+        "completed": "A frozen target is delivered before invalidation and deadline.",
+        "invalidated": "The frozen zone failure boundary, draw, deadline, or terminal path contradiction invalidates the setup."
+      },
+      "invalidation": {
+        "source": "the exact Group5 entry location failure boundary",
+        "freeze_at": "risk_approved_entry",
+        "retrospective_rewrite": false
+      },
+      "targets": {
+        "source": "decision-time visible directional liquidity inventory",
+        "selection": "the exact selected 4H draw, followed only by farther visible same-direction inventory"
+      },
+      "deadline": {
+        "rule": "registered session deadline",
+        "expire_on": [
+          "deadline_elapsed",
+          "contract_change",
+          "entry_zone_failed",
+          "selected_draw_consumed_before_entry"
+        ]
+      },
+      "path_test": {
+        "primary_outcome": "selected_draw_before_frozen_zone_invalidation_within_deadline",
+        "secondary_outcomes": [
+          "causal_sequence_consistency",
+          "time_to_first_pullback",
+          "time_to_trigger",
+          "same_bar_ambiguity"
+        ]
+      }
+    },
+    {
+      "id": "liquidity_sweep_reversal",
+      "schema_version": 1,
+      "status": "typed_causal_development_no_economic_authority",
+      "thesis": "A formed liquidity pool is swept and fails to sustain outside acceptance, then a reverse-direction qualified 5m displacement leaves an FVG or OB, price first returns to that frozen zone, and a strictly-later aligned micro BOS confirms the reversal trigger.",
+      "required_sequence": [
+        {
+          "id": "formed_pool_sweep",
+          "description": "A Group4 formed-liquidity-pool manipulation is registered at its exact sweep clock.",
+          "minimum_value": 1.0,
+          "required_inputs": [
+            "path_sequences.pool_reversal",
+            "path_sequences.pool_swept",
+            "manipulation.swept_at"
+          ]
+        },
+        {
+          "id": "outside_acceptance_failed",
+          "description": "The sweep bar rejected inside or a later completed bar reclaimed and held the frozen pool boundary; accepted outside is disqualifying.",
+          "minimum_value": 1.0,
+          "required_inputs": [
+            "path_sequences.sweep_rejection",
+            "qualified_reacceptances.held_at",
+            "path_sequences.accepted_outside"
+          ]
+        },
+        {
+          "id": "reverse_displacement_zone",
+          "description": "After the sweep failure, a reverse-direction qualified 5m displacement creates an exact typed FVG or OB.",
+          "minimum_value": 1.0,
+          "required_inputs": [
+            "entry_locations.source_displacement_id",
+            "entry_locations.direction",
+            "entry_locations.formed_at"
+          ]
+        },
+        {
+          "id": "reversal_first_pullback",
+          "description": "The first completed 1m return is bound to that reverse-displacement zone.",
+          "minimum_value": 1.0,
+          "required_inputs": [
+            "entry_locations.first_entered_at",
+            "path_sequences.first_pullback"
+          ]
+        },
+        {
+          "id": "aligned_micro_bos_trigger",
+          "description": "A strictly-later M1 BOS aligned with the reversal direction occurs after the first zone return.",
+          "minimum_value": 1.0,
+          "required_inputs": [
+            "micro_bos_references.relation",
+            "micro_bos_references.outcome",
+            "micro_bos_references.resolved_at"
+          ]
+        }
+      ],
+      "hard_gates": [
+        "formed_pool_sweep",
+        "outside_acceptance_failed",
+        "reverse_displacement_zone",
+        "reversal_first_pullback",
+        "aligned_micro_bos_trigger"
+      ],
+      "supporting_evidence": [
+        "pool_liquidity_swept",
+        "pool_return_confirmed",
+        "reverse_displacement_zone",
+        "reversal_first_pullback",
+        "aligned_micro_bos_trigger",
+        "opposing_draw_visible",
+        "remaining_path_available",
+        "execution_fillability"
+      ],
+      "contradicting_evidence": [
+        "accepted_outside_or_failed",
+        "reverse_displacement_missing",
+        "entry_zone_left",
+        "micro_bos_opposed_or_ambiguous",
+        "draw_consumed_or_missing",
+        "remaining_path_consumed",
+        "execution_unavailable"
+      ],
+      "evidence_groups": {
+        "structure": [
+          "pool_return_confirmed",
+          "accepted_outside_or_failed"
+        ],
+        "displacement": [
+          "reverse_displacement_zone",
+          "reverse_displacement_missing"
+        ],
+        "location": [
+          "reversal_first_pullback",
+          "entry_zone_left"
+        ],
+        "liquidity": [
+          "pool_liquidity_swept",
+          "opposing_draw_visible",
+          "draw_consumed_or_missing"
+        ],
+        "trigger": [
+          "aligned_micro_bos_trigger",
+          "micro_bos_opposed_or_ambiguous"
+        ],
+        "execution": [
+          "remaining_path_available",
+          "execution_fillability",
+          "remaining_path_consumed",
+          "execution_unavailable"
+        ]
+      },
+      "phase_rules": {
+        "inactive": "No formed-pool sweep context is active.",
+        "forming": "The pool is swept but outside acceptance has not yet failed.",
+        "armed": "The sweep failed outside acceptance while reverse displacement is still incomplete.",
+        "waiting_location": "The reverse FVG or OB is frozen and awaits its first return.",
+        "waiting_trigger": "The first return is registered and the aligned strictly-later micro BOS is absent.",
+        "executable": "The full typed reversal sequence, frozen plan, draw and remaining-path gates are true.",
+        "entered": "The independent risk engine approved and the later-bar order filled.",
+        "weakening": "The frozen entered reversal remains open while delivery evidence weakens.",
+        "delivering": "Price progresses toward the frozen opposing liquidity target.",
+        "completed": "A frozen target is delivered before invalidation and deadline.",
+        "invalidated": "Outside acceptance, the original sweep extreme, a failed entry zone, draw consumption, or deadline invalidates the setup."
+      },
+      "invalidation": {
+        "source": "the exact original Group4 manipulation sweep extreme bound to the selected pool context",
+        "freeze_at": "risk_approved_entry",
+        "retrospective_rewrite": false
+      },
+      "targets": {
+        "source": "decision-time visible opposing liquidity inventory",
+        "selection": "the exact Group5 selected draw for the reversal direction"
+      },
+      "deadline": {
+        "rule": "registered session deadline",
+        "expire_on": [
+          "deadline_elapsed",
+          "contract_change",
+          "accepted_outside",
+          "frozen_sweep_extreme_breached",
+          "selected_draw_consumed_before_entry"
+        ]
+      },
+      "path_test": {
+        "primary_outcome": "selected_opposing_draw_before_frozen_sweep_extreme_within_deadline",
+        "secondary_outcomes": [
+          "causal_sequence_consistency",
+          "time_from_sweep_to_return",
+          "time_from_return_to_zone",
+          "time_to_micro_bos",
+          "same_bar_ambiguity"
+        ]
+      }
+    },
+    {
+      "id": "failed_auction_value_return",
+      "schema_version": 1,
+      "status": "typed_causal_implemented_parked_pending_real_mature_range",
+      "thesis": "A mature frozen dealing range suffers a failed auction through one boundary, re-enters the range, creates an opposite-direction 5m displacement zone inside the range, returns to that exact zone for the first time, and confirms an aligned 1m trigger toward the opposite range liquidity.",
+      "required_sequence": [
+        {
+          "id": "mature_dealing_range",
+          "description": "A mature authoritative dealing range must exist.",
+          "minimum_value": 1.0,
+          "required_inputs": [
+            "1H.dealing_ranges.mature"
+          ]
+        },
+        {
+          "id": "range_boundary_sweep_reaccepted",
+          "description": "The exact mature-range boundary is swept and a later completed 1m close re-enters the frozen range before outside acceptance.",
+          "minimum_value": 1.0,
+          "required_inputs": [
+            "manipulations.mature_range_boundary"
+          ]
+        },
+        {
+          "id": "opposite_displacement_zone_inside_range",
+          "description": "A later opposite-direction displacement leaves a qualified FVG or OB fully inside the frozen range and on the swept-side half of value.",
+          "minimum_value": 1.0,
+          "required_inputs": [
+            "5m.displacement",
+            "1H.dealing_range",
+            "entry_locations"
+          ]
+        },
+        {
+          "id": "first_pullback_to_frozen_zone",
+          "description": "Price makes its first completed-bar return to that exact frozen FVG or OB; a generic 50 percent pullback is not admissible.",
+          "minimum_value": 1.0,
+          "required_inputs": [
+            "entry_locations.first_entered_at",
+            "path_sequences.first_pullback"
+          ]
+        },
+        {
+          "id": "aligned_entry_trigger",
+          "description": "After the first pullback, either a qualified reacceptance hold or an exact aligned micro BOS confirms entry readiness.",
+          "minimum_value": 1.0,
+          "required_inputs": [
+            "qualified_reacceptances.held",
+            "micro_bos_references"
+          ]
+        }
+      ],
+      "hard_gates": [
+        "mature_dealing_range",
+        "range_boundary_sweep_reaccepted",
+        "opposite_displacement_zone_inside_range",
+        "first_pullback_to_frozen_zone",
+        "aligned_entry_trigger"
+      ],
+      "supporting_evidence": [
+        "mature_range_visible",
+        "range_boundary_sweep_reaccepted",
+        "return_displacement_zone",
+        "exact_first_pullback",
+        "aligned_entry_trigger",
+        "opposing_range_liquidity_visible",
+        "remaining_path_available",
+        "execution_fillability"
+      ],
+      "contradicting_evidence": [
+        "range_broken_or_missing",
+        "accepted_outside",
+        "return_zone_missing_or_outside_range",
+        "entry_zone_left",
+        "trigger_opposed_or_ambiguous",
+        "draw_consumed_or_missing",
+        "midpoint_chase",
+        "remaining_path_consumed",
+        "execution_unavailable"
+      ],
+      "evidence_groups": {
+        "structure": [
+          "mature_range_visible",
+          "range_broken_or_missing"
+        ],
+        "displacement": [
+          "return_displacement_zone",
+          "return_zone_missing_or_outside_range"
+        ],
+        "location": [
+          "exact_first_pullback",
+          "entry_zone_left",
+          "midpoint_chase"
+        ],
+        "liquidity": [
+          "range_boundary_sweep_reaccepted",
+          "opposing_range_liquidity_visible",
+          "accepted_outside",
+          "draw_consumed_or_missing"
+        ],
+        "trigger": [
+          "aligned_entry_trigger",
+          "trigger_opposed_or_ambiguous"
+        ],
+        "execution": [
+          "remaining_path_available",
+          "execution_fillability",
+          "remaining_path_consumed",
+          "execution_unavailable"
+        ]
+      },
+      "phase_rules": {
+        "inactive": "No mature range is available; while status contains parked, execution remains disabled even when diagnostic sequence evidence exists.",
+        "forming": "A mature frozen range exists.",
+        "armed": "Its exact boundary sweep has re-entered the range.",
+        "waiting_location": "A qualified opposite displacement zone exists inside the frozen range.",
+        "waiting_trigger": "The first pullback reached that exact zone and awaits an aligned trigger.",
+        "executable": "All five ordered gates, range-contained planned entry, opposite boundary draw, execution reality and remaining path pass.",
+        "entered": "A position exists for the exact manipulation episode.",
+        "weakening": "The position remains open but delivery evidence weakens without rewriting the original range or sweep extreme.",
+        "delivering": "The position advances toward the frozen opposite range liquidity.",
+        "completed": "The frozen target or explicit completion condition was reached.",
+        "invalidated": "The sweep extreme, range, zone, draw, sequence, deadline or hard execution condition failed."
+      },
+      "invalidation": {
+        "source": "exact original mature-range manipulation sweep extreme",
+        "freeze_at": "range-boundary manipulation formation",
+        "retrospective_rewrite": false
+      },
+      "targets": {
+        "source": "the opposite visible boundary of the exact frozen dealing range",
+        "selection": "range midpoint remains a visible value waypoint; the executable target is the exact opposite range-boundary liquidity inventory item"
+      },
+      "deadline": {
+        "rule": "registered session deadline frozen for the manipulation episode",
+        "expire_on": [
+          "deadline_elapsed",
+          "contract_change",
+          "accepted_outside",
+          "frozen_sweep_extreme_breached",
+          "range_broken",
+          "entry_zone_left",
+          "selected_draw_consumed_before_entry"
+        ]
+      },
+      "path_test": {
+        "primary_outcome": "opposite_range_boundary_before_frozen_sweep_extreme_within_deadline",
+        "secondary_outcomes": [
+          "mature_range_availability",
+          "time_from_sweep_to_reentry",
+          "time_from_reentry_to_displacement_zone",
+          "time_to_first_pullback",
+          "time_to_aligned_trigger",
+          "midpoint_delivery",
+          "same_bar_ambiguity"
+        ]
+      }
+    }
+  ]
+}

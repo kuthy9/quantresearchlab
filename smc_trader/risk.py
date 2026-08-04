@@ -396,8 +396,6 @@ def _valid_typed_entry_location(
         plan.entry_zone_upper,
         plan.selected_draw_id,
     )
-    if not any(value is not None for value in typed):
-        return not observation.group5_authoritative
     if any(value is None for value in typed):
         return False
     location = next(

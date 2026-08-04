@@ -88,24 +88,6 @@ class ReliabilityPoint:
 
 
 @dataclass(frozen=True)
-class PlaybookReliabilityMap:
-    playbook: Playbook
-    episodes: int
-    points: tuple[ReliabilityPoint, ...]
-
-    def apply(self, probability: float) -> float:
-        raw = clamp(probability)
-        if not self.points:
-            return raw
-        x = np.asarray([point.raw_probability for point in self.points], dtype=float)
-        y = np.asarray(
-            [point.calibrated_probability for point in self.points],
-            dtype=float,
-        )
-        return clamp(float(np.interp(raw, x, y, left=y[0], right=y[-1])))
-
-
-@dataclass(frozen=True)
 class DimensionReliabilityPoint:
     """One point in a monotone map for a typed belief dimension."""
 
@@ -133,115 +115,16 @@ class DimensionReliabilityMap:
         return clamp(float(np.interp(raw, x, y, left=y[0], right=y[-1])))
 
 
-@dataclass(frozen=True)
-class ProbabilityCalibrator:
-    version: str
-    fingerprint: str
-    registry_hash: str | None
-    maps: Mapping[Playbook, PlaybookReliabilityMap]
-    status: str
-
-    @classmethod
-    def identity(cls) -> "ProbabilityCalibrator":
-        return cls(
-            version="identity-unvalidated",
-            fingerprint="identity-unvalidated",
-            registry_hash=None,
-            maps={},
-            status="identity_unvalidated",
-        )
-
-    @classmethod
-    def from_file(
-        cls,
-        path: str | Path,
-        *,
-        expected_registry_hash: str | None = None,
-        expected_code_hash: str | None = None,
-    ) -> "ProbabilityCalibrator":
-        source = Path(path)
-        if not source.is_absolute() and not source.exists():
-            source = Path(__file__).resolve().parents[1] / source
-        raw = source.read_bytes()
-        payload = json.loads(raw)
-        if not isinstance(payload, Mapping):
-            raise CalibrationError("calibration artifact root must be an object")
-        status = str(payload.get("status", ""))
-        if status != "ready":
-            raise CalibrationError("only a ready calibration artifact may affect beliefs")
-        registry_hash = str(payload.get("playbook_registry_hash", ""))
-        if expected_registry_hash and registry_hash != expected_registry_hash:
-            raise CalibrationError("calibration artifact registry hash is stale")
-        code_hash = str(payload.get("model_code_hash", ""))
-        if expected_code_hash and code_hash != expected_code_hash:
-            raise CalibrationError("calibration artifact model-code hash is stale")
-        raw_maps = payload.get("playbooks")
-        if not isinstance(raw_maps, Mapping):
-            raise CalibrationError("calibration artifact has no playbook maps")
-        maps: dict[Playbook, PlaybookReliabilityMap] = {}
-        for playbook in Playbook:
-            value = raw_maps.get(playbook.value)
-            if not isinstance(value, Mapping):
-                raise CalibrationError(
-                    f"calibration artifact omits {playbook.value}"
-                )
-            raw_points = value.get("points")
-            if not isinstance(raw_points, list) or len(raw_points) < 2:
-                raise CalibrationError(
-                    f"{playbook.value} calibration requires at least two points"
-                )
-            points = tuple(
-                ReliabilityPoint(
-                    raw_probability=clamp(float(point["raw_probability"])),
-                    calibrated_probability=clamp(
-                        float(point["calibrated_probability"])
-                    ),
-                    episodes=int(point["episodes"]),
-                )
-                for point in raw_points
-            )
-            if any(
-                right.raw_probability <= left.raw_probability
-                or right.calibrated_probability < left.calibrated_probability
-                for left, right in zip(points[:-1], points[1:])
-            ):
-                raise CalibrationError(
-                    f"{playbook.value} calibration is not monotone"
-                )
-            maps[playbook] = PlaybookReliabilityMap(
-                playbook=playbook,
-                episodes=int(value.get("episodes", 0)),
-                points=points,
-            )
-        return cls(
-            version=str(payload.get("calibration_version", "")).strip(),
-            fingerprint=hashlib.sha256(raw).hexdigest(),
-            registry_hash=registry_hash,
-            maps=maps,
-            status=status,
-        )
-
-    def apply(self, playbook: Playbook, raw_probability: float) -> float:
-        mapping = self.maps.get(playbook)
-        return clamp(raw_probability) if mapping is None else mapping.apply(raw_probability)
-
-
 def _typed_point_value(
     point: Mapping[str, Any],
     *,
-    primary: str,
-    compatibility: str,
+    name: str,
     path: str,
 ) -> float:
-    """Read the typed spelling while accepting archived probability spelling."""
+    """Read one current typed calibration coordinate."""
 
-    has_primary = primary in point
-    has_compatibility = compatibility in point
-    if has_primary == has_compatibility:
-        raise CalibrationError(
-            f"{path} must contain exactly one of {primary} or {compatibility}"
-        )
-    name = primary if has_primary else compatibility
+    if name not in point:
+        raise CalibrationError(f"{path}.{name} is required")
     try:
         value = float(point[name])
     except (TypeError, ValueError) as error:
@@ -269,14 +152,12 @@ def _load_dimension_map(
             raise CalibrationError(f"{point_path} must be an object")
         raw_value = _typed_point_value(
             raw_point,
-            primary="raw_value",
-            compatibility="raw_probability",
+            name="raw_value",
             path=point_path,
         )
         calibrated_value = _typed_point_value(
             raw_point,
-            primary="calibrated_value",
-            compatibility="calibrated_probability",
+            name="calibrated_value",
             path=point_path,
         )
         try:
@@ -508,17 +389,6 @@ class TypedBrainCalibrator:
             )
         return playbook_maps[dimension].apply(raw)
 
-    def apply_dimension(
-        self,
-        playbook: Playbook,
-        dimension: str,
-        raw_value: float,
-    ) -> float:
-        """Named alias used by callers that handle both calibrator families."""
-
-        return self.apply(playbook, dimension, raw_value)
-
-
 def monotone_reliability_points(
     probabilities: Sequence[float],
     outcomes: Sequence[bool | int | float],
@@ -657,8 +527,6 @@ __all__ = [
     "DimensionReliabilityMap",
     "DimensionReliabilityPoint",
     "MODEL_CODE_FILES",
-    "PlaybookReliabilityMap",
-    "ProbabilityCalibrator",
     "ReliabilityPoint",
     "TYPED_ACTIVE_PLAYBOOKS",
     "TYPED_CALIBRATION_DIMENSIONS",

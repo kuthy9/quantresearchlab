@@ -22,7 +22,6 @@ from smc_trader.model import (
     LiquidityPoolLifecycle,
     LiquidityPoolState,
     MarketEvent,
-    Playbook,
     SUPPORT_RESISTANCE_RETIREMENT_REASON,
     STRUCTURE_BREAK_FAILURE_REASON,
     STRUCTURE_FORMATION_FAILURE_REASON,
@@ -44,7 +43,7 @@ from smc_trader.observation import (
     _candle_structure,
     _event,
 )
-from smc_trader.playbooks import BrainConfig, _plan, _visible_levels
+from smc_trader.playbooks import _visible_levels
 from smc_trader.risk import _visible_level_ids
 from smc_trader.structure import StructureConfig, StructureTracker
 
@@ -54,7 +53,7 @@ from .helpers import market_observation
 TZ = "America/New_York"
 BASE = pd.Timestamp("2025-01-06 10:00", tz=TZ)
 STRUCTURE_PROTOCOL = (
-    "configs/smc_primitives_v3_group12.json"
+    "configs/primitives_structure_liquidity.json"
 )
 
 
@@ -1334,97 +1333,6 @@ def test_frame_rejects_legacy_liquidity_from_another_timeframe() -> None:
         )
 
 
-def test_generic_plan_uses_all_inventory_for_draws_but_only_swings_for_stop() -> None:
-    observation = market_observation()
-    formed_at = observation.asof - pd.Timedelta(hours=2)
-    confirmed_at = observation.asof - pd.Timedelta(hours=1)
-
-    def inventory(
-        item_id: str,
-        *,
-        side: str,
-        kind: str,
-        price: float,
-    ) -> LiquidityInventoryItem:
-        return LiquidityInventoryItem(
-            item_id=item_id,
-            timeframe=Timeframe.H1,
-            side=side,
-            kind=kind,
-            price=price,
-            lower_bound=price,
-            upper_bound=price,
-            formed_at=formed_at,
-            confirmed_at=confirmed_at,
-            lifecycle=LiquidityInventoryLifecycle.VISIBLE,
-            source_ids=(
-                (f"{item_id}-a", f"{item_id}-b")
-                if kind in {"equal_highs", "equal_lows"}
-                else (item_id.removeprefix("swing:"),)
-            ),
-            age_bars=1,
-            strength=0.8,
-        )
-
-    equal_highs = inventory(
-        "pool:equal-highs-draw",
-        side="above",
-        kind="equal_highs",
-        price=103.0,
-    )
-    equal_lows = inventory(
-        "pool:near-equal-lows",
-        side="below",
-        kind="equal_lows",
-        price=99.0,
-    )
-    swing_low = inventory(
-        "swing:confirmed-swing-low",
-        side="below",
-        kind="swing",
-        price=98.0,
-    )
-
-    def pool(item: LiquidityInventoryItem) -> LiquidityPoolState:
-        pool_id = item.item_id.removeprefix("pool:")
-        return LiquidityPoolState(
-            pool_id=pool_id,
-            timeframe=item.timeframe,
-            side=item.side,
-            lower_bound=item.lower_bound,
-            upper_bound=item.upper_bound,
-            midpoint=item.price,
-            formed_at=item.formed_at,
-            confirmed_at=item.confirmed_at,
-            lifecycle=LiquidityPoolLifecycle.FORMED,
-            member_swing_ids=item.source_ids,
-            touch_times=(
-                item.confirmed_at - pd.Timedelta(minutes=1),
-                item.confirmed_at,
-            ),
-            age_bars=item.age_bars,
-            strength=item.strength,
-            total_touch_count=2,
-        )
-
-    observation = _with_authoritative_liquidity(
-        observation,
-        inventory=(equal_highs, equal_lows, swing_low),
-        pools=(pool(equal_highs), pool(equal_lows)),
-        swings=(_inventory_swing_source(swing_low),),
-    )
-    plan = _plan(
-        Playbook.DISPLACEMENT_FIRST_PULLBACK,
-        Direction.LONG,
-        observation,
-        BrainConfig(),
-    )
-    assert plan is not None
-    assert plan.targets[0].level_id == "pool:equal-highs-draw"
-    assert (
-        plan.invalidation.source_level_id
-        == "swing:confirmed-swing-low"
-    )
 
 
 def test_observation_rejects_pool_inventory_source_drift() -> None:

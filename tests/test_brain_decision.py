@@ -89,6 +89,9 @@ def _two_plan_belief(observation, *, second_plan=None) -> MarketBelief:
         playbook=Playbook.LIQUIDITY_SWEEP_REVERSAL,
         probability=0.93,
         plan=second_plan,
+        invalidation=second_plan.invalidation,
+        deliverable_targets=second_plan.targets,
+        remaining_path_R=second_plan.remaining_path_R,
     )
     return MarketBelief(
         observation.asof,
@@ -119,7 +122,7 @@ def _open_account(observation) -> AccountState:
 
 def test_brain_maintains_only_three_playbooks_in_both_directions() -> None:
     observation = market_observation()
-    brain = PlaybookBrain(BrainConfig(prior_decay=0.0))
+    brain = PlaybookBrain(BrainConfig())
     belief = brain.update(observation)
     assert len(belief.hypotheses) == 6
     assert {item.playbook for item in belief.hypotheses.values()} == set(Playbook)

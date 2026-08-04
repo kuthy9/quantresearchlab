@@ -48,7 +48,6 @@ from smc_trader.mbo import (  # noqa: E402
     MinuteExecutionRealityStore,
     assert_mbo_source_allowed,
 )
-from smc_trader.model import Timeframe  # noqa: E402
 from smc_trader.observation import ExecutionRealityInput  # noqa: E402
 from smc_trader.visualization import DecisionVisualizer  # noqa: E402
 

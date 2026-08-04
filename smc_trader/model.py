@@ -59,8 +59,6 @@ class PlaybookPhase(str, Enum):
     ARMED = "armed"
     WAITING_LOCATION = "waiting_location"
     WAITING_TRIGGER = "waiting_trigger"
-    # Read-only compatibility for archived 2.x/3.0 belief artifacts.
-    WAITING_PULLBACK = "waiting_pullback"
     EXECUTABLE = "executable"
     ENTERED = "entered"
     WEAKENING = "weakening"

@@ -31,14 +31,16 @@ from smc_trader.model import (  # noqa: E402
     Timeframe,
     to_primitive,
 )
-from smc_trader.semantic_audit import SemanticCaseVisualizer  # noqa: E402
-from smc_trader.visualization import _collision_safe_annotate  # noqa: E402
+from smc_trader.visualization import (  # noqa: E402
+    BlindCandlePanelRenderer,
+    _collision_safe_annotate,
+)
 
 
 DEFAULT_SOURCE = (
-    ROOT / "data/processed/nq_1m_previous_session_front_2017_2026.parquet"
+    ROOT / "data/processed/nq_1m_previous_session_front_v2_3_2017_2026.parquet"
 )
-DEFAULT_PROTOCOL = ROOT / "configs/smc_primitives_v3_displacement_episode.json"
+DEFAULT_PROTOCOL = ROOT / "configs/primitives_displacement.json"
 DEFAULT_OUTPUT = (
     ROOT / "outputs/development/displacement_episode_review_202101_v2"
 )
@@ -372,7 +374,7 @@ def _render_case(
     import matplotlib.pyplot as plt
 
     clock = pd.Timestamp(case["clock"])
-    panels = SemanticCaseVisualizer._panels(histories, clock)
+    panels = BlindCandlePanelRenderer.panels(histories, clock)
     figure, axes = plt.subplots(
         4,
         1,
@@ -382,7 +384,7 @@ def _render_case(
     )
     for axis, timeframe in zip(axes, CORE_TIMEFRAMES):
         first_index, candles = panels[timeframe]
-        SemanticCaseVisualizer._candles(
+        BlindCandlePanelRenderer.draw_candles(
             axis,
             candles,
             first_history_index=first_index,

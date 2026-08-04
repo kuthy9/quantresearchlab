@@ -30,7 +30,7 @@ from smc_trader.observation import CausalObserver
 
 
 ROOT = Path(__file__).resolve().parents[1]
-PROTOCOL_PATH = ROOT / "configs/smc_primitives_v3_group5.json"
+PROTOCOL_PATH = ROOT / "configs/primitives_entry.json"
 PROTOCOL_SHA = (
     "108d6e5f24fa733451706a7499c1f45df099ad8ae75ed32158feaedf082bd833"
 )

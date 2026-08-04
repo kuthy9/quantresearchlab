@@ -31,10 +31,10 @@ from smc_trader.model import (
 
 
 ROOT = Path(__file__).resolve().parents[1]
-GROUP3_PROTOCOL_PATH = ROOT / "configs/smc_primitives_v3_group3.json"
+GROUP3_PROTOCOL_PATH = ROOT / "configs/primitives_zones.json"
 DISPLACEMENT_PROTOCOL_PATH = (
     ROOT
-    / "configs/smc_primitives_v3_displacement_episode.json"
+    / "configs/primitives_displacement.json"
 )
 GROUP3_PROTOCOL_SHA = (
     "4086ed67c7fe849e175c149bca8688749ef44d6649a672736535e1fec2d18c51"

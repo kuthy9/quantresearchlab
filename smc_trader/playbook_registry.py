@@ -26,7 +26,7 @@ class SequenceStepProtocol:
 @dataclass(frozen=True)
 class PlaybookProtocol:
     playbook: Playbook
-    version: str
+    schema_version: int
     status: str
     thesis: str
     required_sequence: tuple[SequenceStepProtocol, ...]
@@ -43,7 +43,7 @@ class PlaybookProtocol:
 
 @dataclass(frozen=True)
 class PlaybookRegistry:
-    registry_version: str
+    schema_version: int
     frozen_at: str
     fingerprint: str
     protocols: tuple[PlaybookProtocol, ...]
@@ -65,6 +65,12 @@ def _require_mapping(value: Any, path: str) -> Mapping[str, Any]:
     if not isinstance(value, Mapping):
         raise PlaybookRegistryError(f"{path} must be an object")
     return value
+
+
+def _require_schema_version(value: Any, path: str) -> int:
+    if isinstance(value, bool) or value != 1:
+        raise PlaybookRegistryError(f"{path} must be 1")
+    return 1
 
 
 def _load_step(raw: Any, path: str) -> SequenceStepProtocol:
@@ -107,20 +113,10 @@ def _load_protocol(raw: Any, path: str) -> PlaybookProtocol:
         raise PlaybookRegistryError(f"{path}.required_sequence has duplicate step ids")
 
     phase_rules = _require_mapping(item.get("phase_rules"), f"{path}.phase_rules")
-    all_phases = {phase.value for phase in PlaybookPhase}
-    legacy_phases = all_phases - {
-        PlaybookPhase.WAITING_LOCATION.value,
-        PlaybookPhase.WAITING_TRIGGER.value,
-    }
-    typed_phases = all_phases - {
-        PlaybookPhase.WAITING_PULLBACK.value,
-    }
-    if frozenset(phase_rules) not in {
-        frozenset(legacy_phases),
-        frozenset(typed_phases),
-    }:
+    phases = {phase.value for phase in PlaybookPhase}
+    if set(phase_rules) != phases:
         raise PlaybookRegistryError(
-            f"{path}.phase_rules must use either the archived or typed phase set"
+            f"{path}.phase_rules must exactly match the current phase set"
         )
     supports = item.get("supporting_evidence")
     against = item.get("contradicting_evidence")
@@ -214,16 +210,18 @@ def _load_protocol(raw: Any, path: str) -> PlaybookProtocol:
         raise PlaybookRegistryError(
             f"{path}.hard_gates must reference unique sequence steps"
         )
-    typed_phase_set = frozenset(phase_rules) == frozenset(typed_phases)
-    if typed_phase_set and (not evidence_groups or not hard_gates):
+    if not evidence_groups or not hard_gates:
         raise PlaybookRegistryError(
-            f"{path} typed protocol requires six evidence groups "
+            f"{path} requires six evidence groups "
             "and explicit hard gates"
         )
 
     return PlaybookProtocol(
         playbook=playbook,
-        version=_require_text(item.get("version"), f"{path}.version"),
+        schema_version=_require_schema_version(
+            item.get("schema_version"),
+            f"{path}.schema_version",
+        ),
         status=_require_text(item.get("status"), f"{path}.status"),
         thesis=_require_text(item.get("thesis"), f"{path}.thesis"),
         required_sequence=sequence,
@@ -244,7 +242,7 @@ def _load_protocol(raw: Any, path: str) -> PlaybookProtocol:
 
 @lru_cache(maxsize=8)
 def load_playbook_registry(
-    path: str | Path = "configs/playbooks_v2.json",
+    path: str | Path = "configs/playbooks.json",
 ) -> PlaybookRegistry:
     source = Path(path)
     if not source.is_absolute() and not source.exists():
@@ -266,8 +264,8 @@ def load_playbook_registry(
             "registry must contain exactly the three code-registered playbooks"
         )
     return PlaybookRegistry(
-        registry_version=_require_text(
-            payload.get("registry_version"), "registry_version"
+        schema_version=_require_schema_version(
+            payload.get("schema_version"), "schema_version"
         ),
         frozen_at=_require_text(payload.get("frozen_at"), "frozen_at"),
         fingerprint=hashlib.sha256(raw_bytes).hexdigest(),

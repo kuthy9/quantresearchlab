@@ -26,7 +26,7 @@ from smc_trader.model import (  # noqa: E402
     content_hash,
     to_primitive,
 )
-from smc_trader.semantic_audit import SemanticCaseVisualizer  # noqa: E402
+from smc_trader.visualization import BlindCandlePanelRenderer  # noqa: E402
 
 
 STRATA = (
@@ -380,7 +380,7 @@ def _render_target_reveal(
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    panels = SemanticCaseVisualizer._panels(
+    panels = BlindCandlePanelRenderer.panels(
         histories,
         asof,
     )
@@ -394,7 +394,7 @@ def _render_target_reveal(
     axis_checks: dict[str, dict[str, Any]] = {}
     for axis, timeframe in zip(axes, CORE_TIMEFRAMES):
         first_index, candles = panels[timeframe]
-        SemanticCaseVisualizer._candles(
+        BlindCandlePanelRenderer.draw_candles(
             axis,
             candles,
             first_history_index=first_index,
@@ -545,7 +545,7 @@ def _render_raw_blind(
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    panels = SemanticCaseVisualizer._panels(histories, asof)
+    panels = BlindCandlePanelRenderer.panels(histories, asof)
     figure, axes = plt.subplots(
         4,
         1,
@@ -555,7 +555,7 @@ def _render_raw_blind(
     )
     for axis, timeframe in zip(axes, CORE_TIMEFRAMES):
         first_index, candles = panels[timeframe]
-        SemanticCaseVisualizer._candles(
+        BlindCandlePanelRenderer.draw_candles(
             axis,
             candles,
             first_history_index=first_index,
@@ -698,7 +698,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--source", required=True)
     parser.add_argument(
         "--config",
-        default="configs/model_v3_development.json",
+        default="configs/model.json",
     )
     parser.add_argument("--output", required=True)
     parser.add_argument("--authority-output", required=True)

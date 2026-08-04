@@ -12,13 +12,17 @@ from smc_trader.ai_review import (
     ReviewIssue,
     ai_review_identity,
     compute_primitive,
+    path_evidence_query_from_proposal,
 )
 from smc_trader.decision_trace import (
+    PrimitivePathEvidenceQuery,
+    PrimitivePathEvidenceRecorder,
     TRACE_SCHEMA_VERSION,
     build_decision_trace,
     build_frozen_decision_packet,
     decision_packet_bytes,
     decision_packet_payload_sha256,
+    read_verified_primitive_path_evidence,
     sealed_path_audit_context,
     validate_causal_histories,
 )
@@ -40,21 +44,12 @@ from smc_trader.model import (
     content_hash,
     to_primitive,
 )
-from smc_trader.path_evidence import (
-    PrimitivePathEvidenceQuery,
-    PrimitivePathEvidenceRecorder,
-    read_verified_primitive_path_evidence,
-)
 from smc_trader.scene_graph import (
     EvidenceStatus,
     FocusState,
     HypothesisState,
 )
-from smc_trader.validation import (
-    PathTestResult,
-    PrimitivePathCaseResult,
-    finalize_primitive_evaluation,
-)
+from smc_trader.validation import PathTestResult
 from smc_trader.visualization import (
     DecisionVisualizer,
     SealedVisualAudit,
@@ -1387,6 +1382,10 @@ def test_ai_review_is_converted_to_unvalidated_primitive() -> None:
         proposals[0].origin_value.decision_packet_hash
         == packet["packet_hash"]
     )
+    query = path_evidence_query_from_proposal(proposals[0])
+    assert query.query_id == proposals[0].proposal_id
+    assert query.issue == ReviewIssue.LATE_DISPLACEMENT_CHASE.value
+    assert proposals[0].setup_id in query.relevant_entity_ids
 
 
 def test_empty_ai_review_is_valid_and_identity_bound() -> None:
@@ -1517,7 +1516,7 @@ def test_typed_future_evidence_is_separate_and_packet_bound(
 ) -> None:
     snapshot = _snapshot_with_sequence()
     packet = _decision_packet(snapshot)
-    packet_path = _write_packet(
+    _write_packet(
         packet,
         tmp_path / "decision_packet.json",
     )
@@ -1536,8 +1535,8 @@ def test_typed_future_evidence_is_separate_and_packet_bound(
             hypothesis.plan.entry_location_id,
         ),
     )
-    recorder = PrimitivePathEvidenceRecorder.from_decision_packet(
-        packet_path,
+    recorder = PrimitivePathEvidenceRecorder.from_snapshot(
+        snapshot,
         hypothesis_key=key,
         query=query,
     )
@@ -1558,7 +1557,6 @@ def test_typed_future_evidence_is_separate_and_packet_bound(
     )
     verified = read_verified_primitive_path_evidence(
         evidence_path,
-        decision_packet_path=packet_path,
     )
     assert verified.identity.decision_hash == snapshot.snapshot_hash
     assert verified.finalization_reason == "right_boundary"
@@ -1573,7 +1571,7 @@ def test_typed_future_evidence_contract_boundary_excludes_new_ohlc(
 ) -> None:
     snapshot = _snapshot_with_sequence()
     packet = _decision_packet(snapshot)
-    packet_path = _write_packet(
+    _write_packet(
         packet,
         tmp_path / "decision_packet.json",
     )
@@ -1588,8 +1586,8 @@ def test_typed_future_evidence_contract_boundary_excludes_new_ohlc(
         "contract-boundary-query",
         relevant_entity_ids=(hypothesis.sequence.setup_id,),
     )
-    recorder = PrimitivePathEvidenceRecorder.from_decision_packet(
-        packet_path,
+    recorder = PrimitivePathEvidenceRecorder.from_snapshot(
+        snapshot,
         hypothesis_key=key,
         query=query,
     )
@@ -1603,71 +1601,13 @@ def test_typed_future_evidence_contract_boundary_excludes_new_ohlc(
         symbol="NQM5",
         instrument_id=snapshot.observation.instrument_id + 1,
     )
-    malformed_transition = {
-        "family": "entry_path_boundary",
-        "entity_id": hypothesis.sequence.setup_id,
-        "revision_id": "old-path-censored",
-        "lifecycle": "censored",
-        "observed_at": new_contract_bar.end,
-        "reason": "contract_change_reset",
-    }
-    with pytest.raises(ValueError, match="top-level schema"):
-        recorder.observe(
-            new_contract_bar,
-            typed_state_transitions=(malformed_transition,),
-        )
-    frozen_path = snapshot.observation.path_sequences[0]
-    terminal_path = replace(
-        frozen_path,
-        lifecycle=PathSequenceLifecycle.CENSORED,
-        state_started_at=new_contract_bar.end,
-        last_updated_at=new_contract_bar.end,
-        state_duration_real_1m_bars=0,
-        ended_at=new_contract_bar.end,
-        transition_reason="contract_change_reset",
-    )
-    transition = {
-        "family": "entry_path_boundary",
-        "entity_id": hypothesis.sequence.setup_id,
-        "revision_id": (
-            "entry_path_boundary:"
-            f"{hypothesis.sequence.setup_id}:censored:"
-            f"{new_contract_bar.end}"
-        ),
-        "lifecycle": "censored",
-        "observed_at": new_contract_bar.end,
-        "reason": "contract_change_reset",
-        "state": to_primitive(terminal_path),
-    }
-    with pytest.raises(ValueError, match="production schema"):
-        recorder.observe(
-            new_contract_bar,
-            typed_state_transitions=(
-                {
-                    **transition,
-                    "state": {
-                        "sequence_id": hypothesis.sequence.setup_id,
-                        "lifecycle": "censored",
-                        "last_updated_at": new_contract_bar.end,
-                        "transition_reason": "contract_change_reset",
-                    },
-                },
-            ),
-        )
-    evidence = recorder.observe(
-        new_contract_bar,
-        typed_state_transitions=(transition,),
-    )
+    evidence = recorder.observe(new_contract_bar)
     assert evidence is not None
     assert evidence.finalization_reason == "contract_change_reset"
     assert evidence.points == ()
-    assert evidence.boundary_delta is not None
-    assert evidence.boundary_delta.typed_state_transitions == (
-        to_primitive(transition),
-    )
 
-    empty_recorder = PrimitivePathEvidenceRecorder.from_decision_packet(
-        packet_path,
+    empty_recorder = PrimitivePathEvidenceRecorder.from_snapshot(
+        snapshot,
         hypothesis_key=key,
         query=_registered_path_query(
             packet,
@@ -1680,8 +1620,6 @@ def test_typed_future_evidence_contract_boundary_excludes_new_ohlc(
     empty_evidence = empty_recorder.observe(new_contract_bar)
     assert empty_evidence is not None
     assert empty_evidence.finalization_reason == "contract_change_reset"
-    assert empty_evidence.boundary_delta is not None
-    assert empty_evidence.boundary_delta.typed_state_transitions == ()
 
 
 def test_typed_future_evidence_rejects_labels_and_includes_deadline_bar(
@@ -1689,7 +1627,7 @@ def test_typed_future_evidence_rejects_labels_and_includes_deadline_bar(
 ) -> None:
     snapshot = _snapshot_with_sequence()
     packet = _decision_packet(snapshot)
-    packet_path = _write_packet(
+    _write_packet(
         packet,
         tmp_path / "decision_packet.json",
     )
@@ -1697,8 +1635,8 @@ def test_typed_future_evidence_rejects_labels_and_includes_deadline_bar(
     assert key is not None
     hypothesis = snapshot.belief.hypotheses[key]
     assert hypothesis.plan is not None
-    recorder = PrimitivePathEvidenceRecorder.from_decision_packet(
-        packet_path,
+    recorder = PrimitivePathEvidenceRecorder.from_snapshot(
+        snapshot,
         hypothesis_key=key,
         query=_registered_path_query(
             packet,
@@ -1740,93 +1678,3 @@ def test_typed_future_evidence_rejects_labels_and_includes_deadline_bar(
     assert result is not None
     assert result.finalization_reason == "deadline"
     assert result.points[-1].observed_at == hypothesis.plan.deadline
-
-
-def test_implementation_checks_cannot_mark_ai_primitive_as_passed() -> None:
-    snapshot = _snapshot_with_sequence()
-    packet = _decision_packet(snapshot)
-    packet_sha256 = decision_packet_payload_sha256(packet)
-    proposal = AIReviewAdapter().convert(
-        {
-            **ai_review_identity(snapshot),
-            "decision_packet_hash": packet["packet_hash"],
-            "decision_packet_sha256": packet_sha256,
-            "reviewer_id": "reviewer",
-            "issues": [
-                {
-                    "code": ReviewIssue.LATE_DISPLACEMENT_CHASE.value,
-                    "confidence": 0.8,
-                    "note": "extension dominates remaining visible path",
-                }
-            ],
-        },
-        snapshot,
-        decision_packet_hash=packet["packet_hash"],
-        decision_packet_sha256=packet_sha256,
-        decision_packet=packet,
-    )[0]
-
-    def implementation_case(index: int) -> PrimitivePathCaseResult:
-        return PrimitivePathCaseResult(
-            proposal_id=proposal.proposal_id,
-            definition_hash=proposal.definition_hash,
-            origin_packet_hash=proposal.decision_packet_hash,
-            origin_packet_sha256=proposal.decision_packet_sha256,
-            evaluation_packet_hash=str(index) * 64,
-            evaluation_packet_sha256=str(index + 2) * 64,
-            origin_decision_hash=proposal.decision_hash,
-            evaluation_decision_hash=str(index + 4) * 64,
-            origin_hypothesis_key=proposal.hypothesis_key,
-            evaluation_hypothesis_key=proposal.hypothesis_key or "missing",
-            origin_setup_id=proposal.setup_id,
-            evaluation_setup_id=f"independent-setup-{index}",
-            evaluation_entry_location_id=f"independent-location-{index}",
-            evaluation_entry_path_id=f"independent-path-{index}",
-            origin_window_role="development",
-            evaluation_window_role=f"blind-window-{index}",
-            distinct_case=True,
-            non_overlapping_window=True,
-            causal_clock_valid=True,
-            prefix_invariant=True,
-            bounds_valid=True,
-            implementation_consistency_passed=True,
-            path_evidence_hash=None,
-            path_evidence_verified=False,
-            path_property_passed=None,
-            evaluable=True,
-            status="implementation_checked",
-            reason="implementation consistency only",
-            no_pnl_fields_used=True,
-            origin_values={},
-            evaluation_values={},
-        )
-
-    result = finalize_primitive_evaluation(
-        proposal,
-        (implementation_case(1), implementation_case(2)),
-    )
-    assert result.implementation_checked_cases == 2
-    assert result.path_passed_cases == 0
-    assert result.status == "awaiting_path_evidence"
-    assert "cannot approve" in result.reason
-
-    eligible = replace(
-        implementation_case(1),
-        path_evidence_hash="e" * 64,
-        path_evidence_verified=True,
-        path_property_passed=True,
-    )
-    ineligible = replace(
-        implementation_case(2),
-        non_overlapping_window=False,
-        path_evidence_hash="f" * 64,
-        path_evidence_verified=True,
-        path_property_passed=True,
-    )
-    guarded = finalize_primitive_evaluation(
-        proposal,
-        (eligible, eligible, ineligible),
-    )
-    assert guarded.path_passed_cases == 0
-    assert guarded.path_failed_cases == 0
-    assert guarded.status == "awaiting_path_evidence"

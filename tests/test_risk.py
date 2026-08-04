@@ -5,6 +5,8 @@ from dataclasses import FrozenInstanceError, replace
 import pandas as pd
 import pytest
 
+import smc_trader.risk as risk_module
+
 from smc_trader.model import (
     Action,
     ActionUtility,
@@ -31,6 +33,17 @@ from smc_trader.risk import (
 )
 
 from .helpers import flat_account, long_plan, market_observation
+
+
+@pytest.fixture(autouse=True)
+def _isolate_typed_entry_contract(monkeypatch) -> None:
+    """This file tests risk vetoes; typed plan identity is tested vertically."""
+
+    monkeypatch.setattr(
+        risk_module,
+        "_valid_typed_entry_location",
+        lambda plan, observation: True,
+    )
 
 
 def _decision(observation, plan) -> Decision:

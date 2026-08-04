@@ -4,12 +4,11 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 import hashlib
 import math
-from typing import Iterable, Mapping, Sequence
+from typing import Mapping, Sequence
 
-import numpy as np
 import pandas as pd
 
-from .calibration import ProbabilityCalibrator, TypedBrainCalibrator
+from .calibration import TypedBrainCalibrator
 from .model import (
     BOSLifecycle,
     BOSScope,
@@ -59,30 +58,10 @@ from .scene_graph import (
 
 @dataclass(frozen=True)
 class BrainConfig:
-    prior_decay: float = 0.92
-    forming_probability: float = 0.42
-    armed_probability: float = 0.58
-    executable_probability: float = 0.66
-    weakening_probability: float = 0.46
-    invalidation_probability: float = 0.28
     tick_size: float = 0.25
     minimum_remaining_path_R: float = 1.0
 
     def __post_init__(self) -> None:
-        probabilities = (
-            self.prior_decay,
-            self.forming_probability,
-            self.armed_probability,
-            self.executable_probability,
-            self.weakening_probability,
-            self.invalidation_probability,
-        )
-        if any(
-            not math.isfinite(float(value))
-            or not 0.0 <= float(value) <= 1.0
-            for value in probabilities
-        ):
-            raise ValueError("brain probabilities and decay must be in [0, 1]")
         if (
             not math.isfinite(float(self.tick_size))
             or self.tick_size <= 0.0
@@ -98,10 +77,8 @@ class BrainConfig:
 class _Evaluation:
     evidence: tuple[Evidence, ...]
     trigger_ready: bool
-    waiting_pullback: bool
     setup_clock: pd.Timestamp | None
     sequence_signals: Mapping[str, "_SequenceSignal"]
-    typed: bool = False
     setup_identity: str | None = None
     context_identity: str | None = None
     episode_identity: str | None = None
@@ -194,19 +171,6 @@ def _entry_zone_beyond_frozen_invalidation(
     )
 
 
-def _logit(probability: float) -> float:
-    value = min(1.0 - 1e-9, max(1e-9, float(probability)))
-    return math.log(value / (1.0 - value))
-
-
-def _sigmoid(value: float) -> float:
-    if value >= 0:
-        z = math.exp(-value)
-        return 1.0 / (1.0 + z)
-    z = math.exp(value)
-    return z / (1.0 + z)
-
-
 def _evidence(
     primitive: str,
     value: float,
@@ -223,629 +187,6 @@ def _evidence(
         observed_at=observation.asof,
         explanation=explanation,
     )
-
-
-def _aligned_pair(
-    primitive: str,
-    signed_value: float,
-    direction: Direction,
-    weight: float,
-    observation: MarketObservation,
-    explanation: str,
-) -> tuple[Evidence, Evidence]:
-    aligned = direction.sign * float(signed_value)
-    return (
-        _evidence(
-            primitive,
-            max(0.0, aligned),
-            weight,
-            True,
-            observation,
-            explanation,
-        ),
-        _evidence(
-            f"{primitive}_opposes",
-            max(0.0, -aligned),
-            weight,
-            False,
-            observation,
-            f"opposes {explanation}",
-        ),
-    )
-
-
-def _recent_event_strength(
-    observation: MarketObservation,
-    kind: EventKind,
-    side: str | None,
-    *,
-    half_life_minutes: float,
-    timeframe: Timeframe | None = None,
-    after: pd.Timestamp | None = None,
-) -> tuple[float, pd.Timestamp | None, tuple[str, ...]]:
-    matches = [
-        event
-        for event in observation.recent_events
-        if event.kind is kind
-        and (side is None or event.side == side)
-        and (timeframe is None or event.timeframe is timeframe)
-        and (after is None or event.observed_at > after)
-    ]
-    if not matches:
-        return 0.0, None, ()
-    event = max(matches, key=lambda item: item.observed_at)
-    age = max(0.0, (observation.asof - event.observed_at).total_seconds() / 60.0)
-    strength = event.strength * math.exp(-math.log(2.0) * age / half_life_minutes)
-    return clamp(strength), event.observed_at, event.source_ids
-
-
-def _confirmed_structure_signal(
-    observation: MarketObservation,
-    timeframe: Timeframe,
-    direction: Direction,
-) -> _SequenceSignal:
-    matches = [
-        item
-        for item in observation.frame(timeframe).structures
-        if item.direction is direction
-        and item.lifecycle is StructureLifecycle.CONFIRMED
-        and item.confirmed_at is not None
-    ]
-    if not matches:
-        return _SequenceSignal(0.0, None)
-    item = max(matches, key=lambda value: value.confirmed_at)
-    source_ids = tuple(
-        value
-        for value in (
-            item.structure_id,
-            item.latest_high_id,
-            item.latest_low_id,
-            item.protected_swing_id,
-        )
-        if value is not None
-    )
-    return _SequenceSignal(
-        1.0,
-        item.confirmed_at,
-        source_ids,
-    )
-
-
-def _confirmed_bos_signal(
-    observation: MarketObservation,
-    timeframe: Timeframe,
-    direction: Direction,
-    *,
-    scope: BOSScope,
-    after: pd.Timestamp | None = None,
-) -> _SequenceSignal:
-    matches = [
-        item
-        for item in observation.frame(timeframe).structure_breaks
-        if item.direction is direction
-        and item.lifecycle is BOSLifecycle.CONFIRMED
-        and item.scope is scope
-        and item.resolved_at is not None
-        and (after is None or item.resolved_at > after)
-    ]
-    if not matches:
-        return _SequenceSignal(0.0, None)
-    item = max(matches, key=lambda value: value.resolved_at)
-    return _SequenceSignal(
-        1.0,
-        item.resolved_at,
-        tuple(
-            value
-            for value in (
-                item.bos_id,
-                item.target_swing_id,
-                item.source_structure_id,
-            )
-            if value is not None
-        ),
-    )
-
-
-def _displacement_first_pullback(
-    observation: MarketObservation, direction: Direction
-) -> _Evaluation:
-    h4 = observation.frame(Timeframe.H4).metrics
-    h1 = observation.frame(Timeframe.H1).metrics
-    m5 = observation.frame(Timeframe.M5).metrics
-    m1 = observation.frame(Timeframe.M1).metrics
-    items: list[Evidence] = []
-    for args in (
-        (
-            "h4_directional_displacement",
-            h4["directional_displacement"],
-            1.0,
-            "4H displacement aligns with the thesis",
-        ),
-        (
-            "h4_structure_progression",
-            h4["structure_direction"],
-            0.7,
-            "4H confirmed structure progresses with the thesis",
-        ),
-        (
-            "h1_swing_progression",
-            h1["swing_progression"],
-            1.0,
-            "1H swing sequence aligns with the thesis",
-        ),
-        (
-            "m5_impulse_direction",
-            m5["impulse_direction"] * m5["impulse_strength"],
-            1.2,
-            "5m impulse is aligned and efficient",
-        ),
-        (
-            "m5_reacceptance",
-            m5["reacceptance_direction"],
-            1.1,
-            "5m closes reaccept the impulse direction",
-        ),
-        (
-            "m1_path_sequence",
-            m1["path_sequence"],
-            0.7,
-            "1m short-term structural order aligns",
-        ),
-        (
-            "m1_trigger_hold",
-            m1["trigger_hold_direction"],
-            1.2,
-            "1m trigger level is holding",
-        ),
-    ):
-        items.extend(_aligned_pair(args[0], args[1], direction, args[2], observation, args[3]))
-    pullback = m5["pullback_completeness"]
-    items.append(
-        _evidence(
-            "m5_first_pullback_quality",
-            pullback,
-            1.1,
-            True,
-            observation,
-            "5m pullback is developed but remains structurally intact",
-        )
-    )
-    extension = m5["impulse_extension_atr"]
-    chase = clamp((extension - 1.5) / 1.5) * clamp((0.20 - m5["pullback_depth"]) / 0.20)
-    items.append(
-        _evidence(
-            "late_displacement_chase",
-            chase,
-            1.4,
-            False,
-            observation,
-            "price is extended with too little pullback space",
-        )
-    )
-    obstruction = (
-        h1["up_path_obstruction_atr"]
-        if direction is Direction.LONG
-        else h1["down_path_obstruction_atr"]
-    )
-    items.append(
-        _evidence(
-            "near_path_obstruction",
-            clamp((1.0 - obstruction) / 1.0),
-            0.8,
-            False,
-            observation,
-            "nearby opposing liquidity limits remaining path",
-        )
-    )
-    impulse_clock = (
-        observation.frame(Timeframe.M5).cutoff
-        - pd.Timedelta(minutes=5 * int(m5["impulse_age_bars"]))
-        if m5["impulse_strength"] >= 0.35
-        else None
-    )
-    trigger_ready = bool(
-        direction.sign * m1["trigger_hold_direction"] > 0
-        and direction.sign * m5["reacceptance_direction"] > 0.15
-        and chase < 0.5
-    )
-    waiting = bool(
-        direction.sign * m5["impulse_direction"] > 0
-        and m5["impulse_strength"] >= 0.35
-        and (m5["pullback_depth"] < 0.20 or not trigger_ready)
-    )
-    directional_context = clamp(
-        max(
-            0.0,
-            direction.sign
-            * (
-                0.6 * h4["directional_displacement"]
-                + 0.4 * h1["swing_progression"]
-            ),
-        )
-    )
-    impulse_value = clamp(
-        max(0.0, direction.sign * m5["impulse_direction"])
-        * m5["impulse_strength"]
-    )
-    pullback_value = (
-        clamp(m5["pullback_completeness"])
-        if impulse_clock is not None
-        else 0.0
-    )
-    h4_structure = _confirmed_structure_signal(
-        observation,
-        Timeframe.H4,
-        direction,
-    )
-    h1_bos = _confirmed_bos_signal(
-        observation,
-        Timeframe.H1,
-        direction,
-        scope=BOSScope.CONTINUATION,
-        after=h4_structure.observed_at,
-    )
-    return _Evaluation(
-        tuple(items),
-        trigger_ready,
-        waiting,
-        impulse_clock,
-        {
-            "h4_confirmed_structure": h4_structure,
-            "h1_continuation_bos": h1_bos,
-            "directional_context": _SequenceSignal(
-                directional_context,
-                max(
-                    observation.frame(Timeframe.H4).cutoff,
-                    observation.frame(Timeframe.H1).cutoff,
-                ),
-            ),
-            "m5_displacement": _SequenceSignal(impulse_value, impulse_clock),
-            "m5_first_pullback": _SequenceSignal(
-                pullback_value,
-                observation.frame(Timeframe.M5).cutoff,
-            ),
-            "m1_reacceptance_trigger": _SequenceSignal(
-                1.0 if trigger_ready else 0.0,
-                observation.asof,
-            ),
-        },
-    )
-
-
-def _liquidity_sweep_reversal(
-    observation: MarketObservation, direction: Direction
-) -> _Evaluation:
-    h4 = observation.frame(Timeframe.H4).metrics
-    h1 = observation.frame(Timeframe.H1).metrics
-    m5 = observation.frame(Timeframe.M5).metrics
-    m1 = observation.frame(Timeframe.M1).metrics
-    sweep_side = "below" if direction is Direction.LONG else "above"
-    sweep, sweep_clock, sweep_sources = _recent_event_strength(
-        observation,
-        EventKind.LIQUIDITY_SWEEP,
-        sweep_side,
-        half_life_minutes=45.0,
-    )
-    items = [
-        _evidence(
-            "recent_external_liquidity_sweep",
-            sweep,
-            1.6,
-            True,
-            observation,
-            f"recent {sweep_side} liquidity was swept",
-        )
-    ]
-    for args in (
-        (
-            "h1_rejection",
-            h1["rejection_direction"],
-            1.3,
-            "1H rejected the swept side",
-        ),
-        (
-            "m5_reacceptance",
-            m5["reacceptance_direction"],
-            1.2,
-            "5m reaccepted back from the sweep",
-        ),
-        (
-            "m1_counter_pressure",
-            m1["counter_pressure"],
-            0.8,
-            "1m opposing wick pressure supports reversal",
-        ),
-        (
-            "m1_acceleration",
-            m1["acceleration"],
-            0.8,
-            "1m acceleration turns away from the sweep",
-        ),
-        (
-            "m1_trigger_hold",
-            m1["trigger_hold_direction"],
-            1.0,
-            "1m reversal trigger holds",
-        ),
-    ):
-        items.extend(_aligned_pair(args[0], args[1], direction, args[2], observation, args[3]))
-    location = h1["dealing_range_position"]
-    extreme = (1.0 - location) if direction is Direction.LONG else location
-    items.append(
-        _evidence(
-            "dealing_range_extreme",
-            extreme,
-            0.8,
-            True,
-            observation,
-            "sweep occurred near the relevant dealing-range extreme",
-        )
-    )
-    items.append(
-        _evidence(
-            "h4_opposing_displacement",
-            max(0.0, -direction.sign * h4["directional_displacement"]),
-            0.8,
-            False,
-            observation,
-            "strong 4H displacement still drives into the proposed reversal",
-        )
-    )
-    trigger_ready = bool(
-        sweep >= 0.20
-        and direction.sign * m5["reacceptance_direction"] > 0.15
-        and direction.sign * m1["trigger_hold_direction"] > 0
-    )
-    waiting = bool(sweep >= 0.20 and not trigger_ready)
-    reacceptance = clamp(
-        max(0.0, direction.sign * m5["reacceptance_direction"])
-    )
-    reaccept_side = "above" if direction is Direction.LONG else "below"
-    event_reacceptance, reacceptance_clock, reacceptance_sources = (
-        _recent_event_strength(
-            observation,
-            EventKind.REACCEPTANCE,
-            reaccept_side,
-            half_life_minutes=90.0,
-            timeframe=Timeframe.M5,
-            after=sweep_clock,
-        )
-        if sweep_clock is not None
-        else (0.0, None, ())
-    )
-    impulse_clock = (
-        observation.frame(Timeframe.M5).cutoff
-        - pd.Timedelta(minutes=5 * int(m5["impulse_age_bars"]))
-        if (
-            direction.sign * m5["impulse_direction"] > 0
-            and m5["impulse_strength"] >= 0.35
-        )
-        else None
-    )
-    reverse_displacement = _SequenceSignal(
-        (
-            clamp(m5["impulse_strength"])
-            if impulse_clock is not None
-            and (sweep_clock is None or impulse_clock > sweep_clock)
-            else 0.0
-        ),
-        (
-            impulse_clock
-            if impulse_clock is not None
-            and (sweep_clock is None or impulse_clock > sweep_clock)
-            else None
-        ),
-    )
-    opposed_bos = _confirmed_bos_signal(
-        observation,
-        Timeframe.M1,
-        direction,
-        scope=BOSScope.OPPOSED,
-        after=reverse_displacement.observed_at,
-    )
-    return _Evaluation(
-        tuple(items),
-        trigger_ready,
-        waiting,
-        sweep_clock,
-        {
-            "external_liquidity_sweep": _SequenceSignal(
-                sweep,
-                sweep_clock,
-                sweep_sources,
-            ),
-            "m5_reacceptance_from_sweep": _SequenceSignal(
-                min(reacceptance, event_reacceptance),
-                reacceptance_clock,
-                reacceptance_sources,
-            ),
-            "m1_reversal_trigger": _SequenceSignal(
-                1.0
-                if direction.sign * m1["trigger_hold_direction"] > 0
-                else 0.0,
-                observation.asof,
-            ),
-            "m5_reverse_displacement": reverse_displacement,
-            "m1_opposed_bos": opposed_bos,
-        },
-    )
-
-
-def _failed_auction_value_return(
-    observation: MarketObservation, direction: Direction
-) -> _Evaluation:
-    h4 = observation.frame(Timeframe.H4).metrics
-    h1 = observation.frame(Timeframe.H1).metrics
-    m5 = observation.frame(Timeframe.M5).metrics
-    m1 = observation.frame(Timeframe.M1).metrics
-    failed_side = "below" if direction is Direction.LONG else "above"
-    rejection, rejection_clock, rejection_sources = _recent_event_strength(
-        observation,
-        EventKind.REJECTION,
-        failed_side,
-        half_life_minutes=120.0,
-    )
-    sweep, sweep_clock, sweep_sources = _recent_event_strength(
-        observation,
-        EventKind.LIQUIDITY_SWEEP,
-        failed_side,
-        half_life_minutes=90.0,
-    )
-    if (
-        rejection_clock is not None
-        and (sweep_clock is None or rejection_clock >= sweep_clock)
-    ):
-        failure = rejection
-        setup_clock = rejection_clock
-        failure_sources = rejection_sources
-    else:
-        failure = sweep
-        setup_clock = sweep_clock
-        failure_sources = sweep_sources
-    items = [
-        _evidence(
-            "failed_auction_event",
-            failure,
-            1.5,
-            True,
-            observation,
-            f"auction through {failed_side} failed to hold",
-        )
-    ]
-    for args in (
-        (
-            "h1_rejection_direction",
-            h1["rejection_direction"],
-            1.2,
-            "1H rejection points back toward value",
-        ),
-        (
-            "h1_acceptance_back_to_value",
-            h1["acceptance_direction"],
-            0.9,
-            "1H acceptance points back into the dealing range",
-        ),
-        (
-            "m5_reacceptance",
-            m5["reacceptance_direction"],
-            1.0,
-            "5m reaccepts value",
-        ),
-        (
-            "m1_path_sequence",
-            m1["path_sequence"],
-            0.8,
-            "1m structure orders back toward value",
-        ),
-    ):
-        items.extend(_aligned_pair(args[0], args[1], direction, args[2], observation, args[3]))
-    position = h4["range_position"]
-    return_space = (1.0 - position) if direction is Direction.LONG else position
-    items.append(
-        _evidence(
-            "value_return_space",
-            return_space,
-            0.7,
-            True,
-            observation,
-            "4H range position leaves room for return toward value",
-        )
-    )
-    opposite_acceptance = max(0.0, -direction.sign * h1["acceptance_direction"])
-    items.append(
-        _evidence(
-            "auction_accepted_beyond_failure",
-            opposite_acceptance,
-            1.4,
-            False,
-            observation,
-            "price accepted beyond the proposed failed-auction side",
-        )
-    )
-    trigger_ready = bool(
-        failure >= 0.20
-        and direction.sign * m5["reacceptance_direction"] > 0.10
-        and direction.sign * m1["path_sequence"] > 0
-    )
-    value_acceptance = clamp(
-        max(
-            0.0,
-            direction.sign
-            * (
-                0.4 * h1["acceptance_direction"]
-                + 0.6 * m5["reacceptance_direction"]
-            ),
-        )
-    )
-    return_side = "above" if direction is Direction.LONG else "below"
-    m5_acceptance, m5_acceptance_clock, m5_acceptance_sources = (
-        _recent_event_strength(
-            observation,
-            EventKind.REACCEPTANCE,
-            return_side,
-            half_life_minutes=120.0,
-            timeframe=Timeframe.M5,
-            after=setup_clock,
-        )
-        if setup_clock is not None
-        else (0.0, None, ())
-    )
-    h1_acceptance, h1_acceptance_clock, h1_acceptance_sources = (
-        _recent_event_strength(
-            observation,
-            EventKind.STRUCTURE_BREAK,
-            return_side,
-            half_life_minutes=240.0,
-            timeframe=Timeframe.H1,
-            after=setup_clock,
-        )
-        if setup_clock is not None
-        else (0.0, None, ())
-    )
-    if (
-        h1_acceptance_clock is not None
-        and (
-            m5_acceptance_clock is None
-            or h1_acceptance_clock <= m5_acceptance_clock
-        )
-    ):
-        acceptance_clock = h1_acceptance_clock
-        acceptance_sources = h1_acceptance_sources
-        acceptance_event_strength = h1_acceptance
-    else:
-        acceptance_clock = m5_acceptance_clock
-        acceptance_sources = m5_acceptance_sources
-        acceptance_event_strength = m5_acceptance
-    return _Evaluation(
-        tuple(items),
-        trigger_ready,
-        failure >= 0.20 and not trigger_ready,
-        setup_clock,
-        {
-            "failed_auction_event": _SequenceSignal(
-                failure,
-                setup_clock,
-                failure_sources,
-            ),
-            "acceptance_back_to_value": _SequenceSignal(
-                min(value_acceptance, acceptance_event_strength),
-                acceptance_clock,
-                acceptance_sources,
-            ),
-            "m1_path_toward_value": _SequenceSignal(
-                1.0 if direction.sign * m1["path_sequence"] > 0 else 0.0,
-                observation.asof,
-            ),
-        },
-    )
-
-
-EVALUATORS = {
-    Playbook.DISPLACEMENT_FIRST_PULLBACK: _displacement_first_pullback,
-    Playbook.LIQUIDITY_SWEEP_REVERSAL: _liquidity_sweep_reversal,
-    Playbook.FAILED_AUCTION_VALUE_RETURN: _failed_auction_value_return,
-}
-
 
 _TERMINAL_PHASES = {
     PlaybookPhase.COMPLETED,
@@ -2111,9 +1452,6 @@ def _typed_dfp(
             contradict,
         ),
         trigger_ready=trigger_ready,
-        waiting_pullback=bool(
-            location is not None and first_pullback is None
-        ),
         setup_clock=setup_clock,
         sequence_signals={
             "h4_structure_and_draw": _SequenceSignal(
@@ -2192,7 +1530,6 @@ def _typed_dfp(
                 ),
             ),
         },
-        typed=True,
         setup_identity=setup_identity,
         context_identity=context_identity,
         episode_identity=episode_identity,
@@ -2748,9 +2085,6 @@ def _typed_lsr(
             contradict,
         ),
         trigger_ready=trigger_ready,
-        waiting_pullback=bool(
-            location is not None and first_pullback is None
-        ),
         setup_clock=(
             None if pool_swept is None else pool_swept.observed_at
         ),
@@ -2809,7 +2143,6 @@ def _typed_lsr(
                 ),
             ),
         },
-        typed=True,
         setup_identity=setup_identity,
         context_identity=context_identity,
         episode_identity=episode_identity,
@@ -3460,9 +2793,6 @@ def _typed_favr(
             contradict,
         ),
         trigger_ready=trigger_ready,
-        waiting_pullback=bool(
-            location is not None and first_pullback is None
-        ),
         setup_clock=setup_clock,
         sequence_signals={
             "mature_dealing_range": _SequenceSignal(
@@ -3519,7 +2849,6 @@ def _typed_favr(
                 ),
             ),
         },
-        typed=True,
         setup_identity=setup_identity,
         context_identity=(
             None if dealing_range is None else dealing_range.range_id
@@ -3612,13 +2941,11 @@ def _typed_parked(
             contradict,
         ),
         trigger_ready=False,
-        waiting_pullback=False,
         setup_clock=None,
         sequence_signals={
             step.step_id: _SequenceSignal(0.0, None)
             for step in protocol.required_sequence
         },
-        typed=True,
         thesis_target=0.0,
         location_quality=0.0,
         entry_readiness=0.0,
@@ -3782,7 +3109,6 @@ def _terminal_candidate_is_new(
 def _sequence_state(
     protocol: PlaybookProtocol,
     registry: PlaybookRegistry,
-    direction: Direction,
     evaluation: _Evaluation,
     prior: HypothesisBelief | None,
 ) -> HypothesisSequenceState:
@@ -3796,16 +3122,7 @@ def _sequence_state(
         and first_signal.observed_at <= evaluation.setup_clock
         and first_signal.value >= first_definition.minimum_value
     ):
-        if evaluation.typed:
-            candidate_id = evaluation.setup_identity
-        else:
-            raw = (
-                f"{registry.fingerprint}|{protocol.playbook.value}|"
-                f"{direction.value}|{evaluation.setup_clock.isoformat()}"
-            )
-            candidate_id = hashlib.sha256(
-                raw.encode("utf-8")
-            ).hexdigest()[:24]
+        candidate_id = evaluation.setup_identity
     prior_sequence = None if prior is None else prior.sequence
     prior_is_terminal = bool(
         prior is not None
@@ -3824,44 +3141,16 @@ def _sequence_state(
     if prior_is_terminal and not terminal_candidate_is_new:
         candidate_id = None
         prior_sequence = None
-    if evaluation.typed:
-        reuse_prior = bool(
-            prior_sequence is not None
-            and prior_sequence.setup_id is not None
-            and candidate_id == prior_sequence.setup_id
-        )
-    else:
-        reuse_prior = bool(
-            prior_sequence is not None
-            and prior_sequence.setup_id is not None
-            and (
-                (
-                    prior_sequence.complete
-                    and prior is not None
-                    and prior.phase not in _TERMINAL_PHASES
-                )
-                or candidate_id is None
-                or candidate_id == prior_sequence.setup_id
-                or (
-                    prior_sequence.started_at is not None
-                    and evaluation.setup_clock is not None
-                    and evaluation.setup_clock
-                    <= prior_sequence.started_at
-                )
-            )
-        )
+    reuse_prior = bool(
+        prior_sequence is not None
+        and prior_sequence.setup_id is not None
+        and candidate_id == prior_sequence.setup_id
+    )
     if reuse_prior:
         assert prior_sequence is not None
         setup_id = prior_sequence.setup_id
         setup_clock = prior_sequence.started_at
-        prior_steps = (
-            {}
-            if evaluation.typed
-            else {
-                step.step_id: step
-                for step in prior_sequence.steps
-            }
-        )
+        prior_steps: dict[str, SequenceStepState] = {}
     else:
         setup_id = candidate_id
         setup_clock = evaluation.setup_clock
@@ -3910,7 +3199,7 @@ def _sequence_state(
         setup_id = None
         setup_clock = None
     return HypothesisSequenceState(
-        protocol_version=protocol.version,
+        protocol_version=str(protocol.schema_version),
         protocol_hash=registry.fingerprint,
         setup_id=setup_id,
         steps=tuple(steps),
@@ -3935,47 +3224,6 @@ def _validate_evidence_contract(
         )
 
 
-def _probability(
-    prior: HypothesisBelief | None,
-    evidence: Sequence[Evidence],
-    config: BrainConfig,
-) -> float:
-    total_weight = sum(item.weight for item in evidence) or 1.0
-    signed = sum(
-        item.weight * item.value * (1.0 if item.supports else -1.0)
-        for item in evidence
-    ) / total_weight
-    target = _sigmoid(-0.55 + 3.0 * signed)
-    prior_probability = (
-        prior.raw_probability
-        if prior is not None and prior.raw_probability is not None
-        else prior.probability
-        if prior is not None
-        else 0.30
-    )
-    blended_logit = (
-        config.prior_decay * _logit(prior_probability)
-        + (1.0 - config.prior_decay) * _logit(target)
-    )
-    return clamp(_sigmoid(blended_logit))
-
-
-def _uncertainty(
-    probability: float,
-    evidence: Sequence[Evidence],
-    observation: MarketObservation,
-) -> float:
-    entropy = 0.0
-    if 0.0 < probability < 1.0:
-        entropy = -(
-            probability * math.log(probability)
-            + (1.0 - probability) * math.log(1.0 - probability)
-        ) / math.log(2.0)
-    support = sum(item.weight * item.value for item in evidence if item.supports)
-    contradict = sum(item.weight * item.value for item in evidence if not item.supports)
-    disagreement = min(support, contradict) / max(1e-9, support + contradict)
-    missing = sum(not frame.ready for frame in observation.frames.values()) / 4.0
-    return clamp(0.55 * entropy + 0.25 * (2.0 * disagreement) + 0.20 * missing)
 
 
 def _visible_levels(observation: MarketObservation) -> list[LiquidityLevel]:
@@ -4023,155 +3271,6 @@ def _visible_levels(observation: MarketObservation) -> list[LiquidityLevel]:
     return output
 
 
-def _visible_swing_levels(
-    observation: MarketObservation,
-) -> list[LiquidityLevel]:
-    if observation.liquidity_inventory_authoritative:
-        return [
-            LiquidityLevel(
-                level_id=item.item_id,
-                timeframe=item.timeframe,
-                side=item.side,
-                price=item.price,
-                formed_at=item.formed_at,
-                confirmed_at=item.confirmed_at,
-                touches=max(0, len(item.source_ids) - 1),
-                swept=False,
-            )
-            for item in observation.liquidity_inventory
-            if (
-                item.lifecycle is LiquidityInventoryLifecycle.VISIBLE
-                and item.kind == "swing"
-                and item.confirmed_at <= observation.asof
-            )
-        ]
-    return _visible_levels(observation)
-
-
-def _latest_sweep_invalidation(
-    observation: MarketObservation,
-    direction: Direction,
-) -> StructuralLevel | None:
-    expected_side = direction.invalidation_side
-    matches = [
-        event
-        for event in observation.recent_events
-        if event.kind is EventKind.LIQUIDITY_SWEEP
-        and event.side == expected_side
-        and event.price is not None
-    ]
-    if not matches:
-        return None
-    event = max(matches, key=lambda item: item.observed_at)
-    return StructuralLevel(
-        price=float(event.price),
-        side=expected_side,
-        source_level_id=event.event_id,
-        observed_at=event.observed_at,
-        rationale="observed sweep extreme invalidates reversal thesis if exceeded",
-    )
-
-
-def _latest_failure_invalidation(
-    observation: MarketObservation,
-    direction: Direction,
-) -> StructuralLevel | None:
-    expected_side = direction.invalidation_side
-    matches = [
-        event
-        for event in observation.recent_events
-        if event.kind in {EventKind.LIQUIDITY_SWEEP, EventKind.REJECTION}
-        and event.side == expected_side
-        and event.price is not None
-    ]
-    if not matches:
-        return None
-    event = max(matches, key=lambda item: item.observed_at)
-    return StructuralLevel(
-        price=float(event.price),
-        side=expected_side,
-        source_level_id=event.event_id,
-        observed_at=event.observed_at,
-        rationale="observed failed-auction extreme defines thesis invalidation",
-    )
-
-
-def _plan(
-    playbook: Playbook,
-    direction: Direction,
-    observation: MarketObservation,
-    config: BrainConfig,
-) -> TradePlan | None:
-    price = float(observation.price)
-    levels = _visible_levels(observation)
-    swing_levels = _visible_swing_levels(observation)
-    target_side = direction.opposing_liquidity_side
-    invalidation_side = direction.invalidation_side
-    targets = [
-        level
-        for level in levels
-        if level.side == target_side
-        and (
-            (direction is Direction.LONG and level.price > price + config.tick_size)
-            or (direction is Direction.SHORT and level.price < price - config.tick_size)
-        )
-    ]
-    targets.sort(key=lambda level: abs(level.price - price))
-    deduped_targets: list[LiquidityLevel] = []
-    seen_ticks: set[int] = set()
-    for level in targets:
-        tick = int(round(level.price / config.tick_size))
-        if tick not in seen_ticks:
-            deduped_targets.append(level)
-            seen_ticks.add(tick)
-        if len(deduped_targets) == 3:
-            break
-    if not deduped_targets:
-        return None
-
-    invalidation: StructuralLevel | None = None
-    if playbook is Playbook.LIQUIDITY_SWEEP_REVERSAL:
-        invalidation = _latest_sweep_invalidation(observation, direction)
-    elif playbook is Playbook.FAILED_AUCTION_VALUE_RETURN:
-        invalidation = _latest_failure_invalidation(observation, direction)
-    if invalidation is None:
-        candidates = [
-            level
-            for level in swing_levels
-            if level.side == invalidation_side
-            and (
-                (direction is Direction.LONG and level.price < price - config.tick_size)
-                or (direction is Direction.SHORT and level.price > price + config.tick_size)
-            )
-        ]
-        if candidates:
-            source = min(candidates, key=lambda level: abs(level.price - price))
-            invalidation = StructuralLevel(
-                price=source.price,
-                side=invalidation_side,
-                source_level_id=source.level_id,
-                observed_at=source.confirmed_at,
-                rationale="nearest causally confirmed thesis-side swing",
-            )
-    if invalidation is None:
-        return None
-    risk = abs(price - invalidation.price)
-    if risk < config.tick_size:
-        return None
-    primary_R = abs(deduped_targets[0].price - price) / risk
-    deadline_minutes = max(0, observation.execution.minutes_to_deadline)
-    deadline = observation.asof + pd.Timedelta(minutes=deadline_minutes)
-    return TradePlan(
-        playbook=playbook,
-        direction=direction,
-        planned_entry=price,
-        invalidation=invalidation,
-        targets=tuple(deduped_targets),
-        risk_points=float(risk),
-        primary_target_R=float(primary_R),
-        remaining_path_R=float(primary_R),
-        deadline=deadline,
-    )
 
 
 def _terminal_has_new_setup(
@@ -4185,89 +3284,6 @@ def _terminal_has_new_setup(
     )
 
 
-def _phase(
-    playbook: Playbook,
-    direction: Direction,
-    prior: HypothesisBelief | None,
-    probability: float,
-    evaluation: _Evaluation,
-    sequence: HypothesisSequenceState,
-    plan: TradePlan | None,
-    observation: MarketObservation,
-    position: PositionSnapshot | None,
-    config: BrainConfig,
-) -> PlaybookPhase:
-    if position is not None and (
-        position.playbook is playbook and position.direction is direction
-    ):
-        if position.status == "completed":
-            return PlaybookPhase.COMPLETED
-        if position.status == "invalidated":
-            return PlaybookPhase.INVALIDATED
-        invalidated = (
-            position.direction is Direction.LONG
-            and observation.price <= position.original_invalidation.price
-        ) or (
-            position.direction is Direction.SHORT
-            and observation.price >= position.original_invalidation.price
-        )
-        if invalidated:
-            return PlaybookPhase.INVALIDATED
-        if position.unrealized_R >= 0.35 and probability >= config.weakening_probability:
-            return PlaybookPhase.DELIVERING
-        if probability < config.weakening_probability:
-            return PlaybookPhase.WEAKENING
-        return PlaybookPhase.ENTERED
-
-    if prior is not None and prior.phase in {
-        PlaybookPhase.COMPLETED,
-        PlaybookPhase.INVALIDATED,
-    } and not _terminal_has_new_setup(prior, sequence):
-        # Terminal is an observable one-update acknowledgement, not a
-        # tombstone. The frozen episode remains in its audit ledger.
-        return PlaybookPhase.INACTIVE
-
-    if prior is not None and prior.plan is not None and observation.asof >= prior.plan.deadline:
-        return PlaybookPhase.INVALIDATED
-    if plan is not None:
-        violated = (
-            plan.direction is Direction.LONG and observation.price <= plan.invalidation.price
-        ) or (
-            plan.direction is Direction.SHORT and observation.price >= plan.invalidation.price
-        )
-        if violated:
-            return PlaybookPhase.INVALIDATED
-        if sequence.complete:
-            visible_target_ids = {
-                level.level_id for level in _visible_levels(observation)
-            }
-            if any(target.level_id not in visible_target_ids for target in plan.targets):
-                return PlaybookPhase.INVALIDATED
-    if probability < config.invalidation_probability:
-        return (
-            PlaybookPhase.INVALIDATED
-            if prior is not None and prior.phase is not PlaybookPhase.INACTIVE
-            else PlaybookPhase.INACTIVE
-        )
-    if sequence.setup_id is None or sequence.completed_steps == 0:
-        return PlaybookPhase.INACTIVE
-    if probability < config.forming_probability:
-        return PlaybookPhase.FORMING
-    if sequence.completed_steps == 1 or plan is None:
-        return PlaybookPhase.FORMING
-    if (
-        evaluation.trigger_ready
-        and sequence.complete
-        and probability >= config.executable_probability
-    ):
-        return PlaybookPhase.EXECUTABLE
-    if evaluation.waiting_pullback or sequence.completed_steps < len(sequence.steps):
-        return PlaybookPhase.WAITING_PULLBACK
-    return (
-        PlaybookPhase.ARMED
-        if probability >= config.armed_probability
-        else PlaybookPhase.FORMING
-    )
 
 
 def _typed_evidence_revision(
@@ -4332,7 +3348,6 @@ def _typed_thesis_strength(
     context_id: str | None,
     target: float,
     evidence_revision_id: str,
-    config: BrainConfig,
 ) -> float:
     target = clamp(target)
     prior_raw = (
@@ -4630,30 +3645,16 @@ class PlaybookBrain:
         self,
         config: BrainConfig | None = None,
         registry: PlaybookRegistry | None = None,
-        calibrator: ProbabilityCalibrator | TypedBrainCalibrator | None = None,
+        calibrator: TypedBrainCalibrator | None = None,
     ) -> None:
         self.config = config or BrainConfig()
         self.registry = registry or load_playbook_registry()
-        typed_registry = self.registry.registry_version.startswith("4.")
-        self.calibrator = calibrator or (
-            TypedBrainCalibrator.identity()
-            if typed_registry
-            else ProbabilityCalibrator.identity()
-        )
-        if typed_registry and not isinstance(
+        self.calibrator = calibrator or TypedBrainCalibrator.identity()
+        if not isinstance(
             self.calibrator,
             TypedBrainCalibrator,
         ):
-            raise ValueError(
-                "typed causal registry requires TypedBrainCalibrator"
-            )
-        if not typed_registry and not isinstance(
-            self.calibrator,
-            ProbabilityCalibrator,
-        ):
-            raise ValueError(
-                "legacy registry requires ProbabilityCalibrator"
-            )
+            raise TypeError("brain requires TypedBrainCalibrator")
         if (
             self.calibrator.registry_hash is not None
             and self.calibrator.registry_hash != self.registry.fingerprint
@@ -4722,7 +3723,6 @@ class PlaybookBrain:
                 ),
             )
         )
-        typed_registry = self.registry.registry_version.startswith("4.")
         for playbook in Playbook:
             protocol = self.registry.for_playbook(playbook)
             for direction in Direction:
@@ -4738,430 +3738,361 @@ class PlaybookBrain:
                 terminal_reason: str | None = None
                 terminal_source_ids: tuple[str, ...] = ()
                 raw_quality_dimensions: Mapping[str, float] = {}
-                evaluation = (
-                    _typed_evaluate(
-                        playbook,
-                        observation,
-                        direction,
-                        protocol,
-                        prior,
-                        self.config,
-                    )
-                    if typed_registry
-                    else EVALUATORS[playbook](observation, direction)
+                evaluation = _typed_evaluate(
+                    playbook,
+                    observation,
+                    direction,
+                    protocol,
+                    prior,
+                    self.config,
                 )
-                if typed_registry:
-                    evaluation = _require_connected_graph_sequence(
-                        playbook,
-                        protocol,
-                        evaluation,
-                        scene_graph,
-                        prior,
-                    )
+                evaluation = _require_connected_graph_sequence(
+                    playbook,
+                    protocol,
+                    evaluation,
+                    scene_graph,
+                    prior,
+                )
                 _validate_evidence_contract(protocol, evaluation.evidence)
                 sequence = _sequence_state(
                     protocol,
                     self.registry,
-                    direction,
                     evaluation,
                     prior,
                 )
-                if typed_registry:
-                    if set(evaluation.hard_gate_results) != set(
-                        protocol.hard_gates
-                    ):
-                        raise ValueError(
-                            f"{playbook.value} typed evaluator hard gates "
-                            "disagree with the registry"
+                if set(evaluation.hard_gate_results) != set(
+                    protocol.hard_gates
+                ):
+                    raise ValueError(
+                        f"{playbook.value} typed evaluator hard gates "
+                        "disagree with the registry"
+                    )
+                ordered_gates = {
+                    step.step_id: step.satisfied
+                    for step in sequence.steps
+                    if step.step_id in protocol.hard_gates
+                }
+                if set(ordered_gates) != set(protocol.hard_gates):
+                    raise ValueError(
+                        f"{playbook.value} sequence omitted a hard gate"
+                    )
+                if (
+                    prior is not None
+                    and prior.phase in _TERMINAL_PHASES
+                    and not _terminal_has_new_setup(prior, sequence)
+                ):
+                    # The terminal belief is the immutable closure of the
+                    # last episode.  It remains visible until a different,
+                    # causally newer candidate supersedes it.
+                    hypotheses[key] = prior
+                    continue
+                setup_id = sequence.setup_id
+                context_id = evaluation.context_identity
+                if (
+                    context_id is None
+                    and prior is not None
+                    and prior.setup_context_id == setup_id
+                ):
+                    context_id = prior.context_id
+                episode_id = (
+                    evaluation.episode_identity
+                    if evaluation.episode_identity == setup_id
+                    else None
+                )
+                entry_location_id = evaluation.entry_location_id
+                if (
+                    episode_id is None
+                    and prior is not None
+                    and prior.setup_context_id == setup_id
+                ):
+                    episode_id = prior.episode_id
+                initiating_event_id = (
+                    evaluation.initiating_event_id
+                    or (
+                        prior.initiating_event_id
+                        if (
+                            prior is not None
+                            and prior.setup_context_id == setup_id
                         )
+                        else None
+                    )
+                )
+                position_key_matches = bool(
+                    position is not None
+                    and position.playbook is playbook
+                    and position.direction is direction
+                )
+                position_matches_current = bool(
+                    position_key_matches
+                    and position is not None
+                    and position.setup_id is not None
+                    and position.setup_id == setup_id
+                    and position.entry_location_id
+                    == evaluation.entry_location_id
+                    and position.entry_path_id
+                    == evaluation.entry_path_id
+                )
+                position_matches_prior = bool(
+                    position_key_matches
+                    and position is not None
+                    and position.setup_id is not None
+                    and prior is not None
+                    and prior.setup_context_id == position.setup_id
+                    and prior.entry_location_id
+                    == position.entry_location_id
+                    and prior.plan is not None
+                    and prior.plan.entry_path_id
+                    == position.entry_path_id
+                )
+                position_matches = bool(
+                    position_matches_current
+                    or position_matches_prior
+                )
+                if (
+                    position_matches_prior
+                    and not position_matches_current
+                    and prior is not None
+                    and prior.sequence is not None
+                ):
+                    # An open position owns the exact typed episode that
+                    # created it.  If current source evidence disappears
+                    # or a newer same-direction candidate appears, retain
+                    # the entered episode identity and let current evidence
+                    # move it to weakening instead of attaching the old
+                    # position to the new candidate.
+                    sequence = prior.sequence
+                    setup_id = prior.setup_context_id
+                    context_id = prior.context_id
+                    episode_id = prior.episode_id
+                    entry_location_id = prior.entry_location_id
+                    initiating_event_id = prior.initiating_event_id
                     ordered_gates = {
                         step.step_id: step.satisfied
                         for step in sequence.steps
                         if step.step_id in protocol.hard_gates
                     }
-                    if set(ordered_gates) != set(protocol.hard_gates):
-                        raise ValueError(
-                            f"{playbook.value} sequence omitted a hard gate"
-                        )
+                same_episode = bool(
+                    prior is not None
+                    and episode_id is not None
+                    and prior.episode_id == episode_id
+                    and prior.setup_context_id == setup_id
+                )
+                if (
+                    position_matches
+                    and position is not None
+                    and same_episode
+                    and prior is not None
+                    and prior.invalidation is not None
+                    and position.original_invalidation
+                    != prior.invalidation
+                ):
+                    raise ValueError(
+                        "position invalidation differs from its frozen "
+                        "belief episode"
+                    )
+                frozen_invalidation = (
+                    prior.invalidation
+                    if same_episode
+                    and prior is not None
+                    and prior.invalidation is not None
+                    else position.original_invalidation
+                    if position_matches and position is not None
+                    else evaluation.invalidation
+                )
+                if episode_id is not None:
                     if (
-                        prior is not None
-                        and prior.phase in _TERMINAL_PHASES
-                        and not _terminal_has_new_setup(prior, sequence)
-                    ):
-                        # The terminal belief is the immutable closure of the
-                        # last episode.  It remains visible until a different,
-                        # causally newer candidate supersedes it.
-                        hypotheses[key] = prior
-                        continue
-                    setup_id = sequence.setup_id
-                    context_id = evaluation.context_identity
-                    if (
-                        context_id is None
+                        same_episode
                         and prior is not None
-                        and prior.setup_context_id == setup_id
+                        and prior.episode_deadline is not None
                     ):
-                        context_id = prior.context_id
-                    episode_id = (
-                        evaluation.episode_identity
-                        if evaluation.episode_identity == setup_id
-                        else None
-                    )
-                    entry_location_id = evaluation.entry_location_id
-                    if (
-                        episode_id is None
-                        and prior is not None
-                        and prior.setup_context_id == setup_id
-                    ):
-                        episode_id = prior.episode_id
-                    initiating_event_id = (
-                        evaluation.initiating_event_id
-                        or (
-                            prior.initiating_event_id
-                            if (
-                                prior is not None
-                                and prior.setup_context_id == setup_id
-                            )
-                            else None
-                        )
-                    )
-                    position_key_matches = bool(
-                        position is not None
-                        and position.playbook is playbook
-                        and position.direction is direction
-                    )
-                    position_matches_current = bool(
-                        position_key_matches
-                        and position is not None
-                        and position.setup_id is not None
-                        and position.setup_id == setup_id
-                        and position.entry_location_id
-                        == evaluation.entry_location_id
-                        and position.entry_path_id
-                        == evaluation.entry_path_id
-                    )
-                    position_matches_prior = bool(
-                        position_key_matches
-                        and position is not None
-                        and position.setup_id is not None
-                        and prior is not None
-                        and prior.setup_context_id == position.setup_id
-                        and prior.entry_location_id
-                        == position.entry_location_id
-                        and prior.plan is not None
-                        and prior.plan.entry_path_id
-                        == position.entry_path_id
-                    )
-                    position_matches = bool(
-                        position_matches_current
-                        or position_matches_prior
-                    )
-                    if (
-                        position_matches_prior
-                        and not position_matches_current
-                        and prior is not None
-                        and prior.sequence is not None
-                    ):
-                        # An open position owns the exact typed episode that
-                        # created it.  If current source evidence disappears
-                        # or a newer same-direction candidate appears, retain
-                        # the entered episode identity and let current evidence
-                        # move it to weakening instead of attaching the old
-                        # position to the new candidate.
-                        sequence = prior.sequence
-                        setup_id = prior.setup_context_id
-                        context_id = prior.context_id
-                        episode_id = prior.episode_id
-                        entry_location_id = prior.entry_location_id
-                        initiating_event_id = prior.initiating_event_id
-                        ordered_gates = {
-                            step.step_id: step.satisfied
-                            for step in sequence.steps
-                            if step.step_id in protocol.hard_gates
-                        }
-                    same_episode = bool(
-                        prior is not None
-                        and episode_id is not None
-                        and prior.episode_id == episode_id
-                        and prior.setup_context_id == setup_id
-                    )
-                    if (
-                        position_matches
-                        and position is not None
-                        and same_episode
-                        and prior is not None
-                        and prior.invalidation is not None
-                        and position.original_invalidation
-                        != prior.invalidation
-                    ):
-                        raise ValueError(
-                            "position invalidation differs from its frozen "
-                            "belief episode"
-                        )
-                    frozen_invalidation = (
-                        prior.invalidation
-                        if same_episode
-                        and prior is not None
-                        and prior.invalidation is not None
-                        else position.original_invalidation
-                        if position_matches and position is not None
-                        else evaluation.invalidation
-                    )
-                    if episode_id is not None:
-                        if (
-                            same_episode
-                            and prior is not None
-                            and prior.episode_deadline is not None
-                        ):
-                            episode_deadline = prior.episode_deadline
-                        elif position_matches and position is not None:
-                            episode_deadline = position.deadline
-                        else:
-                            episode_deadline = observation.asof + pd.Timedelta(
-                                minutes=max(
-                                    0,
-                                    observation.execution.minutes_to_deadline,
-                                )
-                            )
-                    evidence_revision_id = _typed_evidence_revision(
-                        key,
-                        protocol,
-                        evaluation,
-                    )
-                    raw_thesis_strength = _typed_thesis_strength(
-                        prior,
-                        context_id,
-                        evaluation.thesis_target,
-                        evidence_revision_id,
-                        self.config,
-                    )
-                    plan = (
-                        evaluation.plan
-                        if (
-                            evaluation.plan is not None
-                            and evaluation.plan.setup_id == setup_id
-                        )
-                        else None
-                    )
-                    if (
-                        position_matches_prior
-                        and prior is not None
-                        and prior.plan is not None
-                    ):
-                        # Preserve the exact entry thesis while the matching
-                        # position is open.  Current evidence may weaken the
-                        # episode, but cannot erase its typed identity.
-                        plan = prior.plan
-                    if (
-                        plan is not None
-                        and frozen_invalidation is not None
-                        and plan.invalidation != frozen_invalidation
-                    ):
-                        plan = None
-                    if (
-                        plan is not None
-                        and same_episode
-                        and prior is not None
-                        and prior.plan is not None
-                        and (
-                            prior.plan.setup_id,
-                            prior.plan.entry_location_id,
-                            prior.plan.entry_path_id,
-                        )
-                        == (
-                            plan.setup_id,
-                            plan.entry_location_id,
-                            plan.entry_path_id,
-                        )
-                    ):
-                        plan = replace(
-                            plan,
-                            deadline=min(
-                                plan.deadline,
-                                prior.plan.deadline,
-                                episode_deadline or plan.deadline,
-                            ),
-                        )
-                    elif (
-                        plan is not None
-                        and episode_deadline is not None
-                        and plan.deadline > episode_deadline
-                    ):
-                        plan = replace(plan, deadline=episode_deadline)
-                    parked = "parked" in protocol.status
-                    if parked:
-                        # Parked playbooks remain fully observable for causal
-                        # diagnostics but cannot expose an executable plan.
-                        plan = None
-                    phase = _typed_phase(
-                        playbook,
-                        direction,
-                        prior,
-                        raw_thesis_strength,
-                        evaluation,
-                        sequence,
-                        plan,
-                        frozen_invalidation,
-                        episode_deadline,
-                        observation,
-                        position if position_matches else None,
-                        self.config,
-                        parked=parked,
-                    )
-                    if (
-                        phase in _TERMINAL_PHASES
-                        and prior is not None
-                        and prior.phase not in _TERMINAL_PHASES
-                        and prior.sequence is not None
-                        and (
-                            sequence.setup_id is None
-                            or sequence.setup_id
-                            != prior.sequence.setup_id
-                        )
-                    ):
-                        # Closing evidence may remove the frozen source from
-                        # the current observation.  Preserve the episode that
-                        # is being closed; the current evidence and terminal
-                        # reason still describe why it closed.
-                        sequence = prior.sequence
-                        setup_id = sequence.setup_id
-                        context_id = prior.context_id
-                        episode_id = prior.episode_id
                         episode_deadline = prior.episode_deadline
-                        entry_location_id = prior.entry_location_id
-                        initiating_event_id = prior.initiating_event_id
-                        frozen_invalidation = prior.invalidation
-                    raw_sequence_progress = (
-                        sequence.completed_steps
-                        / max(1, len(sequence.steps))
-                    )
-                    raw_quality_dimensions = {
-                        "thesis_strength": clamp(raw_thesis_strength),
-                        "sequence_progress": clamp(raw_sequence_progress),
-                        "location_quality": clamp(
-                            evaluation.location_quality
-                        ),
-                        "entry_readiness": clamp(
-                            evaluation.entry_readiness
-                        ),
-                        "delivery_quality": clamp(
-                            evaluation.delivery_quality
-                        ),
-                        "uncertainty": clamp(
-                            evaluation.typed_uncertainty
-                        ),
-                    }
-                    if parked:
-                        calibrated_dimensions = dict(
-                            raw_quality_dimensions
-                        )
+                    elif position_matches and position is not None:
+                        episode_deadline = position.deadline
                     else:
-                        if not isinstance(
-                            self.calibrator,
-                            TypedBrainCalibrator,
-                        ):
-                            raise TypeError(
-                                "typed belief update requires typed calibrator"
+                        episode_deadline = observation.asof + pd.Timedelta(
+                            minutes=max(
+                                0,
+                                observation.execution.minutes_to_deadline,
                             )
-                        calibrated_dimensions = {
-                            name: self.calibrator.apply(
-                                playbook,
-                                name,
-                                value,
-                            )
-                            for name, value in raw_quality_dimensions.items()
-                        }
-                    thesis_strength = calibrated_dimensions[
-                        "thesis_strength"
-                    ]
-                    sequence_progress = calibrated_dimensions[
-                        "sequence_progress"
-                    ]
-                    uncertainty = calibrated_dimensions["uncertainty"]
-                    probability = thesis_strength
-                    raw_probability = raw_thesis_strength
-                    (
-                        terminal_at,
-                        terminal_reason,
-                        terminal_source_ids,
-                    ) = _typed_terminal_closure(
-                        phase,
-                        direction,
-                        evaluation,
-                        sequence,
+                        )
+                evidence_revision_id = _typed_evidence_revision(
+                    key,
+                    protocol,
+                    evaluation,
+                )
+                raw_thesis_strength = _typed_thesis_strength(
+                    prior,
+                    context_id,
+                    evaluation.thesis_target,
+                    evidence_revision_id,
+                )
+                plan = (
+                    evaluation.plan
+                    if (
+                        evaluation.plan is not None
+                        and evaluation.plan.setup_id == setup_id
+                    )
+                    else None
+                )
+                if (
+                    position_matches_prior
+                    and prior is not None
+                    and prior.plan is not None
+                ):
+                    # Preserve the exact entry thesis while the matching
+                    # position is open.  Current evidence may weaken the
+                    # episode, but cannot erase its typed identity.
+                    plan = prior.plan
+                if (
+                    plan is not None
+                    and frozen_invalidation is not None
+                    and plan.invalidation != frozen_invalidation
+                ):
+                    plan = None
+                if (
+                    plan is not None
+                    and same_episode
+                    and prior is not None
+                    and prior.plan is not None
+                    and (
+                        prior.plan.setup_id,
+                        prior.plan.entry_location_id,
+                        prior.plan.entry_path_id,
+                    )
+                    == (
+                        plan.setup_id,
+                        plan.entry_location_id,
+                        plan.entry_path_id,
+                    )
+                ):
+                    plan = replace(
                         plan,
-                        frozen_invalidation,
-                        episode_deadline,
-                        observation,
-                        (
-                            position if position_matches else None
+                        deadline=min(
+                            plan.deadline,
+                            prior.plan.deadline,
+                            episode_deadline or plan.deadline,
                         ),
                     )
-                    if phase in _TERMINAL_PHASES:
-                        terminal_source_ids = _identity_tuple(
-                            *terminal_source_ids,
-                            episode_id,
-                            context_id,
-                            initiating_event_id,
-                        )
+                elif (
+                    plan is not None
+                    and episode_deadline is not None
+                    and plan.deadline > episode_deadline
+                ):
+                    plan = replace(plan, deadline=episode_deadline)
+                parked = "parked" in protocol.status
+                if parked:
+                    # Parked playbooks remain fully observable for causal
+                    # diagnostics but cannot expose an executable plan.
+                    plan = None
+                phase = _typed_phase(
+                    playbook,
+                    direction,
+                    prior,
+                    raw_thesis_strength,
+                    evaluation,
+                    sequence,
+                    plan,
+                    frozen_invalidation,
+                    episode_deadline,
+                    observation,
+                    position if position_matches else None,
+                    self.config,
+                    parked=parked,
+                )
+                if (
+                    phase in _TERMINAL_PHASES
+                    and prior is not None
+                    and prior.phase not in _TERMINAL_PHASES
+                    and prior.sequence is not None
+                    and (
+                        sequence.setup_id is None
+                        or sequence.setup_id
+                        != prior.sequence.setup_id
+                    )
+                ):
+                    # Closing evidence may remove the frozen source from
+                    # the current observation.  Preserve the episode that
+                    # is being closed; the current evidence and terminal
+                    # reason still describe why it closed.
+                    sequence = prior.sequence
+                    setup_id = sequence.setup_id
+                    context_id = prior.context_id
+                    episode_id = prior.episode_id
+                    episode_deadline = prior.episode_deadline
+                    entry_location_id = prior.entry_location_id
+                    initiating_event_id = prior.initiating_event_id
+                    frozen_invalidation = prior.invalidation
+                raw_sequence_progress = (
+                    sequence.completed_steps
+                    / max(1, len(sequence.steps))
+                )
+                raw_quality_dimensions = {
+                    "thesis_strength": clamp(raw_thesis_strength),
+                    "sequence_progress": clamp(raw_sequence_progress),
+                    "location_quality": clamp(
+                        evaluation.location_quality
+                    ),
+                    "entry_readiness": clamp(
+                        evaluation.entry_readiness
+                    ),
+                    "delivery_quality": clamp(
+                        evaluation.delivery_quality
+                    ),
+                    "uncertainty": clamp(
+                        evaluation.typed_uncertainty
+                    ),
+                }
+                if parked:
+                    calibrated_dimensions = dict(
+                        raw_quality_dimensions
+                    )
                 else:
-                    raw_probability = _probability(
-                        prior,
-                        evaluation.evidence,
-                        self.config,
+                    calibrated_dimensions = {
+                        name: self.calibrator.apply(
+                            playbook,
+                            name,
+                            value,
+                        )
+                        for name, value in raw_quality_dimensions.items()
+                    }
+                thesis_strength = calibrated_dimensions[
+                    "thesis_strength"
+                ]
+                sequence_progress = calibrated_dimensions[
+                    "sequence_progress"
+                ]
+                uncertainty = calibrated_dimensions["uncertainty"]
+                probability = thesis_strength
+                raw_probability = raw_thesis_strength
+                (
+                    terminal_at,
+                    terminal_reason,
+                    terminal_source_ids,
+                ) = _typed_terminal_closure(
+                    phase,
+                    direction,
+                    evaluation,
+                    sequence,
+                    plan,
+                    frozen_invalidation,
+                    episode_deadline,
+                    observation,
+                    (
+                        position if position_matches else None
+                    ),
+                )
+                if phase in _TERMINAL_PHASES:
+                    terminal_source_ids = _identity_tuple(
+                        *terminal_source_ids,
+                        episode_id,
+                        context_id,
+                        initiating_event_id,
                     )
-                    probability = self.calibrator.apply(
-                        playbook,
-                        raw_probability,
-                    )
-                    uncertainty = _uncertainty(
-                        probability,
-                        evaluation.evidence,
-                        observation,
-                    )
-                    candidate_plan = _plan(
-                        playbook,
-                        direction,
-                        observation,
-                        self.config,
-                    )
-                    shadow_only = "shadow" in protocol.status
-                    if sequence.setup_id is None or shadow_only:
-                        candidate_plan = None
-                    same_completed_setup = bool(
-                        sequence.complete
-                        and prior is not None
-                        and prior.sequence is not None
-                        and prior.sequence.complete
-                        and prior.sequence.setup_id == sequence.setup_id
-                        and prior.plan is not None
-                    )
-                    plan = (
-                        prior.plan
-                        if same_completed_setup
-                        else candidate_plan
-                    )
-                    phase = _phase(
-                        playbook,
-                        direction,
-                        prior,
-                        probability,
-                        evaluation,
-                        sequence,
-                        plan,
-                        observation,
-                        position,
-                        self.config,
-                    )
-                    if shadow_only:
-                        phase = PlaybookPhase.INACTIVE
-                    thesis_strength = None
-                    sequence_progress = None
                 phase_continues = bool(
                     prior is not None and prior.phase is phase
                 )
                 if (
-                    typed_registry
-                    and prior is not None
+                    prior is not None
                     and prior.phase in _TERMINAL_PHASES
                 ):
                     # A constructed typed belief after a terminal prior has
@@ -5174,21 +4105,15 @@ class PlaybookBrain:
                 )
                 supporting = tuple(item for item in evaluation.evidence if item.supports and item.value > 0)
                 contradicting = tuple(item for item in evaluation.evidence if not item.supports and item.value > 0)
-                belief_invalidation = (
-                    frozen_invalidation
-                    if typed_registry
-                    else None if plan is None else plan.invalidation
-                )
+                belief_invalidation = frozen_invalidation
                 if (
-                    typed_registry
-                    and belief_invalidation is None
+                    belief_invalidation is None
                     and position_matches
                     and position is not None
                 ):
                     belief_invalidation = position.original_invalidation
                 if (
-                    typed_registry
-                    and belief_invalidation is None
+                    belief_invalidation is None
                     and phase in _TERMINAL_PHASES
                     and prior is not None
                     and prior.setup_context_id == sequence.setup_id
@@ -5205,14 +4130,10 @@ class PlaybookBrain:
                     invalidation=belief_invalidation,
                     deliverable_targets=(
                         plan.targets
-                        if typed_registry and plan is not None
-                        else (
-                            ()
-                            if evaluation.selected_draw is None
-                            else (evaluation.selected_draw,)
-                        )
-                        if typed_registry
-                        else () if plan is None else plan.targets
+                        if plan is not None
+                        else ()
+                        if evaluation.selected_draw is None
+                        else (evaluation.selected_draw,)
                     ),
                     remaining_path_R=None if plan is None else plan.remaining_path_R,
                     uncertainty=uncertainty,
@@ -5223,45 +4144,26 @@ class PlaybookBrain:
                     calibration_hash=self.calibrator.fingerprint,
                     thesis_strength=thesis_strength,
                     sequence_progress=sequence_progress,
-                    location_quality=(
-                        calibrated_dimensions["location_quality"]
-                        if typed_registry
-                        else None
-                    ),
-                    entry_readiness=(
-                        calibrated_dimensions["entry_readiness"]
-                        if typed_registry
-                        else None
-                    ),
-                    delivery_quality=(
-                        calibrated_dimensions["delivery_quality"]
-                        if typed_registry
-                        else None
-                    ),
-                    evidence_group_scores=(
-                        evaluation.evidence_group_scores
-                        if typed_registry
-                        else {}
-                    ),
-                    hard_gate_results=(
-                        ordered_gates
-                        if typed_registry
-                        else {}
-                    ),
-                    setup_context_id=(
-                        sequence.setup_id if typed_registry else None
-                    ),
+                    location_quality=calibrated_dimensions[
+                        "location_quality"
+                    ],
+                    entry_readiness=calibrated_dimensions[
+                        "entry_readiness"
+                    ],
+                    delivery_quality=calibrated_dimensions[
+                        "delivery_quality"
+                    ],
+                    evidence_group_scores=evaluation.evidence_group_scores,
+                    hard_gate_results=ordered_gates,
+                    setup_context_id=sequence.setup_id,
                     entry_location_id=(
                         entry_location_id
-                        if typed_registry
-                        and sequence.setup_id is not None
+                        if sequence.setup_id is not None
                         else None
                     ),
                     context_id=context_id,
                     episode_id=episode_id,
-                    episode_deadline=(
-                        episode_deadline if typed_registry else None
-                    ),
+                    episode_deadline=episode_deadline,
                     initiating_event_id=initiating_event_id,
                     evidence_revision_id=evidence_revision_id,
                     terminal_at=terminal_at,

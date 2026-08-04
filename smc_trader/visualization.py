@@ -5,6 +5,7 @@ from dataclasses import dataclass
 import hashlib
 import html
 import json
+import math
 from pathlib import Path
 import textwrap
 from typing import Any, Mapping, Sequence, TYPE_CHECKING
@@ -326,6 +327,137 @@ def _candles(axis, candles: Sequence[Candle]) -> None:
             fontsize=7,
         )
     axis.grid(True, color="#dbe4ee", linewidth=0.4, alpha=0.7)
+
+
+class BlindCandlePanelRenderer:
+    """Reusable causal candle panels for small blind-review scripts."""
+
+    PANEL_BARS = {
+        Timeframe.H4: 20,
+        Timeframe.H1: 48,
+        Timeframe.M5: 48,
+        Timeframe.M1: 80,
+    }
+
+    @classmethod
+    def panels(
+        cls,
+        histories: Mapping[Timeframe, Sequence[Candle]],
+        case_clock: pd.Timestamp,
+    ) -> dict[Timeframe, tuple[int, tuple[Candle, ...]]]:
+        clock = pd.Timestamp(case_clock)
+        if clock.tzinfo is None:
+            raise ValueError("blind panel clock must be timezone aware")
+        output: dict[Timeframe, tuple[int, tuple[Candle, ...]]] = {}
+        for timeframe, count in cls.PANEL_BARS.items():
+            values = tuple(histories.get(timeframe, ()))
+            if not values or any(
+                candle.timeframe is not timeframe
+                or not candle.complete
+                or candle.end > clock
+                for candle in values
+            ):
+                raise ValueError(
+                    "blind renderer requires causal complete histories"
+                )
+            panel = values[-count:]
+            output[timeframe] = (len(values) - len(panel), panel)
+        return output
+
+    @staticmethod
+    def draw_candles(
+        axis: Any,
+        candles: Sequence[Candle],
+        *,
+        first_history_index: int,
+        tick_size: float,
+    ) -> None:
+        from matplotlib.patches import Rectangle
+        from matplotlib.ticker import MultipleLocator
+
+        values = tuple(candles)
+        if not values:
+            raise ValueError("blind candle panel cannot be empty")
+        if not math.isfinite(float(tick_size)) or tick_size <= 0:
+            raise ValueError("blind chart tick size is invalid")
+        for index, candle in enumerate(values):
+            up = candle.close >= candle.open
+            synthetic = candle.synthetic_minutes > 0
+            color = (
+                "#64748b"
+                if synthetic
+                else "#0f766e"
+                if up
+                else "#b91c1c"
+            )
+            axis.vlines(
+                index,
+                candle.low,
+                candle.high,
+                color="#334155",
+                linewidth=0.7,
+            )
+            bottom = min(candle.open, candle.close)
+            height = abs(candle.close - candle.open)
+            if height < 1e-12:
+                axis.hlines(
+                    candle.open,
+                    index - 0.30,
+                    index + 0.30,
+                    color=color,
+                    linewidth=1,
+                )
+            else:
+                axis.add_patch(
+                    Rectangle(
+                        (index - 0.30, bottom),
+                        0.60,
+                        height,
+                        facecolor=color,
+                        edgecolor=color,
+                        linewidth=0.4,
+                        hatch="///" if synthetic else None,
+                    )
+                )
+        tick_count = min(8, len(values))
+        ticks = (
+            [0]
+            if tick_count == 1
+            else sorted(
+                {
+                    int(round(index * (len(values) - 1) / (tick_count - 1)))
+                    for index in range(tick_count)
+                }
+            )
+        )
+        axis.set_xticks(ticks)
+        axis.set_xticklabels(
+            [
+                (
+                    f"#{first_history_index + index}\n"
+                    f"{values[index].start:%m-%d %H:%M}"
+                )
+                for index in ticks
+            ],
+            fontsize=7,
+        )
+        span_ticks = max(
+            1,
+            int(
+                math.ceil(
+                    (
+                        max(candle.high for candle in values)
+                        - min(candle.low for candle in values)
+                    )
+                    / tick_size
+                )
+            ),
+        )
+        grid_step_ticks = max(1, int(math.ceil(span_ticks / 12)))
+        axis.yaxis.set_major_locator(
+            MultipleLocator(grid_step_ticks * tick_size)
+        )
+        axis.grid(True, color="#dbe4ee", linewidth=0.4, alpha=0.7)
 
 
 def _audit_hypothesis(snapshot: EngineSnapshot, key: str | None = None):
@@ -3869,6 +4001,7 @@ th{{background:#f1f5f9}}code{{font-size:.85rem}}
 
 
 __all__ = [
+    "BlindCandlePanelRenderer",
     "DecisionVisualizer",
     "RevealPermit",
     "SealedVisualAudit",

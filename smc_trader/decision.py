@@ -40,23 +40,6 @@ def _deadline_penalty(observation: MarketObservation, config: DecisionConfig) ->
     )
 
 
-def _phase_penalty(phase: PlaybookPhase) -> float:
-    return {
-        PlaybookPhase.EXECUTABLE: 0.0,
-        PlaybookPhase.ARMED: 0.30,
-        PlaybookPhase.WAITING_LOCATION: 0.35,
-        PlaybookPhase.WAITING_TRIGGER: 0.20,
-        PlaybookPhase.WAITING_PULLBACK: 0.45,
-        PlaybookPhase.FORMING: 0.90,
-        PlaybookPhase.INACTIVE: 1.50,
-        PlaybookPhase.INVALIDATED: 2.00,
-        PlaybookPhase.COMPLETED: 2.00,
-        PlaybookPhase.ENTERED: 2.00,
-        PlaybookPhase.WEAKENING: 2.00,
-        PlaybookPhase.DELIVERING: 2.00,
-    }[phase]
-
-
 def _evidence_reason(belief: HypothesisBelief) -> str:
     support = ", ".join(item.primitive for item in belief.supporting[:3]) or "no strong support"
     against = ", ".join(item.primitive for item in belief.contradicting[:2]) or "no strong contradiction"
@@ -180,89 +163,74 @@ class UtilityDecisionLayer:
         fill_penalty = 1.0 - observation.execution.fillability
         for hypothesis in belief.candidates():
             plan = hypothesis.plan
-            typed = _is_typed(hypothesis)
-            if typed:
-                thesis = float(hypothesis.thesis_strength)
-                sequence = float(hypothesis.sequence_progress)
-                location = float(hypothesis.location_quality)
-                readiness = float(hypothesis.entry_readiness)
-                delivery = float(hypothesis.delivery_quality)
-                wait_option = (
-                    thesis
-                    * sequence
-                    * (
-                        (1.0 - location)
-                        + (1.0 - readiness)
-                    )
-                    / 2.0
-                    * self.config.maximum_reward_R
-                    * 0.42
+            if not _is_typed(hypothesis):
+                continue
+            thesis = float(hypothesis.thesis_strength)
+            sequence = float(hypothesis.sequence_progress)
+            location = float(hypothesis.location_quality)
+            readiness = float(hypothesis.entry_readiness)
+            delivery = float(hypothesis.delivery_quality)
+            wait_option = (
+                thesis
+                * sequence
+                * ((1.0 - location) + (1.0 - readiness))
+                / 2.0
+                * self.config.maximum_reward_R
+                * 0.42
+            )
+            uncertainty = (
+                self.config.uncertainty_penalty
+                * hypothesis.uncertainty
+            )
+            wait = wait_option - 0.55 * uncertainty - 0.65 * deadline
+            if hypothesis.phase not in {
+                PlaybookPhase.FORMING,
+                PlaybookPhase.ARMED,
+                PlaybookPhase.WAITING_LOCATION,
+                PlaybookPhase.WAITING_TRIGGER,
+                PlaybookPhase.EXECUTABLE,
+            }:
+                wait = min(wait, -1.0)
+            output.append(
+                ActionUtility(
+                    action=Action.WAIT,
+                    utility=float(wait),
+                    components={
+                        "thesis_strength": thesis,
+                        "sequence_progress": sequence,
+                        "location_gap": -(1.0 - location),
+                        "trigger_gap": -(1.0 - readiness),
+                        "option_value_R": wait_option,
+                        "uncertainty": -0.55 * uncertainty,
+                        "deadline": -0.65 * deadline,
+                    },
+                    hypothesis_key=hypothesis.key,
+                    reason=(
+                        "retain the causal setup while location or "
+                        f"trigger is incomplete; {_evidence_reason(hypothesis)}"
+                    ),
                 )
-                uncertainty = (
-                    self.config.uncertainty_penalty
-                    * hypothesis.uncertainty
-                )
-                wait = (
-                    wait_option
-                    - 0.55 * uncertainty
-                    - 0.65 * deadline
-                )
-                if hypothesis.phase not in {
-                    PlaybookPhase.FORMING,
-                    PlaybookPhase.ARMED,
-                    PlaybookPhase.WAITING_LOCATION,
-                    PlaybookPhase.WAITING_TRIGGER,
-                    PlaybookPhase.EXECUTABLE,
-                }:
-                    wait = min(wait, -1.0)
-                output.append(
-                    ActionUtility(
-                        action=Action.WAIT,
-                        utility=float(wait),
-                        components={
-                            "thesis_strength": thesis,
-                            "sequence_progress": sequence,
-                            "location_gap": -(1.0 - location),
-                            "trigger_gap": -(1.0 - readiness),
-                            "option_value_R": wait_option,
-                            "uncertainty": -0.55 * uncertainty,
-                            "deadline": -0.65 * deadline,
-                        },
-                        hypothesis_key=hypothesis.key,
-                        reason=(
-                            "retain the causal setup while location or "
-                            f"trigger is incomplete; {_evidence_reason(hypothesis)}"
-                        ),
-                    )
-                )
+            )
             if plan is None:
                 continue
             reward = min(self.config.maximum_reward_R, max(0.0, plan.primary_target_R))
             cost = _cost_R(observation, plan.risk_points)
             uncertainty = self.config.uncertainty_penalty * hypothesis.uncertainty
-            effective_probability = (
-                min(
-                    float(hypothesis.thesis_strength),
-                    float(hypothesis.sequence_progress),
-                    float(hypothesis.location_quality),
-                    float(hypothesis.entry_readiness),
-                    float(hypothesis.delivery_quality),
-                )
-                if typed
-                else hypothesis.probability
+            effective_probability = min(
+                thesis,
+                sequence,
+                location,
+                readiness,
+                delivery,
             )
             gross = (
                 effective_probability * reward
                 - (1.0 - effective_probability)
             )
-            phase = _phase_penalty(hypothesis.phase)
-            enter = gross - cost - uncertainty - deadline - 0.35 * fill_penalty - phase
+            enter = gross - cost - uncertainty - deadline - 0.35 * fill_penalty
             gates_pass = bool(
-                not typed
-                or (
-                    hypothesis.hard_gate_results
-                    and all(hypothesis.hard_gate_results.values())
-                )
+                hypothesis.hard_gate_results
+                and all(hypothesis.hard_gate_results.values())
             )
             if (
                 hypothesis.phase is not PlaybookPhase.EXECUTABLE
@@ -279,7 +247,6 @@ class UtilityDecisionLayer:
                         "uncertainty": -uncertainty,
                         "deadline": -deadline,
                         "fillability": -0.35 * fill_penalty,
-                        "phase_readiness": -phase,
                         "effective_readiness": effective_probability,
                         "hard_gates_pass": float(gates_pass),
                     },
@@ -287,49 +254,6 @@ class UtilityDecisionLayer:
                     reason=_evidence_reason(hypothesis),
                 )
             )
-            if not typed:
-                wait_option = (
-                    max(0.0, hypothesis.probability - 0.35)
-                    * min(
-                        self.config.maximum_reward_R,
-                        max(0.0, plan.remaining_path_R),
-                    )
-                    * 0.42
-                )
-                wait = (
-                    wait_option
-                    - 0.55 * uncertainty
-                    - 0.65 * deadline
-                    - (
-                        0.05
-                        if hypothesis.phase
-                        is PlaybookPhase.WAITING_PULLBACK
-                        else 0.15
-                    )
-                )
-                if hypothesis.phase not in {
-                    PlaybookPhase.FORMING,
-                    PlaybookPhase.ARMED,
-                    PlaybookPhase.WAITING_PULLBACK,
-                    PlaybookPhase.EXECUTABLE,
-                }:
-                    wait = min(wait, -1.0)
-                output.append(
-                    ActionUtility(
-                        action=Action.WAIT,
-                        utility=float(wait),
-                        components={
-                            "option_value_R": wait_option,
-                            "uncertainty": -0.55 * uncertainty,
-                            "deadline": -0.65 * deadline,
-                        },
-                        hypothesis_key=hypothesis.key,
-                        reason=(
-                            "retain the setup without paying entry cost; "
-                            f"{_evidence_reason(hypothesis)}"
-                        ),
-                    )
-                )
         return output
 
     def _position_utilities(
@@ -358,18 +282,14 @@ class UtilityDecisionLayer:
             )
         )
         probability = (
-            0.5
-            if hypothesis is None
-            else (
-                min(
-                    float(hypothesis.thesis_strength),
-                    float(hypothesis.delivery_quality),
-                )
-                if setup_matches and _is_typed(hypothesis)
-                else hypothesis.probability
-                if setup_matches
-                else 0.0
+            min(
+                float(hypothesis.thesis_strength),
+                float(hypothesis.delivery_quality),
             )
+            if setup_matches
+            and hypothesis is not None
+            and _is_typed(hypothesis)
+            else 0.0
         )
         uncertainty = (
             hypothesis.uncertainty

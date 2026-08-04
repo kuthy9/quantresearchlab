@@ -17,10 +17,10 @@ from smc_trader.engine import ContinuousSMCEngine
 from smc_trader.io import iter_completed_bars
 from smc_trader.model import Bar, to_primitive
 from smc_trader.observation import ExecutionRealityInput
-from smc_trader.risk import RiskLimits, StructuralRiskEngine
 from smc_trader.simulation import SequentialPortfolio, SequentialReplay
 
-from .helpers import engine_snapshot, flat_account, session_bars
+from .helpers import flat_account, session_bars
+from .test_v4_typed_vertical import _brain, _dfp_fixture, _snapshot
 
 
 def _execution(asof: pd.Timestamp) -> ExecutionRealityInput:
@@ -39,17 +39,30 @@ def _snapshot_without_hash(snapshot) -> dict:
     return payload
 
 
-def test_lightweight_replay_preserves_causal_decisions_risk_and_execution() -> None:
-    bars = session_bars(1)[:600]
-    standard = SequentialReplay(
-        engine=ContinuousSMCEngine.from_config(
-            "configs/model_v2_1_belief_identity.json"
+def _on_grid_session_bars(count: int) -> list[Bar]:
+    output: list[Bar] = []
+    for bar in session_bars(1)[:count]:
+        open_price = round(bar.open / 0.25) * 0.25
+        close = round(bar.close / 0.25) * 0.25
+        output.append(
+            replace(
+                bar,
+                open=open_price,
+                high=max(open_price, close) + 0.5,
+                low=min(open_price, close) - 0.5,
+                close=close,
+            )
         )
+    return output
+
+
+def test_lightweight_replay_preserves_causal_decisions_risk_and_execution() -> None:
+    bars = _on_grid_session_bars(80)
+    standard = SequentialReplay(
+        engine=ContinuousSMCEngine.from_config("configs/model.json")
     )
     lightweight = CalibrationSequentialReplay(
-        engine=ContinuousSMCEngine.from_config(
-            "configs/model_v2_1_belief_identity.json"
-        )
+        engine=ContinuousSMCEngine.from_config("configs/model.json")
     )
     for bar in bars:
         execution = _execution(bar.end)
@@ -73,14 +86,10 @@ def test_lightweight_replay_preserves_causal_decisions_risk_and_execution() -> N
 
 
 def test_non_simulating_replay_preserves_flat_causal_model_without_portfolio() -> None:
-    bars = session_bars(1)[:120]
-    expected_engine = ContinuousSMCEngine.from_config(
-        "configs/model_v2_1_belief_identity.json"
-    )
+    bars = _on_grid_session_bars(40)
+    expected_engine = ContinuousSMCEngine.from_config("configs/model.json")
     replay = CalibrationSequentialReplay(
-        engine=ContinuousSMCEngine.from_config(
-            "configs/model_v2_1_belief_identity.json"
-        ),
+        engine=ContinuousSMCEngine.from_config("configs/model.json"),
         simulate_execution=False,
     )
     assert replay.portfolio is None
@@ -108,26 +117,19 @@ def test_non_simulating_replay_rejects_portfolio_state() -> None:
 
 
 def test_lightweight_replay_passes_open_position_to_brain() -> None:
-    base = engine_snapshot()
-    approved_risk = StructuralRiskEngine(
-        RiskLimits(maximum_cost_R=0.50)
-    ).review(
-        base.decision,
-        base.observation,
-        flat_account(),
-    )
-    assert approved_risk.passed
-    approved = replace(base, risk=approved_risk)
+    _, _, _, forming, triggered = _dfp_fixture()
+    brain = _brain()
+    brain.update(forming)
+    approved = _snapshot(triggered, brain.update(triggered), "a")
+    assert approved.risk.passed
     standard_portfolio = SequentialPortfolio()
     lightweight_portfolio = SequentialPortfolio()
     standard_portfolio.after_decision(approved)
     lightweight_portfolio.after_decision(approved)
     standard = SequentialReplay(portfolio=standard_portfolio)
-    lightweight = CalibrationSequentialReplay(
-        portfolio=lightweight_portfolio
-    )
+    lightweight = CalibrationSequentialReplay(portfolio=lightweight_portfolio)
     bar = Bar(
-        base.observation.asof,
+        approved.observation.asof,
         101.0,
         101.5,
         99.5,
@@ -149,13 +151,13 @@ def test_lightweight_replay_passes_open_position_to_brain() -> None:
 
 
 def test_lightweight_replay_pickle_resume_is_bitwise_deterministic() -> None:
-    bars = session_bars(1)[:400]
+    bars = _on_grid_session_bars(80)
     uninterrupted = CalibrationSequentialReplay()
     resumed = CalibrationSequentialReplay()
     for index, bar in enumerate(bars):
         execution = _execution(bar.end)
         expected = uninterrupted.on_bar(bar, execution=execution)
-        if index == 199:
+        if index == 39:
             resumed = pickle.loads(
                 pickle.dumps(resumed, protocol=pickle.HIGHEST_PROTOCOL)
             )

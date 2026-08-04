@@ -10,7 +10,6 @@ import pytest
 from smc_trader.calibration import (
     CalibrationError,
     MODEL_CODE_FILES,
-    ProbabilityCalibrator,
     TYPED_CALIBRATION_DIMENSIONS,
     TypedBrainCalibrator,
 )
@@ -204,11 +203,19 @@ def test_engine_hashes_exact_configured_protocol_bytes(tmp_path: Path) -> None:
     }
 
 
-def test_engine_selects_calibrator_family_from_registry_version() -> None:
-    typed = ContinuousSMCEngine.from_config("configs/model_v3_development.json")
-    legacy = ContinuousSMCEngine.from_config(
-        "configs/model_v2_1_belief_identity.json"
-    )
+def test_engine_accepts_current_typed_config_and_rejects_incomplete_current_config(
+    tmp_path: Path,
+) -> None:
+    engine = ContinuousSMCEngine.from_config("configs/model.json")
 
-    assert isinstance(typed.brain.calibrator, TypedBrainCalibrator)
-    assert isinstance(legacy.brain.calibrator, ProbabilityCalibrator)
+    assert isinstance(engine.brain.calibrator, TypedBrainCalibrator)
+    incomplete = tmp_path / "model.json"
+    incomplete.write_text(json.dumps({"schema_version": 1}), encoding="utf-8")
+    with pytest.raises(ValueError, match="model.scales"):
+        ContinuousSMCEngine.from_config(incomplete)
+
+    payload = json.loads(Path("configs/model.json").read_text(encoding="utf-8"))
+    payload["observer"].pop("group5_protocol")
+    incomplete.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(CalibrationError, match="observer.group5_protocol"):
+        ContinuousSMCEngine.from_config(incomplete)

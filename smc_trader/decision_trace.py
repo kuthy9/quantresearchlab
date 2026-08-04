@@ -1,9 +1,11 @@
 """Compact causal decision traces and full frozen packets for sampled audits."""
 from __future__ import annotations
 
+from dataclasses import dataclass
 import hashlib
 import json
 from pathlib import Path
+import re
 from typing import Any, Mapping, Sequence
 
 import pandas as pd
@@ -1756,7 +1758,530 @@ def read_verified_decision_packet(path: str | Path) -> dict[str, Any]:
     return packet
 
 
+# Future paths are a small sampled-audit facility, not release artifacts.
+# Development reruns may overwrite them and no packet/SHA custody chain is
+# required.  The useful invariants are causal clocks, contract identity and
+# the absence of action/outcome labels.
+PATH_EVIDENCE_SCHEMA_VERSION = 1
+PATH_EVIDENCE_BOUNDARIES = frozenset(
+    {
+        "deadline",
+        "right_boundary",
+        "contract_change_reset",
+        "data_gap_reset",
+        "data_anomaly",
+        "tick_size_mismatch",
+    }
+)
+_PATH_EVIDENCE_FORBIDDEN_KEYS = frozenset(
+    {
+        "action",
+        "selected_action",
+        "final_action",
+        "action_utilities",
+        "pnl",
+        "pnl_r",
+        "net_pnl",
+        "gross_pnl",
+        "mfe",
+        "mae",
+        "success",
+        "target_hit",
+        "stop_hit",
+        "invalidation_hit",
+    }
+)
+_HEX_SHA256 = re.compile(r"^[0-9a-f]{64}$")
+
+
+def _path_text(value: Any, name: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{name} must be non-empty text")
+    return value.strip()
+
+
+def _path_timestamp(value: Any, name: str) -> pd.Timestamp:
+    timestamp = pd.Timestamp(value)
+    if timestamp.tzinfo is None:
+        raise ValueError(f"{name} must be timezone aware")
+    return timestamp
+
+
+def _reject_path_labels(value: Any, prefix: str = "") -> None:
+    if isinstance(value, Mapping):
+        for raw_name, item in value.items():
+            name = str(raw_name).lower()
+            path = f"{prefix}.{name}" if prefix else name
+            if name in _PATH_EVIDENCE_FORBIDDEN_KEYS:
+                raise ValueError(
+                    f"future path evidence contains forbidden field: {path}"
+                )
+            _reject_path_labels(item, path)
+    elif isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+        for index, item in enumerate(value):
+            _reject_path_labels(item, f"{prefix}[{index}]")
+
+
+@dataclass(frozen=True)
+class PrimitivePathEvidenceQuery:
+    """An AI proposal expressed as selectors over future transitions."""
+
+    query_id: str
+    issue: str
+    primitive_name: str
+    formula_version: str
+    definition_hash: str
+    relevant_transition_families: tuple[str, ...] = ()
+    relevant_entity_ids: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        for name in (
+            "query_id",
+            "issue",
+            "primitive_name",
+            "formula_version",
+        ):
+            object.__setattr__(
+                self,
+                name,
+                _path_text(getattr(self, name), f"query.{name}"),
+            )
+        definition_hash = _path_text(
+            self.definition_hash,
+            "query.definition_hash",
+        )
+        if _HEX_SHA256.fullmatch(definition_hash) is None:
+            raise ValueError("query.definition_hash must be a SHA-256")
+        object.__setattr__(self, "definition_hash", definition_hash)
+        for name in (
+            "relevant_transition_families",
+            "relevant_entity_ids",
+        ):
+            values = tuple(
+                _path_text(item, f"query.{name}")
+                for item in getattr(self, name)
+            )
+            if len(values) != len(set(values)):
+                raise ValueError(f"query.{name} contains duplicates")
+            object.__setattr__(self, name, values)
+
+
+@dataclass(frozen=True)
+class PrimitivePathEvidenceIdentity:
+    decision_hash: str
+    decision_asof: pd.Timestamp
+    hypothesis_key: str
+    setup_id: str
+    entry_location_id: str
+    entry_path_id: str
+    deadline: pd.Timestamp
+    symbol: str
+    instrument_id: int
+    query: PrimitivePathEvidenceQuery
+
+    def __post_init__(self) -> None:
+        for name in (
+            "decision_hash",
+            "hypothesis_key",
+            "setup_id",
+            "entry_location_id",
+            "entry_path_id",
+            "symbol",
+        ):
+            object.__setattr__(
+                self,
+                name,
+                _path_text(getattr(self, name), f"identity.{name}"),
+            )
+        object.__setattr__(
+            self,
+            "decision_asof",
+            _path_timestamp(self.decision_asof, "identity.decision_asof"),
+        )
+        object.__setattr__(
+            self,
+            "deadline",
+            _path_timestamp(self.deadline, "identity.deadline"),
+        )
+        if self.deadline <= self.decision_asof:
+            raise ValueError("future path deadline must follow the decision")
+        if type(self.instrument_id) is not int or self.instrument_id < 0:
+            raise ValueError("future path instrument id is invalid")
+        if not isinstance(self.query, PrimitivePathEvidenceQuery):
+            raise ValueError("future path query is invalid")
+
+
+@dataclass(frozen=True)
+class PrimitivePathEvidencePoint:
+    observed_at: pd.Timestamp
+    completed_m1_bar: Mapping[str, Any]
+    events_added: tuple[Mapping[str, Any], ...] = ()
+    events_ended: tuple[Mapping[str, Any], ...] = ()
+    events_invalidated: tuple[Mapping[str, Any], ...] = ()
+    typed_state_transitions: tuple[Mapping[str, Any], ...] = ()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "observed_at",
+            _path_timestamp(self.observed_at, "path_point.observed_at"),
+        )
+        object.__setattr__(self, "completed_m1_bar", dict(self.completed_m1_bar))
+        for name in (
+            "events_added",
+            "events_ended",
+            "events_invalidated",
+            "typed_state_transitions",
+        ):
+            object.__setattr__(
+                self,
+                name,
+                tuple(dict(item) for item in getattr(self, name)),
+            )
+
+
+@dataclass(frozen=True)
+class PrimitivePathEvidence:
+    identity: PrimitivePathEvidenceIdentity
+    finalized_at: pd.Timestamp
+    finalization_reason: str
+    points: tuple[PrimitivePathEvidencePoint, ...]
+    schema_version: int = PATH_EVIDENCE_SCHEMA_VERSION
+
+    def __post_init__(self) -> None:
+        if self.schema_version != PATH_EVIDENCE_SCHEMA_VERSION:
+            raise ValueError("unsupported future path evidence schema")
+        if not isinstance(self.identity, PrimitivePathEvidenceIdentity):
+            raise ValueError("future path identity is invalid")
+        object.__setattr__(
+            self,
+            "finalized_at",
+            _path_timestamp(self.finalized_at, "path.finalized_at"),
+        )
+        if self.finalization_reason not in PATH_EVIDENCE_BOUNDARIES:
+            raise ValueError("future path finalization reason is invalid")
+        object.__setattr__(self, "points", tuple(self.points))
+        if not (
+            self.identity.decision_asof
+            <= self.finalized_at
+            <= self.identity.deadline
+        ):
+            raise ValueError("future path final clock is outside its boundary")
+
+
+def _path_transition_relevant(
+    transition: Mapping[str, Any],
+    query: PrimitivePathEvidenceQuery,
+) -> bool:
+    families = set(query.relevant_transition_families)
+    entities = set(query.relevant_entity_ids)
+    if families and str(transition.get("family")) not in families:
+        return False
+    if entities and str(transition.get("entity_id")) not in entities:
+        return False
+    return True
+
+
+def _path_bar_payload(value: Bar | Candle) -> dict[str, Any]:
+    if isinstance(value, Candle):
+        if value.timeframe is not Timeframe.M1 or not value.complete:
+            raise ValueError("future path requires a completed M1 candle")
+    elif not isinstance(value, Bar):
+        raise ValueError("future path requires a Bar or completed M1 candle")
+    payload = dict(to_primitive(value))
+    if isinstance(value, Bar):
+        payload["end"] = value.end
+    payload["start"] = _path_timestamp(payload["start"], "path_bar.start")
+    payload["end"] = _path_timestamp(payload["end"], "path_bar.end")
+    return payload
+
+
+def verify_primitive_path_evidence(
+    evidence: PrimitivePathEvidence,
+) -> PrimitivePathEvidence:
+    """Validate causal ordering and absence of action/outcome labels."""
+
+    if not isinstance(evidence, PrimitivePathEvidence):
+        raise ValueError("future path evidence has the wrong type")
+    _reject_path_labels(to_primitive(evidence))
+    expected = evidence.identity.decision_asof
+    for point in evidence.points:
+        bar = point.completed_m1_bar
+        start = _path_timestamp(bar.get("start"), "path_bar.start")
+        end = _path_timestamp(bar.get("end"), "path_bar.end")
+        if end != point.observed_at or start < expected or end <= start:
+            raise ValueError("future path bar order is invalid")
+        if (bar.get("symbol"), bar.get("instrument_id")) != (
+            evidence.identity.symbol,
+            evidence.identity.instrument_id,
+        ):
+            raise ValueError("future path crossed a contract boundary")
+        if end > evidence.identity.deadline:
+            raise ValueError("future path extends beyond its deadline")
+        expected = end
+    if evidence.points and evidence.points[-1].observed_at > evidence.finalized_at:
+        raise ValueError("future path finalizes before its last bar")
+    if (
+        evidence.finalization_reason == "deadline"
+        and evidence.finalized_at != evidence.identity.deadline
+    ):
+        raise ValueError("deadline evidence must end at the frozen deadline")
+    return evidence
+
+
+def _primitive_path_payload(evidence: PrimitivePathEvidence) -> dict[str, Any]:
+    return to_primitive(
+        {
+            "schema_version": evidence.schema_version,
+            "artifact": "sampled_primitive_future_path",
+            "identity": evidence.identity,
+            "finalized_at": evidence.finalized_at,
+            "finalization_reason": evidence.finalization_reason,
+            "points": evidence.points,
+        }
+    )
+
+
+def write_primitive_path_evidence(
+    evidence: PrimitivePathEvidence,
+    destination: str | Path,
+) -> Path:
+    verify_primitive_path_evidence(evidence)
+    output = Path(destination)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(
+        json.dumps(
+            _primitive_path_payload(evidence),
+            indent=2,
+            ensure_ascii=False,
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    return output
+
+
+def _query_from_path_payload(value: Mapping[str, Any]) -> PrimitivePathEvidenceQuery:
+    return PrimitivePathEvidenceQuery(
+        query_id=value["query_id"],
+        issue=value["issue"],
+        primitive_name=value["primitive_name"],
+        formula_version=value["formula_version"],
+        definition_hash=value["definition_hash"],
+        relevant_transition_families=tuple(
+            value.get("relevant_transition_families", ())
+        ),
+        relevant_entity_ids=tuple(value.get("relevant_entity_ids", ())),
+    )
+
+
+def read_verified_primitive_path_evidence(
+    source: str | Path,
+) -> PrimitivePathEvidence:
+    """Read and causally validate a sampled future path (no SHA sealing)."""
+
+    raw = json.loads(Path(source).read_text(encoding="utf-8"))
+    if (
+        not isinstance(raw, Mapping)
+        or raw.get("schema_version") != PATH_EVIDENCE_SCHEMA_VERSION
+        or raw.get("artifact") != "sampled_primitive_future_path"
+    ):
+        raise ValueError("future path evidence schema is invalid")
+    identity_value = raw.get("identity")
+    if not isinstance(identity_value, Mapping):
+        raise ValueError("future path evidence identity is invalid")
+    query_value = identity_value.get("query")
+    if not isinstance(query_value, Mapping):
+        raise ValueError("future path query is invalid")
+    identity = PrimitivePathEvidenceIdentity(
+        decision_hash=identity_value["decision_hash"],
+        decision_asof=pd.Timestamp(identity_value["decision_asof"]),
+        hypothesis_key=identity_value["hypothesis_key"],
+        setup_id=identity_value["setup_id"],
+        entry_location_id=identity_value["entry_location_id"],
+        entry_path_id=identity_value["entry_path_id"],
+        deadline=pd.Timestamp(identity_value["deadline"]),
+        symbol=identity_value["symbol"],
+        instrument_id=identity_value["instrument_id"],
+        query=_query_from_path_payload(query_value),
+    )
+    points = []
+    for value in raw.get("points", ()):
+        if not isinstance(value, Mapping):
+            raise ValueError("future path point is invalid")
+        points.append(
+            PrimitivePathEvidencePoint(
+                observed_at=pd.Timestamp(value["observed_at"]),
+                completed_m1_bar=value["completed_m1_bar"],
+                events_added=tuple(value.get("events_added", ())),
+                events_ended=tuple(value.get("events_ended", ())),
+                events_invalidated=tuple(
+                    value.get("events_invalidated", ())
+                ),
+                typed_state_transitions=tuple(
+                    value.get("typed_state_transitions", ())
+                ),
+            )
+        )
+    return verify_primitive_path_evidence(
+        PrimitivePathEvidence(
+            identity=identity,
+            finalized_at=pd.Timestamp(raw["finalized_at"]),
+            finalization_reason=raw["finalization_reason"],
+            points=tuple(points),
+        )
+    )
+
+
+class PrimitivePathEvidenceRecorder:
+    """Incremental future-path recorder used only by sampled audits."""
+
+    def __init__(self, identity: PrimitivePathEvidenceIdentity) -> None:
+        self.identity = identity
+        self._points: list[PrimitivePathEvidencePoint] = []
+        self._evidence: PrimitivePathEvidence | None = None
+
+    @classmethod
+    def from_snapshot(
+        cls,
+        snapshot: EngineSnapshot,
+        *,
+        hypothesis_key: str,
+        query: PrimitivePathEvidenceQuery,
+    ) -> "PrimitivePathEvidenceRecorder":
+        hypothesis = snapshot.belief.hypotheses.get(hypothesis_key)
+        if hypothesis is None or hypothesis.plan is None:
+            raise ValueError("future path requires a frozen hypothesis plan")
+        sequence = hypothesis.sequence
+        plan = hypothesis.plan
+        setup_id = plan.setup_id or (
+            None if sequence is None else sequence.setup_id
+        )
+        if not all(
+            isinstance(value, str) and value
+            for value in (
+                setup_id,
+                plan.entry_location_id,
+                plan.entry_path_id,
+            )
+        ):
+            raise ValueError("future path requires complete setup identities")
+        return cls(
+            PrimitivePathEvidenceIdentity(
+                decision_hash=snapshot.snapshot_hash,
+                decision_asof=snapshot.observation.asof,
+                hypothesis_key=hypothesis_key,
+                setup_id=str(setup_id),
+                entry_location_id=str(plan.entry_location_id),
+                entry_path_id=str(plan.entry_path_id),
+                deadline=plan.deadline,
+                symbol=snapshot.observation.symbol,
+                instrument_id=snapshot.observation.instrument_id,
+                query=query,
+            )
+        )
+
+    @property
+    def finalized(self) -> bool:
+        return self._evidence is not None
+
+    @property
+    def evidence(self) -> PrimitivePathEvidence:
+        if self._evidence is None:
+            raise ValueError("future path evidence is not finalized")
+        return self._evidence
+
+    def _finalize(self, at: Any, reason: str) -> PrimitivePathEvidence:
+        if self._evidence is not None:
+            return self._evidence
+        at = min(
+            _path_timestamp(at, "path.finalized_at"),
+            self.identity.deadline,
+        )
+        self._evidence = verify_primitive_path_evidence(
+            PrimitivePathEvidence(
+                identity=self.identity,
+                finalized_at=at,
+                finalization_reason=(
+                    "deadline" if at == self.identity.deadline else reason
+                ),
+                points=tuple(self._points),
+            )
+        )
+        return self._evidence
+
+    def observe(
+        self,
+        completed_m1_bar: Bar | Candle,
+        *,
+        events_added: Sequence[Mapping[str, Any]] = (),
+        events_ended: Sequence[Mapping[str, Any]] = (),
+        events_invalidated: Sequence[Mapping[str, Any]] = (),
+        typed_state_transitions: Sequence[Mapping[str, Any]] = (),
+        hard_boundary_reason: str | None = None,
+    ) -> PrimitivePathEvidence | None:
+        if self._evidence is not None:
+            return self._evidence
+        bar = _path_bar_payload(completed_m1_bar)
+        start = pd.Timestamp(bar["start"])
+        end = pd.Timestamp(bar["end"])
+        if start >= self.identity.deadline or end > self.identity.deadline:
+            return self._finalize(self.identity.deadline, "deadline")
+        if (bar.get("symbol"), bar.get("instrument_id")) != (
+            self.identity.symbol,
+            self.identity.instrument_id,
+        ):
+            return self._finalize(start, "contract_change_reset")
+        expected = (
+            self.identity.decision_asof
+            if not self._points
+            else self._points[-1].observed_at
+        )
+        if start < expected:
+            raise ValueError("future path bar precedes the next causal clock")
+        records = {
+            "events_added": tuple(dict(item) for item in events_added),
+            "events_ended": tuple(dict(item) for item in events_ended),
+            "events_invalidated": tuple(
+                dict(item) for item in events_invalidated
+            ),
+            "typed_state_transitions": tuple(
+                dict(item)
+                for item in typed_state_transitions
+                if _path_transition_relevant(item, self.identity.query)
+            ),
+        }
+        _reject_path_labels(records)
+        self._points.append(
+            PrimitivePathEvidencePoint(
+                observed_at=end,
+                completed_m1_bar=bar,
+                **records,
+            )
+        )
+        if hard_boundary_reason is not None:
+            if hard_boundary_reason not in PATH_EVIDENCE_BOUNDARIES:
+                raise ValueError("future path boundary reason is invalid")
+            return self._finalize(end, hard_boundary_reason)
+        if end == self.identity.deadline:
+            return self._finalize(end, "deadline")
+        return None
+
+    def close_right_boundary(self, observed_at: Any) -> PrimitivePathEvidence:
+        return self._finalize(observed_at, "right_boundary")
+
+    def write(self, destination: str | Path) -> Path:
+        return write_primitive_path_evidence(self.evidence, destination)
+
+
 __all__ = [
+    "PATH_EVIDENCE_BOUNDARIES",
+    "PATH_EVIDENCE_SCHEMA_VERSION",
+    "PrimitivePathEvidence",
+    "PrimitivePathEvidenceIdentity",
+    "PrimitivePathEvidencePoint",
+    "PrimitivePathEvidenceQuery",
+    "PrimitivePathEvidenceRecorder",
     "TRACE_SCHEMA_VERSION",
     "active_causal_timeframes",
     "build_decision_trace",
@@ -1765,7 +2290,9 @@ __all__ = [
     "decision_packet_payload_sha256",
     "decision_packet_sha256",
     "read_verified_decision_packet",
+    "read_verified_primitive_path_evidence",
     "sealed_path_audit_context",
     "validate_causal_histories",
     "write_frozen_decision_packet",
+    "write_primitive_path_evidence",
 ]

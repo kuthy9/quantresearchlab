@@ -7,6 +7,7 @@ full visual/audit snapshot hash.
 """
 from __future__ import annotations
 
+from dataclasses import replace
 import hashlib
 import json
 import os
@@ -25,7 +26,7 @@ from .simulation import ReplayStep, SequentialPortfolio
 
 
 CHECKPOINT_FORMAT_VERSION = 1
-HASH_MODE = "rolling_causal_state_commitment_v1"
+HASH_MODE = "rolling_causal_state_commitment_v2"
 
 
 def _rolling_commitment(previous: str, snapshot: EngineSnapshot) -> str:
@@ -36,6 +37,15 @@ def _rolling_commitment(previous: str, snapshot: EngineSnapshot) -> str:
         if snapshot.risk.frozen_thesis is None
         else snapshot.risk.frozen_thesis.thesis_hash
     )
+    hypothesis = (
+        None
+        if snapshot.decision.best_hypothesis_key is None
+        else snapshot.belief.resolve_hypothesis(
+            snapshot.decision.best_hypothesis_key
+        )
+    )
+    focus = snapshot.belief.focus_state
+    plan = snapshot.decision.plan
     fields = (
         previous,
         snapshot.observation.asof.isoformat(),
@@ -45,6 +55,11 @@ def _rolling_commitment(previous: str, snapshot: EngineSnapshot) -> str:
         snapshot.risk.final_action.value,
         snapshot.decision.best_hypothesis_key or "",
         thesis_hash,
+        snapshot.belief.scene_revision_id or "",
+        "" if focus is None else focus.focus_revision_id,
+        "" if hypothesis is None else hypothesis.evidence_revision_id or "",
+        "" if plan is None else plan.setup_id or "",
+        "" if plan is None else plan.entry_path_id or "",
     )
     digest = hashlib.sha256()
     for field in fields:
@@ -71,7 +86,7 @@ class CalibrationSequentialReplay:
             raise ValueError(
                 "a portfolio cannot be supplied when execution simulation is disabled"
             )
-        self.engine = engine or ContinuousSMCEngine()
+        self.engine = engine or ContinuousSMCEngine.from_config()
         self.simulate_execution = bool(simulate_execution)
         self.portfolio = (
             (portfolio or SequentialPortfolio())
@@ -101,37 +116,19 @@ class CalibrationSequentialReplay:
                 else account.position
             )
 
-        update = self.engine.reader.on_bar(bar)
-        observation = self.engine.observer.observe(update, execution)
-        if {
-            "contract_change_history_reset",
-            "data_gap_history_reset",
-        }.intersection(observation.anomalies):
-            self.engine.brain.reset()
-        belief = self.engine.brain.update(
-            observation,
-            position=belief_position,
-            scene_graph=self.engine.observer.scene_graph,
-            scene_delta=self.engine.observer.last_scene_delta,
-        )
-        decision = self.engine.decision.decide(observation, belief, account)
-        risk = self.engine.risk.review(decision, observation, account)
-        provisional = EngineSnapshot(
-            observation=observation,
-            belief=belief,
-            decision=decision,
-            risk=risk,
-            snapshot_hash="",
+        provisional = self.engine.on_bar(
+            bar,
+            execution=execution,
+            account=account,
+            belief_position=belief_position,
+            compute_snapshot_hash=False,
         )
         self.rolling_commitment = _rolling_commitment(
             self.rolling_commitment,
             provisional,
         )
-        snapshot = EngineSnapshot(
-            observation=observation,
-            belief=belief,
-            decision=decision,
-            risk=risk,
+        snapshot = replace(
+            provisional,
             snapshot_hash=self.rolling_commitment,
         )
         self.engine._last_snapshot = snapshot

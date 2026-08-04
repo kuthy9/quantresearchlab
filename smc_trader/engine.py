@@ -8,7 +8,6 @@ from typing import Any, Mapping
 
 from .calibration import (
     CalibrationError,
-    ProbabilityCalibrator,
     TypedBrainCalibrator,
     model_code_fingerprint,
 )
@@ -46,7 +45,7 @@ _PRIMITIVE_PROTOCOL_FIELDS = (
 def _configured_primitive_protocol_hashes(
     observer: Mapping[str, Any],
 ) -> dict[str, str]:
-    """Resolve and hash the exact primitive files bound by a v4 model config."""
+    """Resolve and hash the exact primitive files bound by the model config."""
 
     hashes: dict[str, str] = {}
     repository = Path(__file__).resolve().parents[1]
@@ -75,28 +74,39 @@ class ContinuousSMCEngine:
     def __init__(
         self,
         *,
-        reader: CausalMarketReader | None = None,
-        observer: CausalObserver | None = None,
-        brain: PlaybookBrain | None = None,
-        decision: UtilityDecisionLayer | None = None,
-        risk: StructuralRiskEngine | None = None,
+        reader: CausalMarketReader,
+        observer: CausalObserver,
+        brain: PlaybookBrain,
+        decision: UtilityDecisionLayer,
+        risk: StructuralRiskEngine,
     ) -> None:
-        self.reader = reader or CausalMarketReader()
-        self.observer = observer or CausalObserver()
-        self.brain = brain or PlaybookBrain()
-        self.decision = decision or UtilityDecisionLayer()
-        self.risk = risk or StructuralRiskEngine()
+        self.reader = reader
+        self.observer = observer
+        self.brain = brain
+        self.decision = decision
+        self.risk = risk
         self._last_snapshot: EngineSnapshot | None = None
 
     @classmethod
     def from_config(
         cls,
-        path: str | Path = "configs/model_v2.json",
+        path: str | Path = "configs/model.json",
     ) -> "ContinuousSMCEngine":
-        payload: dict[str, Any] = json.loads(Path(path).read_text(encoding="utf-8"))
-        scale_specs = parse_scale_specs(payload.get("scales"))
+        source = Path(path)
+        if not source.is_absolute() and not source.exists():
+            source = Path(__file__).resolve().parents[1] / source
+        payload: dict[str, Any] = json.loads(source.read_text(encoding="utf-8"))
+        if payload.get("schema_version") != 1:
+            raise ValueError("model.schema_version must be 1")
+        scales_raw = payload.get("scales")
+        if not isinstance(scales_raw, list) or not scales_raw:
+            raise ValueError("model.scales must register the current causal scale stack")
+        scale_specs = parse_scale_specs(scales_raw)
         reader = CausalMarketReader(scale_specs=scale_specs)
-        observer_raw = payload.get("observer", {})
+        observer_raw = payload.get("observer")
+        if not isinstance(observer_raw, Mapping):
+            raise ValueError("model.observer must bind all typed primitive protocols")
+        primitive_protocol_hashes = _configured_primitive_protocol_hashes(observer_raw)
         minimum = observer_raw.get("minimum_bars", {})
         observer = CausalObserver(
             ObserverConfig(
@@ -136,52 +146,25 @@ class ContinuousSMCEngine:
                 scale_specs=scale_specs,
             )
         )
-        brain_raw = payload.get("brain", {})
         registry = load_playbook_registry(
-            payload.get("playbook_registry", "configs/playbooks_v2.json")
+            payload.get("playbook_registry", "configs/playbooks.json")
         )
         calibration_path = payload.get("calibration_artifact")
-        typed_registry = registry.registry_version.startswith("4.")
-        if typed_registry:
-            calibrator = (
-                TypedBrainCalibrator.from_file(
-                    calibration_path,
-                    expected_registry_hash=registry.fingerprint,
-                    expected_code_hash=model_code_fingerprint(),
-                    expected_primitive_protocol_hashes=(
-                        _configured_primitive_protocol_hashes(observer_raw)
-                    ),
-                    expected_brain_input_contract_hash=(
-                        brain_input_contract_hash(scale_specs)
-                    ),
-                )
-                if calibration_path
-                else TypedBrainCalibrator.identity()
+        calibrator = (
+            TypedBrainCalibrator.from_file(
+                calibration_path,
+                expected_registry_hash=registry.fingerprint,
+                expected_code_hash=model_code_fingerprint(),
+                expected_primitive_protocol_hashes=primitive_protocol_hashes,
+                expected_brain_input_contract_hash=(
+                    brain_input_contract_hash(scale_specs)
+                ),
             )
-        else:
-            calibrator = (
-                ProbabilityCalibrator.from_file(
-                    calibration_path,
-                    expected_registry_hash=registry.fingerprint,
-                    expected_code_hash=model_code_fingerprint(),
-                )
-                if calibration_path
-                else ProbabilityCalibrator.identity()
-            )
+            if calibration_path
+            else TypedBrainCalibrator.identity()
+        )
         brain = PlaybookBrain(
             BrainConfig(
-                prior_decay=float(brain_raw.get("prior_decay", 0.92)),
-                forming_probability=float(brain_raw.get("forming_probability", 0.42)),
-                armed_probability=float(brain_raw.get("armed_probability", 0.58)),
-                executable_probability=float(
-                    brain_raw.get("executable_probability", 0.66)
-                ),
-                weakening_probability=float(
-                    brain_raw.get("weakening_probability", 0.46)
-                ),
-                invalidation_probability=float(
-                    brain_raw.get("invalidation_probability", 0.28)
-                ),
                 tick_size=float(payload.get("tick_size", 0.25)),
                 minimum_remaining_path_R=float(
                     payload.get("risk", {}).get(
@@ -248,6 +231,7 @@ class ContinuousSMCEngine:
         execution: ExecutionRealityInput | None = None,
         account: AccountState | None = None,
         belief_position: PositionSnapshot | None = None,
+        compute_snapshot_hash: bool = True,
     ) -> EngineSnapshot:
         account = account or AccountState(equity=100_000.0)
         update = self.reader.on_bar(bar)
@@ -265,13 +249,17 @@ class ContinuousSMCEngine:
         )
         decision = self.decision.decide(observation, belief, account)
         risk = self.risk.review(decision, observation, account)
-        snapshot_hash = content_hash(
-            {
-                "observation": observation,
-                "belief": belief,
-                "decision": decision,
-                "risk": risk,
-            }
+        snapshot_hash = (
+            content_hash(
+                {
+                    "observation": observation,
+                    "belief": belief,
+                    "decision": decision,
+                    "risk": risk,
+                }
+            )
+            if compute_snapshot_hash
+            else ""
         )
         snapshot = EngineSnapshot(
             observation=observation,

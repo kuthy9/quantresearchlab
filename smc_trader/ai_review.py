@@ -9,7 +9,10 @@ from typing import Any, Mapping, Sequence
 
 import pandas as pd
 
-from .decision_trace import decision_packet_payload_sha256
+from .decision_trace import (
+    PrimitivePathEvidenceQuery,
+    decision_packet_payload_sha256,
+)
 from .model import EngineSnapshot, clamp, content_hash
 
 
@@ -1429,6 +1432,58 @@ def ai_review_identity(
     }
 
 
+def path_evidence_query_from_proposal(
+    proposal: PrimitiveProposal,
+    *,
+    relevant_transition_families: Sequence[str] = (),
+    relevant_entity_ids: Sequence[str] = (),
+) -> PrimitivePathEvidenceQuery:
+    """Map diagnostic AI output to a causal future-transition query.
+
+    The adapter deliberately carries no trading action and makes no claim that
+    the proposed primitive is correct.  It only freezes which event identities
+    a later, separately rendered path should expose.
+    """
+
+    if not isinstance(proposal, PrimitiveProposal):
+        raise ValueError("path query requires a primitive proposal")
+    identities = {
+        value
+        for value in (
+            proposal.setup_id,
+            proposal.entry_location_id,
+            proposal.entry_path_id,
+            *relevant_entity_ids,
+        )
+        if isinstance(value, str) and value
+    }
+    values = proposal.origin_value.values
+    if isinstance(values, Mapping):
+        for name, value in values.items():
+            if name.endswith("_id") and isinstance(value, str) and value:
+                identities.add(value)
+            elif name.endswith("_ids") and isinstance(value, Sequence) and not isinstance(
+                value,
+                (str, bytes),
+            ):
+                identities.update(
+                    item
+                    for item in value
+                    if isinstance(item, str) and item
+                )
+    return PrimitivePathEvidenceQuery(
+        query_id=proposal.proposal_id,
+        issue=proposal.issue.value,
+        primitive_name=proposal.primitive_name,
+        formula_version=proposal.formula_version,
+        definition_hash=proposal.definition_hash,
+        relevant_transition_families=tuple(
+            dict.fromkeys(relevant_transition_families)
+        ),
+        relevant_entity_ids=tuple(sorted(identities)),
+    )
+
+
 class AIReviewAdapter:
     """Accepts diagnostic issue codes, never an AI-selected trading action."""
 
@@ -1652,4 +1707,5 @@ __all__ = [
     "ReviewIssue",
     "ai_review_identity",
     "compute_primitive",
+    "path_evidence_query_from_proposal",
 ]

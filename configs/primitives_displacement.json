@@ -1,0 +1,74 @@
+{
+  "protocol_version": "3.2.0-displacement-episode.2",
+  "status": "frozen_after_fixed_real_replay_and_blind_audit",
+  "downstream_authoritative": true,
+  "timeframe": "5m",
+  "tick_size": 0.25,
+  "input_contract": {
+    "completed_real_bars_only": true,
+    "strictly_prior_atr_and_volume_baseline": true,
+    "same_contract_only": true,
+    "future_fields_forbidden": true
+  },
+  "definitions": {
+    "started": "the first completed bar with a non-zero directional body, at least one tick of same-direction close progress versus the strictly prior close, and a close in the directional half of its own range",
+    "active": "after at least two admitted bars, cumulative net displacement, efficiency, ATR speed, mean body fraction and directional-body continuity all meet their frozen definitions at the same completed-bar clock",
+    "interruption": "a completed bar without a new favorable close; at most one consecutive neutral, stalled or small opposite interruption is admitted while origin, protection and cumulative direction remain intact",
+    "started_recovery": "after a STARTED candidate has an interruption, a favorable close resets the interruption only when it crosses at least one additional cumulative ACTIVE gate or becomes ACTIVE; one-tick drift cannot renew a weak candidate forever",
+    "opposite_probe": "a single opposite impulse is only an internal candidate; qualified opposite displacement requires its frozen prefix to satisfy the exact same cumulative ACTIVE definition",
+    "exhausted": "a completed close strictly breaks the frozen protection price, a pending opposite prefix becomes ACTIVE, or a second consecutive interruption confirms loss of progress",
+    "protection": "the first candidate bar low for a long episode and high for a short episode; it is frozen for the entity lifetime",
+    "same_clock_order": "commit old EXHAUSTED before promoted opposite STARTED and ACTIVE; progress-loss cannot create a same-clock same-direction replacement",
+    "activation_window": "absent; a still-causal STARTED episode is never terminalized only because a fixed bar count elapsed",
+    "terminal_geometry": "the terminal evidence bar is not admitted to the old episode; a new opposite STARTED entity may use that same completed bar after the old terminal transition is committed"
+  },
+  "thresholds": {
+    "strictly_prior_baseline_observations": 14,
+    "strong_reverse_body_fraction_min": 0.6,
+    "strong_reverse_directional_clv_min": 0.75,
+    "strong_reverse_tr_over_atr_min": 0.8,
+    "candidate_close_progress_ticks_min": 1,
+    "candidate_directional_clv_min": 0.5,
+    "activation_episode_bar_min": 2,
+    "activation_relative_atr_min": 1.0,
+    "activation_efficiency_min": 0.7,
+    "activation_speed_atr_per_bar_min": 0.3,
+    "activation_mean_body_fraction_min": 0.6,
+    "activation_body_continuity_min": 0.6,
+    "consecutive_interruptions_max": 1,
+    "single_bar_opposite_impulse_is_lifecycle_gate": false,
+    "volume_lifecycle_gate": false,
+    "threshold_search": false
+  },
+  "metrics": {
+    "net_points": "direction_sign * (last_admitted_close - frozen_origin_price)",
+    "travel_points": "seed_body_travel plus absolute close-to-close travel of every later admitted bar",
+    "efficiency": "max(net_points, 0) / max(travel_points, tick_size)",
+    "speed_atr_per_bar": "relative_atr / admitted_real_episode_bar_count",
+    "body_continuity": "same-direction body points / (same-direction body points + opposite-direction body points); neutral bodies do not enter the denominator",
+    "interruption_run": "consecutive admitted bars since the last qualifying recovery; STARTED recovery must improve the cumulative activation gate count",
+    "activation_gate_count": "number of cumulative ACTIVE conditions currently satisfied, including minimum evidence length",
+    "activation_weakest_ratio": "minimum normalized ratio across the cumulative ACTIVE conditions"
+  },
+  "lifecycle": {
+    "market_states": ["IDLE", "STARTED", "ACTIVE", "EXHAUSTED"],
+    "technical_terminal_state": "CENSORED",
+    "terminal_state_revives": false,
+    "one_current_entity_per_instrument_timeframe": true,
+    "same_clock_compound_transitions_preserve_order": true,
+    "progress_loss_same_clock_same_direction_rearm": false,
+    "qualified_opposite_requires_new_active": true
+  },
+  "boundary_rules": {
+    "contract_change": "CENSORED then reset",
+    "data_gap": "CENSORED then reset",
+    "registered_session_boundary": "CENSORED then reset",
+    "invalid_data": "CENSORED then hard fail"
+  },
+  "downstream_contract": {
+    "fvg": "must bind the exact ACTIVE episode identity and admitted prefix",
+    "order_block": "must bind the exact ACTIVE episode identity plus confirmed BOS",
+    "playbooks": "may consume displacement identity and lifecycle but may not reinterpret its bars",
+    "pnl_or_action_fields_forbidden": true
+  }
+}

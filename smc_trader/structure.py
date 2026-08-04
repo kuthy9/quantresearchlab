@@ -1,4 +1,4 @@
-"""Frozen causal HH/HL, LH/LL and BOS state for v3.
+"""Frozen causal HH/HL, LH/LL and BOS state.
 
 The tracker consumes only real completed candles from one timeframe.  Swing
 confirmation is delayed by the two registered right-hand candles; structure
@@ -10,7 +10,6 @@ from collections import deque
 from dataclasses import dataclass, replace
 import hashlib
 import json
-import math
 from pathlib import Path
 from typing import Sequence, TypeVar
 
@@ -69,7 +68,7 @@ class StructureConfig:
     @classmethod
     def from_file(
         cls,
-        path: str | Path = "configs/smc_primitives_v3_group12.json",
+        path: str | Path = "configs/primitives_structure_liquidity.json",
         *,
         atr_period: int = 14,
         tick_size: float = 0.25,

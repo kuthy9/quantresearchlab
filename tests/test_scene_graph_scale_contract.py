@@ -678,7 +678,7 @@ def test_dfp_and_lsr_source_chains_are_reachable_but_not_invented() -> None:
             entity_id="reverse-disp-raw",
         )
     )
-    fvg = graph.add_node(
+    graph.add_node(
         _node(
             "epoch:0:fvg:5m:reverse-fvg-raw",
             "fvg",
@@ -886,7 +886,7 @@ def test_focus_resolution_unsticks_but_unrelated_conflict_does_not_switch() -> N
     observation = market_observation()
     graph = TemporalMarketSceneGraph()
     asof = observation.asof
-    root = graph.add_node(
+    graph.add_node(
         _node(
             "epoch:0:structure:4H:focus-root",
             "structure",

@@ -1,104 +1,127 @@
-# v2 causal continuous architecture
+# Causal continuous architecture
+
+Schema: **1**
 
 ## Runtime flow
 
 ```text
 newly completed 1m OHLCV bar
         ↓
-causal 1m/5m/1H/4H reader
+causal 1m / 5m / 1H / 4H aggregation
         ↓
-descriptive primitives + ordered event memory + MBO execution reality
+descriptive primitives + ordered event memory
         ↓
-Belief(t) = update(Belief(t-1), Observation(t))
+Temporal Market Scene Graph + FocusState
         ↓
-three playbook-specific ordered sequences and continuous phases
+Belief(t) = update(Belief(t-1), Observation(t), SceneDelta(t))
+        ↓
+typed DFP / LSR / FAVR episodes and phases
         ↓
 enter / wait / hold / protect / exit / abstain utility comparison
         ↓
-independent structural-risk, cost, deadline, data, and fillability vetoes
+independent structural, cost, deadline, data and fillability vetoes
         ↓
-later-bar conservative execution → position/trade feedback
+next-bar conservative execution → position feedback
 ```
 
-The model does not first predict a future price path and then select a strategy.
-It updates competing causal hypotheses from the latest completed information,
-constructs only currently visible plans, and compares the utility of acting or
-waiting. Future paths exist only in a separate post-decision validation stream.
+There is one runtime path. Replay calls the same engine used for incremental
+operation; it does not reproduce reader → observer → Brain → Decision → Risk in
+a second implementation. Multi-timeframe bars update only when complete.
 
-## Eyes
+## Eyes and Scene Graph
 
-Each completed minute refreshes:
+Each completed minute updates causal state across four frames:
 
 | Frame | Descriptive state |
 |---|---|
-| 4H | directional displacement, path efficiency, structure progression/age, range position, external liquidity |
-| 1H | swing progression, acceptance/rejection, dealing range, path obstruction |
-| 5m | impulse, first-pullback depth/completeness, reacceptance, compression |
-| 1m | path order, acceleration, counter-pressure, trigger level/hold |
+| 4H | structure direction/age, displacement and efficiency, range position, external draw |
+| 1H | confirmed swings/BOS, acceptance/rejection, dealing range, obstruction |
+| 5m | displacement episode, FVG/OB, first return, reacceptance, compression |
+| 1m | exact event order, acceleration, counter-pressure and trigger hold |
 
-Event memory records confirmed swings, sweeps, breaks, rejection, impulse,
-reacceptance, compression, and trigger changes with causal clocks and state
-persistence. Execution reality contains manifest-bound MBO BBO, displayed
-sizes, depth imbalance, spread, cost, freshness, remaining time, and
-fillability. It describes the market; it cannot choose an action.
+Every semantic event carries identity, formation/confirmation/invalidation
+clocks, lifecycle, direction, strength and source IDs. Event memory retains
+order and duration, not just current scores. In particular:
 
-## Brain
+- first pullback is the first return to one frozen FVG/OB/range zone;
+- reacceptance requires departure, reclaim, hold and explicit failure;
+- path sequence is ordered event identity, not swing progression;
+- value comes from a mature dealing range, not 4H range position;
+- planned entry is a frozen zone price and need not equal the current close.
 
-Exactly three hypotheses are preregistered:
+The scene graph links events, zones, draws, invalidations and competing
+interpretations. Focus identifies what the Brain is currently following while
+preserving ambiguity and unknown authority. The eyes and graph cannot choose an
+action.
 
-1. displacement → first pullback → reacceptance;
-2. external-liquidity sweep → rejection/reacceptance → reversal trigger;
-3. failed auction → acceptance back to value → ordered 1m return path.
+MBO adds only execution reality: bid/ask, displayed size/depth, spread, cost,
+freshness and fillability. Missing MBO stays missing and is not replaced by a
+constant market assumption.
 
-The admission and versioning rules for any future hypothesis are frozen in
-`docs/playbook_preregistration.md`. No fourth playbook is currently admitted;
-location tools such as FVG, order block, breaker, OTE, or premium/discount
-remain evidence primitives unless they demonstrate a distinct causal mechanism.
+## Typed Brain
 
-Each direction uses:
+Exactly three mechanisms remain registered:
 
-`inactive → forming → armed → waiting_pullback → executable → entered →
-weakening/delivering → completed/invalidated`
+1. DFP: directional structure → continuation BOS → displacement zone → first
+   pullback → aligned 1m trigger;
+2. LSR: visible liquidity pool → sweep → opposite displacement/MSS → frozen
+   reversal location → aligned trigger;
+3. FAVR: mature accumulation/dealing range → failed outside auction → re-entry
+   and displacement back inside → first pullback/trigger → midpoint or opposite
+   boundary liquidity.
 
-The ordered event sequence prevents state-combination explosion. Beliefs carry
-raw and calibrated probability, supporting/contradicting primitives,
-uncertainty, phase duration, structural invalidation, visible targets, remaining
-path, and frozen protocol/setup identities.
+FAVR remains parked whenever a mature range and value cannot be established
+with natural market evidence. A general rejection is not a FAVR substitute.
 
-## Decision, risk, and execution
+Each hypothesis exposes separate typed dimensions:
 
-Flat states compare `enter`, `wait`, and `abstain`; open states compare `hold`,
-`protect`, `exit`, and `abstain`. Utility includes delivery belief, available
-R, cost, uncertainty, deadline, fillability, and phase readiness. A small
-best-versus-second-best advantage produces `abstain`.
+- `thesis_strength`;
+- deterministic `sequence_progress`;
+- `location_quality`;
+- `entry_readiness`;
+- `delivery_quality`;
+- `uncertainty`.
 
-Risk is independent. It can veto stale/constant data, spread, cost, insufficient
-depth, deadline, account risk, invalid structural provenance, or consumed
-liquidity. Entry freezes the thesis. Later structure may tighten a separate
-protection stop but cannot rewrite the original invalidation.
+The common phase vocabulary is:
 
-Approved entry is evaluated no earlier than the next bar. Stop/target ambiguity
-is adverse-first, and a same-entry-bar favorable target is not credited.
-Position state and one-decision terminal feedback return to the brain.
+`inactive → forming → armed → waiting_location → waiting_trigger → executable
+→ entered → delivering/weakening → completed/invalidated`
 
-## Validation and visual audit
+Episode, terminal and rearm semantics prevent a later event from silently
+rewriting the active thesis. A stable evidence revision is assimilated once,
+not repeatedly every minute.
 
-Every full sequence creates a frozen path test before later bars are read.
-Calibration uses only raw beliefs from its registered historical window.
-Development, calibration, rolling validation, OHLCV holdout, MBO development,
-and MBO holdout are separate.
+## Decision, risk and execution
 
-Decision charts contain no future candles. They show all four frames, causal
-primitives, probabilities, phases, sequence, evidence, plan provenance,
-utilities, risk vetoes, event persistence, BBO, and AI primitive proposals.
-Future reveal is a separate file and JSON record bound to the decision,
-protocol, config, and model-code hashes.
+Flat states compare enter, wait and abstain. Open states compare hold, protect,
+exit and abstain. An unclear best-versus-second-best advantage resolves to
+abstain.
 
-AI review is a deterministic two-pass workflow. A first replay emits sealed
-decision hashes. Review files may then be placed in a separate directory as
-`<decision_hash>.json`; a second identical replay accepts only registered
-diagnostic issue codes through `--ai-review-directory`. The adapter rejects
-action, outcome, profit, and future-path fields, maps each issue to an
-`unvalidated` causal primitive proposal, and displays that proposal in the
-decision and later reveal. The proposal ledger has no model authority until a
-separately preregistered path test validates it.
+Risk is a separate hard boundary. Entry freezes planned entry, structural
+invalidation, selected draw/targets, deadline and maximum risk. Later extrema
+cannot rewrite the original thesis. Cost, stale or anomalous data, insufficient
+depth, consumed draw, invalid stop provenance and deadline can veto entry.
+
+An approved order becomes eligible only at the next tradable clock. An attempt
+must become filled, expired or cancelled. A fill creates one position, which
+ends completed, invalidated or at a data boundary. Same-bar stop/target
+ambiguity is adverse-first, and position/risk feedback enters the next Brain
+update.
+
+## Replay, audit and validation
+
+Normal historical replay emits only light decision rows, aggregate summaries,
+progress, checkpoints and resumable shards. Brain calibration mode adds typed
+calibration rows. Full traces, charts and future-path tests are opt-in for one
+fixed stratified batch, not per-minute annual output.
+
+The sampled decision view contains no future candles. It shows all four frames,
+event identities and order, scene focus, typed dimensions/phases, selected
+draw, planned entry, invalidation, targets, utilities and risk vetoes. Future
+path is revealed separately only after the blind review is frozen. AI comments
+must map to computable sequence primitives and cannot become action labels.
+
+[`../configs/data_splits.json`](../configs/data_splits.json) separates
+development, calibration, rolling OOF and sealed OHLCV, plus MBO development
+and sealed execution holdout. It binds causal artifacts and their manifests by
+exact SHA-256.

@@ -43,16 +43,8 @@ from smc_trader.engine import (  # noqa: E402
     _configured_primitive_protocol_hashes,
 )
 from smc_trader.calibration import model_code_fingerprint  # noqa: E402
-from smc_trader.decision_trace import (  # noqa: E402
-    TRACE_SCHEMA_VERSION,
-    build_decision_trace,
-)
-from smc_trader.ai_review import (  # noqa: E402
-    CausalPrimitiveRegistry,
-)
-from smc_trader.io import iter_completed_bars, load_ohlcv  # noqa: E402
+from smc_trader.io import load_ohlcv  # noqa: E402
 from smc_trader.model import (  # noqa: E402
-    AccountState,
     Action,
     Timeframe,
     to_primitive,
@@ -63,23 +55,8 @@ from smc_trader.mbo import (  # noqa: E402
     assert_mbo_source_allowed,
 )
 from smc_trader.observation import ExecutionRealityInput  # noqa: E402
-from smc_trader.policy_value import (  # noqa: E402
-    build_v2_1_engine,
-    managed_policy_code_fingerprint,
-    path_structural_score,
-)
-from smc_trader.simulation import SequentialReplay  # noqa: E402
-from smc_trader.visualization import (  # noqa: E402
-    DecisionVisualizer,
-    SealedVisualAudit,
-)
 from smc_trader.validation import (  # noqa: E402
-    FrozenPathTestRecorder,
-    FunnelTransition,
-    PathTestResult,
-    PlaybookFunnelRecorder,
     load_validation_protocol,
-    records_frame,
 )
 
 
@@ -126,7 +103,6 @@ ENTRY_ATTEMPT_COLUMNS = [
     "decision_raw_probability",
     "decision_phase",
     "best_variant_utility_R",
-    "path_structural_score_R",
     "best_variant_components",
     "filled_at",
     "outcome",
@@ -175,17 +151,13 @@ ENTRY_ATTEMPT_FIELD_TYPES = {
     "decision_raw_probability": "float64",
     "decision_phase": "large_string",
     "best_variant_utility_R": "float64",
-    "path_structural_score_R": "float64",
     "best_variant_components": "large_string",
     "filled_at": "timestamp_ny",
     "outcome": "large_string",
 }
 
-STREAM_KEYS = {
+BASE_STREAM_KEYS = {
     "decision_shards": "snapshot_hash",
-    "funnel_transition_shards": "snapshot_hash",
-    "path_test_shards": "setup_id",
-    "brain_calibration_shards": "sample_id",
 }
 
 DECISION_FIELD_TYPES = {
@@ -198,10 +170,6 @@ DECISION_FIELD_TYPES = {
     "best_variant_utility_R": "float64",
     "best_variant_hypothesis_key": "large_string",
     "best_variant_components": "large_string",
-    "path_structural_score_R": "float64",
-    "managed_gross_R": "float64",
-    "managed_policy_value_available": "float64",
-    "managed_policy_value_in_support": "float64",
     "top_playbook": "large_string",
     "top_direction": "large_string",
     "top_probability": "float64",
@@ -285,66 +253,6 @@ DECISION_FIELD_TYPES = {
     "book_depth_imbalance": "float64",
     "vetoes": "large_string",
     "reasons": "large_string",
-    "trace_schema_version": "int64",
-    "decision_trace": "large_string",
-}
-
-FUNNEL_FIELD_TYPES = {
-    "setup_id": "large_string",
-    "playbook": "large_string",
-    "direction": "large_string",
-    "phase": "large_string",
-    "terminal_at": "timestamp_ny",
-    "terminal_reason": "large_string",
-    "terminal_source_ids": "large_string",
-    "observed_at": "timestamp_ny",
-    "probability": "float64",
-    "uncertainty": "float64",
-    "completed_steps": "int64",
-    "total_steps": "int64",
-    "protocol_version": "large_string",
-    "protocol_hash": "large_string",
-    "snapshot_hash": "large_string",
-}
-
-PATH_TEST_FIELD_TYPES = {
-    "setup_id": "large_string",
-    "hypothesis_key": "large_string",
-    "entry_location_id": "large_string",
-    "entry_path_id": "large_string",
-    "playbook": "large_string",
-    "direction": "large_string",
-    "setup_started_at": "timestamp_ny",
-    "sequence_completed_at": "timestamp_ny",
-    "decision_time": "timestamp_ny",
-    "resolved_at": "timestamp_ny",
-    "outcome": "large_string",
-    "success": "bool",
-    "entry": "float64",
-    "invalidation": "float64",
-    "invalidation_source_id": "large_string",
-    "target": "float64",
-    "target_source_id": "large_string",
-    "deadline": "timestamp_ny",
-    "probability": "float64",
-    "raw_probability": "float64",
-    "uncertainty": "float64",
-    "phase": "large_string",
-    "calibration_version": "large_string",
-    "calibration_hash": "large_string",
-    "mfe_R": "float64",
-    "mae_R": "float64",
-    "elapsed_minutes": "int64",
-    "formation_minutes": "int64",
-    "entry_touched": "bool",
-    "entry_touched_at": "timestamp_ny",
-    "time_to_entry_minutes": "int64",
-    "ambiguous_same_bar": "bool",
-    "decision_hash": "large_string",
-    "protocol_version": "large_string",
-    "protocol_hash": "large_string",
-    "config_hash": "large_string",
-    "code_hash": "large_string",
 }
 
 BRAIN_CALIBRATION_FIELD_TYPES = {
@@ -402,8 +310,6 @@ BRAIN_CALIBRATION_FIELD_TYPES = {
 
 STREAM_FIELD_TYPES = {
     "decision_shards": DECISION_FIELD_TYPES,
-    "funnel_transition_shards": FUNNEL_FIELD_TYPES,
-    "path_test_shards": PATH_TEST_FIELD_TYPES,
     "brain_calibration_shards": BRAIN_CALIBRATION_FIELD_TYPES,
 }
 
@@ -434,14 +340,6 @@ def _optional_protocol_sha256(path: str | Path | None) -> str | None:
     if not source.is_absolute() and not source.exists():
         source = ROOT / source
     return sha256_file(source)
-
-
-def _enter_structural_score(utility) -> float:
-    if utility.action is not Action.ENTER:
-        raise ValueError("enter structural score requires an enter variant")
-    if "path_structural_score_R" in utility.components:
-        return float(utility.components["path_structural_score_R"])
-    return path_structural_score(utility)
 
 
 def _source_provenance(observation, source_id: str) -> dict[str, Any] | None:
@@ -610,17 +508,30 @@ def _load_mbo_execution(
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     if int(manifest.get("format_version", 0)) != 1:
         raise RuntimeError("unsupported MBO execution manifest format")
-    if manifest.get("validation_protocol_hash") != validation.fingerprint:
-        raise RuntimeError("MBO execution manifest uses a different validation protocol")
+    registered = None
+    for artifact in validation.mbo_identity.development_execution_artifacts:
+        registered_path = Path(artifact.path)
+        if not registered_path.is_absolute():
+            registered_path = ROOT / registered_path
+        if registered_path.resolve(strict=False) == source:
+            registered = artifact
+            break
+    if registered is None:
+        raise RuntimeError("MBO execution artifact is not registered in data_splits.json")
+    registered_manifest_path = Path(registered.manifest_path)
+    if not registered_manifest_path.is_absolute():
+        registered_manifest_path = ROOT / registered_manifest_path
+    if registered_manifest_path.resolve(strict=False) != manifest_path:
+        raise RuntimeError("MBO execution manifest path is not the registered manifest")
+    if _sha256_file(manifest_path) != registered.manifest_sha256:
+        raise RuntimeError("MBO execution manifest does not match data_splits.json")
     actual_hash = _sha256_file(source)
-    if manifest.get("output_sha256") != actual_hash:
+    if actual_hash != registered.sha256 or manifest.get("output_sha256") != actual_hash:
         raise RuntimeError("MBO execution parquet does not match its manifest hash")
     requested_window = validation.classify_mbo(
         start.tz_convert("UTC"),
         end.tz_convert("UTC"),
     )
-    if manifest.get("validation_window_role") != requested_window.role:
-        raise RuntimeError("MBO execution manifest role does not match replay interval")
     materialized_start = pd.Timestamp(manifest.get("start"))
     materialized_end = pd.Timestamp(manifest.get("end_exclusive"))
     if (
@@ -648,24 +559,10 @@ def _load_mbo_execution(
 
 def _row(
     snapshot,
-    previous_snapshot=None,
     *,
-    source_bar=None,
     account_state=None,
     belief_position_input=None,
-    include_decision_trace: bool = False,
 ) -> dict:
-    trace = (
-        build_decision_trace(
-            snapshot,
-            previous_snapshot,
-            source_bar=source_bar,
-            account_state=account_state,
-            belief_position_input=belief_position_input,
-        )
-        if include_decision_trace
-        else None
-    )
     ranked = snapshot.belief.ranked()
     top = ranked[0] if ranked else None
     decision_hypothesis = (
@@ -696,14 +593,6 @@ def _row(
     best_components = (
         {} if best_variant is None else dict(best_variant.components)
     )
-    if "path_structural_score_R" in best_components:
-        best_structural_score = float(
-            best_components["path_structural_score_R"]
-        )
-    elif best_variant is not None and best_variant.action is Action.ENTER:
-        best_structural_score = _enter_structural_score(best_variant)
-    else:
-        best_structural_score = None
     sequence = None if top is None else top.sequence
     top_raw_dimensions = (
         {} if top is None else dict(top.raw_quality_dimensions)
@@ -765,14 +654,6 @@ def _row(
         "best_variant_components": json.dumps(
             best_components,
             sort_keys=True,
-        ),
-        "path_structural_score_R": best_structural_score,
-        "managed_gross_R": best_components.get("managed_gross_R"),
-        "managed_policy_value_available": (
-            best_components.get("managed_value_available")
-        ),
-        "managed_policy_value_in_support": (
-            best_components.get("managed_value_in_support")
         ),
         "top_playbook": None if top is None else top.playbook.value,
         "top_direction": None if top is None else top.direction.value,
@@ -1078,18 +959,6 @@ def _row(
         "book_depth_imbalance": snapshot.observation.execution.depth_imbalance,
         "vetoes": json.dumps([item.value for item in snapshot.risk.vetoes]),
         "reasons": json.dumps(list(snapshot.risk.reasons), ensure_ascii=False),
-        "trace_schema_version": (
-            TRACE_SCHEMA_VERSION if trace is not None else None
-        ),
-        "decision_trace": (
-            None
-            if trace is None
-            else json.dumps(
-                trace,
-                sort_keys=True,
-                ensure_ascii=False,
-            )
-        ),
     }
 
 
@@ -1098,14 +967,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--source", required=True)
     parser.add_argument("--start", required=True)
     parser.add_argument("--end", required=True)
-    parser.add_argument("--output", default="outputs/v2_replay")
+    parser.add_argument("--output", default="outputs/replay")
     parser.add_argument(
         "--config",
-        default="configs/model_v3_development.json",
+        default="configs/model.json",
     )
     parser.add_argument(
         "--validation-protocol",
-        default="configs/validation_protocol_v2.json",
+        default="configs/data_splits.json",
     )
     parser.add_argument("--warmup-days", type=int, default=45)
     parser.add_argument(
@@ -1123,26 +992,12 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help=(
             "optional constant research slippage; omitted means 0.0 in streamed "
-            "development and preserves the legacy visual default in legacy mode"
+            "development"
         ),
     )
     parser.add_argument(
         "--mbo-execution",
         help="pre-materialized causal MBO minute execution-reality parquet",
-    )
-    parser.add_argument("--chart-every", type=int, default=0)
-    parser.add_argument(
-        "--audit-path-tests",
-        type=int,
-        default=0,
-        help="seal and later reveal the first N frozen path tests as separate visual audits",
-    )
-    parser.add_argument(
-        "--ai-review-directory",
-        help=(
-            "optional directory of identity-bound diagnostic review JSON; "
-            "use templates emitted by the pre-reveal candidate workflow"
-        ),
     )
     parser.add_argument(
         "--simulate-execution",
@@ -1155,11 +1010,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--shard-rows", type=int, default=25_000)
     parser.add_argument("--checkpoint-bars", type=int, default=25_000)
     parser.add_argument(
-        "--include-decision-traces",
+        "--brain-calibration",
         action="store_true",
         help=(
-            "legacy visual-mode compatibility only; streamed history "
-            "rejects full minute traces and uses sampled audit replay"
+            "emit the additional Brain calibration stream for a registered "
+            "calibration window"
         ),
     )
     parser.add_argument("--resume", action="store_true")
@@ -1168,22 +1023,6 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=0,
         help=argparse.SUPPRESS,
-    )
-    parser.add_argument(
-        "--legacy-visual-replay",
-        action="store_true",
-        help=(
-            "run the former non-resumable inline chart/future-reveal workflow; "
-            "daily development should use the default streamed mode"
-        ),
-    )
-    parser.add_argument(
-        "--gross-policy-calibration",
-        action="store_true",
-        help=(
-            "retired annual-calibration entry; use "
-            "scripts/run_managed_policy_calibration.py"
-        ),
     )
     parser.add_argument(
         "--acknowledge-research-roll-lineage",
@@ -1201,457 +1040,6 @@ def parse_args() -> argparse.Namespace:
         help="explicitly reveal a manifest-bound MBO execution holdout",
     )
     return parser.parse_args()
-
-
-def _legacy_visual_main(args: argparse.Namespace) -> None:
-    if args.resume:
-        raise RuntimeError("--legacy-visual-replay does not support checkpoint resume")
-    if args.ai_review_directory:
-        raise ValueError(
-            "identity-bound AI review requires the two-pass "
-            "scripts/run_scenario_visual_audit.py workflow"
-        )
-    if args.gross_policy_calibration:
-        raise RuntimeError(
-            "--gross-policy-calibration is retired; use the bounded, resumable "
-            "scripts/run_managed_policy_calibration.py runner"
-        )
-    legacy_spread_points = (
-        0.25 if args.spread_points is None else float(args.spread_points)
-    )
-    legacy_slippage_points = (
-        0.25 if args.slippage_points is None else float(args.slippage_points)
-    )
-    if legacy_spread_points < 0.0 or legacy_slippage_points < 0.0:
-        raise ValueError("legacy research spread and slippage cannot be negative")
-    start = pd.Timestamp(args.start)
-    end = pd.Timestamp(args.end)
-    if start.tzinfo is None:
-        start = start.tz_localize("America/New_York")
-    if end.tzinfo is None:
-        end = end.tz_localize("America/New_York")
-    validation = load_validation_protocol(args.validation_protocol)
-    window = validation.classify_ohlcv(start, end)
-    if args.gross_policy_calibration:
-        if window.role != "managed_policy_calibration":
-            raise RuntimeError(
-                "--gross-policy-calibration requires the registered "
-                "managed_policy_calibration OHLCV window"
-            )
-        if start != window.start or end != window.end_exclusive:
-            raise RuntimeError(
-                "managed-policy calibration must consume the complete "
-                "registered [start, end) window"
-            )
-        if args.mbo_execution:
-            raise RuntimeError(
-                "gross managed-policy calibration cannot consume MBO execution"
-            )
-        if not args.simulate_execution:
-            raise RuntimeError(
-                "gross managed-policy calibration requires --simulate-execution"
-            )
-    if window.role == "sealed_holdout" and not args.reveal_sealed_holdout:
-        raise RuntimeError(
-            "requested interval is the sealed OHLCV holdout; pass "
-            "--reveal-sealed-holdout only after code/config/calibration hashes are frozen"
-        )
-    source_hash = _sha256_file(args.source)
-    if (
-        source_hash != validation.causal_front_sha256
-        and not args.acknowledge_research_roll_lineage
-    ):
-        raise RuntimeError(
-            "OHLCV source hash does not match the preregistered causal front"
-        )
-    load_start = start - pd.Timedelta(days=args.warmup_days)
-    loaded = load_ohlcv(args.source, start=load_start, end=end)
-    if not loaded.contract_selection_causal and not args.acknowledge_research_roll_lineage:
-        raise RuntimeError(
-            "source uses legacy ex-post same-day roll selection; pass "
-            "--acknowledge-research-roll-lineage for research-only replay"
-        )
-    destination = Path(args.output)
-    if destination.exists() and any(destination.iterdir()):
-        raise FileExistsError(f"refusing to overwrite non-empty output: {destination}")
-    destination.mkdir(parents=True, exist_ok=True)
-
-    config_source = Path(args.config)
-    config_payload = json.loads(config_source.read_text(encoding="utf-8"))
-    managed_artifact = config_payload.get("managed_policy_artifact")
-    if args.gross_policy_calibration and managed_artifact:
-        raise RuntimeError(
-            "managed-policy calibration must use the frozen policy-base model, "
-            "not a fitted managed-policy artifact"
-        )
-    if managed_artifact:
-        engine = build_v2_1_engine(config_source)
-        code_hash = managed_policy_code_fingerprint()
-    else:
-        engine = ContinuousSMCEngine.from_config(config_source)
-        code_hash = model_code_fingerprint()
-    config_hash = hashlib.sha256(config_source.read_bytes()).hexdigest()
-    execution_manifest: dict = {}
-    if args.mbo_execution:
-        execution_store, execution_manifest = _load_mbo_execution(
-            args.mbo_execution,
-            validation=validation,
-            start=start,
-            end=end,
-            reveal_sealed_holdout=args.reveal_sealed_mbo_holdout,
-        )
-    else:
-        execution_store = None
-    sequential = SequentialReplay(engine=engine) if args.simulate_execution else None
-    visualizer = DecisionVisualizer()
-    ai_registry = CausalPrimitiveRegistry()
-    ai_proposals_by_decision: dict[str, tuple] = {}
-    ai_review_files_used: list[str] = []
-
-    def ai_proposals_for(snapshot):
-        cached = ai_proposals_by_decision.get(snapshot.snapshot_hash)
-        if cached is not None:
-            return cached
-        proposals = ()
-        ai_proposals_by_decision[snapshot.snapshot_hash] = proposals
-        return proposals
-
-    funnel = PlaybookFunnelRecorder()
-    path_tests = FrozenPathTestRecorder(
-        config_hash=config_hash,
-        code_hash=code_hash,
-    )
-    rows: list[dict] = []
-    trades = []
-    entry_approvals: dict[str, dict] = {}
-    filled_entries: dict[str, pd.Timestamp] = {}
-    artifacts = []
-    visual_audits: dict[str, SealedVisualAudit] = {}
-    audit_records: list[str] = []
-    sealed_audit_count = 0
-    decision_number = 0
-    last_asof = start
-
-    def reveal_new_results(results) -> None:
-        for result in results:
-            audit = visual_audits.pop(result.setup_id, None)
-            if audit is None:
-                continue
-            _, record = audit.reveal(result)
-            audit_records.append(str(record))
-
-    for bar in iter_completed_bars(loaded.frame):
-        if bar.end >= end:
-            break
-        previous_snapshot = engine.last_snapshot
-        for audit in visual_audits.values():
-            audit.on_bar(bar)
-        result_count = len(path_tests.results)
-        path_tests.on_bar(bar)
-        reveal_new_results(path_tests.results[result_count:])
-        if bar.end < start:
-            execution = ExecutionRealityInput(
-                spread_points=0.0,
-                expected_slippage_points=0.0,
-                commission_per_contract_per_side=0.0,
-                deadline=_deadline(bar.end),
-                source="constant_warmup_no_execution_authority",
-            )
-        elif execution_store is not None:
-            execution = execution_store.for_bar(
-                bar,
-                deadline=_deadline(bar.end),
-            )
-        elif args.gross_policy_calibration:
-            execution = ExecutionRealityInput(
-                spread_points=0.0,
-                expected_slippage_points=0.0,
-                commission_per_contract_per_side=0.0,
-                deadline=_deadline(bar.end),
-                source="gross_policy_calibration_zero_cost",
-            )
-        else:
-            execution = ExecutionRealityInput(
-                spread_points=legacy_spread_points,
-                expected_slippage_points=legacy_slippage_points,
-                deadline=_deadline(bar.end),
-                source="constant_cli_research_only",
-            )
-        if sequential is not None:
-            step = sequential.on_bar(bar, execution=execution)
-            snapshot = step.snapshot
-            in_window_closed = [
-                record
-                for record in step.closed_trades
-                if record.decision_time >= start
-            ]
-            trades.extend(in_window_closed)
-            for record in step.closed_trades:
-                filled_entries.setdefault(record.thesis_hash, record.opened_at)
-            if step.position is not None:
-                filled_entries.setdefault(
-                    step.position.thesis_hash,
-                    step.position.opened_at,
-                )
-        else:
-            snapshot = engine.on_bar(
-                bar,
-                execution=execution,
-                account=AccountState(equity=100_000.0),
-            )
-        if snapshot.observation.asof < start:
-            continue
-        last_asof = snapshot.observation.asof
-        if (
-            snapshot.risk.final_action is Action.ENTER
-            and snapshot.risk.frozen_thesis is not None
-        ):
-            approval = _approval_row(snapshot)
-            thesis_hash = approval["thesis_hash"]
-            if thesis_hash in entry_approvals:
-                raise AssertionError(
-                    "risk-approved thesis hash was emitted more than once"
-                )
-            entry_approvals[thesis_hash] = approval
-        funnel.observe(snapshot)
-        open_before = {item.setup_id for item in path_tests.open_tests}
-        path_tests.observe(snapshot)
-        for frozen in path_tests.open_tests:
-            if (
-                frozen.setup_id in open_before
-                or sealed_audit_count >= max(0, args.audit_path_tests)
-            ):
-                continue
-            audit = SealedVisualAudit.seal(
-                visualizer,
-                snapshot,
-                engine.histories(80),
-                destination / "path_audits" / frozen.setup_id,
-                ai_proposals=ai_proposals_for(snapshot),
-                hypothesis_key=frozen.hypothesis_key,
-                previous_snapshot=previous_snapshot,
-                source_bar=bar,
-                account_state=(
-                    step.account_state
-                    if sequential is not None
-                    else AccountState(equity=100_000.0)
-                ),
-                belief_position_input=(
-                    step.belief_position_input
-                    if sequential is not None
-                    else None
-                ),
-            )
-            visual_audits[frozen.setup_id] = audit
-            sealed_audit_count += 1
-        rows.append(
-            _row(
-                snapshot,
-                previous_snapshot,
-                source_bar=bar,
-                account_state=(
-                    step.account_state
-                    if sequential is not None
-                    else AccountState(equity=100_000.0)
-                ),
-                belief_position_input=(
-                    step.belief_position_input
-                    if sequential is not None
-                    else None
-                ),
-                include_decision_trace=args.include_decision_traces,
-            )
-        )
-        decision_number += 1
-        if args.chart_every > 0 and decision_number % args.chart_every == 0:
-            artifact = visualizer.render_decision(
-                snapshot,
-                engine.histories(80),
-                destination / "decisions" / f"{snapshot.snapshot_hash[:20]}.png",
-                ai_proposals=ai_proposals_for(snapshot),
-            )
-            artifacts.append(artifact)
-
-    decisions = pd.DataFrame(rows)
-    if decisions.empty:
-        raise ValueError("requested interval produced no completed decision bars")
-    if not (
-        (pd.to_datetime(decisions["asof"], utc=True) >= start.tz_convert("UTC"))
-        & (pd.to_datetime(decisions["asof"], utc=True) < end.tz_convert("UTC"))
-    ).all():
-        raise AssertionError("decision clocks escaped the registered [start, end) interval")
-    decisions.to_parquet(destination / "decisions.parquet", index=False)
-    result_count = len(path_tests.results)
-    path_tests.close_unresolved(last_asof)
-    reveal_new_results(path_tests.results[result_count:])
-    records_frame(funnel.rows, record_type=FunnelTransition).to_parquet(
-        destination / "funnel_transitions.parquet",
-        index=False,
-    )
-    records_frame(path_tests.results, record_type=PathTestResult).to_parquet(
-        destination / "path_tests.parquet",
-        index=False,
-    )
-    trade_rows = [to_primitive(record) for record in trades]
-    if args.simulate_execution:
-        pd.DataFrame(trade_rows, columns=TRADE_COLUMNS).to_parquet(
-            destination / "trades.parquet",
-            index=False,
-        )
-        entry_attempt_rows = []
-        for thesis_hash, approval in entry_approvals.items():
-            filled_at = filled_entries.get(thesis_hash)
-            if filled_at is not None:
-                outcome = "filled"
-            elif approval["decision_time"] == last_asof:
-                outcome = "pending_right_censored"
-            else:
-                outcome = "not_filled_or_expired_next_bar"
-            entry_attempt_rows.append(
-                {
-                    **approval,
-                    "filled_at": filled_at,
-                    "outcome": outcome,
-                }
-            )
-        pd.DataFrame(
-            entry_attempt_rows,
-            columns=ENTRY_ATTEMPT_COLUMNS,
-        ).to_parquet(destination / "entry_attempts.parquet", index=False)
-    else:
-        entry_attempt_rows = []
-    if artifacts:
-        visualizer.build_index(artifacts, destination / "decisions" / "index.html")
-    pending_ai_proposals = ai_registry.pending()
-    (destination / "ai_primitive_proposals.json").write_text(
-        json.dumps(
-            [to_primitive(proposal) for proposal in pending_ai_proposals],
-            indent=2,
-            ensure_ascii=False,
-        ),
-        encoding="utf-8",
-    )
-    summary = {
-        "version": str(config_payload.get("version", "")),
-        "source": str(loaded.source),
-        "source_sha256": source_hash,
-        "source_matches_preregistered_causal_front": (
-            source_hash == validation.causal_front_sha256
-        ),
-        "source_role": loaded.source_role,
-        "validation_protocol_version": validation.version,
-        "validation_protocol_hash": validation.fingerprint,
-        "validation_window_role": window.role,
-        "config_hash": config_hash,
-        "model_code_hash": code_hash,
-        "structure_protocol_sha256": _optional_protocol_sha256(
-            getattr(engine.observer.config, "structure_protocol", None)
-        ),
-        "liquidity_protocol_sha256": _optional_protocol_sha256(
-            getattr(engine.observer.config, "liquidity_protocol", None)
-        ),
-        "displacement_protocol_sha256": _optional_protocol_sha256(
-            getattr(engine.observer.config, "displacement_protocol", None)
-        ),
-        "group3_protocol_sha256": _optional_protocol_sha256(
-            getattr(engine.observer.config, "group3_protocol", None)
-        ),
-        "group4_protocol_sha256": _optional_protocol_sha256(
-            getattr(engine.observer.config, "group4_protocol", None)
-        ),
-        "group5_protocol_sha256": _optional_protocol_sha256(
-            getattr(engine.observer.config, "group5_protocol", None)
-        ),
-        "execution_reality_source": (
-            str(args.mbo_execution)
-            if execution_store is not None
-            else (
-                "gross_policy_calibration_zero_cost"
-                if args.gross_policy_calibration
-                else "constant_cli_research_only"
-            )
-        ),
-        "gross_policy_calibration": bool(args.gross_policy_calibration),
-        "execution_authority": bool(execution_store is not None),
-        "mbo_execution_manifest_hash": (
-            hashlib.sha256(
-                json.dumps(
-                    execution_manifest,
-                    sort_keys=True,
-                ).encode("utf-8")
-            ).hexdigest()
-            if execution_manifest
-            else None
-        ),
-        "mbo_execution_window_role": (
-            execution_manifest.get("validation_window_role")
-            if execution_manifest
-            else None
-        ),
-        "contract_selection_causal": loaded.contract_selection_causal,
-        "warnings": loaded.warnings,
-        "start": start.isoformat(),
-        "end": end.isoformat(),
-        "decision_clock_interval": "[start, end)",
-        "decision_rows": len(decisions),
-        "model_action_counts": (
-            decisions["model_action"].value_counts().sort_index().to_dict()
-            if not decisions.empty
-            else {}
-        ),
-        "action_counts": (
-            decisions["risk_action"].value_counts().sort_index().to_dict()
-            if not decisions.empty
-            else {}
-        ),
-        "approved_entry_attempts": len(entry_attempt_rows),
-        "filled_entry_attempts": sum(
-            row["outcome"] == "filled" for row in entry_attempt_rows
-        ),
-        "unfilled_or_expired_entry_attempts": sum(
-            row["outcome"] == "not_filled_or_expired_next_bar"
-            for row in entry_attempt_rows
-        ),
-        "pending_entry_attempts_at_end": sum(
-            row["outcome"] == "pending_right_censored"
-            for row in entry_attempt_rows
-        ),
-        "future_path_loaded": False,
-        "future_path_visible_to_model": False,
-        "sequential_execution_evaluated": bool(args.simulate_execution),
-        "profitability_evaluated": bool(
-            args.simulate_execution
-            and trade_rows
-            and not args.gross_policy_calibration
-        ),
-        "closed_trades": len(trade_rows),
-        "funnel_transitions": len(funnel.rows),
-        "path_tests": len(path_tests.results),
-        "visual_path_audits_sealed": sealed_audit_count,
-        "visual_path_audit_records": audit_records,
-        "ai_review_directory": (
-            None if ai_review_root is None else str(ai_review_root)
-        ),
-        "ai_review_files_used": ai_review_files_used,
-        "ai_primitive_proposals": len(pending_ai_proposals),
-        "ai_primitive_model_authority": False,
-        "path_test_outcomes": (
-            records_frame(path_tests.results)["outcome"].value_counts().to_dict()
-            if path_tests.results
-            else {}
-        ),
-        "net_R": (
-            float(sum(float(row["net_R"]) for row in trade_rows))
-            if trade_rows
-            else 0.0
-        ),
-        "chart_artifacts": [to_primitive(item) for item in artifacts],
-    }
-    (destination / "summary.json").write_text(
-        json.dumps(to_primitive(summary), indent=2, ensure_ascii=False),
-        encoding="utf-8",
-    )
-    print(json.dumps(summary["action_counts"], sort_keys=True))
 
 
 def _stream_progress(
@@ -1695,7 +1083,7 @@ def _stream_progress(
 
 
 def _stream_record(
-    record: FunnelTransition | PathTestResult | BrainCalibrationRecord,
+    record: BrainCalibrationRecord,
 ) -> dict[str, Any]:
     return asdict(record)
 
@@ -1762,7 +1150,6 @@ def _approval_row(snapshot) -> dict[str, Any]:
         ),
         "decision_phase": None if selected is None else selected.phase.value,
         "best_variant_utility_R": best_variant.utility,
-        "path_structural_score_R": _enter_structural_score(best_variant),
         "best_variant_components": json.dumps(
             dict(best_variant.components),
             sort_keys=True,
@@ -1771,23 +1158,6 @@ def _approval_row(snapshot) -> dict[str, Any]:
 
 
 def _streamed_main(args: argparse.Namespace) -> None:
-    if args.gross_policy_calibration:
-        raise RuntimeError(
-            "--gross-policy-calibration is retired; use "
-            "scripts/run_managed_policy_calibration.py"
-        )
-    if args.chart_every or args.audit_path_tests or args.ai_review_directory:
-        raise ValueError(
-            "streamed development replay keeps visualization and AI review "
-            "out of checkpoint state; use scripts/run_scenario_visual_audit.py "
-            "or pass --legacy-visual-replay for the former workflow"
-        )
-    if args.include_decision_traces:
-        raise RuntimeError(
-            "streamed history replay no longer emits full minute traces; "
-            "select a 20-40 case batch from lightweight decision shards and "
-            "render sampled traces with scripts/render_blind_decision_batch.py"
-        )
     if args.warmup_days < 0:
         raise ValueError("warmup days cannot be negative")
     if args.shard_rows < 1 or args.checkpoint_bars < 1:
@@ -1822,7 +1192,7 @@ def _streamed_main(args: argparse.Namespace) -> None:
     source = Path(args.source)
     source_hash = _sha256_file(source)
     if (
-        source_hash != validation.causal_front_sha256
+        source_hash != validation.causal_source.sha256
         and not args.acknowledge_research_roll_lineage
     ):
         raise RuntimeError(
@@ -1847,24 +1217,22 @@ def _streamed_main(args: argparse.Namespace) -> None:
 
     config_source = Path(args.config)
     config_payload = json.loads(config_source.read_text(encoding="utf-8"))
-    managed_artifact = config_payload.get("managed_policy_artifact")
-    if managed_artifact:
-        engine = build_v2_1_engine(config_source)
-        code_hash = managed_policy_code_fingerprint()
-    else:
-        engine = ContinuousSMCEngine.from_config(config_source)
-        code_hash = model_code_fingerprint()
+    engine = ContinuousSMCEngine.from_config(config_source)
+    code_hash = model_code_fingerprint()
     config_hash = sha256_file(config_source)
-    brain_calibration_enabled = bool(
-        engine.brain.registry.registry_version.startswith("4.")
-        and window.role in {"calibration", "belief_calibration"}
+    brain_calibration_enabled = bool(args.brain_calibration)
+    if brain_calibration_enabled and window.role not in {
+        "calibration",
+        "belief_calibration",
+    }:
+        raise RuntimeError(
+            "--brain-calibration requires a registered calibration window"
+        )
+    primitive_protocol_hashes = _configured_primitive_protocol_hashes(
+        config_payload.get("observer", {})
     )
     brain_calibration_protocol_hashes = (
-        _configured_primitive_protocol_hashes(
-            config_payload.get("observer", {})
-        )
-        if brain_calibration_enabled
-        else {}
+        primitive_protocol_hashes if brain_calibration_enabled else {}
     )
     brain_calibration_input_contract_hash = (
         brain_input_contract_hash(engine.reader.scale_specs)
@@ -1872,9 +1240,8 @@ def _streamed_main(args: argparse.Namespace) -> None:
         else None
     )
 
-    execution_manifest: dict[str, Any] = {}
     if args.mbo_execution:
-        execution_store, execution_manifest = _load_mbo_execution(
+        execution_store, _ = _load_mbo_execution(
             args.mbo_execution,
             validation=validation,
             start=start,
@@ -1902,8 +1269,12 @@ def _streamed_main(args: argparse.Namespace) -> None:
         )
     destination.mkdir(parents=True, exist_ok=True)
 
+    stream_keys = dict(BASE_STREAM_KEYS)
+    if brain_calibration_enabled:
+        stream_keys["brain_calibration_shards"] = "sample_id"
+
     bindings = {
-        "runner": "continuous_development_stream_v1",
+        "runner": "continuous_replay_v1",
         "source_sha256": source_hash,
         "source_rows": total_source_rows,
         "source_first": replay_frame.index[0].isoformat(),
@@ -1922,59 +1293,12 @@ def _streamed_main(args: argparse.Namespace) -> None:
             if brain_calibration_enabled
             else None
         ),
-        "brain_calibration_recorder_sha256": (
-            sha256_file(ROOT / "smc_trader/brain_calibration.py")
-            if brain_calibration_enabled
-            else None
-        ),
         "brain_input_contract_hash": (
             brain_calibration_input_contract_hash
         ),
-        "managed_policy_calibration_hash": getattr(
-            getattr(engine.decision, "calibrator", None),
-            "fingerprint",
-            None,
-        ),
-        "structure_protocol_sha256": _optional_protocol_sha256(
-            engine.observer.config.structure_protocol
-        ),
-        "liquidity_protocol_sha256": _optional_protocol_sha256(
-            engine.observer.config.liquidity_protocol
-        ),
-        "displacement_protocol_sha256": _optional_protocol_sha256(
-            engine.observer.config.displacement_protocol
-        ),
-        "group3_protocol_sha256": _optional_protocol_sha256(
-            engine.observer.config.group3_protocol
-        ),
-        "group4_protocol_sha256": _optional_protocol_sha256(
-            engine.observer.config.group4_protocol
-        ),
-        "group5_protocol_sha256": _optional_protocol_sha256(
-            engine.observer.config.group5_protocol
-        ),
+        "primitive_protocol_hashes": primitive_protocol_hashes,
         "validation_protocol_hash": validation.fingerprint,
         "validation_window_role": window.role,
-        "runner_sha256": sha256_file(Path(__file__)),
-        "decision_trace_schema_version": (
-            TRACE_SCHEMA_VERSION
-            if args.include_decision_traces
-            else None
-        ),
-        "decision_trace_sha256": (
-            sha256_file(ROOT / "smc_trader/decision_trace.py")
-            if args.include_decision_traces
-            else None
-        ),
-        "include_decision_traces": bool(
-            args.include_decision_traces
-        ),
-        "calibration_replay_sha256": sha256_file(
-            ROOT / "smc_trader/calibration_replay.py"
-        ),
-        "artifact_stream_sha256": sha256_file(
-            ROOT / "smc_trader/artifact_stream.py"
-        ),
         "simulate_execution": bool(args.simulate_execution),
         "execution_mode": execution_mode,
         "constant_spread_points": args.spread_points,
@@ -1997,8 +1321,7 @@ def _streamed_main(args: argparse.Namespace) -> None:
         "checkpoint_bars": int(args.checkpoint_bars),
         "hash_mode": HASH_MODE,
         "allow_data_gap_reset": False,
-        "visual_state_checkpointed": False,
-        "ai_state_checkpointed": False,
+        "stream_families": sorted(stream_keys),
     }
 
     brain_lineage_path = destination / "brain_calibration_lineage.json"
@@ -2037,8 +1360,6 @@ def _streamed_main(args: argparse.Namespace) -> None:
     checkpoint = ReplayCheckpointStore(destination / "_checkpoint")
     total_fields = {
         "decision_shards": "decision_rows",
-        "funnel_transition_shards": "funnel_rows",
-        "path_test_shards": "path_test_rows",
         "brain_calibration_shards": "brain_calibration_rows",
     }
 
@@ -2050,11 +1371,11 @@ def _streamed_main(args: argparse.Namespace) -> None:
         state["committed_shards"] = decision_stream["committed_shards"]
 
     def verify_state_streams(state: dict[str, Any]) -> None:
-        if set(state.get("streams", {})) != set(STREAM_KEYS):
+        if set(state.get("streams", {})) != set(stream_keys):
             raise ValueError("checkpoint stream family changed")
-        if set(state.get("buffers", {})) != set(STREAM_KEYS):
+        if set(state.get("buffers", {})) != set(stream_keys):
             raise ValueError("checkpoint buffer family changed")
-        for name in STREAM_KEYS:
+        for name in stream_keys:
             committed = verify_stream_shards(
                 destination,
                 state["streams"][name],
@@ -2083,17 +1404,12 @@ def _streamed_main(args: argparse.Namespace) -> None:
     else:
         streams = {
             name: new_stream_state(STREAM_FIELD_TYPES[name])
-            for name in STREAM_KEYS
+            for name in stream_keys
         }
         state = {
             "replay": CalibrationSequentialReplay(
                 engine=engine,
                 simulate_execution=bool(args.simulate_execution),
-            ),
-            "funnel": PlaybookFunnelRecorder(),
-            "path_tests": FrozenPathTestRecorder(
-                config_hash=config_hash,
-                code_hash=code_hash,
             ),
             "brain_calibration": (
                 BrainCalibrationRecorder(
@@ -2111,24 +1427,21 @@ def _streamed_main(args: argparse.Namespace) -> None:
                 else None
             ),
             "streams": streams,
-            "buffers": {name: [] for name in STREAM_KEYS},
+            "buffers": {name: [] for name in stream_keys},
             "processed_bars": 0,
             "source_rows_consumed": 0,
             "last_checkpoint_processed_bars": 0,
             "decision_rows": 0,
-            "funnel_rows": 0,
-            "path_test_rows": 0,
             "brain_calibration_rows": 0,
             "model_action_counts": {},
             "risk_action_counts": {},
-            "path_outcome_counts": {},
             "entry_approvals": {},
             "filled_entries": {},
             "last_source_start": None,
             "last_asof": None,
             "resume_count": 0,
             "finalized": False,
-            "peak_buffer_rows": {name: 0 for name in STREAM_KEYS},
+            "peak_buffer_rows": {name: 0 for name in stream_keys},
             "next_shard_index": 0,
             "committed_shards": streams["decision_shards"][
                 "committed_shards"
@@ -2137,8 +1450,6 @@ def _streamed_main(args: argparse.Namespace) -> None:
     args._streamed_output_owned = True
 
     replay: CalibrationSequentialReplay = state["replay"]
-    funnel: PlaybookFunnelRecorder = state["funnel"]
-    path_tests: FrozenPathTestRecorder = state["path_tests"]
     brain_calibration: BrainCalibrationRecorder | None = state.get(
         "brain_calibration"
     )
@@ -2193,7 +1504,7 @@ def _streamed_main(args: argparse.Namespace) -> None:
                 name,
                 chunk,
                 state["streams"][name],
-                key_column=STREAM_KEYS[name],
+                key_column=stream_keys[name],
                 maximum_rows=effective_shard_rows,
                 field_types=STREAM_FIELD_TYPES[name],
             )
@@ -2205,7 +1516,7 @@ def _streamed_main(args: argparse.Namespace) -> None:
             return
         was_safe_source_checkpoint = safe_source_checkpoint
         safe_source_checkpoint = False
-        for name in STREAM_KEYS:
+        for name in stream_keys:
             flush_stream(name, final=final)
         state["last_checkpoint_processed_bars"] = int(
             state["processed_bars"]
@@ -2263,7 +1574,6 @@ def _streamed_main(args: argparse.Namespace) -> None:
         if not state["finalized"]:
             for bar in iterator:
                 safe_source_checkpoint = False
-                previous_snapshot = replay.engine.last_snapshot
                 if brain_calibration is not None:
                     brain_calibration.on_bar(bar)
                     append_stream(
@@ -2273,24 +1583,6 @@ def _streamed_main(args: argparse.Namespace) -> None:
                             for item in brain_calibration.drain_rows()
                         ],
                     )
-                path_tests.on_bar(bar)
-                resolved = path_tests.drain_results()
-                if resolved:
-                    append_stream(
-                        "path_test_shards",
-                        [_stream_record(item) for item in resolved],
-                    )
-                    for item in resolved:
-                        state["path_outcome_counts"][item.outcome] = (
-                            int(
-                                state["path_outcome_counts"].get(
-                                    item.outcome,
-                                    0,
-                                )
-                            )
-                            + 1
-                        )
-
                 step = replay.on_bar(
                     bar,
                     execution=execution_for_bar(bar),
@@ -2321,28 +1613,14 @@ def _streamed_main(args: argparse.Namespace) -> None:
                                 for item in brain_calibration.drain_rows()
                             ],
                         )
-                    funnel.observe(snapshot)
-                    append_stream(
-                        "funnel_transition_shards",
-                        [
-                            _stream_record(item)
-                            for item in funnel.drain_rows()
-                        ],
-                    )
-                    path_tests.observe(snapshot)
                     append_stream(
                         "decision_shards",
                         [
                             _row(
                                 snapshot,
-                                previous_snapshot,
-                                source_bar=bar,
                                 account_state=step.account_state,
                                 belief_position_input=(
                                     step.belief_position_input
-                                ),
-                                include_decision_trace=(
-                                    args.include_decision_traces
                                 ),
                             )
                         ],
@@ -2386,7 +1664,7 @@ def _streamed_main(args: argparse.Namespace) -> None:
                     >= args.checkpoint_bars
                     or any(
                         len(buffers[name]) >= effective_shard_rows
-                        for name in STREAM_KEYS
+                        for name in stream_keys
                     )
                 )
                 if safe_source_checkpoint and due:
@@ -2448,22 +1726,12 @@ def _streamed_main(args: argparse.Namespace) -> None:
                     for item in brain_calibration.drain_rows()
                 ],
             )
-        path_tests.close_unresolved(state["last_asof"])
-        resolved = path_tests.drain_results()
-        append_stream(
-            "path_test_shards",
-            [_stream_record(item) for item in resolved],
-        )
-        for item in resolved:
-            state["path_outcome_counts"][item.outcome] = (
-                int(state["path_outcome_counts"].get(item.outcome, 0)) + 1
-            )
         state["finalized"] = True
     commit_checkpoint(final=True)
     verify_state_streams(state)
 
     manifest_hashes: dict[str, str] = {}
-    for name in STREAM_KEYS:
+    for name in stream_keys:
         manifest_path = write_stream_manifest(
             destination,
             name,
@@ -2512,20 +1780,15 @@ def _streamed_main(args: argparse.Namespace) -> None:
             field_types=ENTRY_ATTEMPT_FIELD_TYPES,
         )
 
-    ai_proposals_path = destination / "ai_primitive_proposals.json"
-    atomic_bytes(
-        ai_proposals_path,
-        json.dumps([], separators=(",", ":")).encode("utf-8"),
-    )
     summary = {
-        "version": str(config_payload.get("version", "")),
+        "schema_version": config_payload.get("schema_version"),
         "source": str(loaded.source),
         "source_sha256": source_hash,
         "source_matches_preregistered_causal_front": (
-            source_hash == validation.causal_front_sha256
+            source_hash == validation.causal_source.sha256
         ),
         "source_role": loaded.source_role,
-        "validation_protocol_version": validation.version,
+        "validation_schema_version": validation.schema_version,
         "validation_protocol_hash": validation.fingerprint,
         "validation_window_role": window.role,
         "config_hash": config_hash,
@@ -2538,8 +1801,6 @@ def _streamed_main(args: argparse.Namespace) -> None:
         "end": end.isoformat(),
         "decision_clock_interval": "[start, end)",
         "decision_rows": int(state["decision_rows"]),
-        "funnel_transitions": int(state["funnel_rows"]),
-        "path_tests": int(state["path_test_rows"]),
         "brain_calibration_capture": brain_calibration_enabled,
         "brain_calibration_rows": int(
             state["brain_calibration_rows"]
@@ -2551,9 +1812,6 @@ def _streamed_main(args: argparse.Namespace) -> None:
             sorted(state["model_action_counts"].items())
         ),
         "action_counts": dict(sorted(state["risk_action_counts"].items())),
-        "path_test_outcomes": dict(
-            sorted(state["path_outcome_counts"].items())
-        ),
         "approved_entry_attempts": len(entry_attempt_rows),
         "filled_entry_attempts": sum(
             row["outcome"] == "filled" for row in entry_attempt_rows
@@ -2576,11 +1834,11 @@ def _streamed_main(args: argparse.Namespace) -> None:
         "checkpoint_bars": int(args.checkpoint_bars),
         "stream_rows": {
             name: int(state["streams"][name]["rows"])
-            for name in STREAM_KEYS
+            for name in stream_keys
         },
         "peak_buffer_rows": dict(state["peak_buffer_rows"]),
         "future_path_visible_to_model": False,
-        "future_path_outcomes_separate_stream": True,
+        "future_path_output": False,
         "sequential_execution_evaluated": bool(args.simulate_execution),
         "profitability_evaluated": bool(
             args.simulate_execution and trade_rows
@@ -2591,8 +1849,6 @@ def _streamed_main(args: argparse.Namespace) -> None:
             if args.simulate_execution
             else None
         ),
-        "chart_artifacts": [],
-        "ai_primitive_model_authority": False,
     }
     summary_path = destination / "summary.json"
     atomic_bytes(summary_path, canonical_json(to_primitive(summary)))
@@ -2607,9 +1863,7 @@ def _streamed_main(args: argparse.Namespace) -> None:
         "resume_supported": False,
     }
     atomic_bytes(progress_path, canonical_json(final_progress))
-    auxiliary_hashes = {
-        "ai_primitive_proposals.json": sha256_file(ai_proposals_path),
-    }
+    auxiliary_hashes: dict[str, str] = {}
     if brain_calibration_enabled:
         auxiliary_hashes["brain_calibration_lineage.json"] = sha256_file(
             brain_lineage_path
@@ -2645,9 +1899,6 @@ def _streamed_main(args: argparse.Namespace) -> None:
 
 def main() -> None:
     args = parse_args()
-    if args.legacy_visual_replay:
-        _legacy_visual_main(args)
-        return
     try:
         _streamed_main(args)
     except Exception as exc:

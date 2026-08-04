@@ -22,7 +22,6 @@ import pandas as pd
 from .model import Candle, Direction, Timeframe, aware_timestamp
 
 
-LEGACY_PROTOCOL_VERSION = "3.0.2-displacement-dual-clock.1"
 EPISODE_PROTOCOL_VERSION = "3.2.0-displacement-episode.2"
 
 
@@ -41,8 +40,7 @@ class DisplacementProtocol:
     protocol_version: str = EPISODE_PROTOCOL_VERSION
     atr_baseline_bars: int = 14
 
-    # A strong one-bar impulse is an immediate opposite-displacement reason.
-    # The names remain available for archived packet compatibility.
+    # A strong one-bar impulse seeds the cumulative opposite-displacement probe.
     seed_body_fraction: float = 0.60
     seed_directional_clv: float = 0.75
     seed_tr_atr: float = 0.80
@@ -62,10 +60,7 @@ class DisplacementProtocol:
     downstream_authoritative: bool = False
 
     def __post_init__(self) -> None:
-        if self.protocol_version not in {
-            LEGACY_PROTOCOL_VERSION,
-            EPISODE_PROTOCOL_VERSION,
-        }:
+        if self.protocol_version != EPISODE_PROTOCOL_VERSION:
             raise ValueError("unsupported displacement protocol version")
         if (
             not isinstance(self.protocol_hash, str)
@@ -120,6 +115,10 @@ class DisplacementProtocol:
         payload = json.loads(raw)
         thresholds = payload["thresholds"]
         version = str(payload["protocol_version"])
+        if version != EPISODE_PROTOCOL_VERSION:
+            raise ValueError("unsupported displacement protocol version")
+        if payload.get("timeframe") != "5m":
+            raise ValueError("displacement episode protocol requires 5m")
         tick_size = payload.get("tick_size")
         if tick_size is None:
             tick_size = payload["input_contract"]["tick_size"]
@@ -132,29 +131,16 @@ class DisplacementProtocol:
                 thresholds["strictly_prior_baseline_observations"]
             ),
             seed_body_fraction=float(
-                thresholds.get(
-                    "strong_reverse_body_fraction_min",
-                    thresholds.get("seed_body_fraction_min", 0.60),
-                )
+                thresholds["strong_reverse_body_fraction_min"]
             ),
             seed_directional_clv=float(
-                thresholds.get(
-                    "strong_reverse_directional_clv_min",
-                    thresholds.get("seed_directional_clv_min", 0.75),
-                )
+                thresholds["strong_reverse_directional_clv_min"]
             ),
             seed_tr_atr=float(
-                thresholds.get(
-                    "strong_reverse_tr_over_atr_min",
-                    thresholds.get("seed_tr_over_atr0_min", 0.80),
-                )
+                thresholds["strong_reverse_tr_over_atr_min"]
             ),
-            activation_min_bar=int(
-                thresholds.get("activation_episode_bar_min", 2)
-            ),
-            activation_max_bar=int(
-                thresholds.get("activation_episode_bar_max", 0)
-            ),
+            activation_min_bar=int(thresholds["activation_episode_bar_min"]),
+            activation_max_bar=0,
             activation_relative_atr=float(
                 thresholds["activation_relative_atr_min"]
             ),
@@ -167,53 +153,21 @@ class DisplacementProtocol:
             activation_mean_body_fraction=float(
                 thresholds["activation_mean_body_fraction_min"]
             ),
-            activation_min_directional_clv=float(
-                thresholds.get("activation_min_directional_clv_min", 0.0)
-            ),
+            activation_min_directional_clv=0.0,
             continuation_progress_ticks=int(
-                thresholds.get(
-                    "candidate_close_progress_ticks_min",
-                    thresholds.get("continuation_close_progress_ticks_min", 1),
-                )
+                thresholds["candidate_close_progress_ticks_min"]
             ),
             candidate_directional_clv=float(
-                thresholds.get("candidate_directional_clv_min", 0.50)
+                thresholds["candidate_directional_clv_min"]
             ),
             activation_body_continuity=float(
-                thresholds.get("activation_body_continuity_min", 0.60)
+                thresholds["activation_body_continuity_min"]
             ),
             consecutive_interruptions_max=int(
-                thresholds.get("consecutive_interruptions_max", 1)
+                thresholds["consecutive_interruptions_max"]
             ),
-            downstream_authoritative=payload.get(
-                "downstream_authoritative", False
-            ),
+            downstream_authoritative=payload["downstream_authoritative"],
         )
-
-        if version == LEGACY_PROTOCOL_VERSION:
-            mirrors = (
-                "protocol_version",
-                "tick_size",
-                "atr_baseline_bars",
-                "seed_body_fraction",
-                "seed_directional_clv",
-                "seed_tr_atr",
-                "activation_min_bar",
-                "activation_max_bar",
-                "activation_relative_atr",
-                "activation_efficiency",
-                "activation_speed",
-                "activation_mean_body_fraction",
-                "activation_min_directional_clv",
-                "continuation_progress_ticks",
-            )
-            if any(
-                payload.get(name) != getattr(protocol, name)
-                for name in mirrors
-            ):
-                raise ValueError("legacy displacement mirrors disagree")
-        elif payload.get("timeframe") != "5m":
-            raise ValueError("displacement episode protocol requires 5m")
         return protocol
 
 

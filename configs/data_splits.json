@@ -1,0 +1,120 @@
+{
+  "schema_version": 1,
+  "frozen_at": "2026-08-04T00:00:00-04:00",
+  "sources": {
+    "ohlcv": {
+      "path": "data/processed/nq_1m_previous_session_front_v2_3_2017_2026.parquet",
+      "sha256": "84c9ed4d1de379382bdc41e0fe02e3611373ba182cfeebe09e3832d29cbafd7b",
+      "manifest_path": "data/processed/nq_1m_previous_session_front_v2_3_2017_2026.manifest.json",
+      "manifest_sha256": "391415fa23abfde5281c60ad4d882b32ff284b1aedb6298e398ed72036a9042f",
+      "selection": "highest total volume from the strictly prior completed Globex session",
+      "current_session_volume_used": false,
+      "off_session_rows_removed_before_contract_selection": 2215
+    },
+    "mbo": {
+      "development": {
+        "root": "data/raw/nq_mbo/legacy_parquet",
+        "partition_manifest_path": "data/raw/nq_mbo/legacy_parquet/manifest.json",
+        "partition_manifest_sha256": "9fbaef324de51cdbc60e13ea07acb7015cce6c409545761d7148ec5f7e8045cd",
+        "execution_artifacts": [
+          {
+            "path": "data/processed/mbo_execution_dev_202406_v2_3_clockfix.parquet",
+            "sha256": "8dc1df19e4b3bcf3c829a2b07c69552a583e667224d89305f78aaae21b73b1ed",
+            "manifest_path": "data/processed/mbo_execution_dev_202406_v2_3_clockfix.parquet.manifest.json",
+            "manifest_sha256": "862e0908617ac74194692bcda8e8f95077c07eb52ba136f398b18b04db7678a2"
+          },
+          {
+            "path": "data/processed/mbo_execution_dev_202407_v2_3_clockfix.parquet",
+            "sha256": "2edea16b4d2f579027767621ab12c144dee84e2f23c87ed6bfd3916b4db3ff18",
+            "manifest_path": "data/processed/mbo_execution_dev_202407_v2_3_clockfix.parquet.manifest.json",
+            "manifest_sha256": "940c71b54c3b7fed3091880027c632f1f62614f2ff855897eeb717521d184bb1"
+          }
+        ]
+      },
+      "sealed_holdout": {
+        "path": "data/raw/nq_mbo/holdout_dbn/glbx-mdp3-20240801-20241201.mbo.dbn.zst",
+        "sha256": "8927a904876d3a22af8dce7f3fe05d2ba574f2083435ba9bb477faafc45477b8",
+        "manifest_path": "data/raw/nq_mbo/holdout_dbn/manifest_20240801-20241201.json",
+        "manifest_sha256": "cb04c2706a21bc4c293e6900ef7d34b0fecf13bd304a13dfbebf162278e17c6f",
+        "sealed_marker": "data/raw/nq_mbo/holdout_dbn/.HOLDOUT_SEALED",
+        "independent_start": "2024-08-02T00:00:00Z"
+      }
+    }
+  },
+  "belief_calibration_valid_from": "2022-01-01T00:00:00-05:00",
+  "ohlcv_windows": {
+    "development": {
+      "start": "2017-01-03T18:00:00-05:00",
+      "end_exclusive": "2022-01-01T00:00:00-05:00",
+      "purpose": "Primitive, episode and playbook-definition development; no PnL-driven threshold search."
+    },
+    "calibration": {
+      "start": "2022-01-01T00:00:00-05:00",
+      "end_exclusive": "2024-01-01T00:00:00-05:00",
+      "purpose": "Typed Brain reliability mappings after primitive definitions are frozen."
+    },
+    "rolling_oof": {
+      "start": "2024-01-01T00:00:00-05:00",
+      "end_exclusive": "2026-04-01T00:00:00-04:00",
+      "purpose": "One rolling out-of-fold evaluation after the vertical chain is stable."
+    },
+    "sealed_holdout": {
+      "start": "2026-04-01T00:00:00-04:00",
+      "end_exclusive": "2026-07-14T00:00:00-04:00",
+      "purpose": "Single final reveal after code, registry, calibration and execution bindings are frozen."
+    }
+  },
+  "mbo_windows": {
+    "development": {
+      "start": "2024-06-02T00:00:00Z",
+      "end_exclusive": "2024-08-02T00:00:00Z",
+      "purpose": "Observed spread, depth, fillability and cost development only."
+    },
+    "sealed_holdout": {
+      "start": "2024-08-02T00:00:00Z",
+      "end_exclusive": "2024-12-02T00:00:00Z",
+      "purpose": "Single final execution-reality reveal; DBN content remains sealed until authorized."
+    }
+  },
+  "fixed_development_windows": {
+    "mature_range_coverage": {
+      "purpose": "Outcome-blind descriptive coverage of natural H1 dealing ranges and range-boundary manipulation.",
+      "warmup_calendar_days": 7,
+      "threshold_search": false,
+      "windows": [
+        {
+          "id": "2017-june",
+          "start": "2017-06-01T18:00:00-04:00",
+          "end_exclusive": "2017-07-01T18:00:00-04:00"
+        },
+        {
+          "id": "2018-june",
+          "start": "2018-06-01T18:00:00-04:00",
+          "end_exclusive": "2018-07-01T18:00:00-04:00"
+        },
+        {
+          "id": "2019-june",
+          "start": "2019-06-01T18:00:00-04:00",
+          "end_exclusive": "2019-07-01T18:00:00-04:00"
+        },
+        {
+          "id": "2020-june",
+          "start": "2020-06-01T18:00:00-04:00",
+          "end_exclusive": "2020-07-01T18:00:00-04:00"
+        },
+        {
+          "id": "2021-june",
+          "start": "2021-06-01T18:00:00-04:00",
+          "end_exclusive": "2021-07-01T18:00:00-04:00"
+        }
+      ]
+    }
+  },
+  "leakage_rules": [
+    "Only completed bars at or before the decision clock may enter Observation, Scene Graph, Belief, Decision or Risk.",
+    "MBO supplies execution reality only; it cannot define SMC primitives, market labels or future direction.",
+    "Calibration, rolling OOF, MBO stability and sealed holdout are separate stages and cannot select each other's thresholds.",
+    "The sealed OHLCV and MBO windows cannot be opened to repair a failed development hypothesis.",
+    "Same-bar stop and target ambiguity is resolved conservatively."
+  ]
+}

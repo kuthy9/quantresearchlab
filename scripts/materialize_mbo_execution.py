@@ -36,14 +36,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--mbo-root", default="data/raw/nq_mbo/legacy_parquet")
     parser.add_argument(
         "--ohlcv-source",
-        default="data/processed/nq_1m_previous_session_front_2017_2026.parquet",
+        default="data/processed/nq_1m_previous_session_front_v2_3_2017_2026.parquet",
     )
     parser.add_argument("--start", required=True)
     parser.add_argument("--end", required=True)
     parser.add_argument("--output", required=True)
     parser.add_argument(
         "--validation-protocol",
-        default="configs/validation_protocol_v2.json",
+        default="configs/data_splits.json",
     )
     parser.add_argument("--batch-size", type=int, default=100_000)
     parser.add_argument("--workers", type=int, default=4)
@@ -496,7 +496,7 @@ def main() -> None:
     if destination.exists():
         raise FileExistsError(f"refusing to overwrite existing output: {destination}")
     ohlcv_hash = _sha256_file(args.ohlcv_source)
-    if ohlcv_hash != protocol.causal_front_sha256:
+    if ohlcv_hash != protocol.causal_source.sha256:
         raise RuntimeError(
             "MBO execution materialization requires the preregistered "
             "strict previous-session contract series"
@@ -600,7 +600,7 @@ def main() -> None:
     output.to_parquet(destination, index=False)
     manifest = {
         "format_version": 1,
-        "validation_protocol_version": protocol.version,
+        "validation_schema_version": protocol.schema_version,
         "validation_protocol_hash": protocol.fingerprint,
         "validation_window_role": window.role,
         "start": start.isoformat(),

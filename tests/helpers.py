@@ -299,6 +299,28 @@ def executable_belief(
         plan.remaining_path_R,
         uncertainty,
         plan,
+        thesis_strength=probability,
+        sequence_progress=1.0,
+        location_quality=1.0,
+        entry_readiness=1.0,
+        delivery_quality=1.0,
+        evidence_group_scores={
+            "structure": probability,
+            "displacement": 1.0,
+            "location": 1.0,
+            "liquidity": probability,
+            "trigger": 1.0,
+            "execution": 1.0,
+        },
+        hard_gate_results={"synthetic_current_gate": True},
+        raw_quality_dimensions={
+            "thesis_strength": probability,
+            "sequence_progress": 1.0,
+            "location_quality": 1.0,
+            "entry_readiness": 1.0,
+            "delivery_quality": 1.0,
+            "uncertainty": uncertainty,
+        },
     )
     return MarketBelief(observation.asof, {hypothesis.key: hypothesis})
 

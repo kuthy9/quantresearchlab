@@ -8,7 +8,7 @@ revision remains available for decision-time reconstruction.
 from __future__ import annotations
 
 from collections import defaultdict, deque
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from enum import Enum
 import hashlib
 import json
@@ -19,16 +19,12 @@ from typing import Any, Iterable, Mapping, Sequence
 import pandas as pd
 
 from .model import (
-    BOSLifecycle,
     CORE_TIMEFRAMES,
     Direction,
-    EntryLocationLifecycle,
     EventKind,
-    FairValueGapLifecycle,
     LiquidityInventoryLifecycle,
     MarketObservation,
     MarketEvent,
-    OrderBlockLifecycle,
     Playbook,
     PlaybookPhase,
     StructureLifecycle,
@@ -2239,7 +2235,6 @@ _PHASE_FOCUS: Mapping[PlaybookPhase, tuple[str, ...]] = {
     PlaybookPhase.WEAKENING: (Timeframe.H1.value, Timeframe.M5.value, Timeframe.M1.value),
     PlaybookPhase.COMPLETED: (Timeframe.H1.value, Timeframe.M15.value),
     PlaybookPhase.INVALIDATED: (Timeframe.H1.value, Timeframe.M15.value),
-    PlaybookPhase.WAITING_PULLBACK: (Timeframe.M15.value, Timeframe.M5.value),
 }
 
 

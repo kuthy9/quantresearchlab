@@ -1,4 +1,4 @@
-"""Causal continuous SMC trader, product version 3."""
+"""Causal continuous SMC trader, product version 1."""
 
 from .engine import ContinuousSMCEngine
 from .model import (
@@ -18,4 +18,4 @@ __all__ = [
     "PlaybookPhase",
 ]
 
-__version__ = "3.0.0"
+__version__ = "1.0.0"

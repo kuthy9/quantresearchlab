@@ -39,7 +39,7 @@ from .helpers import market_observation
 
 
 ROOT = Path(__file__).resolve().parents[1]
-PROTOCOL_PATH = ROOT / "configs/smc_primitives_v3_group4.json"
+PROTOCOL_PATH = ROOT / "configs/primitives_range.json"
 PROTOCOL_SHA = (
     "14b049facadb815c3fdc0d134275ee3f1efb3ca7c775a5f18ec4efad61663bc5"
 )
@@ -1040,7 +1040,7 @@ def test_group4_requires_the_typed_h1_structure_source() -> None:
         CausalObserver(
             ObserverConfig(
                 liquidity_protocol=(
-                    "configs/smc_primitives_v3_group12.json"
+                    "configs/primitives_structure_liquidity.json"
                 ),
                 group4_protocol=str(PROTOCOL_PATH),
             )

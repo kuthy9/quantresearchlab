@@ -23,8 +23,8 @@ from smc_trader.model import Playbook
 
 
 ROOT = Path(__file__).resolve().parents[1]
-MODEL_CONFIG = ROOT / "configs/model_v3_development.json"
-VALIDATION_PROTOCOL = ROOT / "configs/validation_protocol_v2.json"
+MODEL_CONFIG = ROOT / "configs/model.json"
+VALIDATION_PROTOCOL = ROOT / "configs/data_splits.json"
 DFP = Playbook.DISPLACEMENT_FIRST_PULLBACK
 LSR = Playbook.LIQUIDITY_SWEEP_REVERSAL
 FAVR = Playbook.FAILED_AUCTION_VALUE_RETURN
@@ -63,7 +63,7 @@ def _rows() -> pd.DataFrame:
     rows: list[dict[str, object]] = []
     start = pd.Timestamp("2022-02-01T09:31:00-05:00")
     for playbook in (DFP, LSR):
-        version = bindings["playbook_protocol_versions"][playbook.value]
+        version = bindings["playbook_schema_versions"][playbook.value]
         for dimension_index, dimension in enumerate(FITTED_DIMENSIONS):
             for index in range(8):
                 sampled_at = start + pd.Timedelta(

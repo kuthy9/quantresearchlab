@@ -9,16 +9,14 @@ from smc_trader.calibration_replay import ReplayCheckpointStore
 from smc_trader.causal import CausalMarketReader, ReaderUpdate
 from smc_trader.displacement import DisplacementLifecycle, DisplacementProtocol
 from smc_trader.displacement_observer import CausalDisplacementEye, READER_ANOMALY_WHITELIST
-from smc_trader.engine import ContinuousSMCEngine
 from smc_trader.model import Bar, Candle, EventKind, MarketEvent, Timeframe
 from smc_trader.observation import CausalObserver, EventMemory, ObserverConfig
-from smc_trader.visualization import DecisionVisualizer
 
 
 ROOT = Path(__file__).resolve().parents[1]
-PROTOCOL_PATH = ROOT / "configs/smc_primitives_v3_displacement_episode.json"
-GROUP12_PROTOCOL_PATH = ROOT / "configs/smc_primitives_v3_group12.json"
-GROUP3_PROTOCOL_PATH = ROOT / "configs/smc_primitives_v3_group3.json"
+PROTOCOL_PATH = ROOT / "configs/primitives_displacement.json"
+GROUP12_PROTOCOL_PATH = ROOT / "configs/primitives_structure_liquidity.json"
+GROUP3_PROTOCOL_PATH = ROOT / "configs/primitives_zones.json"
 EXPERIMENT_ID = "EXP-SMC-3.0.2-013-CAUSAL-5M-DISPLACEMENT-RECOVERY-IDENTITY-CLOSURE"
 SEMANTIC_BASE_SHA = "0d7844635ee77a679da87fd47f284719adcca9afc71850ecd0da76addf62455b"
 PREREGISTRATION_SHA = "220ddd88eb6decf2d23af7b4368d5b9ea3867588c3f7310564f6160349a6de75"
@@ -434,45 +432,3 @@ def test_exp013_checkpoint_resume_observation_equivalence(tmp_path: Path) -> Non
     assert _send(uninterrupted, continuation) == _send(resumed, continuation)
     assert uninterrupted.last_batch == resumed.last_batch
     assert uninterrupted.tracker.snapshot() == resumed.tracker.snapshot()
-
-
-def _histories(asof: pd.Timestamp):
-    durations = {Timeframe.H4: 240, Timeframe.H1: 60, Timeframe.M5: 5, Timeframe.M1: 1}
-    return {
-        timeframe: (Candle(
-            timeframe, asof - pd.Timedelta(minutes=minutes), asof,
-            100.0, 100.25, 99.75, 100.0, 100.0, "NQH5", 1,
-            minutes, minutes, True, minutes, 0,
-        ),)
-        for timeframe, minutes in durations.items()
-    }
-
-
-def test_exp013_visualization_and_legacy_pipeline_noninterference(
-    tmp_path: Path,
-) -> None:
-    legacy_engine = ContinuousSMCEngine()
-    shadow_engine = ContinuousSMCEngine(observer=CausalObserver(
-        ObserverConfig(displacement_protocol=str(PROTOCOL_PATH))
-    ))
-    legacy, shadow = legacy_engine.on_bar(_bar(0)), shadow_engine.on_bar(_bar(0))
-    assert (legacy.observation.displacement, shadow.observation.displacement is not None) == (
-        None, True,
-    )
-    assert replace(shadow.observation, displacement=None) == legacy.observation
-    assert (shadow.belief, shadow.decision, shadow.risk) == (
-        legacy.belief, legacy.decision, legacy.risk,
-    )
-    visualizer, histories = DecisionVisualizer(), _histories(legacy.observation.asof)
-    legacy_artifact = visualizer.render_decision(
-        legacy, histories, tmp_path / "legacy.png"
-    )
-    shadow_artifact = visualizer.render_decision(
-        replace(shadow, snapshot_hash=legacy.snapshot_hash),
-        histories, tmp_path / "shadow.png",
-    )
-    # The causal displacement eye remains isolated from belief/decision/risk,
-    # while the audit image must expose the additional observation instead of
-    # hiding model-visible evidence to preserve a legacy byte hash.
-    assert shadow_artifact.sha256 != legacy_artifact.sha256
-    assert shadow_artifact.maximum_market_time == legacy_artifact.maximum_market_time

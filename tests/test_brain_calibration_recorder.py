@@ -18,7 +18,6 @@ from smc_trader.model import (
     StructureLifecycle,
     Timeframe,
 )
-from smc_trader.validation import PlaybookFunnelRecorder
 
 
 TZ = "America/New_York"
@@ -851,45 +850,6 @@ def test_non_future_deadline_is_censored_not_labelled_success() -> None:
     assert all(row.outcome_value is None for row in fitted)
     assert all(row.censored and not row.fit_eligible for row in fitted)
     assert all(row.resolution == "non_future_deadline" for row in fitted)
-
-
-def test_funnel_persists_non_top_terminal_identity_once() -> None:
-    recorder = PlaybookFunnelRecorder()
-    terminal = _hypothesis(
-        playbook=Playbook.LIQUIDITY_SWEEP_REVERSAL,
-        phase=PlaybookPhase.INVALIDATED,
-        setup_id="terminal-setup",
-        context_id="terminal-context",
-        terminal_at=_clock(-2),
-        terminal_reason="micro_bos_opposed_or_ambiguous",
-        terminal_source_ids=("terminal-setup", "micro-bos-event"),
-    )
-    terminal.probability = 0.1
-    top = _hypothesis(
-        phase=PlaybookPhase.ARMED,
-        complete=False,
-        setup_id="top-setup",
-        context_id="top-context",
-    )
-    top.probability = 0.95
-    snapshot = _snapshot(hypotheses=(top, terminal))
-
-    recorder.observe(snapshot)
-    terminal_row = next(
-        row for row in recorder.rows if row.setup_id == "terminal-setup"
-    )
-    assert terminal_row.terminal_at == _clock(-2)
-    assert terminal_row.observed_at == _clock(0)
-    assert terminal_row.terminal_reason == (
-        "micro_bos_opposed_or_ambiguous"
-    )
-    assert json.loads(terminal_row.terminal_source_ids) == [
-        "terminal-setup",
-        "micro-bos-event",
-    ]
-
-    recorder.observe(snapshot)
-    assert len(recorder.rows) == 2
 
 
 def test_frozen_delivery_survives_brain_setup_rearm() -> None:
