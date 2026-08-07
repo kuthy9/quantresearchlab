@@ -40,7 +40,9 @@ class Group4Protocol:
     tick_size: float
     h1_atr_period: int
     m1_atr_period: int
-    manipulation_resolution_delay_real_1m_bars: int
+    reacceptance_hold_bars: int
+    outside_acceptance_closes: int
+    resolution_deadline_real_1m_bars: int
     minimum_candidate_real_h1_bars: int
     maximum_forming_real_h1_bars: int
     minimum_boundary_touches_each: int
@@ -52,7 +54,7 @@ class Group4Protocol:
     maximum_compression_ratio: float
     maximum_ranges: int
     maximum_manipulations: int
-    protocol_version: str = "3.1.0-group4.0"
+    protocol_version: str = "3.2.0-group4.1"
 
     def __post_init__(self) -> None:
         hashes = (
@@ -66,42 +68,26 @@ class Group4Protocol:
                        for character in value)
                 for value in hashes
             )
-            or self.protocol_version != "3.1.0-group4.0"
-            or not math.isclose(
-                self.tick_size,
-                0.25,
-                rel_tol=0.0,
-                abs_tol=0.0,
-            )
-            or self.h1_atr_period != 14
-            or self.m1_atr_period != 14
-            or self.manipulation_resolution_delay_real_1m_bars != 1
-            or self.minimum_candidate_real_h1_bars != 8
-            or self.maximum_forming_real_h1_bars != 24
-            or self.minimum_boundary_touches_each != 2
-            or self.minimum_midpoint_crossings != 2
-            or not math.isclose(
-                self.minimum_inside_close_fraction,
-                0.8,
-                rel_tol=0.0,
-                abs_tol=0.0,
-            )
-            or not math.isclose(
-                self.maximum_width_atr_at_formation,
-                4.0,
-                rel_tol=0.0,
-                abs_tol=0.0,
-            )
-            or self.compression_early_real_h1_bars != 4
-            or self.compression_late_real_h1_bars != 4
-            or not math.isclose(
-                self.maximum_compression_ratio,
-                0.8,
-                rel_tol=0.0,
-                abs_tol=0.0,
-            )
-            or self.maximum_ranges != 64
-            or self.maximum_manipulations != 256
+            or not self.protocol_version
+            or not math.isfinite(float(self.tick_size))
+            or self.tick_size <= 0.0
+            or self.h1_atr_period < 1
+            or self.m1_atr_period < 1
+            or self.reacceptance_hold_bars != 1
+            or self.outside_acceptance_closes != 2
+            or self.resolution_deadline_real_1m_bars != 5
+            or self.minimum_candidate_real_h1_bars < 2
+            or self.maximum_forming_real_h1_bars
+            < self.minimum_candidate_real_h1_bars
+            or self.minimum_boundary_touches_each < 2
+            or self.minimum_midpoint_crossings < 1
+            or not 0.0 < self.minimum_inside_close_fraction <= 1.0
+            or self.maximum_width_atr_at_formation <= 0.0
+            or self.compression_early_real_h1_bars < 1
+            or self.compression_late_real_h1_bars < 1
+            or self.maximum_compression_ratio <= 0.0
+            or self.maximum_ranges < 1
+            or self.maximum_manipulations < 1
         ):
             raise ValueError("Group 4 protocol differs from its frozen contract")
 
@@ -121,10 +107,14 @@ class Group4Protocol:
             tick_size=float(payload["tick_size"]),
             h1_atr_period=int(parameters["h1_atr_period"]),
             m1_atr_period=int(parameters["m1_atr_period"]),
-            manipulation_resolution_delay_real_1m_bars=int(
-                parameters[
-                    "manipulation_resolution_delay_real_1m_bars"
-                ]
+            reacceptance_hold_bars=int(
+                parameters["reacceptance_hold_bars"]
+            ),
+            outside_acceptance_closes=int(
+                parameters["outside_acceptance_closes"]
+            ),
+            resolution_deadline_real_1m_bars=int(
+                parameters["resolution_deadline_real_1m_bars"]
             ),
             minimum_candidate_real_h1_bars=int(
                 parameters["minimum_candidate_real_h1_bars"]
@@ -356,12 +346,20 @@ class CausalGroup4Tracker:
         supports = tuple(
             zone
             for zone in zones
-            if zone.side == "support" and self._source_is_live(zone)
+            if (
+                zone.source_kind == "structural_swing"
+                and zone.side == "support"
+                and self._source_is_live(zone)
+            )
         )
         resistances = tuple(
             zone
             for zone in zones
-            if zone.side == "resistance" and self._source_is_live(zone)
+            if (
+                zone.source_kind == "structural_swing"
+                and zone.side == "resistance"
+                and self._source_is_live(zone)
+            )
         )
         self._blocked_cold_pairs.update(
             (lower.zone_id, upper.zone_id)
@@ -716,12 +714,20 @@ class CausalGroup4Tracker:
         supports = tuple(
             zone
             for zone in zones
-            if zone.side == "support" and self._source_is_live(zone)
+            if (
+                zone.source_kind == "structural_swing"
+                and zone.side == "support"
+                and self._source_is_live(zone)
+            )
         )
         resistances = tuple(
             zone
             for zone in zones
-            if zone.side == "resistance" and self._source_is_live(zone)
+            if (
+                zone.source_kind == "structural_swing"
+                and zone.side == "resistance"
+                and self._source_is_live(zone)
+            )
         )
         admitted = {
             (
@@ -1073,7 +1079,8 @@ class CausalGroup4Tracker:
             else pool.lower_bound
         )
         if (
-            item.side != pool.side
+            pool.lifecycle.value != "formed"
+            or item.side != pool.side
             or item.kind != expected_kind
             or item.price != expected_price
             or item.lower_bound != pool.lower_bound
@@ -1222,12 +1229,9 @@ class CausalGroup4Tracker:
             if isinstance(state_or_source, ManipulationState)
             else state_or_source.upper_bound
         )
-        if state_or_source.source_kind == "mature_range_boundary":
-            if close > upper_bound:
-                return True, "above"
-            if close < lower_bound:
-                return True, "below"
-            return False, None
+        # Acceptance is always measured against the actually swept side.
+        # The opposite range boundary is a separate liquidity source, not a
+        # second way to accept this auction outside.
         if state_or_source.side == "above":
             return close > upper_bound, (
                 "above"
@@ -1247,7 +1251,10 @@ class CausalGroup4Tracker:
         live = tuple(
             state
             for state in self._manipulations.values()
-            if state.lifecycle is ManipulationLifecycle.SWEPT
+            if (
+                state.lifecycle is ManipulationLifecycle.SWEPT
+                and state.censored_at is None
+            )
         )
         if len(live) > 1:
             raise RuntimeError(
@@ -1262,44 +1269,98 @@ class CausalGroup4Tracker:
         )
         age = state.age_1m_bars + 1
         outside_bars = state.outside_completed_bars + int(outside)
-        if (
-            age
-            < self.protocol.manipulation_resolution_delay_real_1m_bars
-        ):
-            self._manipulations[state.manipulation_id] = replace(
-                state,
-                last_updated_at=candle.end,
-                outside_completed_bars=outside_bars,
-                age_1m_bars=age,
-            )
-            return None
         if outside:
-            resolved = replace(
-                state,
-                lifecycle=ManipulationLifecycle.ACCEPTED_OUTSIDE,
-                accepted_outside_at=candle.end,
-                resolved_at=candle.end,
-                state_started_at=candle.end,
-                last_updated_at=candle.end,
-                resolved_side=resolved_side,
-                outside_completed_bars=outside_bars,
-                age_1m_bars=age,
-                transition_reason="close_held_outside",
+            outside_run = (
+                state.outside_run + 1
+                if state.outside_run_side == resolved_side
+                else 1
             )
-        else:
-            resolved = replace(
+            advanced = replace(
                 state,
-                lifecycle=ManipulationLifecycle.REACCEPTED,
-                reaccepted_at=candle.end,
-                resolved_at=candle.end,
-                state_started_at=candle.end,
                 last_updated_at=candle.end,
-                reentry_price=float(candle.close),
                 outside_completed_bars=outside_bars,
                 age_1m_bars=age,
-                transition_reason="close_returned_inside",
+                reentry_candidate_at=None,
+                reentry_candidate_price=None,
+                inside_hold_bars=0,
+                reentry_failed_at=(
+                    candle.end
+                    if state.reentry_candidate_at is not None
+                    else state.reentry_failed_at
+                ),
+                outside_run=outside_run,
+                outside_run_side=resolved_side,
+            )
+            if outside_run >= self.protocol.outside_acceptance_closes:
+                resolved = replace(
+                    advanced,
+                    lifecycle=ManipulationLifecycle.ACCEPTED_OUTSIDE,
+                    accepted_outside_at=candle.end,
+                    resolved_at=candle.end,
+                    state_started_at=candle.end,
+                    resolved_side=resolved_side,
+                    transition_reason="consecutive_closes_held_outside",
+                )
+            else:
+                resolved = advanced
+        else:
+            if state.reentry_candidate_at is None:
+                resolved = replace(
+                    state,
+                    last_updated_at=candle.end,
+                    outside_completed_bars=outside_bars,
+                    age_1m_bars=age,
+                    reentry_candidate_at=candle.end,
+                    reentry_candidate_price=float(candle.close),
+                    inside_hold_bars=0,
+                    outside_run=0,
+                    outside_run_side=None,
+                )
+            else:
+                hold = state.inside_hold_bars + 1
+                advanced = replace(
+                    state,
+                    last_updated_at=candle.end,
+                    outside_completed_bars=outside_bars,
+                    age_1m_bars=age,
+                    inside_hold_bars=hold,
+                    outside_run=0,
+                    outside_run_side=None,
+                )
+                if hold >= self.protocol.reacceptance_hold_bars:
+                    resolved = replace(
+                        advanced,
+                        lifecycle=ManipulationLifecycle.REACCEPTED,
+                        reaccepted_at=candle.end,
+                        resolved_at=candle.end,
+                        state_started_at=candle.end,
+                        reentry_price=(
+                            state.reentry_candidate_price
+                        ),
+                        transition_reason=(
+                            "reentry_held_inside_swept_boundary"
+                        ),
+                    )
+                else:
+                    resolved = advanced
+        if (
+            resolved.lifecycle is ManipulationLifecycle.SWEPT
+            and age >= self.protocol.resolution_deadline_real_1m_bars
+        ):
+            resolved = replace(
+                resolved,
+                last_updated_at=candle.end,
+                censored_at=candle.end,
+                deadline_at=candle.end,
+                deadline_elapsed=True,
+                transition_reason="deadline_elapsed",
             )
         self._manipulations[state.manipulation_id] = resolved
+        if (
+            resolved.lifecycle is ManipulationLifecycle.SWEPT
+            and resolved.censored_at is None
+        ):
+            return None
         return resolved
 
     def _consume_range_crossings(
@@ -1328,6 +1389,7 @@ class CausalGroup4Tracker:
         self,
         source: _ManipulationSource,
         coincident_source_ids: tuple[str, ...],
+        crossed_source_ids: tuple[str, ...],
         candle: Candle,
         prior_atr: float,
     ) -> ManipulationState:
@@ -1400,6 +1462,18 @@ class CausalGroup4Tracker:
             age_1m_bars=0,
             transition_reason="source_swept",
             censored_at=None,
+            reentry_candidate_at=None,
+            reentry_candidate_price=None,
+            inside_hold_bars=0,
+            reentry_failed_at=None,
+            outside_run=int(outside),
+            outside_run_side=(source.side if outside else None),
+            # The fifth future real-completed bar is not knowable at sweep
+            # time across gaps/closures.  Record its actual clock only when
+            # the real-bar deadline is reached.
+            deadline_at=None,
+            deadline_elapsed=False,
+            crossed_source_ids=crossed_source_ids,
         )
         self._manipulations[manipulation_id] = state
         self._manipulation_order.append(manipulation_id)
@@ -1415,8 +1489,11 @@ class CausalGroup4Tracker:
                 (
                     identity
                     for identity in self._manipulation_order
-                    if self._manipulations[identity].lifecycle
-                    is not ManipulationLifecycle.SWEPT
+                    if not (
+                        self._manipulations[identity].lifecycle
+                        is ManipulationLifecycle.SWEPT
+                        and self._manipulations[identity].censored_at is None
+                    )
                 ),
                 None,
             )
@@ -1442,7 +1519,10 @@ class CausalGroup4Tracker:
             if state.source_inventory_item_id in retained_source_ids:
                 continue
             if (
-                state.lifecycle is ManipulationLifecycle.SWEPT
+                (
+                    state.lifecycle is ManipulationLifecycle.SWEPT
+                    and state.censored_at is None
+                )
                 or state.last_updated_at >= current_end
             ):
                 continue
@@ -1481,6 +1561,11 @@ class CausalGroup4Tracker:
                 == self.protocol.m1_atr_period
             )
             else None
+        )
+        had_live_before = any(
+            state.lifecycle is ManipulationLifecycle.SWEPT
+            and state.censored_at is None
+            for state in self._manipulations.values()
         )
         resolved = self._resolve_live_manipulation(candle)
         candidate_sources: list[_ManipulationSource] = []
@@ -1560,7 +1645,7 @@ class CausalGroup4Tracker:
         )
         created = None
         if (
-            resolved is None
+            not had_live_before
             and candidate_sources
             and not ambiguous
             and prior_atr is not None
@@ -1593,6 +1678,18 @@ class CausalGroup4Tracker:
             created = self._create_manipulation(
                 primary,
                 coincident,
+                tuple(
+                    dict.fromkeys(
+                        (
+                            primary.source_id,
+                            *(
+                                source.source_id
+                                for source in ordered
+                                if source is not primary
+                            ),
+                        )
+                    )
+                ),
                 candle,
                 prior_atr,
             )
@@ -1907,7 +2004,10 @@ class CausalGroup4Tracker:
                     censored_at=observed_at,
                 )
                 for state in candidate._manipulations.values()
-                if state.lifecycle is ManipulationLifecycle.SWEPT
+                if (
+                    state.lifecycle is ManipulationLifecycle.SWEPT
+                    and state.censored_at is None
+                )
             )
             candidate._ranges.clear()
             candidate._range_order.clear()

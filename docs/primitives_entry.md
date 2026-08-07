@@ -3,6 +3,9 @@
 The executable companion is
 `configs/primitives_entry.json`.
 
+Current protocol: `3.2.0-group5.3`. Typed state is available to the Brain,
+but natural authority is not yet validated and FAVR remains disabled.
+
 Group 5 closes four legacy semantic gaps with one incremental reducer:
 
 1. entry location is the completed 1m relationship to one exact frozen 5m
@@ -15,9 +18,10 @@ Group 5 closes four legacy semantic gaps with one incremental reducer:
 Micro BOS is not detected again. Group 5 only binds the exact upstream M1
 `BreakOfStructureState` to a causal context and anchor clock.
 
-This is descriptive eye infrastructure. It does not change a playbook,
-probability, state-machine phase, action utility, stop, target or risk
-decision.
+This is descriptive eye infrastructure. It never chooses a playbook, phase,
+action, stop, target or risk result. Typed playbooks may consume its exact
+states through their own causal gates; Group 5 has no independent action
+authority.
 
 ## Minimal implementation boundary
 
@@ -34,8 +38,10 @@ Overlapping FVG and order-block zones remain distinct. Their shared
 avoid counting the same displacement twice.
 
 FAVR remains disabled. A forming or broken range midpoint is not value.
-Mature-range entry sources and range-boundary manipulations are not Group 5
-inputs until Group 4 independently un-parks them.
+Mature ranges and range-boundary manipulations remain Group4/Brain context;
+Group5 does not register a range as an entry zone. After Group4 reacceptance,
+Group5 may observe only the reverse-displacement FVG/OB location and its
+ordered first-pullback/trigger path.
 
 ## Frozen dependencies and prohibited proxies
 
@@ -51,12 +57,13 @@ The following legacy values have no Group 5 authority:
 - `1m.path_sequence`;
 - `1m.trigger_hold_direction`;
 - support/resistance `reaccepted`;
-- a one-bar Group 4 `reaccepted`;
+- a duplicate Group5 pool reclaim/hold reconstruction when Group4 already
+  owns manipulation reacceptance;
 - legacy dealing ranges or 4H range position; and
 - any future path, PnL, MFE, MAE, action label or MBO outcome.
 
-They may remain temporarily for backward-compatible old tests, but the new
-typed reducer must neither read nor reproduce them as Group 5 truth.
+The typed reducer, Brain and visualization must neither read nor reproduce
+them as Group 5 truth.
 
 ## Completed-bar clock
 
@@ -210,11 +217,9 @@ Reacceptance lifecycle is:
 
 `held`, `failed` and `censored` are terminal.
 
-The two allowed anchors are:
-
-1. a first pullback to a frozen entry zone, using the near edge as reference;
-2. a Group 4 `formed_liquidity_pool` manipulation whose sweep bar completed
-   outside, using the swept pool boundary as reference.
+The only allowed anchor is a first pullback to a frozen FVG/OB entry zone,
+using its near edge as reference. Pool manipulation reacceptance is a Group4
+state and never creates `QualifiedReacceptanceState`.
 
 For long, `left` requires a close strictly below reference and reclaim
 requires a later close strictly above. Short is mirrored. Equality is
@@ -226,24 +231,16 @@ close exactly at the reference neither adds a hold bar nor fails; state
 remains `reclaimed`. A synthetic bar cannot prove hold.
 
 Before `held`, a strict completed-close loss back to the adverse side, a
-strict completed close beyond the frozen failure boundary, source failure
-or Group 4 `accepted_outside` produces a specific immutable failure reason.
+strict completed close beyond the frozen failure boundary, or typed entry-zone
+source failure produces a specific immutable failure reason.
 Wick-only excursions through the failure boundary are not this descriptive
 failure and do not replace the risk engine's separate same-bar stop rules.
 
-A wick that enters a zone but always closes on the delivery side is
-rejection, not reacceptance. A Group 4 sweep that closes back inside is also
-sweep rejection, not Group 5 reacceptance. Group 4 `reaccepted` is only
-minimum return evidence; Group 5 still requires strict reclaim and its later
-hold bar.
-
-For a pool context the original `sweep_extreme` is the frozen failure
-boundary. Later extrema never replace it. If Group 4 reaccepts only at exact
-boundary equality, Group 5 remains `left`; a later strict reclaim is still
-allowed. The first on-clock Group 4 `reaccepted_at` is therefore frozen as
-bounded causal memory in the Group 5 reacceptance state. It remains usable
-after the terminal Group 4 source leaves upstream retention, but an older
-newly appearing `reaccepted_at` may never be backfilled.
+A wick that enters an entry zone but always closes on the delivery side is
+rejection, not reacceptance. For pool reversal, Group4 `reaccepted` already
+means that a later inside close was followed by the configured hold bar.
+Group5 appends that exact event as the pool path's `reacceptance_held` step;
+it does not manufacture leave, reclaim or hold clocks of its own.
 
 Reclaim margin is frozen using causal ATR at `reclaimed_at`; hold margin is
 frozen using causal ATR at `held_at`. Strength is their clipped minimum. It
@@ -263,7 +260,7 @@ The only permitted source is a typed confirmed
 The anchor is:
 
 - `first_entered_at` for `zone_return`; or
-- `swept_at` for `pool_reversal`.
+- the exact `opposite_displacement` path-step clock for `pool_reversal`.
 
 The first confirmed M1 BOS strictly after the anchor is bound once. An
 aligned direction is recorded as `micro_bos_confirmed`; an opposed first
@@ -317,8 +314,9 @@ Step source identity is frozen as follows:
 | `zone_visible` | source zone ID | source zone ID |
 | `departure_confirmed`, `first_pullback`, `wick_rejection` | null | location ID |
 | `location_left` | typed zone ID only for typed source failure; otherwise null | location ID |
-| `pool_swept`, `sweep_rejection`, `accepted_outside` | manipulation ID | manipulation ID |
-| reacceptance leave/reclaim/held/failed | null | reacceptance ID |
+| `pool_swept`, pool `reacceptance_held`, `accepted_outside` | manipulation ID | manipulation ID |
+| `opposite_displacement` | source FVG/OB ID | displacement ID |
+| entry-zone reacceptance leave/reclaim/held/failed | null | reacceptance ID |
 | every micro-BOS form | BOS ID | target swing ID |
 
 The first step has no predecessor. Every later step points to exactly the
@@ -355,11 +353,12 @@ applicable.
 
 Pool paths may contain:
 
-`pool_swept → sweep_rejection|reference_left →
-reference_reclaimed → reacceptance_held|reacceptance_failed`
+`pool_swept → reacceptance_held → opposite_displacement →
+micro_bos_confirmed|micro_bos_opposed`
 
-plus one bound micro-BOS clock, record-only `micro_bos_simultaneous`, and
-`accepted_outside` when applicable.
+They may instead terminate on `accepted_outside`, the Group4 resolution
+deadline, earliest-clock opposite-displacement ambiguity, or strictly-later
+micro-BOS ambiguity. `micro_bos_simultaneous` remains record-only.
 
 Steps are ordered only when the completed data proves order. Events at the
 same completed clock carry `same_clock_known` or `same_clock_unknown`.
@@ -389,18 +388,16 @@ close-reason priority is: `location_left`, `reacceptance_failed`,
 `micro_bos_aligned`. `qualified_reacceptance_held` and
 `zone_rejection_observed` are milestone reasons, not close reasons.
 
-Pool sweep rejection and pool reacceptance held do not close by themselves.
-The pool path closes when its first single aligned/opposed M1 BOS coexists
-with either sweep rejection or held reacceptance, or immediately on
-strictly-later BOS ambiguity, `accepted_outside`, or reacceptance failure.
-Ambiguity closes with `micro_bos_ambiguous_same_clock`. FVG/OB mitigation
-alone never closes a continuously registered context. Closed/censored paths
-cannot retain a nonterminal reacceptance.
+Pool reacceptance does not close by itself. Group5 first waits for one
+strictly-later opposite displacement evidenced by a displacement-linked FVG
+or qualified order block, then binds a strictly-later M1 BOS. Multiple
+eligible displacement identities on the same earliest clock fail closed.
+`accepted_outside` and the Group4 resolution deadline close immediately.
+FVG/OB mitigation alone never closes a continuously registered context.
 
-A simultaneous anchor-clock BOS never closes a pool path. At a hard
-boundary, both the active path and any live reacceptance are censored,
-exposed once on the dedicated boundary channel, and then removed with the old
-epoch.
+A simultaneous anchor-clock BOS never closes a pool path. At a hard boundary,
+the active path and any live entry-zone reacceptance are censored, exposed
+once on the dedicated boundary channel, and then removed with the old epoch.
 
 Censored states retain the old epoch `symbol` and `instrument_id`. On
 `contract_change_reset` that pair must differ from the boundary
@@ -432,9 +429,8 @@ timestamps use timezone-aware ISO-8601.
   `group5-step-v1|protocol_hash|sequence_id|ordinal|kind|observed_at|`
   `source_entity_id`.
 
-The reacceptance identity's `context_kind` is exactly `entry_zone` or
-`pool_sweep`; it never encodes the path aliases `zone_return` or
-`pool_reversal`.
+The reacceptance identity's `context_kind` is exactly `entry_zone`; it never
+encodes the path aliases `zone_return` or `pool_reversal`.
 
 Every state outputs identity, full provenance, lifecycle, formation,
 state-start, last-update and terminal clocks, real-1m age, real-1m state
@@ -454,17 +450,14 @@ bar fails before commit.
 
 ## Stopping rule
 
-Group 5 receives:
-
-1. this one formalization;
-2. one incremental implementation;
-3. one static trading-logic and code review;
-4. one unified synthetic/edge/causal suite;
-5. one finite descriptive real OHLCV replay; and
-6. one small stratified outcome-blind review.
+Formalization, one incremental implementation, static review and the unified
+synthetic/edge/causal suite are complete for `3.2.0-group5.3`. One finite
+descriptive real OHLCV replay and one small stratified outcome-blind review of
+the current protocol remain pending before natural authority is validated.
 
 At most one concept-level repair is allowed. A second systematic semantic
 failure parks the affected concept instead of starting threshold search.
 
 Primitive PnL, rolling OOF, MBO stability and sealed holdout are explicitly
-out of scope. Playbooks remain unchanged until Group 5 primitives freeze.
+out of scope. Typed state may feed the Brain during development, but Group5
+never owns an independent action and FAVR remains disabled.

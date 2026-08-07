@@ -1,8 +1,8 @@
 """Frozen causal HH/HL, LH/LL and BOS state.
 
-The tracker consumes only real completed candles from one timeframe.  Swing
-confirmation is delayed by the two registered right-hand candles; structure
-and BOS clocks are never backfilled to the pivot candle.
+The tracker consumes only real completed candles from one timeframe. Swing
+confirmation is delayed by that timeframe's configured right-hand span;
+structure and BOS clocks are never backfilled to the pivot candle.
 """
 from __future__ import annotations
 
@@ -17,6 +17,7 @@ import pandas as pd
 
 from .model import (
     BOSLifecycle,
+    BOSPostBreakState,
     BOSScope,
     BreakOfStructureState,
     Candle,
@@ -30,6 +31,7 @@ from .model import (
     SwingRelation,
     SwingSide,
     Timeframe,
+    candle_identity,
 )
 
 
@@ -41,8 +43,13 @@ class StructureProtocolError(ValueError):
 class StructureConfig:
     protocol_version: str = "3.0.0-structure-bos.1"
     protocol_hash: str = "unregistered-structure-protocol"
-    left_bars: int = 2
-    right_bars: int = 2
+    swing_spans: tuple[tuple[Timeframe, int], ...] = (
+        (Timeframe.H4, 2),
+        (Timeframe.H1, 2),
+        (Timeframe.M15, 2),
+        (Timeframe.M5, 2),
+        (Timeframe.M1, 1),
+    )
     atr_period: int = 14
     tick_size: float = 0.25
     retained_swings: int = 256
@@ -51,10 +58,27 @@ class StructureConfig:
     def __post_init__(self) -> None:
         if not self.protocol_version or not self.protocol_hash:
             raise StructureProtocolError("structure protocol identity is required")
-        if self.left_bars != 2 or self.right_bars != 2:
+        spans = tuple(self.swing_spans)
+        if (
+            len(spans) != len({timeframe for timeframe, _ in spans})
+            or {timeframe for timeframe, _ in spans}
+            != {
+                Timeframe.H4,
+                Timeframe.H1,
+                Timeframe.M15,
+                Timeframe.M5,
+                Timeframe.M1,
+            }
+            or any(
+                not isinstance(timeframe, Timeframe)
+                or type(span) is not int
+                or span < 1
+                for timeframe, span in spans
+            )
+        ):
             raise StructureProtocolError(
-                "registered group 1-2 structure protocols freeze two left "
-                "and two right bars"
+                "structure swing spans require one positive integer for "
+                "every enabled timeframe"
             )
         if (
             self.atr_period < 1
@@ -64,6 +88,14 @@ class StructureConfig:
             or self.retained_swings < self.retained_bos + 2
         ):
             raise StructureProtocolError("invalid structure tracker bounds")
+
+    def span_for(self, timeframe: Timeframe) -> int:
+        try:
+            return dict(self.swing_spans)[timeframe]
+        except KeyError as exc:
+            raise StructureProtocolError(
+                f"no swing span is registered for {timeframe.value}"
+            ) from exc
 
     @classmethod
     def from_file(
@@ -78,12 +110,18 @@ class StructureConfig:
             source = Path(__file__).resolve().parents[1] / source
         raw = source.read_bytes()
         payload = json.loads(raw)
-        swing = payload.get("swing", {})
+        raw_spans = payload.get("swing_span_by_timeframe", {})
+        if not isinstance(raw_spans, dict):
+            raise StructureProtocolError(
+                "structure swing span registry must be an object"
+            )
         return cls(
             protocol_version=str(payload.get("protocol_version", "")),
             protocol_hash=hashlib.sha256(raw).hexdigest(),
-            left_bars=int(swing.get("left_completed_bars", -1)),
-            right_bars=int(swing.get("right_completed_bars", -1)),
+            swing_spans=tuple(
+                (Timeframe(value), int(span))
+                for value, span in raw_spans.items()
+            ),
             atr_period=int(atr_period),
             tick_size=float(tick_size),
         )
@@ -162,10 +200,11 @@ class StructureTracker:
     ) -> None:
         self.timeframe = timeframe
         self.config = config or StructureConfig()
+        self.swing_span = self.config.span_for(timeframe)
         self.reset()
 
     def reset(self) -> None:
-        width = self.config.left_bars + self.config.right_bars + 1
+        width = self.swing_span * 2 + 1
         self._recent: deque[tuple[int, Candle]] = deque(maxlen=width)
         self._true_ranges: deque[float] = deque(maxlen=self.config.atr_period)
         self._swings: deque[_SwingRecord] = deque()
@@ -303,6 +342,12 @@ class StructureTracker:
             side.value,
             candle.start.isoformat(),
             price_ticks,
+        )
+
+    def _candle_id(self, candle: Candle) -> str:
+        return candle_identity(
+            candle,
+            tick_size=self.config.tick_size,
         )
 
     @staticmethod
@@ -755,6 +800,16 @@ class StructureTracker:
         direction: Direction,
         target_swing_id: str,
     ) -> tuple[BOSScope, str | None]:
+        target = next(
+            (
+                record.point
+                for record in self._swings
+                if record.point.swing_id == target_swing_id
+            ),
+            None,
+        )
+        if target is None:
+            raise StructureProtocolError("BOS target swing is not retained")
         same = self._structures[direction].state
         opposite_direction = (
             Direction.SHORT if direction is Direction.LONG else Direction.LONG
@@ -765,9 +820,48 @@ class StructureTracker:
             and opposite.protected_swing_id == target_swing_id
         ):
             return BOSScope.OPPOSED, opposite.structure_id
-        if same.lifecycle is StructureLifecycle.CONFIRMED:
+        if (
+            same.lifecycle is StructureLifecycle.CONFIRMED
+            and target_swing_id
+            == (
+                same.latest_high_id
+                if direction is Direction.LONG
+                else same.latest_low_id
+            )
+        ):
             return BOSScope.CONTINUATION, same.structure_id
         return BOSScope.LOCAL, None
+
+    def _advance_post_break_states(self, candle: Candle) -> None:
+        close_ticks = self._ticks(candle.close)
+        updated: deque[_BosRecord] = deque(maxlen=self._recent_bos.maxlen)
+        for record in self._recent_bos:
+            state = record.state
+            if (
+                state.lifecycle is not BOSLifecycle.CONFIRMED
+                or state.post_break_state is not BOSPostBreakState.PENDING
+                or state.resolved_at is None
+                or candle.end <= state.resolved_at
+            ):
+                updated.append(record)
+                continue
+            accepted = (
+                close_ticks > state.target_ticks
+                if state.direction is Direction.LONG
+                else close_ticks < state.target_ticks
+            )
+            state = replace(
+                state,
+                post_break_state=(
+                    BOSPostBreakState.ACCEPTED
+                    if accepted
+                    else BOSPostBreakState.REJECTED
+                ),
+                accepted_at=candle.end if accepted else None,
+                rejected_at=None if accepted else candle.end,
+            )
+            updated.append(replace(record, state=state))
+        self._recent_bos = updated
 
     def _resolve_bos(self, candle: Candle) -> None:
         close_ticks = self._ticks(candle.close)
@@ -783,21 +877,18 @@ class StructureTracker:
                 else close_ticks < state.target_ticks
             )
             if confirmed:
-                scope, source_structure = self._bos_scope(
-                    direction,
-                    state.target_swing_id,
+                break_distance_atr = (
+                    abs(candle.close - state.target_price)
+                    / max(self._atr(), self.config.tick_size)
                 )
                 resolved = replace(
                     state,
                     lifecycle=BOSLifecycle.CONFIRMED,
-                    scope=scope,
-                    source_structure_id=source_structure,
                     resolved_at=candle.end,
-                    strength=min(
-                        1.0,
-                        abs(candle.close - state.target_price)
-                        / max(self._atr(), self.config.tick_size),
-                    ),
+                    strength=min(1.0, break_distance_atr),
+                    break_bar_id=self._candle_id(candle),
+                    break_distance_atr=break_distance_atr,
+                    post_break_state=BOSPostBreakState.PENDING,
                 )
                 self._recent_bos.append(
                     _BosRecord(resolved, record.pending_index, self._bar_index)
@@ -950,33 +1041,46 @@ class StructureTracker:
                 or target.point.relation is SwingRelation.NONE
             ):
                 continue
+            scope, source_structure = self._bos_scope(
+                direction,
+                target.point.swing_id,
+            )
             current = self._pending_bos.get(direction)
             if (
                 current is not None
                 and current.state.target_swing_id == target.point.swing_id
+                and current.state.scope is scope
+                and current.state.source_structure_id == source_structure
             ):
                 continue
             if current is not None:
+                # The target price can stay unchanged while a newly confirmed
+                # structure gives that target different semantic authority.
+                # Close the old generation and start a fresh one at the
+                # current evidence clock; never backdate CONTINUATION/OPPOSED
+                # authority into the earlier LOCAL attempt.
                 self._fail_pending(
                     direction,
-                    resolved_at=target.point.confirmed_at,
+                    resolved_at=observed_at,
                     reason="superseded",
                 )
-            structure = self._structures[direction].state
-            source_structure = (
-                structure.structure_id
-                if structure.lifecycle is StructureLifecycle.CONFIRMED
-                else None
+            source_state = next(
+                (
+                    record.state
+                    for record in self._structures.values()
+                    if record.state.structure_id == source_structure
+                ),
+                None,
             )
             # A terminal BOS attempt cannot be re-armed retroactively from
             # the target's original confirmation clock.  The new attempt
             # starts when the evidence refresh makes it pending again.
             pending_at = max(target.point.confirmed_at, observed_at)
             if (
-                source_structure is not None
-                and structure.confirmed_at is not None
+                source_state is not None
+                and source_state.confirmed_at is not None
             ):
-                pending_at = max(pending_at, structure.confirmed_at)
+                pending_at = max(pending_at, source_state.confirmed_at)
             bos_id = _identity(
                 self.config.protocol_hash,
                 self.timeframe.value,
@@ -990,11 +1094,7 @@ class StructureTracker:
                     timeframe=self.timeframe,
                     direction=direction,
                     lifecycle=BOSLifecycle.PENDING,
-                    scope=(
-                        BOSScope.CONTINUATION
-                        if source_structure is not None
-                        else BOSScope.LOCAL
-                    ),
+                    scope=scope,
                     target_swing_id=target.point.swing_id,
                     source_structure_id=source_structure,
                     target_price=target.point.price,
@@ -1008,19 +1108,31 @@ class StructureTracker:
             )
 
     def _resolve_pivot(self, observed_at: pd.Timestamp) -> None:
-        width = self.config.left_bars + self.config.right_bars + 1
+        width = self.swing_span * 2 + 1
         if len(self._recent) < width:
             return
         values = list(self._recent)
-        pivot_position = self.config.left_bars
+        pivot_position = self.swing_span
         pivot = values[pivot_position][1]
         left = [item[1] for item in values[:pivot_position]]
         right = [item[1] for item in values[pivot_position + 1 :]]
+        candidates = tuple(
+            side
+            for side in (SwingSide.HIGH, SwingSide.LOW)
+            if self._candidate_is_left_extreme(side, pivot, left)
+        )
+        confirmations = {
+            side: self._right_confirms(side, pivot, right)
+            for side in candidates
+        }
+        if sum(confirmations.values()) > 1:
+            # An outside bar can geometrically dominate both sides of the
+            # window.  That is an ambiguous expansion, not two independent
+            # pivots at one candle; declining both avoids inventing an order.
+            return
         new_records: list[_SwingRecord] = []
-        for side in (SwingSide.HIGH, SwingSide.LOW):
-            if not self._candidate_is_left_extreme(side, pivot, left):
-                continue
-            confirmed = self._right_confirms(side, pivot, right)
+        for side in candidates:
+            confirmed = confirmations[side]
             record = self._build_resolved_swing(
                 side,
                 pivot,
@@ -1055,6 +1167,7 @@ class StructureTracker:
             self._last_end = candle.end
             return
         self._bar_index += 1
+        self._advance_post_break_states(candle)
         self._resolve_bos(candle)
         self._mark_swings_broken(candle)
         self._break_structures(candle)
@@ -1080,15 +1193,15 @@ class StructureTracker:
     def _forming_swings(self) -> tuple[SwingPoint, ...]:
         values = list(self._recent)
         output: list[SwingPoint] = []
-        for position in range(self.config.left_bars, len(values)):
+        for position in range(self.swing_span, len(values)):
             _, pivot = values[position]
             right = [item[1] for item in values[position + 1 :]]
-            if len(right) >= self.config.right_bars:
+            if len(right) >= self.swing_span:
                 continue
             left = [
                 item[1]
                 for item in values[
-                    position - self.config.left_bars : position
+                    position - self.swing_span : position
                 ]
             ]
             for side in (SwingSide.HIGH, SwingSide.LOW):

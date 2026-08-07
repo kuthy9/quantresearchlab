@@ -4,15 +4,21 @@ from dataclasses import replace
 import hashlib
 import pickle
 from pathlib import Path
+from types import SimpleNamespace
 
 import pandas as pd
 import pytest
 
 from smc_trader.causal import ReaderUpdate
-from smc_trader.liquidity import CausalLiquidityTracker, LiquidityConfig
+from smc_trader.liquidity import (
+    CausalLiquidityTracker,
+    LiquidityConfig,
+    LiquidityProtocolError,
+)
 from smc_trader.model import (
     BOS_CONFIRMATION_REASON,
     BOSLifecycle,
+    BOSPostBreakState,
     Candle,
     Direction,
     EventKind,
@@ -42,18 +48,28 @@ from smc_trader.observation import (
     _atr,
     _candle_structure,
     _event,
+    _strict_prior_atr,
 )
 from smc_trader.playbooks import _visible_levels
 from smc_trader.risk import _visible_level_ids
 from smc_trader.structure import StructureConfig, StructureTracker
 
-from .helpers import market_observation
+from .helpers import (
+    CORE_TEST_SCALE_REGISTRY_ID,
+    CORE_TEST_SCALE_SPECS,
+    market_observation,
+)
 
 
 TZ = "America/New_York"
 BASE = pd.Timestamp("2025-01-06 10:00", tz=TZ)
 STRUCTURE_PROTOCOL = (
     "configs/primitives_structure_liquidity.json"
+)
+CORE_TEST_TIMEFRAMES = tuple(
+    spec.native_timeframe
+    for spec in CORE_TEST_SCALE_SPECS
+    if spec.enabled and spec.native_timeframe is not None
 )
 
 
@@ -158,7 +174,6 @@ def _with_authoritative_liquidity(
         observation,
         frames=frames,
         liquidity_inventory=inventory,
-        liquidity_inventory_authoritative=True,
         liquidity_pool_states=pools,
     )
 
@@ -279,6 +294,10 @@ def test_candle_structure_handles_zero_range_synthetic_and_invalid_input() -> No
     assert state.upper_wick_ratio == 0.0
     assert state.lower_wick_ratio == 0.0
     assert state.direction == 0
+    assert state.body_class == "doji"
+    assert state.range_class == "compressed"
+    assert state.dominant_wick == "none"
+    assert state.close_class == "middle"
     assert not state.real_completed
     assert state.anomalies == ("synthetic_or_partial_completed_candle",)
 
@@ -299,6 +318,10 @@ def test_candle_structure_handles_zero_range_synthetic_and_invalid_input() -> No
     assert normal_state.lower_wick_ratio == pytest.approx(1.0 / 3.0)
     assert normal_state.close_location == pytest.approx(2.0 / 3.0)
     assert normal_state.direction == 1
+    assert normal_state.body_class == "normal"
+    assert normal_state.range_class == "normal"
+    assert normal_state.dominant_wick == "balanced"
+    assert normal_state.close_class == "middle"
     assert normal_state.real_completed
     assert normal_state.anomalies == ()
 
@@ -324,6 +347,58 @@ def test_candle_structure_handles_zero_range_synthetic_and_invalid_input() -> No
         replace(zero, symbol="")
 
 
+def test_candle_derived_classes_use_only_strictly_prior_atr() -> None:
+    prior = _candle(
+        0,
+        open_=100.0,
+        high=101.0,
+        low=99.0,
+        close=100.0,
+    )
+    large = _candle(
+        1,
+        open_=99.5,
+        high=104.0,
+        low=99.0,
+        close=103.5,
+    )
+    prior_atr = _strict_prior_atr((prior, large), large, 14)
+    assert prior_atr == pytest.approx(2.0)
+
+    state = _candle_structure(large, prior_atr=prior_atr)
+    assert state.body_class == "large"
+    assert state.range_class == "expanded"
+    assert state.dominant_wick == "none"
+    assert state.close_class == "near_high"
+    frame = CausalObserver._observe_frame(
+        Timeframe.M1,
+        (prior, large),
+        large.end,
+        ObserverConfig(scale_specs=CORE_TEST_SCALE_SPECS),
+    )
+    assert frame.candle_structure is not None
+    assert frame.candle_structure.body_class == "large"
+    assert frame.candle_structure.range_class == "expanded"
+
+    small = _candle(
+        2,
+        open_=100.2,
+        high=100.6,
+        low=99.6,
+        close=100.4,
+    )
+    small_state = _candle_structure(small, prior_atr=2.0)
+    assert small_state.body_class == "small"
+    assert small_state.range_class == "compressed"
+    assert small_state.dominant_wick == "lower"
+    assert small_state.close_class == "near_high"
+
+    # With no causal ATR baseline, the same large geometry is not promoted.
+    no_prior_state = _candle_structure(large)
+    assert no_prior_state.body_class == "normal"
+    assert no_prior_state.range_class == "normal"
+
+
 def test_synthetic_minutes_advance_cutoff_without_changing_semantics() -> None:
     first = _candle(
         0,
@@ -347,7 +422,7 @@ def test_synthetic_minutes_advance_cutoff_without_changing_semantics() -> None:
         low=100.0,
         close=101.5,
     )
-    config = ObserverConfig()
+    config = ObserverConfig(scale_specs=CORE_TEST_SCALE_SPECS)
     baseline = CausalObserver._observe_frame(
         Timeframe.M1,
         (first, second),
@@ -361,7 +436,6 @@ def test_synthetic_minutes_advance_cutoff_without_changing_semantics() -> None:
         config,
     )
     assert with_synthetic.metrics == baseline.metrics
-    assert with_synthetic.liquidity == baseline.liquidity
     assert with_synthetic.bars == baseline.bars == 2
     assert _atr((first, synthetic, second), 14) == _atr(
         (first, second),
@@ -412,16 +486,19 @@ def test_synthetic_minutes_advance_cutoff_without_changing_semantics() -> None:
     assert liquidity_tracker.last_end == synthetic.end
 
     memory = EventMemory(16)
-    impulse = _event(
-        EventKind.IMPULSE,
+    active_zone = _event(
+        EventKind.SUPPORT_RESISTANCE_STATE,
         BASE,
         Timeframe.M1,
-        "above",
+        "below",
         100.0,
         0.5,
+        entity_id="synthetic-gap-zone",
+        lifecycle=SupportResistanceLifecycle.ACTIVE.value,
         formed_at=BASE,
+        confirmed_at=BASE,
     )
-    memory.append(impulse)
+    memory.append(active_zone)
     memory.observe_minute(
         _candle(
             0,
@@ -466,12 +543,11 @@ def test_synthetic_minutes_advance_cutoff_without_changing_semantics() -> None:
                 close=100.0,
             )
         )
-    assert memory.durations(BASE + pd.Timedelta(minutes=2))[
-        impulse.event_id
-    ] == 0
-    assert memory.ages(BASE + pd.Timedelta(minutes=2))[
-        impulse.event_id
-    ] == 0
+    durations, ages = memory.temporal_metrics(
+        BASE + pd.Timedelta(minutes=2)
+    )
+    assert durations[active_zone.event_id] == 0
+    assert ages[active_zone.event_id] == 0
     real_after_gap = _candle(
         2,
         open_=100.0,
@@ -480,8 +556,9 @@ def test_synthetic_minutes_advance_cutoff_without_changing_semantics() -> None:
         close=100.0,
     )
     memory.observe_minute(real_after_gap)
-    assert memory.durations(real_after_gap.end)[impulse.event_id] == 1
-    assert memory.ages(real_after_gap.end)[impulse.event_id] == 1
+    durations, ages = memory.temporal_metrics(real_after_gap.end)
+    assert durations[active_zone.event_id] == 1
+    assert ages[active_zone.event_id] == 1
 
 
 def test_mixed_frame_tail_is_clock_only_and_reuses_semantic_snapshot() -> None:
@@ -534,9 +611,15 @@ def test_mixed_frame_tail_is_clock_only_and_reuses_semantic_snapshot() -> None:
             newly_completed=newly_completed,
             histories=histories,
             anomalies=(),
+            active_timeframes=CORE_TEST_TIMEFRAMES,
+            scale_specs=CORE_TEST_SCALE_SPECS,
+            scale_registry_id=CORE_TEST_SCALE_REGISTRY_ID,
         )
 
-    config = ObserverConfig(structure_protocol=STRUCTURE_PROTOCOL)
+    config = ObserverConfig(
+        structure_protocol=STRUCTURE_PROTOCOL,
+        scale_specs=CORE_TEST_SCALE_SPECS,
+    )
     real_observation = CausalObserver(config).observe(update(real_h4))
     mixed_observer = CausalObserver(config)
     mixed_update = update((*real_h4, mixed_tail))
@@ -546,7 +629,6 @@ def test_mixed_frame_tail_is_clock_only_and_reuses_semantic_snapshot() -> None:
     assert mixed_frame.cutoff == mixed_tail.end
     assert mixed_frame.bars == real_frame.bars == len(real_h4)
     assert mixed_frame.metrics == real_frame.metrics
-    assert mixed_frame.liquidity == real_frame.liquidity
     assert mixed_frame.swings == real_frame.swings
     assert all(
         event.observed_at <= real_h4[-1].end
@@ -578,18 +660,13 @@ def test_mixed_frame_tail_is_clock_only_and_reuses_semantic_snapshot() -> None:
     assert mixed_observer._terminal_failure is not None
 
 
-def test_frame_event_clock_uses_latest_real_completion() -> None:
-    observer = CausalObserver()
+def test_descriptive_compression_does_not_create_a_legacy_event() -> None:
+    observer = CausalObserver(
+        ObserverConfig(scale_specs=CORE_TEST_SCALE_SPECS)
+    )
     real_cutoff = BASE + pd.Timedelta(minutes=5)
     mixed_cutoff = real_cutoff + pd.Timedelta(minutes=5)
     metrics = {
-        "impulse_direction": 1.0,
-        "impulse_strength": 0.8,
-        "impulse_age_bars": 0.0,
-        "impulse_extension_atr": 1.2,
-        "pullback_depth": 0.2,
-        "pullback_completeness": 0.4,
-        "reacceptance_direction": 0.5,
         "compression": 0.7,
         "atr": 1.0,
     }
@@ -603,19 +680,27 @@ def test_frame_event_clock_uses_latest_real_completion() -> None:
         newly_completed=True,
         event_clock=real_cutoff,
     )
-    m5_events = tuple(
-        event
-        for event in observer.memory.recent()
-        if event.timeframe is Timeframe.M5
-    )
-    assert m5_events
-    assert {
-        event.observed_at for event in m5_events
-    } == {real_cutoff}
+    assert observer.memory.recent() == ()
+    with pytest.raises(
+        ValueError,
+        match="frame event clock cannot exceed the observation cutoff",
+    ):
+        observer._record_frame_events(
+            FrameObservation(
+                timeframe=Timeframe.M5,
+                cutoff=mixed_cutoff,
+                bars=4,
+                metrics=metrics,
+            ),
+            newly_completed=True,
+            event_clock=mixed_cutoff + pd.Timedelta(minutes=1),
+        )
 
 
 def test_cold_event_memory_fails_when_age_origin_predates_m1_prefix() -> None:
-    observer = CausalObserver()
+    observer = CausalObserver(
+        ObserverConfig(scale_specs=CORE_TEST_SCALE_SPECS)
+    )
     retained = _candle(
         0,
         open_=100.0,
@@ -653,6 +738,9 @@ def test_cold_event_memory_fails_when_age_origin_predates_m1_prefix() -> None:
             Timeframe.M1: (retained,),
         },
         anomalies=(),
+        active_timeframes=CORE_TEST_TIMEFRAMES,
+        scale_specs=CORE_TEST_SCALE_SPECS,
+        scale_registry_id=CORE_TEST_SCALE_REGISTRY_ID,
     )
     with pytest.raises(
         ValueError,
@@ -665,7 +753,7 @@ def test_cold_event_memory_fails_when_age_origin_predates_m1_prefix() -> None:
     bounded.set_clock_coverage_start(retained.start)
     bounded.append(
         _event(
-            EventKind.TRIGGER_HELD,
+            EventKind.LIQUIDITY_CONSUMED,
             retained.end,
             Timeframe.M1,
             "above",
@@ -675,7 +763,7 @@ def test_cold_event_memory_fails_when_age_origin_predates_m1_prefix() -> None:
     )
     bounded.append(
         _event(
-            EventKind.TRIGGER_HELD,
+            EventKind.LIQUIDITY_CONSUMED,
             retained.end + pd.Timedelta(minutes=1),
             Timeframe.M1,
             "above",
@@ -821,7 +909,10 @@ def test_forming_structure_identity_and_failure_clock_are_frozen() -> None:
     assert short_state.lifecycle is StructureLifecycle.FORMATION_FAILED
     assert short_state.structure_id == short_forming_id
     assert short_state.formed_at == short_formed_at
-    assert short_state.formation_failed_at == candles[-1].end
+    # M1 uses a one-left/one-right internal swing, so the conflicting
+    # relation becomes knowable one completed minute earlier than the old
+    # five-bar structural-swing fixture expected.
+    assert short_state.formation_failed_at == candles[-2].end
     assert (
         short_state.failure_reason
         == STRUCTURE_FORMATION_FAILURE_REASON
@@ -829,7 +920,9 @@ def test_forming_structure_identity_and_failure_clock_are_frozen() -> None:
     with pytest.raises(ValueError, match="registered clock and reason"):
         replace(short_state, failure_reason="arbitrary")
 
-    observer = CausalObserver()
+    observer = CausalObserver(
+        ObserverConfig(scale_specs=CORE_TEST_SCALE_SPECS)
+    )
     observer._record_frame_events(
         FrameObservation(
             timeframe=Timeframe.M1,
@@ -866,7 +959,7 @@ def test_swing_candidate_remains_visible_until_registered_resolution_clock() -> 
         _candle(4, open_=102.0, high=103.0, low=101.0, close=102.0),
         _candle(5, open_=101.0, high=102.0, low=100.0, close=101.0),
     ]
-    for candle in candles[:4]:
+    for candle in candles[:3]:
         tracker.on_candle(candle)
     swings, _, _ = tracker.snapshot()
     forming = next(
@@ -876,9 +969,9 @@ def test_swing_candidate_remains_visible_until_registered_resolution_clock() -> 
         and item.side is SwingSide.HIGH
     )
     assert forming.lifecycle is SwingLifecycle.FORMING
-    assert forming.age_bars == 1
+    assert forming.age_bars == 0
 
-    tracker.on_candle(candles[4])
+    tracker.on_candle(candles[3])
     swings, _, _ = tracker.snapshot()
     failed = next(
         item
@@ -887,12 +980,12 @@ def test_swing_candidate_remains_visible_until_registered_resolution_clock() -> 
     )
     assert failed.lifecycle is SwingLifecycle.FORMATION_FAILED
     assert failed.failure_reason == "right_side_invalidated"
-    assert failed.observed_at == candles[4].end
+    assert failed.observed_at == candles[3].end
     assert failed.age_bars == 0
     with pytest.raises(ValueError, match="must resolve after"):
         replace(failed, observed_at=failed.pivot_end)
 
-    tracker.on_candle(candles[5])
+    tracker.on_candle(candles[4])
     swings, _, _ = tracker.snapshot()
     aged = next(item for item in swings if item.swing_id == forming.swing_id)
     assert aged.age_bars == 1
@@ -934,11 +1027,16 @@ def test_pending_bos_cannot_hide_raw_break_strength() -> None:
         lifecycle=BOSLifecycle.CONFIRMED,
         resolved_at=resolved_at,
         strength=0.25,
+        break_bar_id="manual-break-bar",
+        break_distance_atr=0.25,
+        post_break_state=BOSPostBreakState.PENDING,
     )
     with pytest.raises(ValueError, match="finite and non-negative"):
         replace(confirmed, strength=-0.25)
 
-    observer = CausalObserver()
+    observer = CausalObserver(
+        ObserverConfig(scale_specs=CORE_TEST_SCALE_SPECS)
+    )
     observer._record_frame_events(
         FrameObservation(
             timeframe=Timeframe.M1,
@@ -964,12 +1062,12 @@ def test_pending_bos_cannot_hide_raw_break_strength() -> None:
         for item in observer.memory.recent()
         if item.entity_id == confirmed.bos_id
     }
-    assert events[BOSLifecycle.CONFIRMED.value].ended_at == resolved_at
+    assert events[BOSLifecycle.CONFIRMED.value].ended_at is None
     assert (
         events[BOSLifecycle.CONFIRMED.value].transition_reason
         == BOS_CONFIRMATION_REASON
     )
-    assert confirmed.bos_id not in observer.memory._latest_by_entity
+    assert confirmed.bos_id in observer.memory._latest_by_entity
 
 
 def test_equal_pool_and_zone_lifecycles_are_incremental_and_frozen() -> None:
@@ -1020,6 +1118,7 @@ def test_equal_pool_and_zone_lifecycles_are_incremental_and_frozen() -> None:
     assert zone.touch_count == 2
     assert pool.lifecycle is LiquidityPoolLifecycle.FORMED
     assert pool.touch_count == 2
+    assert (pool.lower_bound, pool.upper_bound) == (100.0, 100.25)
     assert any(item.kind == "equal_highs" for item in inventory)
 
     checkpoint = pickle.loads(pickle.dumps(tracker))
@@ -1055,6 +1154,46 @@ def test_equal_pool_and_zone_lifecycles_are_incremental_and_frozen() -> None:
     assert pools[0].lifecycle is LiquidityPoolLifecycle.REJECTED
     assert pools[0].resolution_reason == "close_returned_inside"
     assert (zones[0].lower_bound, zones[0].upper_bound) == frozen_bounds
+
+
+@pytest.mark.parametrize(
+    ("side", "third_price", "confirmation_bar"),
+    (
+        (
+            SwingSide.HIGH,
+            100.25,
+            _candle(2, open_=99.5, high=99.75, low=99.0, close=99.5),
+        ),
+        (
+            SwingSide.LOW,
+            99.75,
+            _candle(2, open_=100.5, high=101.0, low=100.25, close=100.5),
+        ),
+    ),
+)
+def test_equal_pool_does_not_count_a_third_swing_beyond_member_boundary(
+    side: SwingSide,
+    third_price: float,
+    confirmation_bar: Candle,
+) -> None:
+    tracker = CausalLiquidityTracker(Timeframe.M1)
+    first = _swing("equal-first", side=side, price=100.0, confirmed_index=0)
+    second = _swing("equal-second", side=side, price=100.0, confirmed_index=1)
+    third = _swing("crossed-third", side=side, price=third_price, confirmed_index=2)
+    neutral_close = 99.75 if side is SwingSide.HIGH else 100.25
+    tracker.on_candle(
+        _candle(0, open_=neutral_close, high=101.0, low=99.0, close=neutral_close),
+        (first,),
+    )
+    tracker.on_candle(
+        _candle(1, open_=neutral_close, high=101.0, low=99.0, close=neutral_close),
+        (first, second),
+    )
+    tracker.on_candle(confirmation_bar, (first, second, third))
+
+    pool = tracker.snapshot()[1][0]
+    assert pool.member_swing_ids == (first.swing_id, second.swing_id)
+    assert pool.touch_count == 2
 
 
 def test_zone_break_reaccept_and_pool_acceptance_are_distinguishable() -> None:
@@ -1183,42 +1322,14 @@ def test_brain_and_risk_share_the_same_top_level_inventory_universe() -> None:
     assert brain_ids == risk_ids == {"swing:h4-swing"}
 
 
-def test_authoritative_empty_inventory_never_falls_back_to_legacy_levels() -> None:
-    legacy = market_observation()
-    assert _visible_levels(legacy)
-    assert _visible_level_ids(legacy)
+def test_empty_typed_inventory_fails_closed() -> None:
+    populated = market_observation()
+    assert _visible_levels(populated)
+    assert _visible_level_ids(populated)
 
-    authoritative = _with_authoritative_liquidity(legacy)
-    assert _visible_levels(authoritative) == []
-    assert _visible_level_ids(authoritative) == set()
-
-    observer = CausalObserver()
-    observer._prior = authoritative
-    crossing_bar = _candle(
-        0,
-        open_=102.5,
-        high=104.0,
-        low=102.0,
-        close=103.5,
-    )
-    observer._record_minute_events(
-        ReaderUpdate(
-            asof=crossing_bar.end,
-            completed_1m=crossing_bar,
-            newly_completed={},
-            histories={},
-            anomalies=(),
-        ),
-        authoritative.frames,
-    )
-    assert not any(
-        event.kind
-        in {
-            EventKind.LIQUIDITY_SWEEP,
-            EventKind.LIQUIDITY_CONSUMED,
-        }
-        for event in observer.memory.recent()
-    )
+    empty = _with_authoritative_liquidity(populated)
+    assert _visible_levels(empty) == []
+    assert _visible_level_ids(empty) == set()
 
 
 def test_observation_rejects_duplicate_or_post_cutoff_inventory() -> None:
@@ -1242,7 +1353,6 @@ def test_observation_rejects_duplicate_or_post_cutoff_inventory() -> None:
         replace(
             observation,
             liquidity_inventory=(item, item),
-            liquidity_inventory_authoritative=True,
         )
 
     source_cutoff = observation.asof - pd.Timedelta(hours=1)
@@ -1266,7 +1376,6 @@ def test_observation_rejects_duplicate_or_post_cutoff_inventory() -> None:
                 Timeframe.H1: h1_frame,
             },
             liquidity_inventory=(late_item,),
-            liquidity_inventory_authoritative=True,
         )
 
     source = _inventory_swing_source(item)
@@ -1305,21 +1414,6 @@ def test_observation_rejects_duplicate_or_post_cutoff_inventory() -> None:
         match="completed 1m cutoff",
     ):
         replace(projected, frames=lagging_frames)
-
-
-def test_frame_rejects_legacy_liquidity_from_another_timeframe() -> None:
-    observation = market_observation()
-    h1_level = observation.frame(Timeframe.H1).liquidity[0]
-    with pytest.raises(
-        ValueError,
-        match="legacy liquidity from another timeframe",
-    ):
-        replace(
-            observation.frame(Timeframe.H4),
-            liquidity=(h1_level,),
-        )
-
-
 
 
 def test_liquidity_protocol_file_is_the_executable_identity() -> None:
@@ -1434,7 +1528,7 @@ def test_late_attach_rebuilds_coarse_pool_clocks_from_completed_m1() -> None:
     pre_sweep = _candle(
         0,
         open_=99.75,
-        high=100.1,
+        high=100.0,
         low=99.5,
         close=99.75,
     )
@@ -1473,6 +1567,7 @@ def test_late_attach_rebuilds_coarse_pool_clocks_from_completed_m1() -> None:
         ObserverConfig(
             structure_protocol=STRUCTURE_PROTOCOL,
             liquidity_protocol=STRUCTURE_PROTOCOL,
+            scale_specs=CORE_TEST_SCALE_SPECS,
         )
     )
     observer._liquidity_trackers[Timeframe.H1] = tracker
@@ -1500,6 +1595,9 @@ def test_late_attach_rebuilds_coarse_pool_clocks_from_completed_m1() -> None:
             )
         },
         anomalies=(),
+        active_timeframes=CORE_TEST_TIMEFRAMES,
+        scale_specs=CORE_TEST_SCALE_SPECS,
+        scale_registry_id=CORE_TEST_SCALE_REGISTRY_ID,
     )
     projected = observer._project_inventory(
         update,
@@ -1527,10 +1625,13 @@ def test_late_attach_rebuilds_coarse_pool_clocks_from_completed_m1() -> None:
         LiquidityPoolLifecycle.SWEPT.value,
         LiquidityPoolLifecycle.REJECTED.value,
     ]
+
+
     missing_predecessor = CausalObserver(
         ObserverConfig(
             structure_protocol=STRUCTURE_PROTOCOL,
             liquidity_protocol=STRUCTURE_PROTOCOL,
+            scale_specs=CORE_TEST_SCALE_SPECS,
         )
     )
     missing_predecessor._liquidity_trackers[Timeframe.H1] = (
@@ -1560,6 +1661,7 @@ def test_late_attach_rebuilds_coarse_pool_clocks_from_completed_m1() -> None:
         ObserverConfig(
             structure_protocol=STRUCTURE_PROTOCOL,
             liquidity_protocol=STRUCTURE_PROTOCOL,
+            scale_specs=CORE_TEST_SCALE_SPECS,
         )
     )
     synthetic_cannot_warm._liquidity_trackers[Timeframe.H1] = (
@@ -1599,6 +1701,7 @@ def test_late_attach_rebuilds_coarse_pool_clocks_from_completed_m1() -> None:
         ObserverConfig(
             structure_protocol=STRUCTURE_PROTOCOL,
             liquidity_protocol=STRUCTURE_PROTOCOL,
+            scale_specs=CORE_TEST_SCALE_SPECS,
         )
     )
     too_late._liquidity_trackers[Timeframe.H1] = tracker
@@ -1648,6 +1751,7 @@ def test_late_attach_rebuilds_coarse_pool_clocks_from_completed_m1() -> None:
         ObserverConfig(
             structure_protocol=STRUCTURE_PROTOCOL,
             liquidity_protocol=STRUCTURE_PROTOCOL,
+            scale_specs=CORE_TEST_SCALE_SPECS,
         )
     )
     divergent._liquidity_trackers[Timeframe.H1] = (
@@ -1662,6 +1766,635 @@ def test_late_attach_rebuilds_coarse_pool_clocks_from_completed_m1() -> None:
             market_observation(asof=tail.end).frames,
             divergent_inventory,
         )
+
+
+@pytest.mark.parametrize(
+    ("side", "kind", "equal_bar", "crossing_bar"),
+    (
+        (
+            "above",
+            "swing",
+            _candle(0, open_=99.75, high=100.0, low=99.5, close=99.75),
+            _candle(1, open_=99.75, high=100.25, low=99.5, close=100.0),
+        ),
+        (
+            "below",
+            "swing",
+            _candle(0, open_=100.25, high=100.5, low=100.0, close=100.25),
+            _candle(1, open_=100.25, high=100.5, low=99.75, close=100.0),
+        ),
+    ),
+)
+def test_swing_liquidity_consumes_on_strict_wick_crossing(
+    side: str,
+    kind: str,
+    equal_bar: Candle,
+    crossing_bar: Candle,
+) -> None:
+    item = LiquidityInventoryItem(
+        item_id=f"swing:strict-{side}",
+        timeframe=Timeframe.H1,
+        side=side,
+        kind=kind,
+        price=100.0,
+        lower_bound=100.0,
+        upper_bound=100.0,
+        formed_at=BASE - pd.Timedelta(minutes=1),
+        confirmed_at=BASE,
+        lifecycle=LiquidityInventoryLifecycle.VISIBLE,
+        source_ids=(f"strict-{side}",),
+        age_bars=0,
+        strength=0.5,
+    )
+    observer = CausalObserver(
+        ObserverConfig(
+            structure_protocol=STRUCTURE_PROTOCOL,
+            liquidity_protocol=STRUCTURE_PROTOCOL,
+            scale_specs=CORE_TEST_SCALE_SPECS,
+        )
+    )
+    warmup = tuple(
+        _candle(
+            index,
+            open_=(99.50 if side == "above" else 100.50),
+            high=(99.75 if side == "above" else 100.75),
+            low=(99.25 if side == "above" else 100.25),
+            close=(99.50 if side == "above" else 100.50),
+        )
+        for index in range(-14, 0)
+    )
+    update = ReaderUpdate(
+        asof=crossing_bar.end,
+        completed_1m=crossing_bar,
+        newly_completed={},
+        histories={Timeframe.M1: (*warmup, equal_bar, crossing_bar)},
+        anomalies=(),
+        active_timeframes=CORE_TEST_TIMEFRAMES,
+        scale_specs=CORE_TEST_SCALE_SPECS,
+        scale_registry_id=CORE_TEST_SCALE_REGISTRY_ID,
+    )
+
+    projected = observer._project_inventory(
+        update,
+        market_observation(asof=crossing_bar.end).frames,
+        (item,),
+    )
+
+    assert projected[0].lifecycle is LiquidityInventoryLifecycle.CONSUMED
+    assert projected[0].consumed_at == crossing_bar.end
+
+
+def test_previous_session_reference_retires_into_completed_replacement() -> None:
+    observer = CausalObserver(
+        ObserverConfig(scale_specs=CORE_TEST_SCALE_SPECS)
+    )
+    observer._reference_coverage_start = pd.Timestamp(
+        "2025-01-05 18:00",
+        tz=TZ,
+    )
+
+    def reference_candle(start: str, high: float, low: float) -> Candle:
+        clock = pd.Timestamp(start, tz=TZ)
+        return replace(
+            _candle(0, open_=100.0, high=high, low=low, close=100.0),
+            start=clock,
+            end=clock + pd.Timedelta(minutes=1),
+        )
+
+    observer._advance_reference_periods(
+        reference_candle("2025-01-06 17:59", 101.0, 99.0),
+        append_retirement_events=True,
+    )
+    observer._advance_reference_periods(
+        reference_candle("2025-01-06 18:00", 102.0, 98.0),
+        append_retirement_events=True,
+    )
+    old_items = tuple(
+        item
+        for item in observer._reference_inventory.values()
+        if item.kind.startswith("previous_session_")
+    )
+    assert {item.source_ids[0] for item in old_items} == {
+        "reference_source:session:2025-01-06:high:NQH5:1",
+        "reference_source:session:2025-01-06:low:NQH5:1",
+    }
+
+    observer._advance_reference_periods(
+        reference_candle("2025-01-07 18:00", 103.0, 97.0),
+        append_retirement_events=True,
+    )
+    new_items = tuple(
+        item
+        for item in observer._reference_inventory.values()
+        if item.kind.startswith("previous_session_")
+    )
+    assert {item.source_ids[0] for item in new_items} == {
+        "reference_source:session:2025-01-07:high:NQH5:1",
+        "reference_source:session:2025-01-07:low:NQH5:1",
+    }
+    retirements = tuple(
+        event
+        for event in observer.memory.recent()
+        if event.kind is EventKind.LIQUIDITY_RETIRED
+        and event.details.get("source_kind", "").startswith(
+            "previous_session_"
+        )
+    )
+    assert len(retirements) == 2
+    assert {
+        event.details["replacement_period"] for event in retirements
+    } == {"2025-01-07"}
+
+
+def test_reference_sr_has_real_source_identity_and_independent_lifecycle() -> None:
+    tracker = CausalLiquidityTracker(
+        Timeframe.M1,
+        LiquidityConfig(retained_zones=8),
+    )
+    for index in range(13):
+        tracker.on_candle(
+            _candle(
+                index,
+                open_=98.0,
+                high=98.5,
+                low=97.5,
+                close=98.0,
+            ),
+            (),
+        )
+    confirmation_bar = _candle(
+        13,
+        open_=98.0,
+        high=150.0,
+        low=50.0,
+        close=98.0,
+    )
+    tracker.on_candle(confirmation_bar, ())
+    source_id = "reference_source:day:2025-01-06:high:NQH5:1"
+    reference = LiquidityInventoryItem(
+        item_id="reference:day:2025-01-06:high:NQH5:1",
+        timeframe=Timeframe.M1,
+        side="above",
+        kind="previous_day_high",
+        price=100.0,
+        lower_bound=100.0,
+        upper_bound=100.0,
+        formed_at=BASE,
+        confirmed_at=confirmation_bar.end,
+        lifecycle=LiquidityInventoryLifecycle.VISIBLE,
+        source_ids=(source_id,),
+        age_bars=0,
+        strength=0.9,
+        structural_rank="external",
+        visibility_strength=0.9,
+    )
+    wick_sweep = _candle(
+        14,
+        open_=99.75,
+        high=100.10,
+        low=99.50,
+        close=99.90,
+    )
+    tracker.on_candle(
+        wick_sweep,
+        (),
+        reference_sources=(reference,),
+    )
+    zone = next(
+        item
+        for item in tracker.snapshot()[0]
+        if item.source_kind == "previous_day"
+    )
+
+    assert zone.member_swing_ids == ()
+    assert zone.source_ids == (source_id,)
+    assert zone.lifecycle is SupportResistanceLifecycle.TESTED
+    assert zone.touch_count == 2
+    assert zone.lower_bound == pytest.approx(99.75)
+    assert zone.upper_bound == pytest.approx(100.25)
+    assert CausalObserver._inventory_crossed(reference, wick_sweep)
+
+    # Remaining inside one contact episode is not another independent test.
+    tracker.on_candle(
+        _candle(
+            15,
+            open_=99.9,
+            high=100.05,
+            low=99.8,
+            close=99.95,
+        ),
+        (),
+        reference_sources=(reference,),
+    )
+    assert next(
+        item
+        for item in tracker.snapshot()[0]
+        if item.zone_id == zone.zone_id
+    ).touch_count == 2
+
+    # A strict close beyond the frozen band, not the earlier wick sweep,
+    # breaks S/R; a later close back inside records descriptive reacceptance.
+    tracker.on_candle(
+        _candle(
+            16,
+            open_=99.5,
+            high=99.6,
+            low=99.2,
+            close=99.4,
+        ),
+        (),
+        reference_sources=(reference,),
+    )
+    tracker.on_candle(
+        _candle(
+            17,
+            open_=99.7,
+            high=100.0,
+            low=99.6,
+            close=99.9,
+        ),
+        (),
+        reference_sources=(reference,),
+    )
+    assert next(
+        item
+        for item in tracker.snapshot()[0]
+        if item.zone_id == zone.zone_id
+    ).touch_count == 3
+    tracker.on_candle(
+        _candle(
+            18,
+            open_=100.0,
+            high=100.6,
+            low=99.9,
+            close=100.5,
+        ),
+        (),
+        reference_sources=(reference,),
+    )
+    broken = next(
+        item
+        for item in tracker.snapshot()[0]
+        if item.zone_id == zone.zone_id
+    )
+    assert broken.lifecycle is SupportResistanceLifecycle.BROKEN
+    tracker.on_candle(
+        _candle(
+            19,
+            open_=100.4,
+            high=100.5,
+            low=100.0,
+            close=100.1,
+        ),
+        (),
+        reference_sources=(reference,),
+    )
+    reaccepted = next(
+        item
+        for item in tracker.snapshot()[0]
+        if item.zone_id == zone.zone_id
+    )
+    assert reaccepted.lifecycle is SupportResistanceLifecycle.REACCEPTED
+    assert tracker.snapshot()[1] == ()
+
+    # A current completed-period source remains queryable after reaching a
+    # terminal descriptive lifecycle.  Retention may evict older terminal
+    # history, but must not evict the still-live reference and then attempt to
+    # recreate it non-causally on a later bar.
+    live_record = tracker._zones[zone.zone_id]
+    for index in range(7):
+        stale_id = f"stale-reference-zone-{index}"
+        tracker._zones[stale_id] = replace(
+            live_record,
+            state=replace(
+                reaccepted,
+                zone_id=stale_id,
+                source_ids=(f"stale-reference-source-{index}",),
+            ),
+        )
+    tracker.on_candle(
+        _candle(
+            20,
+            open_=98.0,
+            high=98.5,
+            low=97.5,
+            close=98.0,
+        ),
+        (),
+        reference_sources=(reference,),
+    )
+    tracker._prune_zones()
+    assert zone.zone_id in tracker._zones
+    assert len(tracker._zones) == 7
+
+
+def test_reference_sr_replacement_retires_old_source_without_fake_swing() -> None:
+    tracker = CausalLiquidityTracker(Timeframe.M1)
+    first_bar = _candle(
+        0,
+        open_=100.0,
+        high=100.5,
+        low=99.5,
+        close=100.0,
+    )
+    tracker.on_candle(first_bar, ())
+
+    def source(identity: str, price: float, confirmed_at: pd.Timestamp):
+        return LiquidityInventoryItem(
+            item_id=f"reference:{identity}",
+            timeframe=Timeframe.M1,
+            side="above",
+            kind="previous_session_high",
+            price=price,
+            lower_bound=price,
+            upper_bound=price,
+            formed_at=BASE,
+            confirmed_at=confirmed_at,
+            lifecycle=LiquidityInventoryLifecycle.VISIBLE,
+            source_ids=(f"reference_source:{identity}",),
+            age_bars=0,
+            strength=0.75,
+            structural_rank="external",
+            visibility_strength=0.75,
+        )
+
+    old = source("session-old-high", 200.0, first_bar.end)
+    second_bar = _candle(
+        1,
+        open_=100.0,
+        high=100.5,
+        low=99.5,
+        close=100.0,
+    )
+    tracker.on_candle(second_bar, (), reference_sources=(old,))
+    old_zone = next(
+        item for item in tracker.snapshot()[0] if old.source_ids[0] in item.source_ids
+    )
+    assert old_zone.lifecycle is SupportResistanceLifecycle.ACTIVE
+
+    new = source("session-new-high", 210.0, second_bar.end)
+    tracker.on_candle(
+        _candle(
+            2,
+            open_=199.75,
+            high=201.0,
+            low=199.5,
+            close=200.75,
+        ),
+        (),
+        reference_sources=(new,),
+    )
+    zones = tracker.snapshot()[0]
+    retired = next(item for item in zones if item.zone_id == old_zone.zone_id)
+    replacement = next(
+        item for item in zones if new.source_ids[0] in item.source_ids
+    )
+    assert retired.lifecycle is SupportResistanceLifecycle.RETIRED
+    assert retired.broken_at is None
+    assert retired.reaccepted_at is None
+    assert retired.transition_reason == SUPPORT_RESISTANCE_RETIREMENT_REASON
+    assert replacement.member_swing_ids == ()
+    assert replacement.lifecycle is SupportResistanceLifecycle.ACTIVE
+    assert tracker.snapshot()[1] == ()
+
+
+def test_reference_sr_bounded_contacts_preserve_frozen_test_evidence() -> None:
+    tracker = CausalLiquidityTracker(
+        Timeframe.M1,
+        LiquidityConfig(retained_touches=8),
+    )
+    confirmation = _candle(
+        0,
+        open_=98.0,
+        high=98.5,
+        low=97.5,
+        close=98.0,
+    )
+    tracker.on_candle(confirmation, ())
+    reference = LiquidityInventoryItem(
+        item_id="reference:bounded-high",
+        timeframe=Timeframe.M1,
+        side="above",
+        kind="previous_day_high",
+        price=100.0,
+        lower_bound=100.0,
+        upper_bound=100.0,
+        formed_at=BASE,
+        confirmed_at=confirmation.end,
+        lifecycle=LiquidityInventoryLifecycle.VISIBLE,
+        source_ids=("reference_source:bounded-high",),
+        age_bars=0,
+        strength=0.9,
+        structural_rank="external",
+        visibility_strength=0.9,
+    )
+    tracker.on_candle(
+        _candle(1, open_=98.0, high=98.5, low=97.5, close=98.0),
+        (),
+        reference_sources=(reference,),
+    )
+    first_test_at = None
+    for episode in range(12):
+        contact_index = 2 + episode * 2
+        tracker.on_candle(
+            _candle(
+                contact_index,
+                open_=99.8,
+                high=100.1,
+                low=99.6,
+                close=99.9,
+            ),
+            (),
+            reference_sources=(reference,),
+        )
+        zone = next(
+            item
+            for item in tracker.snapshot()[0]
+            if item.source_ids == reference.source_ids
+        )
+        first_test_at = first_test_at or zone.tested_at
+        tracker.on_candle(
+            _candle(
+                contact_index + 1,
+                open_=99.0,
+                high=99.4,
+                low=98.8,
+                close=99.0,
+            ),
+            (),
+            reference_sources=(reference,),
+        )
+
+    zone = next(
+        item
+        for item in tracker.snapshot()[0]
+        if item.source_ids == reference.source_ids
+    )
+    assert zone.total_touch_count == 13
+    assert len(zone.touch_times) == 8
+    assert zone.tested_at == first_test_at == zone.touch_times[1]
+
+
+def test_reference_sr_rejects_late_or_rewritten_source() -> None:
+    tracker = CausalLiquidityTracker(Timeframe.M1)
+    confirmation = _candle(
+        0,
+        open_=98.0,
+        high=98.5,
+        low=97.5,
+        close=98.0,
+    )
+    tracker.on_candle(confirmation, ())
+    reference = LiquidityInventoryItem(
+        item_id="reference:causal-high",
+        timeframe=Timeframe.M1,
+        side="above",
+        kind="previous_day_high",
+        price=100.0,
+        lower_bound=100.0,
+        upper_bound=100.0,
+        formed_at=BASE,
+        confirmed_at=confirmation.end,
+        lifecycle=LiquidityInventoryLifecycle.VISIBLE,
+        source_ids=("reference_source:causal-high",),
+        age_bars=0,
+        strength=0.9,
+        structural_rank="external",
+        visibility_strength=0.9,
+    )
+    tracker.on_candle(
+        _candle(1, open_=98.0, high=98.5, low=97.5, close=98.0),
+        (),
+    )
+    with pytest.raises(
+        LiquidityProtocolError,
+        match="first real candle",
+    ):
+        tracker.on_candle(
+            _candle(2, open_=98.0, high=98.5, low=97.5, close=98.0),
+            (),
+            reference_sources=(reference,),
+        )
+
+    fresh = CausalLiquidityTracker(Timeframe.M1)
+    fresh.on_candle(confirmation, ())
+    fresh.on_candle(
+        _candle(1, open_=98.0, high=98.5, low=97.5, close=98.0),
+        (),
+        reference_sources=(reference,),
+    )
+    rewritten = replace(
+        reference,
+        price=101.0,
+        lower_bound=101.0,
+        upper_bound=101.0,
+    )
+    with pytest.raises(
+        LiquidityProtocolError,
+        match="rewrite frozen",
+    ):
+        fresh.on_candle(
+            _candle(2, open_=98.0, high=98.5, low=97.5, close=98.0),
+            (),
+            reference_sources=(rewritten,),
+        )
+
+    missing_atr = CausalLiquidityTracker(Timeframe.M1)
+    missing_atr.on_candle(confirmation, ())
+    missing_atr._strict_prior_atr_by_end.clear()
+    with pytest.raises(
+        LiquidityProtocolError,
+        match="first real candle",
+    ):
+        missing_atr.on_candle(
+            _candle(1, open_=98.0, high=98.5, low=97.5, close=98.0),
+            (),
+            reference_sources=(reference,),
+        )
+
+
+def test_reference_sr_source_identity_enters_event_memory_without_proxy() -> None:
+    observer = CausalObserver(
+        ObserverConfig(scale_specs=CORE_TEST_SCALE_SPECS)
+    )
+    candle = _candle(
+        0,
+        open_=99.0,
+        high=99.5,
+        low=98.5,
+        close=99.0,
+    )
+    observer.memory.observe_minute(candle)
+    source_id = "reference_source:week:2025-W01:high:NQH5:1"
+    zone = SupportResistanceState(
+        zone_id="reference-zone:event-memory",
+        timeframe=Timeframe.M1,
+        side="resistance",
+        lower_bound=99.75,
+        upper_bound=100.25,
+        anchor_price=100.0,
+        formed_at=candle.start,
+        confirmed_at=candle.end,
+        lifecycle=SupportResistanceLifecycle.ACTIVE,
+        member_swing_ids=(),
+        touch_times=(candle.end,),
+        reaction_magnitudes_atr=(0.0,),
+        age_bars=0,
+        strength=0.2,
+        total_touch_count=1,
+        source_kind="previous_week",
+        structural_rank="external",
+        visibility_strength=1.0,
+        source_ids=(source_id,),
+    )
+    observer._record_frame_events(
+        FrameObservation(
+            timeframe=Timeframe.M1,
+            cutoff=candle.end,
+            bars=1,
+            metrics={"atr": 1.0},
+            support_resistance=(zone,),
+        ),
+        newly_completed=True,
+        event_clock=candle.end,
+    )
+
+    event = next(
+        item
+        for item in observer.memory.recent()
+        if item.kind is EventKind.SUPPORT_RESISTANCE_STATE
+    )
+    assert event.entity_id == zone.zone_id
+    assert event.source_ids == (source_id,)
+    assert event.details["source_kind"] == "previous_week"
+
+
+def test_partial_cold_start_period_never_becomes_previous_session() -> None:
+    observer = CausalObserver(
+        ObserverConfig(scale_specs=CORE_TEST_SCALE_SPECS)
+    )
+
+    def reference_candle(start: str) -> Candle:
+        clock = pd.Timestamp(start, tz=TZ)
+        return replace(
+            _candle(0, open_=100.0, high=101.0, low=99.0, close=100.0),
+            start=clock,
+            end=clock + pd.Timedelta(minutes=1),
+        )
+
+    observer._advance_reference_periods(
+        reference_candle("2025-01-06 17:59"),
+        append_retirement_events=False,
+    )
+    observer._advance_reference_periods(
+        reference_candle("2025-01-06 18:00"),
+        append_retirement_events=False,
+    )
+
+    assert not any(
+        item.kind.startswith("previous_session_")
+        for item in observer._reference_inventory.values()
+    )
 
 
 def test_cold_attach_rebuilds_first_swing_crossing_or_fails_closed() -> None:
@@ -1712,11 +2445,15 @@ def test_cold_attach_rebuilds_first_swing_crossing_or_fails_closed() -> None:
             Timeframe.M1: (*warmup, crossing, tail),
         },
         anomalies=(),
+        active_timeframes=CORE_TEST_TIMEFRAMES,
+        scale_specs=CORE_TEST_SCALE_SPECS,
+        scale_registry_id=CORE_TEST_SCALE_REGISTRY_ID,
     )
     observer = CausalObserver(
         ObserverConfig(
             structure_protocol=STRUCTURE_PROTOCOL,
             liquidity_protocol=STRUCTURE_PROTOCOL,
+            scale_specs=CORE_TEST_SCALE_SPECS,
         )
     )
     projected = observer._project_inventory(
@@ -1742,10 +2479,39 @@ def test_cold_attach_rebuilds_first_swing_crossing_or_fails_closed() -> None:
     assert crossing_event.kind is EventKind.LIQUIDITY_SWEEP
     assert crossing_event.observed_at == crossing.end
 
+    observer._prior = SimpleNamespace(liquidity_inventory=projected)
+    next_bar = _candle(
+        3,
+        open_=99.75,
+        high=99.9,
+        low=99.5,
+        close=99.75,
+    )
+    next_update = replace(
+        update,
+        asof=next_bar.end,
+        completed_1m=next_bar,
+        histories={Timeframe.M1: (*update.histories[Timeframe.M1], next_bar)},
+    )
+    later_metadata = replace(
+        item,
+        age_bars=2,
+        structural_rank="external",
+        is_protected_swing=True,
+        visibility_strength=1.0,
+    )
+    still_frozen = observer._project_inventory(
+        next_update,
+        market_observation(asof=next_bar.end).frames,
+        (later_metadata,),
+    )
+    assert still_frozen == projected
+
     too_late = CausalObserver(
         ObserverConfig(
             structure_protocol=STRUCTURE_PROTOCOL,
             liquidity_protocol=STRUCTURE_PROTOCOL,
+            scale_specs=CORE_TEST_SCALE_SPECS,
         )
     )
     with pytest.raises(
@@ -1776,6 +2542,9 @@ def test_unregistered_range_boundary_projection_fails_closed() -> None:
         newly_completed={},
         histories={Timeframe.M1: (bar,)},
         anomalies=(),
+        active_timeframes=CORE_TEST_TIMEFRAMES,
+        scale_specs=CORE_TEST_SCALE_SPECS,
+        scale_registry_id=CORE_TEST_SCALE_REGISTRY_ID,
     )
     item = LiquidityInventoryItem(
         item_id="range:disabled",
@@ -1793,7 +2562,9 @@ def test_unregistered_range_boundary_projection_fails_closed() -> None:
         strength=0.5,
     )
     for cold_attach in (True, False):
-        observer = CausalObserver()
+        observer = CausalObserver(
+            ObserverConfig(scale_specs=CORE_TEST_SCALE_SPECS)
+        )
         if not cold_attach:
             observer._prior = market_observation(asof=bar.start)
         with pytest.raises(
@@ -2150,7 +2921,12 @@ def test_pool_terminal_exposure_avoids_same_bar_capacity_deadlock() -> None:
 
 
 def test_observer_pool_event_projection_and_timeline_wiring() -> None:
-    observer = CausalObserver(ObserverConfig(memory_events=2))
+    observer = CausalObserver(
+        ObserverConfig(
+            memory_events=2,
+            scale_specs=CORE_TEST_SCALE_SPECS,
+        )
+    )
     formed_at = BASE + pd.Timedelta(minutes=1)
     confirmed_at = BASE + pd.Timedelta(minutes=2)
     swept_at = BASE + pd.Timedelta(minutes=3)
@@ -2264,13 +3040,12 @@ def test_observer_pool_event_projection_and_timeline_wiring() -> None:
         ),
         pools=(rejected,),
     )
+    durations, ages = observer.memory.temporal_metrics(resolved_at)
     terminal_observation = replace(
         base,
         recent_events=observer.memory.recent(),
-        event_durations_minutes=observer.memory.durations(
-            resolved_at
-        ),
-        event_ages_minutes=observer.memory.ages(resolved_at),
+        event_durations_minutes=durations,
+        event_ages_minutes=ages,
         retained_entity_timelines=(
             observer.memory.entity_timelines()
         ),
@@ -2313,7 +3088,9 @@ def test_zone_visibility_retires_stale_evidence_and_pins_unresolved_pool() -> No
     )
     swings: list[SwingPoint] = []
     first_retired_zone_id: str | None = None
-    overflow_observer = CausalObserver()
+    overflow_observer = CausalObserver(
+        ObserverConfig(scale_specs=CORE_TEST_SCALE_SPECS)
+    )
     first_retired_event_id: str | None = None
     for index in range(10):
         price = 300.0 - 10.0 * index
@@ -2472,7 +3249,7 @@ def test_zone_visibility_retires_stale_evidence_and_pins_unresolved_pool() -> No
         _candle(
             2,
             open_=100.0,
-            high=100.2,
+            high=100.0,
             low=99.8,
             close=100.0,
         ),
@@ -2514,6 +3291,35 @@ def test_zone_visibility_retires_stale_evidence_and_pins_unresolved_pool() -> No
         zones[0].transition_reason
         == SUPPORT_RESISTANCE_RETIREMENT_REASON
     )
+    retired_zone_id = zones[0].zone_id
+    retained_pool_id = pools[0].pool_id
+    for index in range(5, 13):
+        price = 200.0 + 10.0 * index
+        source = _swing(
+            f"post-pool-zone-{index}",
+            side=SwingSide.HIGH,
+            price=price,
+            confirmed_index=index,
+        )
+        pool_tracker.on_candle(
+            _candle(
+                index,
+                open_=price,
+                high=price + 0.2,
+                low=price - 0.2,
+                close=price,
+            ),
+            (source,),
+        )
+    zones, pools, inventory = pool_tracker.snapshot()
+    assert retired_zone_id not in {item.zone_id for item in zones}
+    assert retained_pool_id in {item.pool_id for item in pools}
+    retained_pool_item = next(
+        item
+        for item in inventory
+        if item.item_id == f"pool:{retained_pool_id}"
+    )
+    assert retained_pool_item.lifecycle is LiquidityInventoryLifecycle.CONSUMED
 
     break_tracker = CausalLiquidityTracker(Timeframe.M1)
     break_source = _swing(
@@ -2721,6 +3527,7 @@ def test_one_minute_pool_projection_is_authoritative_and_starts_new_generation()
         ObserverConfig(
             structure_protocol=STRUCTURE_PROTOCOL,
             liquidity_protocol=STRUCTURE_PROTOCOL,
+            scale_specs=CORE_TEST_SCALE_SPECS,
         )
     )
     observer._liquidity_trackers[Timeframe.M1] = tracker
@@ -2739,6 +3546,9 @@ def test_one_minute_pool_projection_is_authoritative_and_starts_new_generation()
         newly_completed={},
         histories={},
         anomalies=(),
+        active_timeframes=CORE_TEST_TIMEFRAMES,
+        scale_specs=CORE_TEST_SCALE_SPECS,
+        scale_registry_id=CORE_TEST_SCALE_REGISTRY_ID,
     )
     swept_inventory = observer._project_inventory(
         sweep_update,
@@ -2783,6 +3593,9 @@ def test_one_minute_pool_projection_is_authoritative_and_starts_new_generation()
         newly_completed={},
         histories={},
         anomalies=(),
+        active_timeframes=CORE_TEST_TIMEFRAMES,
+        scale_specs=CORE_TEST_SCALE_SPECS,
+        scale_registry_id=CORE_TEST_SCALE_REGISTRY_ID,
     )
     same_clock_touch = _swing(
         "generation-1-at-resolution",
@@ -2818,10 +3631,10 @@ def test_one_minute_pool_projection_is_authoritative_and_starts_new_generation()
         confirmed_index=5,
     )
     third_bar = _candle(
-        4, open_=99.75, high=100.2, low=99.5, close=99.75
+        4, open_=99.75, high=100.0, low=99.5, close=99.75
     )
     fourth_bar = _candle(
-        5, open_=99.75, high=100.2, low=99.5, close=99.75
+        5, open_=99.75, high=100.0, low=99.5, close=99.75
     )
     tracker.on_candle(
         third_bar,
@@ -2845,7 +3658,7 @@ def test_one_minute_pool_projection_is_authoritative_and_starts_new_generation()
             _candle(
                 index,
                 open_=99.75,
-                high=100.2,
+                high=100.0,
                 low=99.5,
                 close=99.75,
             ),
@@ -2921,7 +3734,9 @@ def test_terminal_event_duration_closes_and_broken_zone_remains_open() -> None:
     memory.append(formed)
     memory.append(swept)
     memory.append(terminal)
-    durations = memory.durations(terminal_at + pd.Timedelta(minutes=20))
+    durations, _ = memory.temporal_metrics(
+        terminal_at + pd.Timedelta(minutes=20)
+    )
     assert durations[formed.event_id] == 2
     assert durations[swept.event_id] == 1
     assert durations[terminal.event_id] == 0
@@ -2946,7 +3761,9 @@ def test_terminal_event_duration_closes_and_broken_zone_remains_open() -> None:
         tested_at=tested_at,
         total_touch_count=2,
     )
-    tested_observer = CausalObserver()
+    tested_observer = CausalObserver(
+        ObserverConfig(scale_specs=CORE_TEST_SCALE_SPECS)
+    )
     tested_observer._record_frame_events(
         FrameObservation(
             timeframe=Timeframe.M1,
@@ -2978,11 +3795,19 @@ def test_terminal_event_duration_closes_and_broken_zone_remains_open() -> None:
         newly_completed=True,
     )
     assert updated_tested.touch_count == 3
-    assert len(tested_observer.memory._events) == event_count
+    assert len(tested_observer.memory._events) == event_count + 1
+    revision_event = tested_observer.memory.recent()[-1]
+    assert revision_event.entity_id is None
+    assert revision_event.details["state_revision"] is True
+    assert revision_event.details["touch_count"] == 3
+    assert revision_event.transition_reason == (
+        "support_resistance_evidence_revised"
+    )
     tested_event = next(iter(tested_observer.memory._events))
-    assert tested_observer.memory.durations(
+    durations, _ = tested_observer.memory.temporal_metrics(
         BASE + pd.Timedelta(minutes=5)
-    )[tested_event.event_id] == 4
+    )
+    assert durations[tested_event.event_id] == 4
 
     broken_at = BASE + pd.Timedelta(minutes=5)
     broken = SupportResistanceState(
@@ -3010,7 +3835,9 @@ def test_terminal_event_duration_closes_and_broken_zone_remains_open() -> None:
         metrics={},
         support_resistance=(broken,),
     )
-    observer = CausalObserver()
+    observer = CausalObserver(
+        ObserverConfig(scale_specs=CORE_TEST_SCALE_SPECS)
+    )
     observer._record_frame_events(frame, newly_completed=True)
     broken_event = next(
         item
@@ -3018,9 +3845,10 @@ def test_terminal_event_duration_closes_and_broken_zone_remains_open() -> None:
         if item.entity_id == broken.zone_id
     )
     assert broken_event.ended_at is None
-    assert observer.memory.durations(
+    durations, _ = observer.memory.temporal_metrics(
         broken_at + pd.Timedelta(minutes=4)
-    )[broken_event.event_id] == 4
+    )
+    assert durations[broken_event.event_id] == 4
 
     count = len(observer.memory._events)
     observer._record_frame_events(
@@ -3139,7 +3967,7 @@ def test_retained_entity_timeline_survives_fifo_eviction() -> None:
     for offset in range(9, 13):
         memory.append(
             _event(
-                EventKind.REJECTION,
+                EventKind.LIQUIDITY_CONSUMED,
                 BASE + pd.Timedelta(minutes=offset),
                 Timeframe.M1,
                 "above",
@@ -3153,20 +3981,19 @@ def test_retained_entity_timeline_survives_fifo_eviction() -> None:
     )
 
     assert all(
-        event.kind is EventKind.REJECTION
+        event.kind is EventKind.LIQUIDITY_CONSUMED
         for event in memory.recent()
     )
     assert tuple(
         event.lifecycle
         for event in memory.timeline("zone:timeline-zone")
     ) == ("active", "tested", "retired")
-    durations = memory.durations(
+    durations, ages = memory.temporal_metrics(
         BASE + pd.Timedelta(minutes=20)
     )
     assert durations[active.event_id] == 3
     assert durations[tested.event_id] == 4
     assert durations[retired.event_id] == 0
-    ages = memory.ages(BASE + pd.Timedelta(minutes=20))
     assert {
         ages[active.event_id],
         ages[tested.event_id],
@@ -3182,7 +4009,9 @@ def test_retained_entity_timeline_survives_fifo_eviction() -> None:
 
 
 def test_projection_dedupe_expiry_does_not_rewrite_retained_lifecycle() -> None:
-    observer = CausalObserver()
+    observer = CausalObserver(
+        ObserverConfig(scale_specs=CORE_TEST_SCALE_SPECS)
+    )
     swing = _swing(
         "long-retained-swing",
         side=SwingSide.HIGH,
@@ -3286,8 +4115,9 @@ def test_retained_entity_timeline_duration_excludes_synthetic_minutes() -> None:
         {"zone:synthetic-zone"},
         asof=tested.observed_at,
     )
-    assert memory.durations(tested.observed_at)[active.event_id] == 2
-    assert memory.ages(tested.observed_at)[tested.event_id] == 3
+    durations, ages = memory.temporal_metrics(tested.observed_at)
+    assert durations[active.event_id] == 2
+    assert ages[tested.event_id] == 3
 
 
 def test_retained_entity_timeline_prunes_with_typed_snapshot() -> None:
@@ -3314,7 +4144,7 @@ def test_retained_entity_timeline_prunes_with_typed_snapshot() -> None:
     )
     memory.append(
         _event(
-            EventKind.REJECTION,
+            EventKind.LIQUIDITY_CONSUMED,
             BASE + pd.Timedelta(minutes=3),
             Timeframe.M1,
             "above",
@@ -3329,12 +4159,11 @@ def test_retained_entity_timeline_prunes_with_typed_snapshot() -> None:
     assert set(memory.entity_timelines()) == {
         "pool:retained-pool"
     }
-    assert zone.event_id not in memory.durations(
+    durations, ages = memory.temporal_metrics(
         BASE + pd.Timedelta(minutes=3)
     )
-    assert zone.event_id not in memory.ages(
-        BASE + pd.Timedelta(minutes=3)
-    )
+    assert zone.event_id not in durations
+    assert zone.event_id not in ages
     with pytest.raises(
         ValueError,
         match="lacks a lifecycle timeline",
@@ -3458,7 +4287,7 @@ def test_retained_entity_timeline_extends_clock_coverage_guard() -> None:
     )
     memory.append(
         _event(
-            EventKind.REJECTION,
+            EventKind.LIQUIDITY_CONSUMED,
             BASE + pd.Timedelta(minutes=2),
             Timeframe.M1,
             "above",

@@ -9,10 +9,12 @@ import subprocess
 import sys
 
 import pandas as pd
+import pytest
 
 from scripts.run_continuous_replay import (
     BRAIN_CALIBRATION_FIELD_TYPES,
     DECISION_FIELD_TYPES,
+    _visualization_clocks,
 )
 from smc_trader.brain_calibration import BrainCalibrationRecord
 
@@ -42,10 +44,10 @@ def test_stream_schemas_match_the_lightweight_contract() -> None:
         assert repeated_identity not in BRAIN_CALIBRATION_FIELD_TYPES
 
 
-def _write_source(tmp_path: Path) -> Path:
+def _write_source(tmp_path: Path, *, periods: int = 32) -> Path:
     index = pd.date_range(
         "2022-06-06 18:00",
-        periods=32,
+        periods=periods,
         freq="min",
         tz="America/New_York",
         name="ts",
@@ -76,6 +78,8 @@ def _command(
     resume: bool = False,
     stop_after: int = 0,
     brain_calibration: bool = False,
+    end: str = "2022-06-06T18:32:00-04:00",
+    visualize_at: tuple[str, ...] = (),
 ) -> list[str]:
     command = [
         sys.executable,
@@ -91,7 +95,7 @@ def _command(
         "--start",
         "2022-06-06T18:00:00-04:00",
         "--end",
-        "2022-06-06T18:32:00-04:00",
+        end,
         "--warmup-days",
         "0",
         "--shard-rows",
@@ -106,6 +110,8 @@ def _command(
         command.extend(["--diagnostic-stop-after-bars", str(stop_after)])
     if brain_calibration:
         command.append("--brain-calibration")
+    for clock in visualize_at:
+        command.extend(["--visualize-at", clock])
     return command
 
 
@@ -190,6 +196,79 @@ def test_default_replay_is_lightweight_resumable_and_deterministic(
         "ai_primitive_proposals.json",
     ):
         assert not (resumed_output / retired).exists()
+    assert not (resumed_output / "visualizations").exists()
+
+
+def test_visualization_clocks_are_bounded_causal_and_unique() -> None:
+    start = pd.Timestamp("2022-06-06T18:00:00-04:00")
+    end = pd.Timestamp("2022-06-06T19:00:00-04:00")
+    clocks = _visualization_clocks(
+        ["2022-06-06T18:30:00-04:00"],
+        start=start,
+        end=end,
+    )
+    assert clocks == (pd.Timestamp("2022-06-06T22:30:00Z"),)
+
+    with pytest.raises(ValueError, match="timezone-aware"):
+        _visualization_clocks(
+            ["2022-06-06T18:30:00"],
+            start=start,
+            end=end,
+        )
+    with pytest.raises(ValueError, match="inside the replay interval"):
+        _visualization_clocks(
+            ["2022-06-06T19:00:00-04:00"],
+            start=start,
+            end=end,
+        )
+    with pytest.raises(ValueError, match="unique"):
+        _visualization_clocks(
+            [
+                "2022-06-06T18:30:00-04:00",
+                "2022-06-06T22:30:00Z",
+            ],
+            start=start,
+            end=end,
+        )
+
+
+def test_explicit_decision_clock_renders_one_causal_visual(
+    tmp_path: Path,
+) -> None:
+    source = _write_source(tmp_path, periods=241)
+    output = tmp_path / "visualized"
+    decision_clock = "2022-06-06T22:01:00-04:00"
+    completed = _run(
+        _command(
+            source,
+            output,
+            end="2022-06-06T22:02:00-04:00",
+            visualize_at=(decision_clock,),
+        )
+    )
+    assert completed.returncode == 0, completed.stderr
+
+    image = output / "visualizations/20220607T020100Z.png"
+    index = output / "visualizations/index.html"
+    assert image.is_file()
+    assert image.stat().st_size > 0
+    assert index.is_file()
+    assert image.name in index.read_text(encoding="utf-8")
+
+    summary = json.loads((output / "summary.json").read_text())
+    assert summary["visualization_capture"] is True
+    assert summary["visualization_decisions"] == 1
+    assert summary["visualization_index"] == "visualizations/index.html"
+
+    manifest = json.loads((output / "run_manifest.json").read_text())
+    assert manifest["output"]["visualization"] == {
+        "enabled": True,
+        "decision_clocks_utc": ["2022-06-07T02:01:00+00:00"],
+        "directory": "visualizations",
+        "selection": "explicit_decision_clocks",
+    }
+    marker = json.loads((output / "COMPLETED.json").read_text())
+    assert marker["visualizations_index"] == "visualizations/index.html"
 
 
 def test_brain_calibration_is_the_only_optional_default_stream(tmp_path: Path) -> None:

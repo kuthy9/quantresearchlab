@@ -19,10 +19,16 @@ from typing import Any
 
 import pandas as pd
 
-from .model import Candle, Direction, Timeframe, aware_timestamp
+from .model import (
+    Candle,
+    Direction,
+    Timeframe,
+    aware_timestamp,
+    candle_identity,
+)
 
 
-EPISODE_PROTOCOL_VERSION = "3.2.0-displacement-episode.2"
+EPISODE_PROTOCOL_VERSION = "3.2.0-displacement-episode.3"
 
 
 class DisplacementLifecycle(str, Enum):
@@ -204,6 +210,9 @@ class DisplacementState:
     efficiency: float
     speed_atr_per_bar: float
     mean_body_fraction: float
+    mean_overlap_ratio: float
+    max_overlap_ratio: float
+    mean_directional_clv: float
     min_directional_clv: float
     volume_ratio: float | None
     favorable_extreme: float
@@ -243,7 +252,12 @@ class DisplacementUpdate:
 class _OpenEpisode:
     state: DisplacementState
     last_close: float
+    last_high: float
+    last_low: float
     body_fraction_sum: float
+    overlap_ratio_sum: float
+    overlap_pair_count: int
+    directional_clv_sum: float
     volume_sum: float
 
 
@@ -303,23 +317,9 @@ class CausalDisplacementTracker:
         return int(rounded)
 
     def _candle_id(self, candle: Candle) -> str:
-        return _identity(
-            "candle-v1",
-            candle.timeframe,
-            candle.start,
-            candle.end,
-            self._ticks(candle.open),
-            self._ticks(candle.high),
-            self._ticks(candle.low),
-            self._ticks(candle.close),
-            float(candle.volume),
-            candle.symbol,
-            candle.instrument_id,
-            candle.observed_minutes,
-            candle.expected_minutes,
-            candle.real_minutes,
-            candle.synthetic_minutes,
-            candle.complete,
+        return candle_identity(
+            candle,
+            tick_size=self.protocol.tick_size,
         )
 
     def _geometry(
@@ -491,6 +491,9 @@ class CausalDisplacementTracker:
             / max(travel, self.protocol.tick_size),
             speed_atr_per_bar=relative,
             mean_body_fraction=body_fraction,
+            mean_overlap_ratio=0.0,
+            max_overlap_ratio=0.0,
+            mean_directional_clv=clv,
             min_directional_clv=clv,
             volume_ratio=(
                 None if v0 is None else float(candle.volume) / v0
@@ -522,7 +525,12 @@ class CausalDisplacementTracker:
         opened = _OpenEpisode(
             state=state,
             last_close=float(candle.close),
+            last_high=float(candle.high),
+            last_low=float(candle.low),
             body_fraction_sum=body_fraction,
+            overlap_ratio_sum=0.0,
+            overlap_pair_count=0,
+            directional_clv_sum=clv,
             volume_sum=float(candle.volume),
         )
         return opened, self._transition(state)
@@ -581,6 +589,26 @@ class CausalDisplacementTracker:
         favorable_progress = self._favorable_close_progress(candle, prior)
         count = prior.real_episode_bar_count + 1
         body_sum = opened.body_fraction_sum + body_fraction
+        prior_range = max(
+            opened.last_high - opened.last_low,
+            self.protocol.tick_size,
+        )
+        current_range = max(
+            float(candle.high - candle.low),
+            self.protocol.tick_size,
+        )
+        overlap_points = max(
+            0.0,
+            min(opened.last_high, float(candle.high))
+            - max(opened.last_low, float(candle.low)),
+        )
+        overlap_ratio = min(
+            1.0,
+            overlap_points / min(prior_range, current_range),
+        )
+        overlap_sum = opened.overlap_ratio_sum + overlap_ratio
+        overlap_count = opened.overlap_pair_count + 1
+        directional_clv_sum = opened.directional_clv_sum + clv
         volume_sum = opened.volume_sum + float(candle.volume)
         net = q * float(candle.close - prior.origin_price)
         travel = prior.travel_points + abs(
@@ -626,6 +654,9 @@ class CausalDisplacementTracker:
             / max(travel, self.protocol.tick_size),
             speed_atr_per_bar=relative / count,
             mean_body_fraction=body_sum / count,
+            mean_overlap_ratio=overlap_sum / overlap_count,
+            max_overlap_ratio=max(prior.max_overlap_ratio, overlap_ratio),
+            mean_directional_clv=directional_clv_sum / count,
             min_directional_clv=min(prior.min_directional_clv, clv),
             volume_ratio=(
                 None if prior.v0 is None else volume_sum / count / prior.v0
@@ -682,7 +713,12 @@ class CausalDisplacementTracker:
         return _OpenEpisode(
             state=state,
             last_close=float(candle.close),
+            last_high=float(candle.high),
+            last_low=float(candle.low),
             body_fraction_sum=body_sum,
+            overlap_ratio_sum=overlap_sum,
+            overlap_pair_count=overlap_count,
+            directional_clv_sum=directional_clv_sum,
             volume_sum=volume_sum,
         )
 
@@ -829,10 +865,7 @@ class CausalDisplacementTracker:
                 desired,
             )
             return
-        if (
-            int(self._reverse_probe.state.direction.sign) != desired
-            or candidate != desired
-        ):
+        if int(self._reverse_probe.state.direction.sign) != desired:
             self._reverse_probe = None
             return
         prior_probe = self._reverse_probe.state

@@ -129,6 +129,46 @@ def test_observation_integrity_anomaly_hard_vetoes_flat_entry(
     assert VetoCode.DATA_ANOMALY in result.vetoes
 
 
+@pytest.mark.parametrize(
+    ("source", "execution_anomalies"),
+    (
+        ("missing", ()),
+        ("unknown", ()),
+        ("constant", ()),
+        (
+            "synthetic_observed_execution",
+            ("spread_missing_used_one_tick",),
+        ),
+    ),
+)
+def test_non_observed_execution_or_missing_spread_hard_vetoes_entry(
+    source: str,
+    execution_anomalies: tuple[str, ...],
+) -> None:
+    observation = market_observation()
+    observation = replace(
+        observation,
+        execution=replace(
+            observation.execution,
+            source=source,
+            anomalies=execution_anomalies,
+        ),
+    )
+    plan = long_plan(observation)
+
+    result = StructuralRiskEngine(
+        RiskLimits(maximum_cost_R=0.50)
+    ).review(
+        _decision(observation, plan),
+        observation,
+        flat_account(),
+    )
+
+    assert not result.passed
+    assert result.final_action is Action.ABSTAIN
+    assert result.vetoes == (VetoCode.DATA_ANOMALY,)
+
+
 @pytest.mark.parametrize("anomaly", ("data_anomaly", "tick_size_mismatch"))
 def test_observation_integrity_anomaly_forces_open_position_exit(
     anomaly: str,
@@ -247,12 +287,12 @@ def test_stop_and_target_ids_are_bound_to_their_canonical_values() -> None:
     )
 
 
-def test_only_sweep_or_rejection_events_can_source_an_invalidation() -> None:
+def test_consumption_event_cannot_source_an_invalidation() -> None:
     observation = market_observation()
     event = replace(
         observation.recent_events[0],
-        event_id="compression-event",
-        kind=EventKind.COMPRESSION,
+        event_id="consumed-liquidity-event",
+        kind=EventKind.LIQUIDITY_CONSUMED,
     )
     observation = replace(observation, recent_events=(event,))
     plan = long_plan(observation)
@@ -263,7 +303,7 @@ def test_only_sweep_or_rejection_events_can_source_an_invalidation() -> None:
             side="below",
             source_level_id=event.event_id,
             observed_at=event.observed_at,
-            rationale="non-structural event must not register as a stop",
+            rationale="consumption event must not register as a stop",
         ),
     )
     assert not _valid_stop(plan, observation)
@@ -347,16 +387,59 @@ def test_protect_uses_structure_confirmed_on_the_current_action_clock() -> None:
         opened_at,
         0,
     )
+
+    def typed_source(level: LiquidityLevel):
+        source_id = f"source:{level.level_id}"
+        template = observation.frame(Timeframe.H1).swings[0]
+        swing = replace(
+            template,
+            swing_id=source_id,
+            timeframe=level.timeframe,
+            price=level.price,
+            price_ticks=int(round(level.price / 0.25)),
+            pivot_start=level.formed_at - pd.Timedelta(minutes=1),
+            pivot_end=level.formed_at,
+            observed_at=level.confirmed_at,
+            confirmed_at=level.confirmed_at,
+            broken_at=None,
+        )
+        item = LiquidityInventoryItem(
+            item_id=level.level_id,
+            timeframe=level.timeframe,
+            side=level.side,
+            kind="swing",
+            price=level.price,
+            lower_bound=level.price,
+            upper_bound=level.price,
+            formed_at=level.formed_at,
+            confirmed_at=level.confirmed_at,
+            lifecycle=LiquidityInventoryLifecycle.VISIBLE,
+            source_ids=(source_id,),
+            age_bars=0,
+            strength=0.5,
+        )
+        return swing, item
+
+    m1_swing, m1_item = typed_source(current_m1)
+    h4_swing, h4_item = typed_source(ignored_h4)
     frames = dict(observation.frames)
     frames[Timeframe.M1] = replace(
         frames[Timeframe.M1],
-        liquidity=(current_m1,),
+        swings=(*frames[Timeframe.M1].swings, m1_swing),
     )
     frames[Timeframe.H4] = replace(
         frames[Timeframe.H4],
-        liquidity=(*frames[Timeframe.H4].liquidity, ignored_h4),
+        swings=(*frames[Timeframe.H4].swings, h4_swing),
     )
-    observation = replace(observation, frames=frames)
+    observation = replace(
+        observation,
+        frames=frames,
+        liquidity_inventory=(
+            *observation.liquidity_inventory,
+            m1_item,
+            h4_item,
+        ),
+    )
     position = PositionSnapshot(
         thesis_hash="a" * 64,
         symbol=observation.symbol,
@@ -434,7 +517,6 @@ def test_protect_does_not_use_equal_liquidity_as_structure() -> None:
         observation,
         frames=frames,
         liquidity_inventory=(equal_low,),
-        liquidity_inventory_authoritative=True,
         liquidity_pool_states=(equal_low_pool,),
     )
     position = PositionSnapshot(

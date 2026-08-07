@@ -1,13 +1,14 @@
 {
-  "protocol_version": "3.1.0-group3.3",
+  "protocol_version": "3.2.0-group3.4",
   "tick_size": 0.25,
   "timeframe": "5m",
   "fvg_source_bars": 3,
+  "fvg_formation_atr_period": 14,
   "ob_anchor_history_bars": 64,
   "maximum_fvg_states": 256,
   "maximum_order_block_states": 128,
   "role": "causal_descriptive_development_contract",
-  "status": "formalized_implementation_pending",
+  "status": "implementation_complete_real_replay_review_pending",
   "scope": [
     "5m fair value gap",
     "5m order block"
@@ -36,7 +37,7 @@
       "required_timeframe": "5m",
       "identity_source": "the exact upstream BreakOfStructureState.bos_id",
       "protocol_source": "the exact frozen structure/BOS protocol SHA carried by a same-contract, same-tick-grid source envelope",
-      "scope_filter": "none; local, continuation and opposed are retained descriptively"
+      "scope_filter": "order blocks reject local BOS; continuation is eligible, while opposed requires MSS qualification from the same displacement"
     }
   },
   "clock": {
@@ -98,7 +99,14 @@
       },
       "equality": "touching outer candles do not form an FVG",
       "midpoint": "(lower_bound + upper_bound) / 2",
-      "frozen": "direction, bounds, edges, midpoint, source candle identities and source displacement identity never change"
+      "frozen": "direction, bounds, edges, midpoint, source candle identities, formation ATR and formation-time qualification never change"
+    },
+    "qualification": {
+      "raw": "every strict three-bar geometry is created and remains visible even without displacement evidence",
+      "displacement_linked": "at c3 formation only: one active same-direction displacement admits c2 and has active_at <= c3.end",
+      "no_backfill": "a raw gap is never upgraded when a displacement activates after c3",
+      "formation_atr": "mean positive true range of at most 14 real 5m bars completed before c3; c3 is excluded and tick_size is the positive fallback",
+      "strength": "compatibility-only zero value; width_atr remains the descriptive geometry and is not a trade-quality score"
     },
     "qualified_displacement": {
       "evaluation_clock": "after c3 has been admitted to the upstream displacement reducer",
@@ -125,7 +133,7 @@
       "c1 candle_id",
       "c2 candle_id",
       "c3 candle_id",
-      "source_displacement_id"
+      "qualification is deliberately excluded from identity"
     ],
     "lifecycle": {
       "states": [
@@ -187,8 +195,9 @@
     "timeframe": "5m",
     "formation": {
       "required_displacement": "one same-direction active displacement episode",
-      "required_bos": "one newly observed same-direction confirmed 5m BOS",
-      "clock_relation": "displacement.started_at <= bos.resolved_at <= displacement.prefix_last_admitted_at",
+      "required_bos": "one newly observed same-direction confirmed 5m continuation BOS, or opposed BOS qualified as MSS by this exact displacement; local BOS is rejected",
+      "clock_relation": "bos.pending_at <= displacement.started_at <= bos.resolved_at <= displacement.prefix_last_admitted_at",
+      "break_membership": "bos.break_bar_id must be one of the displacement admitted_candle_ids",
       "displacement_state_clock": "the displacement episode must still be active after the BOS resolution candle is admitted",
       "created_at": "bos.resolved_at",
       "formed_at": "bos.resolved_at",
@@ -198,16 +207,17 @@
     },
     "source_search": {
       "freeze_clock": "the displacement seed completion clock",
-      "lookback_real_completed_bars": 64,
-      "window": "up to 64 immediately preceding, contiguous, same-contract real_completed 5m candles ending no later than the displacement seed start",
+      "bounded_retention_bars": 64,
+      "window": "the real completed 5m candle immediately before the displacement seed is mandatory; retained history is bounded at 64 but a full 64-bar prefix is not a qualification condition",
       "future_expansion": "the frozen window is never enlarged after the seed",
-      "long_displacement_candidate": "close_ticks < open_ticks",
-      "short_displacement_candidate": "close_ticks > open_ticks",
-      "doji": "excluded",
-      "selection": "the candidate with the latest unique end clock",
+      "long_displacement_candidate": "the seed-adjacent candle must have close_ticks < open_ticks",
+      "short_displacement_candidate": "the seed-adjacent candle must have close_ticks > open_ticks",
+      "cluster_extension": "scan backward only through immediately contiguous same-contract reverse or doji candles; stop at the first directional, missing or synthetic interruption",
+      "doji": "allowed only while extending behind the strict seed-adjacent reverse anchor",
+      "selection": "the strict seed-adjacent reverse candle plus its contiguous reverse/doji predecessor cluster",
       "missing": "no order block is generated",
       "non_unique": "no order block is generated",
-      "frozen_zone": "the selected candle full low-to-high range, including wicks"
+      "frozen_zone": "freeze every anchor candle identity, cluster full low/high bounds, cluster body bounds and full-range midpoint"
     },
     "geometry": {
       "long": {
@@ -225,7 +235,8 @@
         "distal_edge_ticks": "source_candle.high_ticks"
       },
       "midpoint": "(lower_bound + upper_bound) / 2",
-      "frozen": "source candle, full-range bounds, midpoint, displacement identity, BOS identity and all source clocks never change"
+      "body_bounds": "minimum body low through maximum body high across the frozen cluster",
+      "frozen": "anchor candle identities, full-range bounds, body bounds, midpoint, displacement identity, BOS identity and all source clocks never change"
     },
     "association": {
       "direction": "order block, displacement and BOS directions must match",
@@ -239,7 +250,7 @@
       "instrument_id",
       "timeframe",
       "direction",
-      "source candle_id",
+      "ordered anchor candle_ids",
       "source_displacement_id",
       "source_bos_id"
     ],
@@ -326,7 +337,7 @@
     ],
     "order_block_specific": [
       "near_edge, distal_edge and width_ticks",
-      "source candle identity and strict body direction",
+      "ordered anchor candle identities, strict seed-adjacent body direction, full bounds and body bounds",
       "source displacement identity and clocks",
       "source BOS identity, target swing, scope and resolution clock"
     ],

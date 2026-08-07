@@ -4,7 +4,6 @@ from __future__ import annotations
 from bisect import bisect_right
 from collections import deque
 from dataclasses import dataclass, field, replace
-from functools import lru_cache
 import hashlib
 import math
 from typing import Iterable, Mapping, Sequence
@@ -13,7 +12,7 @@ import numpy as np
 import pandas as pd
 
 from .causal import ReaderUpdate
-from .displacement import DisplacementProtocol
+from .displacement import DisplacementLifecycle, DisplacementProtocol
 from .displacement_observer import (
     CONTRACT_BOUNDARY,
     DATA_GAP_BOUNDARY,
@@ -45,6 +44,7 @@ from .liquidity import (
 from .model import (
     BOS_CONFIRMATION_REASON,
     BOSLifecycle,
+    BOSScope,
     BreakOfStructureState,
     Candle,
     CandleStructureState,
@@ -59,7 +59,6 @@ from .model import (
     GROUP4_HARD_BOUNDARY_REASONS,
     LiquidityInventoryItem,
     LiquidityInventoryLifecycle,
-    LiquidityLevel,
     LiquidityPoolLifecycle,
     LiquidityPoolState,
     ManipulationLifecycle,
@@ -81,7 +80,6 @@ from .scene_graph import (
     ScaleSpec,
     SceneGraphDelta,
     TemporalMarketSceneGraph,
-    legacy_scale_specs,
     scale_registry_id,
 )
 from .structure import StructureConfig, StructureTracker
@@ -90,8 +88,6 @@ from .structure import StructureConfig, StructureTracker
 @dataclass(frozen=True)
 class ObserverConfig:
     atr_period: int = 14
-    swing_k: int = 2
-    external_liquidity_lookback: int = 80
     memory_events: int = 512
     minimum_bars: Mapping[Timeframe, int] = field(
         default_factory=lambda: {
@@ -110,7 +106,7 @@ class ObserverConfig:
     group3_protocol: str | None = None
     group4_protocol: str | None = None
     group5_protocol: str | None = None
-    scale_specs: tuple[ScaleSpec, ...] | None = None
+    scale_specs: tuple[ScaleSpec, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -129,6 +125,37 @@ class ExecutionRealityInput:
     ask_size: float | None = None
     depth_imbalance: float | None = None
     anomalies: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class _ReferencePeriod:
+    """Incremental completed-period extrema; never uses an unfinished bar."""
+
+    key: str
+    started_at: pd.Timestamp
+    last_end: pd.Timestamp
+    high: float
+    low: float
+    symbol: str
+    instrument_id: int
+    coverage_complete: bool
+
+
+_REFERENCE_KINDS = {
+    "previous_session_high",
+    "previous_session_low",
+    "previous_day_high",
+    "previous_day_low",
+    "previous_week_high",
+    "previous_week_low",
+}
+
+_INVENTORY_KINDS = {
+    "swing",
+    "equal_highs",
+    "equal_lows",
+    *_REFERENCE_KINDS,
+}
 
 
 def _safe_div(numerator: float, denominator: float, default: float = 0.0) -> float:
@@ -170,6 +197,44 @@ def _atr(candles: Sequence[Candle], period: int) -> float:
     return float(np.mean(positive)) if positive else 1.0
 
 
+def _strict_prior_atr(
+    candles: Sequence[Candle],
+    current: Candle,
+    period: int,
+) -> float | None:
+    """ATR from real bars completed before ``current``; never includes it."""
+
+    prior = tuple(
+        candle
+        for candle in candles
+        if candle.real_completed and candle.end <= current.start
+    )
+    if not prior:
+        return None
+    limit = max(1, int(period))
+    reverse_window: list[float] = []
+    for index in range(len(prior) - 1, -1, -1):
+        candle = prior[index]
+        if index == 0:
+            value = candle.high - candle.low
+        else:
+            prior_close = prior[index - 1].close
+            value = max(
+                candle.high - candle.low,
+                abs(candle.high - prior_close),
+                abs(candle.low - prior_close),
+            )
+        if math.isfinite(value) and value > 0.0:
+            reverse_window.append(float(value))
+            if len(reverse_window) == limit:
+                break
+    return (
+        float(np.mean(tuple(reversed(reverse_window))))
+        if reverse_window
+        else None
+    )
+
+
 def _efficiency(closes: Sequence[float]) -> float:
     if len(closes) < 2:
         return 0.0
@@ -181,7 +246,11 @@ def _range_position(price: float, low: float, high: float) -> float:
     return clamp(_safe_div(price - low, high - low, 0.5))
 
 
-def _candle_structure(candle: Candle) -> CandleStructureState:
+def _candle_structure(
+    candle: Candle,
+    *,
+    prior_atr: float | None = None,
+) -> CandleStructureState:
     candle_range = max(0.0, float(candle.high - candle.low))
     body = abs(float(candle.close - candle.open))
     upper = max(
@@ -209,6 +278,59 @@ def _candle_structure(candle: Candle) -> CandleStructureState:
             else -1 if candle.close < candle.open
             else 0
         )
+
+    # Fixed descriptive buckets only.  Small/large require both relative
+    # geometry and a strictly prior ATR comparison; no prior ATR means normal.
+    valid_prior_atr = (
+        prior_atr is not None
+        and math.isfinite(float(prior_atr))
+        and float(prior_atr) > 0.0
+    )
+    if zero_range or body_ratio <= 0.10:
+        body_class = "doji"
+    elif (
+        valid_prior_atr
+        and body_ratio <= 0.35
+        and body <= 0.35 * float(prior_atr)
+    ):
+        body_class = "small"
+    elif (
+        valid_prior_atr
+        and body_ratio >= 0.65
+        and body >= 0.75 * float(prior_atr)
+    ):
+        body_class = "large"
+    else:
+        body_class = "normal"
+
+    if zero_range:
+        range_class = "compressed"
+    elif not valid_prior_atr:
+        range_class = "normal"
+    elif candle_range <= 0.75 * float(prior_atr):
+        range_class = "compressed"
+    elif candle_range >= 1.50 * float(prior_atr):
+        range_class = "expanded"
+    else:
+        range_class = "normal"
+
+    # A wick must occupy at least 20% of the range and be 1.5x its peer to
+    # dominate; two material but similar wicks are balanced.
+    if zero_range or max(upper_ratio, lower_ratio) < 0.20:
+        dominant_wick = "none"
+    elif upper >= 1.50 * lower:
+        dominant_wick = "upper"
+    elif lower >= 1.50 * upper:
+        dominant_wick = "lower"
+    else:
+        dominant_wick = "balanced"
+
+    if close_location >= 0.75:
+        close_class = "near_high"
+    elif close_location <= 0.25:
+        close_class = "near_low"
+    else:
+        close_class = "middle"
     anomalies = ()
     if not candle.real_completed:
         anomalies = ("synthetic_or_partial_completed_candle",)
@@ -227,105 +349,36 @@ def _candle_structure(candle: Candle) -> CandleStructureState:
         direction=direction,
         real_completed=candle.real_completed,
         zero_range=zero_range,
+        body_class=body_class,
+        range_class=range_class,
+        dominant_wick=dominant_wick,
+        close_class=close_class,
         anomalies=anomalies,
     )
 
 
-@lru_cache(maxsize=16_384)
-def _level_id_digest(raw: str) -> str:
-    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:20]
-
-
-def _level_id(
-    timeframe: Timeframe, side: str, formed_at: pd.Timestamp, price: float
-) -> str:
-    raw = f"{timeframe.value}|{side}|{formed_at.isoformat()}|{price:.8f}"
-    return _level_id_digest(raw)
-
-
-def confirmed_swings(
-    candles: Sequence[Candle],
-    timeframe: Timeframe,
-    *,
-    k: int,
-    lookback: int,
-) -> tuple[LiquidityLevel, ...]:
-    """Return causally confirmed swing levels, including swept audit state."""
-
-    values = list(
-        candles[-max(2 * k + 1, int(lookback)) :]
-    )
-    if len(values) < 2 * k + 1:
-        return ()
-    output: list[LiquidityLevel] = []
-    for index in range(k, len(values) - k):
-        pivot = values[index]
-        left = values[index - k : index]
-        right = values[index + 1 : index + k + 1]
-        high_pivot = all(pivot.high > candle.high for candle in (*left, *right))
-        low_pivot = all(pivot.low < candle.low for candle in (*left, *right))
-        confirmed_at = values[index + k].end
-        if high_pivot:
-            later = values[index + k + 1 :]
-            swept = any(candle.high > pivot.high for candle in later)
-            touches = sum(abs(candle.high - pivot.high) <= 1e-10 for candle in later)
-            output.append(
-                LiquidityLevel(
-                    level_id=_level_id(timeframe, "above", pivot.start, pivot.high),
-                    timeframe=timeframe,
-                    side="above",
-                    price=float(pivot.high),
-                    formed_at=pivot.start,
-                    confirmed_at=confirmed_at,
-                    touches=int(touches),
-                    swept=bool(swept),
-                )
-            )
-        if low_pivot:
-            later = values[index + k + 1 :]
-            swept = any(candle.low < pivot.low for candle in later)
-            touches = sum(abs(candle.low - pivot.low) <= 1e-10 for candle in later)
-            output.append(
-                LiquidityLevel(
-                    level_id=_level_id(timeframe, "below", pivot.start, pivot.low),
-                    timeframe=timeframe,
-                    side="below",
-                    price=float(pivot.low),
-                    formed_at=pivot.start,
-                    confirmed_at=confirmed_at,
-                    touches=int(touches),
-                    swept=bool(swept),
-                )
-            )
-    return tuple(sorted(output, key=lambda level: level.confirmed_at))
-
-
-def _progression(levels: Sequence[LiquidityLevel], atr: float) -> tuple[float, float, float]:
-    highs = [level for level in levels if level.side == "above"]
-    lows = [level for level in levels if level.side == "below"]
-    high_step = (
-        _signed_tanh((highs[-1].price - highs[-2].price) / atr)
-        if len(highs) >= 2
-        else 0.0
-    )
-    low_step = (
-        _signed_tanh((lows[-1].price - lows[-2].price) / atr)
-        if len(lows) >= 2
-        else 0.0
-    )
-    return high_step, low_step, float((high_step + low_step) / 2.0)
-
-
 def _external_distances(
-    levels: Sequence[LiquidityLevel], price: float, atr: float
+    inventory: Sequence[LiquidityInventoryItem], price: float, atr: float
 ) -> tuple[float, float, int, int]:
-    above = [level for level in levels if not level.swept and level.price > price]
-    below = [level for level in levels if not level.swept and level.price < price]
+    above = [
+        item
+        for item in inventory
+        if item.lifecycle is LiquidityInventoryLifecycle.VISIBLE
+        and item.side == "above"
+        and item.price > price
+    ]
+    below = [
+        item
+        for item in inventory
+        if item.lifecycle is LiquidityInventoryLifecycle.VISIBLE
+        and item.side == "below"
+        and item.price < price
+    ]
     above_distance = (
-        min((level.price - price) / atr for level in above) if above else 99.0
+        min((item.price - price) / atr for item in above) if above else 99.0
     )
     below_distance = (
-        min((price - level.price) / atr for level in below) if below else 99.0
+        min((price - item.price) / atr for item in below) if below else 99.0
     )
     return (
         float(min(99.0, max(0.0, above_distance))),
@@ -343,8 +396,8 @@ def _blank_metrics(timeframe: Timeframe, price: float) -> dict[str, float]:
             "structure_direction": 0.0,
             "structure_age_bars": 0.0,
             "range_position": 0.5,
-            "dealing_range_low": price,
-            "dealing_range_high": price,
+            "rolling_range_low": price,
+            "rolling_range_high": price,
             "external_above_distance_atr": 99.0,
             "external_below_distance_atr": 99.0,
             "external_above_count": 0.0,
@@ -360,33 +413,24 @@ def _blank_metrics(timeframe: Timeframe, price: float) -> dict[str, float]:
             "rejection_direction": 0.0,
             "rejection_high": price,
             "rejection_low": price,
-            "dealing_range_low": price,
-            "dealing_range_high": price,
-            "dealing_range_position": 0.5,
+            "rolling_range_low": price,
+            "rolling_range_high": price,
+            "rolling_range_position": 0.5,
             "up_path_obstruction_atr": 99.0,
             "down_path_obstruction_atr": 99.0,
             "atr": 1.0,
         }
     if timeframe is Timeframe.M5:
         return {
-            "impulse_direction": 0.0,
-            "impulse_strength": 0.0,
-            "impulse_age_bars": 99.0,
-            "impulse_extension_atr": 0.0,
-            "pullback_depth": 0.0,
-            "pullback_completeness": 0.0,
-            "reacceptance_direction": 0.0,
             "compression": 0.0,
             "atr": 1.0,
         }
     return {
-        "path_sequence": 0.0,
+        "bar_progression_direction": 0.0,
+        "bar_progression_run_bars": 0.0,
+        "bar_progression_net_atr": 0.0,
         "acceleration": 0.0,
         "counter_pressure": 0.0,
-        "trigger_hold_direction": 0.0,
-        "trigger_high": price,
-        "trigger_low": price,
-        "trigger_age_bars": 0.0,
         "atr": 1.0,
     }
 
@@ -400,45 +444,31 @@ def _observe_4h(
             Timeframe.H4, asof, 0, _blank_metrics(Timeframe.H4, price), ready=False
         )
     atr = _atr(candles, config.atr_period)
-    levels = confirmed_swings(
-        candles,
-        Timeframe.H4,
-        k=config.swing_k,
-        lookback=config.external_liquidity_lookback,
-    )
     closes = [candle.close for candle in candles[-7:]]
     displacement = _signed_tanh((closes[-1] - closes[0]) / atr) if len(closes) >= 2 else 0.0
-    _, _, progression = _progression(levels, atr)
     recent = list(candles)[-20:]
     low = min(candle.low for candle in recent)
     high = max(candle.high for candle in recent)
-    latest_structure = max(
-        (level.confirmed_at for level in levels),
-        default=candles[0].end,
-    )
-    age = sum(candle.end > latest_structure for candle in candles)
-    above_d, below_d, above_n, below_n = _external_distances(levels, price, atr)
     metrics = {
         "directional_displacement": displacement,
         "path_efficiency": _efficiency(closes),
-        "structure_direction": progression,
-        "structure_age_bars": float(age),
+        "structure_direction": 0.0,
+        "structure_age_bars": 0.0,
         "range_position": _range_position(price, low, high),
-        "dealing_range_low": float(low),
-        "dealing_range_high": float(high),
-        "external_above_distance_atr": above_d,
-        "external_below_distance_atr": below_d,
-        "external_above_count": float(above_n),
-        "external_below_count": float(below_n),
+        "rolling_range_low": float(low),
+        "rolling_range_high": float(high),
+        "external_above_distance_atr": 99.0,
+        "external_below_distance_atr": 99.0,
+        "external_above_count": 0.0,
+        "external_below_count": 0.0,
         "atr": atr,
     }
     return FrameObservation(
-        Timeframe.H4,
-        candles[-1].end,
-        len(candles),
-        metrics,
-        levels,
-        len(candles) >= config.minimum_bars[Timeframe.H4],
+        timeframe=Timeframe.H4,
+        cutoff=candles[-1].end,
+        bars=len(candles),
+        metrics=metrics,
+        ready=len(candles) >= config.minimum_bars[Timeframe.H4],
     )
 
 
@@ -455,13 +485,6 @@ def _observe_1h(
             timeframe, asof, 0, _blank_metrics(timeframe, price), ready=False
         )
     atr = _atr(candles, config.atr_period)
-    levels = confirmed_swings(
-        candles,
-        timeframe,
-        k=config.swing_k,
-        lookback=config.external_liquidity_lookback,
-    )
-    high_step, low_step, progression = _progression(levels, atr)
     reference = list(candles)[-13:-1]
     last = candles[-1]
     prior_high = max((candle.high for candle in reference), default=last.high)
@@ -474,57 +497,30 @@ def _observe_1h(
         rejection -= clamp((last.high - prior_high) / atr)
     if last.low < prior_low and last.close >= prior_low:
         rejection += clamp((prior_low - last.low) / atr)
-    active_levels = [level for level in levels if not level.swept]
-    range_low = max(
-        (level.price for level in active_levels if level.side == "below" and level.price < price),
-        default=min(candle.low for candle in candles[-24:]),
-    )
-    range_high = min(
-        (level.price for level in active_levels if level.side == "above" and level.price > price),
-        default=max(candle.high for candle in candles[-24:]),
-    )
-    if range_high <= range_low:
-        range_low = min(candle.low for candle in candles[-24:])
-        range_high = max(candle.high for candle in candles[-24:])
-    above_d, below_d, _, _ = _external_distances(levels, price, atr)
+    range_low = min(candle.low for candle in candles[-24:])
+    range_high = max(candle.high for candle in candles[-24:])
     metrics = {
-        "swing_high_progression": high_step,
-        "swing_low_progression": low_step,
-        "swing_progression": progression,
+        "swing_high_progression": 0.0,
+        "swing_low_progression": 0.0,
+        "swing_progression": 0.0,
         "acceptance_direction": acceptance,
         "rejection_direction": float(np.clip(rejection, -1.0, 1.0)),
         "rejection_high": float(last.high),
         "rejection_low": float(last.low),
-        "dealing_range_low": float(range_low),
-        "dealing_range_high": float(range_high),
-        "dealing_range_position": _range_position(price, range_low, range_high),
-        "up_path_obstruction_atr": above_d,
-        "down_path_obstruction_atr": below_d,
+        "rolling_range_low": float(range_low),
+        "rolling_range_high": float(range_high),
+        "rolling_range_position": _range_position(price, range_low, range_high),
+        "up_path_obstruction_atr": 99.0,
+        "down_path_obstruction_atr": 99.0,
         "atr": atr,
     }
     return FrameObservation(
-        timeframe,
-        candles[-1].end,
-        len(candles),
-        metrics,
-        levels,
-        len(candles) >= config.minimum_bars.get(timeframe, 24),
+        timeframe=timeframe,
+        cutoff=candles[-1].end,
+        bars=len(candles),
+        metrics=metrics,
+        ready=len(candles) >= config.minimum_bars.get(timeframe, 24),
     )
-
-
-def _impulse(candles: Sequence[Candle], atr: float) -> tuple[int, int, float, float]:
-    if len(candles) < 4:
-        return 0, max(0, len(candles) - 1), 0.0, 0.0
-    start_at = max(0, len(candles) - 12)
-    best: tuple[int, int, float, float] = (start_at, start_at, 0.0, 0.0)
-    for end in range(start_at + 2, len(candles)):
-        for start in range(max(start_at, end - 4), end - 1):
-            segment = candles[start : end + 1]
-            move = segment[-1].close - segment[0].open
-            score = abs(move) / atr * _efficiency([bar.close for bar in segment])
-            if score > best[3]:
-                best = (start, end, move, float(score))
-    return best
 
 
 def _observe_5m(
@@ -536,49 +532,20 @@ def _observe_5m(
             Timeframe.M5, asof, 0, _blank_metrics(Timeframe.M5, price), ready=False
         )
     atr = _atr(candles, config.atr_period)
-    levels = confirmed_swings(
-        candles,
-        Timeframe.M5,
-        k=config.swing_k,
-        lookback=config.external_liquidity_lookback,
-    )
-    start, end, move, score = _impulse(candles, atr)
-    direction = float(np.sign(move))
-    magnitude = abs(move)
-    post = candles[end:]
-    if direction > 0:
-        adverse = max(0.0, candles[end].close - min(candle.low for candle in post))
-        recovered = max(0.0, candles[-1].close - min(candle.low for candle in post))
-    elif direction < 0:
-        adverse = max(0.0, max(candle.high for candle in post) - candles[end].close)
-        recovered = max(0.0, max(candle.high for candle in post) - candles[-1].close)
-    else:
-        adverse = recovered = 0.0
-    depth = clamp(_safe_div(adverse, magnitude, 0.0))
-    completeness = clamp(1.0 - abs(depth - 0.5) / 0.5)
-    reacceptance = direction * clamp(_safe_div(recovered, magnitude, 0.0))
     ranges = np.asarray([candle.high - candle.low for candle in candles[-9:]], dtype=float)
     recent_range = float(np.mean(ranges[-3:])) if len(ranges) >= 3 else atr
     prior_range = float(np.mean(ranges[:-3])) if len(ranges) > 3 else atr
     compression = clamp(1.0 - _safe_div(recent_range, prior_range, 1.0))
     metrics = {
-        "impulse_direction": direction,
-        "impulse_strength": clamp(score / 2.0),
-        "impulse_age_bars": float(len(candles) - 1 - end),
-        "impulse_extension_atr": float(magnitude / atr),
-        "pullback_depth": depth,
-        "pullback_completeness": completeness,
-        "reacceptance_direction": float(np.clip(reacceptance, -1.0, 1.0)),
         "compression": compression,
         "atr": atr,
     }
     return FrameObservation(
-        Timeframe.M5,
-        candles[-1].end,
-        len(candles),
-        metrics,
-        levels,
-        len(candles) >= config.minimum_bars[Timeframe.M5],
+        timeframe=Timeframe.M5,
+        cutoff=candles[-1].end,
+        bars=len(candles),
+        metrics=metrics,
+        ready=len(candles) >= config.minimum_bars[Timeframe.M5],
     )
 
 
@@ -591,18 +558,31 @@ def _observe_1m(
             Timeframe.M1, asof, 0, _blank_metrics(Timeframe.M1, price), ready=False
         )
     atr = _atr(candles, config.atr_period)
-    levels = confirmed_swings(
-        candles,
-        Timeframe.M1,
-        k=1,
-        lookback=config.external_liquidity_lookback,
-    )
-    _, _, progression = _progression(levels, atr)
     closes = np.asarray([candle.close for candle in candles[-7:]], dtype=float)
     changes = np.diff(closes)
     recent = float(np.mean(changes[-3:])) if len(changes) >= 3 else 0.0
     prior = float(np.mean(changes[:-3])) if len(changes) > 3 else 0.0
     acceleration = _signed_tanh((recent - prior) / atr)
+    progression_direction = 0
+    progression_run = 0
+    progression_net_atr = 0.0
+    if len(changes):
+        latest_change = float(changes[-1])
+        progression_direction = (
+            1 if latest_change > 0.0 else -1 if latest_change < 0.0 else 0
+        )
+        if progression_direction:
+            for change in reversed(changes):
+                if (
+                    (change > 0.0 and progression_direction > 0)
+                    or (change < 0.0 and progression_direction < 0)
+                ):
+                    progression_run += 1
+                else:
+                    break
+            progression_net_atr = float(
+                closes[-1] - closes[-progression_run - 1]
+            ) / atr
     pressure: list[float] = []
     for candle in candles[-6:]:
         body_high = max(candle.open, candle.close)
@@ -610,53 +590,25 @@ def _observe_1m(
         upper = candle.high - body_high
         lower = body_low - candle.low
         pressure.append(_safe_div(lower - upper, candle.high - candle.low, 0.0))
-    highs = [level for level in levels if level.side == "above"]
-    lows = [level for level in levels if level.side == "below"]
-    trigger_high = highs[-1].price if highs else max(candle.high for candle in candles[-10:])
-    trigger_low = lows[-1].price if lows else min(candle.low for candle in candles[-10:])
-    if price > trigger_high:
-        trigger_direction = 1.0
-        trigger_time = highs[-1].confirmed_at if highs else candles[-1].end
-    elif price < trigger_low:
-        trigger_direction = -1.0
-        trigger_time = lows[-1].confirmed_at if lows else candles[-1].end
-    else:
-        trigger_direction = 0.0
-        trigger_time = max(
-            highs[-1].confirmed_at if highs else candles[0].end,
-            lows[-1].confirmed_at if lows else candles[0].end,
-        )
-    age = sum(candle.end > trigger_time for candle in candles)
     metrics = {
-        "path_sequence": progression,
+        "bar_progression_direction": float(progression_direction),
+        "bar_progression_run_bars": float(progression_run),
+        "bar_progression_net_atr": progression_net_atr,
         "acceleration": acceleration,
         "counter_pressure": float(np.clip(np.mean(pressure), -1.0, 1.0)),
-        "trigger_hold_direction": trigger_direction,
-        "trigger_high": float(trigger_high),
-        "trigger_low": float(trigger_low),
-        "trigger_age_bars": float(age),
         "atr": atr,
     }
     return FrameObservation(
-        Timeframe.M1,
-        candles[-1].end,
-        len(candles),
-        metrics,
-        levels,
-        len(candles) >= config.minimum_bars[Timeframe.M1],
+        timeframe=Timeframe.M1,
+        cutoff=candles[-1].end,
+        bars=len(candles),
+        metrics=metrics,
+        ready=len(candles) >= config.minimum_bars[Timeframe.M1],
     )
 
 
 class EventMemory:
     _GROUP4_CREATION_SEQUENCE_FLOOR = 1_000_000
-    STATEFUL_KINDS = frozenset(
-        {
-            EventKind.IMPULSE,
-            EventKind.REACCEPTANCE,
-            EventKind.COMPRESSION,
-            EventKind.TRIGGER_HELD,
-        }
-    )
     _TIMELINE_TRANSITIONS: Mapping[
         str,
         Mapping[str, frozenset[str]],
@@ -784,10 +736,12 @@ class EventMemory:
                 {
                     ManipulationLifecycle.REACCEPTED.value,
                     ManipulationLifecycle.ACCEPTED_OUTSIDE.value,
+                    "censored",
                 }
             ),
             ManipulationLifecycle.REACCEPTED.value: frozenset(),
             ManipulationLifecycle.ACCEPTED_OUTSIDE.value: frozenset(),
+            "censored": frozenset(),
         },
         "entry_path": {
             PathSequenceLifecycle.ACTIVE.value: frozenset(
@@ -840,13 +794,6 @@ class EventMemory:
             )
         self._events: deque[MarketEvent] = deque(maxlen=maximum_events)
         self._ids: set[str] = set()
-        self._latest_by_state: dict[
-            tuple[EventKind, Timeframe],
-            MarketEvent,
-        ] = {}
-        self._recently_closed_states: deque[MarketEvent] = deque(
-            maxlen=len(self.STATEFUL_KINDS)
-        )
         self._latest_by_entity: dict[str, MarketEvent] = {}
         self._closed_durations: dict[str, int] = {}
         self._sequence_counts: dict[pd.Timestamp, int] = {}
@@ -1003,67 +950,6 @@ class EventMemory:
         return max(0, wall_minutes - synthetic_minutes)
 
     @staticmethod
-    def _state_key(event: MarketEvent) -> tuple[EventKind, Timeframe]:
-        return event.kind, event.timeframe
-
-    @staticmethod
-    def _same_stateful_identity(
-        previous: MarketEvent,
-        current: MarketEvent,
-    ) -> bool:
-        """Return whether two observations describe one continuous state.
-
-        Price, strength, details and the observation clock are descriptive
-        revisions, not state identity.  A direction/side, typed identity or
-        frozen source change starts a new state.
-        """
-
-        return (
-            previous.kind is current.kind
-            and previous.timeframe is current.timeframe
-            and previous.side == current.side
-            and previous.direction == current.direction
-            and previous.entity_id == current.entity_id
-            and tuple(previous.source_ids) == tuple(current.source_ids)
-        )
-
-    def close_state(
-        self,
-        kind: EventKind,
-        timeframe: Timeframe,
-        observed_at: pd.Timestamp,
-        *,
-        reason: str = "state_condition_no_longer_held",
-    ) -> None:
-        previous = self._latest_by_state.pop((kind, timeframe), None)
-        if previous is None:
-            return
-        if (
-            self._recently_closed_states.maxlen is not None
-            and len(self._recently_closed_states)
-            == self._recently_closed_states.maxlen
-        ):
-            evicted = self._recently_closed_states[0]
-            if evicted.event_id not in self._ids:
-                self._closed_durations.pop(evicted.event_id, None)
-        terminal = replace(
-            previous,
-            observed_at=observed_at,
-            ended_at=observed_at,
-            transition_reason=reason,
-            sequence_no=self._sequence_counts.get(observed_at, 0),
-        )
-        self._sequence_counts[observed_at] = terminal.sequence_no + 1
-        self._recently_closed_states.append(terminal)
-        self._closed_durations[previous.event_id] = max(
-            0,
-            self._elapsed_minutes(
-                previous.formed_at or previous.observed_at,
-                observed_at,
-            ),
-        )
-
-    @staticmethod
     def _normalized_event(event: MarketEvent) -> MarketEvent:
         return replace(event, sequence_no=0)
 
@@ -1086,19 +972,6 @@ class EventMemory:
             )
             if existing is not None:
                 return existing
-        active_state = next(
-            (
-                event
-                for event in (
-                    *self._latest_by_state.values(),
-                    *self._recently_closed_states,
-                )
-                if event.event_id == event_id
-            ),
-            None,
-        )
-        if active_state is not None:
-            return active_state
         if event_id not in self._ids:
             return None
         return next(
@@ -1205,11 +1078,6 @@ class EventMemory:
             raise ValueError(
                 "event origin predates retained 1m clock coverage"
             )
-        if (
-            event.kind in self.STATEFUL_KINDS
-            and event.formed_at is None
-        ):
-            event = replace(event, formed_at=event.observed_at)
         entity_key = typed_event_entity_key(event)
         existing = self._existing_event(
             event.event_id,
@@ -1224,43 +1092,6 @@ class EventMemory:
                     "market event id conflicts with retained payload"
                 )
             return
-        if event.kind in self.STATEFUL_KINDS:
-            previous_state = self._latest_by_state.get(
-                self._state_key(event)
-            )
-            if (
-                previous_state is not None
-                and self._same_stateful_identity(previous_state, event)
-            ):
-                sequence_no = self._sequence_counts.get(
-                    event.observed_at,
-                    0,
-                )
-                self._sequence_counts[event.observed_at] = (
-                    sequence_no + 1
-                )
-                self._latest_by_state[
-                    self._state_key(event)
-                ] = replace(
-                    event,
-                    event_id=previous_state.event_id,
-                    formed_at=(
-                        previous_state.formed_at
-                        or previous_state.observed_at
-                    ),
-                    sequence_no=sequence_no,
-                )
-                return
-            if previous_state is not None:
-                # End the old identity before admitting the replacement at
-                # the same completed-bar clock. This preserves causal ordering
-                # for direction/source changes in the event trace.
-                self.close_state(
-                    event.kind,
-                    event.timeframe,
-                    event.observed_at,
-                    reason="state_identity_changed",
-                )
         if entity_key is not None:
             self._validate_timeline_append(entity_key, event)
         starts_incomplete = bool(
@@ -1280,18 +1111,7 @@ class EventMemory:
             if len(self._events) == self._events.maxlen and self._events:
                 removed = self._events[0]
                 self._ids.discard(removed.event_id)
-                active_state = (
-                    removed.kind in self.STATEFUL_KINDS
-                    and self._latest_by_state.get(
-                        self._state_key(removed)
-                    )
-                    == removed
-                )
-                retained_closed_state = any(
-                    item.event_id == removed.event_id
-                    for item in self._recently_closed_states
-                )
-                if not active_state and not retained_closed_state:
+                if removed.entity_id is None:
                     self._closed_durations.pop(
                         removed.event_id,
                         None,
@@ -1331,16 +1151,6 @@ class EventMemory:
             else:
                 self._latest_by_entity.pop(event.entity_id, None)
                 self._closed_durations[event.event_id] = 0
-        elif event.kind in self.STATEFUL_KINDS:
-            key = self._state_key(event)
-            self._latest_by_state[key] = event
-        elif event.kind is EventKind.TRIGGER_LOST:
-            self.close_state(
-                EventKind.TRIGGER_HELD,
-                event.timeframe,
-                event.observed_at,
-                reason="trigger_lost",
-            )
         if len(self._sequence_counts) > self._events.maxlen * 2:
             clocks = {
                 item.observed_at
@@ -1391,11 +1201,7 @@ class EventMemory:
         self._incomplete_entity_keys.intersection_update(retained)
         retained_event_ids = {
             event.event_id
-            for event in (
-                *self._events,
-                *self._latest_by_state.values(),
-                *self._recently_closed_states,
-            )
+            for event in self._events
         } | {
             event.event_id
             for timeline in next_timelines.values()
@@ -1444,57 +1250,31 @@ class EventMemory:
         )
 
     def recent(self, limit: int = 64) -> tuple[MarketEvent, ...]:
-        # Preserve at most four still-open scalar states even if a burst of
-        # other events pushes their start records out of the bounded deque.
-        # This keeps lifecycle duration and later closure observable without
-        # retaining full history.
-        protected = {
-            event.event_id: event
-            for event in (
-                *self._latest_by_state.values(),
-                *self._recently_closed_states,
-            )
-        }
-        by_id = {
-            event.event_id: event
-            for event in (
-                *tuple(self._events)[-int(limit) :],
-                *protected.values(),
-            )
-        }
-        return tuple(
-            sorted(
-                by_id.values(),
-                key=lambda item: (
-                    item.observed_at,
-                    item.sequence_no,
-                    item.event_id,
-                ),
-            )
-        )
+        return tuple(self._events)[-int(limit) :]
 
-    def durations(self, asof: pd.Timestamp) -> dict[str, int]:
-        output: dict[str, int] = {}
+    def temporal_metrics(
+        self,
+        asof: pd.Timestamp,
+    ) -> tuple[dict[str, int], dict[str, int]]:
+        """Materialize event duration and age in one causal traversal."""
+
+        durations: dict[str, int] = {}
+        ages: dict[str, int] = {}
         active = {
             event.event_id
-            for event in (
-                *self._latest_by_state.values(),
-                *self._latest_by_entity.values(),
-            )
+            for event in self._latest_by_entity.values()
         }
         events = {
             event.event_id: event
-            for event in (
-                *self._events,
-                *self._latest_by_state.values(),
-                *self._recently_closed_states,
-            )
+            for event in self._events
         }
         for event in events.values():
             if event.event_id in self._closed_durations:
-                output[event.event_id] = self._closed_durations[event.event_id]
+                durations[event.event_id] = self._closed_durations[
+                    event.event_id
+                ]
             elif event.event_id in active:
-                output[event.event_id] = max(
+                durations[event.event_id] = max(
                     0,
                     self._elapsed_minutes(
                         event.formed_at or event.observed_at,
@@ -1502,56 +1282,41 @@ class EventMemory:
                     ),
                 )
             else:
-                output[event.event_id] = 0
-        for timeline in self._entity_timelines.values():
-            for index, event in enumerate(timeline):
-                if index + 1 < len(timeline):
-                    end = timeline[index + 1].observed_at
-                    output[event.event_id] = max(
-                        0,
-                        self._elapsed_minutes(event.observed_at, end),
-                    )
-                elif event.ended_at is not None:
-                    output[event.event_id] = 0
-                else:
-                    output[event.event_id] = max(
-                        0,
-                        self._elapsed_minutes(event.observed_at, asof),
-                    )
-        return output
-
-    def ages(self, asof: pd.Timestamp) -> dict[str, int]:
-        output: dict[str, int] = {}
-        events = {
-            event.event_id: event
-            for event in (
-                *self._events,
-                *self._latest_by_state.values(),
-                *self._recently_closed_states,
-            )
-        }
-        for event in events.values():
+                durations[event.event_id] = 0
             origin = (
                 event.formed_at
                 or event.confirmed_at
                 or event.observed_at
             )
-            output[event.event_id] = max(
+            ages[event.event_id] = max(
                 0,
                 self._elapsed_minutes(origin, asof),
             )
         for timeline in self._entity_timelines.values():
-            for event in timeline:
+            for index, event in enumerate(timeline):
+                if index + 1 < len(timeline):
+                    end = timeline[index + 1].observed_at
+                    durations[event.event_id] = max(
+                        0,
+                        self._elapsed_minutes(event.observed_at, end),
+                    )
+                elif event.ended_at is not None:
+                    durations[event.event_id] = 0
+                else:
+                    durations[event.event_id] = max(
+                        0,
+                        self._elapsed_minutes(event.observed_at, asof),
+                    )
                 origin = (
                     event.formed_at
                     or event.confirmed_at
                     or event.observed_at
                 )
-                output[event.event_id] = max(
+                ages[event.event_id] = max(
                     0,
                     self._elapsed_minutes(origin, asof),
                 )
-        return output
+        return durations, ages
 
 
 def _event(
@@ -1572,6 +1337,9 @@ def _event(
     direction: Direction | None = None,
     transition_reason: str | None = None,
 ) -> MarketEvent:
+    source_ids = tuple(
+        str(value) for value in source_ids if value is not None
+    )
     raw = (
         f"{kind.value}|{observed_at.isoformat()}|{timeframe.value}|{side}|"
         f"{price}|{'|'.join(source_ids)}|{entity_id}|{lifecycle}"
@@ -1674,15 +1442,11 @@ def _typed_progression(
 class CausalObserver:
     """Describes current market state without producing or accepting actions."""
 
-    def __init__(self, config: ObserverConfig | None = None) -> None:
-        self.config = config or ObserverConfig()
-        self._scale_specs_explicit = self.config.scale_specs is not None
-        self._scale_contract_bound = self._scale_specs_explicit
-        self.scale_specs = tuple(
-            self.config.scale_specs
-            if self.config.scale_specs is not None
-            else legacy_scale_specs()
-        )
+    def __init__(self, config: ObserverConfig) -> None:
+        self.config = config
+        self.scale_specs = tuple(self.config.scale_specs)
+        if not self.scale_specs:
+            raise ValueError("observer requires an explicit scale registry")
         self._active_timeframes = tuple(
             spec.native_timeframe
             for spec in self.scale_specs
@@ -1811,6 +1575,13 @@ class CausalObserver:
             if liquidity_config is not None
             else {}
         )
+        # Native liquidity snapshots are immutable views at the tracker's
+        # completed-timeframe cutoff.  Reuse unchanged higher-timeframe views;
+        # exact 1m projection mutations explicitly invalidate their source.
+        self._liquidity_snapshot_cache: dict[
+            Timeframe,
+            tuple[pd.Timestamp | None, tuple],
+        ] = {}
         if (
             self.config.group4_protocol is not None
             and (
@@ -1908,16 +1679,7 @@ class CausalObserver:
         ] = deque(
             maxlen=max(2048, self.config.memory_events * 4)
         )
-        self._swept_level_ids: set[str] = set()
-        self._swept_level_order: deque[str] = deque(
-            maxlen=max(1024, self.config.memory_events * 2)
-        )
-        self._consumed_level_ids: set[str] = set()
-        self._consumed_level_order: deque[str] = deque(
-            maxlen=max(1024, self.config.memory_events * 2)
-        )
         self._last_frame_cutoff: dict[Timeframe, pd.Timestamp] = {}
-        self._last_trigger_direction = 0.0
         self._known_structure_events: set[
             tuple[str, BOSLifecycle]
         ] = set()
@@ -1942,6 +1704,7 @@ class CausalObserver:
             pd.Timestamp,
             tuple[str, ...],
         ] | None = None
+        self._mss_displacement_by_bos: dict[str, str] = {}
         self._inventory_consumption: dict[
             str,
             tuple[pd.Timestamp, str],
@@ -1950,6 +1713,18 @@ class CausalObserver:
             str,
             tuple[pd.Timestamp, LiquidityInventoryItem],
         ] = {}
+        self._reference_periods: dict[str, _ReferencePeriod] = {}
+        self._reference_inventory: dict[str, LiquidityInventoryItem] = {}
+        self._reference_last_end: pd.Timestamp | None = None
+        self._reference_coverage_start: pd.Timestamp | None = None
+
+    @property
+    def group5_protocol(self) -> Group5Protocol | None:
+        return (
+            None
+            if self._group5_reducer is None
+            else self._group5_reducer.protocol
+        )
 
     @staticmethod
     def _remember_bounded(
@@ -2027,21 +1802,22 @@ class CausalObserver:
         self._prior = None
         self._known_level_ids.clear()
         self._known_level_order.clear()
-        self._swept_level_ids.clear()
-        self._swept_level_order.clear()
-        self._consumed_level_ids.clear()
-        self._consumed_level_order.clear()
         self._last_frame_cutoff.clear()
-        self._last_trigger_direction = 0.0
         self._known_structure_events.clear()
         self._known_structure_event_order.clear()
         self._known_sequence_events.clear()
         self._known_sequence_event_order.clear()
         self._liquidity_entity_revisions.clear()
+        self._mss_displacement_by_bos.clear()
         for tracker in self._liquidity_trackers.values():
             tracker.reset()
+        self._liquidity_snapshot_cache.clear()
         self._inventory_consumption.clear()
         self._pending_pool_sweeps.clear()
+        self._reference_periods.clear()
+        self._reference_inventory.clear()
+        self._reference_last_end = None
+        self._reference_coverage_start = None
         for item in failed_bos:
             key = (item.bos_id, item.lifecycle)
             self._remember_bounded(
@@ -2215,6 +1991,74 @@ class CausalObserver:
             )
         return prior
 
+    def _enrich_mss_breaks(
+        self,
+        states: Sequence[BreakOfStructureState],
+    ) -> tuple[BreakOfStructureState, ...]:
+        """Bind an opposed BOS to exact same-bar active M5 displacement."""
+
+        batch = (
+            ()
+            if self._displacement_eye is None
+            else self._displacement_eye.last_batch
+        )
+        candidates: dict[
+            tuple[pd.Timestamp, Direction, str],
+            str,
+        ] = {}
+        for candle, update in batch:
+            displacement_state = update.state
+            if (
+                displacement_state is None
+                or displacement_state.lifecycle
+                is not DisplacementLifecycle.ACTIVE
+                or displacement_state.prefix_last_admitted_at != candle.end
+                or displacement_state.last_valid_candle_id
+                not in displacement_state.admitted_candle_ids
+            ):
+                continue
+            key = (
+                candle.end,
+                displacement_state.direction,
+                displacement_state.last_valid_candle_id,
+            )
+            if key in candidates:
+                raise RuntimeError(
+                    "same completed bar exposed multiple active displacement "
+                    "identities"
+                )
+            candidates[key] = displacement_state.entity_id
+
+        output: list[BreakOfStructureState] = []
+        for state in states:
+            source_id = self._mss_displacement_by_bos.get(state.bos_id)
+            if (
+                source_id is None
+                and state.lifecycle is BOSLifecycle.CONFIRMED
+                and state.scope is BOSScope.OPPOSED
+                and state.resolved_at is not None
+                and state.break_bar_id is not None
+            ):
+                source_id = candidates.get(
+                    (
+                        state.resolved_at,
+                        state.direction,
+                        state.break_bar_id,
+                    )
+                )
+                if source_id is not None:
+                    self._mss_displacement_by_bos[state.bos_id] = source_id
+            output.append(
+                state
+                if source_id is None
+                else replace(
+                    state,
+                    source_displacement_id=source_id,
+                    mss_qualified=True,
+                )
+            )
+        return tuple(output)
+
     @staticmethod
     def _observe_frame(
         timeframe: Timeframe,
@@ -2246,10 +2090,18 @@ class CausalObserver:
         else:
             raise ValueError("unsupported observation timeframe")
         if history:
+            current = history[-1]
             frame = replace(
                 frame,
-                cutoff=history[-1].end,
-                candle_structure=_candle_structure(history[-1]),
+                cutoff=current.end,
+                candle_structure=_candle_structure(
+                    current,
+                    prior_atr=_strict_prior_atr(
+                        history,
+                        current,
+                        config.atr_period,
+                    ),
+                ),
             )
         return frame
 
@@ -2261,6 +2113,18 @@ class CausalObserver:
         liquidity_tracker: CausalLiquidityTracker | None,
     ) -> None:
         history = update.histories[timeframe]
+        reference_bootstrap = bool(
+            timeframe is Timeframe.M1
+            and self._reference_last_end is None
+        )
+        if reference_bootstrap and history:
+            real_history = tuple(
+                candle for candle in history if candle.real_completed
+            )
+            if real_history:
+                self._reference_coverage_start = min(
+                    candle.start for candle in real_history
+                )
         incoming = (
             history
             if tracker.last_end is None
@@ -2268,10 +2132,35 @@ class CausalObserver:
         )
         for candle in incoming:
             try:
+                if (
+                    timeframe is Timeframe.M1
+                    and candle.real_completed
+                    and (
+                        self._reference_last_end is None
+                        or candle.end > self._reference_last_end
+                    )
+                ):
+                    self._advance_reference_periods(
+                        candle,
+                        append_retirement_events=(
+                            not reference_bootstrap
+                        ),
+                    )
+                    self._reference_last_end = candle.end
                 tracker.on_candle(candle)
                 if liquidity_tracker is not None:
-                    swings, _, _ = tracker.snapshot()
-                    liquidity_tracker.on_candle(candle, swings)
+                    swings, structures, _ = tracker.snapshot()
+                    liquidity_tracker.on_candle(
+                        candle,
+                        swings,
+                        structures,
+                        reference_sources=(
+                            tuple(self._reference_inventory.values())
+                            if timeframe is Timeframe.M1
+                            else ()
+                        ),
+                    )
+                    self._invalidate_liquidity_snapshot(timeframe)
                     if (
                         timeframe is Timeframe.H1
                         and self._group4_tracker is not None
@@ -2502,12 +2391,30 @@ class CausalObserver:
                 )
             )
         for zone in frame.support_resistance:
-            revision = (zone.lifecycle.value,)
-            if self._liquidity_entity_revisions.get(
+            revision = (
+                zone.lifecycle.value,
+                zone.total_touch_count,
+                zone.member_swing_ids,
+                zone.source_ids,
+                zone.range_id,
+                zone.source_zone_id,
+                zone.source_kind,
+                zone.structural_rank,
+                zone.is_protected_swing,
+                zone.zone_role,
+                zone.reaction_quality,
+                zone.depletion_risk,
+            )
+            prior_revision = self._liquidity_entity_revisions.get(
                 zone.zone_id
-            ) == revision:
+            )
+            if prior_revision == revision:
                 continue
             self._liquidity_entity_revisions[zone.zone_id] = revision
+            lifecycle_revision = bool(
+                prior_revision is None
+                or prior_revision[0] != zone.lifecycle.value
+            )
             observed_at = (
                 zone.retired_at
                 or zone.reaccepted_at
@@ -2520,6 +2427,11 @@ class CausalObserver:
                 )
                 or zone.confirmed_at
             )
+            if not lifecycle_revision:
+                observed_at = max(
+                    observed_at,
+                    zone.metadata_observed_at,
+                )
             self.memory.append(
                 _event(
                     EventKind.SUPPORT_RESISTANCE_STATE,
@@ -2532,8 +2444,12 @@ class CausalObserver:
                     ),
                     zone.anchor_price,
                     zone.strength,
-                    zone.member_swing_ids,
+                    (
+                        *(() if lifecycle_revision else (zone.zone_id,)),
+                        *zone.causal_source_ids,
+                    ),
                     {
+                        "state_revision": not lifecycle_revision,
                         "lower_bound": zone.lower_bound,
                         "upper_bound": zone.upper_bound,
                         "touch_times": tuple(
@@ -2545,43 +2461,79 @@ class CausalObserver:
                         ),
                         "touch_count": zone.touch_count,
                         "age_bars": zone.age_bars,
+                        "source_kind": zone.source_kind,
+                        "source_ids": zone.source_ids,
+                        "range_id": zone.range_id,
+                        "source_zone_id": zone.source_zone_id,
+                        "zone_role": zone.zone_role,
+                        "structural_rank": zone.structural_rank,
+                        "is_protected_swing": zone.is_protected_swing,
+                        "visibility_strength": zone.visibility_strength,
+                        "reaction_quality": zone.reaction_quality,
+                        "freshness": zone.freshness,
+                        "depletion_risk": zone.depletion_risk,
                     },
-                    entity_id=zone.zone_id,
-                    lifecycle=zone.lifecycle.value,
+                    entity_id=(
+                        zone.zone_id if lifecycle_revision else None
+                    ),
+                    lifecycle=(
+                        zone.lifecycle.value if lifecycle_revision else None
+                    ),
                     formed_at=zone.formed_at,
                     confirmed_at=zone.confirmed_at,
                     ended_at=(
                         observed_at
-                        if zone.lifecycle
+                        if lifecycle_revision and zone.lifecycle
                         in {
                             SupportResistanceLifecycle.REACCEPTED,
                             SupportResistanceLifecycle.RETIRED,
                         }
                         else None
                     ),
-                    transition_reason=zone.transition_reason,
+                    transition_reason=(
+                        zone.transition_reason
+                        if lifecycle_revision
+                        else "support_resistance_evidence_revised"
+                    ),
                 )
             )
         for pool in frame.liquidity_pools:
             if pool.lifecycle is not LiquidityPoolLifecycle.FORMED:
                 continue
             entity_id = f"pool:{pool.pool_id}"
-            revision = (pool.lifecycle.value,)
-            if self._liquidity_entity_revisions.get(
+            revision = (
+                pool.lifecycle.value,
+                pool.touch_count,
+                pool.member_swing_ids,
+            )
+            prior_revision = self._liquidity_entity_revisions.get(
                 entity_id
-            ) == revision:
+            )
+            if prior_revision == revision:
                 continue
             self._liquidity_entity_revisions[entity_id] = revision
+            lifecycle_revision = bool(
+                prior_revision is None
+                or prior_revision[0] != pool.lifecycle.value
+            )
             self.memory.append(
                 _event(
                     EventKind.LIQUIDITY_POOL_STATE,
-                    pool.confirmed_at,
+                    (
+                        pool.confirmed_at
+                        if lifecycle_revision
+                        else pool.touch_times[-1]
+                    ),
                     frame.timeframe,
                     pool.side,
                     pool.midpoint,
                     pool.strength,
-                    pool.member_swing_ids,
+                    (
+                        *(() if lifecycle_revision else (entity_id,)),
+                        *pool.member_swing_ids,
+                    ),
                     {
+                        "state_revision": not lifecycle_revision,
                         "lower_bound": pool.lower_bound,
                         "upper_bound": pool.upper_bound,
                         "touch_times": tuple(
@@ -2591,29 +2543,30 @@ class CausalObserver:
                         "touch_count": pool.touch_count,
                         "age_bars": pool.age_bars,
                     },
-                    entity_id=entity_id,
-                    lifecycle=pool.lifecycle.value,
+                    entity_id=entity_id if lifecycle_revision else None,
+                    lifecycle=(
+                        pool.lifecycle.value if lifecycle_revision else None
+                    ),
                     formed_at=pool.formed_at,
                     confirmed_at=pool.confirmed_at,
+                    transition_reason=(
+                        None
+                        if lifecycle_revision
+                        else "liquidity_pool_membership_revised"
+                    ),
                 )
             )
         for item in frame.structure_breaks:
             key = (item.bos_id, item.lifecycle)
-            if (
-                not self._remember_bounded(
-                    key,
-                    known=self._known_structure_events,
-                    order=self._known_structure_event_order,
-                )
+            is_new_lifecycle = self._remember_bounded(
+                key,
+                known=self._known_structure_events,
+                order=self._known_structure_event_order,
+            )
+            if is_new_lifecycle and not self.memory.has_entity_lifecycle(
+                f"bos:{item.bos_id}", item.lifecycle.value
             ):
-                continue
-            if self.memory.has_entity_lifecycle(
-                f"bos:{item.bos_id}",
-                item.lifecycle.value,
-            ):
-                continue
-            self.memory.append(
-                _event(
+                self.memory.append(_event(
                     (
                         EventKind.BOS_STATE
                         if item.lifecycle is BOSLifecycle.PENDING
@@ -2627,7 +2580,16 @@ class CausalObserver:
                     "above" if item.direction is Direction.LONG else "below",
                     item.target_price,
                     item.strength,
-                    (item.target_swing_id,),
+                    tuple(
+                        value
+                        for value in (
+                            item.target_swing_id,
+                            item.source_structure_id,
+                            item.source_displacement_id,
+                            item.break_bar_id,
+                        )
+                        if value is not None
+                    ),
                     {
                         "bos_id": item.bos_id,
                         "scope": item.scope.value,
@@ -2640,6 +2602,19 @@ class CausalObserver:
                         ),
                         "failure_reason": item.failure_reason,
                         "strength": item.strength,
+                        "break_bar_id": item.break_bar_id,
+                        "break_distance_atr": item.break_distance_atr,
+                        "source_displacement_id": (
+                            item.source_displacement_id
+                        ),
+                        "mss_qualified": item.mss_qualified,
+                        "post_break_state": (
+                            "pending"
+                            if item.lifecycle is BOSLifecycle.CONFIRMED
+                            else None
+                        ),
+                        "accepted_at": None,
+                        "rejected_at": None,
                     },
                     entity_id=item.bos_id,
                     lifecycle=item.lifecycle.value,
@@ -2651,11 +2626,7 @@ class CausalObserver:
                     ),
                     ended_at=(
                         item.resolved_at
-                        if item.lifecycle
-                        in {
-                            BOSLifecycle.CONFIRMED,
-                            BOSLifecycle.FAILED,
-                        }
+                        if item.lifecycle is BOSLifecycle.FAILED
                         else None
                     ),
                     direction=item.direction,
@@ -2664,80 +2635,57 @@ class CausalObserver:
                         if item.lifecycle is BOSLifecycle.CONFIRMED
                         else item.failure_reason
                     ),
-                )
-            )
-        metrics = frame.metrics
-        if frame.timeframe is Timeframe.H1:
-            rejection = metrics["rejection_direction"]
-            if abs(rejection) >= 0.25:
+                ))
+            post_break_at = item.accepted_at or item.rejected_at
+            if (
+                item.lifecycle is BOSLifecycle.CONFIRMED
+                and post_break_at is not None
+                and item.post_break_state is not None
+            ):
                 self.memory.append(
                     _event(
-                        EventKind.REJECTION,
-                        event_clock,
+                        EventKind.BOS_POST_BREAK_STATE,
+                        post_break_at,
                         frame.timeframe,
-                        "below" if rejection > 0 else "above",
                         (
-                            metrics["rejection_low"]
-                            if rejection > 0
-                            else metrics["rejection_high"]
+                            "above"
+                            if item.direction is Direction.LONG
+                            else "below"
                         ),
-                        abs(rejection),
+                        item.target_price,
+                        item.strength,
+                        tuple(
+                            value
+                            for value in (
+                                item.bos_id,
+                                item.target_swing_id,
+                                item.break_bar_id,
+                                item.source_displacement_id,
+                            )
+                            if value is not None
+                        ),
+                        {
+                            "bos_id": item.bos_id,
+                            "scope": item.scope.value,
+                            "post_break_state": (
+                                item.post_break_state.value
+                            ),
+                            "accepted_at": (
+                                None
+                                if item.accepted_at is None
+                                else item.accepted_at.isoformat()
+                            ),
+                            "rejected_at": (
+                                None
+                                if item.rejected_at is None
+                                else item.rejected_at.isoformat()
+                            ),
+                        },
+                        direction=item.direction,
+                        transition_reason=(
+                            f"post_break_{item.post_break_state.value}"
+                        ),
                     )
-                )
-        if frame.timeframe is Timeframe.M5:
-            direction = metrics["impulse_direction"]
-            strength = metrics["impulse_strength"]
-            if strength >= 0.55:
-                self.memory.append(
-                    _event(
-                        EventKind.IMPULSE,
-                        event_clock,
-                        frame.timeframe,
-                        "above" if direction > 0 else "below",
-                        None,
-                        strength,
-                    )
-                )
-            else:
-                self.memory.close_state(
-                    EventKind.IMPULSE,
-                    frame.timeframe,
-                    event_clock,
-                )
-            reacceptance = metrics["reacceptance_direction"]
-            if abs(reacceptance) >= 0.35:
-                self.memory.append(
-                    _event(
-                        EventKind.REACCEPTANCE,
-                        event_clock,
-                        frame.timeframe,
-                        "above" if reacceptance > 0 else "below",
-                        None,
-                        abs(reacceptance),
-                    )
-                )
-            else:
-                self.memory.close_state(
-                    EventKind.REACCEPTANCE,
-                    frame.timeframe,
-                    event_clock,
-                )
-            if metrics["compression"] >= 0.6:
-                self.memory.append(
-                    _event(
-                        EventKind.COMPRESSION,
-                        event_clock,
-                        frame.timeframe,
-                        None,
-                        None,
-                        metrics["compression"],
-                    )
-                )
-            else:
-                self.memory.close_state(
-                    EventKind.COMPRESSION,
-                    frame.timeframe,
-                    event_clock,
                 )
 
     def _record_group3_events(
@@ -2769,6 +2717,7 @@ class CausalObserver:
                     ),
                     {
                         "protocol_hash": state.protocol_hash,
+                        "qualification": state.qualification.value,
                         "lower_bound": state.lower_bound,
                         "upper_bound": state.upper_bound,
                         "midpoint": state.midpoint,
@@ -2777,6 +2726,7 @@ class CausalObserver:
                         ),
                         "width_ticks": state.width_ticks,
                         "width_atr": state.width_atr,
+                        "formation_atr": state.formation_atr,
                         "age_bars": state.age_bars,
                         "max_fill_fraction": (
                             state.max_fill_fraction
@@ -2785,10 +2735,14 @@ class CausalObserver:
                             state.source_displacement_protocol_hash
                         ),
                         "source_displacement_started_at": (
-                            state.source_displacement_started_at.isoformat()
+                            None
+                            if state.source_displacement_started_at is None
+                            else state.source_displacement_started_at.isoformat()
                         ),
                         "source_displacement_active_at": (
-                            state.source_displacement_active_at.isoformat()
+                            None
+                            if state.source_displacement_active_at is None
+                            else state.source_displacement_active_at.isoformat()
                         ),
                         "source_displacement_prefix_commitment": (
                             state.source_displacement_prefix_commitment
@@ -2842,6 +2796,9 @@ class CausalObserver:
                         ),
                         "anchor_open": state.anchor_open,
                         "anchor_close": state.anchor_close,
+                        "anchor_candle_ids": state.anchor_candle_ids,
+                        "body_lower_bound": state.body_lower_bound,
+                        "body_upper_bound": state.body_upper_bound,
                         "width_ticks": state.width_ticks,
                         "width_atr": state.width_atr,
                         "age_bars": state.age_bars,
@@ -2874,6 +2831,15 @@ class CausalObserver:
                         ),
                         "source_bos_resolved_at": (
                             state.source_bos_resolved_at.isoformat()
+                        ),
+                        "source_bos_pending_at": (
+                            state.source_bos_pending_at.isoformat()
+                        ),
+                        "source_bos_break_bar_id": (
+                            state.source_bos_break_bar_id
+                        ),
+                        "source_bos_mss_qualified": (
+                            state.source_bos_mss_qualified
                         ),
                         "anchor_start": state.anchor_start.isoformat(),
                         "anchor_end": state.anchor_end.isoformat(),
@@ -2908,6 +2874,92 @@ class CausalObserver:
             raise TypeError("Group 4 event phase flags must be boolean")
         if update.boundary_reason is not None:
             return
+        if include_creations and self._prior is not None:
+            prior_manipulations = {
+                state.manipulation_id: state
+                for state in self._prior.manipulations
+            }
+            revision_fields = (
+                "reentry_candidate_at",
+                "reentry_candidate_price",
+                "inside_hold_bars",
+                "reentry_failed_at",
+                "outside_run",
+                "outside_run_side",
+            )
+            for state in update.manipulations:
+                prior_state = prior_manipulations.get(
+                    state.manipulation_id
+                )
+                if (
+                    prior_state is None
+                    or state.lifecycle
+                    is not ManipulationLifecycle.SWEPT
+                    or state.deadline_elapsed
+                    or all(
+                        getattr(state, name)
+                        == getattr(prior_state, name)
+                        for name in revision_fields
+                    )
+                ):
+                    continue
+                if (
+                    state.reentry_candidate_at is not None
+                    and state.reentry_candidate_at
+                    != prior_state.reentry_candidate_at
+                ):
+                    revision_reason = "reentry_candidate_started"
+                elif (
+                    state.reentry_failed_at is not None
+                    and state.reentry_failed_at
+                    != prior_state.reentry_failed_at
+                ):
+                    revision_reason = "reentry_candidate_failed"
+                else:
+                    revision_reason = "outside_acceptance_progressed"
+                self.memory.append(
+                    _event(
+                        EventKind.MANIPULATION_STATE,
+                        state.last_updated_at,
+                        Timeframe.M1,
+                        state.side,
+                        (
+                            state.reentry_candidate_price
+                            if state.reentry_candidate_price is not None
+                            else state.sweep_extreme
+                        ),
+                        state.strength,
+                        (
+                            state.manipulation_id,
+                            state.source_inventory_item_id,
+                            *state.crossed_source_ids,
+                        ),
+                        {
+                            "state_revision": True,
+                            "revision_reason": revision_reason,
+                            "protocol_hash": state.protocol_hash,
+                            "source_kind": state.source_kind,
+                            "reentry_candidate_at": (
+                                None
+                                if state.reentry_candidate_at is None
+                                else state.reentry_candidate_at.isoformat()
+                            ),
+                            "reentry_candidate_price": (
+                                state.reentry_candidate_price
+                            ),
+                            "inside_hold_bars": state.inside_hold_bars,
+                            "reentry_failed_at": (
+                                None
+                                if state.reentry_failed_at is None
+                                else state.reentry_failed_at.isoformat()
+                            ),
+                            "outside_run": state.outside_run,
+                            "outside_run_side": state.outside_run_side,
+                            "age_1m_bars": state.age_1m_bars,
+                        },
+                        transition_reason=revision_reason,
+                    )
+                )
         for state in (
             update.range_transitions
             if include_ranges
@@ -2965,7 +3017,7 @@ class CausalObserver:
             terminal = state.lifecycle in {
                 ManipulationLifecycle.REACCEPTED,
                 ManipulationLifecycle.ACCEPTED_OUTSIDE,
-            }
+            } or state.deadline_elapsed
             if (
                 (terminal and not include_resolutions)
                 or (not terminal and not include_creations)
@@ -2974,7 +3026,11 @@ class CausalObserver:
             self.memory.append(
                 _event(
                     EventKind.MANIPULATION_STATE,
-                    state.state_started_at,
+                    (
+                        state.censored_at
+                        if state.deadline_elapsed
+                        else state.state_started_at
+                    ),
                     Timeframe.M1,
                     state.side,
                     (
@@ -2984,9 +3040,8 @@ class CausalObserver:
                     ),
                     state.strength,
                     (
-                        state.source_id,
                         state.source_inventory_item_id,
-                        *state.coincident_source_ids,
+                        *state.crossed_source_ids,
                     ),
                     {
                         "protocol_hash": state.protocol_hash,
@@ -3007,15 +3062,45 @@ class CausalObserver:
                         "outside_completed_bars": (
                             state.outside_completed_bars
                         ),
+                        "outside_run": state.outside_run,
+                        "outside_run_side": state.outside_run_side,
+                        "reentry_candidate_at": (
+                            None
+                            if state.reentry_candidate_at is None
+                            else state.reentry_candidate_at.isoformat()
+                        ),
+                        "reentry_candidate_price": (
+                            state.reentry_candidate_price
+                        ),
+                        "inside_hold_bars": state.inside_hold_bars,
+                        "reentry_failed_at": (
+                            None
+                            if state.reentry_failed_at is None
+                            else state.reentry_failed_at.isoformat()
+                        ),
+                        "deadline_at": (
+                            None
+                            if state.deadline_at is None
+                            else state.deadline_at.isoformat()
+                        ),
+                        "deadline_elapsed": state.deadline_elapsed,
                         "penetration_atr": state.penetration_atr,
                         "age_1m_bars": state.age_1m_bars,
                         "resolved_side": state.resolved_side,
                     },
                     entity_id=state.manipulation_id,
-                    lifecycle=state.lifecycle.value,
+                    lifecycle=(
+                        "censored"
+                        if state.deadline_elapsed
+                        else state.lifecycle.value
+                    ),
                     formed_at=state.formed_at,
                     confirmed_at=state.confirmed_at,
-                    ended_at=state.resolved_at if terminal else None,
+                    ended_at=(
+                        state.censored_at
+                        if state.deadline_elapsed
+                        else state.resolved_at if terminal else None
+                    ),
                     transition_reason=state.transition_reason,
                 ),
                 include_in_recent=False,
@@ -3292,155 +3377,6 @@ class CausalObserver:
         )
         return keys
 
-    def _record_minute_events(
-        self,
-        update: ReaderUpdate,
-        frames: Mapping[Timeframe, FrameObservation],
-    ) -> None:
-        bar = update.completed_1m
-        if not bar.real_completed:
-            return
-        prior_levels: list[LiquidityLevel] = []
-        if (
-            self._prior is not None
-            and not self._prior.liquidity_inventory_authoritative
-        ):
-            for timeframe in self._prior.active_timeframes:
-                if timeframe is Timeframe.M1:
-                    continue
-                prior_levels.extend(
-                    self._prior.frame(timeframe).liquidity
-                )
-        atr = frames[Timeframe.M1].metrics["atr"]
-        for level in prior_levels:
-            if (
-                level.swept
-                or level.level_id in self._consumed_level_ids
-                or level.confirmed_at > bar.start
-            ):
-                continue
-            if level.side == "above" and bar.high > level.price:
-                kind = (
-                    EventKind.LIQUIDITY_SWEEP
-                    if bar.close <= level.price
-                    else EventKind.LIQUIDITY_CONSUMED
-                )
-                if (
-                    kind is EventKind.LIQUIDITY_SWEEP
-                    and not self._remember_bounded(
-                        level.level_id,
-                        known=self._swept_level_ids,
-                        order=self._swept_level_order,
-                    )
-                ):
-                    continue
-                self.memory.append(
-                    _event(
-                        kind,
-                        update.asof,
-                        Timeframe.M1,
-                        "above",
-                        bar.high,
-                        clamp((bar.high - level.price) / atr),
-                        (level.level_id,),
-                        {
-                            "source_timeframe": level.timeframe.value,
-                            "close_accepted_outside": bool(bar.close > level.price),
-                        },
-                    )
-                )
-                if kind is EventKind.LIQUIDITY_CONSUMED:
-                    self._remember_bounded(
-                        level.level_id,
-                        known=self._consumed_level_ids,
-                        order=self._consumed_level_order,
-                    )
-            elif level.side == "below" and bar.low < level.price:
-                kind = (
-                    EventKind.LIQUIDITY_SWEEP
-                    if bar.close >= level.price
-                    else EventKind.LIQUIDITY_CONSUMED
-                )
-                if (
-                    kind is EventKind.LIQUIDITY_SWEEP
-                    and not self._remember_bounded(
-                        level.level_id,
-                        known=self._swept_level_ids,
-                        order=self._swept_level_order,
-                    )
-                ):
-                    continue
-                self.memory.append(
-                    _event(
-                        kind,
-                        update.asof,
-                        Timeframe.M1,
-                        "below",
-                        bar.low,
-                        clamp((level.price - bar.low) / atr),
-                        (level.level_id,),
-                        {
-                            "source_timeframe": level.timeframe.value,
-                            "close_accepted_outside": bool(bar.close < level.price),
-                        },
-                    )
-                )
-                if kind is EventKind.LIQUIDITY_CONSUMED:
-                    self._remember_bounded(
-                        level.level_id,
-                        known=self._consumed_level_ids,
-                        order=self._consumed_level_order,
-                    )
-        trigger = frames[Timeframe.M1].metrics["trigger_hold_direction"]
-        if trigger and trigger != self._last_trigger_direction:
-            self.memory.append(
-                _event(
-                    EventKind.TRIGGER_HELD,
-                    update.asof,
-                    Timeframe.M1,
-                    "above" if trigger > 0 else "below",
-                    bar.close,
-                    0.6,
-                )
-            )
-        elif not trigger and self._last_trigger_direction:
-            self.memory.append(
-                _event(
-                    EventKind.TRIGGER_LOST,
-                    update.asof,
-                    Timeframe.M1,
-                    "above" if self._last_trigger_direction > 0 else "below",
-                    bar.close,
-                    0.6,
-                )
-            )
-        self._last_trigger_direction = trigger
-
-    @staticmethod
-    def _legacy_liquidity_projection(
-        inventory: Sequence[LiquidityInventoryItem],
-        *,
-        cutoff: pd.Timestamp,
-    ) -> tuple[LiquidityLevel, ...]:
-        return tuple(
-            LiquidityLevel(
-                level_id=item.item_id,
-                timeframe=item.timeframe,
-                side=item.side,
-                price=item.price,
-                formed_at=item.formed_at,
-                confirmed_at=item.confirmed_at,
-                touches=max(0, len(item.source_ids) - 1),
-                swept=(
-                    item.lifecycle
-                    is LiquidityInventoryLifecycle.CONSUMED
-                    and item.consumed_at is not None
-                    and item.consumed_at <= cutoff
-                ),
-            )
-            for item in inventory
-        )
-
     @staticmethod
     def _pool_formation_source(
         pool,
@@ -3486,6 +3422,39 @@ class CausalObserver:
             raise RuntimeError("projected pool has no formation tracker")
         return tracker, item.item_id[len(prefix) :]
 
+    def _liquidity_snapshot(
+        self,
+        timeframe: Timeframe,
+        tracker: CausalLiquidityTracker,
+    ) -> tuple:
+        """Return one native snapshot per changed timeframe cutoff.
+
+        The 1m tracker remains intentionally live on every observation.  A
+        higher-timeframe cache entry is removed whenever completed-1m pool
+        projection changes that tracker, so reuse cannot hide a sweep or its
+        subsequent resolution.
+        """
+
+        cached = self._liquidity_snapshot_cache.get(timeframe)
+        if (
+            timeframe is not Timeframe.M1
+            and cached is not None
+            and cached[0] == tracker.last_end
+        ):
+            return cached[1]
+        snapshot = tracker.snapshot()
+        self._liquidity_snapshot_cache[timeframe] = (
+            tracker.last_end,
+            snapshot,
+        )
+        return snapshot
+
+    def _invalidate_liquidity_snapshot(
+        self,
+        timeframe: Timeframe,
+    ) -> None:
+        self._liquidity_snapshot_cache.pop(timeframe, None)
+
     @staticmethod
     def _inventory_crossed(
         item: LiquidityInventoryItem,
@@ -3496,6 +3465,190 @@ class CausalObserver:
             if item.side == "above"
             else candle.low < item.lower_bound
         )
+
+    @staticmethod
+    def _reference_period_keys(
+        candle: Candle,
+    ) -> dict[str, str]:
+        local = candle.start.tz_convert("America/New_York")
+        civil_date = local.date()
+        session_date = (
+            local.normalize() + pd.Timedelta(days=1)
+            if local.hour >= 18
+            else local.normalize()
+        ).date()
+        iso_year, iso_week, _ = session_date.isocalendar()
+        return {
+            "session": session_date.isoformat(),
+            "day": civil_date.isoformat(),
+            "week": f"{iso_year:04d}-W{iso_week:02d}",
+        }
+
+    @staticmethod
+    def _reference_period_start(
+        family: str,
+        candle: Candle,
+    ) -> pd.Timestamp:
+        local = candle.start.tz_convert("America/New_York")
+        session_date = (
+            local.normalize() + pd.Timedelta(days=1)
+            if local.hour >= 18
+            else local.normalize()
+        )
+        if family == "session":
+            return session_date - pd.Timedelta(hours=6)
+        if family == "day":
+            return local.normalize()
+        if family == "week":
+            monday = session_date.normalize() - pd.Timedelta(
+                days=session_date.weekday()
+            )
+            return monday - pd.Timedelta(hours=6)
+        raise ValueError("unknown reference period family")
+
+    def _materialize_reference_period(
+        self,
+        family: str,
+        period: _ReferencePeriod,
+    ) -> None:
+        # These extrema are aggregated and projected by the completed-1m
+        # clock; period identity lives in ``kind`` rather than pretending
+        # they were confirmed by an H1/H4 candle.
+        timeframe = Timeframe.M1
+        visibility = {
+            "session": 0.75,
+            "day": 0.90,
+            "week": 1.00,
+        }[family]
+        for side, suffix, price in (
+            ("above", "high", period.high),
+            ("below", "low", period.low),
+        ):
+            kind = f"previous_{family}_{suffix}"
+            item_id = (
+                f"reference:{family}:{period.key}:{suffix}:"
+                f"{period.symbol}:{period.instrument_id}"
+            )
+            source_id = (
+                f"reference_source:{family}:{period.key}:{suffix}:"
+                f"{period.symbol}:{period.instrument_id}"
+            )
+            self._reference_inventory[item_id] = LiquidityInventoryItem(
+                item_id=item_id,
+                timeframe=timeframe,
+                side=side,
+                kind=kind,
+                price=price,
+                lower_bound=price,
+                upper_bound=price,
+                formed_at=period.started_at,
+                confirmed_at=period.last_end,
+                lifecycle=LiquidityInventoryLifecycle.VISIBLE,
+                source_ids=(source_id,),
+                age_bars=0,
+                strength=visibility,
+                structural_rank="external",
+                is_protected_swing=False,
+                visibility_strength=visibility,
+            )
+
+    def _advance_reference_periods(
+        self,
+        candle: Candle,
+        *,
+        append_retirement_events: bool,
+    ) -> None:
+        if not candle.real_completed:
+            return
+        self._reference_inventory = {
+            item_id: replace(item, age_bars=item.age_bars + 1)
+            for item_id, item in self._reference_inventory.items()
+        }
+        keys = self._reference_period_keys(candle)
+        for family, key in keys.items():
+            current = self._reference_periods.get(family)
+            if current is None:
+                period_start = self._reference_period_start(
+                    family,
+                    candle,
+                )
+                self._reference_periods[family] = _ReferencePeriod(
+                    key=key,
+                    started_at=period_start,
+                    last_end=candle.end,
+                    high=float(candle.high),
+                    low=float(candle.low),
+                    symbol=candle.symbol,
+                    instrument_id=int(candle.instrument_id),
+                    coverage_complete=bool(
+                        self._reference_coverage_start is not None
+                        and self._reference_coverage_start
+                        <= period_start
+                    ),
+                )
+                continue
+            if current.key == key:
+                self._reference_periods[family] = replace(
+                    current,
+                    last_end=candle.end,
+                    high=max(current.high, float(candle.high)),
+                    low=min(current.low, float(candle.low)),
+                )
+                continue
+            retired = tuple(
+                item
+                for item in self._reference_inventory.values()
+                if item.kind
+                in {
+                    f"previous_{family}_high",
+                    f"previous_{family}_low",
+                }
+            )
+            self._reference_inventory = {
+                item_id: item
+                for item_id, item in self._reference_inventory.items()
+                if item.kind
+                not in {
+                    f"previous_{family}_high",
+                    f"previous_{family}_low",
+                }
+            }
+            if append_retirement_events:
+                for item in retired:
+                    self.memory.append(
+                        _event(
+                            EventKind.LIQUIDITY_RETIRED,
+                            candle.end,
+                            Timeframe.M1,
+                            item.side,
+                            item.price,
+                            0.0,
+                            (item.item_id,),
+                            {
+                                "source_kind": item.kind,
+                                "replacement_period": current.key,
+                            },
+                            transition_reason=(
+                                "reference_period_replaced"
+                            ),
+                        )
+                    )
+            if current.coverage_complete:
+                self._materialize_reference_period(family, current)
+            period_start = self._reference_period_start(
+                family,
+                candle,
+            )
+            self._reference_periods[family] = _ReferencePeriod(
+                key=key,
+                started_at=period_start,
+                last_end=candle.end,
+                high=float(candle.high),
+                low=float(candle.low),
+                symbol=candle.symbol,
+                instrument_id=int(candle.instrument_id),
+                coverage_complete=True,
+            )
 
     @staticmethod
     def _pool_close_outside(
@@ -3563,7 +3716,7 @@ class CausalObserver:
             _event(
                 EventKind.LIQUIDITY_POOL_STATE,
                 candle.end,
-                Timeframe.M1,
+                item.timeframe,
                 item.side,
                 extreme,
                 item.strength,
@@ -3590,7 +3743,7 @@ class CausalObserver:
             _event(
                 EventKind.LIQUIDITY_POOL_STATE,
                 candle.end,
-                Timeframe.M1,
+                item.timeframe,
                 item.side,
                 candle.close,
                 item.strength,
@@ -3620,6 +3773,8 @@ class CausalObserver:
         self,
         update: ReaderUpdate,
         base_inventory: Sequence[LiquidityInventoryItem],
+        *,
+        projected_pool_states: dict[str, LiquidityPoolState] | None = None,
     ) -> None:
         """Rebuild exact draw transitions when an observer first attaches.
 
@@ -3643,7 +3798,7 @@ class CausalObserver:
                 )
             return
         for item in base_inventory:
-            if item.kind not in {"swing", "equal_highs", "equal_lows"}:
+            if item.kind not in _INVENTORY_KINDS:
                 raise LiquidityProtocolError(
                     "inventory draw kind is not enabled for exact 1m "
                     "lifecycle projection"
@@ -3692,10 +3847,14 @@ class CausalObserver:
                     "reconstructed draw crossing postdates its native "
                     "completed-bar transition"
                 )
-            if item.kind == "swing":
+            if item.kind not in {"equal_highs", "equal_lows"}:
                 self._inventory_consumption[item.item_id] = (
                     sweep_candle.end,
-                    "swing_swept",
+                    (
+                        "swing_swept"
+                        if item.kind == "swing"
+                        else "reference_level_swept"
+                    ),
                 )
                 self._append_inventory_crossing_event(
                     item,
@@ -3719,7 +3878,7 @@ class CausalObserver:
                 sweep_candle,
             )
             tracker, pool_id = self._projected_pool_tracker(item)
-            tracker.bootstrap_pool_projection(
+            projected = tracker.bootstrap_pool_projection(
                 pool_id,
                 swept_at=sweep_candle.end,
                 sweep_extreme=(
@@ -3742,6 +3901,9 @@ class CausalObserver:
                     )
                 ),
             )
+            self._invalidate_liquidity_snapshot(item.timeframe)
+            if projected_pool_states is not None:
+                projected_pool_states[projected.pool_id] = projected
             self._inventory_consumption[item.item_id] = (
                 sweep_candle.end,
                 "pool_swept",
@@ -3770,6 +3932,7 @@ class CausalObserver:
         update: ReaderUpdate,
         *,
         append_events: bool = True,
+        projected_pool_states: dict[str, LiquidityPoolState] | None = None,
     ) -> tuple[tuple[LiquidityInventoryItem, Candle], ...]:
         """Resolve pending sweeps before any same-clock HTF state update."""
 
@@ -3786,11 +3949,14 @@ class CausalObserver:
                 continue
             outside = self._pool_close_outside(item, bar)
             tracker, pool_id = self._projected_pool_tracker(item)
-            tracker.project_pool_resolution(
+            projected = tracker.project_pool_resolution(
                 pool_id,
                 observed_at=update.asof,
                 accepted_outside=outside,
             )
+            self._invalidate_liquidity_snapshot(item.timeframe)
+            if projected_pool_states is not None:
+                projected_pool_states[projected.pool_id] = projected
             if append_events:
                 self._append_projected_pool_resolution_event(item, bar)
             else:
@@ -3803,6 +3969,8 @@ class CausalObserver:
         update: ReaderUpdate,
         frames: Mapping[Timeframe, FrameObservation],
         base_inventory: Sequence[LiquidityInventoryItem],
+        *,
+        projected_pool_states: dict[str, LiquidityPoolState] | None = None,
     ) -> tuple[LiquidityInventoryItem, ...]:
         """Apply the completed 1m path to native pool formation sources.
 
@@ -3814,7 +3982,7 @@ class CausalObserver:
 
         bar = update.completed_1m
         if any(
-            item.kind not in {"swing", "equal_highs", "equal_lows"}
+            item.kind not in _INVENTORY_KINDS
             for item in base_inventory
         ):
             raise LiquidityProtocolError(
@@ -3826,23 +3994,28 @@ class CausalObserver:
             self._bootstrap_inventory_lifecycles(
                 update,
                 base_inventory,
+                projected_pool_states=projected_pool_states,
             )
         may_transition = bar.real_completed
-        self._resolve_pending_pool_sweeps(update)
-
-        prior_inventory = (
-            tuple(
-                item
-                for item in base_inventory
-                if item.confirmed_at <= bar.start
-            )
-            if self._prior is None
-            else tuple(
-                item
-                for item in self._prior.liquidity_inventory
-                if item.item_id in base_ids
-            )
+        self._resolve_pending_pool_sweeps(
+            update,
+            projected_pool_states=projected_pool_states,
         )
+
+        successful_prior_by_id = {
+            item.item_id: item
+            for item in (
+                ()
+                if self._prior is None
+                else self._prior.liquidity_inventory
+            )
+            if item.item_id in base_ids
+        }
+        prior_by_id = dict(successful_prior_by_id)
+        for item in base_inventory:
+            if item.confirmed_at <= bar.start:
+                prior_by_id.setdefault(item.item_id, item)
+        prior_inventory = tuple(prior_by_id.values())
         atr = frames[Timeframe.M1].metrics["atr"]
         for item in prior_inventory:
             if (
@@ -3859,7 +4032,11 @@ class CausalObserver:
             reason = (
                 "pool_swept"
                 if item.kind in {"equal_highs", "equal_lows"}
-                else "swing_swept"
+                else (
+                    "swing_swept"
+                    if item.kind == "swing"
+                    else "reference_level_swept"
+                )
             )
             self._inventory_consumption[item.item_id] = (
                 update.asof,
@@ -3872,12 +4049,15 @@ class CausalObserver:
                     bar,
                 )
                 tracker, pool_id = self._projected_pool_tracker(item)
-                tracker.project_pool_sweep(
+                projected = tracker.project_pool_sweep(
                     pool_id,
                     observed_at=update.asof,
                     sweep_extreme=extreme,
                     close_outside_on_sweep=accepted_outside,
                 )
+                self._invalidate_liquidity_snapshot(item.timeframe)
+                if projected_pool_states is not None:
+                    projected_pool_states[projected.pool_id] = projected
                 self._append_projected_pool_sweep_events(
                     item,
                     bar,
@@ -3919,6 +4099,25 @@ class CausalObserver:
                     for value in (native_consumed, projected)
                     if value is not None and value[0] is not None
                 ]
+            prior_item = successful_prior_by_id.get(item.item_id)
+            if (
+                prior_item is not None
+                and prior_item.lifecycle
+                is LiquidityInventoryLifecycle.CONSUMED
+            ):
+                if any(
+                    consumed_at < prior_item.consumed_at
+                    for consumed_at, _ in candidates
+                ):
+                    raise LiquidityProtocolError(
+                        "later inventory state attempted to backdate a "
+                        "frozen consumption"
+                    )
+                # Consumption is terminal.  Freeze the complete item at its
+                # first completed-1m crossing so later structural-rank, age
+                # or visibility metadata cannot rewrite that market fact.
+                output.append(prior_item)
+                continue
             if not candidates:
                 output.append(item)
                 continue
@@ -3963,47 +4162,17 @@ class CausalObserver:
                 "observer received a duplicate or out-of-order "
                 "successfully committed update"
             )
-        update_timeframes = tuple(
-            update.active_timeframes
-            or (
-                CORE_TIMEFRAMES
-                if (
-                    not update.scale_specs
-                    and update.scale_registry_id == "legacy-four-scale"
-                )
-                else update.histories.keys()
-            )
-        )
+        update_timeframes = tuple(update.active_timeframes)
         if set(update_timeframes) != set(self._active_timeframes):
             raise ValueError(
                 "reader and observer enabled scale registries disagree"
             )
         if (
-            update.scale_specs
-            and not getattr(self, "_scale_contract_bound", True)
-            and self._prior is None
-            and self.memory.last_minute_end is None
-        ):
-            # The legacy constructor did not receive a ScaleSpec.  Bind once
-            # to the upstream reader's exact four-scale contract before any
-            # state is consumed.  Explicit/development registries remain
-            # strict and can never be changed mid-stream.
-            self.scale_specs = tuple(update.scale_specs)
-            self._scale_registry_id = update.scale_registry_id
-            self._scale_contract_bound = True
-        if update.scale_specs:
-            if (
-                tuple(update.scale_specs) != self.scale_specs
-                or update.scale_registry_id != self._scale_registry_id
-            ):
-                raise ValueError(
-                    "reader and observer scale registry contracts disagree"
-                )
-        elif update.scale_registry_id != "legacy-four-scale" or (
-            self.scale_specs != legacy_scale_specs()
+            tuple(update.scale_specs) != self.scale_specs
+            or update.scale_registry_id != self._scale_registry_id
         ):
             raise ValueError(
-                "reader update omitted its non-legacy scale registry contract"
+                "reader and observer scale registry contracts disagree"
             )
         reality = reality or ExecutionRealityInput()
         execution = self._execution(update, reality)
@@ -4122,6 +4291,7 @@ class CausalObserver:
         histories = update.histories
         frames: dict[Timeframe, FrameObservation] = {}
         base_inventory: list[LiquidityInventoryItem] = []
+        liquidity_snapshots: dict[Timeframe, tuple] = {}
         for timeframe in self._active_timeframes:
             prior = self._prior_frame_if_unchanged(update, timeframe)
             if prior is not None:
@@ -4149,16 +4319,19 @@ class CausalObserver:
                 support_resistance = ()
                 liquidity_pools = ()
                 native_inventory = ()
-                legacy_liquidity = frame.liquidity
             else:
                 (
                     support_resistance,
                     liquidity_pools,
                     native_inventory,
-                ) = liquidity_tracker.snapshot()
-                legacy_liquidity = self._legacy_liquidity_projection(
+                ) = self._liquidity_snapshot(
+                    timeframe,
+                    liquidity_tracker,
+                )
+                liquidity_snapshots[timeframe] = (
+                    support_resistance,
+                    liquidity_pools,
                     native_inventory,
-                    cutoff=frame.cutoff,
                 )
             terminal_breaks = self._boundary_terminal_breaks.get(
                 timeframe,
@@ -4192,6 +4365,16 @@ class CausalObserver:
                 metrics["structure_direction"] = metrics[
                     "confirmed_structure_direction"
                 ]
+                confirmed_structures = tuple(
+                    item
+                    for item in structures
+                    if item.lifecycle is StructureLifecycle.CONFIRMED
+                )
+                metrics["structure_age_bars"] = (
+                    float(confirmed_structures[0].age_bars)
+                    if len(confirmed_structures) == 1
+                    else 0.0
+                )
                 if semantic_tail is not None:
                     (
                         metrics["external_above_distance_atr"],
@@ -4199,7 +4382,7 @@ class CausalObserver:
                         above_count,
                         below_count,
                     ) = _external_distances(
-                        legacy_liquidity,
+                        native_inventory,
                         semantic_tail.close,
                         atr,
                     )
@@ -4220,19 +4403,13 @@ class CausalObserver:
                         _,
                         _,
                     ) = _external_distances(
-                        legacy_liquidity,
+                        native_inventory,
                         semantic_tail.close,
                         atr,
                     )
-            elif timeframe is Timeframe.M1 and histories[timeframe]:
-                metrics["legacy_swing_progression_proxy"] = metrics[
-                    "path_sequence"
-                ]
-                metrics["path_sequence"] = 0.0
             frames[timeframe] = replace(
                 frame,
                 metrics=metrics,
-                liquidity=legacy_liquidity,
                 swings=swings,
                 structures=structures,
                 structure_breaks=visible_breaks,
@@ -4243,6 +4420,13 @@ class CausalObserver:
                 liquidity_pools=tuple(
                     self._pool_formation_source(item)
                     for item in liquidity_pools
+                ),
+            )
+        if Timeframe.M5 in frames:
+            frames[Timeframe.M5] = replace(
+                frames[Timeframe.M5],
+                structure_breaks=self._enrich_mss_breaks(
+                    frames[Timeframe.M5].structure_breaks
                 ),
             )
         try:
@@ -4260,9 +4444,14 @@ class CausalObserver:
                 "last checkpoint"
             )
             raise
-        for tracker in self._liquidity_trackers.values():
-            _, _, native_inventory = tracker.snapshot()
+        for timeframe, tracker in self._liquidity_trackers.items():
+            if timeframe not in liquidity_snapshots:
+                liquidity_snapshots[timeframe] = (
+                    self._liquidity_snapshot(timeframe, tracker)
+                )
+            _, _, native_inventory = liquidity_snapshots[timeframe]
             base_inventory.extend(native_inventory)
+        base_inventory.extend(self._reference_inventory.values())
         retained_liquidity_entities = {
             item.zone_id
             for frame in frames.values()
@@ -4281,9 +4470,9 @@ class CausalObserver:
         pre_projection_pool_states = tuple(
             sorted(
                 (
-                    pool
-                    for tracker in self._liquidity_trackers.values()
-                    for pool in tracker.snapshot()[1]
+                    self._pool_formation_source(pool)
+                    for _, pools, _ in liquidity_snapshots.values()
+                    for pool in pools
                 ),
                 key=lambda item: (
                     item.confirmed_at,
@@ -4360,10 +4549,12 @@ class CausalObserver:
                     item,
                     candle,
                 )
+            projected_pool_states: dict[str, LiquidityPoolState] = {}
             liquidity_inventory = self._project_inventory(
                 update,
                 frames,
                 base_inventory,
+                projected_pool_states=projected_pool_states,
             )
         except Exception:
             self._terminal_failure = (
@@ -4473,13 +4664,15 @@ class CausalObserver:
                     "from the last checkpoint"
                 )
                 raise
+        pool_by_id = {
+            pool.pool_id: pool
+            for _, pools, _ in liquidity_snapshots.values()
+            for pool in pools
+        }
+        pool_by_id.update(projected_pool_states)
         liquidity_pool_states = tuple(
             sorted(
-                (
-                    pool
-                    for tracker in self._liquidity_trackers.values()
-                    for pool in tracker.snapshot()[1]
-                ),
+                pool_by_id.values(),
                 key=lambda item: (
                     item.confirmed_at,
                     item.timeframe.value,
@@ -4527,15 +4720,6 @@ class CausalObserver:
                     "from the last checkpoint"
                 )
                 raise
-        try:
-            self._record_minute_events(update, frames)
-        except Exception:
-            self._terminal_failure = (
-                "minute-event projection failed after state may have "
-                "changed; discard this observer and resume from the "
-                "last checkpoint"
-            )
-            raise
         if group5_update is not None:
             try:
                 self._record_group5_events(group5_update)
@@ -4607,6 +4791,9 @@ class CausalObserver:
         )
         if incomplete_timeline_keys:
             anomalies.append("clock_incomplete_entity_timeline")
+        event_durations_minutes, event_ages_minutes = (
+            self.memory.temporal_metrics(update.asof)
+        )
         try:
             observation = MarketObservation(
                 asof=update.asof,
@@ -4615,16 +4802,13 @@ class CausalObserver:
                 price=float(update.completed_1m.close),
                 frames=frames,
                 recent_events=self.memory.recent(),
-                event_durations_minutes=self.memory.durations(update.asof),
+                event_durations_minutes=event_durations_minutes,
                 execution=execution,
                 anomalies=tuple(dict.fromkeys(anomalies)),
                 displacement=displacement,
                 liquidity_inventory=liquidity_inventory,
-                liquidity_inventory_authoritative=bool(
-                    self._liquidity_trackers
-                ),
                 liquidity_pool_states=liquidity_pool_states,
-                event_ages_minutes=self.memory.ages(update.asof),
+                event_ages_minutes=event_ages_minutes,
                 retained_entity_timelines=(
                     self.memory.entity_timelines()
                 ),
@@ -4682,7 +4866,7 @@ class CausalObserver:
                     if group4_update is None
                     else group4_update.atr_unready_sweep_item_ids
                 ),
-                group5_authoritative=(
+                group5_typed_available=(
                     self._group5_reducer is not None
                 ),
                 entry_locations=(
@@ -4772,5 +4956,4 @@ __all__ = [
     "EventMemory",
     "ExecutionRealityInput",
     "ObserverConfig",
-    "confirmed_swings",
 ]

@@ -160,3 +160,44 @@ def test_engine_accepts_current_typed_config_and_rejects_incomplete_current_conf
     incomplete.write_text(json.dumps(payload), encoding="utf-8")
     with pytest.raises(ValueError, match="group5_protocol"):
         ContinuousSMCEngine.from_config(incomplete)
+
+
+def test_engine_live_mode_has_one_fail_closed_release_gate(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(RuntimeError, match="live execution readiness"):
+        ContinuousSMCEngine.from_config(
+            "configs/model.json",
+            runtime_mode="live",
+        )
+
+    group5 = json.loads(
+        Path("configs/primitives_entry.json").read_text(encoding="utf-8")
+    )
+    group5["authority"]["natural_authority_validated"] = True
+    group5_path = tmp_path / "primitives_entry.json"
+    group5_path.write_text(json.dumps(group5), encoding="utf-8")
+
+    model = json.loads(
+        Path("configs/model.json").read_text(encoding="utf-8")
+    )
+    model["observer"]["group5_protocol"] = str(group5_path)
+    model["release_readiness"] = {
+        "active_model_natural_authority_validated": True,
+        "economic_validation_complete": True,
+        "live_execution_allowed": True,
+    }
+    model_path = tmp_path / "model-live.json"
+    model_path.write_text(json.dumps(model), encoding="utf-8")
+
+    engine = ContinuousSMCEngine.from_config(
+        model_path,
+        runtime_mode="live",
+    )
+    assert isinstance(engine, ContinuousSMCEngine)
+
+    with pytest.raises(ValueError, match="runtime_mode"):
+        ContinuousSMCEngine.from_config(
+            "configs/model.json",
+            runtime_mode="paper",
+        )

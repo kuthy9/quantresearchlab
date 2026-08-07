@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import asdict
+from dataclasses import asdict, replace
 import json
+import os
 from pathlib import Path
 import sys
 import time
@@ -50,6 +51,10 @@ from smc_trader.mbo import (  # noqa: E402
 from smc_trader.observation import ExecutionRealityInput  # noqa: E402
 from smc_trader.validation import (  # noqa: E402
     load_validation_protocol,
+)
+from smc_trader.visualization import (  # noqa: E402
+    DecisionVisualizer,
+    VisualArtifact,
 )
 
 
@@ -342,23 +347,22 @@ def _source_provenance(observation, source_id: str) -> dict[str, Any] | None:
             "upper_bound": float(location.upper_bound),
             "failure_boundary": float(location.failure_boundary),
         }
-    if observation.liquidity_inventory_authoritative:
-        item = next(
-            (
-                value
-                for value in observation.liquidity_inventory
-                if value.item_id == source_id
-            ),
-            None,
-        )
-        if item is not None:
-            return {
-                "source_kind": item.kind,
-                "timeframe": item.timeframe.value,
-                "formed_at": item.formed_at.isoformat(),
-                "confirmed_at": item.confirmed_at.isoformat(),
-                "lifecycle": item.lifecycle.value,
-            }
+    item = next(
+        (
+            value
+            for value in observation.liquidity_inventory
+            if value.item_id == source_id
+        ),
+        None,
+    )
+    if item is not None:
+        return {
+            "source_kind": item.kind,
+            "timeframe": item.timeframe.value,
+            "formed_at": item.formed_at.isoformat(),
+            "confirmed_at": item.confirmed_at.isoformat(),
+            "lifecycle": item.lifecycle.value,
+        }
     event = next(
         (
             value
@@ -383,24 +387,7 @@ def _source_provenance(observation, source_id: str) -> dict[str, Any] | None:
             ),
             "lifecycle": event.lifecycle,
         }
-    level = next(
-        (
-            value
-            for timeframe in observation.active_timeframes
-            for value in observation.frame(timeframe).liquidity
-            if value.level_id == source_id
-        ),
-        None,
-    )
-    if level is None:
-        return None
-    return {
-        "source_kind": "legacy_liquidity",
-        "timeframe": level.timeframe.value,
-        "formed_at": level.formed_at.isoformat(),
-        "confirmed_at": level.confirmed_at.isoformat(),
-        "lifecycle": "consumed" if level.swept else "visible",
-    }
+    return None
 
 
 def _invalidation_provenance(observation, plan) -> str | None:
@@ -814,6 +801,16 @@ def parse_args() -> argparse.Namespace:
             "calibration window"
         ),
     )
+    parser.add_argument(
+        "--visualize-at",
+        action="append",
+        default=[],
+        metavar="AWARE_TIMESTAMP",
+        help=(
+            "render one completed-data decision view at this exact decision "
+            "clock; repeat for at most 40 preselected clocks"
+        ),
+    )
     parser.add_argument("--resume", action="store_true")
     parser.add_argument(
         "--diagnostic-stop-after-bars",
@@ -837,6 +834,44 @@ def parse_args() -> argparse.Namespace:
         help="explicitly reveal a manifest-bound MBO execution holdout",
     )
     return parser.parse_args()
+
+
+def _visualization_clocks(
+    values: list[str] | tuple[str, ...],
+    *,
+    start: pd.Timestamp,
+    end: pd.Timestamp,
+) -> tuple[pd.Timestamp, ...]:
+    if len(values) > 40:
+        raise ValueError("at most 40 decision clocks may be visualized")
+    clocks: list[pd.Timestamp] = []
+    for raw in values:
+        clock = pd.Timestamp(raw)
+        if clock.tzinfo is None:
+            raise ValueError("visualization decision clocks must be timezone-aware")
+        clock = clock.tz_convert("UTC")
+        if not start.tz_convert("UTC") <= clock < end.tz_convert("UTC"):
+            raise ValueError(
+                "visualization decision clocks must lie inside the replay interval"
+            )
+        clocks.append(clock)
+    if len(clocks) != len(set(clocks)):
+        raise ValueError("visualization decision clocks must be unique")
+    return tuple(sorted(clocks))
+
+
+def _visualization_key(value: pd.Timestamp) -> str:
+    clock = pd.Timestamp(value)
+    if clock.tzinfo is None:
+        raise ValueError("visualization decision clock must be timezone-aware")
+    return clock.tz_convert("UTC").isoformat()
+
+
+def _visualization_filename(value: pd.Timestamp) -> str:
+    clock = pd.Timestamp(value)
+    if clock.tzinfo is None:
+        raise ValueError("visualization decision clock must be timezone-aware")
+    return clock.tz_convert("UTC").strftime("%Y%m%dT%H%M%SZ.png")
 
 
 def _stream_progress(
@@ -968,6 +1003,15 @@ def _streamed_main(args: argparse.Namespace) -> None:
         end = end.tz_localize("America/New_York")
     if end <= start:
         raise ValueError("replay interval must be positive")
+    visualization_clocks = _visualization_clocks(
+        args.visualize_at,
+        start=start,
+        end=end,
+    )
+    visualization_clock_keys = frozenset(
+        _visualization_key(clock) for clock in visualization_clocks
+    )
+    visualization_enabled = bool(visualization_clocks)
 
     validation = load_validation_protocol(args.validation_protocol)
     window = validation.classify_ohlcv(start, end)
@@ -1097,6 +1141,14 @@ def _streamed_main(args: argparse.Namespace) -> None:
             "shard_rows": effective_shard_rows,
             "checkpoint_bars": int(args.checkpoint_bars),
             "stream_families": sorted(stream_keys),
+            "visualization": {
+                "enabled": visualization_enabled,
+                "decision_clocks_utc": sorted(visualization_clock_keys),
+                "directory": (
+                    "visualizations" if visualization_enabled else None
+                ),
+                "selection": "explicit_decision_clocks",
+            },
         },
     }
     run_manifest_bytes = canonical_json(to_primitive(run_manifest))
@@ -1183,6 +1235,7 @@ def _streamed_main(args: argparse.Namespace) -> None:
             "last_asof": None,
             "resume_count": 0,
             "finalized": False,
+            "visual_artifacts": {},
             "peak_buffer_rows": {name: 0 for name in stream_keys},
             "next_shard_index": 0,
             "committed_shards": streams["decision_shards"][
@@ -1207,6 +1260,28 @@ def _streamed_main(args: argparse.Namespace) -> None:
         raise ValueError("checkpoint execution-simulation mode changed")
     if state["finalized"] and int(state["source_rows_consumed"]) != total_source_rows:
         raise ValueError("finalized checkpoint did not consume the bound source")
+
+    visual_artifacts = state.get("visual_artifacts")
+    if not isinstance(visual_artifacts, dict):
+        raise ValueError("checkpoint visualization state is invalid")
+    if not set(visual_artifacts).issubset(visualization_clock_keys):
+        raise ValueError("checkpoint contains an unrequested visualization")
+    for clock_key, artifact in visual_artifacts.items():
+        if not isinstance(artifact, VisualArtifact):
+            raise ValueError("checkpoint visual artifact is invalid")
+        if artifact.path.is_symlink() or not artifact.path.is_file():
+            raise FileNotFoundError(
+                f"checkpoint visual artifact is missing: {artifact.path}"
+            )
+        if _visualization_key(artifact.maximum_market_time) > clock_key:
+            raise ValueError("visual artifact contains future market data")
+
+    visualizer = DecisionVisualizer() if visualization_enabled else None
+    visualization_directory = (
+        destination / "visualizations" if visualization_enabled else None
+    )
+    if visualization_directory is not None:
+        visualization_directory.mkdir(parents=True, exist_ok=True)
 
     session_started = time.monotonic()
     session_source_start = int(state["source_rows_consumed"])
@@ -1285,6 +1360,41 @@ def _streamed_main(args: argparse.Namespace) -> None:
         print(json.dumps(durable_progress, sort_keys=True), flush=True)
         safe_source_checkpoint = was_safe_source_checkpoint
 
+    def render_requested_visual(snapshot) -> None:
+        if visualizer is None or visualization_directory is None:
+            return
+        clock_key = _visualization_key(snapshot.observation.asof)
+        if (
+            clock_key not in visualization_clock_keys
+            or clock_key in visual_artifacts
+        ):
+            return
+        histories = replay.engine.histories(
+            bars=max(DecisionVisualizer.PANEL_BARS.values())
+        )
+        destination_path = (
+            visualization_directory
+            / _visualization_filename(snapshot.observation.asof)
+        )
+        temporary_path = destination_path.with_name(
+            f".{destination_path.stem}.tmp.png"
+        )
+        try:
+            artifact = visualizer.render_decision(
+                snapshot,
+                histories,
+                temporary_path,
+            )
+            if artifact.maximum_market_time > snapshot.observation.asof:
+                raise AssertionError("visual artifact revealed future market data")
+            os.replace(temporary_path, destination_path)
+        except Exception:
+            if temporary_path.is_file() and not temporary_path.is_symlink():
+                temporary_path.unlink()
+            raise
+        artifact = replace(artifact, path=destination_path)
+        visual_artifacts[clock_key] = artifact
+
     def execution_for_bar(bar) -> ExecutionRealityInput:
         if execution_store is not None and bar.end >= start:
             return execution_store.for_bar(
@@ -1343,6 +1453,7 @@ def _streamed_main(args: argparse.Namespace) -> None:
                         )
 
                 if snapshot.observation.asof >= start:
+                    render_requested_visual(snapshot)
                     if brain_calibration is not None:
                         brain_calibration.observe(
                             snapshot,
@@ -1458,6 +1569,14 @@ def _streamed_main(args: argparse.Namespace) -> None:
         raise ValueError("requested interval produced no completed decisions")
     if int(state["source_rows_consumed"]) != total_source_rows:
         raise RuntimeError("source iterator ended before all bound rows were consumed")
+    missing_visualizations = sorted(
+        visualization_clock_keys.difference(visual_artifacts)
+    )
+    if missing_visualizations:
+        raise ValueError(
+            "requested visualization decision clocks were not observed: "
+            + ", ".join(missing_visualizations)
+        )
     if not state["finalized"]:
         if brain_calibration is not None:
             brain_calibration.close_unresolved(state["last_asof"])
@@ -1482,6 +1601,20 @@ def _streamed_main(args: argparse.Namespace) -> None:
             bindings=bindings,
         )
         stream_manifests[name] = str(manifest_path.relative_to(destination))
+
+    visualization_index: str | None = None
+    if visualization_directory is not None:
+        index_path = visualization_directory / "index.html"
+        temporary_index_path = visualization_directory / ".index.tmp.html"
+        DecisionVisualizer.build_index(
+            tuple(
+                visual_artifacts[key]
+                for key in sorted(visual_artifacts)
+            ),
+            temporary_index_path,
+        )
+        os.replace(temporary_index_path, index_path)
+        visualization_index = str(index_path.relative_to(destination))
 
     trade_rows: list[dict[str, Any]] = []
     entry_attempt_rows: list[dict[str, Any]] = []
@@ -1569,6 +1702,9 @@ def _streamed_main(args: argparse.Namespace) -> None:
             for name in stream_keys
         },
         "peak_buffer_rows": dict(state["peak_buffer_rows"]),
+        "visualization_capture": visualization_enabled,
+        "visualization_decisions": len(visual_artifacts),
+        "visualization_index": visualization_index,
         "future_path_visible_to_model": False,
         "future_path_output": False,
         "sequential_execution_evaluated": bool(args.simulate_execution),
@@ -1609,6 +1745,7 @@ def _streamed_main(args: argparse.Namespace) -> None:
                 "entry_attempts": (
                     "entry_attempts.parquet" if args.simulate_execution else None
                 ),
+                "visualizations_index": visualization_index,
             }
         ),
     )

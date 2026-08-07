@@ -7,7 +7,7 @@ Schema: **1**
 ```text
 newly completed 1m OHLCV bar
         ↓
-causal 1m / 5m / 1H / 4H aggregation
+causal 1m / 5m / 15m / 1H / 4H aggregation
         ↓
 descriptive primitives + ordered event memory
         ↓
@@ -30,21 +30,27 @@ a second implementation. Multi-timeframe bars update only when complete.
 
 ## Eyes and Scene Graph
 
-Each completed minute updates causal state across four frames:
+Each completed minute updates one shared observation across five enabled
+frames. A higher-timeframe frame changes only when a bar for that frame has
+completed:
 
 | Frame | Descriptive state |
 |---|---|
-| 4H | structure direction/age, displacement and efficiency, range position, external draw |
-| 1H | confirmed swings/BOS, acceptance/rejection, dealing range, obstruction |
-| 5m | displacement episode, FVG/OB, first return, reacceptance, compression |
-| 1m | exact event order, acceleration, counter-pressure and trigger hold |
+| 4H | confirmed structure/BOS and external liquidity; directional displacement, efficiency and range position remain explicitly descriptive proxies |
+| 1H | confirmed swings/BOS, support/resistance and typed dealing range; rolling acceptance/rejection remains an explicitly descriptive proxy |
+| 15m | bridge-scale candle, structure and liquidity context |
+| 5m | displacement episode, raw/displacement-linked FVG, qualified order block; rolling compression remains an explicitly descriptive proxy |
+| 1m | candle description, manipulation resolution, exact first return, qualified entry-zone reacceptance, micro BOS and ordered path steps |
 
 Every semantic event carries identity, formation/confirmation/invalidation
 clocks, lifecycle, direction, strength and source IDs. Event memory retains
 order and duration, not just current scores. In particular:
 
-- first pullback is the first return to one frozen FVG/OB/range zone;
-- reacceptance requires departure, reclaim, hold and explicit failure;
+- first pullback is the first return to one frozen qualified FVG/OB entry
+  zone; a mature range is context, not the entry zone itself;
+- qualified entry-zone reacceptance requires departure, reclaim, hold and
+  explicit failure; manipulation reacceptance remains the separate Group4
+  multi-bar lifecycle;
 - path sequence is ordered event identity, not swing progression;
 - value comes from a mature dealing range, not 4H range position;
 - planned entry is a frozen zone price and need not equal the current close.

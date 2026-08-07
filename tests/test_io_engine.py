@@ -12,7 +12,7 @@ from smc_trader.io import (
     iter_completed_bars,
     load_ohlcv,
 )
-from smc_trader.model import AccountState, Direction
+from smc_trader.model import AccountState, Direction, Timeframe
 from smc_trader.observation import ExecutionRealityInput
 
 from .helpers import session_bars
@@ -166,6 +166,26 @@ def test_engine_runs_all_layers_once_per_completed_minute() -> None:
     assert all(
         frame.cutoff <= snapshot.observation.asof
         for frame in snapshot.observation.frames.values()
+    )
+    expected_timeframes = (
+        Timeframe.H4,
+        Timeframe.H1,
+        Timeframe.M15,
+        Timeframe.M5,
+        Timeframe.M1,
+    )
+    assert engine.reader.active_timeframes == expected_timeframes
+    assert engine.observer._active_timeframes == expected_timeframes
+    assert snapshot.observation.active_timeframes == expected_timeframes
+    assert tuple(snapshot.observation.frames) == expected_timeframes
+    assert (
+        engine.reader.scale_registry_id
+        == engine.observer._scale_registry_id
+        == snapshot.observation.scale_registry_id
+    )
+    assert (
+        snapshot.observation.frame(Timeframe.M15).cutoff
+        <= snapshot.observation.asof
     )
     assert snapshot.risk.final_action.value in {
         "enter", "wait", "hold", "protect", "exit", "abstain"

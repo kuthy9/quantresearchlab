@@ -11,6 +11,7 @@ from .model import (
     Action,
     Bar,
     BOSLifecycle,
+    BOSScope,
     Decision,
     DealingRangeLifecycle,
     Direction,
@@ -164,6 +165,51 @@ def _entry_location_has_exact_zone_source(
     )
 
 
+def _exact_entry_zone_source(
+    location: EntryLocationState,
+    observation: MarketObservation,
+):
+    if not _entry_location_has_exact_zone_source(location, observation):
+        return None
+    frame = observation.frame(Timeframe.M5)
+    candidates = (
+        tuple(
+            state
+            for state in frame.fair_value_gaps
+            if state.fvg_id == location.source_zone_id
+        )
+        if location.source_zone_kind == "fvg"
+        else tuple(
+            state
+            for state in frame.order_blocks
+            if state.order_block_id == location.source_zone_id
+        )
+    )
+    return candidates[0] if len(candidates) == 1 else None
+
+
+def _has_opposed_mss(
+    observation: MarketObservation,
+    direction: Direction,
+    displacement_id: str,
+    *,
+    after: pd.Timestamp,
+    before: pd.Timestamp,
+) -> bool:
+    return any(
+        state.timeframe is Timeframe.M5
+        and state.direction is direction
+        and state.lifecycle is BOSLifecycle.CONFIRMED
+        and state.scope is BOSScope.OPPOSED
+        and state.mss_qualified
+        and state.source_displacement_id == displacement_id
+        and state.resolved_at is not None
+        and state.resolved_at > after
+        and state.resolved_at <= before
+        for state in observation.frame(Timeframe.M5).structure_breaks
+    )
+
+
 def _micro_reference_has_exact_source(
     reference: MicroBOSReference,
     observation: MarketObservation,
@@ -186,47 +232,23 @@ def _micro_reference_has_exact_source(
 def _canonical_visible_levels(
     observation: MarketObservation,
 ) -> dict[str, LiquidityLevel]:
-    if observation.liquidity_inventory_authoritative:
-        candidates = [
-            LiquidityLevel(
-                level_id=item.item_id,
-                timeframe=item.timeframe,
-                side=item.side,
-                price=item.price,
-                formed_at=item.formed_at,
-                confirmed_at=item.confirmed_at,
-                touches=max(0, len(item.source_ids) - 1),
-                swept=False,
-            )
-            for item in observation.liquidity_inventory
-            if (
-                item.lifecycle
-                is LiquidityInventoryLifecycle.VISIBLE
-                and item.confirmed_at <= observation.asof
-            )
-        ]
-    else:
-        consumed = {
-            source_id
-            for event in observation.recent_events
-            if event.kind
-            in {
-                EventKind.LIQUIDITY_SWEEP,
-                EventKind.LIQUIDITY_CONSUMED,
-                EventKind.STRUCTURE_BREAK,
-            }
-            for source_id in event.source_ids
-        }
-        candidates = [
-            level
-            for timeframe in observation.active_timeframes
-            for level in observation.frame(timeframe).liquidity
-            if (
-                not level.swept
-                and level.level_id not in consumed
-                and level.confirmed_at <= observation.asof
-            )
-        ]
+    candidates = [
+        LiquidityLevel(
+            level_id=item.item_id,
+            timeframe=item.timeframe,
+            side=item.side,
+            price=item.price,
+            formed_at=item.formed_at,
+            confirmed_at=item.confirmed_at,
+            touches=max(0, len(item.source_ids) - 1),
+            swept=False,
+        )
+        for item in observation.liquidity_inventory
+        if (
+            item.lifecycle is LiquidityInventoryLifecycle.VISIBLE
+            and item.confirmed_at <= observation.asof
+        )
+    ]
 
     canonical: dict[str, LiquidityLevel] = {}
     ambiguous: set[str] = set()
@@ -285,39 +307,26 @@ def _canonical_stop_sources(
             sources.pop(source_id, None)
             ambiguous.add(source_id)
 
-    if observation.liquidity_inventory_authoritative:
-        for item in observation.liquidity_inventory:
-            if (
-                item.lifecycle is LiquidityInventoryLifecycle.VISIBLE
-                and item.kind == "swing"
-                and item.confirmed_at <= observation.asof
-            ):
-                register(
-                    item.item_id,
-                    _CausalStopSource(
-                        price=item.price,
-                        side=item.side,
-                        timeframe=item.timeframe,
-                        observed_at=item.confirmed_at,
-                        source_kind="swing",
-                    ),
-                )
-    else:
-        for level in _canonical_visible_levels(observation).values():
+    for item in observation.liquidity_inventory:
+        if (
+            item.lifecycle is LiquidityInventoryLifecycle.VISIBLE
+            and item.kind == "swing"
+            and item.confirmed_at <= observation.asof
+        ):
             register(
-                level.level_id,
+                item.item_id,
                 _CausalStopSource(
-                    price=level.price,
-                    side=level.side,
-                    timeframe=level.timeframe,
-                    observed_at=level.confirmed_at,
+                    price=item.price,
+                    side=item.side,
+                    timeframe=item.timeframe,
+                    observed_at=item.confirmed_at,
                     source_kind="swing",
                 ),
             )
 
     for event in observation.recent_events:
         if (
-            event.kind in {EventKind.LIQUIDITY_SWEEP, EventKind.REJECTION}
+            event.kind is EventKind.LIQUIDITY_SWEEP
             and event.observed_at <= observation.asof
             and event.side in {"above", "below"}
             and event.price is not None
@@ -341,19 +350,6 @@ def _canonical_stop_sources(
                 timeframe=Timeframe.M5,
                 observed_at=location.formed_at,
                 source_kind="entry_zone_failure",
-            ),
-        )
-    for state in observation.qualified_reacceptances:
-        if state.context_kind != "pool_sweep":
-            continue
-        register(
-            state.reacceptance_id,
-            _CausalStopSource(
-                price=state.failure_boundary,
-                side=state.direction.invalidation_side,
-                timeframe=Timeframe.M1,
-                observed_at=state.formed_at,
-                source_kind="pool_sweep_extreme",
             ),
         )
     for state in observation.manipulations:
@@ -545,6 +541,7 @@ def _valid_typed_entry_location(
             ),
             None,
         )
+        zone_source = _exact_entry_zone_source(location, observation)
         if (
             dealing_range is None
             or dealing_range.lifecycle is not DealingRangeLifecycle.MATURE
@@ -554,6 +551,18 @@ def _valid_typed_entry_location(
             or manipulation.lifecycle is not ManipulationLifecycle.REACCEPTED
             or manipulation.reaccepted_at is None
             or manipulation.reentry_price is None
+            or manipulation.reentry_candidate_at is None
+            or zone_source is None
+            or zone_source.source_displacement_active_at is None
+            or zone_source.source_displacement_active_at
+            <= manipulation.reaccepted_at
+            or not _has_opposed_mss(
+                observation,
+                plan.direction,
+                location.source_displacement_id,
+                after=manipulation.reaccepted_at,
+                before=first_pullback.observed_at,
+            )
             or dealing_range.mature_at != context.mature_at
             or not _same_price(
                 dealing_range.lower_bound,
@@ -571,6 +580,8 @@ def _valid_typed_entry_location(
             or manipulation.side != context.manipulation_side
             or manipulation.swept_at != context.swept_at
             or manipulation.reaccepted_at != context.reentered_at
+            or manipulation.reentry_candidate_at
+            != context.reentry_candidate_at
             or not _same_price(
                 manipulation.sweep_extreme,
                 context.manipulation_extreme,
@@ -717,12 +728,53 @@ def _valid_typed_entry_location(
     return_steps = [
         step
         for step in pool_path.steps
-        if step.kind in {"sweep_rejection", "reacceptance_held"}
+        if step.kind == "reacceptance_held"
     ]
+    displacement_steps = [
+        step
+        for step in pool_path.steps
+        if step.kind == "opposite_displacement"
+    ]
+    if len(return_steps) != 1 or len(displacement_steps) != 1:
+        return False
+    return_step = return_steps[0]
+    displacement_step = displacement_steps[0]
+    manipulation = next(
+        (
+            state
+            for state in observation.manipulations
+            if (
+                state.manipulation_id == pool_path.context_id
+                and state.source_kind == "formed_liquidity_pool"
+            )
+        ),
+        None,
+    )
     return bool(
-        return_steps
-        and min(step.observed_at for step in return_steps)
-        < location.formed_at
+        manipulation is not None
+        and manipulation.lifecycle is ManipulationLifecycle.REACCEPTED
+        and manipulation.reaccepted_at == return_step.observed_at
+        and return_step.source_event_id == manipulation.manipulation_id
+        and return_step.source_entity_id == manipulation.manipulation_id
+        and return_step.observed_at < displacement_step.observed_at
+        <= location.formed_at
+        and displacement_step.source_event_id == location.source_zone_id
+        and displacement_step.source_entity_id
+        == location.source_displacement_id
+        and (
+            (zone_source := _exact_entry_zone_source(location, observation))
+            is not None
+        )
+        and zone_source.source_displacement_active_at is not None
+        and zone_source.source_displacement_active_at
+        > return_step.observed_at
+        and _has_opposed_mss(
+            observation,
+            plan.direction,
+            location.source_displacement_id,
+            after=return_step.observed_at,
+            before=first_pullback.observed_at,
+        )
     )
 
 
@@ -840,7 +892,7 @@ def _valid_stop(
                 )
                 or not any(
                     step.kind
-                    in {"sweep_rejection", "reacceptance_held"}
+                    == "reacceptance_held"
                     for step in pool_path.steps
                 )
             ):
@@ -1013,31 +1065,23 @@ def causal_protection_candidate(
         for event in observation.recent_events
         for source_id in event.source_ids
     }
-    inventory_levels = (
-        [
-            LiquidityLevel(
-                level_id=item.item_id,
-                timeframe=item.timeframe,
-                side=item.side,
-                price=item.price,
-                formed_at=item.formed_at,
-                confirmed_at=item.confirmed_at,
-                touches=max(0, len(item.source_ids) - 1),
-                swept=False,
-            )
-            for item in observation.liquidity_inventory
-            if (
-                item.lifecycle is LiquidityInventoryLifecycle.VISIBLE
-                and item.kind == "swing"
-            )
-        ]
-        if observation.liquidity_inventory_authoritative
-        else [
-            level
-            for timeframe in observation.active_timeframes
-            for level in observation.frame(timeframe).liquidity
-        ]
-    )
+    inventory_levels = [
+        LiquidityLevel(
+            level_id=item.item_id,
+            timeframe=item.timeframe,
+            side=item.side,
+            price=item.price,
+            formed_at=item.formed_at,
+            confirmed_at=item.confirmed_at,
+            touches=max(0, len(item.source_ids) - 1),
+            swept=False,
+        )
+        for item in observation.liquidity_inventory
+        if (
+            item.lifecycle is LiquidityInventoryLifecycle.VISIBLE
+            and item.kind == "swing"
+        )
+    ]
     candidates = [
         level
         for level in inventory_levels

@@ -97,12 +97,17 @@ _READINESS_FAILURE_REASONS = frozenset(
         "entry_trigger_contradicted",
         "entry_zone_left_or_failed",
         "entry_zone_left",
+        "micro_bos_opposed",
+        "mss_confirmed_after_first_pullback",
     }
 )
 _CENSOR_TERMINAL_REASONS = frozenset(
     {
         "entry_path_censored",
         "pool_path_censored",
+        "manipulation_resolution_deadline",
+        "opposite_displacement_ambiguous_same_clock",
+        "micro_bos_ambiguous_same_clock",
         "data_gap_reset",
         "contract_change_reset",
         "data_anomaly",

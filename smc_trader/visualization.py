@@ -15,7 +15,9 @@ from .model import (
     DealingRangeLifecycle,
     EngineSnapshot,
     EventKind,
+    FVGQualification,
     FairValueGapLifecycle,
+    LiquidityInventoryLifecycle,
     ManipulationLifecycle,
     OrderBlockLifecycle,
     PlaybookPhase,
@@ -367,7 +369,8 @@ def _metric_text(
                     f"{'none' if displacement.current_direction is None else displacement.current_direction.value}"
                 )
             ),
-            f"descriptive compression: {metrics['compression']:+.2f}",
+            "descriptive proxy: compression (not mature range): "
+            f"{metrics['compression']:+.2f}",
         ]
         if displacement is not None:
             rows.extend(
@@ -395,7 +398,7 @@ def _metric_text(
                 )
             )
         return "\n".join(rows)
-    if timeframe is Timeframe.M1 and snapshot.observation.group5_authoritative:
+    if timeframe is Timeframe.M1 and snapshot.observation.group5_typed_available:
         _, paths, reacceptances, micro_bos_references = (
             _selected_group5_entities(
                 snapshot,
@@ -440,7 +443,11 @@ def _metric_text(
         )
     if timeframe is Timeframe.H4:
         values = (
-            ("directional displacement", metrics["directional_displacement"]),
+            (
+                "descriptive proxy: directional move "
+                "(not typed displacement)",
+                metrics["directional_displacement"],
+            ),
             ("efficiency", metrics["path_efficiency"]),
             ("structure progression", metrics["structure_direction"]),
             ("structure age", metrics["structure_age_bars"]),
@@ -451,27 +458,38 @@ def _metric_text(
     elif timeframe in {Timeframe.H1, Timeframe.M15}:
         values = (
             ("swing progression", metrics["swing_progression"]),
-            ("acceptance", metrics["acceptance_direction"]),
-            ("rejection", metrics["rejection_direction"]),
-            ("range position", metrics["dealing_range_position"]),
+            (
+                "descriptive proxy: acceptance",
+                metrics["acceptance_direction"],
+            ),
+            (
+                "descriptive proxy: rejection",
+                metrics["rejection_direction"],
+            ),
+            (
+                "rolling envelope position",
+                metrics["rolling_range_position"],
+            ),
             ("up obstruction ATR", metrics["up_path_obstruction_atr"]),
             ("down obstruction ATR", metrics["down_path_obstruction_atr"]),
         )
     elif timeframe is Timeframe.M5:
         values = (
-            ("impulse direction", metrics["impulse_direction"]),
-            ("impulse strength", metrics["impulse_strength"]),
-            ("first pullback depth", metrics["pullback_depth"]),
-            ("pullback completeness", metrics["pullback_completeness"]),
-            ("reacceptance", metrics["reacceptance_direction"]),
-            ("compression", metrics["compression"]),
+            (
+                "descriptive proxy: compression (not mature range)",
+                metrics["compression"],
+            ),
+        )
+        return "\n".join(
+            (
+                "typed displacement: unavailable",
+                *(f"{name}: {value:+.2f}" for name, value in values),
+            )
         )
     else:
         values = (
             ("acceleration", metrics["acceleration"]),
             ("counter pressure", metrics["counter_pressure"]),
-            ("trigger hold", metrics["trigger_hold_direction"]),
-            ("trigger age", metrics["trigger_age_bars"]),
         )
         return "\n".join(
             (
@@ -495,18 +513,14 @@ def _event_markers(
         EventKind.SWING_STATE: "#7c3aed",
         EventKind.STRUCTURE_STATE: "#1d4ed8",
         EventKind.BOS_STATE: "#60a5fa",
+        EventKind.BOS_POST_BREAK_STATE: "#3b82f6",
         EventKind.SUPPORT_RESISTANCE_STATE: "#0f766e",
         EventKind.LIQUIDITY_POOL_STATE: "#a21caf",
         EventKind.LIQUIDITY_SWEEP: "#db2777",
         EventKind.LIQUIDITY_CONSUMED: "#9d174d",
+        EventKind.LIQUIDITY_RETIRED: "#94a3b8",
         EventKind.STRUCTURE_BREAK: "#2563eb",
         EventKind.STRUCTURE_BREAK_FAILED: "#94a3b8",
-        EventKind.REJECTION: "#ea580c",
-        EventKind.IMPULSE: "#0891b2",
-        EventKind.REACCEPTANCE: "#16a34a",
-        EventKind.COMPRESSION: "#64748b",
-        EventKind.TRIGGER_HELD: "#15803d",
-        EventKind.TRIGGER_LOST: "#dc2626",
         EventKind.FVG_STATE: "#0284c7",
         EventKind.ORDER_BLOCK_STATE: "#9333ea",
         EventKind.DEALING_RANGE_STATE: "#ca8a04",
@@ -927,7 +941,9 @@ def _typed_structure_overlay(
                 axis,
                 (
                     f"BOS {item.direction.value[0].upper()} "
-                    f"{item.lifecycle.value} "
+                    f"{item.lifecycle.value}/{item.scope.value} "
+                    f"post={None if item.post_break_state is None else item.post_break_state.value} "
+                    f"mss={item.mss_qualified} "
                     f"[{_short_identity(item.bos_id)}] "
                     f"→ {_short_identity(item.target_swing_id)}"
                 ),
@@ -952,7 +968,9 @@ def _typed_structure_overlay(
         )
         end_index = _candle_index(candles, terminal)
         end_index = len(candles) - 1 if end_index is None else end_index
-        color = "#0f766e"
+        color, line_style = _support_resistance_style(
+            state.source_kind
+        )
         axis.fill_between(
             [start_index - 0.4, end_index + 0.4],
             lower,
@@ -961,21 +979,47 @@ def _typed_structure_overlay(
             alpha=0.035,
             zorder=0,
         )
-        if offset == len(zones) - 1:
-            _collision_safe_annotate(
-                axis,
-                (
-                    f"{state.side} {state.lifecycle.value} "
-                    f"[{_short_identity(state.zone_id)}]"
-                ),
-                min(end_index + 0.35, len(candles) - 1),
-                upper,
-                color=color,
-                fontsize=4.9,
-                preferred_side="left",
-            )
+        axis.hlines(
+            state.anchor_price,
+            start_index - 0.4,
+            end_index + 0.4,
+            color=color,
+            linewidth=0.55,
+            linestyle=line_style,
+            alpha=0.78,
+            zorder=2,
+        )
+        _collision_safe_annotate(
+            axis,
+            (
+                f"S/R src={state.source_kind} "
+                f"{state.side} {state.lifecycle.value} "
+                f"{state.structural_rank}/"
+                f"{'protected' if state.is_protected_swing else 'ordinary'} "
+                f"vis={state.visibility_strength:.2f} "
+                f"react={state.reaction_quality:.2f} "
+                f"fresh={state.freshness:.2f} "
+                f"dep={state.depletion_risk:.2f} "
+                f"[{_short_identity(state.zone_id)}]"
+            ),
+            min(end_index + 0.35, len(candles) - 1),
+            upper,
+            color=color,
+            fontsize=4.9,
+            preferred_side="left",
+            priority=offset == len(zones) - 1,
+        )
 
-    pools = tuple(frame.liquidity_pools)[-3:]
+    authoritative_pools = tuple(
+        state
+        for state in snapshot.observation.liquidity_pool_states
+        if state.timeframe is timeframe
+    )
+    pools = (
+        authoritative_pools
+        if authoritative_pools
+        else tuple(frame.liquidity_pools)
+    )[-3:]
     for offset, state in enumerate(pools):
         if not visible_low <= state.midpoint <= visible_high:
             continue
@@ -1010,6 +1054,18 @@ def _typed_structure_overlay(
     axis.set_ylim(visible_low, visible_high)
 
 
+def _support_resistance_style(source_kind: str) -> tuple[str, Any]:
+    """Return a stable visual vocabulary for independent S/R sources."""
+
+    return {
+        "structural_swing": ("#0f766e", "-"),
+        "previous_session": ("#2563eb", "--"),
+        "previous_day": ("#d97706", "-."),
+        "previous_week": ("#7c3aed", ":"),
+        "range_boundary": ("#be123c", (0, (3, 1, 1, 1))),
+    }.get(str(source_kind), ("#64748b", "-"))
+
+
 def _displacement_overlay(
     axis: Any,
     snapshot: EngineSnapshot,
@@ -1041,6 +1097,9 @@ def _displacement_overlay(
             (
                 f"DISP {item.direction.value[0].upper()} "
                 f"{item.lifecycle} "
+                f"ov={dict(item.state_metrics).get('mean_overlap_ratio', 0.0):.2f}/"
+                f"{dict(item.state_metrics).get('max_overlap_ratio', 0.0):.2f} "
+                f"clv={dict(item.state_metrics).get('mean_directional_clv', 0.0):.2f} "
                 f"[{_short_identity(item.entity_id)}]"
             ),
             index,
@@ -1051,6 +1110,66 @@ def _displacement_overlay(
         )
 
 
+def _liquidity_inventory_overlay(
+    axis: Any,
+    snapshot: EngineSnapshot,
+    timeframe: Timeframe,
+    candles: Sequence[Candle],
+) -> None:
+    """Show Eye inventory independently from Brain TARGETED overlays."""
+
+    if not candles:
+        return
+    visible_low, visible_high = axis.get_ylim()
+    states = sorted(
+        (
+            item
+            for item in snapshot.observation.liquidity_inventory
+            if item.timeframe is timeframe
+            and visible_low <= item.price <= visible_high
+            and item.confirmed_at <= candles[-1].end
+            and (
+                item.consumed_at is None
+                or item.consumed_at > candles[0].start
+            )
+        ),
+        key=lambda item: (item.confirmed_at, item.item_id),
+    )[-4:]
+    for offset, item in enumerate(states):
+        start = _candle_index(candles, item.confirmed_at)
+        start = 0 if start is None else start
+        end = _candle_index(candles, item.consumed_at)
+        end = len(candles) - 1 if end is None else end
+        visible = item.lifecycle is LiquidityInventoryLifecycle.VISIBLE
+        color = "#7c3aed" if visible else "#94a3b8"
+        axis.hlines(
+            item.price,
+            start - 0.4,
+            end + 0.4,
+            color=color,
+            linewidth=0.55,
+            linestyle="--" if visible else ":",
+            alpha=0.75,
+            zorder=2,
+        )
+        if offset == len(states) - 1:
+            _collision_safe_annotate(
+                axis,
+                (
+                    f"LIQ {item.kind} {item.lifecycle.value} "
+                    f"{item.structural_rank} "
+                    f"vis={item.visibility_strength:.2f} "
+                    f"[{_short_identity(item.item_id)}]"
+                ),
+                min(end + 0.35, len(candles) - 1),
+                item.price,
+                color=color,
+                fontsize=4.8,
+                preferred_side="left",
+            )
+    axis.set_ylim(visible_low, visible_high)
+
+
 def _group5_overlay(
     axis: Any,
     snapshot: EngineSnapshot,
@@ -1059,7 +1178,7 @@ def _group5_overlay(
 ) -> None:
     """Mark exact first-pullback, reacceptance, micro-BOS and path order."""
 
-    if not candles or not snapshot.observation.group5_authoritative:
+    if not candles or not snapshot.observation.group5_typed_available:
         return
     locations, paths, reacceptances, references = (
         _selected_group5_entities(snapshot, belief)
@@ -1214,7 +1333,21 @@ def _group3_zone_overlay(
     frame = snapshot.observation.frame(Timeframe.M5)
     candidates: list[tuple[str, Any, str]] = []
     candidates.extend(
-        ("FVG", state, "#0284c7")
+        (
+            (
+                "FVG raw"
+                if state.qualification is FVGQualification.RAW
+                else "FVG linked"
+            ),
+            state,
+            (
+                "#94a3b8"
+                if state.qualification is FVGQualification.RAW
+                else "#0284c7"
+                if state.direction.value == "long"
+                else "#ea580c"
+            ),
+        )
         for state in frame.fair_value_gaps
     )
     candidates.extend(
@@ -1299,6 +1432,22 @@ def _group3_zone_overlay(
                 zorder=1,
             )
         )
+        if label == "OB":
+            body_lower = max(float(state.body_lower_bound), visible_low)
+            body_upper = min(float(state.body_upper_bound), visible_high)
+            if body_lower < body_upper:
+                axis.add_patch(
+                    Rectangle(
+                        (start_index - 0.45, body_lower),
+                        max(0.9, end_index - start_index + 0.9),
+                        body_upper - body_lower,
+                        facecolor="none",
+                        edgecolor=color,
+                        linewidth=1.0,
+                        linestyle="--",
+                        zorder=2,
+                    )
+                )
         midpoint = float(state.midpoint)
         if visible_low <= midpoint <= visible_high:
             axis.hlines(
@@ -1321,7 +1470,12 @@ def _group3_zone_overlay(
             (
                 f"{label} {state.direction.value[0].upper()} "
                 f"{state.lifecycle.value} · {state.age_bars}b "
-                f"[{_short_identity(entity_id)}]"
+                + (
+                    f"q={state.qualification.value} "
+                    if hasattr(state, "qualification")
+                    else f"anchors={len(state.anchor_candle_ids)} "
+                )
+                + f"[{_short_identity(entity_id)}]"
             ),
             min(end_index + 0.42, len(candles) - 1),
             upper,
@@ -1352,7 +1506,20 @@ def _group3_text(snapshot: EngineSnapshot) -> str:
                 f"[{state.lower_bound:.2f},{state.upper_bound:.2f}] "
                 f"age={state.age_bars}b "
                 f"id={_short_identity(entity_id)} "
-                f"src={_short_identity(state.source_displacement_id)}"
+                f"src={_short_identity(state.source_displacement_id)} "
+                + (
+                    f"q={state.qualification.value} "
+                    f"widthATR={state.width_atr:.2f} "
+                    f"fill={state.max_fill_fraction:.2f}"
+                    if hasattr(state, "qualification")
+                    else (
+                        f"scope={state.source_bos_scope.value} "
+                        f"mss={state.source_bos_mss_qualified} "
+                        f"anchors={len(state.anchor_candle_ids)} "
+                        f"body=[{state.body_lower_bound:.2f},"
+                        f"{state.body_upper_bound:.2f}]"
+                    )
+                )
             )
     for label, states in (
         (
@@ -1531,6 +1698,73 @@ def _group4_manipulation_overlay(
                 fontsize=5.2,
                 priority=offset == len(states) - 1,
             )
+        if (
+            state.reentry_candidate_at is not None
+            and state.reentry_candidate_price is not None
+        ):
+            candidate_index = _candle_index(
+                candles, state.reentry_candidate_at
+            )
+            if (
+                candidate_index is not None
+                and visible_low
+                <= state.reentry_candidate_price
+                <= visible_high
+            ):
+                axis.scatter(
+                    [candidate_index],
+                    [state.reentry_candidate_price],
+                    marker="s",
+                    s=18,
+                    facecolors="none",
+                    edgecolors="#0284c7",
+                    linewidths=0.8,
+                    zorder=6,
+                )
+        if state.reentry_failed_at is not None:
+            failed_index = _candle_index(
+                candles,
+                state.reentry_failed_at,
+            )
+            if failed_index is not None:
+                failed_price = candles[failed_index].close
+                if visible_low <= failed_price <= visible_high:
+                    axis.scatter(
+                        [failed_index],
+                        [failed_price],
+                        marker="x",
+                        s=22,
+                        color="#dc2626",
+                        linewidths=0.8,
+                        zorder=6,
+                    )
+                    _collision_safe_annotate(
+                        axis,
+                        (
+                            "reentry failed "
+                            f"[{_short_identity(state.manipulation_id)}]"
+                        ),
+                        failed_index,
+                        failed_price,
+                        color="#dc2626",
+                        fontsize=4.8,
+                    )
+        if state.deadline_elapsed and state.censored_at is not None:
+            deadline_index = _candle_index(candles, state.censored_at)
+            if deadline_index is not None:
+                deadline_price = candles[deadline_index].close
+                _collision_safe_annotate(
+                    axis,
+                    (
+                        f"manip deadline run={state.outside_run} "
+                        f"hold={state.inside_hold_bars} "
+                        f"[{_short_identity(state.manipulation_id)}]"
+                    ),
+                    deadline_index,
+                    deadline_price,
+                    color="#64748b",
+                    fontsize=4.8,
+                )
         if state.resolved_at is None:
             continue
         resolution_index = next(
@@ -1614,8 +1848,12 @@ def _group4_text(snapshot: EngineSnapshot) -> str:
             f"at={state.swept_at:%m-%d %H:%M} "
             f"dur={state.age_1m_bars}b "
             f"outside={state.outside_completed_bars}b "
+            f"run={state.outside_run}/{state.outside_run_side} "
+            f"hold={state.inside_hold_bars} "
+            f"deadline={state.deadline_elapsed} "
             f"{resolution} {outcome} "
-            f"src={_short_identity(state.source_id)}"
+            f"src={_short_identity(state.source_id)} "
+            f"crossed={len(state.crossed_source_ids)}"
         )
     for state in snapshot.observation.group4_boundary_range_transitions[-1:]:
         rows.append(
@@ -2399,6 +2637,12 @@ class DecisionVisualizer:
                 timeframe,
                 values,
             )
+            _liquidity_inventory_overlay(
+                axis,
+                snapshot,
+                timeframe,
+                values,
+            )
             if timeframe is Timeframe.M5:
                 _group3_zone_overlay(
                     axis,
@@ -2454,8 +2698,14 @@ class DecisionVisualizer:
                 frame = snapshot.observation.frame(Timeframe.H1)
                 candle_low = min(candle.low for candle in values)
                 candle_high = max(candle.high for candle in values)
-                range_low = max(frame.metrics["dealing_range_low"], candle_low)
-                range_high = min(frame.metrics["dealing_range_high"], candle_high)
+                range_low = max(
+                    frame.metrics["rolling_range_low"],
+                    candle_low,
+                )
+                range_high = min(
+                    frame.metrics["rolling_range_high"],
+                    candle_high,
+                )
                 if range_low < range_high:
                     axis.axhspan(
                         range_low,
@@ -2466,7 +2716,7 @@ class DecisionVisualizer:
                     axis.text(
                         0.995,
                         0.02,
-                        "legacy rolling range proxy",
+                        "rolling envelope (descriptive)",
                         ha="right",
                         va="bottom",
                         fontsize=5.2,
@@ -2594,8 +2844,9 @@ class DecisionVisualizer:
                     f"extreme={context.manipulation_extreme:.2f}"
                     f" swept={context.swept_at:%m-%d %H:%M}"
                     "\n  reentry "
-                    f"{context.reentry_price:.2f} at "
-                    f"{context.reentered_at:%m-%d %H:%M}"
+                    f"{context.reentry_price:.2f} candidate "
+                    f"{context.reentry_candidate_at:%m-%d %H:%M}; "
+                    f"held {context.reentered_at:%m-%d %H:%M}"
                     "\n  opposite liquidity "
                     f"{context.opposite_liquidity_id}"
                 )

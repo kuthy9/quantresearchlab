@@ -36,6 +36,7 @@ from smc_trader.model import (  # noqa: E402
     Timeframe,
     to_primitive,
 )
+from smc_trader.scene_graph import parse_scale_specs  # noqa: E402
 from smc_trader.structure import StructureConfig, StructureTracker  # noqa: E402
 from smc_trader.validation import load_validation_protocol  # noqa: E402
 
@@ -85,6 +86,7 @@ def _coverage_payload(payload: Mapping[str, Any], config: Path) -> dict[str, Any
         "schema_version": payload.get("schema_version"),
         "source": ohlcv.get("path"),
         "validation_protocol": str(config.relative_to(ROOT)),
+        "model_config": "configs/model.json",
         "group12_protocol": "configs/primitives_structure_liquidity.json",
         "group4_protocol": "configs/primitives_range.json",
         "warmup_calendar_days": coverage.get("warmup_calendar_days"),
@@ -635,7 +637,10 @@ def _scan_window(
         tick_size=protocol.tick_size,
         atr_period=protocol.h1_atr_period,
     )
-    reader = CausalMarketReader()
+    model = _json(ROOT / str(payload["model_config"]))
+    reader = CausalMarketReader(
+        scale_specs=parse_scale_specs(model.get("scales"))
+    )
     structure = StructureTracker(Timeframe.H1, structure_config)
     liquidity = CausalLiquidityTracker(Timeframe.H1, liquidity_config)
     group4 = CausalGroup4Tracker(protocol)

@@ -1,5 +1,6 @@
 {
-  "protocol_version": "3.1.0-group12.4",
+  "protocol_version": "3.2.0-group12.7",
+  "status": "implementation_complete_current_version_real_replay_review_pending",
   "role": "causal_descriptive_development_contract",
   "prohibited_inputs": [
     "future bars",
@@ -28,9 +29,14 @@
     "zone_visibility": "admit_a_matching_newly_confirmed_swing_then_retire_after_all_member_swings_leave_the_current_authoritative_structure_snapshot_unless_an_unresolved_pool_pins_the_zone",
     "retirement_reason": "source_evidence_retired"
   },
+  "swing_span_by_timeframe": {
+    "4H": 2,
+    "1H": 2,
+    "15m": 2,
+    "5m": 2,
+    "1m": 1
+  },
   "swing": {
-    "left_completed_bars": 2,
-    "right_completed_bars": 2,
     "lifecycle": [
       "forming",
       "confirmed",
@@ -53,7 +59,11 @@
   },
   "bos": {
     "confirmation": "a later same-timeframe completed close strictly beyond an already-confirmed target swing",
+    "scope": "opposed only when target_swing_id equals the opposite confirmed structure protected_swing_id; continuation only when target_swing_id equals the same confirmed structure latest high for long or latest low for short; otherwise local",
     "confirmation_reason": "close_beyond_confirmed_swing",
+    "break_evidence": "freeze break_bar_id and unclipped close distance beyond target divided by causal ATR",
+    "post_break_acceptance": "the first later real completed same-timeframe close strictly remaining beyond the target is accepted; equality or a close back inside is rejected",
+    "mss": "the structure reducer leaves MSS false and displacement identity null; the integrated observer may qualify an opposed BOS only when a same-direction active displacement admits the same completed break bar",
     "identity": "one BOS identity represents one pending attempt and is terminal after confirmed or failed",
     "lifecycle": [
       "pending",
@@ -64,8 +74,15 @@
     "wick_only": "records an attempt and never confirms BOS"
   },
   "support_resistance": {
-    "frozen_tolerance": "max(1 tick, 0.10 causal ATR at first confirmed swing)",
-    "touch_history": "formation touches plus newest bounded history are retained while total_touch_count remains exact",
+    "frozen_tolerance": "max(1 tick, 0.10 strictly-prior causal ATR at source confirmation); the confirming bar never widens its own zone",
+    "source_identity": "structural swing zones retain real member_swing_ids; previous session/day/week zones retain one real source_id; mature range-boundary liquidity reuses its frozen source S/R through range_id plus source_zone_id and never manufactures a swing identity",
+    "reference_projection": "each previous completed session/day/week exact high or low remains a point liquidity item and also owns a distinct 1m reaction band with shared source identity",
+    "independent_lifecycle": "wick crossing may consume exact liquidity while S/R remains active/tested; only a completed close beyond the frozen S/R outer edge breaks the zone",
+    "reference_contacts": "a later completed 1m bar entering the frozen band starts one contact episode; consecutive bars remaining inside do not inflate touch count",
+    "reference_admission": "a completed-period source is admitted only on the first real 1m candle after its source confirmation; its strictly-prior ATR must already be frozen and a repeated source identity cannot rewrite price, side or clocks",
+    "reference_replacement": "a source absent from the current completed-period inventory is retired before the replacement bar price is applied, so replacement cannot fabricate a test, break or reacceptance of the old zone",
+    "range_boundary_reuse": "valid mature range geometry equals its two frozen source S/R distal edges, so range-boundary liquidity is LOCATED_AT the source S/R without duplicating a zone",
+    "touch_history": "the first two formation/test touches plus newest bounded history are retained while tested_at and total_touch_count remain exact",
     "lifecycle": [
       "active",
       "tested",
@@ -74,10 +91,13 @@
       "retired"
     ],
     "reaccepted_semantics": "descriptive_zone_recapture_only_not_a_qualified_entry_trigger",
-    "retired_semantics": "terminal_realtime_visibility_state_with_final_clock_and_reason_preserved_in_event_memory"
+    "retired_semantics": "terminal_realtime_visibility_state_with_final_clock_and_reason_preserved_in_event_memory",
+    "source_metadata": "source_kind, timeframe, internal/external structural_rank, protected-swing flag and reaction/liquidity/both zone role remain separate from lifecycle",
+    "quality_decomposition": "visibility_strength describes structural visibility; reaction_quality describes causal observed reactions; freshness and depletion_risk describe age and repeated use; legacy strength remains compatibility-only"
   },
   "equal_liquidity": {
     "formation": "two confirmed same-side swings inside one frozen active/tested zone",
+    "geometry": "matching uses the frozen S/R tolerance, while pool lower/upper and sweep boundary freeze the first two actual member prices; later members never expand the pool",
     "touch_history": "formation touches plus newest bounded history are retained while total_touch_count remains exact",
     "lifecycle": [
       "formed",
@@ -93,8 +113,17 @@
       "consumed"
     ],
     "targeted_owner": "belief and plan only",
-    "projection": "each real completed 1m bar may advance an already-visible higher-timeframe pool without rewriting the higher-timeframe frame cutoff",
+    "sources": [
+      "confirmed structural swing",
+      "equal highs/lows",
+      "previous completed session high/low",
+      "previous completed day high/low",
+      "previous completed week high/low",
+      "mature range boundary"
+    ],
+    "projection": "each real completed 1m bar independently consumes a visible swing, reference level or pool on strict wick crossing without rewriting structure close-break state or the source timeframe cutoff",
     "authority": "explicit top-level inventory remains authoritative when empty; top-level pool states hold current lifecycle and event memory holds ordered transitions",
-    "late_attach": "reconstruct every swing or pool first crossing and each pool next-real-1m resolution from a prefix covering draw confirmation plus one predecessor and the ATR window; fail closed on missing history, uncovered event-clock history, a swallowed post-resolution generation touch, or any partially applied multi-draw projection"
+    "reference_periods": "session is the 18:00 ET Globex trade date, day is ET civil date, and week is the ISO week of the session label; only the immediately previous completed period is materialized and it never repaints",
+    "late_attach": "reconstruct every swing, reference level or pool first crossing and each pool resolution from the retained completed-1m prefix; fail closed on missing history or any partially applied multi-draw projection"
   }
 }

@@ -20,15 +20,18 @@ from .displacement import (
 )
 from .model import (
     BOSLifecycle,
+    BOSScope,
     BreakOfStructureState,
     Candle,
     Direction,
+    FVGQualification,
     FairValueGapLifecycle,
     FairValueGapState,
     OrderBlockLifecycle,
     OrderBlockState,
     Timeframe,
     aware_timestamp,
+    candle_identity,
 )
 
 
@@ -55,9 +58,10 @@ class Group3Protocol:
 
     protocol_hash: str
     tick_size: float
-    protocol_version: str = "3.1.0-group3.3"
+    protocol_version: str = "3.2.0-group3.4"
     timeframe: str = "5m"
     fvg_source_bars: int = 3
+    fvg_formation_atr_period: int = 14
     ob_anchor_history_bars: int = 64
     maximum_fvg_states: int = 256
     maximum_order_block_states: int = 128
@@ -70,7 +74,7 @@ class Group3Protocol:
                 character not in "0123456789abcdef"
                 for character in self.protocol_hash
             )
-            or self.protocol_version != "3.1.0-group3.3"
+            or self.protocol_version != "3.2.0-group3.4"
             or self.timeframe != "5m"
             or not math.isclose(
                 float(self.tick_size),
@@ -79,6 +83,7 @@ class Group3Protocol:
                 abs_tol=0.0,
             )
             or self.fvg_source_bars != 3
+            or self.fvg_formation_atr_period != 14
             or self.ob_anchor_history_bars != 64
             or self.maximum_fvg_states != 256
             or self.maximum_order_block_states != 128
@@ -98,6 +103,9 @@ class Group3Protocol:
             tick_size=payload["tick_size"],
             timeframe=payload["timeframe"],
             fvg_source_bars=payload["fvg_source_bars"],
+            fvg_formation_atr_period=payload[
+                "fvg_formation_atr_period"
+            ],
             ob_anchor_history_bars=payload[
                 "ob_anchor_history_bars"
             ],
@@ -158,6 +166,8 @@ class Group3Update:
 class _FrozenOrderBlockCandidate:
     candle: Candle
     candle_id: str
+    cluster: tuple[Candle, ...]
+    cluster_ids: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -377,24 +387,37 @@ class CausalGroup3Tracker:
         return int(rounded)
 
     def _candle_id(self, candle: Candle) -> str:
-        # This deliberately mirrors the upstream displacement candle identity.
-        return _identity(
-            "candle-v1",
-            candle.timeframe,
-            candle.start,
-            candle.end,
-            self._ticks(candle.open),
-            self._ticks(candle.high),
-            self._ticks(candle.low),
-            self._ticks(candle.close),
-            float(candle.volume),
-            candle.symbol,
-            candle.instrument_id,
-            candle.observed_minutes,
-            candle.expected_minutes,
-            candle.real_minutes,
-            candle.synthetic_minutes,
-            candle.complete,
+        return candle_identity(
+            candle,
+            tick_size=self.protocol.tick_size,
+        )
+
+    def _strict_prior_atr(self, current: Candle) -> float:
+        """Formation ATR from completed bars strictly preceding current."""
+
+        prior = tuple(
+            candle
+            for candle in self._history
+            if candle.real_completed and candle.end <= current.start
+        )
+        true_ranges: list[float] = []
+        for index, candle in enumerate(prior):
+            if index == 0:
+                value = float(candle.high - candle.low)
+            else:
+                prior_close = float(prior[index - 1].close)
+                value = max(
+                    float(candle.high - candle.low),
+                    abs(float(candle.high) - prior_close),
+                    abs(float(candle.low) - prior_close),
+                )
+            if math.isfinite(value) and value > 0.0:
+                true_ranges.append(value)
+        window = true_ranges[-self.protocol.fvg_formation_atr_period :]
+        return (
+            sum(window) / len(window)
+            if window
+            else self.protocol.tick_size
         )
 
     @staticmethod
@@ -981,56 +1004,57 @@ class CausalGroup3Tracker:
             self._episode_membership[admitted_id] = state.entity_id
         seed_index = candle_ids.index(state.seed_candle_id)
         prior_history = history[:seed_index]
-        complete_window = bool(
-            (
-                len(prior_history) >= self.protocol.ob_anchor_history_bars
-                or self._window_epoch_known
-            )
+        if not prior_history:
+            self._ob_candidates[state.entity_id] = None
+            return
+        anchor = prior_history[-1]
+        seed = history[seed_index]
+        valid_anchor = (
+            anchor.end == seed.start
+            and anchor.real_completed
+            and anchor.symbol == seed.symbol
+            and anchor.instrument_id == seed.instrument_id
             and (
-                not prior_history
-                or prior_history[-1].end == history[seed_index].start
-            )
-            and all(
-                left.end == right.start
-                for left, right in zip(
-                    prior_history[:-1],
-                    prior_history[1:],
-                )
-            )
-            and all(
-                item.real_completed
-                and item.symbol == candle.symbol
-                and item.instrument_id == candle.instrument_id
-                for item in prior_history
-            )
-        )
-        if not complete_window:
-            self._ob_candidates[state.entity_id] = None
-            return
-        candidates = tuple(
-            item
-            for item in prior_history
-            if (
-                self._ticks(item.close) < self._ticks(item.open)
+                self._ticks(anchor.close) < self._ticks(anchor.open)
                 if state.direction is Direction.LONG
-                else self._ticks(item.close) > self._ticks(item.open)
+                else self._ticks(anchor.close) > self._ticks(anchor.open)
             )
         )
-        if not candidates:
+        if not valid_anchor:
             self._ob_candidates[state.entity_id] = None
             return
-        latest_end = max(item.end for item in candidates)
-        latest = tuple(
-            item for item in candidates if item.end == latest_end
-        )
-        if len(latest) != 1:
-            self._ob_candidates[state.entity_id] = None
-            return
-        anchor = latest[0]
+
+        # The seed-adjacent bar must strictly oppose the displacement.  Only
+        # its immediately contiguous reverse/doji predecessors may extend the
+        # frozen cluster; an older unrelated reverse candle is never selected.
+        reverse_cluster = [anchor]
+        next_start = anchor.start
+        for item in reversed(prior_history[:-1]):
+            if (
+                item.end != next_start
+                or not item.real_completed
+                or item.symbol != seed.symbol
+                or item.instrument_id != seed.instrument_id
+            ):
+                break
+            body_sign = self._ticks(item.close) - self._ticks(item.open)
+            extends = (
+                body_sign <= 0
+                if state.direction is Direction.LONG
+                else body_sign >= 0
+            )
+            if not extends:
+                break
+            reverse_cluster.append(item)
+            next_start = item.start
+        cluster = tuple(reversed(reverse_cluster))
+        cluster_ids = tuple(self._candle_id(item) for item in cluster)
         self._ob_candidates[state.entity_id] = (
             _FrozenOrderBlockCandidate(
                 candle=anchor,
                 candle_id=self._candle_id(anchor),
+                cluster=cluster,
+                cluster_ids=cluster_ids,
             )
         )
 
@@ -1086,33 +1110,27 @@ class CausalGroup3Tracker:
         else:
             return None
         source = displacement.state
-        if (
-            source is None
-            or source.lifecycle is not DisplacementLifecycle.ACTIVE
-            or source.direction is not direction
-            or source.active_at is None
-            or source.active_at > c3.end
-            or not (
-                source.started_at
-                <= c2.end
-                <= c3.end
-                <= source.prefix_last_admitted_at
-            )
-            or self._episode_membership.get(c2_id)
-            != source.entity_id
-        ):
-            return None
-        active_transition_id = self._active_transition_ids.get(
-            source.entity_id
+        linked = bool(
+            source is not None
+            and source.lifecycle is DisplacementLifecycle.ACTIVE
+            and source.direction is direction
+            and source.active_at is not None
+            and source.active_at <= c3.end
+            and c2_id in source.admitted_candle_ids
+            and self._episode_membership.get(c2_id) == source.entity_id
+            and self._active_transition_ids.get(source.entity_id) is not None
         )
-        if active_transition_id is None:
-            return None
+        active_transition_id = (
+            self._active_transition_ids[source.entity_id]
+            if linked and source is not None
+            else None
+        )
         width_points = upper_bound - lower_bound
         width_ticks = self._ticks(upper_bound) - self._ticks(
             lower_bound
         )
         fvg_id = _identity(
-            "group3-fvg-v1",
+            "group3-fvg-v2",
             self.protocol.protocol_hash,
             c3.symbol,
             c3.instrument_id,
@@ -1121,7 +1139,6 @@ class CausalGroup3Tracker:
             c1_id,
             c2_id,
             c3_id,
-            source.entity_id,
         )
         if fvg_id in self._fair_value_gaps:
             return None
@@ -1131,7 +1148,8 @@ class CausalGroup3Tracker:
             maximum=self.protocol.maximum_fvg_states,
             terminal=self._is_fvg_terminal,
         )
-        width_atr = width_points / source.atr0
+        formation_atr = self._strict_prior_atr(c3)
+        width_atr = width_points / formation_atr
         state = FairValueGapState(
             fvg_id=fvg_id,
             protocol_hash=self.protocol.protocol_hash,
@@ -1140,13 +1158,28 @@ class CausalGroup3Tracker:
             timeframe=Timeframe.M5,
             direction=direction,
             lifecycle=FairValueGapLifecycle.OPEN,
-            source_displacement_id=source.entity_id,
+            qualification=(
+                FVGQualification.DISPLACEMENT_LINKED
+                if linked
+                else FVGQualification.RAW
+            ),
+            source_displacement_id=(
+                source.entity_id if linked and source is not None else None
+            ),
             source_active_transition_id=active_transition_id,
-            source_displacement_protocol_hash=source.protocol_hash,
-            source_displacement_started_at=source.started_at,
-            source_displacement_active_at=source.active_at,
+            source_displacement_protocol_hash=(
+                source.protocol_hash if linked and source is not None else None
+            ),
+            source_displacement_started_at=(
+                source.started_at if linked and source is not None else None
+            ),
+            source_displacement_active_at=(
+                source.active_at if linked and source is not None else None
+            ),
             source_displacement_prefix_commitment=(
                 source.prefix_commitment
+                if linked and source is not None
+                else None
             ),
             source_candle_ids=(c1_id, c2_id, c3_id),
             source_candle_starts=(c1.start, c2.start, c3.start),
@@ -1160,8 +1193,10 @@ class CausalGroup3Tracker:
             ),
             width_points=width_points,
             width_ticks=width_ticks,
+            formation_atr=formation_atr,
             width_atr=width_atr,
-            strength=min(1.0, width_atr),
+            # Width is descriptive geometry, not a trade-quality score.
+            strength=0.0,
             formed_at=c3.end,
             confirmed_at=c3.end,
             state_started_at=c3.end,
@@ -1195,6 +1230,19 @@ class CausalGroup3Tracker:
                 and bos_source.state.lifecycle is BOSLifecycle.CONFIRMED
                 and bos_source.state.direction is source.direction
                 and bos_source.state.resolved_at == candle.end
+                and bos_source.state.scope
+                in {BOSScope.CONTINUATION, BOSScope.OPPOSED}
+                and (
+                    bos_source.state.scope is BOSScope.CONTINUATION
+                    or (
+                        bos_source.state.mss_qualified
+                        and bos_source.state.source_displacement_id
+                        == source.entity_id
+                    )
+                )
+                and bos_source.state.pending_at <= source.started_at
+                and bos_source.state.break_bar_id
+                in source.admitted_candle_ids
                 and source.started_at
                 <= bos_source.state.resolved_at
                 <= source.prefix_last_admitted_at
@@ -1213,8 +1261,16 @@ class CausalGroup3Tracker:
         if candidate is None or active_transition_id is None:
             return None
         anchor = candidate.candle
-        lower_bound = float(anchor.low)
-        upper_bound = float(anchor.high)
+        lower_bound = min(float(item.low) for item in candidate.cluster)
+        upper_bound = max(float(item.high) for item in candidate.cluster)
+        body_lower_bound = min(
+            min(float(item.open), float(item.close))
+            for item in candidate.cluster
+        )
+        body_upper_bound = max(
+            max(float(item.open), float(item.close))
+            for item in candidate.cluster
+        )
         width_points = upper_bound - lower_bound
         width_ticks = self._ticks(upper_bound) - self._ticks(
             lower_bound
@@ -1228,7 +1284,7 @@ class CausalGroup3Tracker:
             candle.instrument_id,
             Timeframe.M5,
             source.direction,
-            candidate.candle_id,
+            *candidate.cluster_ids,
             source.entity_id,
             bos.bos_id,
         )
@@ -1262,14 +1318,20 @@ class CausalGroup3Tracker:
             source_bos_target_swing_id=bos.target_swing_id,
             source_bos_structure_id=bos.source_structure_id,
             source_bos_scope=bos.scope,
+            source_bos_pending_at=bos.pending_at,
             source_bos_resolved_at=bos.resolved_at,
+            source_bos_break_bar_id=bos.break_bar_id,
+            source_bos_mss_qualified=bos.mss_qualified,
             anchor_candle_id=candidate.candle_id,
+            anchor_candle_ids=candidate.cluster_ids,
             anchor_start=anchor.start,
             anchor_end=anchor.end,
             anchor_open=float(anchor.open),
             anchor_close=float(anchor.close),
             lower_bound=lower_bound,
             upper_bound=upper_bound,
+            body_lower_bound=body_lower_bound,
+            body_upper_bound=body_upper_bound,
             midpoint=(lower_bound + upper_bound) / 2.0,
             invalidation_price=(
                 lower_bound

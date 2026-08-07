@@ -6,11 +6,11 @@ import pytest
 from smc_trader.causal import CausalClockError, CausalMarketReader
 from smc_trader.model import Bar, Candle, Timeframe
 
-from .helpers import session_bars
+from .helpers import MODEL_SCALE_SPECS, session_bars
 
 
 def test_reader_emits_only_completed_higher_timeframe_bars() -> None:
-    reader = CausalMarketReader()
+    reader = CausalMarketReader(scale_specs=MODEL_SCALE_SPECS)
     update = None
     for bar in session_bars(1)[:300]:
         update = reader.on_bar(bar)
@@ -24,18 +24,18 @@ def test_reader_emits_only_completed_higher_timeframe_bars() -> None:
 
 def test_duplicate_and_unregistered_gap_fail_closed() -> None:
     first, second, third = session_bars(1)[:3]
-    reader = CausalMarketReader()
+    reader = CausalMarketReader(scale_specs=MODEL_SCALE_SPECS)
     reader.on_bar(first)
     with pytest.raises(CausalClockError):
         reader.on_bar(first)
-    reader = CausalMarketReader()
+    reader = CausalMarketReader(scale_specs=MODEL_SCALE_SPECS)
     reader.on_bar(first)
     with pytest.raises(CausalClockError):
         reader.on_bar(third)
 
 
 def test_explicit_data_gap_resets_histories_and_emits_hard_anomaly() -> None:
-    reader = CausalMarketReader()
+    reader = CausalMarketReader(scale_specs=MODEL_SCALE_SPECS)
     first = Bar(
         pd.Timestamp("2025-01-06 10:00", tz="America/New_York"),
         100.0,
@@ -70,14 +70,14 @@ def test_scheduled_maintenance_gap_is_explicitly_allowed() -> None:
     bars = session_bars(2)
     close_bar = next(bar for bar in bars if bar.start.strftime("%Y-%m-%d %H:%M") == "2025-01-06 16:59")
     next_open = next(bar for bar in bars if bar.start.strftime("%Y-%m-%d %H:%M") == "2025-01-06 18:00")
-    reader = CausalMarketReader()
+    reader = CausalMarketReader(scale_specs=MODEL_SCALE_SPECS)
     reader.on_bar(close_bar)
     update = reader.on_bar(next_open)
     assert "scheduled_market_closure" in update.anomalies
 
 
 def test_scheduled_weekend_and_registered_full_session_closures_are_exact() -> None:
-    reader = CausalMarketReader()
+    reader = CausalMarketReader(scale_specs=MODEL_SCALE_SPECS)
     friday_close = Bar(
         pd.Timestamp("2021-01-08 16:59", tz="America/New_York"),
         100.0,
@@ -102,7 +102,7 @@ def test_scheduled_weekend_and_registered_full_session_closures_are_exact() -> N
     update = reader.on_bar(sunday_open)
     assert "scheduled_weekend_closure" in update.anomalies
 
-    reader = CausalMarketReader()
+    reader = CausalMarketReader(scale_specs=MODEL_SCALE_SPECS)
     new_year_close = Bar(
         pd.Timestamp("2020-12-31 16:59", tz="America/New_York"),
         100.0,
@@ -129,7 +129,7 @@ def test_scheduled_weekend_and_registered_full_session_closures_are_exact() -> N
 
 
 def test_arbitrary_multi_day_maintenance_shaped_gap_fails_closed() -> None:
-    reader = CausalMarketReader()
+    reader = CausalMarketReader(scale_specs=MODEL_SCALE_SPECS)
     reader.on_bar(
         Bar(
             pd.Timestamp("2021-01-04 16:59", tz="America/New_York"),
@@ -158,7 +158,7 @@ def test_arbitrary_multi_day_maintenance_shaped_gap_fails_closed() -> None:
 
 
 def test_historical_settlement_pause_keeps_h1_bucket_complete() -> None:
-    reader = CausalMarketReader()
+    reader = CausalMarketReader(scale_specs=MODEL_SCALE_SPECS)
     timestamps = list(
         pd.date_range(
             "2021-01-05 16:00",
@@ -189,7 +189,7 @@ def test_historical_settlement_pause_keeps_h1_bucket_complete() -> None:
 
 
 def test_unregistered_post_cutoff_settlement_gap_fails_closed() -> None:
-    reader = CausalMarketReader()
+    reader = CausalMarketReader(scale_specs=MODEL_SCALE_SPECS)
     first = Bar(
         pd.Timestamp("2021-06-28 16:14", tz="America/New_York"),
         100.0,
@@ -216,7 +216,7 @@ def test_unregistered_post_cutoff_settlement_gap_fails_closed() -> None:
 
 
 def test_registered_special_close_emits_complete_shortened_h4() -> None:
-    reader = CausalMarketReader()
+    reader = CausalMarketReader(scale_specs=MODEL_SCALE_SPECS)
     update = None
     for timestamp in pd.date_range(
         "2021-01-18 10:00",
@@ -248,7 +248,7 @@ def test_registered_special_close_emits_complete_shortened_h4() -> None:
 
 
 def test_post_thanksgiving_close_emits_complete_final_partial_hour() -> None:
-    reader = CausalMarketReader()
+    reader = CausalMarketReader(scale_specs=MODEL_SCALE_SPECS)
     update = None
     for timestamp in pd.date_range(
         "2021-11-26 12:00",
@@ -287,7 +287,7 @@ def test_post_thanksgiving_close_emits_complete_final_partial_hour() -> None:
 def test_christmas_eve_nq_session_runs_through_1315(
     session_date: str,
 ) -> None:
-    reader = CausalMarketReader()
+    reader = CausalMarketReader(scale_specs=MODEL_SCALE_SPECS)
     update = None
     for timestamp in pd.date_range(
         f"{session_date} 13:00",
@@ -312,7 +312,7 @@ def test_christmas_eve_nq_session_runs_through_1315(
 def test_national_day_of_mourning_nq_session_runs_through_0930(
     session_date: str,
 ) -> None:
-    reader = CausalMarketReader()
+    reader = CausalMarketReader(scale_specs=MODEL_SCALE_SPECS)
     update = None
     for timestamp in pd.date_range(
         f"{session_date} 09:00",
@@ -332,7 +332,7 @@ def test_national_day_of_mourning_nq_session_runs_through_0930(
 
 
 def test_contract_change_resets_multitimeframe_history() -> None:
-    reader = CausalMarketReader()
+    reader = CausalMarketReader(scale_specs=MODEL_SCALE_SPECS)
     bars = session_bars(1)
     for bar in bars[:60]:
         reader.on_bar(bar)
@@ -353,7 +353,7 @@ def test_contract_change_resets_multitimeframe_history() -> None:
 
 
 def test_real_and_synthetic_minute_provenance_reaches_higher_timeframes() -> None:
-    reader = CausalMarketReader()
+    reader = CausalMarketReader(scale_specs=MODEL_SCALE_SPECS)
     update = None
     for index in range(5):
         update = reader.on_bar(

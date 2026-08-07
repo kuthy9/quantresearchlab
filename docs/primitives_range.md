@@ -2,6 +2,9 @@
 
 The executable definition is `configs/primitives_range.json`.
 
+Current protocol: `3.2.0-group4.1`. Status:
+`implementation_complete_natural_market_authority_pending`.
+
 This contract freezes the causal meaning of:
 
 1. one H1 `DealingRangeState` with lifecycle
@@ -13,17 +16,17 @@ The executable companion is
 `configs/primitives_range.json`. If this document and that file ever
 disagree, development stops until both are versioned together.
 
-Group 4 is descriptive market-eye infrastructure. It does not authorize an
-entry, FAVR, a probability change, a state-machine advance, a stop, a target
-or a profitability claim. In particular, the existing legacy H1 dealing
-range, H1 acceptance/rejection, H4 range position, 5m compression and 1m path
-scores are not Group 4 sources.
+Group 4 is descriptive market-eye infrastructure. It never selects an entry,
+phase, stop, target, risk result, execution result or profitability claim.
+Typed playbooks may consume its exact identities and lifecycles through their
+own causal gates. The legacy H1 dealing range, H1 acceptance/rejection, H4
+range position, 5m compression and 1m path scores are not Group 4 sources.
 
 ## Minimal implementation boundary
 
-The later implementation should add one incremental Group 4 reducer, not
-separate accumulation, range, value, manipulation, custody, controller or
-wrapper layers.
+The implementation uses one incremental Group 4 reducer, not separate
+accumulation, range, value, manipulation, custody, controller or wrapper
+layers.
 
 - Accumulation is the evidence accumulated while one typed range is
   `forming`.
@@ -39,9 +42,8 @@ Group 4 update, and leaves playbooks untouched.
 
 Group 4 binds exactly:
 
-- Group 1–2 version `3.1.0-group12.4`;
-- Group 1–2 SHA-256
-  `189b6af3bff631c3985fa37bcf9f5f82528296800886d9c9bd4cbe123ea4c701`;
+- Group 1–2 version `3.2.0-group12.7` and the exact hash declared by the
+  executable Group 4 config;
 - tick size `0.25`;
 - H1 `SupportResistanceState`;
 - authoritative `LiquidityPoolState`;
@@ -81,7 +83,9 @@ future paths or action labels.
 | Maximum frozen width | 4.0 formation H1 ATR | Excludes very broad directional areas while allowing multi-hour balance. |
 | Compression windows | first 4 / latest 4 real H1 bars | Non-overlapping at the first maturity clock and bounded thereafter. |
 | Maximum compression ratio | 0.80 | Requires at least a 20% median true-range contraction. |
-| Manipulation resolution delay | 1 later real 1m bar | Prevents the sweep bar from resolving itself and matches typed pool timing. |
+| Reacceptance hold | 1 additional inside real 1m bar | The first inside close is only a reentry candidate; the next inside close proves the hold. |
+| Outside acceptance | 2 consecutive outside closes | Distinguishes sustained outside acceptance from a one-close excursion; the sweep close counts when outside. |
+| Resolution deadline | 5 later real 1m bars | Censors unresolved observation without relabelling it accepted or rejected. |
 | Retained ranges | 64 | Memory-safety limit, not a market threshold. |
 | Retained manipulations | 256 | Memory-safety limit, not a market threshold. |
 
@@ -346,42 +350,40 @@ source-use tombstone.
 
 ### Resolution
 
-The sweep bar cannot resolve itself. Resolution occurs on the first later
-real completed 1m bar.
+The sweep bar cannot confirm reacceptance. For an above-side source, a close
+at or below the frozen upper boundary is inside; for a below-side source, a
+close at or above the frozen lower boundary is inside. Equality is inside.
 
-For a mature range source:
+The first later inside close freezes `reentry_candidate_at` and
+`reentry_price`. One additional real completed 1m close must remain inside;
+only then does lifecycle become `reaccepted`. An outside close before that
+hold clears the candidate, records `reentry_failed_at`, and restarts the
+outside run.
 
-- a close within the full frozen range, including equality, is
-  `reaccepted`;
-- a close strictly outside the full range is `accepted_outside`, and
-  `resolved_side` records which side.
+`accepted_outside` requires two consecutive source-specific outside closes.
+The sweep close counts as the first when it closed outside, so acceptance can
+complete on the first later real bar only in that case. Otherwise it completes
+on the second close of a later consecutive outside pair.
 
-For an above pool:
+If neither result resolves within five later real completed 1m bars, lifecycle
+remains `swept` while `deadline_elapsed`, `deadline_at` and `censored_at` record
+the actual fifth real-bar clock. A terminal market result on that fifth bar
+takes priority. Synthetic and scheduled-closure bars do not count.
 
-- close at or below the upper bound is `reaccepted`;
-- close above it is `accepted_outside`.
-
-For a below pool:
-
-- close at or above the lower bound is `reaccepted`;
-- close below it is `accepted_outside`.
-
-`reentry_price` is the terminal close only for `reaccepted`.
-`outside_completed_bars` counts sweep and later real bars whose closes satisfy
-the source-specific outside rule. Duration is reported both in real 1m bars
-and through EventMemory market minutes; synthetic and closure minutes are
-excluded.
-
-`reaccepted` and `accepted_outside` are terminal. Later paths cannot relabel
-the event. Qualified leave/return/hold entry reacceptance remains a Group 5
-concept; this one-bar resolution is only the minimum manipulation description.
+`reaccepted` and `accepted_outside` are terminal. The original source,
+boundary and sweep extreme never change. This multi-bar pool/range
+reacceptance belongs to Group 4. Group 5 does not build a second pool
+leave/reclaim/hold state; it only records the Group4 outcome in the ordered
+pool path and later handles qualified entry-zone reacceptance for a frozen
+FVG/OB.
 
 ### Per-minute processing order
 
 For each completed 1m update:
 
 1. validate contract, clock, tick-size and boundary provenance;
-2. resolve an already-swept manipulation from the current completed close;
+2. advance or resolve an already-swept manipulation from the current
+   completed close;
 3. project every prior-visible inventory crossing;
 4. apply an optional current real completed H1 range transition;
 5. if an older manipulation resolved this minute, do not create another;
@@ -443,7 +445,8 @@ plus the 14-real-1m ATR window. The reducer reconstructs:
 
 1. the first strict crossing;
 2. the exact range-boundary/pool inventory consumption clock; and
-3. the first later real-bar manipulation resolution.
+3. every later real bar needed to reproduce reentry candidate, hold,
+   outside-run, terminal result or five-bar deadline.
 
 A prefix beginning after eligibility cannot prove that an earlier sweep did
 not occur and fails closed. Failure for one retained source rejects the whole
@@ -553,33 +556,30 @@ without expanding the price axis.
 Consumers must read these typed outputs directly. They may not reconstruct
 Group 4 from old rolling ranges, current price, annotations or future extrema.
 
-## FAVR remains shadow
+## FAVR remains runtime parked
 
-This formalization does not modify `configs/playbooks.json`,
-`smc_trader/playbooks.py`, the decision layer or the risk engine.
+The typed FAVR evaluator and vertical data path are implemented, but runtime
+execution remains parked. Group 4 owns the mature range, boundary liquidity,
+sweep and multi-bar failed-outside/reacceptance sequence. After that outcome,
+Group 5 may register only the reverse-displacement FVG/OB entry location and
+its first-pullback/trigger path; it does not duplicate Group4 manipulation
+reacceptance.
 
-Failed-auction value return remains shadow and inactive. It may be reconsidered
-only after:
-
-1. Group 4 implementation passes synthetic, boundary and causal tests;
-2. one finite real OHLCV replay and stratified blind review show no systematic
-   mature-range/manipulation misread; and
-3. Group 5 supplies qualified reacceptance, entry location, micro BOS and true
-   path sequence.
+FAVR may be enabled only after a finite real OHLCV replay and stratified blind
+review show that natural mature ranges and their manipulations are observable
+without a systematic semantic misread. The complete causal sequence must then
+remain connected through range identity, manipulation identity, reverse
+displacement, zone identity, first pullback and trigger.
 
 If mature ranges remain unreliable after the one permitted concept repair,
 FAVR stays disabled and Group 4 is parked rather than threshold-tuned.
 
 ## Formalization gate
 
-This document completes the single formalization step only. Pending work is:
-
-- one implementation;
-- one static trading-logic/code self-review;
-- the unified synthetic/boundary/causal suite;
-- one finite real OHLCV replay;
-- one small stratified blind review; and
-- freeze or park.
+Formal definition, incremental implementation, static review and the unified
+synthetic/boundary/causal suite are complete for `3.2.0-group4.1`. Pending work
+is one finite real OHLCV replay, one small stratified blind review, and then a
+single freeze-or-park decision.
 
 Primitive profitability, MBO stability, rolling OOF and sealed holdout are not
 required at this gate.

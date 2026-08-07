@@ -33,17 +33,160 @@ from smc_trader.visualization import (
     _collision_safe_annotate,
     _event_timeline,
     _liquidity_route_text,
+    _metric_text,
     _partial_geometry_text,
     _plan_display_context,
     _plan_overlay,
     _sequence_text,
     _selected_hypothesis,
     _short_identity,
+    _support_resistance_style,
     _temporal_market_reading_text,
+    _typed_structure_overlay,
     validate_causal_histories,
 )
 
 from .helpers import candle, engine_snapshot
+
+
+def test_h1_metric_text_labels_rolling_envelope_as_descriptive_context() -> None:
+    metrics = {
+        "swing_progression": 0.25,
+        "acceptance_direction": 0.1,
+        "rejection_direction": -0.2,
+        "rolling_range_position": 0.3,
+        "up_path_obstruction_atr": 1.5,
+        "down_path_obstruction_atr": 1.0,
+    }
+    observation = SimpleNamespace(
+        frame=lambda timeframe: SimpleNamespace(metrics=metrics)
+    )
+    snapshot = SimpleNamespace(observation=observation)
+
+    text = _metric_text(snapshot, Timeframe.H1, None)
+
+    assert "rolling envelope position" in text
+    assert "range position" not in text
+    assert "descriptive proxy: acceptance" in text
+    assert "descriptive proxy: rejection" in text
+
+
+def test_h4_and_m5_rolling_metrics_are_labeled_as_descriptive_proxies() -> None:
+    h4_metrics = {
+        "directional_displacement": 0.4,
+        "path_efficiency": 0.6,
+        "structure_direction": 1.0,
+        "structure_age_bars": 3.0,
+        "range_position": 0.7,
+        "external_above_distance_atr": 2.0,
+        "external_below_distance_atr": 1.0,
+    }
+    m5_metrics = {"compression": 0.25}
+    observation = SimpleNamespace(
+        displacement=None,
+        frame=lambda timeframe: SimpleNamespace(
+            metrics=(
+                h4_metrics
+                if timeframe is Timeframe.H4
+                else m5_metrics
+            )
+        ),
+    )
+    snapshot = SimpleNamespace(observation=observation)
+
+    h4_text = _metric_text(snapshot, Timeframe.H4, None)
+    m5_text = _metric_text(snapshot, Timeframe.M5, None)
+
+    assert "descriptive proxy: directional move" in h4_text
+    assert "not typed displacement" in h4_text
+    assert "descriptive proxy: compression" in m5_text
+    assert "not mature range" in m5_text
+
+
+@pytest.mark.parametrize(
+    ("source_kind", "expected_color"),
+    (
+        ("structural_swing", "#0f766e"),
+        ("previous_session", "#2563eb"),
+        ("previous_day", "#d97706"),
+        ("previous_week", "#7c3aed"),
+        ("range_boundary", "#be123c"),
+    ),
+)
+def test_support_resistance_overlay_displays_source_kind_and_style(
+    source_kind: str,
+    expected_color: str,
+) -> None:
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.colors import to_hex
+
+    values = (
+        candle(Timeframe.M1, "2025-01-06 09:58", 100.0),
+        candle(Timeframe.M1, "2025-01-06 09:59", 100.1),
+    )
+    zone = SimpleNamespace(
+        zone_id=f"zone:{source_kind}",
+        side="resistance",
+        lower_bound=99.5,
+        upper_bound=100.5,
+        anchor_price=100.0,
+        confirmed_at=values[0].end,
+        lifecycle=SimpleNamespace(value="active"),
+        retired_at=None,
+        reaccepted_at=None,
+        broken_at=None,
+        source_kind=source_kind,
+        structural_rank="external",
+        is_protected_swing=False,
+        visibility_strength=0.8,
+        reaction_quality=0.5,
+        freshness=0.9,
+        depletion_risk=0.1,
+    )
+    frame = SimpleNamespace(
+        swings=(),
+        structure_breaks=(),
+        support_resistance=(zone,),
+        liquidity_pools=(),
+    )
+    snapshot = SimpleNamespace(
+        observation=SimpleNamespace(
+            frame=lambda _timeframe: frame,
+            liquidity_pool_states=(),
+        )
+    )
+    figure, axis = plt.subplots()
+    axis.set_xlim(-0.5, len(values) - 0.5)
+    axis.set_ylim(98.0, 102.0)
+
+    _typed_structure_overlay(
+        axis,
+        snapshot,
+        Timeframe.M1,
+        values,
+    )
+
+    labels = tuple(text.get_text() for text in axis.texts)
+    rendered_colors = {
+        to_hex(color, keep_alpha=False)
+        for collection in axis.collections
+        for getter_name in (
+            "get_colors",
+            "get_facecolors",
+            "get_edgecolors",
+        )
+        for getter in (getattr(collection, getter_name, None),)
+        if getter is not None
+        for color in getter()
+    }
+    plt.close(figure)
+
+    assert f"S/R src={source_kind}" in "\n".join(labels)
+    assert expected_color in rendered_colors
+    assert _support_resistance_style(source_kind)[0] == expected_color
 
 
 
@@ -54,7 +197,15 @@ def _scene_reading_snapshot():
     m15_frame = replace(
         snapshot.observation.frame(Timeframe.H1),
         timeframe=Timeframe.M15,
-        liquidity=(),
+        swings=(),
+        structures=(),
+        structure_breaks=(),
+        candle_structure=None,
+        support_resistance=(),
+        liquidity_pools=(),
+        fair_value_gaps=(),
+        order_blocks=(),
+        dealing_ranges=(),
     )
     active = (
         Timeframe.H4,
@@ -344,7 +495,7 @@ def _snapshot_with_sequence():
         snapshot,
         observation=replace(
             snapshot.observation,
-            group5_authoritative=True,
+            group5_typed_available=True,
             entry_locations=(location,),
             path_sequences=(path,),
         ),

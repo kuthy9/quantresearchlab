@@ -51,7 +51,8 @@ _STATE_CLOCK_FIELDS = (
 )
 _CURRENT_METRIC_FIELDS = (
     "age_minutes_at_last_admitted", "atr0", "efficiency",
-    "favorable_extreme", "mean_body_fraction", "min_directional_clv",
+    "favorable_extreme", "mean_body_fraction", "mean_overlap_ratio",
+    "max_overlap_ratio", "mean_directional_clv", "min_directional_clv",
     "nested_seed_observed", "net_points", "net_ticks", "origin_price",
     "real_episode_bar_count", "relative_atr", "speed_atr_per_bar",
     "travel_points", "v0", "volume_ratio", "volume_ready",

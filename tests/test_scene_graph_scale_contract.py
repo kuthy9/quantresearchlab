@@ -9,8 +9,11 @@ import pytest
 from smc_trader.causal import CausalMarketReader
 from smc_trader.model import (
     Bar,
+    CandleStructureState,
     Direction,
     EventKind,
+    LiquidityInventoryItem,
+    LiquidityInventoryLifecycle,
     LiquidityPoolLifecycle,
     LiquidityPoolState,
     MarketEvent,
@@ -33,15 +36,17 @@ from smc_trader.scene_graph import (
     StructuralScale,
     TemporalMarketSceneGraph,
     build_hypothesis_states,
-    development_scale_specs,
-    legacy_scale_specs,
     parse_scale_specs,
     scale_registry_id,
     select_focus,
     supplement_focus_once,
 )
 
-from .helpers import market_observation
+from .helpers import (
+    CORE_TEST_SCALE_SPECS,
+    MODEL_SCALE_SPECS,
+    market_observation,
+)
 
 
 TZ = "America/New_York"
@@ -95,7 +100,9 @@ def _node(
 
 
 def test_scale_registry_hashes_the_full_contract_and_rejects_coercion() -> None:
-    base = legacy_scale_specs(history_limit=64)
+    base = tuple(
+        replace(item, history_limit=64) for item in MODEL_SCALE_SPECS
+    )
     changed = tuple(
         replace(item, session_anchor="exchange_session")
         for item in base[:-1]
@@ -117,13 +124,15 @@ def test_scale_registry_hashes_the_full_contract_and_rejects_coercion() -> None:
                     if item.native_timeframe is Timeframe.M1
                     else True,
                 }
-                for item in legacy_scale_specs()
+                for item in MODEL_SCALE_SPECS
             ]
         )
 
 
 def test_m15_emits_only_on_completed_bar_across_dst_and_contract_reset() -> None:
-    specs = development_scale_specs(history_limit=64)
+    specs = tuple(
+        replace(item, history_limit=64) for item in MODEL_SCALE_SPECS
+    )
     reader = CausalMarketReader(scale_specs=specs)
     friday = pd.date_range(
         "2025-03-07 16:50",
@@ -173,7 +182,9 @@ def test_m15_emits_only_on_completed_bar_across_dst_and_contract_reset() -> None
 
 
 def test_m15_blank_frame_is_immutable_until_first_completed_bar() -> None:
-    specs = development_scale_specs(history_limit=64)
+    specs = tuple(
+        replace(item, history_limit=64) for item in MODEL_SCALE_SPECS
+    )
     reader = CausalMarketReader(scale_specs=specs)
     observer = CausalObserver(ObserverConfig(scale_specs=specs))
     start = _clock("2025-03-10 09:00")
@@ -417,6 +428,8 @@ def test_terminal_pool_event_is_not_reopened_by_stale_frame_source() -> None:
             entity_id=pool.pool_id,
         )
     )
+    assert node_id not in graph._current_epoch_node_ids
+    assert node_id in graph._entity_index[pool.pool_id]
     stale = graph._adapt_state(pool, asof=asof)
     assert stale is not None
     graph._add_frame_state_node(
@@ -427,6 +440,124 @@ def test_terminal_pool_event_is_not_reopened_by_stale_frame_source() -> None:
     )
     assert graph._nodes[node_id].lifecycle == "accepted"
     assert len(graph.node_history(node_id)) == 1
+
+
+def test_update_uses_lightweight_token_before_full_snapshot_adaptation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    graph = TemporalMarketSceneGraph()
+    t0 = _clock("2025-01-06 10:00")
+    item = LiquidityInventoryItem(
+        item_id="heartbeat-liquidity",
+        timeframe=Timeframe.M1,
+        side="above",
+        kind="previous_day_high",
+        price=101.0,
+        lower_bound=101.0,
+        upper_bound=101.0,
+        formed_at=t0 - pd.Timedelta(minutes=10),
+        confirmed_at=t0 - pd.Timedelta(minutes=5),
+        lifecycle=LiquidityInventoryLifecycle.VISIBLE,
+        source_ids=("previous-day-source",),
+        age_bars=0,
+        strength=0.7,
+        structural_rank="external",
+        visibility_strength=0.7,
+    )
+    first_observation = replace(
+        market_observation(asof=t0, price=100.0),
+        liquidity_inventory=(item,),
+    )
+    graph.update(first_observation)
+    adapted: list[str] = []
+    original = graph._adapt_snapshot_state
+
+    def record_adaptation(state, *, asof, frame_state):
+        adapted.append(type(state).__name__)
+        return original(state, asof=asof, frame_state=frame_state)
+
+    monkeypatch.setattr(graph, "_adapt_snapshot_state", record_adaptation)
+    graph.update(
+        replace(
+            first_observation,
+            asof=t0 + pd.Timedelta(minutes=1),
+            liquidity_inventory=(replace(item, age_bars=1),),
+        )
+    )
+
+    assert adapted == []
+
+
+def test_ordinary_update_does_not_rescan_all_retained_timelines() -> None:
+    class CountingTimelines(dict):
+        values_calls = 0
+
+        def values(self):
+            self.values_calls += 1
+            return super().values()
+
+    graph = TemporalMarketSceneGraph()
+    timelines = CountingTimelines()
+    observation = replace(
+        market_observation(asof=_clock("2025-01-06 10:00")),
+        retained_entity_timelines=timelines,
+    )
+
+    graph.update(observation)
+
+    # One tail scan belongs to unseen-ledger collection.  The terminal
+    # snapshot guard must reuse that result on an ordinary market minute.
+    assert timelines.values_calls == 1
+
+
+def test_pool_ledger_namespace_reuses_the_typed_state_node() -> None:
+    graph = TemporalMarketSceneGraph()
+    confirmed_at = _clock("2025-01-06 10:00")
+    pool = LiquidityPoolState(
+        pool_id="one-pool-identity",
+        timeframe=Timeframe.M5,
+        side="above",
+        lower_bound=100.75,
+        upper_bound=101.25,
+        midpoint=101.0,
+        formed_at=confirmed_at - pd.Timedelta(minutes=10),
+        confirmed_at=confirmed_at,
+        lifecycle=LiquidityPoolLifecycle.FORMED,
+        member_swing_ids=("pool-a", "pool-b"),
+        touch_times=(
+            confirmed_at - pd.Timedelta(minutes=10),
+            confirmed_at,
+        ),
+        age_bars=0,
+        strength=0.7,
+        total_touch_count=2,
+    )
+    event = MarketEvent(
+        event_id="pool-formed-event",
+        kind=EventKind.LIQUIDITY_POOL_STATE,
+        observed_at=confirmed_at,
+        timeframe=Timeframe.M5,
+        side="above",
+        price=pool.midpoint,
+        strength=pool.strength,
+        source_ids=pool.member_swing_ids,
+        entity_id=f"pool:{pool.pool_id}",
+        lifecycle=LiquidityPoolLifecycle.FORMED.value,
+        formed_at=pool.formed_at,
+        confirmed_at=pool.confirmed_at,
+    )
+
+    graph._adapt_market_event(event, enrichment=pool)
+    node = graph._adapt_state(pool, asof=confirmed_at)
+    assert node is not None
+    graph._add_frame_state_node(node)
+
+    pool_nodes = tuple(
+        value for value in graph.nodes if value.kind == "liquidity_pool"
+    )
+    assert len(pool_nodes) == 1
+    assert pool_nodes[0].entity_id == pool.pool_id
+    assert pool_nodes[0].node_id.endswith(f":{pool.pool_id}")
 
 
 def test_semantic_heartbeat_does_not_create_scene_revisions() -> None:
@@ -464,6 +595,600 @@ def test_semantic_heartbeat_does_not_create_scene_revisions() -> None:
     assert len(
         graph.node_history("epoch:0:entry_location:1m:location-1")
     ) == 1
+
+
+def test_support_resistance_freshness_is_not_a_persistent_revision() -> None:
+    graph = TemporalMarketSceneGraph()
+    t0 = _clock("2025-01-06 10:00")
+    state = SimpleNamespace(
+        zone_id="support-1",
+        timeframe=Timeframe.M1,
+        lifecycle="active",
+        side="support",
+        formed_at=t0 - pd.Timedelta(minutes=10),
+        confirmed_at=t0,
+        metadata_observed_at=t0,
+        lower_bound=99.5,
+        upper_bound=100.0,
+        member_swing_ids=("swing-1",),
+        source_kind="structural_swing",
+        structural_rank="internal",
+        is_protected_swing=False,
+        zone_role="both",
+        visibility_strength=0.8,
+        reaction_quality=0.6,
+        freshness=1.0,
+        depletion_risk=0.1,
+        age_bars=0,
+    )
+    node = graph._adapt_state(state, asof=t0)
+    assert node is not None
+    graph.add_node(node)
+    node_id = node.node_id
+    revision = graph.revision_id
+
+    heartbeat = SimpleNamespace(
+        **{
+            **vars(state),
+            "metadata_observed_at": t0 + pd.Timedelta(minutes=1),
+            "freshness": 0.9,
+            "age_bars": 1,
+        }
+    )
+    heartbeat_node = graph._adapt_state(
+        heartbeat,
+        asof=t0 + pd.Timedelta(minutes=1),
+    )
+    assert heartbeat_node is not None
+    graph.add_node(heartbeat_node)
+
+    assert graph.revision_id == revision
+    assert len(graph.node_history(node_id)) == 1
+    assert "freshness" not in dict(graph.nodes[0].descriptive_metrics)
+
+    changed = SimpleNamespace(
+        **{
+            **vars(heartbeat),
+            "metadata_observed_at": t0 + pd.Timedelta(minutes=2),
+            "reaction_quality": 0.7,
+        }
+    )
+    changed_node = graph._adapt_state(
+        changed,
+        asof=t0 + pd.Timedelta(minutes=2),
+    )
+    assert changed_node is not None
+    graph.add_node(changed_node)
+    assert len(graph.node_history(node_id)) == 2
+
+    promoted = SimpleNamespace(
+        **{
+            **vars(changed),
+            "metadata_observed_at": t0 + pd.Timedelta(minutes=3),
+            "structural_rank": "external",
+            "is_protected_swing": True,
+            "visibility_strength": 1.0,
+        }
+    )
+    promoted_node = graph._adapt_state(
+        promoted,
+        asof=t0 + pd.Timedelta(minutes=3),
+    )
+    assert promoted_node is not None
+    graph.add_node(promoted_node)
+    assert graph.nodes[0].structural_scale is StructuralScale.EXTERNAL
+    assert len(graph.node_history(node_id)) == 3
+
+    demoted = SimpleNamespace(
+        **{
+            **vars(promoted),
+            "metadata_observed_at": t0 + pd.Timedelta(minutes=4),
+            "structural_rank": "internal",
+            "is_protected_swing": False,
+            "visibility_strength": 0.2,
+        }
+    )
+    demoted_node = graph._adapt_state(
+        demoted,
+        asof=t0 + pd.Timedelta(minutes=4),
+    )
+    assert demoted_node is not None
+    graph.add_node(demoted_node)
+    assert graph.nodes[0].structural_scale is StructuralScale.INTERNAL
+    assert len(graph.node_history(node_id)) == 4
+
+
+def test_snapshot_semantic_signature_skips_heartbeat_adaptation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    graph = TemporalMarketSceneGraph()
+    t0 = _clock("2025-01-06 10:00")
+    state = SimpleNamespace(
+        zone_id="signature-zone",
+        timeframe=Timeframe.M1,
+        lifecycle="active",
+        side="support",
+        formed_at=t0 - pd.Timedelta(minutes=10),
+        confirmed_at=t0,
+        metadata_observed_at=t0,
+        lower_bound=99.5,
+        upper_bound=100.0,
+        member_swing_ids=("signature-swing",),
+        source_kind="structural_swing",
+        structural_rank="internal",
+        is_protected_swing=False,
+        zone_role="both",
+        visibility_strength=0.8,
+        reaction_quality=0.6,
+        freshness=1.0,
+        depletion_risk=0.1,
+        age_bars=0,
+    )
+    original = graph._adapt_state
+    adapted: list[str] = []
+
+    def counted(item: object, *, asof: pd.Timestamp) -> SceneNode | None:
+        adapted.append(str(getattr(item, "zone_id", "unknown")))
+        return original(item, asof=asof)
+
+    monkeypatch.setattr(graph, "_adapt_state", counted)
+    graph._adapt_snapshot_state(state, asof=t0, frame_state=True)
+    heartbeat = SimpleNamespace(
+        **{
+            **vars(state),
+            "metadata_observed_at": t0 + pd.Timedelta(minutes=1),
+            "freshness": 0.5,
+            "age_bars": 1,
+        }
+    )
+    graph._adapt_snapshot_state(
+        heartbeat,
+        asof=t0 + pd.Timedelta(minutes=1),
+        frame_state=True,
+    )
+
+    node_id = "epoch:0:support_resistance:1m:signature-zone"
+    assert adapted == ["signature-zone"]
+    assert len(graph.node_history(node_id)) == 1
+
+    metadata_only = SimpleNamespace(
+        **{
+            **vars(heartbeat),
+            "metadata_observed_at": t0 + pd.Timedelta(minutes=2),
+            "reaction_quality": 0.7,
+            "structural_rank": "external",
+            "is_protected_swing": True,
+        }
+    )
+    graph._adapt_snapshot_state(
+        metadata_only,
+        asof=t0 + pd.Timedelta(minutes=2),
+        frame_state=True,
+    )
+    assert adapted == ["signature-zone"]
+    assert len(graph.node_history(node_id)) == 1
+
+    changed = SimpleNamespace(
+        **{
+            **vars(metadata_only),
+            "lifecycle": "tested",
+            "tested_at": t0 + pd.Timedelta(minutes=3),
+        }
+    )
+    graph._adapt_snapshot_state(
+        changed,
+        asof=t0 + pd.Timedelta(minutes=3),
+        frame_state=True,
+    )
+    assert adapted == ["signature-zone", "signature-zone"]
+    assert len(graph.node_history(node_id)) == 2
+
+
+def test_terminal_sr_metadata_promotion_does_not_rewrite_frozen_graph_fact() -> None:
+    graph = TemporalMarketSceneGraph()
+    t0 = _clock("2025-01-06 10:00")
+    reaccepted_at = t0 + pd.Timedelta(minutes=2)
+    state = SimpleNamespace(
+        zone_id="terminal-rank-zone",
+        timeframe=Timeframe.M1,
+        lifecycle="reaccepted",
+        side="support",
+        formed_at=t0 - pd.Timedelta(minutes=10),
+        confirmed_at=t0,
+        broken_at=t0 + pd.Timedelta(minutes=1),
+        reaccepted_at=reaccepted_at,
+        lower_bound=99.5,
+        upper_bound=100.0,
+        member_swing_ids=("terminal-rank-swing",),
+        source_kind="structural_swing",
+        structural_rank="internal",
+        is_protected_swing=False,
+        zone_role="both",
+        visibility_strength=0.2,
+        reaction_quality=0.5,
+        depletion_risk=0.5,
+    )
+    stored = graph._adapt_snapshot_state(
+        state,
+        asof=reaccepted_at,
+        frame_state=True,
+    )
+    assert stored is not None
+
+    promoted_snapshot = SimpleNamespace(
+        **{
+            **vars(state),
+            "structural_rank": "external",
+            "is_protected_swing": True,
+            "visibility_strength": 1.0,
+            "metadata_observed_at": reaccepted_at + pd.Timedelta(minutes=1),
+        }
+    )
+    retained = graph._adapt_snapshot_state(
+        promoted_snapshot,
+        asof=reaccepted_at + pd.Timedelta(minutes=1),
+        frame_state=True,
+    )
+
+    assert retained is stored
+    assert retained.structural_scale is StructuralScale.INTERNAL
+    assert len(graph.node_history(stored.node_id)) == 1
+
+
+def test_reaccepted_support_resistance_is_confirmed_and_terminal() -> None:
+    graph = TemporalMarketSceneGraph()
+    t0 = _clock("2025-01-06 10:00")
+    reaccepted_at = t0 + pd.Timedelta(minutes=2)
+    state = SimpleNamespace(
+        zone_id="reaccepted-zone",
+        timeframe=Timeframe.M1,
+        lifecycle="reaccepted",
+        side="support",
+        formed_at=t0 - pd.Timedelta(minutes=10),
+        confirmed_at=t0,
+        broken_at=t0 + pd.Timedelta(minutes=1),
+        reaccepted_at=reaccepted_at,
+        lower_bound=99.5,
+        upper_bound=100.0,
+        member_swing_ids=("reaccepted-swing",),
+        source_kind="structural_swing",
+        structural_rank="internal",
+        is_protected_swing=False,
+        zone_role="both",
+    )
+    node = graph._adapt_state(state, asof=reaccepted_at)
+    assert node is not None
+    assert node.ambiguity_state is EvidenceStatus.CONFIRMED
+    stored = graph.add_node(node)
+
+    with pytest.raises(ValueError, match="rewrite frozen fact"):
+        graph.add_node(
+            replace(
+                stored,
+                observed_at=reaccepted_at + pd.Timedelta(minutes=1),
+                lifecycle="tested",
+                revision_id="",
+            )
+        )
+
+
+def test_same_bar_ledger_transitions_remain_ordered_before_snapshot_fast_path() -> None:
+    graph = TemporalMarketSceneGraph()
+    t0 = _clock("2025-01-06 10:00")
+    opened = MarketEvent(
+        event_id="z-opened",
+        kind=EventKind.FVG_STATE,
+        observed_at=t0,
+        timeframe=Timeframe.M5,
+        side=None,
+        price=None,
+        strength=0.5,
+        source_ids=("same-bar-fvg",),
+        entity_id="same-bar-fvg",
+        lifecycle="open",
+        formed_at=t0,
+        confirmed_at=t0,
+        direction=Direction.LONG,
+        sequence_no=0,
+    )
+    partial = replace(
+        opened,
+        event_id="a-partial",
+        lifecycle="partial",
+        transition_reason="first_partial_fill",
+        sequence_no=1,
+    )
+    observation = replace(
+        market_observation(asof=t0),
+        # Reverse the container order and event-id lexical order: sequence_no
+        # remains the sole same-clock causal ordering authority.
+        recent_events=(partial, opened),
+    )
+
+    graph.update(observation)
+
+    history = graph.node_history(
+        "epoch:0:fvg:5m:same-bar-fvg"
+    )
+    assert tuple(node.lifecycle for node in history) == ("open", "partial")
+    assert history[0].revision_id != history[1].revision_id
+
+
+def test_path_block_edges_are_current_only_and_recomputed_by_adjacency() -> None:
+    graph = TemporalMarketSceneGraph()
+    t0 = _clock("2025-01-06 10:00")
+
+    def liquidity(identity: str, price: float) -> LiquidityInventoryItem:
+        return LiquidityInventoryItem(
+            item_id=identity,
+            timeframe=Timeframe.M1,
+            side="above",
+            kind="previous_day_high",
+            price=price,
+            lower_bound=price,
+            upper_bound=price,
+            formed_at=t0 - pd.Timedelta(minutes=10),
+            confirmed_at=t0 - pd.Timedelta(minutes=5),
+            lifecycle=LiquidityInventoryLifecycle.VISIBLE,
+            source_ids=(f"source:{identity}",),
+            age_bars=0,
+            strength=0.7,
+            structural_rank="external",
+            visibility_strength=0.7,
+        )
+
+    near = liquidity("liquidity-near", 101.0)
+    middle = liquidity("liquidity-middle", 102.0)
+    far = liquidity("liquidity-far", 103.0)
+    first = replace(
+        market_observation(asof=t0, price=100.0),
+        liquidity_inventory=(near, far),
+    )
+    first_delta = graph.update(first)
+    first_edges = tuple(
+        edge
+        for edge in graph.edges
+        if edge.relation is SceneEdgeKind.BLOCKS_PATH_TO
+    )
+    assert len(first_edges) == 1
+    stale_edge_id = first_edges[0].edge_id
+    assert graph.edge_history(stale_edge_id) == ()
+    assert stale_edge_id not in first_delta.added_edge_ids
+
+    second = replace(
+        market_observation(
+            asof=t0 + pd.Timedelta(minutes=1),
+            price=100.0,
+        ),
+        liquidity_inventory=(near, middle, far),
+    )
+    second_delta = graph.update(second)
+    node_by_id = {node.node_id: node for node in graph.nodes}
+    current_block_edges = tuple(
+        edge
+        for edge in graph.edges
+        if edge.relation is SceneEdgeKind.BLOCKS_PATH_TO
+    )
+    current_pairs = {
+        (
+            node_by_id[edge.source_node_id].entity_id,
+            node_by_id[edge.target_node_id].entity_id,
+        )
+        for edge in current_block_edges
+    }
+    assert current_pairs == {
+        ("liquidity-near", "liquidity-middle"),
+        ("liquidity-middle", "liquidity-far"),
+    }
+    current_path = graph.find_path(
+        (near.item_id,),
+        (far.item_id,),
+        asof=second.asof,
+    )
+    assert current_path.count(SceneEdgeKind.BLOCKS_PATH_TO.value) == 2
+    assert stale_edge_id not in {
+        edge.edge_id
+        for edge in graph.edges
+        if edge.relation is SceneEdgeKind.BLOCKS_PATH_TO
+    }
+    assert not any(
+        edge.relation is SceneEdgeKind.BLOCKS_PATH_TO
+        for edge in graph.edges_asof(t0)
+    )
+    assert all(
+        graph.edge_history(edge.edge_id) == ()
+        for edge in current_block_edges
+    )
+    assert not any(
+        edge.relation is SceneEdgeKind.BLOCKS_PATH_TO
+        for edge in graph._edges.values()
+    )
+    assert not set(second_delta.added_edge_ids).intersection(
+        edge.edge_id for edge in current_block_edges
+    )
+
+    consumed_middle = replace(
+        middle,
+        lifecycle=LiquidityInventoryLifecycle.CONSUMED,
+        consumed_at=t0 + pd.Timedelta(minutes=2),
+        lifecycle_reason="reference_level_swept",
+    )
+    third = replace(
+        market_observation(
+            asof=t0 + pd.Timedelta(minutes=2),
+            price=100.0,
+        ),
+        liquidity_inventory=(near, consumed_middle, far),
+    )
+    graph.update(third)
+    third_nodes = {node.node_id: node for node in graph.nodes}
+    third_pairs = {
+        (
+            third_nodes[edge.source_node_id].entity_id,
+            third_nodes[edge.target_node_id].entity_id,
+        )
+        for edge in graph.edges
+        if edge.relation is SceneEdgeKind.BLOCKS_PATH_TO
+    }
+    assert third_pairs == {("liquidity-near", "liquidity-far")}
+    consumed_id = (
+        "epoch:0:liquidity:1m:liquidity-middle"
+    )
+    assert consumed_id not in (
+        graph._visible_liquidity_node_ids_by_side["above"]
+    )
+
+
+def test_located_at_uses_shared_source_indexes_for_all_authoritative_sources(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    graph = TemporalMarketSceneGraph()
+    t0 = _clock("2025-01-06 10:00")
+    source_cases = (
+        ("pool-source", "liquidity_pool", None),
+        ("previous-day-source", "liquidity", "previous_day_high"),
+        ("range-source", "liquidity", "range_boundary"),
+    )
+    expected: set[tuple[str, str]] = set()
+    for index, (source_id, kind, inventory_kind) in enumerate(source_cases):
+        zone = graph.add_node(
+            SceneNode(
+                node_id=f"epoch:0:support_resistance:1m:zone-{index}",
+                kind="support_resistance",
+                timeframe=Timeframe.M1.value,
+                structural_scale=StructuralScale.EXTERNAL,
+                direction=None,
+                formed_at=t0,
+                confirmed_at=t0,
+                observed_at=t0,
+                lifecycle="active",
+                price_bounds=(100.0 + index, 100.5 + index),
+                invalidation_rule="close_beyond_frozen_zone",
+                ambiguity_state=EvidenceStatus.CONFIRMED,
+                source_ids=(f"zone-{index}", source_id),
+                entity_id=f"zone-{index}",
+            )
+        )
+        liquidity = graph.add_node(
+            SceneNode(
+                node_id=f"epoch:0:{kind}:1m:liquidity-{index}",
+                kind=kind,
+                timeframe=Timeframe.M1.value,
+                structural_scale=StructuralScale.EXTERNAL,
+                direction=Direction.LONG,
+                formed_at=t0,
+                confirmed_at=t0,
+                observed_at=t0,
+                lifecycle=(
+                    "formed" if kind == "liquidity_pool" else "visible"
+                ),
+                price_bounds=(100.25 + index, 100.25 + index),
+                invalidation_rule="liquidity_consumed",
+                ambiguity_state=EvidenceStatus.CONFIRMED,
+                source_ids=(f"liquidity-{index}", source_id),
+                entity_id=f"liquidity-{index}",
+                semantic_attributes=(
+                    ()
+                    if inventory_kind is None
+                    else (("inventory_kind", inventory_kind),)
+                ),
+            )
+        )
+        expected.add((liquidity.node_id, zone.node_id))
+
+    def no_history_scan(_: pd.Timestamp) -> tuple[SceneNode, ...]:
+        raise AssertionError("LOCATED_AT must not scan the full node ledger")
+
+    monkeypatch.setattr(graph, "nodes_asof", no_history_scan)
+    graph._derive_source_relations(market_observation(asof=t0))
+
+    located = {
+        (edge.source_node_id, edge.target_node_id)
+        for edge in graph.edges
+        if edge.relation is SceneEdgeKind.LOCATED_AT
+    }
+    assert located == expected
+    assert not any(
+        edge.relation is SceneEdgeKind.SOURCED_FROM
+        and graph._nodes[edge.source_node_id].kind == "support_resistance"
+        and graph._nodes[edge.target_node_id].kind == "liquidity"
+        for edge in graph.edges
+    )
+
+
+def test_candle_structure_is_an_explicit_transient_scene_view() -> None:
+    graph = TemporalMarketSceneGraph()
+    t0 = _clock("2025-01-06 10:00")
+    candle = CandleStructureState(
+        timeframe=Timeframe.M1,
+        start=t0 - pd.Timedelta(minutes=1),
+        observed_at=t0,
+        range_points=4.0,
+        body_points=2.0,
+        upper_wick_points=1.0,
+        lower_wick_points=1.0,
+        body_ratio=0.5,
+        upper_wick_ratio=0.25,
+        lower_wick_ratio=0.25,
+        close_location=0.75,
+        direction=1,
+        real_completed=True,
+        zero_range=False,
+        body_class="normal",
+        range_class="expanded",
+        dominant_wick="balanced",
+        close_class="near_high",
+    )
+    observation = market_observation(asof=t0)
+    frames = dict(observation.frames)
+    frames[Timeframe.M1] = replace(
+        frames[Timeframe.M1],
+        candle_structure=candle,
+    )
+    observation = replace(observation, frames=frames)
+    graph.update(observation)
+    revision = graph.revision_id
+    persistent_ids = {node.node_id for node in graph.nodes}
+
+    nodes = graph.current_candle_structure_nodes(
+        observation,
+        timeframes=(Timeframe.M1,),
+    )
+
+    assert len(nodes) == 1
+    node = nodes[0]
+    assert node.kind == "candle_structure"
+    assert node.direction is Direction.LONG
+    assert node.ambiguity_state is EvidenceStatus.CONFIRMED
+    assert dict(node.semantic_attributes) == {
+        "body_class": "normal",
+        "range_class": "expanded",
+        "dominant_wick": "balanced",
+        "close_class": "near_high",
+        "real_completed": "true",
+        "zero_range": "false",
+    }
+    assert dict(node.descriptive_metrics)["body_ratio"] == 0.5
+    assert node.node_id not in persistent_ids
+    assert node.node_id not in {value.node_id for value in graph.nodes}
+    assert graph.node_history(node.node_id) == ()
+    assert graph.revision_id == revision
+
+    focus = FocusState(
+        asof=t0,
+        primary_timeframes=(Timeframe.M1.value,),
+        supplemental_timeframes=(),
+        reason_codes=("test_default_query",),
+        trigger_event_ids=(),
+        question="verify default semantic query",
+        resolution_status=EvidenceStatus.CONFIRMED,
+        switched=False,
+        switched_at=None,
+    )
+    assert not any(
+        value.kind == "candle_structure"
+        for value in graph.query(focus).nodes
+    )
 
 
 def test_clock_only_projection_keeps_terminal_reason_without_revision() -> None:
@@ -576,6 +1301,143 @@ def test_micro_bos_reference_keeps_its_own_entity_identity() -> None:
     assert node.kind == "micro_bos"
     assert node.entity_id == "micro-reference-1"
     assert node.direction is Direction.LONG
+
+
+def test_reference_retirement_resolves_the_prior_liquidity_node() -> None:
+    graph = TemporalMarketSceneGraph()
+    confirmed_at = _clock("2025-01-06 18:00")
+    retired_at = _clock("2025-01-07 18:01")
+    item = LiquidityInventoryItem(
+        item_id="reference:session:2025-01-06:high:NQH5:1",
+        timeframe=Timeframe.M1,
+        side="above",
+        kind="previous_session_high",
+        price=101.0,
+        lower_bound=101.0,
+        upper_bound=101.0,
+        formed_at=_clock("2025-01-06 09:30"),
+        confirmed_at=confirmed_at,
+        lifecycle=LiquidityInventoryLifecycle.VISIBLE,
+        source_ids=("session:2025-01-06",),
+        age_bars=0,
+        strength=0.75,
+        structural_rank="external",
+        visibility_strength=0.75,
+    )
+    node = graph._adapt_state(item, asof=confirmed_at)
+    assert node is not None
+    graph.add_node(node)
+    retirement = MarketEvent(
+        event_id="retire:previous-session-high",
+        kind=EventKind.LIQUIDITY_RETIRED,
+        observed_at=retired_at,
+        timeframe=Timeframe.M1,
+        side="above",
+        price=101.0,
+        strength=0.0,
+        source_ids=(item.item_id,),
+        details={
+            "source_kind": item.kind,
+            "replacement_period": "2025-01-07",
+        },
+        transition_reason="reference_period_replaced",
+    )
+    graph._adapt_market_event(retirement)
+    graph._derive_source_relations(
+        market_observation(asof=retired_at)
+    )
+
+    history = graph.node_history(node.node_id)
+    assert history[-1].lifecycle == "retired"
+    assert history[-1].resolution_reason == "reference_period_replaced"
+    assert any(
+        edge.relation is SceneEdgeKind.RESOLVES
+        and edge.target_node_id == node.node_id
+        for edge in graph.edges
+    )
+
+
+def test_external_protected_liquidity_keeps_authority_in_scene_graph() -> None:
+    graph = TemporalMarketSceneGraph()
+    confirmed_at = _clock("2025-01-06 10:00")
+    item = LiquidityInventoryItem(
+        item_id="swing:external-draw",
+        timeframe=Timeframe.M5,
+        side="above",
+        kind="swing",
+        price=101.0,
+        lower_bound=101.0,
+        upper_bound=101.0,
+        formed_at=confirmed_at - pd.Timedelta(minutes=15),
+        confirmed_at=confirmed_at,
+        lifecycle=LiquidityInventoryLifecycle.VISIBLE,
+        source_ids=("external-draw",),
+        age_bars=0,
+        strength=0.8,
+        structural_rank="external",
+        is_protected_swing=True,
+        visibility_strength=0.9,
+    )
+
+    node = graph._adapt_state(item, asof=confirmed_at)
+
+    assert node is not None
+    assert node.structural_scale is StructuralScale.EXTERNAL
+    assert dict(node.semantic_attributes)["structural_rank"] == "external"
+    assert dict(node.semantic_attributes)["is_protected_swing"] == "true"
+    assert dict(node.descriptive_metrics)["visibility_strength"] == 0.9
+
+
+def test_order_block_has_displacement_and_bos_creation_edges() -> None:
+    graph = TemporalMarketSceneGraph()
+    clock = _clock("2025-01-06 10:00")
+    displacement = graph.add_node(
+        _node(
+            "epoch:0:displacement:5m:disp-ob",
+            "displacement",
+            Timeframe.M5,
+            clock,
+            source_ids=("disp-ob",),
+            entity_id="disp-ob",
+            lifecycle="active",
+        )
+    )
+    bos = graph.add_node(
+        _node(
+            "epoch:0:bos:5m:bos-ob",
+            "bos",
+            Timeframe.M5,
+            clock,
+            source_ids=("bos-ob",),
+            entity_id="bos-ob",
+        )
+    )
+    order_block = graph.add_node(
+        _node(
+            "epoch:0:order_block:5m:ob",
+            "order_block",
+            Timeframe.M5,
+            clock + pd.Timedelta(minutes=1),
+            source_ids=("ob", "disp-ob", "bos-ob"),
+            entity_id="ob",
+            lifecycle="created",
+        )
+    )
+
+    graph._derive_source_relations(
+        market_observation(
+            asof=clock + pd.Timedelta(minutes=1),
+            price=100.0,
+        )
+    )
+
+    creators = {
+        edge.source_node_id
+        for edge in graph.edges
+        if edge.relation is SceneEdgeKind.CREATES
+        and edge.target_node_id == order_block.node_id
+    }
+    assert creators == {displacement.node_id, bos.node_id}
 
 
 def test_dfp_and_lsr_source_chains_are_reachable_but_not_invented() -> None:
@@ -710,9 +1572,9 @@ def test_dfp_and_lsr_source_chains_are_reachable_but_not_invented() -> None:
         asof=t0 + pd.Timedelta(minutes=32),
     )
     assert any(
-        edge.relation is SceneEdgeKind.RESPONDS_TO
-        and edge.source_node_id == reverse_displacement.node_id
-        and edge.target_node_id == manipulation.node_id
+        edge.relation is SceneEdgeKind.PRECEDES
+        and edge.source_node_id == manipulation.node_id
+        and edge.target_node_id == reverse_displacement.node_id
         for edge in graph.edges_asof(t0 + pd.Timedelta(minutes=32))
     )
 
@@ -811,18 +1673,22 @@ def test_focus_and_hypothesis_ambiguity_stay_in_active_context() -> None:
         current_stage,
         tuple(
             spec.native_timeframe
-            for spec in development_scale_specs()
+            for spec in MODEL_SCALE_SPECS
             if spec.enabled and spec.native_timeframe is not None
         ),
     )
     assert Timeframe.M15.value in five_scale.supplemental_timeframes
-    legacy = supplement_focus_once(
+    core_only = supplement_focus_once(
         stage_focus,
         prior_stage,
         current_stage,
-        tuple(spec.native_timeframe for spec in legacy_scale_specs()),
+        tuple(
+            spec.native_timeframe
+            for spec in CORE_TEST_SCALE_SPECS
+            if spec.enabled and spec.native_timeframe is not None
+        ),
     )
-    assert Timeframe.M15.value not in legacy.supplemental_timeframes
+    assert Timeframe.M15.value not in core_only.supplemental_timeframes
     assert five_scale.hypothesis_id == "hyp:context-a"
 
     graph = TemporalMarketSceneGraph()
@@ -880,6 +1746,136 @@ def test_focus_and_hypothesis_ambiguity_stay_in_active_context() -> None:
     primary = next(iter(contexts.values()))
     assert primary.ambiguous_evidence == {}
     assert primary.missing_evidence["m5_displacement"] is EvidenceStatus.NOT_OBSERVED
+
+
+def test_select_focus_uses_current_epoch_conflict_and_ambiguity_indexes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observation = market_observation()
+    asof = observation.asof
+    graph = TemporalMarketSceneGraph()
+    parent = graph.add_node(
+        _node(
+            "epoch:0:structure:1H:index-parent",
+            "structure",
+            Timeframe.H1,
+            asof,
+            direction=Direction.LONG,
+            source_ids=("index-parent",),
+            entity_id="index-parent",
+        )
+    )
+    displacement = graph.add_node(
+        _node(
+            "epoch:0:displacement:5m:index-opposition",
+            "displacement",
+            Timeframe.M5,
+            asof,
+            direction=Direction.SHORT,
+            source_ids=("index-opposition",),
+            entity_id="index-opposition",
+        )
+    )
+    ambiguous = graph.add_node(
+        _node(
+            "epoch:0:manipulation_candidate:1m:index-ambiguity",
+            "manipulation_candidate",
+            Timeframe.M1,
+            asof,
+            lifecycle="ambiguous",
+            status=EvidenceStatus.AMBIGUOUS,
+        )
+    )
+    graph._last_asof = asof
+    original_nodes_asof = graph.nodes_asof
+    original_edges_asof = graph.edges_asof
+
+    def no_history_scan(_: pd.Timestamp):
+        raise AssertionError("current focus selection must use live indexes")
+
+    monkeypatch.setattr(graph, "nodes_asof", no_history_scan)
+    monkeypatch.setattr(graph, "edges_asof", no_history_scan)
+    ambiguous_focus = select_focus(None, observation, None, graph)
+    assert ambiguous.node_id in graph._current_epoch_ambiguous_node_ids
+    assert ambiguous_focus.resolution_status is EvidenceStatus.AMBIGUOUS
+
+    opposition = graph.add_edge(
+        SceneEdge(
+            edge_id="edge:index-opposition",
+            source_node_id=displacement.node_id,
+            relation=SceneEdgeKind.OPPOSES,
+            target_node_id=parent.node_id,
+            observed_at=asof,
+            source_ids=(displacement.node_id, parent.node_id),
+        )
+    )
+    prior_focus = replace(
+        ambiguous_focus,
+        primary_timeframes=(Timeframe.M5.value, Timeframe.M1.value),
+        resolution_status=EvidenceStatus.UNKNOWN,
+        hypothesis_id="hyp:index-parent",
+    )
+    hypothesis = SimpleNamespace(
+        phase=PlaybookPhase.FORMING,
+        plan=None,
+        key="displacement_first_pullback:short",
+        context_id="index-parent",
+        setup_context_id=None,
+        initiating_event_id=None,
+    )
+    previous = SimpleNamespace(
+        focus_state=prior_focus,
+        dominant_hypothesis_id="hyp:index-parent",
+        context_hypotheses={
+            "hyp:index-parent": SimpleNamespace(
+                context_root_ids=("index-parent",)
+            )
+        },
+        ranked=lambda: [hypothesis],
+    )
+    conflicting_focus = select_focus(
+        previous,
+        observation,
+        None,
+        graph,
+    )
+    assert opposition.edge_id in (
+        graph._current_epoch_active_opposes_edge_ids
+    )
+    assert "cross_scale_conflict" in conflicting_focus.reason_codes
+    assert conflicting_focus.resolution_status is EvidenceStatus.CONFLICTING
+
+    resolved_at = asof + pd.Timedelta(minutes=1)
+    graph.add_edge(
+        replace(
+            opposition,
+            observed_at=resolved_at,
+            lifecycle="closed",
+            resolution_reason="test_resolution",
+        )
+    )
+    graph.add_node(
+        replace(
+            ambiguous,
+            observed_at=resolved_at,
+            lifecycle="confirmed",
+            ambiguity_state=EvidenceStatus.CONFIRMED,
+        )
+    )
+    graph._last_asof = resolved_at
+    resolved_observation = market_observation(asof=resolved_at)
+    resolved_focus = select_focus(None, resolved_observation, None, graph)
+    assert opposition.edge_id not in (
+        graph._current_epoch_active_opposes_edge_ids
+    )
+    assert ambiguous.node_id not in graph._current_epoch_ambiguous_node_ids
+    assert resolved_focus.resolution_status is EvidenceStatus.FORMING
+
+    # Historical focus reconstruction continues to use the revision ledger.
+    monkeypatch.setattr(graph, "nodes_asof", original_nodes_asof)
+    monkeypatch.setattr(graph, "edges_asof", original_edges_asof)
+    historical_focus = select_focus(None, observation, None, graph)
+    assert historical_focus.resolution_status is EvidenceStatus.AMBIGUOUS
 
 
 def test_focus_resolution_unsticks_but_unrelated_conflict_does_not_switch() -> None:
@@ -1040,7 +2036,9 @@ def test_focus_conflict_excludes_internal_pullback_but_keeps_displacement() -> N
     )
 
 
-def test_bounded_query_never_drops_an_old_context_root() -> None:
+def test_current_bounded_query_uses_hot_indexes_and_keeps_old_root(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     graph = TemporalMarketSceneGraph()
     t0 = _clock("2025-01-06 09:00")
     root = graph.add_node(
@@ -1074,6 +2072,12 @@ def test_bounded_query_never_drops_an_old_context_root() -> None:
         switched=False,
         switched_at=None,
     )
+
+    def no_history_scan(_: pd.Timestamp):
+        raise AssertionError("current scene query must not scan history")
+
+    monkeypatch.setattr(graph, "nodes_asof", no_history_scan)
+    monkeypatch.setattr(graph, "edges_asof", no_history_scan)
     result = graph.query(
         focus,
         context_ids=("old-root",),
@@ -1088,7 +2092,15 @@ def test_m15_query_marks_unsupported_group3_evidence_unknown_not_false() -> None
     m15 = replace(
         observation.frame(Timeframe.H1),
         timeframe=Timeframe.M15,
-        liquidity=(),
+        swings=(),
+        structures=(),
+        structure_breaks=(),
+        candle_structure=None,
+        support_resistance=(),
+        liquidity_pools=(),
+        fair_value_gaps=(),
+        order_blocks=(),
+        dealing_ranges=(),
     )
     observation = replace(
         observation,
@@ -1126,23 +2138,40 @@ def test_m15_query_marks_unsupported_group3_evidence_unknown_not_false() -> None
     )
 
 
-def test_m15_bridge_liquidity_reaches_minute_sweep_memory() -> None:
+def test_m15_typed_liquidity_reaches_scene_graph() -> None:
     prior = market_observation()
-    source = prior.frame(Timeframe.H1).liquidity[1]
-    bridge_level = replace(
+    source = next(
+        item
+        for item in prior.liquidity_inventory
+        if item.timeframe is Timeframe.H1 and item.side == "above"
+    )
+    bridge_item = replace(
         source,
-        level_id="m15-bridge-above",
+        item_id="m15-bridge-above",
         timeframe=Timeframe.M15,
+        kind="previous_session_high",
         price=100.5,
+        lower_bound=100.5,
+        upper_bound=100.5,
+        source_ids=("previous-session:m15",),
     )
     m15 = replace(
         prior.frame(Timeframe.H1),
         timeframe=Timeframe.M15,
-        liquidity=(bridge_level,),
+        swings=(),
+        structures=(),
+        structure_breaks=(),
+        candle_structure=None,
+        support_resistance=(),
+        liquidity_pools=(),
+        fair_value_gaps=(),
+        order_blocks=(),
+        dealing_ranges=(),
     )
     prior = replace(
         prior,
         frames={**prior.frames, Timeframe.M15: m15},
+        liquidity_inventory=(*prior.liquidity_inventory, bridge_item),
         active_timeframes=(
             Timeframe.H4,
             Timeframe.H1,
@@ -1150,34 +2179,20 @@ def test_m15_bridge_liquidity_reaches_minute_sweep_memory() -> None:
             Timeframe.M5,
             Timeframe.M1,
         ),
-        scale_registry_id="scale:test-five",
+        scale_registry_id=scale_registry_id(MODEL_SCALE_SPECS),
     )
-    specs = development_scale_specs(history_limit=64)
-    reader = CausalMarketReader(scale_specs=specs)
-    update = reader.on_bar(
-        Bar(
-            prior.asof,
-            100.0,
-            101.0,
-            99.75,
-            100.25,
-            10,
-            "NQH5",
-            1,
-        )
-    )
-    observer = CausalObserver(ObserverConfig(scale_specs=specs))
-    observer._prior = prior
-    observer._record_minute_events(update, prior.frames)
+    graph = TemporalMarketSceneGraph()
+    graph.update(prior)
     assert any(
-        event.kind is EventKind.LIQUIDITY_SWEEP
-        and bridge_level.level_id in event.source_ids
-        for event in observer.memory.recent()
+        node.kind == "liquidity"
+        and node.timeframe == Timeframe.M15.value
+        and node.entity_id == bridge_item.item_id
+        for node in graph.nodes
     )
 
 
 def test_observer_transfers_revised_edge_ids_into_observation() -> None:
-    reader = CausalMarketReader()
+    reader = CausalMarketReader(scale_specs=MODEL_SCALE_SPECS)
     update = reader.on_bar(
         Bar(
             _clock("2025-03-10 09:00"),
@@ -1190,7 +2205,9 @@ def test_observer_transfers_revised_edge_ids_into_observation() -> None:
             1,
         )
     )
-    observer = CausalObserver()
+    observer = CausalObserver(
+        ObserverConfig(scale_specs=MODEL_SCALE_SPECS)
+    )
     delta = SceneGraphDelta(
         asof=update.asof,
         revision_id="scene:test-revision",

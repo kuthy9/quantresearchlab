@@ -77,6 +77,26 @@
     }
   },
   "fixed_development_windows": {
+    "natural_authority_2023": {
+      "purpose": "Outcome-blind Group1-5 natural-authority lifecycle and continuous Scene Graph review; no PnL or threshold selection.",
+      "selection_rule": "From 2023 Globex weeks whose review week and preceding local-calendar warmup week each contain exactly 6900 causal rows under one unchanged contract, sample with Python random seed 20230807 until the review weeks are at least 90 days apart.",
+      "random_seed": 20230807,
+      "warmup_calendar_days": 7,
+      "threshold_search": false,
+      "maximum_extension": "2023 calendar year; zero natural cases remain authority_pending",
+      "windows": [
+        {
+          "id": "2023-03-27-week",
+          "start": "2023-03-26T18:00:00-04:00",
+          "end_exclusive": "2023-03-31T17:01:00-04:00"
+        },
+        {
+          "id": "2023-11-06-week",
+          "start": "2023-11-05T18:00:00-05:00",
+          "end_exclusive": "2023-11-10T17:01:00-05:00"
+        }
+      ]
+    },
     "mature_range_coverage": {
       "purpose": "Outcome-blind descriptive coverage of natural H1 dealing ranges and range-boundary manipulation.",
       "warmup_calendar_days": 7,

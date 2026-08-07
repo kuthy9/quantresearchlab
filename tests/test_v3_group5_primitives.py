@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import replace
 import hashlib
+import json
+import math
 from pathlib import Path
 
 import pandas as pd
@@ -10,6 +12,7 @@ import pytest
 from smc_trader.group5 import CausalGroup5Reducer, Group5Protocol
 from smc_trader.model import (
     BOSLifecycle,
+    BOSPostBreakState,
     BOSScope,
     BreakOfStructureState,
     Candle,
@@ -18,6 +21,7 @@ from smc_trader.model import (
     EventKind,
     FairValueGapLifecycle,
     FairValueGapState,
+    FVGQualification,
     LiquidityInventoryItem,
     LiquidityInventoryLifecycle,
     ManipulationLifecycle,
@@ -26,23 +30,28 @@ from smc_trader.model import (
     QualifiedReacceptanceLifecycle,
     Timeframe,
 )
-from smc_trader.observation import CausalObserver
+from smc_trader.observation import CausalObserver, ObserverConfig
+
+from .helpers import CORE_TEST_SCALE_SPECS
 
 
 ROOT = Path(__file__).resolve().parents[1]
 PROTOCOL_PATH = ROOT / "configs/primitives_entry.json"
-PROTOCOL_SHA = (
-    "108d6e5f24fa733451706a7499c1f45df099ad8ae75ed32158feaedf082bd833"
+GROUP12_PROTOCOL_PATH = (
+    ROOT / "configs/primitives_structure_liquidity.json"
 )
-GROUP12_SHA = (
-    "189b6af3bff631c3985fa37bcf9f5f82528296800886d9c9bd4cbe123ea4c701"
-)
-GROUP3_SHA = (
-    "4086ed67c7fe849e175c149bca8688749ef44d6649a672736535e1fec2d18c51"
-)
-GROUP4_SHA = (
-    "14b049facadb815c3fdc0d134275ee3f1efb3ca7c775a5f18ec4efad61663bc5"
-)
+GROUP3_PROTOCOL_PATH = ROOT / "configs/primitives_zones.json"
+GROUP4_PROTOCOL_PATH = ROOT / "configs/primitives_range.json"
+
+
+def _sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+PROTOCOL_SHA = _sha256(PROTOCOL_PATH)
+GROUP12_SHA = _sha256(GROUP12_PROTOCOL_PATH)
+GROUP3_SHA = _sha256(GROUP3_PROTOCOL_PATH)
+GROUP4_SHA = _sha256(GROUP4_PROTOCOL_PATH)
 DISPLACEMENT_SHA = "a" * 64
 BASE = pd.Timestamp("2025-01-07T09:30:00-05:00")
 
@@ -86,6 +95,9 @@ def _fvg(
     confirmed_at: pd.Timestamp,
     *,
     identity: str = "fvg-long",
+    qualification: FVGQualification = FVGQualification.DISPLACEMENT_LINKED,
+    direction: Direction = Direction.LONG,
+    displacement_active_at: pd.Timestamp | None = None,
 ) -> FairValueGapState:
     starts = (
         confirmed_at - pd.Timedelta(minutes=15),
@@ -98,14 +110,43 @@ def _fvg(
         symbol="NQH5",
         instrument_id=1,
         timeframe=Timeframe.M5,
-        direction=Direction.LONG,
+        direction=direction,
         lifecycle=FairValueGapLifecycle.OPEN,
-        source_displacement_id=f"displacement:{identity}",
-        source_active_transition_id=f"active:{identity}",
-        source_displacement_protocol_hash=DISPLACEMENT_SHA,
-        source_displacement_started_at=starts[1],
-        source_displacement_active_at=starts[2],
-        source_displacement_prefix_commitment=f"prefix:{identity}",
+        qualification=qualification,
+        source_displacement_id=(
+            f"displacement:{identity}"
+            if qualification is FVGQualification.DISPLACEMENT_LINKED
+            else None
+        ),
+        source_active_transition_id=(
+            f"active:{identity}"
+            if qualification is FVGQualification.DISPLACEMENT_LINKED
+            else None
+        ),
+        source_displacement_protocol_hash=(
+            DISPLACEMENT_SHA
+            if qualification is FVGQualification.DISPLACEMENT_LINKED
+            else None
+        ),
+        source_displacement_started_at=(
+            starts[1]
+            if qualification is FVGQualification.DISPLACEMENT_LINKED
+            else None
+        ),
+        source_displacement_active_at=(
+            (
+                starts[2]
+                if displacement_active_at is None
+                else displacement_active_at
+            )
+            if qualification is FVGQualification.DISPLACEMENT_LINKED
+            else None
+        ),
+        source_displacement_prefix_commitment=(
+            f"prefix:{identity}"
+            if qualification is FVGQualification.DISPLACEMENT_LINKED
+            else None
+        ),
         source_candle_ids=(
             f"{identity}:one",
             f"{identity}:two",
@@ -115,9 +156,12 @@ def _fvg(
         lower_bound=99.0,
         upper_bound=100.0,
         midpoint=99.5,
-        invalidation_price=99.0,
+        invalidation_price=(
+            99.0 if direction is Direction.LONG else 100.0
+        ),
         width_points=1.0,
         width_ticks=4,
+        formation_atr=1.0,
         width_atr=1.0,
         strength=0.8,
         formed_at=confirmed_at,
@@ -189,6 +233,9 @@ def _bos(
         resolved_at=resolved_at,
         age_bars=1,
         strength=0.8,
+        break_bar_id=f"break:{identity}",
+        break_distance_atr=0.8,
+        post_break_state=BOSPostBreakState.PENDING,
     )
 
 
@@ -252,7 +299,11 @@ def _manipulation(
             if lifecycle is ManipulationLifecycle.ACCEPTED_OUTSIDE
             else None
         ),
-        outside_completed_bars=1 if close_outside else 0,
+        outside_completed_bars=(
+            2
+            if lifecycle is ManipulationLifecycle.ACCEPTED_OUTSIDE
+            else 1 if close_outside else 0
+        ),
         penetration_atr=0.25,
         strength=0.25,
         age_1m_bars=age,
@@ -260,12 +311,55 @@ def _manipulation(
             "source_swept"
             if lifecycle is ManipulationLifecycle.SWEPT
             else (
-                "close_returned_inside"
+                "reentry_held_inside_swept_boundary"
                 if lifecycle is ManipulationLifecycle.REACCEPTED
-                else "close_held_outside"
+                else "consecutive_closes_held_outside"
             )
         ),
         censored_at=None,
+        reentry_candidate_at=(
+            resolved_at - pd.Timedelta(minutes=1)
+            if (
+                lifecycle is ManipulationLifecycle.REACCEPTED
+                and resolved_at is not None
+            )
+            else None
+        ),
+        reentry_candidate_price=(
+            100.75
+            if lifecycle is ManipulationLifecycle.REACCEPTED
+            else None
+        ),
+        inside_hold_bars=(
+            1 if lifecycle is ManipulationLifecycle.REACCEPTED else 0
+        ),
+        reentry_failed_at=None,
+        outside_run=(
+            2
+            if lifecycle is ManipulationLifecycle.ACCEPTED_OUTSIDE
+            else (
+                1
+                if (
+                    lifecycle is ManipulationLifecycle.SWEPT
+                    and close_outside
+                )
+                else 0
+            )
+        ),
+        outside_run_side=(
+            "above"
+            if (
+                lifecycle is ManipulationLifecycle.ACCEPTED_OUTSIDE
+                or (
+                    lifecycle is ManipulationLifecycle.SWEPT
+                    and close_outside
+                )
+            )
+            else None
+        ),
+        deadline_at=None,
+        deadline_elapsed=False,
+        crossed_source_ids=("pool-above",),
     )
 
 
@@ -285,18 +379,88 @@ def _zone_formation(
     return candle, fvg, output
 
 
-def test_group5_protocol_parses_the_exact_formalized_contract() -> None:
-    protocol = _protocol()
+def test_raw_fvg_is_visible_input_but_not_registered_by_group5() -> None:
+    protocol = replace(
+        _protocol(),
+        source_group3_protocol_hash=GROUP3_SHA,
+    )
+    reducer = CausalGroup5Reducer(protocol)
+    candle = _m1(0)
+    raw = _fvg(
+        candle.end,
+        identity="fvg-raw",
+        qualification=FVGQualification.RAW,
+    )
 
-    assert hashlib.sha256(PROTOCOL_PATH.read_bytes()).hexdigest() == PROTOCOL_SHA
+    output = reducer.on_completed_1m(
+        candle,
+        fair_value_gaps=(raw,),
+        m1_atr=1.0,
+    )
+
+    assert output.entry_locations == ()
+    assert output.path_sequences == ()
+    assert output.cold_source_ids == (raw.fvg_id,)
+
+
+def test_group5_protocol_tracks_current_config_and_upstream_bindings() -> None:
+    protocol = _protocol()
+    payload = json.loads(PROTOCOL_PATH.read_bytes())
+    parameters = payload["engineering_parameters"]
+    assert payload["authority"] == {
+        "typed_state_available": True,
+        "brain_input_allowed": True,
+        "natural_authority_validated": False,
+        "independent_action_authority": False,
+        "favr_enabled": False,
+    }
+    assert (
+        protocol.typed_state_available,
+        protocol.brain_input_allowed,
+        protocol.natural_authority_validated,
+        protocol.independent_action_authority,
+        protocol.favr_enabled,
+    ) == (True, True, False, False, False)
+
+    assert _sha256(PROTOCOL_PATH) == PROTOCOL_SHA
     assert protocol.protocol_hash == PROTOCOL_SHA
     assert protocol.source_group12_protocol_hash == GROUP12_SHA
     assert protocol.source_group3_protocol_hash == GROUP3_SHA
     assert protocol.source_group4_protocol_hash == GROUP4_SHA
-    assert protocol.m1_atr_period == 14
-    assert protocol.later_hold_bars == 1
-    assert protocol.maximum_contexts == 256
-    assert protocol.maximum_steps_per_path == 16
+    assert (
+        payload["upstream"]["group12_protocol_sha256"]
+        == GROUP12_SHA
+    )
+    assert payload["upstream"]["group3_protocol_sha256"] == GROUP3_SHA
+    assert payload["upstream"]["group4_protocol_sha256"] == GROUP4_SHA
+    assert protocol.protocol_version == payload["protocol_version"]
+    assert protocol.tick_size == payload["tick_size"]
+    assert (
+        protocol.m1_atr_period,
+        protocol.later_hold_bars,
+        protocol.maximum_contexts,
+        protocol.maximum_steps_per_path,
+    ) == (
+        parameters["m1_atr_period"],
+        parameters["qualified_reacceptance_later_hold_bars"],
+        parameters["maximum_context_states"],
+        parameters["maximum_steps_per_path"],
+    )
+    assert isinstance(protocol.protocol_version, str)
+    assert protocol.protocol_version
+    assert isinstance(protocol.tick_size, (int, float))
+    assert not isinstance(protocol.tick_size, bool)
+    assert math.isfinite(float(protocol.tick_size))
+    assert protocol.tick_size > 0.0
+    assert all(
+        type(item) is int and item > 0
+        for item in (
+            protocol.m1_atr_period,
+            protocol.later_hold_bars,
+            protocol.maximum_contexts,
+            protocol.maximum_steps_per_path,
+        )
+    )
 
 
 def test_first_pullback_rejection_draw_and_event_memory_are_source_bound() -> None:
@@ -369,7 +533,9 @@ def test_first_pullback_rejection_draw_and_event_memory_are_source_bound() -> No
     ]
     assert path.steps[-1].same_clock_relation == "same_clock_known"
 
-    observer = CausalObserver()
+    observer = CausalObserver(
+        ObserverConfig(scale_specs=CORE_TEST_SCALE_SPECS)
+    )
     observer._record_group5_events(created)
     observer._record_group5_events(resolved)
     assert any(
@@ -575,7 +741,6 @@ def test_reacceptance_requires_leave_reclaim_and_a_later_real_hold() -> None:
     reacceptance = left.qualified_reacceptances[0]
     path = left.path_sequences[0]
     assert reacceptance.lifecycle is QualifiedReacceptanceLifecycle.LEFT
-    assert reacceptance.source_reaccepted_at is None
     assert path.steps[-2].kind == "first_pullback"
     assert path.steps[-1].kind == "reference_left"
     assert path.steps[-1].same_clock_relation == "same_clock_known"
@@ -709,8 +874,13 @@ def test_pool_reaccepted_clock_is_latched_and_old_bos_cannot_be_backfilled() -> 
         manipulations=(swept,),
         m1_atr=1.0,
     )
+    reducer.on_completed_1m(
+        _m1(1),
+        manipulations=(swept,),
+        m1_atr=1.0,
+    )
 
-    source_clock = _m1(1).end
+    source_clock = _m1(2).end
     returned = _manipulation(
         sweep_bar.end,
         lifecycle=ManipulationLifecycle.REACCEPTED,
@@ -722,7 +892,7 @@ def test_pool_reaccepted_clock_is_latched_and_old_bos_cannot_be_backfilled() -> 
         direction=Direction.SHORT,
     )
     equality_bar = _m1(
-        1,
+        2,
         open_=101.0,
         high=101.25,
         low=100.75,
@@ -734,56 +904,58 @@ def test_pool_reaccepted_clock_is_latched_and_old_bos_cannot_be_backfilled() -> 
         m1_bos=(first_bos,),
         m1_atr=1.0,
     )
-    reacceptance = waiting.qualified_reacceptances[0]
-    assert reacceptance.lifecycle is QualifiedReacceptanceLifecycle.LEFT
-    assert reacceptance.source_reaccepted_at == source_clock
+    assert waiting.qualified_reacceptances == ()
+    assert waiting.path_sequences[0].steps[-1].kind == "reacceptance_held"
     assert waiting.path_sequences[0].lifecycle is PathSequenceLifecycle.ACTIVE
 
-    later_reclaim = _m1(
-        2,
+    displacement_bar = _m1(
+        3,
         open_=101.0,
         high=101.0,
         low=100.5,
         close=100.75,
     )
-    reclaimed = reducer.on_completed_1m(
-        later_reclaim,
+    reverse_zone = _fvg(
+        displacement_bar.end,
+        identity="fvg:pool-reverse-short",
+        direction=Direction.SHORT,
+        displacement_active_at=displacement_bar.end,
+    )
+    displaced = reducer.on_completed_1m(
+        displacement_bar,
+        fair_value_gaps=(reverse_zone,),
         manipulations=(),
-        m1_bos=(),
         m1_atr=1.0,
     )
-    assert (
-        reclaimed.qualified_reacceptances[0].lifecycle
-        is QualifiedReacceptanceLifecycle.RECLAIMED
+    assert displaced.path_sequences[0].steps[-1].kind == (
+        "opposite_displacement"
     )
-    assert (
-        reclaimed.qualified_reacceptances[0].source_reaccepted_at
-        == source_clock
+    later_trigger = _m1(
+        4,
+        open_=100.75,
+        high=101.0,
+        low=100.0,
+        close=100.25,
     )
-
-    before = reducer.snapshot()
-    unseen_same_clock = _bos(
-        identity="bos:late-extra",
-        resolved_at=source_clock,
-        direction=Direction.LONG,
-    )
-    with pytest.raises(
-        RuntimeError,
-        match="cannot revise its first bound M1 BOS clock",
-    ):
-        reducer.on_completed_1m(
-            _m1(
-                3,
-                open_=100.75,
-                high=101.0,
-                low=100.5,
-                close=101.0,
+    triggered = reducer.on_completed_1m(
+        later_trigger,
+        fair_value_gaps=(reverse_zone,),
+        manipulations=(),
+        m1_bos=(
+            _bos(
+                identity="bos:strict-after-reacceptance",
+                resolved_at=later_trigger.end,
+                direction=Direction.SHORT,
             ),
-            manipulations=(),
-            m1_bos=(first_bos, unseen_same_clock),
-            m1_atr=1.0,
-        )
-    assert reducer.snapshot() == before
+        ),
+        m1_atr=1.0,
+    )
+    assert triggered.path_sequences[0].lifecycle is (
+        PathSequenceLifecycle.CLOSED
+    )
+    assert triggered.path_sequences[0].transition_reason == (
+        "pool_reversal_sequence_observed"
+    )
 
 
 def test_pool_reacceptance_accepts_atr_derived_off_tick_zone_boundary() -> None:
@@ -808,40 +980,44 @@ def test_pool_reacceptance_accepts_atr_derived_off_tick_zone_boundary() -> None:
         manipulations=(swept,),
         m1_atr=1.0,
     )
-
-    reacceptance = output.qualified_reacceptances[0]
-    assert reacceptance.reference_price == 101.0625
-    assert reacceptance.lifecycle is QualifiedReacceptanceLifecycle.LEFT
-    expected_id = hashlib.sha256(
-        "|".join(
-            (
-                "group5-reacceptance-v1",
-                PROTOCOL_SHA,
-                "pool_sweep",
-                swept.manipulation_id,
-                "101.0625000000",
-                sweep_bar.end.isoformat(),
-            )
-        ).encode("utf-8")
-    ).hexdigest()
-    assert reacceptance.reacceptance_id == expected_id
-    assert (
-        reducer.on_completed_1m(
-            sweep_bar,
-            manipulations=(swept,),
-            m1_atr=1.0,
-        )
-        is output
-    )
-    rebuilt = CausalGroup5Reducer(_protocol()).on_completed_1m(
-        sweep_bar,
+    assert output.qualified_reacceptances == ()
+    reducer.on_completed_1m(
+        _m1(1),
         manipulations=(swept,),
         m1_atr=1.0,
     )
-    assert rebuilt.qualified_reacceptances[0].reacceptance_id == expected_id
+    returned = replace(
+        _manipulation(
+            sweep_bar.end,
+            lifecycle=ManipulationLifecycle.REACCEPTED,
+            resolved_at=_m1(2).end,
+        ),
+        source_lower_bound=100.6875,
+        source_upper_bound=101.0625,
+        penetration_atr=0.1875,
+        strength=0.1875,
+    )
+    held = reducer.on_completed_1m(
+        _m1(2),
+        manipulations=(returned,),
+        m1_atr=1.0,
+    )
+    assert held.qualified_reacceptances == ()
+    assert held.path_sequences[0].steps[-1].kind == "reacceptance_held"
+    assert held.path_sequences[0].steps[-1].source_entity_id == (
+        returned.manipulation_id
+    )
+    assert (
+        reducer.on_completed_1m(
+            _m1(2),
+            manipulations=(returned,),
+            m1_atr=1.0,
+        )
+        is held
+    )
 
 
-def test_anchor_clock_bos_is_sorted_record_only_and_never_closes_pool() -> None:
+def test_sweep_clock_bos_is_not_a_post_reacceptance_trigger() -> None:
     reducer = CausalGroup5Reducer(_protocol())
     sweep_bar = _m1(
         0,
@@ -872,25 +1048,10 @@ def test_anchor_clock_bos_is_sorted_record_only_and_never_closes_pool() -> None:
         m1_atr=1.0,
     )
     path = output.path_sequences[0]
-    simultaneous = [
-        step for step in path.steps
-        if step.kind == "micro_bos_simultaneous"
-    ]
-
     assert path.lifecycle is PathSequenceLifecycle.ACTIVE
-    assert [step.source_event_id for step in simultaneous] == [
-        "bos:a",
-        "bos:z",
-    ]
-    assert all(
-        step.same_clock_relation == "same_clock_unknown"
-        for step in simultaneous
-    )
-    assert all(
-        not reference.qualified
-        and reference.outcome == "simultaneous_unknown"
-        for reference in output.micro_bos_references
-    )
+    assert [step.kind for step in path.steps] == ["pool_swept"]
+    assert output.micro_bos_references == ()
+    assert output.qualified_reacceptances == ()
 
 
 def test_hard_boundary_censors_old_epoch_with_reason_aware_identity() -> None:

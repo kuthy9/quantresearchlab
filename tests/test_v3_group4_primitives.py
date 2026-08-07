@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 import hashlib
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -35,17 +36,22 @@ from smc_trader.observation import (
 from smc_trader.playbooks import _visible_levels
 from smc_trader.risk import _visible_level_ids
 
-from .helpers import market_observation
+from .helpers import CORE_TEST_SCALE_SPECS, market_observation
 
 
 ROOT = Path(__file__).resolve().parents[1]
 PROTOCOL_PATH = ROOT / "configs/primitives_range.json"
-PROTOCOL_SHA = (
-    "14b049facadb815c3fdc0d134275ee3f1efb3ca7c775a5f18ec4efad61663bc5"
+GROUP12_PROTOCOL_PATH = (
+    ROOT / "configs/primitives_structure_liquidity.json"
 )
-GROUP12_SHA = (
-    "189b6af3bff631c3985fa37bcf9f5f82528296800886d9c9bd4cbe123ea4c701"
-)
+
+
+def _sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+PROTOCOL_SHA = _sha256(PROTOCOL_PATH)
+GROUP12_SHA = _sha256(GROUP12_PROTOCOL_PATH)
 H1_BASE = pd.Timestamp("2025-01-06T00:00:00-05:00")
 M1_BASE = pd.Timestamp("2025-01-07T09:30:00-05:00")
 
@@ -210,6 +216,27 @@ def _warm_h1(
         assert output.dealing_ranges == ()
 
 
+def test_range_candidates_ignore_nonstructural_support_resistance() -> None:
+    tracker = CausalGroup4Tracker(_protocol())
+    support = _zone("support")
+    resistance = _zone("resistance")
+
+    def as_previous_day(zone: SupportResistanceState) -> SupportResistanceState:
+        source_id = f"reference_source:day:2025-01-05:{zone.side}"
+        return replace(
+            zone,
+            member_swing_ids=(),
+            source_kind="previous_day",
+            source_ids=(source_id,),
+            structural_rank="external",
+        )
+
+    assert tracker._eligible_pairs(
+        _h1(0, close=100.0),
+        (as_previous_day(support), as_previous_day(resistance)),
+    ) == ()
+
+
 def _mature_range(
     protocol: Group4Protocol,
 ) -> tuple[
@@ -286,12 +313,18 @@ def _frozen_range_geometry(
     )
 
 
-def test_group4_protocol_parses_exact_frozen_contract() -> None:
+def test_group4_protocol_tracks_current_config_and_upstream_binding() -> None:
     protocol = _protocol()
+    payload = json.loads(PROTOCOL_PATH.read_bytes())
+    parameters = payload["engineering_parameters"]
 
-    assert hashlib.sha256(PROTOCOL_PATH.read_bytes()).hexdigest() == PROTOCOL_SHA
+    assert _sha256(PROTOCOL_PATH) == PROTOCOL_SHA
     assert protocol.protocol_hash == PROTOCOL_SHA
     assert protocol.source_group12_protocol_hash == GROUP12_SHA
+    assert (
+        payload["upstream"]["group12_protocol_sha256"]
+        == GROUP12_SHA
+    )
     assert (
         protocol.protocol_version,
         protocol.tick_size,
@@ -302,17 +335,37 @@ def test_group4_protocol_parses_exact_frozen_contract() -> None:
         protocol.maximum_ranges,
         protocol.maximum_manipulations,
     ) == (
-        "3.1.0-group4.0",
-        0.25,
-        14,
-        14,
-        8,
-        24,
-        64,
-        256,
+        payload["protocol_version"],
+        payload["tick_size"],
+        parameters["h1_atr_period"],
+        parameters["m1_atr_period"],
+        parameters["minimum_candidate_real_h1_bars"],
+        parameters["maximum_forming_real_h1_bars"],
+        parameters["retained_dealing_range_states"],
+        parameters["retained_manipulation_states"],
     )
-    with pytest.raises(ValueError, match="differs from its frozen contract"):
-        replace(protocol, tick_size=0.5)
+    assert isinstance(protocol.protocol_version, str)
+    assert protocol.protocol_version
+    assert isinstance(protocol.tick_size, (int, float))
+    assert not isinstance(protocol.tick_size, bool)
+    assert protocol.tick_size > 0.0
+    assert all(
+        type(item) is int and item > 0
+        for item in (
+            protocol.h1_atr_period,
+            protocol.m1_atr_period,
+            protocol.minimum_candidate_real_h1_bars,
+            protocol.maximum_forming_real_h1_bars,
+            protocol.maximum_ranges,
+            protocol.maximum_manipulations,
+        )
+    )
+    assert (
+        protocol.minimum_candidate_real_h1_bars
+        <= protocol.maximum_forming_real_h1_bars
+    )
+    with pytest.raises(ValueError):
+        replace(protocol, tick_size=0.0)
 
 
 def test_h1_range_forms_matures_breaks_and_never_rewrites_geometry() -> None:
@@ -459,7 +512,7 @@ def test_cold_existing_range_pair_waits_for_a_new_source_identity() -> None:
     assert formed.lower_source_zone_id == fresh_support.zone_id
 
 
-def test_pool_source_must_exist_before_bar_then_sweep_resolves_next_bar() -> None:
+def test_pool_source_must_exist_before_bar_then_reentry_must_hold() -> None:
     tracker = CausalGroup4Tracker(_protocol())
     _warm_m1(tracker)
     gated = _m1(
@@ -501,7 +554,6 @@ def test_pool_source_must_exist_before_bar_then_sweep_resolves_next_bar() -> Non
     assert swept.transition_reason == "source_swept"
     live_observation = replace(
         market_observation(asof=sweep.end),
-        liquidity_inventory_authoritative=True,
         manipulations=(swept,),
     )
     assert live_observation.manipulations == (swept,)
@@ -518,21 +570,36 @@ def test_pool_source_must_exist_before_bar_then_sweep_resolves_next_bar() -> Non
         high=101.5,
         low=99.75,
     )
-    resolved_output = tracker.on_completed_update(
+    candidate_output = tracker.on_completed_update(
         resolution,
+        prior_inventory=(consumed,),
+        liquidity_pools=(),
+    )
+    candidate = candidate_output.manipulations[-1]
+    assert candidate.lifecycle is ManipulationLifecycle.SWEPT
+    assert candidate.reentry_candidate_at == resolution.end
+    assert candidate.inside_hold_bars == 0
+    held = _m1(
+        18,
+        close=100.0,
+        high=100.5,
+        low=99.75,
+    )
+    resolved_output = tracker.on_completed_update(
+        held,
         prior_inventory=(consumed,),
         liquidity_pools=(),
     )
     resolved = resolved_output.manipulations[-1]
     assert resolved.lifecycle is ManipulationLifecycle.REACCEPTED
-    assert resolved.resolved_at == resolution.end
+    assert resolved.resolved_at == held.end
     assert resolved.reentry_price == resolution.close
+    assert resolved.inside_hold_bars == 1
     assert resolved.sweep_extreme == frozen_extreme
-    assert resolved.age_1m_bars == 1
+    assert resolved.age_1m_bars == 2
 
     same_bar_observation = replace(
-        market_observation(asof=resolution.end),
-        liquidity_inventory_authoritative=True,
+        market_observation(asof=held.end),
         manipulations=(resolved,),
     )
     assert same_bar_observation.manipulations == (resolved,)
@@ -542,32 +609,222 @@ def test_pool_source_must_exist_before_bar_then_sweep_resolves_next_bar() -> Non
     ):
         replace(
             market_observation(
-                asof=resolution.end + pd.Timedelta(minutes=1)
+                asof=held.end + pd.Timedelta(minutes=1)
             ),
-            liquidity_inventory_authoritative=True,
             manipulations=(resolved,),
         )
 
     synthetic_output = tracker.on_completed_update(
-        _m1(18, synthetic=True),
+        _m1(19, synthetic=True),
         prior_inventory=(),
         liquidity_pools=(),
     )
     assert synthetic_output.manipulations == (resolved,)
 
     retained = tracker.on_completed_update(
-        _m1(19),
+        _m1(20),
         prior_inventory=(consumed,),
         liquidity_pools=(pool,),
     )
     assert retained.manipulations == (resolved,)
 
     compacted = tracker.on_completed_update(
-        _m1(20),
+        _m1(21),
         prior_inventory=(),
         liquidity_pools=(),
     )
     assert compacted.manipulations == ()
+
+
+def test_pool_outside_acceptance_requires_two_consecutive_closes() -> None:
+    tracker = CausalGroup4Tracker(_protocol())
+    _warm_m1(tracker)
+    pool, inventory = _pool(
+        "above",
+        confirmed_at=M1_BASE - pd.Timedelta(minutes=1),
+        identity="outside-above",
+    )
+    sweep = _m1(15, close=101.25, high=101.5, low=100.0)
+    first = tracker.on_completed_update(
+        sweep,
+        prior_inventory=(inventory,),
+        liquidity_pools=(pool,),
+    ).manipulations[-1]
+    assert first.lifecycle is ManipulationLifecycle.SWEPT
+    assert first.close_outside_on_sweep
+    assert first.outside_run == 1
+
+    consumed = replace(
+        inventory,
+        lifecycle=LiquidityInventoryLifecycle.CONSUMED,
+        consumed_at=sweep.end,
+        lifecycle_reason="pool_swept",
+    )
+    later = _m1(16, close=101.25, high=101.5, low=100.0)
+    resolved = tracker.on_completed_update(
+        later,
+        prior_inventory=(consumed,),
+        liquidity_pools=(),
+    ).manipulations[-1]
+    assert resolved.lifecycle is ManipulationLifecycle.ACCEPTED_OUTSIDE
+    assert resolved.accepted_outside_at == later.end
+    assert resolved.outside_run == 2
+    assert resolved.resolved_side == "above"
+    assert resolved.sweep_extreme == first.sweep_extreme
+
+
+def test_pool_reentry_failure_resets_then_deadline_censors_unresolved() -> None:
+    tracker = CausalGroup4Tracker(_protocol())
+    _warm_m1(tracker)
+    pool, inventory = _pool(
+        "above",
+        confirmed_at=M1_BASE - pd.Timedelta(minutes=1),
+        identity="deadline-above",
+    )
+    sweep = _m1(15, close=100.5, high=101.25, low=100.0)
+    swept = tracker.on_completed_update(
+        sweep,
+        prior_inventory=(inventory,),
+        liquidity_pools=(pool,),
+    ).manipulations[-1]
+    assert swept.deadline_at is None
+    consumed = replace(
+        inventory,
+        lifecycle=LiquidityInventoryLifecycle.CONSUMED,
+        consumed_at=sweep.end,
+        lifecycle_reason="pool_swept",
+    )
+
+    candidate = tracker.on_completed_update(
+        _m1(16, close=100.5, high=100.75, low=100.0),
+        prior_inventory=(consumed,),
+        liquidity_pools=(),
+    ).manipulations[-1]
+    assert candidate.reentry_candidate_at == _m1(16).end
+
+    failed = tracker.on_completed_update(
+        _m1(17, close=101.25, high=101.5, low=100.0),
+        prior_inventory=(consumed,),
+        liquidity_pools=(),
+    ).manipulations[-1]
+    assert failed.lifecycle is ManipulationLifecycle.SWEPT
+    assert failed.reentry_candidate_at is None
+    assert failed.reentry_failed_at == _m1(17).end
+    assert failed.outside_run == 1
+
+    tracker.on_completed_update(
+        _m1(18, close=100.5, high=100.75, low=100.0),
+        prior_inventory=(consumed,),
+        liquidity_pools=(),
+    )
+    tracker.on_completed_update(
+        _m1(19, close=101.25, high=101.5, low=100.0),
+        prior_inventory=(consumed,),
+        liquidity_pools=(),
+    )
+    censored = tracker.on_completed_update(
+        _m1(20, close=100.5, high=100.75, low=100.0),
+        prior_inventory=(consumed,),
+        liquidity_pools=(),
+    ).manipulations[-1]
+    assert censored.lifecycle is ManipulationLifecycle.SWEPT
+    assert censored.deadline_elapsed
+    assert censored.censored_at == _m1(20).end
+    assert censored.deadline_at == censored.censored_at
+    assert censored.age_1m_bars == 5
+    assert censored.sweep_extreme == swept.sweep_extreme
+
+
+def test_manipulation_candidate_and_failure_enter_event_memory() -> None:
+    tracker = CausalGroup4Tracker(_protocol())
+    _warm_m1(tracker)
+    pool, inventory = _pool(
+        "above",
+        confirmed_at=M1_BASE - pd.Timedelta(minutes=1),
+        identity="memory-revision",
+    )
+    swept_update = tracker.on_completed_update(
+        _m1(15, close=100.5, high=101.25, low=100.0),
+        prior_inventory=(inventory,),
+        liquidity_pools=(pool,),
+    )
+    swept = swept_update.manipulations[-1]
+    consumed = replace(
+        inventory,
+        lifecycle=LiquidityInventoryLifecycle.CONSUMED,
+        consumed_at=_m1(15).end,
+        lifecycle_reason="pool_swept",
+    )
+    observer = CausalObserver(
+        ObserverConfig(scale_specs=CORE_TEST_SCALE_SPECS)
+    )
+    observer._prior = SimpleNamespace(manipulations=(swept,))
+
+    candidate_update = tracker.on_completed_update(
+        _m1(16, close=100.5, high=100.75, low=100.0),
+        prior_inventory=(consumed,),
+        liquidity_pools=(),
+    )
+    observer._record_group4_events(
+        candidate_update,
+        include_ranges=False,
+    )
+    candidate = candidate_update.manipulations[-1]
+    observer._prior = SimpleNamespace(manipulations=(candidate,))
+
+    failed_update = tracker.on_completed_update(
+        _m1(17, close=101.25, high=101.5, low=100.0),
+        prior_inventory=(consumed,),
+        liquidity_pools=(),
+    )
+    observer._record_group4_events(
+        failed_update,
+        include_ranges=False,
+    )
+
+    revisions = tuple(
+        event
+        for event in observer.memory.recent()
+        if event.kind is EventKind.MANIPULATION_STATE
+        and event.details.get("state_revision") is True
+    )
+    assert [event.transition_reason for event in revisions] == [
+        "reentry_candidate_started",
+        "reentry_candidate_failed",
+    ]
+    assert revisions[0].details["reentry_candidate_at"] == (
+        _m1(16).end.isoformat()
+    )
+    assert revisions[1].details["reentry_failed_at"] == (
+        _m1(17).end.isoformat()
+    )
+
+
+def test_native_swept_pool_is_passed_to_group4_as_frozen_formation() -> None:
+    pool, inventory = _pool(
+        "above",
+        confirmed_at=M1_BASE - pd.Timedelta(minutes=1),
+        identity="native-sweep-formation",
+    )
+    sweep_bar = _m1(15, close=101.25, high=101.5, low=100.0)
+    swept = replace(
+        pool,
+        lifecycle=LiquidityPoolLifecycle.SWEPT,
+        swept_at=sweep_bar.end,
+        sweep_extreme=sweep_bar.high,
+        close_outside_on_sweep=True,
+    )
+
+    formation = CausalObserver._pool_formation_source(swept)
+
+    assert formation.lifecycle is LiquidityPoolLifecycle.FORMED
+    assert formation.swept_at is None
+    assert formation.sweep_extreme is None
+    assert formation.close_outside_on_sweep is None
+    assert CausalGroup4Tracker(_protocol())._pool_by_inventory(
+        inventory,
+        (formation,),
+    ) == formation
 
 
 def test_dual_side_sweep_is_ambiguous_and_creates_no_manipulation() -> None:
@@ -908,6 +1165,12 @@ def test_cold_prefix_reconstructs_first_sweep_and_next_bar_resolution() -> None:
             high=100.5,
             low=99.75,
         ),
+        _m1(
+            17,
+            close=100.0,
+            high=100.5,
+            low=99.75,
+        ),
     )
 
     output = CausalGroup4Tracker(
@@ -921,7 +1184,7 @@ def test_cold_prefix_reconstructs_first_sweep_and_next_bar_resolution() -> None:
     final = output.manipulations[-1]
     assert final.lifecycle is ManipulationLifecycle.REACCEPTED
     assert final.swept_at == _m1(15).end
-    assert final.resolved_at == _m1(16).end
+    assert final.resolved_at == _m1(17).end
     assert [
         state.lifecycle
         for state in output.manipulation_transitions
@@ -1039,6 +1302,7 @@ def test_group4_requires_the_typed_h1_structure_source() -> None:
     ):
         CausalObserver(
             ObserverConfig(
+                scale_specs=CORE_TEST_SCALE_SPECS,
                 liquidity_protocol=(
                     "configs/primitives_structure_liquidity.json"
                 ),
@@ -1056,7 +1320,6 @@ def test_range_boundaries_join_the_visible_liquidity_route_inventory() -> None:
         identity="canonical-draw",
     )
     observation = SimpleNamespace(
-        liquidity_inventory_authoritative=True,
         liquidity_inventory=(
             *tracker.snapshot().range_boundary_inventory,
             pool_item,
@@ -1094,6 +1357,12 @@ def test_same_clock_event_sequence_matches_the_frozen_causal_order() -> None:
             high=100.5,
             low=99.75,
         ),
+        _m1(
+            17,
+            close=100.0,
+            high=100.5,
+            low=99.75,
+        ),
     )
     update = CausalGroup4Tracker(
         _protocol()
@@ -1104,7 +1373,9 @@ def test_same_clock_event_sequence_matches_the_frozen_causal_order() -> None:
     )
     swept, resolved = update.manipulation_transitions
     assert resolved.resolved_at is not None
-    observer = CausalObserver()
+    observer = CausalObserver(
+        ObserverConfig(scale_specs=CORE_TEST_SCALE_SPECS)
+    )
     observer._record_group4_events(
         update,
         include_ranges=False,

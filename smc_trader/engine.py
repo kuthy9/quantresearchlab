@@ -14,6 +14,7 @@ from .model import (
     AccountState,
     Bar,
     EngineSnapshot,
+    Playbook,
     PositionSnapshot,
     Timeframe,
 )
@@ -61,7 +62,13 @@ class ContinuousSMCEngine:
     def from_config(
         cls,
         path: str | Path = "configs/model.json",
+        *,
+        runtime_mode: str = "development",
     ) -> "ContinuousSMCEngine":
+        if runtime_mode not in {"development", "live"}:
+            raise ValueError(
+                "runtime_mode must be development or live"
+            )
         source = Path(path)
         if not source.is_absolute() and not source.exists():
             source = Path(__file__).resolve().parents[1] / source
@@ -91,10 +98,6 @@ class ContinuousSMCEngine:
         observer = CausalObserver(
             ObserverConfig(
                 atr_period=int(observer_raw.get("atr_period", 14)),
-                swing_k=int(observer_raw.get("swing_k", 2)),
-                external_liquidity_lookback=int(
-                    observer_raw.get("external_liquidity_lookback", 80)
-                ),
                 memory_events=int(observer_raw.get("memory_events", 512)),
                 minimum_bars={
                     timeframe: int(minimum.get(timeframe.value, default))
@@ -129,6 +132,48 @@ class ContinuousSMCEngine:
         registry = load_playbook_registry(
             payload.get("playbook_registry", "configs/playbooks.json")
         )
+        group5_protocol = observer.group5_protocol
+        if group5_protocol is None:
+            raise ValueError("current engine requires typed Group 5 state")
+        favr_parked = "parked" in registry.for_playbook(
+            Playbook.FAILED_AUCTION_VALUE_RETURN
+        ).status
+        if group5_protocol.favr_enabled == favr_parked:
+            raise ValueError(
+                "Group 5 favr_enabled must agree with the FAVR "
+                "development restriction"
+            )
+        if runtime_mode == "live":
+            readiness = payload.get("release_readiness")
+            checks = {
+                "active_model_natural_authority_validated": bool(
+                    isinstance(readiness, Mapping)
+                    and readiness.get(
+                        "active_model_natural_authority_validated"
+                    )
+                    is True
+                ),
+                "economic_validation_complete": bool(
+                    isinstance(readiness, Mapping)
+                    and readiness.get("economic_validation_complete")
+                    is True
+                ),
+                "live_execution_allowed": bool(
+                    isinstance(readiness, Mapping)
+                    and readiness.get("live_execution_allowed") is True
+                ),
+                "group5_natural_authority_validated": (
+                    group5_protocol.natural_authority_validated
+                ),
+            }
+            missing = tuple(
+                name for name, ready in checks.items() if not ready
+            )
+            if missing:
+                raise RuntimeError(
+                    "live execution readiness is incomplete: "
+                    + ", ".join(missing)
+                )
         calibration_path = payload.get("calibration_artifact")
         calibrator = (
             TypedBrainCalibrator.from_file(

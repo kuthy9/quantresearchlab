@@ -19,6 +19,7 @@ from .model import (
     Direction,
     EntryLocationLifecycle,
     EntryLocationState,
+    FVGQualification,
     FairValueGapLifecycle,
     FairValueGapState,
     GROUP5_HARD_BOUNDARY_REASONS,
@@ -54,7 +55,12 @@ class Group5Protocol:
     later_hold_bars: int
     maximum_contexts: int
     maximum_steps_per_path: int
-    protocol_version: str = "3.1.0-group5.2"
+    protocol_version: str
+    typed_state_available: bool
+    brain_input_allowed: bool
+    natural_authority_validated: bool
+    independent_action_authority: bool
+    favr_enabled: bool
 
     def __post_init__(self) -> None:
         hashes = (
@@ -72,27 +78,40 @@ class Group5Protocol:
                 )
                 for value in hashes
             )
-            or self.protocol_version != "3.1.0-group5.2"
-            or self.protocol_hash
-            != "108d6e5f24fa733451706a7499c1f45df099ad8ae75ed32158feaedf082bd833"
-            or self.source_group12_protocol_hash
-            != "189b6af3bff631c3985fa37bcf9f5f82528296800886d9c9bd4cbe123ea4c701"
-            or self.source_group3_protocol_hash
-            != "4086ed67c7fe849e175c149bca8688749ef44d6649a672736535e1fec2d18c51"
-            or self.source_group4_protocol_hash
-            != "14b049facadb815c3fdc0d134275ee3f1efb3ca7c775a5f18ec4efad61663bc5"
-            or not math.isclose(
-                float(self.tick_size),
-                0.25,
-                rel_tol=0.0,
-                abs_tol=0.0,
+            or not isinstance(self.protocol_version, str)
+            or not self.protocol_version.strip()
+            or any(
+                type(value) is not bool
+                for value in (
+                    self.typed_state_available,
+                    self.brain_input_allowed,
+                    self.natural_authority_validated,
+                    self.independent_action_authority,
+                    self.favr_enabled,
+                )
             )
-            or self.m1_atr_period != 14
-            or self.later_hold_bars != 1
-            or self.maximum_contexts != 256
-            or self.maximum_steps_per_path != 16
+            or not self.typed_state_available
+            or not self.brain_input_allowed
+            or self.independent_action_authority
+            or (
+                self.favr_enabled
+                and not self.natural_authority_validated
+            )
+            or isinstance(self.tick_size, bool)
+            or not isinstance(self.tick_size, (int, float))
+            or not math.isfinite(float(self.tick_size))
+            or float(self.tick_size) <= 0.0
+            or any(
+                type(value) is not int or value < 1
+                for value in (
+                    self.m1_atr_period,
+                    self.later_hold_bars,
+                    self.maximum_contexts,
+                    self.maximum_steps_per_path,
+                )
+            )
         ):
-            raise ValueError("Group 5 protocol differs from its frozen contract")
+            raise ValueError("Group 5 protocol is invalid")
 
     @classmethod
     def from_file(cls, path: str | Path) -> "Group5Protocol":
@@ -102,6 +121,7 @@ class Group5Protocol:
         raw = source.read_bytes()
         payload = json.loads(raw)
         parameters = payload["engineering_parameters"]
+        authority = payload["authority"]
         return cls(
             protocol_hash=hashlib.sha256(raw).hexdigest(),
             source_group12_protocol_hash=payload["upstream"][
@@ -113,20 +133,27 @@ class Group5Protocol:
             source_group4_protocol_hash=payload["upstream"][
                 "group4_protocol_sha256"
             ],
-            tick_size=float(payload["tick_size"]),
-            m1_atr_period=int(parameters["m1_atr_period"]),
-            later_hold_bars=int(
-                parameters[
-                    "qualified_reacceptance_later_hold_bars"
-                ]
-            ),
-            maximum_contexts=int(
-                parameters["maximum_context_states"]
-            ),
-            maximum_steps_per_path=int(
-                parameters["maximum_steps_per_path"]
-            ),
+            tick_size=payload["tick_size"],
+            m1_atr_period=parameters["m1_atr_period"],
+            later_hold_bars=parameters[
+                "qualified_reacceptance_later_hold_bars"
+            ],
+            maximum_contexts=parameters["maximum_context_states"],
+            maximum_steps_per_path=parameters[
+                "maximum_steps_per_path"
+            ],
             protocol_version=payload["protocol_version"],
+            typed_state_available=authority[
+                "typed_state_available"
+            ],
+            brain_input_allowed=authority["brain_input_allowed"],
+            natural_authority_validated=authority[
+                "natural_authority_validated"
+            ],
+            independent_action_authority=authority[
+                "independent_action_authority"
+            ],
+            favr_enabled=authority["favr_enabled"],
         )
 
 
@@ -210,8 +237,10 @@ class _ZoneSource:
     symbol: str
     instrument_id: int
     direction: Direction
-    source_displacement_id: str
+    source_displacement_id: str | None
+    source_displacement_active_at: pd.Timestamp | None
     source_bos_id: str | None
+    fvg_qualification: FVGQualification | None
     lower_bound: float
     upper_bound: float
     midpoint: float
@@ -224,6 +253,8 @@ class _ZoneSource:
     def can_register(self) -> bool:
         return (
             self.kind == "fvg"
+            and self.fvg_qualification
+            is FVGQualification.DISPLACEMENT_LINKED
             and self.lifecycle == FairValueGapLifecycle.OPEN.value
         ) or (
             self.kind == "order_block"
@@ -371,7 +402,11 @@ class CausalGroup5Reducer:
                 instrument_id=state.instrument_id,
                 direction=state.direction,
                 source_displacement_id=state.source_displacement_id,
+                source_displacement_active_at=(
+                    state.source_displacement_active_at
+                ),
                 source_bos_id=None,
+                fvg_qualification=state.qualification,
                 lower_bound=state.lower_bound,
                 upper_bound=state.upper_bound,
                 midpoint=state.midpoint,
@@ -389,7 +424,11 @@ class CausalGroup5Reducer:
                 instrument_id=state.instrument_id,
                 direction=state.direction,
                 source_displacement_id=state.source_displacement_id,
+                source_displacement_active_at=(
+                    state.source_displacement_active_at
+                ),
                 source_bos_id=state.source_bos_id,
+                fvg_qualification=None,
                 lower_bound=state.lower_bound,
                 upper_bound=state.upper_bound,
                 midpoint=state.midpoint,
@@ -858,6 +897,10 @@ class CausalGroup5Reducer:
         path_transitions: list[PathSequenceState],
         step_transitions: list[tuple[str, PathSequenceStep]],
     ) -> None:
+        if not source.can_register or source.source_displacement_id is None:
+            raise ValueError(
+                "Group 5 registers only displacement-linked FVGs or strict OBs"
+            )
         location_id = self._location_id(source)
         if location_id in self._locations:
             raise RuntimeError("Group 5 location identity was registered twice")
@@ -1019,16 +1062,15 @@ class CausalGroup5Reducer:
         context_kind: str,
         context_id: str,
     ) -> tuple[str, QualifiedReacceptanceState] | None:
-        mapped = (
-            "entry_zone"
-            if context_kind == "zone_return"
-            else "pool_sweep"
-        )
+        if context_kind != "zone_return":
+            raise ValueError(
+                "qualified reacceptance is only defined for entry zones"
+            )
         matches = tuple(
             (key, state)
             for key, state in self._reacceptances.items()
             if (
-                state.context_kind == mapped
+                state.context_kind == "entry_zone"
                 and state.context_id == context_id
             )
         )
@@ -1083,7 +1125,6 @@ class CausalGroup5Reducer:
         candle: Candle,
         atr: float,
         *,
-        source_reaccepted_at: pd.Timestamp | None,
         path_id: str,
         step_transitions: list[tuple[str, PathSequenceStep]],
     ) -> QualifiedReacceptanceState:
@@ -1098,29 +1139,6 @@ class CausalGroup5Reducer:
                 state.state_duration_real_1m_bars + 1
             ),
         )
-        if source_reaccepted_at is not None:
-            if state.context_kind != "pool_sweep":
-                raise RuntimeError(
-                    "entry-zone reacceptance received a pool source clock"
-                )
-            if (
-                state.source_reaccepted_at is None
-                and source_reaccepted_at != candle.end
-            ):
-                raise RuntimeError(
-                    "Group 5 cannot backfill Group 4 reacceptance evidence"
-                )
-            if (
-                state.source_reaccepted_at is not None
-                and state.source_reaccepted_at != source_reaccepted_at
-            ):
-                raise RuntimeError(
-                    "Group 4 reacceptance clock changed after observation"
-                )
-            aged = replace(
-                aged,
-                source_reaccepted_at=source_reaccepted_at,
-            )
         self._reacceptances[key] = aged
         if self._adverse_side(
             state.direction,
@@ -1137,10 +1155,6 @@ class CausalGroup5Reducer:
         if state.lifecycle is QualifiedReacceptanceLifecycle.LEFT:
             if (
                 candle.end > state.left_at
-                and (
-                    state.context_kind == "entry_zone"
-                    or aged.source_reaccepted_at is not None
-                )
                 and self._delivery_side(
                     state.direction,
                     float(candle.close),
@@ -1699,48 +1713,9 @@ class CausalGroup5Reducer:
         )
         path_transitions.append(path)
         step_transitions.append((path.sequence_id, first_step))
-        reference = (
-            state.source_upper_bound
-            if state.side == "above"
-            else state.source_lower_bound
-        )
-        if state.close_outside_on_sweep:
-            self._new_reacceptance(
-                symbol=state.symbol,
-                instrument_id=state.instrument_id,
-                context_kind="pool_sweep",
-                context_id=state.manipulation_id,
-                source_entity_id=state.source_id,
-                direction=direction,
-                reference_price=reference,
-                failure_boundary=state.sweep_extreme,
-                candle=candle,
-                atr=atr,
-                path_id=path.sequence_id,
-                step_transitions=step_transitions,
-            )
-        else:
-            margin = clamp(
-                abs(float(candle.close) - reference) / atr
-            )
-            self._append_step(
-                path.sequence_id,
-                kind="sweep_rejection",
-                observed_at=candle.end,
-                source_event_id=state.manipulation_id,
-                source_entity_id=state.manipulation_id,
-                strength=margin,
-                reason="sweep_bar_closed_inside",
-                step_transitions=step_transitions,
-                same_clock_relation="same_clock_known",
-            )
-        self._bind_micro_bos(
-            path_id=path.sequence_id,
-            anchor_at=state.swept_at,
-            current_end=candle.end,
-            m1_bos=m1_bos,
-            step_transitions=step_transitions,
-        )
+        # Group 4 owns the pool reclaim/hold lifecycle. Group 5 records the
+        # sweep context only and waits for the authoritative REACCEPTED state;
+        # entry-zone reacceptance remains a separate Group 5 primitive.
 
     def _reference_for_context(
         self,
@@ -1964,6 +1939,107 @@ class CausalGroup5Reducer:
             )
         return tuple(created)
 
+    def _bind_pool_opposite_displacement(
+        self,
+        path_id: str,
+        sources: Sequence[_ZoneSource],
+        candle: Candle,
+        step_transitions: list[tuple[str, PathSequenceStep]],
+    ) -> PathSequenceStep | None:
+        path = self._paths[path_id]
+        existing = next(
+            (
+                step
+                for step in path.steps
+                if step.kind == "opposite_displacement"
+            ),
+            None,
+        )
+        if existing is not None:
+            return existing
+        reaccepted_step = next(
+            (
+                step
+                for step in path.steps
+                if step.kind == "reacceptance_held"
+            ),
+            None,
+        )
+        if reaccepted_step is None:
+            return None
+        reaccepted_at = reaccepted_step.observed_at
+        eligible = tuple(
+            source
+            for source in sources
+            if (
+                source.can_register
+                and source.direction is path.direction
+                and source.source_displacement_id is not None
+                and source.source_displacement_active_at is not None
+                and source.source_displacement_active_at > reaccepted_at
+                and source.confirmed_at > reaccepted_at
+            )
+        )
+        late = tuple(
+            source
+            for source in eligible
+            if source.confirmed_at < candle.end
+        )
+        if late:
+            raise RuntimeError(
+                "Group 5 cannot backfill opposite displacement evidence"
+            )
+        current = tuple(
+            source
+            for source in eligible
+            if source.confirmed_at == candle.end
+        )
+        displacement_ids = tuple(
+            dict.fromkeys(
+                source.source_displacement_id for source in current
+            )
+        )
+        if len(displacement_ids) != 1:
+            if len(displacement_ids) > 1:
+                source = min(
+                    current,
+                    key=lambda value: (value.kind, value.source_id),
+                )
+                self._append_step(
+                    path_id,
+                    kind="opposite_displacement_ambiguous",
+                    observed_at=candle.end,
+                    source_event_id=source.source_id,
+                    source_entity_id=_identity(
+                        "ambiguous-displacement",
+                        *sorted(displacement_ids),
+                    ),
+                    strength=0.0,
+                    reason="multiple_opposite_displacements_same_clock",
+                    step_transitions=step_transitions,
+                )
+            return None
+        displacement_id = displacement_ids[0]
+        source = min(
+            (
+                value
+                for value in current
+                if value.source_displacement_id == displacement_id
+            ),
+            key=lambda value: (value.kind, value.source_id),
+        )
+        self._append_step(
+            path_id,
+            kind="opposite_displacement",
+            observed_at=source.confirmed_at,
+            source_event_id=source.source_id,
+            source_entity_id=displacement_id,
+            strength=0.0,
+            reason="displacement_linked_zone_after_reacceptance",
+            step_transitions=step_transitions,
+        )
+        return self._paths[path_id].steps[-1]
+
     def _path_has_step(
         self,
         path_id: str,
@@ -2010,11 +2086,7 @@ class CausalGroup5Reducer:
         # Existing reacceptances advance before their locations consume the
         # resulting held/failed state.
         for key, state in tuple(self._reacceptances.items()):
-            path_kind = (
-                "zone_return"
-                if state.context_kind == "entry_zone"
-                else "pool_reversal"
-            )
+            path_kind = "zone_return"
             path_id = self._path_id(
                 symbol=state.symbol,
                 instrument_id=state.instrument_id,
@@ -2031,32 +2103,10 @@ class CausalGroup5Reducer:
                         "closed Group 5 path retained a live reacceptance"
                     )
                 continue
-            source_failed = False
-            accepted_outside = False
-            source_reaccepted_at = None
-            if state.context_kind == "entry_zone":
-                location = self._locations[state.context_id]
-                source = source_by_id.get(location.source_zone_id)
-                source_failed = bool(
-                    source is not None and source.failed
-                )
-            else:
-                manipulation = manipulation_by_id.get(state.context_id)
-                source_reaccepted_at = (
-                    manipulation.reaccepted_at
-                    if (
-                        manipulation is not None
-                        and manipulation.lifecycle
-                        is ManipulationLifecycle.REACCEPTED
-                    )
-                    else None
-                )
-                accepted_outside = bool(
-                    manipulation is not None
-                    and manipulation.lifecycle
-                    is ManipulationLifecycle.ACCEPTED_OUTSIDE
-                )
-            if source_failed or accepted_outside:
+            location = self._locations[state.context_id]
+            source = source_by_id.get(location.source_zone_id)
+            source_failed = bool(source is not None and source.failed)
+            if source_failed:
                 self._reacceptances[key] = replace(
                     state,
                     last_updated_at=candle.end,
@@ -2068,11 +2118,7 @@ class CausalGroup5Reducer:
                 deferred_source_failures.append(
                     (
                         key,
-                        (
-                            "source_invalidated"
-                            if source_failed
-                            else "accepted_outside"
-                        ),
+                        "source_invalidated",
                         path_id,
                     )
                 )
@@ -2081,7 +2127,6 @@ class CausalGroup5Reducer:
                     key,
                     candle,
                     atr,
-                    source_reaccepted_at=source_reaccepted_at,
                     path_id=path_id,
                     step_transitions=step_transitions,
                 )
@@ -2108,8 +2153,7 @@ class CausalGroup5Reducer:
                     step_transitions,
                 )
 
-        # Group 4 resolution is applied to pool paths even when no qualified
-        # reacceptance exists (for example a sweep-bar rejection).
+        # Project the one authoritative Group 4 resolution into the path.
         for path_id, path in tuple(self._paths.items()):
             if (
                 path.lifecycle is not PathSequenceLifecycle.ACTIVE
@@ -2122,6 +2166,12 @@ class CausalGroup5Reducer:
                 and manipulation.lifecycle
                 is ManipulationLifecycle.ACCEPTED_OUTSIDE
             ):
+                if manipulation.accepted_outside_at < candle.end and not (
+                    self._path_has_step(path_id, {"accepted_outside"})
+                ):
+                    raise RuntimeError(
+                        "Group 5 cannot backfill accepted-outside state"
+                    )
                 if not self._path_has_step(path_id, {"accepted_outside"}):
                     self._append_step(
                         path_id,
@@ -2133,6 +2183,58 @@ class CausalGroup5Reducer:
                         reason="group4_accepted_outside",
                         step_transitions=step_transitions,
                     )
+            elif (
+                manipulation is not None
+                and manipulation.lifecycle
+                is ManipulationLifecycle.REACCEPTED
+                and not self._path_has_step(
+                    path_id,
+                    {"reacceptance_held"},
+                )
+            ):
+                if manipulation.reaccepted_at < candle.end:
+                    raise RuntimeError(
+                        "Group 5 cannot backfill manipulation reacceptance"
+                    )
+                self._append_step(
+                    path_id,
+                    kind="reacceptance_held",
+                    observed_at=manipulation.reaccepted_at,
+                    source_event_id=manipulation.manipulation_id,
+                    source_entity_id=manipulation.manipulation_id,
+                    strength=clamp(manipulation.penetration_atr),
+                    reason="group4_reentry_held",
+                    step_transitions=step_transitions,
+                )
+            elif (
+                manipulation is not None
+                and manipulation.lifecycle
+                is ManipulationLifecycle.SWEPT
+                and manipulation.deadline_elapsed
+            ):
+                if manipulation.censored_at < candle.end:
+                    raise RuntimeError(
+                        "Group 5 cannot backfill manipulation deadline"
+                    )
+                self._close_path(
+                    path_id,
+                    manipulation.censored_at,
+                    "manipulation_resolution_deadline",
+                    path_transitions,
+                )
+
+        for path_id, path in tuple(self._paths.items()):
+            if (
+                path.lifecycle is not PathSequenceLifecycle.ACTIVE
+                or path.context_kind != "pool_reversal"
+            ):
+                continue
+            self._bind_pool_opposite_displacement(
+                path_id,
+                sources,
+                candle,
+                step_transitions,
+            )
 
         # Typed source transitions are recorded before their derived
         # reacceptance failure at the same completed clock.
@@ -2158,10 +2260,18 @@ class CausalGroup5Reducer:
                 anchor = self._locations[path.context_id].first_entered_at
             else:
                 manipulation = manipulation_by_id.get(path.context_id)
+                displacement_step = next(
+                    (
+                        step
+                        for step in self._paths[path_id].steps
+                        if step.kind == "opposite_displacement"
+                    ),
+                    None,
+                )
                 anchor = (
-                    manipulation.swept_at
-                    if manipulation is not None
-                    else path.formed_at
+                    None
+                    if displacement_step is None
+                    else displacement_step.observed_at
                 )
             self._bind_micro_bos(
                 path_id=path_id,
@@ -2223,50 +2333,39 @@ class CausalGroup5Reducer:
                     continue
                 else:
                     continue
+                if (
+                    reacceptance is not None
+                    and not self._reacceptance_terminal(reacceptance[1])
+                ):
+                    self._fail_reacceptance(
+                        reacceptance[0],
+                        candle,
+                        "context_closed_before_hold",
+                        path_id,
+                        step_transitions,
+                    )
             else:
-                reacceptance = self._context_reacceptance(
-                    "pool_reversal",
-                    path.context_id,
-                )
                 if "accepted_outside" in kinds:
                     reason = "accepted_outside"
-                elif (
-                    reacceptance is not None
-                    and reacceptance[1].lifecycle
-                    is QualifiedReacceptanceLifecycle.FAILED
-                ):
-                    reason = "reacceptance_failed"
+                elif "opposite_displacement_ambiguous" in kinds:
+                    reason = "opposite_displacement_ambiguous_same_clock"
                 elif "micro_bos_ambiguous" in kinds:
                     reason = "micro_bos_ambiguous_same_clock"
+                elif "micro_bos_opposed" in kinds:
+                    reason = "micro_bos_opposed"
                 else:
-                    has_bos = bool(
-                        kinds
-                        & {
-                            "micro_bos_confirmed",
-                            "micro_bos_opposed",
-                        }
-                    )
+                    has_bos = "micro_bos_confirmed" in kinds
                     returned = bool(
-                        "sweep_rejection" in kinds
-                        or (
-                            reacceptance is not None
-                            and reacceptance[1].lifecycle
-                            is QualifiedReacceptanceLifecycle.HELD
-                        )
+                        "reacceptance_held" in kinds
                     )
-                    if not (has_bos and returned):
+                    has_displacement = (
+                        "opposite_displacement" in kinds
+                    )
+                    if not (
+                        has_bos and returned and has_displacement
+                    ):
                         continue
                     reason = "pool_reversal_sequence_observed"
-            if reacceptance is not None and not self._reacceptance_terminal(
-                reacceptance[1]
-            ):
-                self._fail_reacceptance(
-                    reacceptance[0],
-                    candle,
-                    "context_closed_before_hold",
-                    path_id,
-                    step_transitions,
-                )
             self._close_path(
                 path_id,
                 candle.end,
@@ -2303,6 +2402,7 @@ class CausalGroup5Reducer:
             if (
                 state.source_kind == "formed_liquidity_pool"
                 and state.lifecycle is ManipulationLifecycle.SWEPT
+                and state.censored_at is None
                 and state.swept_at == candle.end
             ):
                 self._new_pool_context(

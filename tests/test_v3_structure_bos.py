@@ -9,6 +9,7 @@ from smc_trader.causal import CausalMarketReader
 from smc_trader.model import (
     Bar,
     BOSLifecycle,
+    BOSPostBreakState,
     BOSScope,
     Candle,
     Direction,
@@ -22,6 +23,8 @@ from smc_trader.model import (
 )
 from smc_trader.observation import CausalObserver, ObserverConfig
 from smc_trader.structure import StructureConfig, StructureTracker
+
+from .helpers import MODEL_SCALE_SPECS
 
 
 BASE = pd.Timestamp("2020-01-06 09:30:00", tz="America/New_York")
@@ -102,6 +105,107 @@ def test_tick_relation_table_is_exact_and_atr_independent() -> None:
     assert relation(SwingSide.LOW, 100, 100) is SwingRelation.EL
 
 
+def test_swing_span_is_one_for_m1_and_two_for_other_enabled_frames() -> None:
+    config = StructureConfig.from_file(STRUCTURE_PROTOCOL)
+    assert config.span_for(Timeframe.M1) == 1
+    assert all(
+        config.span_for(timeframe) == 2
+        for timeframe in (
+            Timeframe.M5,
+            Timeframe.M15,
+            Timeframe.H1,
+            Timeframe.H4,
+        )
+    )
+
+
+def test_swing_span_values_are_registry_driven_not_code_hardcoded() -> None:
+    config = StructureConfig.from_file(STRUCTURE_PROTOCOL)
+    configured = replace(
+        config,
+        swing_spans=tuple(
+            (timeframe, 1 if timeframe is Timeframe.M5 else span)
+            for timeframe, span in config.swing_spans
+        ),
+    )
+
+    assert configured.span_for(Timeframe.M5) == 1
+    assert StructureTracker(Timeframe.M5, configured).swing_span == 1
+
+
+def test_pending_bos_rearms_when_same_target_gains_structure_scope() -> None:
+    tracker = _tracker()
+    prefix = _bull_structure_prefix()
+    for candle in prefix[:8]:
+        tracker.on_candle(candle)
+
+    _, _, before = tracker.snapshot()
+    local = next(
+        item
+        for item in before
+        if item.direction is Direction.LONG
+        and item.lifecycle is BOSLifecycle.PENDING
+        and item.target_price == 14.0
+    )
+    assert local.scope is BOSScope.LOCAL
+    assert local.source_structure_id is None
+
+    for candle in prefix[8:10]:
+        tracker.on_candle(candle)
+
+    _, structures, after = tracker.snapshot()
+    bull = next(
+        item
+        for item in structures
+        if item.direction is Direction.LONG
+    )
+    continuation = next(
+        item
+        for item in after
+        if item.direction is Direction.LONG
+        and item.lifecycle is BOSLifecycle.PENDING
+        and item.target_swing_id == local.target_swing_id
+    )
+    superseded = next(item for item in after if item.bos_id == local.bos_id)
+    assert bull.lifecycle is StructureLifecycle.CONFIRMED
+    assert continuation.scope is BOSScope.CONTINUATION
+    assert continuation.source_structure_id == bull.structure_id
+    assert continuation.bos_id != local.bos_id
+    assert continuation.pending_at == prefix[9].end
+    assert superseded.lifecycle is BOSLifecycle.FAILED
+    assert superseded.resolved_at == prefix[9].end
+    assert superseded.failure_reason == "superseded"
+
+
+@pytest.mark.parametrize("span", [1, 2])
+def test_outside_bar_never_confirms_both_swing_sides(span: int) -> None:
+    config = StructureConfig.from_file(STRUCTURE_PROTOCOL)
+    config = replace(
+        config,
+        swing_spans=tuple(
+            (timeframe, span if timeframe is Timeframe.M1 else value)
+            for timeframe, value in config.swing_spans
+        ),
+    )
+    tracker = StructureTracker(Timeframe.M1, config)
+    pivot_index = span
+    for index in range(span * 2 + 1):
+        tracker.on_candle(
+            _candle(
+                index,
+                12.0 if index == pivot_index else 10.0,
+                7.0 if index == pivot_index else 9.0,
+            )
+        )
+
+    swings, _, _ = tracker.snapshot()
+    assert not any(
+        item.pivot_start == _candle(pivot_index, 12.0, 7.0).start
+        and item.lifecycle is SwingLifecycle.CONFIRMED
+        for item in swings
+    )
+
+
 def test_structure_and_bos_are_prefix_invariant_and_not_backfilled() -> None:
     prefix = _bull_structure_prefix()
     tracker = _tracker()
@@ -154,16 +258,18 @@ def test_wick_attempt_stays_pending_then_later_close_confirms_continuation() -> 
     tracker = _tracker()
     for candle in _bull_structure_prefix():
         tracker.on_candle(candle)
+    settle = _candle(11, 14.0, 12.5, open_=13.0, close=13.75)
+    tracker.on_candle(settle)
     _, _, before = tracker.snapshot()
     pending = next(
         item
         for item in before
         if item.direction is Direction.LONG
         and item.lifecycle is BOSLifecycle.PENDING
-        and item.target_price == 14.0
+        and item.target_price == 15.0
     )
 
-    wick = _candle(11, 14.5, 12.5, open_=13.0, close=13.75)
+    wick = _candle(12, 15.5, 13.5, open_=14.0, close=14.75)
     tracker.on_candle(wick)
     _, _, after_wick = tracker.snapshot()
     attempted = next(item for item in after_wick if item.bos_id == pending.bos_id)
@@ -176,11 +282,11 @@ def test_wick_attempt_stays_pending_then_later_close_confirms_continuation() -> 
     )
 
     second_wick = _candle(
-        12,
-        15.25,
-        13.0,
-        open_=13.75,
-        close=13.50,
+        13,
+        16.25,
+        13.5,
+        open_=14.75,
+        close=14.50,
     )
     tracker.on_candle(second_wick)
     _, _, after_second_wick = tracker.snapshot()
@@ -196,11 +302,11 @@ def test_wick_attempt_stays_pending_then_later_close_confirms_continuation() -> 
     )
 
     close_break = _candle(
-        13,
-        14.75,
-        13.0,
-        open_=13.75,
-        close=14.25,
+        14,
+        15.75,
+        14.0,
+        open_=14.75,
+        close=15.25,
     )
     tracker.on_candle(close_break)
     _, _, resolved = tracker.snapshot()
@@ -210,13 +316,34 @@ def test_wick_attempt_stays_pending_then_later_close_confirms_continuation() -> 
     assert confirmed.resolved_at == close_break.end
     assert confirmed.resolved_at > confirmed.pending_at
     assert confirmed.attempt_clocks == twice_attempted.attempt_clocks
+    assert confirmed.break_bar_id == tracker._candle_id(close_break)
+    assert confirmed.break_distance_atr is not None
+    assert confirmed.post_break_state is BOSPostBreakState.PENDING
+    assert confirmed.source_displacement_id is None
+    assert confirmed.mss_qualified is False
+
+    accepted_bar = _candle(
+        15,
+        16.0,
+        14.75,
+        open_=15.25,
+        close=15.50,
+    )
+    tracker.on_candle(accepted_bar)
+    accepted = next(
+        item for item in tracker.snapshot()[2] if item.bos_id == pending.bos_id
+    )
+    assert accepted.post_break_state is BOSPostBreakState.ACCEPTED
+    assert accepted.accepted_at == accepted_bar.end
+    assert accepted.rejected_at is None
 
 
 def test_same_clock_attempt_is_only_valid_for_failed_resolution() -> None:
     tracker = _tracker()
     for candle in _bull_structure_prefix():
         tracker.on_candle(candle)
-    wick = _candle(11, 14.5, 12.5, open_=13.0, close=13.75)
+    tracker.on_candle(_candle(11, 14.0, 12.5, open_=13.0, close=13.75))
+    wick = _candle(12, 15.5, 13.5, open_=14.0, close=14.75)
     tracker.on_candle(wick)
     _, _, states = tracker.snapshot()
     attempted = next(
@@ -329,7 +456,7 @@ def test_failed_bos_rearm_of_same_target_starts_new_generation() -> None:
         and item.target_swing_id == failed.target_swing_id
     )
     assert rearmed.bos_id != failed.bos_id
-    assert rearmed.pending_at == refresh_bars[-1].end
+    assert rearmed.pending_at == refresh_bars[0].end
     assert rearmed.pending_at > failed.resolved_at
 
     close_break = _candle(
@@ -456,13 +583,14 @@ def test_boundary_reset_terminalizes_pending_bos_before_clearing_state() -> None
 def test_observer_records_boundary_terminal_events_before_new_epoch() -> None:
     observer = CausalObserver(
         ObserverConfig(
+            scale_specs=MODEL_SCALE_SPECS,
             minimum_bars={
                 timeframe: 1 for timeframe in Timeframe
             },
             structure_protocol=STRUCTURE_PROTOCOL,
         )
     )
-    reader = CausalMarketReader()
+    reader = CausalMarketReader(scale_specs=MODEL_SCALE_SPECS)
     observation = None
     for candle in _bull_structure_prefix():
         observation = observer.observe(
@@ -522,13 +650,14 @@ def test_observer_records_boundary_terminal_events_before_new_epoch() -> None:
 def test_simultaneous_gap_and_contract_change_terminalizes_once() -> None:
     observer = CausalObserver(
         ObserverConfig(
+            scale_specs=MODEL_SCALE_SPECS,
             minimum_bars={
                 timeframe: 1 for timeframe in Timeframe
             },
             structure_protocol=STRUCTURE_PROTOCOL,
         )
     )
-    reader = CausalMarketReader()
+    reader = CausalMarketReader(scale_specs=MODEL_SCALE_SPECS)
     observation = None
     for candle in _bull_structure_prefix():
         observation = observer.observe(
@@ -600,13 +729,14 @@ def test_boundary_terminal_state_survives_observation_retry(
 ) -> None:
     observer = CausalObserver(
         ObserverConfig(
+            scale_specs=MODEL_SCALE_SPECS,
             minimum_bars={
                 timeframe: 1 for timeframe in Timeframe
             },
             structure_protocol=STRUCTURE_PROTOCOL,
         )
     )
-    reader = CausalMarketReader()
+    reader = CausalMarketReader(scale_specs=MODEL_SCALE_SPECS)
     observation = None
     for candle in _bull_structure_prefix():
         observation = observer.observe(

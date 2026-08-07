@@ -14,7 +14,7 @@ from .market_clock import (
     special_session_close,
 )
 from .model import Bar, Candle, Timeframe
-from .scene_graph import ScaleSpec, legacy_scale_specs, scale_registry_id
+from .scene_graph import ScaleSpec, scale_registry_id
 
 
 class CausalClockError(RuntimeError):
@@ -28,9 +28,9 @@ class ReaderUpdate:
     newly_completed: Mapping[Timeframe, tuple[Candle, ...]]
     histories: Mapping[Timeframe, tuple[Candle, ...]]
     anomalies: tuple[str, ...]
-    active_timeframes: tuple[Timeframe, ...] = ()
-    scale_specs: tuple[ScaleSpec, ...] = ()
-    scale_registry_id: str = "legacy-four-scale"
+    active_timeframes: tuple[Timeframe, ...]
+    scale_specs: tuple[ScaleSpec, ...]
+    scale_registry_id: str
 
 
 class _TimeframeAggregator:
@@ -164,15 +164,9 @@ class CausalMarketReader:
     def __init__(
         self,
         *,
-        maximum_history: int = 1024,
-        scale_specs: Sequence[ScaleSpec] | None = None,
+        scale_specs: Sequence[ScaleSpec],
     ) -> None:
-        self.maximum_history = int(maximum_history)
-        self.scale_specs = tuple(
-            scale_specs
-            if scale_specs is not None
-            else legacy_scale_specs(history_limit=self.maximum_history)
-        )
+        self.scale_specs = tuple(scale_specs)
         if not self.scale_specs:
             raise ValueError("reader requires at least one scale specification")
         active_specs = tuple(item for item in self.scale_specs if item.enabled)

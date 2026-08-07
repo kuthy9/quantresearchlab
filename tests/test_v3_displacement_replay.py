@@ -11,6 +11,12 @@ from smc_trader.displacement_observer import CausalDisplacementEye, READER_ANOMA
 from smc_trader.model import Bar, Candle, EventKind, MarketEvent, Timeframe
 from smc_trader.observation import CausalObserver, EventMemory, ObserverConfig
 
+from .helpers import (
+    CORE_TEST_SCALE_REGISTRY_ID,
+    CORE_TEST_SCALE_SPECS,
+    MODEL_SCALE_SPECS,
+)
+
 
 ROOT = Path(__file__).resolve().parents[1]
 PROTOCOL_PATH = ROOT / "configs/primitives_displacement.json"
@@ -55,11 +61,25 @@ def _update(asof: pd.Timestamp, *, m5=(), anomalies=()) -> ReaderUpdate:
         Timeframe.M1, start, asof, 100.0, 100.25, 99.75, 100.0, 100.0,
         "NQH5", 1, 1, 1, True, 1, 0,
     )
-    newly = {timeframe: () for timeframe in Timeframe}
-    histories = {timeframe: () for timeframe in Timeframe}
+    active_timeframes = tuple(
+        spec.native_timeframe
+        for spec in CORE_TEST_SCALE_SPECS
+        if spec.enabled and spec.native_timeframe is not None
+    )
+    newly = {timeframe: () for timeframe in active_timeframes}
+    histories = {timeframe: () for timeframe in active_timeframes}
     newly[Timeframe.M1], newly[Timeframe.M5] = (minute,), m5
     histories[Timeframe.M1], histories[Timeframe.M5] = (minute,), m5
-    return ReaderUpdate(asof, minute, newly, histories, anomalies)
+    return ReaderUpdate(
+        asof=asof,
+        completed_1m=minute,
+        newly_completed=newly,
+        histories=histories,
+        anomalies=anomalies,
+        active_timeframes=active_timeframes,
+        scale_specs=CORE_TEST_SCALE_SPECS,
+        scale_registry_id=CORE_TEST_SCALE_REGISTRY_ID,
+    )
 
 
 def _send(eye: CausalDisplacementEye, candle: Candle):
@@ -89,7 +109,8 @@ def _bar(index: int) -> Bar:
 
 
 def test_exp013_no_advance_before_completed_m5() -> None:
-    reader, eye = CausalMarketReader(), CausalDisplacementEye(_protocol())
+    reader = CausalMarketReader(scale_specs=MODEL_SCALE_SPECS)
+    eye = CausalDisplacementEye(_protocol())
     for index in range(4):
         update = reader.on_bar(_bar(index))
         observation = eye.on_update(update)
@@ -205,9 +226,12 @@ def test_exp013_boundary_m5_xor() -> None:
 def test_observer_reuses_displacement_on_exact_boundary_retry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    reader = CausalMarketReader()
+    reader = CausalMarketReader(scale_specs=MODEL_SCALE_SPECS)
     observer = CausalObserver(
-        ObserverConfig(displacement_protocol=str(PROTOCOL_PATH))
+        ObserverConfig(
+            scale_specs=MODEL_SCALE_SPECS,
+            displacement_protocol=str(PROTOCOL_PATH),
+        )
     )
     observer.observe(reader.on_bar(_bar(0)))
     update = reader.on_bar(
@@ -238,6 +262,7 @@ def test_observer_reuses_displacement_on_exact_boundary_retry(
 def test_group3_derived_data_anomaly_is_auditable_without_memory_leak() -> None:
     observer = CausalObserver(
         ObserverConfig(
+            scale_specs=CORE_TEST_SCALE_SPECS,
             structure_protocol=str(GROUP12_PROTOCOL_PATH),
             liquidity_protocol=str(GROUP12_PROTOCOL_PATH),
             displacement_protocol=str(PROTOCOL_PATH),

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import hashlib
 from pathlib import Path
 
 import pandas as pd
@@ -17,16 +18,20 @@ from smc_trader.group5 import CausalGroup5Reducer, Group5Protocol
 from smc_trader.model import (
     AccountState,
     BOSLifecycle,
+    BOSPostBreakState,
     BOSScope,
     BreakOfStructureState,
     Candle,
     Direction,
     ExecutionObservation,
     FairValueGapLifecycle,
+    FVGQualification,
     FairValueGapState,
     LiquidityInventoryItem,
     LiquidityInventoryLifecycle,
     LiquidityLevel,
+    LiquidityPoolLifecycle,
+    LiquidityPoolState,
     ManipulationLifecycle,
     ManipulationState,
     MarketObservation,
@@ -48,15 +53,20 @@ from .helpers import market_observation
 
 
 ROOT = Path(__file__).resolve().parents[1]
-GROUP12_SHA = (
-    "189b6af3bff631c3985fa37bcf9f5f82528296800886d9c9bd4cbe123ea4c701"
+GROUP12_PROTOCOL_PATH = (
+    ROOT / "configs/primitives_structure_liquidity.json"
 )
-GROUP3_SHA = (
-    "4086ed67c7fe849e175c149bca8688749ef44d6649a672736535e1fec2d18c51"
-)
-GROUP4_SHA = (
-    "14b049facadb815c3fdc0d134275ee3f1efb3ca7c775a5f18ec4efad61663bc5"
-)
+GROUP3_PROTOCOL_PATH = ROOT / "configs/primitives_zones.json"
+GROUP4_PROTOCOL_PATH = ROOT / "configs/primitives_range.json"
+
+
+def _sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+GROUP12_SHA = _sha256(GROUP12_PROTOCOL_PATH)
+GROUP3_SHA = _sha256(GROUP3_PROTOCOL_PATH)
+GROUP4_SHA = _sha256(GROUP4_PROTOCOL_PATH)
 DISPLACEMENT_SHA = "a" * 64
 BASE = pd.Timestamp("2025-01-07T09:30:00-05:00")
 
@@ -161,11 +171,12 @@ def _fvg(
         timeframe=Timeframe.M5,
         direction=direction,
         lifecycle=FairValueGapLifecycle.OPEN,
+        qualification=FVGQualification.DISPLACEMENT_LINKED,
         source_displacement_id=f"displacement:{identity}",
         source_active_transition_id=f"active:{identity}",
         source_displacement_protocol_hash=DISPLACEMENT_SHA,
         source_displacement_started_at=starts[1],
-        source_displacement_active_at=starts[2],
+        source_displacement_active_at=confirmed_at,
         source_displacement_prefix_commitment=f"prefix:{identity}",
         source_candle_ids=(
             f"{identity}:one",
@@ -181,8 +192,9 @@ def _fvg(
         ),
         width_points=upper - lower,
         width_ticks=round((upper - lower) / 0.25),
+        formation_atr=1.0,
         width_atr=upper - lower,
-        strength=0.8,
+        strength=0.0,
         formed_at=confirmed_at,
         confirmed_at=confirmed_at,
         state_started_at=confirmed_at,
@@ -275,6 +287,10 @@ def _continuation_bos(clock: pd.Timestamp) -> BreakOfStructureState:
         resolved_at=clock,
         age_bars=1,
         strength=0.8,
+        break_bar_id="h1-continuation-break-bar",
+        break_distance_atr=0.5,
+        post_break_state=BOSPostBreakState.ACCEPTED,
+        accepted_at=clock + pd.Timedelta(hours=1),
     )
 
 
@@ -287,20 +303,10 @@ def _dfp_observation(
     draw: LiquidityInventoryItem,
 ) -> MarketObservation:
     base = market_observation(asof=asof, price=price)
-    target = LiquidityLevel(
-        level_id=draw.item_id,
-        timeframe=Timeframe.H4,
-        side=draw.side,
-        price=draw.price,
-        formed_at=draw.formed_at,
-        confirmed_at=draw.confirmed_at,
-        touches=0,
-    )
     frames = dict(base.frames)
     frames[Timeframe.H4] = replace(
         frames[Timeframe.H4],
         cutoff=asof,
-        liquidity=(target,),
         swings=(
             SwingPoint(
                 swing_id=draw.source_ids[0],
@@ -348,8 +354,7 @@ def _dfp_observation(
         frames=frames,
         execution=_execution(asof, cost=0.10),
         liquidity_inventory=(draw,),
-        liquidity_inventory_authoritative=True,
-        group5_authoritative=True,
+        group5_typed_available=True,
         entry_locations=output.entry_locations,
         qualified_reacceptances=output.qualified_reacceptances,
         micro_bos_references=output.micro_bos_references,
@@ -511,6 +516,70 @@ def test_dfp_vertical_chain_uses_exact_group5_plan_and_risk_binding() -> None:
     )
     assert not vetoed.passed
     assert vetoed.final_action.value == "abstain"
+
+
+def test_same_episode_sequence_history_does_not_regress_with_trimmed_snapshot() -> None:
+    _, _, _, forming, triggered = _dfp_fixture()
+    brain = _brain()
+    key = "displacement_first_pullback:long"
+    brain.update(forming)
+    complete = brain.update(triggered).hypotheses[key]
+    assert complete.sequence is not None
+    assert complete.sequence.complete
+
+    path = triggered.path_sequences[0]
+    trimmed_path = replace(
+        path,
+        steps=path.steps[:2],
+        transition_reason="departure_confirmed",
+    )
+    later = triggered.asof + pd.Timedelta(minutes=1)
+    trimmed = replace(
+        _advance_observation(triggered, later),
+        path_sequences=(trimmed_path,),
+        qualified_reacceptances=(),
+        micro_bos_references=(),
+    )
+
+    belief = brain.update(trimmed)
+    updated = belief.hypotheses[key]
+    assert updated.sequence == complete.sequence
+    assert updated.sequence.complete
+    assert not updated.hard_gate_results[
+        "first_pullback_to_frozen_zone"
+    ]
+    assert not updated.hard_gate_results["typed_entry_trigger"]
+    assert (
+        UtilityDecisionLayer().decide(trimmed, belief).selected_action.value
+        != "enter"
+    )
+
+
+def test_invalidated_source_keeps_episode_history_but_fails_current_gates() -> None:
+    _, _, _, forming, triggered = _dfp_fixture()
+    brain = _brain()
+    key = "displacement_first_pullback:long"
+    brain.update(forming)
+    complete = brain.update(triggered).hypotheses[key]
+    assert complete.sequence is not None
+    assert complete.sequence.complete
+
+    later = triggered.asof + pd.Timedelta(minutes=1)
+    missing_draw = replace(
+        _advance_observation(triggered, later),
+        liquidity_inventory=(),
+    )
+    invalidated = brain.update(missing_draw).hypotheses[key]
+
+    assert invalidated.phase is PlaybookPhase.INVALIDATED
+    assert invalidated.sequence == complete.sequence
+    assert invalidated.sequence.complete
+    assert not invalidated.hard_gate_results[
+        "h4_structure_and_draw"
+    ]
+    assert invalidated.terminal_reason == (
+        "context_draw_consumed_or_missing"
+    )
 
 
 
@@ -810,6 +879,40 @@ def test_terminal_episode_is_immutable_and_a_newer_episode_can_rearm() -> None:
         low=100.5,
         close=101.0,
     )
+    same_identity_fvg = _fvg(
+        rearm_bar.end,
+        direction=Direction.LONG,
+        identity="dfp-fvg",
+        lower=99.0,
+        upper=100.0,
+    )
+    same_identity_output = CausalGroup5Reducer(
+        _group5_protocol()
+    ).on_completed_1m(
+        rearm_bar,
+        fair_value_gaps=(same_identity_fvg,),
+        liquidity_inventory=(draw,),
+        m1_atr=1.0,
+    )
+    same_identity_observation = _dfp_observation(
+        asof=rearm_bar.end,
+        price=rearm_bar.close,
+        output=same_identity_output,
+        fvg=same_identity_fvg,
+        draw=draw,
+    )
+    same_identity = brain.update(
+        same_identity_observation
+    ).hypotheses[key]
+    assert same_identity is terminal
+
+    rearm_bar = _m1(
+        11,
+        open_=101.0,
+        high=101.25,
+        low=100.5,
+        close=101.0,
+    )
     rearm_fvg = _fvg(
         rearm_bar.end,
         direction=Direction.LONG,
@@ -1091,6 +1194,15 @@ def _pool_manipulation(swept_at: pd.Timestamp) -> ManipulationState:
         age_1m_bars=0,
         transition_reason="source_swept",
         censored_at=None,
+        reentry_candidate_at=None,
+        reentry_candidate_price=None,
+        inside_hold_bars=0,
+        reentry_failed_at=None,
+        outside_run=0,
+        outside_run_side=None,
+        deadline_at=None,
+        deadline_elapsed=False,
+        crossed_source_ids=("pool-above",),
     )
 
 
@@ -1109,6 +1221,42 @@ def _local_bos(clock: pd.Timestamp) -> BreakOfStructureState:
         resolved_at=clock,
         age_bars=1,
         strength=0.8,
+        break_bar_id="lsr-trigger-break-bar",
+        break_distance_atr=0.5,
+        post_break_state=BOSPostBreakState.PENDING,
+    )
+
+
+def _opposed_m5_bos(
+    clock: pd.Timestamp,
+    *,
+    displacement_id: str,
+    break_bar_id: str,
+    direction: Direction = Direction.SHORT,
+) -> BreakOfStructureState:
+    return BreakOfStructureState(
+        bos_id=f"opposed-return-mss:{direction.value}",
+        timeframe=Timeframe.M5,
+        direction=direction,
+        lifecycle=BOSLifecycle.CONFIRMED,
+        scope=BOSScope.OPPOSED,
+        target_swing_id=f"opposed-protected:{direction.value}",
+        source_structure_id=(
+            "prior-structure:short"
+            if direction is Direction.LONG
+            else "prior-structure:long"
+        ),
+        target_price=100.5,
+        target_ticks=402,
+        pending_at=clock - pd.Timedelta(minutes=15),
+        resolved_at=clock,
+        age_bars=1,
+        strength=0.8,
+        break_bar_id=break_bar_id,
+        break_distance_atr=0.5,
+        source_displacement_id=displacement_id,
+        mss_qualified=True,
+        post_break_state=BOSPostBreakState.PENDING,
     )
 
 
@@ -1149,6 +1297,52 @@ def _lsr_target(
     return swing, inventory
 
 
+def _lsr_pool_source(
+    swept_at: pd.Timestamp,
+    resolved_at: pd.Timestamp,
+) -> tuple[LiquidityPoolState, LiquidityInventoryItem]:
+    touch_one = swept_at - pd.Timedelta(minutes=5)
+    touch_two = swept_at - pd.Timedelta(minutes=1)
+    pool = LiquidityPoolState(
+        pool_id="pool-above",
+        timeframe=Timeframe.M1,
+        side="above",
+        lower_bound=100.75,
+        upper_bound=101.0,
+        midpoint=100.875,
+        formed_at=touch_one,
+        confirmed_at=touch_two,
+        lifecycle=LiquidityPoolLifecycle.REJECTED,
+        member_swing_ids=("pool-high-1", "pool-high-2"),
+        touch_times=(touch_one, touch_two),
+        age_bars=6,
+        strength=0.8,
+        swept_at=swept_at,
+        sweep_extreme=101.25,
+        close_outside_on_sweep=False,
+        resolved_at=resolved_at,
+        resolution_reason="close_returned_inside",
+    )
+    inventory = LiquidityInventoryItem(
+        item_id="pool:pool-above",
+        timeframe=Timeframe.M1,
+        side="above",
+        kind="equal_highs",
+        price=101.0,
+        lower_bound=100.75,
+        upper_bound=101.0,
+        formed_at=touch_one,
+        confirmed_at=touch_two,
+        lifecycle=LiquidityInventoryLifecycle.CONSUMED,
+        source_ids=pool.member_swing_ids,
+        age_bars=6,
+        strength=0.8,
+        consumed_at=swept_at,
+        lifecycle_reason="pool_swept",
+    )
+    return pool, inventory
+
+
 def _lsr_observation() -> MarketObservation:
     reducer = CausalGroup5Reducer(_group5_protocol())
     swing, target = _lsr_target(BASE - pd.Timedelta(hours=1))
@@ -1166,8 +1360,53 @@ def _lsr_observation() -> MarketObservation:
         liquidity_inventory=(target,),
         m1_atr=1.0,
     )
-    formation = _m1(
+    candidate = _m1(
         1,
+        open_=100.5,
+        high=100.75,
+        low=100.25,
+        close=100.5,
+    )
+    candidate_manipulation = replace(
+        manipulation,
+        last_updated_at=candidate.end,
+        age_1m_bars=1,
+        reentry_candidate_at=candidate.end,
+        reentry_candidate_price=candidate.close,
+    )
+    reducer.on_completed_1m(
+        candidate,
+        manipulations=(candidate_manipulation,),
+        liquidity_inventory=(target,),
+        m1_atr=1.0,
+    )
+    reaccept = _m1(
+        2,
+        open_=100.5,
+        high=100.75,
+        low=100.25,
+        close=100.5,
+    )
+    reaccepted_manipulation = replace(
+        candidate_manipulation,
+        lifecycle=ManipulationLifecycle.REACCEPTED,
+        reaccepted_at=reaccept.end,
+        resolved_at=reaccept.end,
+        state_started_at=reaccept.end,
+        last_updated_at=reaccept.end,
+        reentry_price=candidate.close,
+        inside_hold_bars=1,
+        age_1m_bars=2,
+        transition_reason="reentry_held_inside_swept_boundary",
+    )
+    reducer.on_completed_1m(
+        reaccept,
+        manipulations=(reaccepted_manipulation,),
+        liquidity_inventory=(target,),
+        m1_atr=1.0,
+    )
+    formation = _m1(
+        3,
         open_=100.5,
         high=100.75,
         low=100.25,
@@ -1183,12 +1422,12 @@ def _lsr_observation() -> MarketObservation:
     reducer.on_completed_1m(
         formation,
         fair_value_gaps=(fvg,),
-        manipulations=(manipulation,),
+        manipulations=(reaccepted_manipulation,),
         liquidity_inventory=(target,),
         m1_atr=1.0,
     )
     pullback = _m1(
-        2,
+        4,
         open_=100.75,
         high=101.5,
         low=100.5,
@@ -1197,12 +1436,12 @@ def _lsr_observation() -> MarketObservation:
     reducer.on_completed_1m(
         pullback,
         fair_value_gaps=(fvg,),
-        manipulations=(manipulation,),
+        manipulations=(reaccepted_manipulation,),
         liquidity_inventory=(target,),
         m1_atr=1.0,
     )
     trigger = _m1(
-        3,
+        5,
         open_=101.0,
         high=101.25,
         low=100.5,
@@ -1212,7 +1451,7 @@ def _lsr_observation() -> MarketObservation:
     output = reducer.on_completed_1m(
         trigger,
         fair_value_gaps=(fvg,),
-        manipulations=(manipulation,),
+        manipulations=(reaccepted_manipulation,),
         liquidity_inventory=(target,),
         m1_bos=(trigger_bos,),
         m1_atr=1.0,
@@ -1222,6 +1461,10 @@ def _lsr_observation() -> MarketObservation:
         price=trigger.close,
     )
     frames = dict(base.frames)
+    pool, pool_inventory = _lsr_pool_source(
+        sweep_bar.end,
+        candidate.end,
+    )
     frames[Timeframe.H4] = replace(
         frames[Timeframe.H4],
         cutoff=trigger.end,
@@ -1235,20 +1478,28 @@ def _lsr_observation() -> MarketObservation:
         frames[Timeframe.M5],
         cutoff=trigger.end,
         fair_value_gaps=(fvg,),
+        structure_breaks=(
+            _opposed_m5_bos(
+                formation.end,
+                displacement_id=fvg.source_displacement_id,
+                break_bar_id=fvg.source_candle_ids[-1],
+            ),
+        ),
     )
     frames[Timeframe.M1] = replace(
         frames[Timeframe.M1],
         cutoff=trigger.end,
         structure_breaks=(trigger_bos,),
+        liquidity_pools=(pool,),
     )
     return replace(
         base,
         frames=frames,
         execution=_execution(trigger.end, cost=0.025),
-        liquidity_inventory=(target,),
-        liquidity_inventory_authoritative=True,
-        manipulations=(manipulation,),
-        group5_authoritative=True,
+        liquidity_inventory=(target, pool_inventory),
+        liquidity_pool_states=(pool,),
+        manipulations=(reaccepted_manipulation,),
+        group5_typed_available=True,
         entry_locations=output.entry_locations,
         qualified_reacceptances=output.qualified_reacceptances,
         micro_bos_references=output.micro_bos_references,
@@ -1306,6 +1557,33 @@ def test_lsr_requires_exact_later_micro_bos_and_original_sweep_stop() -> None:
     assert orphaned_micro_risk.final_action.value == "abstain"
 
 
+def test_lsr_terminalizes_mss_confirmed_after_first_pullback() -> None:
+    observation = _lsr_observation()
+    frames = dict(observation.frames)
+    late_mss = replace(
+        frames[Timeframe.M5].structure_breaks[0],
+        resolved_at=observation.asof,
+    )
+    frames[Timeframe.M5] = replace(
+        frames[Timeframe.M5],
+        structure_breaks=(late_mss,),
+    )
+    late = replace(observation, frames=frames)
+
+    hypothesis = _brain().update(late).hypotheses[
+        "liquidity_sweep_reversal:short"
+    ]
+
+    assert hypothesis.phase is PlaybookPhase.INVALIDATED
+    assert (
+        hypothesis.terminal_reason
+        == "mss_confirmed_after_first_pullback"
+    )
+    assert not hypothesis.hard_gate_results[
+        "reverse_displacement_zone"
+    ]
+
+
 def test_insufficient_remaining_path_stays_in_delivery_not_uncertainty() -> None:
     observation = _lsr_observation()
     target = replace(
@@ -1328,7 +1606,7 @@ def test_insufficient_remaining_path_stays_in_delivery_not_uncertainty() -> None
     near_draw = replace(
         observation,
         frames=frames,
-        liquidity_inventory=(target,),
+        liquidity_inventory=(target, observation.liquidity_inventory[1]),
         manipulations=(
             replace(
                 observation.manipulations[0],
@@ -1357,7 +1635,7 @@ def test_insufficient_remaining_path_stays_in_delivery_not_uncertainty() -> None
 def _lsr_without_plan_or_trigger() -> MarketObservation:
     observation = _lsr_observation()
     frames = {
-        timeframe: replace(frame, liquidity=(), swings=())
+        timeframe: replace(frame, swings=())
         for timeframe, frame in observation.frames.items()
     }
     frames[Timeframe.M1] = replace(
@@ -1367,7 +1645,11 @@ def _lsr_without_plan_or_trigger() -> MarketObservation:
     return replace(
         observation,
         frames=frames,
-        liquidity_inventory=(),
+        liquidity_inventory=tuple(
+            item
+            for item in observation.liquidity_inventory
+            if item.kind in {"equal_highs", "equal_lows"}
+        ),
     )
 
 
@@ -1426,11 +1708,7 @@ def test_pre_entry_episode_deadline_is_frozen_without_a_plan() -> None:
     armed_observation = replace(
         observation,
         entry_locations=(),
-        qualified_reacceptances=tuple(
-            item
-            for item in observation.qualified_reacceptances
-            if item.context_kind == "pool_sweep"
-        ),
+        qualified_reacceptances=(),
         micro_bos_references=pool_references,
         path_sequences=pool_paths,
     )

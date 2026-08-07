@@ -11,6 +11,7 @@ import pandas as pd
 from .calibration import TypedBrainCalibrator
 from .model import (
     BOSLifecycle,
+    BOSPostBreakState,
     BOSScope,
     DealingRangeLifecycle,
     Direction,
@@ -19,6 +20,7 @@ from .model import (
     EntryLocationState,
     Evidence,
     EventKind,
+    FairValueGapLifecycle,
     FrozenRangeAuctionContext,
     HypothesisBelief,
     HypothesisSequenceState,
@@ -29,6 +31,7 @@ from .model import (
     MarketObservation,
     ManipulationLifecycle,
     MicroBOSReference,
+    OrderBlockLifecycle,
     PathSequenceLifecycle,
     PathSequenceState,
     Playbook,
@@ -48,6 +51,7 @@ from .playbook_registry import (
 )
 from .scene_graph import (
     EvidenceStatus,
+    SceneEdgeKind,
     SceneGraphDelta,
     TemporalMarketSceneGraph,
     build_hypothesis_states,
@@ -158,7 +162,9 @@ def _entry_zone_beyond_frozen_invalidation(
     if location is None:
         return False
     planned_entry = (
-        location.contact_reference_price
+        evaluation.plan.planned_entry
+        if evaluation.plan is not None
+        else location.contact_reference_price
         if location.contact_reference_price is not None
         else location.near_edge
     )
@@ -259,19 +265,30 @@ def _draw_rank(
         )
     higher_timeframe = item.timeframe in {Timeframe.H4, Timeframe.H1}
     pooled = item.kind in {"equal_highs", "equal_lows"}
+    external = bool(
+        item.structural_rank == "external"
+        or item.is_protected_swing
+        or higher_timeframe
+    )
+    reference = item.kind.startswith("previous_")
     tier = (
         0
-        if higher_timeframe and pooled
+        if item.is_protected_swing
         else 1
-        if item.kind == "range_boundary"
+        if external and pooled
         else 2
-        if higher_timeframe and item.kind == "swing"
+        if reference
         else 3
-        if pooled
+        if external and item.kind == "swing"
         else 4
+        if item.kind == "range_boundary"
+        else 5
+        if pooled
+        else 6
     )
     return (
         tier,
+        -float(item.visibility_strength),
         -float(item.strength),
         abs(level.price - entry),
         level.confirmed_at,
@@ -355,25 +372,42 @@ def _select_target(
     *,
     preferred_id: str | None = None,
     required_timeframe: Timeframe | None = None,
+    require_external: bool = False,
     require_preferred: bool = False,
 ) -> LiquidityLevel | None:
     levels = _visible_level_map(observation)
+    inventory = _inventory_item_map(observation)
+
+    def eligible(level: LiquidityLevel) -> bool:
+        item = inventory.get(level.level_id)
+        return bool(
+            (
+                required_timeframe is None
+                or level.timeframe is required_timeframe
+            )
+            and (
+                not require_external
+                or item is not None
+                and (
+                    item.structural_rank == "external"
+                    or item.is_protected_swing
+                    or item.timeframe in {Timeframe.H4, Timeframe.H1}
+                )
+            )
+            and _target_is_deliverable(
+                level,
+                direction,
+                entry,
+                config.tick_size,
+            )
+        )
     if require_preferred and preferred_id is None:
         return None
     if preferred_id is not None:
         preferred = levels.get(preferred_id)
         if (
             preferred is not None
-            and (
-                required_timeframe is None
-                or preferred.timeframe is required_timeframe
-            )
-            and _target_is_deliverable(
-                preferred,
-                direction,
-                entry,
-                config.tick_size,
-            )
+            and eligible(preferred)
         ):
             return preferred
         if require_preferred:
@@ -382,16 +416,7 @@ def _select_target(
         level
         for level in levels.values()
         if (
-            (
-                required_timeframe is None
-                or level.timeframe is required_timeframe
-            )
-            and _target_is_deliverable(
-                level,
-                direction,
-                entry,
-                config.tick_size,
-            )
+            eligible(level)
         )
     ]
     if not candidates:
@@ -664,6 +689,70 @@ def _delivery_quality(
     return min(remaining_fraction, clearance)
 
 
+def _select_planned_entry(
+    observation: MarketObservation,
+    direction: Direction,
+    location: EntryLocationState | None,
+    invalidation: StructuralLevel | None,
+    target: LiquidityLevel | None,
+    config: BrainConfig,
+) -> float | None:
+    """Compare frozen zone prices; the eye never substitutes current close."""
+
+    if location is None or invalidation is None or target is None:
+        return None
+    candidates = [location.near_edge, location.midpoint]
+    if location.source_zone_kind == "order_block":
+        order_block = next(
+            (
+                item
+                for item in observation.frame(Timeframe.M5).order_blocks
+                if item.order_block_id == location.source_zone_id
+            ),
+            None,
+        )
+        if order_block is not None:
+            candidates.append(
+                order_block.body_upper_bound
+                if direction is Direction.LONG
+                else order_block.body_lower_bound
+            )
+    valid: list[tuple[float, float, float, float]] = []
+    for candidate in dict.fromkeys(float(value) for value in candidates):
+        if not location.lower_bound <= candidate <= location.upper_bound:
+            continue
+        risk_points = abs(candidate - invalidation.price)
+        reward_points = direction.sign * (target.price - candidate)
+        net_space = (
+            reward_points
+            - observation.execution.expected_round_trip_cost_points
+        )
+        if (
+            risk_points < config.tick_size
+            or reward_points <= 0.0
+            or net_space <= 0.0
+            or (
+                direction is Direction.LONG
+                and invalidation.price >= candidate
+            )
+            or (
+                direction is Direction.SHORT
+                and invalidation.price <= candidate
+            )
+        ):
+            continue
+        utility = net_space / risk_points
+        valid.append(
+            (
+                utility,
+                net_space,
+                -abs(candidate - location.near_edge),
+                candidate,
+            )
+        )
+    return None if not valid else max(valid)[-1]
+
+
 def _typed_plan(
     *,
     playbook: Playbook,
@@ -678,6 +767,7 @@ def _typed_plan(
     draw_selection: DrawSelection | None = None,
     range_auction: FrozenRangeAuctionContext | None = None,
     liquidity_route: LiquidityRoute | None = None,
+    planned_entry: float | None = None,
 ) -> TradePlan | None:
     if (
         setup_id is None
@@ -688,10 +778,19 @@ def _typed_plan(
     ):
         return None
     planned_entry = (
-        location.contact_reference_price
-        if location.contact_reference_price is not None
-        else location.near_edge
+        _select_planned_entry(
+            observation,
+            direction,
+            location,
+            invalidation,
+            target,
+            config,
+        )
+        if planned_entry is None
+        else float(planned_entry)
     )
+    if planned_entry is None:
+        return None
     risk = abs(planned_entry - invalidation.price)
     if (
         risk < config.tick_size
@@ -825,8 +924,7 @@ def _typed_market_uncertainty(
     ) / max(1.0, float(len(observation.frames)))
     authority_missing = max(
         missing_frames,
-        float(not observation.liquidity_inventory_authoritative),
-        float(not observation.group5_authoritative),
+        float(not observation.group5_typed_available),
         clamp(semantic_authority_missing),
         float(
             any(
@@ -905,6 +1003,8 @@ def _select_entry_location(
     *,
     after: pd.Timestamp | None,
     prior: HypothesisBelief | None,
+    source_displacement_id: str | None = None,
+    source_zone_id: str | None = None,
 ) -> EntryLocationState | None:
     by_id = {
         location.location_id: location
@@ -918,7 +1018,19 @@ def _select_entry_location(
         bound = by_id.get(prior.entry_location_id)
         return (
             bound
-            if bound is not None and bound.direction is direction
+            if (
+                bound is not None
+                and bound.direction is direction
+                and (
+                    source_displacement_id is None
+                    or bound.source_displacement_id
+                    == source_displacement_id
+                )
+                and (
+                    source_zone_id is None
+                    or bound.source_zone_id == source_zone_id
+                )
+            )
             else None
         )
     terminal_cutoff = (
@@ -939,6 +1051,15 @@ def _select_entry_location(
         for location in observation.entry_locations
         if (
             location.direction is direction
+            and (
+                source_displacement_id is None
+                or location.source_displacement_id
+                == source_displacement_id
+            )
+            and (
+                source_zone_id is None
+                or location.source_zone_id == source_zone_id
+            )
             and location.lifecycle is not EntryLocationLifecycle.LEFT
             and location.location_id in path_by_location
             and (
@@ -1053,7 +1174,7 @@ def _typed_dfp(
         reference_entry,
         config,
         preferred_id=preferred_context_draw_id,
-        required_timeframe=Timeframe.H4,
+        require_external=True,
         require_preferred=preferred_context_draw_id is not None,
     )
     context_clock = (
@@ -1068,6 +1189,7 @@ def _typed_dfp(
             item.direction is direction
             and item.lifecycle is BOSLifecycle.CONFIRMED
             and item.scope is BOSScope.CONTINUATION
+            and item.post_break_state is BOSPostBreakState.ACCEPTED
             and item.resolved_at is not None
             and context_clock is not None
             and item.resolved_at > context_clock
@@ -1209,7 +1331,7 @@ def _typed_dfp(
             float(planned_entry),
             config,
             preferred_id=preferred_context_draw_id,
-            required_timeframe=Timeframe.H4,
+            require_external=True,
             require_preferred=preferred_context_draw_id is not None,
         )
     else:
@@ -1226,6 +1348,16 @@ def _typed_dfp(
             preferred_id=preferred_primary_target_id,
         )
     )
+    selected_planned_entry = _select_planned_entry(
+        observation,
+        direction,
+        location,
+        invalidation,
+        primary_target,
+        config,
+    )
+    if selected_planned_entry is not None:
+        planned_entry = selected_planned_entry
     draw_selection = _draw_selection(
         observation,
         primary_target if structure is not None else None,
@@ -1258,6 +1390,7 @@ def _typed_dfp(
         target=primary_target,
         draw_selection=draw_selection,
         liquidity_route=liquidity_route,
+        planned_entry=selected_planned_entry,
     )
     remaining_ok = bool(
         plan is not None
@@ -1275,7 +1408,7 @@ def _typed_dfp(
         and h1_bos is None
     )
     frozen_location_missing = bool(
-        observation.group5_authoritative
+        observation.group5_typed_available
         and prior is not None
         and prior.phase not in _TERMINAL_PHASES
         and prior.entry_location_id is not None
@@ -1307,13 +1440,11 @@ def _typed_dfp(
         and entry_path.ended_at != observation.asof
     )
     context_draw_missing = bool(
-        observation.liquidity_inventory_authoritative
-        and preferred_context_draw_id is not None
+        preferred_context_draw_id is not None
         and context_draw is None
     )
     primary_target_missing = bool(
-        observation.liquidity_inventory_authoritative
-        and preferred_primary_target_id is not None
+        preferred_primary_target_id is not None
         and primary_target is None
     )
     trigger_contradiction = contradiction_step is not None
@@ -1596,13 +1727,11 @@ def _typed_dfp(
             or trigger_contradiction
             or censored_path
             or (
-                observation.liquidity_inventory_authoritative
-                and preferred_context_draw_id is not None
+                preferred_context_draw_id is not None
                 and preferred_context_draw_id not in visible
             )
             or (
-                observation.liquidity_inventory_authoritative
-                and preferred_primary_target_id is not None
+                preferred_primary_target_id is not None
                 and preferred_primary_target_id not in visible
             )
         ),
@@ -1652,6 +1781,37 @@ def _select_pool_path(
     )
 
 
+def _opposed_mss_for_displacement(
+    observation: MarketObservation,
+    direction: Direction,
+    displacement_id: str | None,
+    *,
+    after: pd.Timestamp | None,
+):
+    """Return the first exact M5 opposed BOS/MSS for one displacement."""
+
+    if displacement_id is None or after is None:
+        return None
+    candidates = tuple(
+        state
+        for state in observation.frame(Timeframe.M5).structure_breaks
+        if (
+            state.direction is direction
+            and state.lifecycle is BOSLifecycle.CONFIRMED
+            and state.scope is BOSScope.OPPOSED
+            and state.mss_qualified
+            and state.source_displacement_id == displacement_id
+            and state.resolved_at is not None
+            and state.resolved_at > after
+        )
+    )
+    return (
+        min(candidates, key=lambda state: (state.resolved_at, state.bos_id))
+        if candidates
+        else None
+    )
+
+
 def _typed_lsr(
     observation: MarketObservation,
     direction: Direction,
@@ -1677,13 +1837,16 @@ def _typed_lsr(
         else None
     )
     pool_swept = _path_step(pool_path, {"pool_swept"})
-    sweep_return = _path_step(
-        pool_path,
-        {"sweep_rejection", "reacceptance_held"},
+    sweep_return = _path_step(pool_path, {"reacceptance_held"})
+    opposite_displacement = _path_step(
+        pool_path, {"opposite_displacement"}
     )
     pool_ambiguity = _path_step(
         pool_path,
-        {"micro_bos_ambiguous"},
+        {
+            "opposite_displacement_ambiguous",
+            "micro_bos_ambiguous",
+        },
     )
     pool_contradiction = _path_step(
         pool_path,
@@ -1693,15 +1856,51 @@ def _typed_lsr(
             "micro_bos_opposed",
         },
     )
-    return_clock = (
-        None if sweep_return is None else sweep_return.observed_at
+    pool_acceptance_failure = _path_step(
+        pool_path,
+        {"accepted_outside"},
+    )
+    return_clock = None if sweep_return is None else sweep_return.observed_at
+    displacement_id = (
+        None
+        if opposite_displacement is None
+        else opposite_displacement.source_entity_id
+    )
+    opposed_mss = _opposed_mss_for_displacement(
+        observation,
+        direction,
+        displacement_id,
+        after=return_clock,
     )
     location = _select_entry_location(
         observation,
         direction,
         after=return_clock,
         prior=prior,
+        source_displacement_id=displacement_id,
+        source_zone_id=(
+            None
+            if opposite_displacement is None
+            else opposite_displacement.source_event_id
+        ),
     )
+    if (
+        location is not None
+        and (
+            location.source_displacement_id != displacement_id
+            or (
+                (source_zone := _entry_location_source_zone(
+                    observation,
+                    location,
+                ))
+                is None
+            )
+            or source_zone.source_displacement_active_at is None
+            or return_clock is None
+            or source_zone.source_displacement_active_at <= return_clock
+        )
+    ):
+        location = None
     entry_path = _path_for_location(observation, location)
     if (
         location is not None
@@ -1713,6 +1912,11 @@ def _typed_lsr(
         location = None
         entry_path = None
     first_pullback = _path_step(entry_path, {"first_pullback"})
+    mss_after_first_pullback = bool(
+        first_pullback is not None
+        and opposed_mss is not None
+        and opposed_mss.resolved_at > first_pullback.observed_at
+    )
     micro_trigger = _path_step(entry_path, {"micro_bos_confirmed"})
     qualified_micro = next(
         (
@@ -1848,6 +2052,16 @@ def _typed_lsr(
             preferred_id=preferred_primary_target_id,
         )
     )
+    selected_planned_entry = _select_planned_entry(
+        observation,
+        direction,
+        location,
+        invalidation,
+        primary_target,
+        config,
+    )
+    if selected_planned_entry is not None:
+        planned_entry = selected_planned_entry
     draw_selection = _draw_selection(
         observation,
         primary_target if manipulation is not None else None,
@@ -1880,6 +2094,7 @@ def _typed_lsr(
         target=primary_target,
         draw_selection=draw_selection,
         liquidity_route=liquidity_route,
+        planned_entry=selected_planned_entry,
     )
     remaining_ok = bool(
         plan is not None
@@ -1887,7 +2102,7 @@ def _typed_lsr(
     )
     execution_missing = _execution_unavailable(observation)
     accepted_outside = bool(
-        pool_contradiction is not None
+        pool_acceptance_failure is not None
         or (
             manipulation is not None
             and manipulation.lifecycle
@@ -1904,14 +2119,14 @@ def _typed_lsr(
         and entry_path.ended_at != observation.asof
     )
     frozen_pool_missing = bool(
-        observation.group5_authoritative
+        observation.group5_typed_available
         and prior is not None
         and prior.phase not in _TERMINAL_PHASES
         and prior.setup_context_id is not None
         and pool_path is None
     )
     frozen_location_missing = bool(
-        observation.group5_authoritative
+        observation.group5_typed_available
         and prior is not None
         and prior.phase not in _TERMINAL_PHASES
         and prior.entry_location_id is not None
@@ -1925,11 +2140,25 @@ def _typed_lsr(
         ),
         "outside_acceptance_failed": bool(
             sweep_return is not None
+            and manipulation is not None
+            and manipulation.lifecycle
+            is ManipulationLifecycle.REACCEPTED
+            and manipulation.reaccepted_at
+            == sweep_return.observed_at
+            and sweep_return.source_event_id
+            == manipulation.manipulation_id
+            and sweep_return.source_entity_id
+            == manipulation.manipulation_id
             and not accepted_outside
             and pool_ambiguity is None
         ),
         "reverse_displacement_zone": bool(
-            location is not None and entry_path is not None
+            opposite_displacement is not None
+            and opposed_mss is not None
+            and location is not None
+            and entry_path is not None
+            and location.source_displacement_id == displacement_id
+            and not mss_after_first_pullback
         ),
         "reversal_first_pullback": first_pullback is not None,
         "aligned_micro_bos_trigger": trigger_ready,
@@ -1958,14 +2187,20 @@ def _typed_lsr(
     }
     contradict = {
         "accepted_outside_or_failed": float(accepted_outside),
-        "reverse_displacement_missing": 0.0,
+        "reverse_displacement_missing": float(
+            sweep_return is not None
+            and (
+                opposite_displacement is None
+                or opposed_mss is None
+                or mss_after_first_pullback
+            )
+        ),
         "entry_zone_left": float(zone_left),
         "micro_bos_opposed_or_ambiguous": float(
             entry_contradiction is not None
         ),
         "draw_consumed_or_missing": float(
-            observation.liquidity_inventory_authoritative
-            and (
+            (
                 (
                     preferred_context_draw_id is not None
                     and context_draw is None
@@ -1998,17 +2233,29 @@ def _typed_lsr(
         "execution": support["execution_fillability"]
         * (1.0 - contradict["execution_unavailable"]),
     }
-    pool_censored = bool(
+    pool_terminal_failure = bool(
         pool_path is not None
-        and pool_path.lifecycle is PathSequenceLifecycle.CENSORED
+        and (
+            pool_path.lifecycle is PathSequenceLifecycle.CENSORED
+            or (
+                pool_path.lifecycle is PathSequenceLifecycle.CLOSED
+                and pool_path.transition_reason
+                in {
+                    "accepted_outside",
+                    "opposite_displacement_ambiguous_same_clock",
+                    "micro_bos_ambiguous_same_clock",
+                    "micro_bos_opposed",
+                    "manipulation_resolution_deadline",
+                }
+            )
+        )
     )
     entry_path_censored = bool(
         entry_path is not None
         and entry_path.lifecycle is PathSequenceLifecycle.CENSORED
     )
     selected_draw_missing = bool(
-        observation.liquidity_inventory_authoritative
-        and prior_plan_same_setup
+        prior_plan_same_setup
         and prior is not None
         and prior.plan is not None
         and prior.plan.selected_draw_id
@@ -2021,11 +2268,11 @@ def _typed_lsr(
         terminal_source_ids = _identity_tuple(
             None if pool_path is None else pool_path.sequence_id,
             None
-            if pool_contradiction is None
-            else pool_contradiction.source_entity_id,
+            if pool_acceptance_failure is None
+            else pool_acceptance_failure.source_entity_id,
             None
-            if pool_contradiction is None
-            else pool_contradiction.source_event_id,
+            if pool_acceptance_failure is None
+            else pool_acceptance_failure.source_event_id,
         )
     elif frozen_pool_missing:
         terminal_reason = "frozen_pool_path_missing"
@@ -2038,7 +2285,7 @@ def _typed_lsr(
             None if prior is None else prior.entry_location_id
         )
     elif (
-        observation.group5_authoritative
+        observation.group5_typed_available
         and pool_path is not None
         and manipulation is None
     ):
@@ -2049,14 +2296,24 @@ def _typed_lsr(
         terminal_source_ids = _identity_tuple(
             None if location is None else location.location_id
         )
+    elif mss_after_first_pullback:
+        terminal_reason = "mss_confirmed_after_first_pullback"
+        terminal_source_ids = _identity_tuple(
+            None if opposed_mss is None else opposed_mss.bos_id,
+            None if entry_path is None else entry_path.sequence_id,
+        )
     elif entry_contradiction is not None:
         terminal_reason = "micro_bos_opposed"
         terminal_source_ids = _identity_tuple(
             entry_contradiction.source_entity_id,
             entry_contradiction.source_event_id,
         )
-    elif pool_censored:
-        terminal_reason = "pool_path_censored"
+    elif pool_terminal_failure:
+        terminal_reason = (
+            "pool_path_censored"
+            if pool_path is None
+            else pool_path.transition_reason
+        )
         terminal_source_ids = _identity_tuple(
             None if pool_path is None else pool_path.sequence_id
         )
@@ -2108,10 +2365,22 @@ def _typed_lsr(
             ),
             "reverse_displacement_zone": _SequenceSignal(
                 float(hard_gates["reverse_displacement_zone"]),
-                None if location is None else location.formed_at,
+                (
+                    None
+                    if opposed_mss is None
+                    else opposed_mss.resolved_at
+                ),
                 ()
-                if location is None
+                if (
+                    location is None
+                    or opposite_displacement is None
+                    or opposed_mss is None
+                )
                 else (
+                    opposite_displacement.step_id,
+                    opposite_displacement.source_entity_id,
+                    opposed_mss.bos_id,
+                    opposed_mss.target_swing_id,
                     location.location_id,
                     location.source_displacement_id,
                     location.source_zone_id,
@@ -2210,14 +2479,15 @@ def _typed_lsr(
             or frozen_pool_missing
             or frozen_location_missing
             or (
-                observation.group5_authoritative
+                observation.group5_typed_available
                 and pool_path is not None
                 and manipulation is None
             )
             or zone_left
             or entry_contradiction is not None
-            or pool_censored
+            or pool_terminal_failure
             or entry_path_censored
+            or mss_after_first_pullback
             or selected_draw_missing
         ),
         entry_window_expired=stale_trigger,
@@ -2301,6 +2571,85 @@ def _select_favr_context(
     return selected, None
 
 
+def _entry_location_source_zone(
+    observation: MarketObservation,
+    location: EntryLocationState,
+):
+    """Resolve the exact current M5 zone frozen into an entry location."""
+
+    frame = observation.frame(Timeframe.M5)
+    candidates = (
+        tuple(
+            state
+            for state in frame.fair_value_gaps
+            if state.fvg_id == location.source_zone_id
+        )
+        if location.source_zone_kind == "fvg"
+        else tuple(
+            state
+            for state in frame.order_blocks
+            if state.order_block_id == location.source_zone_id
+        )
+        if location.source_zone_kind == "order_block"
+        else ()
+    )
+    if len(candidates) != 1:
+        return None
+    source = candidates[0]
+    source_bos_id = (
+        None
+        if location.source_zone_kind == "fvg"
+        else source.source_bos_id
+    )
+    source_failed = (
+        source.lifecycle is FairValueGapLifecycle.INVALIDATED
+        if location.source_zone_kind == "fvg"
+        else source.lifecycle is OrderBlockLifecycle.FAILED
+    )
+    if (
+        source_failed
+        or source.protocol_hash
+        != location.source_group3_protocol_hash
+        or source.protocol_hash != location.source_zone_protocol_hash
+        or source.symbol != observation.symbol
+        or source.symbol != location.symbol
+        or source.instrument_id != observation.instrument_id
+        or source.instrument_id != location.instrument_id
+        or source.timeframe is not Timeframe.M5
+        or source.source_displacement_id
+        != location.source_displacement_id
+        or source_bos_id != location.source_bos_id
+        or source.direction is not location.direction
+        or not math.isclose(
+            source.lower_bound,
+            location.lower_bound,
+            rel_tol=1e-9,
+            abs_tol=1e-9,
+        )
+        or not math.isclose(
+            source.upper_bound,
+            location.upper_bound,
+            rel_tol=1e-9,
+            abs_tol=1e-9,
+        )
+        or not math.isclose(
+            source.midpoint,
+            location.midpoint,
+            rel_tol=1e-9,
+            abs_tol=1e-9,
+        )
+        or not math.isclose(
+            source.invalidation_price,
+            location.failure_boundary,
+            rel_tol=1e-9,
+            abs_tol=1e-9,
+        )
+        or source.confirmed_at != location.formed_at
+    ):
+        return None
+    return source
+
+
 def _select_favr_location(
     observation: MarketObservation,
     direction: Direction,
@@ -2321,10 +2670,15 @@ def _select_favr_location(
     }
 
     def eligible(location: EntryLocationState) -> bool:
+        source = _entry_location_source_zone(observation, location)
         return bool(
-            location.direction is direction
+            source is not None
+            and source.source_displacement_active_at is not None
+            and location.direction is direction
             and location.lifecycle is not EntryLocationLifecycle.LEFT
             and location.formed_at > manipulation.reaccepted_at
+            and source.source_displacement_active_at
+            > manipulation.reaccepted_at
             and dealing_range.lower_bound <= location.lower_bound
             and location.upper_bound <= dealing_range.upper_bound
             and (
@@ -2438,18 +2792,10 @@ def _typed_favr(
     )
     frozen_manipulation_missing = bool(
         observation.frame(Timeframe.H1).ready
-        and observation.liquidity_inventory_authoritative
         and prior_episode_live
         and prior is not None
         and prior.initiating_event_id is not None
         and prior.initiating_event_id not in observed_manipulation_ids
-    )
-    frozen_location_missing = bool(
-        observation.group5_authoritative
-        and prior_episode_live
-        and prior is not None
-        and prior.entry_location_id is not None
-        and prior.entry_location_id not in observed_location_ids
     )
     mature = bool(
         dealing_range is not None
@@ -2468,6 +2814,12 @@ def _typed_favr(
         manipulation is not None
         and manipulation.lifecycle is ManipulationLifecycle.ACCEPTED_OUTSIDE
     )
+    resolution_censored = bool(
+        manipulation is not None
+        and manipulation.lifecycle is ManipulationLifecycle.SWEPT
+        and manipulation.deadline_elapsed
+        and manipulation.censored_at is not None
+    )
     location = _select_favr_location(
         observation,
         direction,
@@ -2475,8 +2827,31 @@ def _typed_favr(
         manipulation,
         prior,
     )
+    frozen_location_missing = bool(
+        observation.group5_typed_available
+        and prior_episode_live
+        and prior is not None
+        and prior.entry_location_id is not None
+        and (
+            prior.entry_location_id not in observed_location_ids
+            or location is None
+        )
+    )
     entry_path = _path_for_location(observation, location)
+    return_mss = _opposed_mss_for_displacement(
+        observation,
+        direction,
+        None if location is None else location.source_displacement_id,
+        after=(
+            None if manipulation is None else manipulation.reaccepted_at
+        ),
+    )
     first_pullback = _path_step(entry_path, {"first_pullback"})
+    mss_after_first_pullback = bool(
+        first_pullback is not None
+        and return_mss is not None
+        and return_mss.resolved_at > first_pullback.observed_at
+    )
     held_trigger = _path_step(entry_path, {"reacceptance_held"})
     micro_trigger = _path_step(entry_path, {"micro_bos_confirmed"})
     qualified_micro = next(
@@ -2585,6 +2960,16 @@ def _typed_favr(
         if location.contact_reference_price is not None
         else location.near_edge
     )
+    selected_planned_entry = _select_planned_entry(
+        observation,
+        direction,
+        location,
+        invalidation,
+        target,
+        config,
+    )
+    if selected_planned_entry is not None:
+        planned_entry = selected_planned_entry
     midpoint_chase = bool(
         dealing_range is not None
         and planned_entry is not None
@@ -2606,6 +2991,7 @@ def _typed_favr(
             manipulation_side=manipulation.side,
             swept_at=manipulation.swept_at,
             manipulation_extreme=manipulation.sweep_extreme,
+            reentry_candidate_at=manipulation.reentry_candidate_at,
             reentered_at=manipulation.reaccepted_at,
             reentry_price=manipulation.reentry_price,
             opposite_liquidity_id=target.level_id,
@@ -2647,6 +3033,7 @@ def _typed_favr(
             draw_selection=draw_selection,
             range_auction=range_auction,
             liquidity_route=liquidity_route,
+            planned_entry=selected_planned_entry,
         )
     )
     remaining_ok = bool(
@@ -2663,11 +3050,18 @@ def _typed_favr(
         and entry_path.lifecycle is PathSequenceLifecycle.CLOSED
         and entry_path.ended_at != observation.asof
     )
+    entry_path_censored = bool(
+        entry_path is not None
+        and entry_path.lifecycle is PathSequenceLifecycle.CENSORED
+    )
     hard_gates = {
         "mature_dealing_range": mature,
         "range_boundary_sweep_reaccepted": range_reaccepted,
         "opposite_displacement_zone_inside_range": bool(
-            location is not None and entry_path is not None
+            location is not None
+            and entry_path is not None
+            and return_mss is not None
+            and not mss_after_first_pullback
         ),
         "first_pullback_to_frozen_zone": first_pullback is not None,
         "aligned_entry_trigger": trigger_ready,
@@ -2697,14 +3091,20 @@ def _typed_favr(
         "return_zone_missing_or_outside_range": float(
             frozen_manipulation_missing
             or frozen_location_missing
+            or (
+                location is not None
+                and (
+                    return_mss is None
+                    or mss_after_first_pullback
+                )
+            )
         ),
         "entry_zone_left": float(zone_left),
         "trigger_opposed_or_ambiguous": float(
             entry_contradiction is not None
         ),
         "draw_consumed_or_missing": float(
-            observation.liquidity_inventory_authoritative
-            and range_reaccepted
+            range_reaccepted
             and target is None
         ),
         "midpoint_chase": float(midpoint_chase),
@@ -2740,6 +3140,8 @@ def _typed_favr(
     terminal_source_ids: tuple[str, ...] = ()
     if accepted_outside:
         terminal_reason = "range_auction_accepted_outside"
+    elif resolution_censored:
+        terminal_reason = "range_auction_resolution_deadline"
     elif frozen_range_missing:
         terminal_reason = "frozen_dealing_range_missing"
     elif dealing_range is not None and not mature:
@@ -2752,13 +3154,16 @@ def _typed_favr(
         terminal_reason = "entry_zone_left"
     elif entry_contradiction is not None:
         terminal_reason = "entry_trigger_contradicted"
+    elif entry_path_censored:
+        terminal_reason = "entry_path_censored"
+    elif mss_after_first_pullback:
+        terminal_reason = "mss_confirmed_after_first_pullback"
     elif midpoint_chase:
         terminal_reason = "planned_entry_chased_past_range_value"
     elif (
         prior is not None
         and prior.phase not in _TERMINAL_PHASES
         and prior.draw_selection is not None
-        and observation.liquidity_inventory_authoritative
         and target is None
     ):
         terminal_reason = "selected_draw_consumed_or_missing"
@@ -2815,14 +3220,20 @@ def _typed_favr(
                 ),
             ),
             "opposite_displacement_zone_inside_range": _SequenceSignal(
-                float(location is not None and entry_path is not None),
-                None if location is None else location.formed_at,
+                float(
+                    location is not None
+                    and entry_path is not None
+                    and return_mss is not None
+                ),
+                None if return_mss is None else return_mss.resolved_at,
                 ()
-                if location is None
+                if location is None or return_mss is None
                 else (
                     location.location_id,
                     location.source_displacement_id,
                     location.source_zone_id,
+                    return_mss.bos_id,
+                    return_mss.target_swing_id,
                 ),
             ),
             "first_pullback_to_frozen_zone": _SequenceSignal(
@@ -2831,17 +3242,23 @@ def _typed_favr(
                 if first_pullback is None
                 else first_pullback.observed_at,
                 ()
-                if first_pullback is None
-                else (first_pullback.source_entity_id,),
+                if first_pullback is None or entry_path is None
+                else (
+                    entry_path.sequence_id,
+                    first_pullback.step_id,
+                    first_pullback.source_entity_id,
+                ),
             ),
             "aligned_entry_trigger": _SequenceSignal(
                 float(trigger_ready),
                 None if trigger_step is None else trigger_step.observed_at,
                 ()
-                if trigger_step is None
+                if trigger_step is None or entry_path is None
                 else tuple(
                     value
                     for value in (
+                        entry_path.sequence_id,
+                        trigger_step.step_id,
                         trigger_step.source_entity_id,
                         trigger_step.source_event_id,
                     )
@@ -2905,17 +3322,16 @@ def _typed_favr(
         hard_gate_results=hard_gates,
         invalidated=bool(
             accepted_outside
+            or resolution_censored
             or frozen_range_missing
             or frozen_manipulation_missing
             or frozen_location_missing
             or (dealing_range is not None and not mature)
             or zone_left
             or entry_contradiction is not None
+            or entry_path_censored
+            or mss_after_first_pullback
             or midpoint_chase
-            or (
-                entry_path is not None
-                and entry_path.lifecycle is PathSequenceLifecycle.CENSORED
-            )
             or terminal_reason == "selected_draw_consumed_or_missing"
         ),
         entry_window_expired=stale_trigger,
@@ -2994,6 +3410,145 @@ def _typed_evaluate(
     )
 
 
+def _favr_graph_broken_index(
+    evaluation: _Evaluation,
+    scene_graph: TemporalMarketSceneGraph,
+) -> int | None:
+    """Return the first disconnected FAVR stage using exact identities."""
+
+    signals = evaluation.sequence_signals
+    range_signal = signals["mature_dealing_range"]
+    sweep_signal = signals["range_boundary_sweep_reaccepted"]
+    zone_signal = signals[
+        "opposite_displacement_zone_inside_range"
+    ]
+    pullback_signal = signals["first_pullback_to_frozen_zone"]
+    trigger_signal = signals["aligned_entry_trigger"]
+
+    if sweep_signal.value > 0.0:
+        if (
+            len(range_signal.source_ids) < 1
+            or len(sweep_signal.source_ids) < 2
+        ):
+            return 1
+        range_id = range_signal.source_ids[0]
+        manipulation_id, boundary_id = sweep_signal.source_ids[:2]
+        if not (
+            evaluation.context_identity == range_id
+            and evaluation.initiating_event_id == manipulation_id
+            and scene_graph.has_direct_relation(
+                (boundary_id,),
+                SceneEdgeKind.SOURCED_FROM,
+                (range_id,),
+                source_kind="liquidity",
+                target_kind="range",
+            )
+            and scene_graph.has_direct_relation(
+                (manipulation_id,),
+                SceneEdgeKind.SWEEPS,
+                (boundary_id,),
+                source_kind="manipulation",
+                target_kind="liquidity",
+            )
+        ):
+            return 1
+
+    if zone_signal.value > 0.0:
+        if (
+            len(sweep_signal.source_ids) < 1
+            or len(zone_signal.source_ids) < 3
+        ):
+            return 2
+        manipulation_id = sweep_signal.source_ids[0]
+        location_id, displacement_id, zone_id = (
+            zone_signal.source_ids[:3]
+        )
+        zone_created = any(
+            scene_graph.has_direct_relation(
+                (displacement_id,),
+                SceneEdgeKind.CREATES,
+                (zone_id,),
+                source_kind="displacement",
+                target_kind=zone_kind,
+            )
+            for zone_kind in ("fvg", "order_block")
+        )
+        zone_return = any(
+            scene_graph.has_direct_relation(
+                (location_id,),
+                SceneEdgeKind.RETURNS_TO,
+                (zone_id,),
+                source_kind="entry_location",
+                target_kind=zone_kind,
+            )
+            for zone_kind in ("fvg", "order_block")
+        )
+        if not (
+            evaluation.entry_location_id == location_id
+            and scene_graph.has_direct_relation(
+                (manipulation_id,),
+                SceneEdgeKind.PRECEDES,
+                (displacement_id,),
+                source_kind="manipulation",
+                target_kind="displacement",
+            )
+            and zone_created
+            and zone_return
+        ):
+            return 2
+
+    if pullback_signal.value > 0.0:
+        if (
+            len(zone_signal.source_ids) < 1
+            or len(pullback_signal.source_ids) < 3
+        ):
+            return 3
+        location_id = zone_signal.source_ids[0]
+        path_id, pullback_step_id, pullback_location_id = (
+            pullback_signal.source_ids[:3]
+        )
+        if not (
+            evaluation.entry_path_id == path_id
+            and pullback_location_id == location_id
+            and scene_graph.has_direct_relation(
+                (pullback_step_id,),
+                SceneEdgeKind.SOURCED_FROM,
+                (path_id,),
+                source_kind="path_step",
+                target_kind="path_sequence",
+            )
+            and scene_graph.has_direct_relation(
+                (pullback_step_id,),
+                SceneEdgeKind.SOURCED_FROM,
+                (location_id,),
+                source_kind="path_step",
+                target_kind="entry_location",
+            )
+        ):
+            return 3
+
+    if trigger_signal.value > 0.0:
+        if (
+            len(pullback_signal.source_ids) < 1
+            or len(trigger_signal.source_ids) < 2
+        ):
+            return 4
+        path_id = pullback_signal.source_ids[0]
+        trigger_path_id, trigger_step_id = trigger_signal.source_ids[:2]
+        if not (
+            evaluation.entry_path_id == path_id == trigger_path_id
+            and scene_graph.has_direct_relation(
+                (trigger_step_id,),
+                SceneEdgeKind.SOURCED_FROM,
+                (path_id,),
+                source_kind="path_step",
+                target_kind="path_sequence",
+            )
+        ):
+            return 4
+    return None
+
+
 def _require_connected_graph_sequence(
     playbook: Playbook,
     protocol: PlaybookProtocol,
@@ -3001,7 +3556,7 @@ def _require_connected_graph_sequence(
     scene_graph: TemporalMarketSceneGraph | None,
     prior: HypothesisBelief | None,
 ) -> _Evaluation:
-    """Fail closed on disconnected DFP/LSR facts without inventing a veto.
+    """Fail closed on disconnected typed facts without inventing a veto.
 
     Snapshot detectors still describe each fact.  In the graph-backed engine,
     however, a later fact may advance a hypothesis only when the graph can
@@ -3011,14 +3566,7 @@ def _require_connected_graph_sequence(
     thesis or create contradictory evidence.
     """
 
-    if (
-        scene_graph is None
-        or playbook
-        not in {
-            Playbook.DISPLACEMENT_FIRST_PULLBACK,
-            Playbook.LIQUIDITY_SWEEP_REVERSAL,
-        }
-    ):
+    if scene_graph is None:
         return evaluation
     ordered_ids = tuple(
         step.step_id for step in protocol.required_sequence
@@ -3032,30 +3580,42 @@ def _require_connected_graph_sequence(
             else prior.sequence.steps
         )
     }
-    broken_index: int | None = None
-    for index, (left_id, right_id) in enumerate(
-        zip(ordered_ids[:-1], ordered_ids[1:]),
-        start=1,
-    ):
-        left = signals[left_id]
-        right = signals[right_id]
-        prior_left = prior_steps.get(left_id)
-        left_sources = (
-            left.source_ids
-            if left.value > 0.0
-            else ()
-            if prior_left is None or not prior_left.satisfied
-            else prior_left.source_ids
+    broken_index: int | None
+    if playbook is Playbook.FAILED_AUCTION_VALUE_RETURN:
+        broken_index = _favr_graph_broken_index(
+            evaluation,
+            scene_graph,
         )
-        if not left_sources or right.value <= 0.0:
-            continue
-        if not scene_graph.find_path(
-            left_sources,
-            right.source_ids,
-            max_depth=6,
+    elif playbook in {
+        Playbook.DISPLACEMENT_FIRST_PULLBACK,
+        Playbook.LIQUIDITY_SWEEP_REVERSAL,
+    }:
+        broken_index = None
+        for index, (left_id, right_id) in enumerate(
+            zip(ordered_ids[:-1], ordered_ids[1:]),
+            start=1,
         ):
-            broken_index = index
-            break
+            left = signals[left_id]
+            right = signals[right_id]
+            prior_left = prior_steps.get(left_id)
+            left_sources = (
+                left.source_ids
+                if left.value > 0.0
+                else ()
+                if prior_left is None or not prior_left.satisfied
+                else prior_left.source_ids
+            )
+            if not left_sources or right.value <= 0.0:
+                continue
+            if not scene_graph.find_path(
+                left_sources,
+                right.source_ids,
+                max_depth=6,
+            ):
+                broken_index = index
+                break
+    else:
+        return evaluation
     if broken_index is None:
         return evaluation
     gates = dict(evaluation.hard_gate_results)
@@ -3150,7 +3710,9 @@ def _sequence_state(
         assert prior_sequence is not None
         setup_id = prior_sequence.setup_id
         setup_clock = prior_sequence.started_at
-        prior_steps: dict[str, SequenceStepState] = {}
+        prior_steps = {
+            step.step_id: step for step in prior_sequence.steps
+        }
     else:
         setup_id = candidate_id
         setup_clock = evaluation.setup_clock
@@ -3227,48 +3789,23 @@ def _validate_evidence_contract(
 
 
 def _visible_levels(observation: MarketObservation) -> list[LiquidityLevel]:
-    if observation.liquidity_inventory_authoritative:
-        return [
-            LiquidityLevel(
-                level_id=item.item_id,
-                timeframe=item.timeframe,
-                side=item.side,
-                price=item.price,
-                formed_at=item.formed_at,
-                confirmed_at=item.confirmed_at,
-                touches=max(0, len(item.source_ids) - 1),
-                swept=False,
-            )
-            for item in observation.liquidity_inventory
-            if (
-                item.lifecycle
-                is LiquidityInventoryLifecycle.VISIBLE
-                and item.confirmed_at <= observation.asof
-            )
-        ]
-    consumed_ids = {
-        source_id
-        for event in observation.recent_events
-        if event.kind
-        in {
-            EventKind.LIQUIDITY_SWEEP,
-            EventKind.LIQUIDITY_CONSUMED,
-            EventKind.STRUCTURE_BREAK,
-        }
-        for source_id in event.source_ids
-    }
-    output: list[LiquidityLevel] = []
-    for timeframe in observation.active_timeframes:
-        output.extend(
-            level
-            for level in observation.frame(timeframe).liquidity
-            if (
-                not level.swept
-                and level.level_id not in consumed_ids
-                and level.confirmed_at <= observation.asof
-            )
+    return [
+        LiquidityLevel(
+            level_id=item.item_id,
+            timeframe=item.timeframe,
+            side=item.side,
+            price=item.price,
+            formed_at=item.formed_at,
+            confirmed_at=item.confirmed_at,
+            touches=max(0, len(item.source_ids) - 1),
+            swept=False,
         )
-    return output
+        for item in observation.liquidity_inventory
+        if (
+            item.lifecycle is LiquidityInventoryLifecycle.VISIBLE
+            and item.confirmed_at <= observation.asof
+        )
+    ]
 
 
 
@@ -3767,15 +4304,12 @@ class PlaybookBrain:
                         f"{playbook.value} typed evaluator hard gates "
                         "disagree with the registry"
                     )
-                ordered_gates = {
-                    step.step_id: step.satisfied
-                    for step in sequence.steps
-                    if step.step_id in protocol.hard_gates
-                }
-                if set(ordered_gates) != set(protocol.hard_gates):
-                    raise ValueError(
-                        f"{playbook.value} sequence omitted a hard gate"
+                current_hard_gates = {
+                    gate_id: bool(
+                        evaluation.hard_gate_results[gate_id]
                     )
+                    for gate_id in protocol.hard_gates
+                }
                 if (
                     prior is not None
                     and prior.phase in _TERMINAL_PHASES
@@ -3866,11 +4400,6 @@ class PlaybookBrain:
                     episode_id = prior.episode_id
                     entry_location_id = prior.entry_location_id
                     initiating_event_id = prior.initiating_event_id
-                    ordered_gates = {
-                        step.step_id: step.satisfied
-                        for step in sequence.steps
-                        if step.step_id in protocol.hard_gates
-                    }
                 same_episode = bool(
                     prior is not None
                     and episode_id is not None
@@ -4153,7 +4682,7 @@ class PlaybookBrain:
                         "delivery_quality"
                     ],
                     evidence_group_scores=evaluation.evidence_group_scores,
-                    hard_gate_results=ordered_gates,
+                    hard_gate_results=current_hard_gates,
                     setup_context_id=sequence.setup_id,
                     entry_location_id=(
                         entry_location_id
@@ -4319,7 +4848,6 @@ class PlaybookBrain:
                 phase_at_selection=(
                     None if current_top is None else current_top.phase.value
                 ),
-                focus_revision_id="",
             )
             unresolved = tuple(
                 dict.fromkeys(

@@ -1,4 +1,6 @@
 from dataclasses import replace
+import hashlib
+import json
 from pathlib import Path
 import pickle
 
@@ -20,28 +22,36 @@ from smc_trader.group3 import (
 )
 from smc_trader.model import (
     BOSLifecycle,
+    BOSPostBreakState,
     BOSScope,
     BreakOfStructureState,
     Candle,
     Direction,
     FairValueGapLifecycle,
+    FVGQualification,
     OrderBlockLifecycle,
     Timeframe,
 )
+from smc_trader.structure import StructureConfig, StructureTracker
 
 
 ROOT = Path(__file__).resolve().parents[1]
 GROUP3_PROTOCOL_PATH = ROOT / "configs/primitives_zones.json"
+STRUCTURE_PROTOCOL_PATH = (
+    ROOT / "configs/primitives_structure_liquidity.json"
+)
 DISPLACEMENT_PROTOCOL_PATH = (
     ROOT
     / "configs/primitives_displacement.json"
 )
-GROUP3_PROTOCOL_SHA = (
-    "4086ed67c7fe849e175c149bca8688749ef44d6649a672736535e1fec2d18c51"
-)
-STRUCTURE_PROTOCOL_SHA = (
-    "189b6af3bff631c3985fa37bcf9f5f82528296800886d9c9bd4cbe123ea4c701"
-)
+
+
+def _sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+GROUP3_PROTOCOL_SHA = _sha256(GROUP3_PROTOCOL_PATH)
+STRUCTURE_PROTOCOL_SHA = _sha256(STRUCTURE_PROTOCOL_PATH)
 BASE = pd.Timestamp("2025-01-06T09:30:00-05:00")
 
 _FVG_FROZEN_FIELDS = (
@@ -51,6 +61,7 @@ _FVG_FROZEN_FIELDS = (
     "instrument_id",
     "timeframe",
     "direction",
+    "qualification",
     "source_displacement_id",
     "source_active_transition_id",
     "source_displacement_protocol_hash",
@@ -65,6 +76,7 @@ _FVG_FROZEN_FIELDS = (
     "invalidation_price",
     "width_points",
     "width_ticks",
+    "formation_atr",
     "width_atr",
     "strength",
     "formed_at",
@@ -89,14 +101,20 @@ _ORDER_BLOCK_FROZEN_FIELDS = (
     "source_bos_target_swing_id",
     "source_bos_structure_id",
     "source_bos_scope",
+    "source_bos_pending_at",
     "source_bos_resolved_at",
+    "source_bos_break_bar_id",
+    "source_bos_mss_qualified",
     "anchor_candle_id",
+    "anchor_candle_ids",
     "anchor_start",
     "anchor_end",
     "anchor_open",
     "anchor_close",
     "lower_bound",
     "upper_bound",
+    "body_lower_bound",
+    "body_upper_bound",
     "midpoint",
     "invalidation_price",
     "width_points",
@@ -247,6 +265,10 @@ def _confirmed_bos(
     timeframe: Timeframe = Timeframe.M5,
     lifecycle: BOSLifecycle = BOSLifecycle.CONFIRMED,
     resolved_at: pd.Timestamp | None = None,
+    scope: BOSScope = BOSScope.CONTINUATION,
+    pending_at: pd.Timestamp | None = None,
+    source_displacement_id: str | None = None,
+    mss_qualified: bool = False,
 ) -> BreakOfStructureState:
     resolution = (
         clock
@@ -261,12 +283,18 @@ def _confirmed_bos(
         timeframe=timeframe,
         direction=direction,
         lifecycle=lifecycle,
-        scope=BOSScope.LOCAL,
+        scope=scope,
         target_swing_id=f"swing-{suffix}",
-        source_structure_id=None,
+        source_structure_id=(
+            None if scope is BOSScope.LOCAL else f"structure-{suffix}"
+        ),
         target_price=target,
         target_ticks=round(target / 0.25),
-        pending_at=pending_reference - pd.Timedelta(minutes=5),
+        pending_at=(
+            pending_reference - pd.Timedelta(minutes=5)
+            if pending_at is None
+            else pending_at
+        ),
         resolved_at=resolution,
         age_bars=1,
         failure_reason=(
@@ -278,6 +306,21 @@ def _confirmed_bos(
             0.8
             if lifecycle is BOSLifecycle.CONFIRMED
             else 0.0
+        ),
+        break_bar_id=(
+            "current-break-bar"
+            if lifecycle is BOSLifecycle.CONFIRMED
+            else None
+        ),
+        break_distance_atr=(
+            0.8 if lifecycle is BOSLifecycle.CONFIRMED else None
+        ),
+        source_displacement_id=source_displacement_id,
+        mss_qualified=mss_qualified,
+        post_break_state=(
+            BOSPostBreakState.PENDING
+            if lifecycle is BOSLifecycle.CONFIRMED
+            else None
         ),
     )
 
@@ -291,6 +334,14 @@ def _bos_source(
     protocol_hash: str = STRUCTURE_PROTOCOL_SHA,
     tick_size: float = 0.25,
 ) -> Group3BOSSource:
+    if (
+        bos.lifecycle is BOSLifecycle.CONFIRMED
+        and bos.break_bar_id == "current-break-bar"
+    ):
+        break_id = CausalGroup3Tracker(
+            _group3_protocol()
+        )._candle_id(candle)
+        bos = replace(bos, break_bar_id=break_id)
     return Group3BOSSource(
         state=bos,
         symbol=candle.symbol if symbol is None else symbol,
@@ -414,27 +465,60 @@ def _form_order_block(direction: Direction = Direction.LONG):
     ("field", "value"),
     (
         ("protocol_hash", "0" * 63),
-        ("protocol_version", "3.1.0-group3.2"),
-        ("tick_size", 0.5),
-        ("timeframe", "1m"),
-        ("fvg_source_bars", 4),
-        ("ob_anchor_history_bars", 63),
-        ("maximum_fvg_states", 255),
-        ("maximum_order_block_states", 127),
+        ("protocol_version", ""),
+        ("tick_size", 0.0),
+        ("timeframe", ""),
+        ("fvg_source_bars", 0),
+        ("fvg_formation_atr_period", 0),
+        ("ob_anchor_history_bars", 0),
+        ("maximum_fvg_states", 0),
+        ("maximum_order_block_states", 0),
     ),
 )
-def test_group3_protocol_is_frozen(field: str, value: object) -> None:
+def test_group3_protocol_tracks_current_config_and_rejects_invalid_ranges(
+    field: str,
+    value: object,
+) -> None:
     protocol = _group3_protocol()
+    payload = json.loads(GROUP3_PROTOCOL_PATH.read_bytes())
+
     assert protocol.protocol_hash == GROUP3_PROTOCOL_SHA
     assert (
+        protocol.protocol_version,
         protocol.tick_size,
         protocol.timeframe,
         protocol.fvg_source_bars,
+        protocol.fvg_formation_atr_period,
         protocol.ob_anchor_history_bars,
         protocol.maximum_fvg_states,
         protocol.maximum_order_block_states,
-    ) == (0.25, "5m", 3, 64, 256, 128)
-    with pytest.raises(ValueError, match="frozen contract"):
+    ) == (
+        payload["protocol_version"],
+        payload["tick_size"],
+        payload["timeframe"],
+        payload["fvg_source_bars"],
+        payload["fvg_formation_atr_period"],
+        payload["ob_anchor_history_bars"],
+        payload["maximum_fvg_states"],
+        payload["maximum_order_block_states"],
+    )
+    assert isinstance(protocol.protocol_version, str)
+    assert protocol.protocol_version
+    assert isinstance(protocol.tick_size, (int, float))
+    assert not isinstance(protocol.tick_size, bool)
+    assert protocol.tick_size > 0.0
+    assert protocol.timeframe
+    assert all(
+        type(item) is int and item > 0
+        for item in (
+            protocol.fvg_source_bars,
+            protocol.fvg_formation_atr_period,
+            protocol.ob_anchor_history_bars,
+            protocol.maximum_fvg_states,
+            protocol.maximum_order_block_states,
+        )
+    )
+    with pytest.raises(ValueError):
         replace(protocol, **{field: value})
 
 
@@ -505,6 +589,11 @@ def test_fvg_strict_three_bar_and_activation_on_c3(
         c2.start,
         c3.start,
     )
+    assert state.qualification is FVGQualification.DISPLACEMENT_LINKED
+    assert state.formation_atr > 0.0
+    assert state.width_atr == pytest.approx(
+        state.width_points / state.formation_atr
+    )
     assert state.source_displacement_id == active.state.entity_id
     assert (
         state.source_active_transition_id
@@ -541,7 +630,7 @@ def test_fvg_outer_bar_equality_does_not_form(pattern) -> None:
     assert output.fvg_transitions == ()
 
 
-def test_fvg_geometry_without_qualified_displacement_does_not_form() -> None:
+def test_fvg_geometry_without_qualified_displacement_forms_raw() -> None:
     harness = _Harness()
     updates = []
     output = None
@@ -554,7 +643,11 @@ def test_fvg_geometry_without_qualified_displacement_does_not_form() -> None:
         updates.append(displacement)
     assert all(update.state is None for update in updates)
     assert output is not None
-    assert output.fair_value_gaps == ()
+    assert len(output.fair_value_gaps) == 1
+    state = output.fair_value_gaps[0]
+    assert state.qualification is FVGQualification.RAW
+    assert state.source_displacement_id is None
+    assert state.source_active_transition_id is None
 
 
 def test_fvg_requires_exact_central_bar_episode_membership() -> None:
@@ -585,8 +678,9 @@ def test_fvg_requires_exact_central_bar_episode_membership() -> None:
         ),
     )
     output = harness.group3.on_completed_5m(c3, foreign)
-    assert output.fair_value_gaps == ()
-    assert output.fvg_transitions == ()
+    assert len(output.fair_value_gaps) == 1
+    assert output.fair_value_gaps[0].qualification is FVGQualification.RAW
+    assert output.fair_value_gaps[0].source_displacement_id is None
 
 
 @pytest.mark.parametrize("case", ("cross-contract", "future-clock"))
@@ -637,7 +731,12 @@ def test_fvg_late_activation_never_backfills_the_prior_gap() -> None:
         (101.75, 103.0, 101.25, 103.0),
     )
     outputs = [harness.send(values)[-1] for values in patterns]
-    assert all(output.fair_value_gaps == () for output in outputs)
+    first_raw = next(
+        state
+        for output in outputs
+        for state in output.fair_value_gaps
+        if state.qualification is FVGQualification.RAW
+    )
     assert harness.displacement.snapshot() is not None
     assert (
         harness.displacement.snapshot().lifecycle
@@ -647,6 +746,13 @@ def test_fvg_late_activation_never_backfills_the_prior_gap() -> None:
         harness.displacement.snapshot().active_at
         == BASE + pd.Timedelta(minutes=5 * harness.index)
     )
+    retained = next(
+        state
+        for state in outputs[-1].fair_value_gaps
+        if state.fvg_id == first_raw.fvg_id
+    )
+    assert retained.qualification is FVGQualification.RAW
+    assert retained.source_displacement_id is None
 
 
 @pytest.mark.parametrize("direction", (Direction.LONG, Direction.SHORT))
@@ -1005,7 +1111,80 @@ def test_order_block_uses_latest_reverse_bar_and_new_confirmed_bos(
     assert _order_block_by_id(retried, state.order_block_id) == state
 
 
-def test_order_block_requires_complete_frozen_64_bar_window() -> None:
+def test_real_structure_displacement_ids_join_without_fixture_rewrite() -> None:
+    structure_config = StructureConfig.from_file(
+        STRUCTURE_PROTOCOL_PATH
+    )
+    structure = StructureTracker(Timeframe.M5, structure_config)
+    displacement_protocol = _displacement_protocol()
+    displacement_tracker = CausalDisplacementTracker(
+        displacement_protocol
+    )
+    group3 = CausalGroup3Tracker(
+        _group3_protocol(),
+        displacement_protocol_hash=displacement_protocol.protocol_hash,
+        structure_protocol_hash=structure_config.protocol_hash,
+    )
+    highs = (
+        101, 102, 104, 103, 102, 102, 102, 102, 102, 103,
+        106, 104, 103, 103, 103, 103, 103, 103, 104, 107,
+    )
+    lows = (
+        99, 99, 99, 99, 99, 98, 96, 97, 98, 98,
+        98, 98, 98, 99, 97, 98, 99, 100, 101, 104,
+    )
+    opens = (*([100.0] * 17), 102.0, 101.0, 104.0)
+    closes = (*([100.0] * 17), 101.0, 104.0, 107.0)
+    final_displacement = None
+    output = None
+    candles = []
+    for index, values in enumerate(zip(opens, highs, lows, closes)):
+        candle = _candle(index, tuple(float(value) for value in values))
+        candles.append(candle)
+        structure.on_candle(candle)
+        final_displacement = displacement_tracker.on_completed_5m(candle)
+        confirmed_now = tuple(
+            state
+            for state in structure.snapshot()[2]
+            if state.lifecycle is BOSLifecycle.CONFIRMED
+            and state.resolved_at == candle.end
+        )
+        sources = tuple(
+            Group3BOSSource(
+                state=state,
+                symbol=candle.symbol,
+                instrument_id=candle.instrument_id,
+                protocol_hash=structure_config.protocol_hash,
+                tick_size=structure_config.tick_size,
+            )
+            for state in confirmed_now
+        )
+        output = group3.on_completed_5m(
+            candle,
+            final_displacement,
+            sources,
+        )
+
+    assert output is not None
+    assert final_displacement is not None
+    assert final_displacement.state is not None
+    assert len(output.order_block_transitions) == 1
+    order_block = output.order_block_transitions[0]
+    assert (
+        order_block.source_bos_break_bar_id
+        == final_displacement.state.last_valid_candle_id
+    )
+    assert order_block.source_bos_break_bar_id in (
+        final_displacement.state.admitted_candle_ids
+    )
+    assert order_block.anchor_end == candles[17].end
+    assert (
+        order_block.source_bos_pending_at
+        <= order_block.source_displacement_started_at
+    )
+
+
+def test_order_block_does_not_require_complete_64_bar_window() -> None:
     harness = _Harness()
     _warm(
         harness,
@@ -1024,8 +1203,12 @@ def test_order_block_requires_complete_frozen_64_bar_window() -> None:
         )
 
     output = harness.send(active, bos_factory=bos_factory)[-1]
-    assert output.order_blocks == ()
-    assert output.order_block_transitions == ()
+    assert len(output.order_block_transitions) == 1
+    assert (
+        output.order_block_transitions[0].anchor_end
+        == output.order_block_transitions[0].source_displacement_started_at
+        - pd.Timedelta(minutes=5)
+    )
 
 
 def test_order_block_never_expands_seed_window_to_bar_65() -> None:
@@ -1226,11 +1409,12 @@ def test_order_block_ambiguous_bos_does_not_consume_displacement() -> None:
         next_displacement,
         (
             _bos_source(
-                _confirmed_bos(
-                    clock=next_candle.end,
-                    direction=Direction.LONG,
-                    suffix="later",
-                ),
+                    _confirmed_bos(
+                        clock=next_candle.end,
+                        direction=Direction.LONG,
+                        suffix="later",
+                        pending_at=displacement.state.started_at,
+                    ),
                 candle=next_candle,
             ),
         ),

@@ -35,13 +35,14 @@
         },
         {
           "id": "h1_continuation_bos",
-          "description": "A later completed 1H close confirms a same-direction continuation BOS.",
+          "description": "A later completed 1H close confirms a same-direction continuation BOS and the first subsequent completed 1H bar accepts beyond the broken swing.",
           "minimum_value": 1.0,
           "required_inputs": [
             "1H.structure_breaks",
             "bos.target_swing_id",
             "bos.resolved_at",
-            "bos.scope"
+            "bos.scope",
+            "bos.post_break_state"
           ]
         },
         {
@@ -188,22 +189,25 @@
         },
         {
           "id": "outside_acceptance_failed",
-          "description": "The sweep bar rejected inside or a later completed bar reclaimed and held the frozen pool boundary; accepted outside is disqualifying.",
+          "description": "A later completed 1m bar reclaimed the frozen pool boundary and one additional real completed bar held it; accepted outside is disqualifying and the sweep bar cannot self-confirm reacceptance.",
           "minimum_value": 1.0,
           "required_inputs": [
-            "path_sequences.sweep_rejection",
-            "qualified_reacceptances.held_at",
+            "path_sequences.reacceptance_held",
+            "manipulation.reaccepted_at",
             "path_sequences.accepted_outside"
           ]
         },
         {
           "id": "reverse_displacement_zone",
-          "description": "After the sweep failure, a reverse-direction qualified 5m displacement creates an exact typed FVG or OB.",
+          "description": "After the sweep failure, a reverse-direction qualified 5m displacement creates an exact typed FVG or OB and the same displacement qualifies an OPPOSED 5m BOS/MSS before the first pullback.",
           "minimum_value": 1.0,
           "required_inputs": [
             "entry_locations.source_displacement_id",
             "entry_locations.direction",
-            "entry_locations.formed_at"
+            "entry_locations.formed_at",
+            "5m.structure_breaks.scope",
+            "5m.structure_breaks.mss_qualified",
+            "5m.structure_breaks.source_displacement_id"
           ]
         },
         {
@@ -340,7 +344,7 @@
         },
         {
           "id": "range_boundary_sweep_reaccepted",
-          "description": "The exact mature-range boundary is swept and a later completed 1m close re-enters the frozen range before outside acceptance.",
+          "description": "The exact mature-range boundary is swept; a later completed 1m close becomes the frozen reentry candidate and one additional real completed 1m bar holds inside before outside acceptance.",
           "minimum_value": 1.0,
           "required_inputs": [
             "manipulations.mature_range_boundary"
@@ -348,12 +352,15 @@
         },
         {
           "id": "opposite_displacement_zone_inside_range",
-          "description": "A later opposite-direction displacement leaves a qualified FVG or OB fully inside the frozen range and on the swept-side half of value.",
+          "description": "A later opposite-direction displacement leaves a qualified FVG or OB fully inside the frozen range and on the swept-side half of value; the same displacement must qualify an OPPOSED 5m BOS/MSS before the first pullback.",
           "minimum_value": 1.0,
           "required_inputs": [
             "5m.displacement",
             "1H.dealing_range",
-            "entry_locations"
+            "entry_locations",
+            "5m.structure_breaks.scope",
+            "5m.structure_breaks.mss_qualified",
+            "5m.structure_breaks.source_displacement_id"
           ]
         },
         {

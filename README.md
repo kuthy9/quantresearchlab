@@ -38,6 +38,26 @@ Only schema version 1 is active:
 - [`configs/primitives_range.json`](configs/primitives_range.json): accumulation, dealing range and manipulation;
 - [`configs/primitives_entry.json`](configs/primitives_entry.json): entry location, first pullback, reacceptance, micro BOS and path sequence.
 
+Current primitive protocol status:
+
+| Family | Protocol | Status |
+|---|---|---|
+| Structure/liquidity | `3.2.0-group12.7` | implementation complete; current-version real replay/review pending |
+| Displacement | `3.2.0-displacement-episode.3` | implementation complete; natural authority pending |
+| FVG/order block | `3.2.0-group3.4` | implementation complete; real replay/review pending |
+| Range/manipulation | `3.2.0-group4.1` | implementation complete; natural market authority pending |
+| Entry/path | `3.2.0-group5.3` | typed state available; natural authority pending; FAVR disabled |
+
+“Implementation complete” means the typed incremental contract and its
+synthetic/boundary tests exist. It is not a profitability or natural-market
+authority claim.
+
+`ContinuousSMCEngine.from_config()` defaults to development mode. Constructing
+it with `runtime_mode="live"` is rejected unless the single top-level release
+readiness block, current Group5 natural authority, and economic validation are
+all explicitly complete. The current configuration intentionally fails that
+gate; typed DFP/LSR development actions are not live-trading authorization.
+
 Internal semantic event identities remain version/hash bound where needed, but
 the runtime does not select between historical product generations.
 
@@ -90,6 +110,20 @@ observed spread/depth/fillability to Observation, Decision and Risk;
 `--simulate-execution` enables the existing next-bar position feedback path.
 Pending fills remain conservatively OHLCV-bar based until the MBO queue/depth
 fill simulator is completed.
+
+Visualization is opt-in and limited to preselected decision clocks. Repeat an
+aware `--visualize-at` value for at most 40 sampled cases; the replay renders
+each view immediately after its `step.snapshot` and writes a single index under
+`<output>/visualizations/`. With no such option, the replay creates no images.
+
+```bash
+python3 scripts/run_continuous_replay.py \
+  --source data/processed/nq_1m_previous_session_front_v2_3_2017_2026.parquet \
+  --start 2022-01-03 --end 2022-02-01 \
+  --output outputs/development_replay_visuals \
+  --visualize-at 2022-01-10T10:31:00-05:00 \
+  --visualize-at 2022-01-14T14:06:00-05:00
+```
 
 The former frozen-packet, sealed-reveal and identity-bound AI audit stack has
 been retired from the development runtime. After the vertical chain is stable,

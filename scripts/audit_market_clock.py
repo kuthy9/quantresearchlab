@@ -15,7 +15,7 @@ if str(ROOT) not in sys.path:
 
 from smc_trader.causal import CausalMarketReader  # noqa: E402
 from smc_trader.io import iter_completed_bars, load_ohlcv  # noqa: E402
-from smc_trader.model import CORE_TIMEFRAMES  # noqa: E402
+from smc_trader.scene_graph import parse_scale_specs  # noqa: E402
 from smc_trader.validation import load_validation_protocol  # noqa: E402
 
 
@@ -29,6 +29,7 @@ def parse_args() -> argparse.Namespace:
         "--validation-protocol",
         default="configs/data_splits.json",
     )
+    parser.add_argument("--model-config", default="configs/model.json")
     parser.add_argument("--output", required=True)
     return parser.parse_args()
 
@@ -51,7 +52,13 @@ def main() -> None:
     if source_hash != protocol.causal_source.sha256:
         raise RuntimeError("clock audit source is not the preregistered causal front")
     loaded = load_ohlcv(args.source)
-    reader = CausalMarketReader()
+    model_path = Path(args.model_config)
+    if not model_path.is_absolute():
+        model_path = ROOT / model_path
+    model = json.loads(model_path.read_text(encoding="utf-8"))
+    reader = CausalMarketReader(
+        scale_specs=parse_scale_specs(model.get("scales"))
+    )
     anomaly_counts: Counter[str] = Counter()
     candle_counts: Counter[str] = Counter()
     contracts: set[tuple[str, int]] = set()
@@ -74,7 +81,7 @@ def main() -> None:
         contracts.add(contract)
         update = reader.on_bar(bar)
         anomaly_counts.update(update.anomalies)
-        for timeframe in CORE_TIMEFRAMES:
+        for timeframe in reader.active_timeframes:
             candle_counts[timeframe.value] += len(update.newly_completed[timeframe])
         processed += 1
         synthetic += int(bar.synthetic_no_trade)

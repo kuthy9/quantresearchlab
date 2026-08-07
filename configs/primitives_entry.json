@@ -1,15 +1,15 @@
 {
-  "protocol_version": "3.1.0-group5.2",
-  "status": "formalized_implementation_complete",
+  "protocol_version": "3.2.0-group5.3",
+  "status": "implementation_complete_natural_authority_pending",
   "role": "causal_descriptive_development_contract",
   "tick_size": 0.25,
   "upstream": {
-    "group12_protocol_version": "3.1.0-group12.4",
-    "group12_protocol_sha256": "189b6af3bff631c3985fa37bcf9f5f82528296800886d9c9bd4cbe123ea4c701",
-    "group3_protocol_version": "3.1.0-group3.3",
-    "group3_protocol_sha256": "4086ed67c7fe849e175c149bca8688749ef44d6649a672736535e1fec2d18c51",
-    "group4_protocol_version": "3.1.0-group4.0",
-    "group4_protocol_sha256": "14b049facadb815c3fdc0d134275ee3f1efb3ca7c775a5f18ec4efad61663bc5",
+    "group12_protocol_version": "3.2.0-group12.7",
+    "group12_protocol_sha256": "ab3d2cde247f222900fb74c1b61f88c51b87b5056c15b51f003878042e18c457",
+    "group3_protocol_version": "3.2.0-group3.4",
+    "group3_protocol_sha256": "1fb83f45c2b00a1c35c2644776e97669dfa614ef9ac9daf688b03523f4e19f64",
+    "group4_protocol_version": "3.2.0-group4.1",
+    "group4_protocol_sha256": "af04fc78133d43c4a643e26898b026ece9f0aafc5c51da4719437d9cb06d1d5b",
     "required_typed_sources": [
       "5m FairValueGapState",
       "5m OrderBlockState",
@@ -29,10 +29,10 @@
     "legacy 1m path_sequence or trigger_hold_direction",
     "swing progression used as path order",
     "support/resistance reaccepted used as an entry trigger",
-    "one-bar Group4 reaccepted used as qualified reacceptance",
+    "a duplicate Group5 pool reclaim/hold state when Group4 already owns manipulation reacceptance",
     "forming or broken dealing-range midpoint used as value",
     "legacy dealing range or 4H range position used as value",
-    "mature-range entry sources, range-boundary manipulation and FAVR"
+    "direct mature-range or range-boundary-manipulation registration inside Group5; those remain Group4 and Brain context while Group5 observes only qualified FVG/OB entry locations and their ordered 1m path"
   ],
   "engineering_parameters": {
     "m1_atr_period": 14,
@@ -60,7 +60,7 @@
     "source_registration": "a new open FVG or created order block is registered only on the real completed 1m bar whose end equals source.confirmed_at, after that bar has been processed for older states; partial and untested are continuation states only",
     "source_visit_gate": "a registered zone can be visited only by a later real completed 1m bar, so source.confirmed_at <= current_bar.start",
     "cold_start": "a zone first seen after its confirmation clock is ineligible because the reducer cannot prove that an earlier first visit did not occur",
-    "pool_registration": "a pool_reversal context is registered only when a formed_liquidity_pool manipulation is first received as swept with swept_at equal to current_bar.end; after its origin and sweep-close step, current-input M1 BOS records resolved exactly at swept_at are appended immediately as record-only micro_bos_simultaneous in bos_id order so they are never backfilled on a later bar; a manipulation first seen later or already terminal is cold and cannot be backfilled",
+    "pool_registration": "a pool_reversal context is registered only when a formed_liquidity_pool manipulation is first received as live swept with swept_at equal to current_bar.end; Group4 alone owns reentry and hold, then Group5 requires a strictly later aligned displacement-linked FVG/OB and only then binds a strictly later 1m micro BOS; terminal or causal steps cannot be backfilled",
     "synthetic": "synthetic or partially synthetic candles may advance raw cutoff but cannot alter semantic state, age, hold count, strength or steps",
     "same_clock": "steps derived from one completed candle retain explicit same_clock_known or same_clock_unknown relation; unavailable intrabar ordering is never invented",
     "boundary_identity": "censored states retain the old epoch symbol and instrument_id; for contract_change_reset that pair must differ from the boundary observation pair, while data_gap_reset, data_anomaly and tick_size_mismatch require the same pair",
@@ -169,8 +169,7 @@
   "qualified_reacceptance": {
     "state_name": "QualifiedReacceptanceState",
     "contexts": [
-      "entry_zone",
-      "pool_sweep"
+      "entry_zone"
     ],
     "lifecycle": [
       "left",
@@ -201,16 +200,6 @@
       "left_short": "a completed close strictly above reference",
       "wick_only": "a range touch whose close remains on the delivery side is rejection and creates no reacceptance"
     },
-    "pool_sweep_context": {
-      "source": "a Group4 formed_liquidity_pool manipulation only",
-      "direction": "short after an above-pool sweep and long after a below-pool sweep",
-      "reference": "the frozen swept pool upper bound for above or lower bound for below",
-      "creation": "only close_outside_on_sweep=true creates left; a sweep that closes back inside is rejection, not reacceptance",
-      "accepted_outside": "terminal failure",
-      "reaccepted": "Group4 reaccepted is necessary source evidence but Group5 still requires a strict reclaim and a later hold bar",
-      "reaccepted_memory": "the first on-clock Group4 reaccepted_at is frozen inside the bounded reacceptance state; it may support a later strict reclaim after the terminal Group4 source leaves upstream retention, but it may never be backfilled from an older newly appearing source",
-      "frozen_extreme": "the original sweep_extreme is retained as the failure boundary and is never replaced by a later extreme"
-    },
     "reclaim": {
       "long": "a later real completed close strictly above reference",
       "short": "a later real completed close strictly below reference",
@@ -222,8 +211,7 @@
       "reclaim_bar": "the reclaim bar contributes zero hold bars",
       "synthetic": "synthetic bars do not count",
       "reference_equality_after_reclaim": "a later close equal to reference neither adds a hold bar nor fails; lifecycle remains reclaimed",
-      "failure": "before held, a completed close strictly back to the adverse side, a completed close strictly beyond the frozen failure boundary, typed source invalidation/failure or accepted_outside produces an immutable reason; wick-only failure-boundary excursions are not this descriptive failure",
-      "pool_equality_reclaim": "if Group4 reaccepted only at boundary equality, Group5 remains left and a still-later strict reclaim is allowed",
+      "failure": "before held, a completed close strictly back to the adverse side, a completed close strictly beyond the frozen failure boundary or typed entry-zone source invalidation/failure produces an immutable reason; wick-only failure-boundary excursions are not this descriptive failure",
       "same_bar_far_failure": "a first-pullback bar that closes strictly beyond the far edge records first_pullback then location_left and creates no reacceptance",
       "strength": "freeze reclaim_margin_atr using causal ATR at reclaimed_at and hold_margin_atr using causal ATR at held_at; held strength is their clipped minimum"
     },
@@ -232,7 +220,7 @@
   },
   "micro_bos": {
     "source": "exact Group1-2 Timeframe.M1 BreakOfStructureState; no second detector is permitted",
-    "anchor": "first_entered_at for zone_return and swept_at for pool_reversal",
+    "anchor": "first_entered_at for zone_return and the opposite_displacement path-step clock for pool_reversal",
     "qualified": "the first confirmed M1 BOS whose resolved_at is strictly later than anchor_at and whose direction matches the context direction",
     "opposed_first": "if the first strictly later confirmed M1 BOS is opposed, record the contradiction and do not rearm the same context from a later BOS",
     "same_clock": "each BOS with resolved_at equal to anchor_at appends micro_bos_simultaneous in ascending bos_id order with same_clock_unknown; it is record-only, is never a bound reference for closure, never counts as aligned or opposed and never closes either context",
@@ -302,11 +290,9 @@
     ],
     "pool_steps": [
       "pool_swept",
-      "sweep_rejection",
-      "reference_left",
-      "reference_reclaimed",
       "reacceptance_held",
-      "reacceptance_failed",
+      "opposite_displacement",
+      "opposite_displacement_ambiguous",
       "micro_bos_confirmed",
       "micro_bos_opposed",
       "micro_bos_ambiguous",
@@ -332,7 +318,7 @@
       "zone_reacceptance_on_bos_close": "if a live left or reclaimed reacceptance exists when BOS closes before hold, terminalize it as failed at the closure clock with reason context_closed_before_hold; retain and freeze the in_zone location",
       "zone_location_on_reacceptance_failure": "when reacceptance failure closes a zone path and the same bar did not separately satisfy close_beyond_far_edge or typed source failure, retain and freeze the exact in_zone location in the terminal atomic context; do not relabel it left and do not advance its age, state duration or current view after closure",
       "zone_close_reason_priority": "when multiple terminal facts share one completed clock use location_left, then reacceptance_failed, then micro_bos_ambiguous_same_clock, then micro_bos_opposed, then micro_bos_aligned; qualified_reacceptance_held and zone_rejection_observed are active milestone reasons, not close reasons",
-      "pool_reversal": "sweep rejection or reacceptance held alone remains active; bind the earliest strictly-later M1 BOS clock once; ambiguity closes immediately as contradiction micro_bos_ambiguous_same_clock; a single aligned or opposed reference closes only when it coexists with sweep rejection or held reacceptance; accepted_outside or reacceptance failure closes immediately; same-clock simultaneous BOS never closes",
+      "pool_reversal": "Group4 reaccepted appends reacceptance_held; then bind one strictly-later opposite displacement through a displacement-linked FVG or qualified OB; only a strictly-later M1 BOS may close the path. Multiple displacement identities on one earliest clock close as opposite_displacement_ambiguous_same_clock. accepted_outside or Group4 resolution deadline closes immediately; same-clock BOS never closes",
       "mitigation": "FVG or order-block mitigated alone never closes a continuously registered context",
       "hard_boundary": "censor the active path and any live reacceptance rather than claim market failure; expose dedicated censored transitions once, then clear the old epoch",
       "no_active_reacceptance_after_close": "a closed or censored path cannot retain a nonterminal reacceptance"
@@ -343,7 +329,7 @@
   "identity_and_output": {
     "canonical_identity_encoding": "UTF-8 strings joined by the literal vertical bar in the listed order; timestamps use timezone-aware ISO-8601; IDs are lowercase SHA-256 hex",
     "location_id": "sha256(group5-location-v1|protocol_hash|symbol|instrument_id|source_zone_kind|source_zone_id)",
-    "reacceptance_id": "sha256(group5-reacceptance-v1|protocol_hash|reacceptance_context_kind|context_id|reference_price_decimal_10|left_at), where reference_price_decimal_10 is the finite positive frozen descriptive reference formatted with exactly 10 decimal places and may be off the executable tick grid; reacceptance_context_kind is exactly entry_zone or pool_sweep and never zone_return or pool_reversal",
+    "reacceptance_id": "sha256(group5-reacceptance-v1|protocol_hash|entry_zone|context_id|reference_price_decimal_10|left_at), where reference_price_decimal_10 is the finite positive frozen descriptive reference formatted with exactly 10 decimal places and may be off the executable tick grid",
     "sequence_id": "sha256(group5-path-v1|protocol_hash|symbol|instrument_id|context_kind|context_id)",
     "step_id": "sha256(group5-step-v1|protocol_hash|sequence_id|zero_based_ordinal|kind|observed_at|source_entity_id)",
     "context_id_mapping": {
@@ -357,7 +343,8 @@
       "wick_rejection": "source_event_id=null; source_entity_id=location_id",
       "location_left": "source_event_id=typed source_zone_id only for typed FVG invalidation or OB failure, otherwise null; source_entity_id=location_id",
       "pool_swept": "source_event_id=manipulation_id; source_entity_id=manipulation_id",
-      "sweep_rejection": "source_event_id=manipulation_id; source_entity_id=manipulation_id",
+      "opposite_displacement": "source_event_id=source zone id; source_entity_id=displacement id",
+      "opposite_displacement_ambiguous": "source_event_id=null; source_entity_id=deterministic identity over competing displacement ids",
       "accepted_outside": "source_event_id=manipulation_id; source_entity_id=manipulation_id",
       "reference_left": "source_event_id=null; source_entity_id=reacceptance_id",
       "reference_reclaimed": "source_event_id=null; source_entity_id=reacceptance_id",
@@ -428,6 +415,7 @@
         "location_left",
         "reacceptance_failed",
         "pool_reversal_sequence_observed",
+        "opposite_displacement_ambiguous_same_clock",
         "accepted_outside"
       ]
     },
@@ -443,7 +431,8 @@
       "micro_bos": "exact upstream BOS strength",
       "location_left": "zero",
       "pool_swept": "clipped Group4 penetration_atr",
-      "sweep_rejection": "absolute completed-close return margin divided by causal ATR, clipped",
+      "opposite_displacement": "zero; displacement measurements remain on the source episode",
+      "opposite_displacement_ambiguous": "zero",
       "accepted_outside": "zero"
     }
   },
@@ -462,12 +451,10 @@
     "capacity_failure": "if a new context requires capacity and no previously exposed terminal context exists, reject the entire update before commit"
   },
   "authority": {
-    "eye_only": true,
-    "brain_authority": false,
-    "action_authority": false,
-    "risk_authority": false,
-    "execution_authority": false,
-    "profitability_evaluated": false,
+    "typed_state_available": true,
+    "brain_input_allowed": true,
+    "natural_authority_validated": false,
+    "independent_action_authority": false,
     "favr_enabled": false
   },
   "stopping_rule": {

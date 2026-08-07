@@ -2,6 +2,9 @@
 
 The executable definition is `configs/primitives_zones.json`.
 
+Current protocol: `3.2.0-group3.4`. Status:
+`implementation_complete_real_replay_review_pending`.
+
 This contract freezes the causal meaning of the 5m fair value gap and order
 block. Both are descriptive location entities. Neither is an entry signal,
 playbook, stop, target, probability adjustment, or profitability claim.
@@ -84,20 +87,24 @@ update are complete.
 Equality is not a gap. The midpoint is the arithmetic mean of the frozen
 bounds; it may lie between ticks and is descriptive only.
 
-At `c3.end`, a same-direction displacement must be `active`, `c2` must be an
-exact admitted member of that episode, and:
+Every strict three-bar geometry is materialized as one FVG with qualification
+`raw`. At `c3.end`, it becomes `displacement_linked` only when a
+same-direction displacement is `active`, `c2` is an exact admitted member of
+that episode, and:
 
 `displacement.started_at <= c2.end <= c3.end <=
 displacement.prefix_last_admitted_at`.
 
-The displacement `active_at` must be no later than `c3.end`. The FVG stores
-the three candle IDs, displacement identity, displacement clocks and prefix
-commitment. A geometric gap without this qualified source emits no FVG.
+The displacement `active_at` must be no later than `c3.end`. A linked FVG
+stores the displacement identity, clocks and prefix commitment. A geometric
+gap without that source remains visible as `raw`; it cannot register a Group5
+entry location. A displacement that activates after `c3.end` never upgrades
+or backfills the frozen qualification.
 
 `formed_at` and `confirmed_at` both equal `c3.end`. Identity includes the
-Group 3 protocol hash, contract, direction, all three candle IDs and the
-source displacement ID. Direction, boundaries, midpoint and source identity
-never change.
+Group 3 protocol hash, contract, direction and all three candle IDs; it does
+not include qualification or displacement identity. Direction, boundaries,
+midpoint, formation ATR and formation-time qualification never change.
 
 ### Lifecycle
 
@@ -258,7 +265,8 @@ clocks, age, duration, frozen bounds, midpoint, transition reason and exact
 source identities.
 
 FVG additionally exposes near/far edges, width, maximum penetration, all
-three candle IDs and displacement provenance. Order block additionally
+three candle IDs, qualification and optional linked-displacement provenance.
+Order block additionally
 exposes near/distal edges, source candle body direction, displacement
 provenance and BOS provenance.
 
@@ -270,17 +278,17 @@ cannot contaminate new-epoch memory. Consumers must not reconstruct a zone
 from natural-language annotations, current price, future extremes or the
 legacy impulse proxy.
 
-This protocol does not change DFP admission, belief weights, entry readiness,
-planned entry, invalidation, target, action utility or risk rules. Those
-links may be implemented only after the primitives pass their own synthetic,
-boundary, causal, finite real OHLCV and stratified blind-review stopping
-conditions.
+This protocol does not itself choose DFP admission, belief weights, entry
+readiness, planned entry, invalidation, target, action utility or risk. Typed
+playbooks may consume only displacement-linked FVGs and qualified order blocks
+through their own causal gates; raw FVG remains descriptive geometry.
 
 ## Formalization gate
 
-This document completes only the one allowed formalization step. It does not
-claim implementation, test, real-replay, blind-review or profitability
-completion.
+Formalization, incremental implementation, static review and the unified
+synthetic/boundary/causal suite are complete for `3.2.0-group3.4`. A finite
+real OHLCV replay and small stratified outcome-blind review remain pending;
+there is no profitability claim.
 
 Any change to a gap inequality, source association, order-block search
 window, lifecycle transition, same-bar priority, boundary behavior or

@@ -35,8 +35,10 @@ descriptive and must not be tuned against PnL.
 
 ## Confirmed swing and directional sequence
 
-- Swing pivots use two completed real bars on the left and two on the right.
-- A candidate remains `forming` until the second registered right bar. At that
+- Swing span is timeframe-specific: 1m uses one completed real bar on each
+  side (a three-bar internal pivot), while 5m, 15m, 1H and 4H use two on each
+  side (a five-bar structural pivot).
+- A candidate remains `forming` until its configured final right bar. At that
   clock it becomes `confirmed` or `formation_failed`; confirmation is never
   backfilled to the pivot.
 - Confirmed same-side swings are compared in integer ticks to produce
@@ -67,7 +69,13 @@ descriptive and must not be tuned against PnL.
 
 ## Support/resistance
 
-- The first confirmed swing freezes a zone centered on its price.
+- A confirmed swing may freeze a structural zone centered on its price.
+- Each previous completed session/day/week high or low also materializes a
+  distinct reaction zone around the exact reference price. It shares the real
+  source identity with the corresponding point-liquidity item but never uses a
+  fabricated swing ID.
+- A mature range boundary normally reuses its two source S/R zones. Only
+  genuinely different boundary geometry may create a derived reaction zone.
 - Frozen tolerance is `max(1 tick, 0.10 × causal ATR at formation)`.
 - A later confirmed same-side swing inside the frozen zone is another touch.
   Formation touches plus the newest bounded touch history are retained, while
@@ -114,8 +122,9 @@ descriptive and must not be tuned against PnL.
   `accepted/rejected` pool remains visible when another pool forms at full
   capacity on that bar. Overflow is bounded by the same-bar terminal pool
   count, then compacted before the next real semantic update.
-- Inventory contains typed confirmed swings and equal pools. The eye emits only
-  `visible` or `consumed`; `targeted` is a downstream belief/plan overlay.
+- Inventory contains typed confirmed swings, equal pools, previous completed
+  session/day/week highs and lows, and mature-range boundaries. The eye emits
+  only `visible` or `consumed`; `targeted` is a downstream belief/plan overlay.
 - Typed liquidity is enabled only by an explicit `observer.liquidity_protocol`.
   Its file SHA is part of replay bindings. An authoritative inventory remains
   authoritative when empty and must never fall back to legacy proxy levels.
@@ -152,41 +161,20 @@ descriptive and must not be tuned against PnL.
 - The brain and risk engine must consume this same top-level inventory. Legacy
   frame liquidity is only a compatibility projection.
 
-## Group 1–2 development freeze
+## Group 1–2 status
 
-Status: frozen for downstream development as
-`3.1.0-group12.4`. This is a primitive-level freeze, not a profitability or
-strategy-validation claim.
+Current protocol: `3.2.0-group12.7`.
 
-- Protocol SHA-256:
-  `189b6af3bff631c3985fa37bcf9f5f82528296800886d9c9bd4cbe123ea4c701`.
-- Model configuration SHA-256:
-  `cca13a4dbb70c215dc624c7db061034efaf78aa91537765cdcb9f1bf6755bdc4`.
-- The unified default development suite passed with 421 selected tests; the 28
-  historical-frozen tests remained excluded by the registered default marker.
-  Focused BOS, Group 1–2, event-timeline, observer equivalence, and checkpoint
-  resume tests also passed.
-- The finite real replay used 12,279 rows from the registered causal front
-  (source SHA-256
-  `5057fe574b82b26e3fe8a7798607a177b847876fee7f5ef41a938c7c87499bfc`)
-  and produced 5,460 decision-time observations. Its completion artifact is
-  `outputs/development/group12_3_event_timeline_real_replay_r2_20190311_20190316/COMPLETED.json`
-  with SHA-256
-  `f6cd01a24c0b6ebf0a740b67f2d7d1b7df26c466ccb42d1d93b5ec4932ebabac`.
-- Final replay acceptance found 1,228 retained entity timelines exactly
-  matching the current four-timeframe typed snapshot, zero incomplete
-  timelines, zero decision-time incomplete-clock anomalies, and 29 current
-  retired zones with complete `active → ... → retired` histories.
-- The prior stratified blind review passed 22/22 cases: 11 structure/BOS cases
-  and 11 support/resistance or liquidity cases, with no systematic semantic
-  misread. The real-replay BOS failure then consumed the one allowed BOS
-  concept repair: a terminal attempt can no longer be re-armed under the same
-  identity. The repaired case has a deterministic candle regression and the
-  complete finite replay passed afterward.
-- No PnL search, threshold search, MBO authority, or future-path input was used.
-  All 5,460 actions remained `abstain`; this is expected before brain and
-  decision calibration and is not evidence for or against profitability.
+The incremental implementation and unified synthetic, boundary, causality and
+resume tests are present. The older `3.1.0-group12.4` replay and blind-review
+claims do not establish natural authority for the current version, which also
+adds timeframe-specific swing spans, target-identity BOS scope, independent
+wick consumption, completed-period S/R/liquidity sources and richer candle/S/R
+descriptions.
 
-Any second systematic BOS semantic failure parks BOS instead of triggering
-another threshold or concept rewrite. Downstream code may consume the frozen
-typed snapshots and retained timelines without expanding `recent_events`.
+Status is therefore
+`implementation_complete_current_version_real_replay_review_pending`. A
+bounded real OHLCV replay and small outcome-blind review of the current version
+remain required before a primitive-level natural-authority claim. This status
+does not prevent typed downstream development and is not a profitability,
+MBO, action or strategy-validation claim.

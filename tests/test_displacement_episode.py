@@ -17,6 +17,7 @@ from smc_trader.group3 import (
 )
 from smc_trader.model import (
     BOSLifecycle,
+    BOSPostBreakState,
     BOSScope,
     BreakOfStructureState,
     Candle,
@@ -26,6 +27,11 @@ from smc_trader.model import (
     Timeframe,
 )
 from smc_trader.observation import CausalObserver, ObserverConfig
+
+from .helpers import (
+    CORE_TEST_SCALE_REGISTRY_ID,
+    CORE_TEST_SCALE_SPECS,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -119,16 +125,30 @@ def _reader_update(candle: Candle) -> ReaderUpdate:
         real_minutes=1,
         synthetic_minutes=0,
     )
-    newly = {timeframe: () for timeframe in Timeframe}
-    histories = {timeframe: () for timeframe in Timeframe}
+    active_timeframes = tuple(
+        spec.native_timeframe
+        for spec in CORE_TEST_SCALE_SPECS
+        if spec.enabled and spec.native_timeframe is not None
+    )
+    newly = {timeframe: () for timeframe in active_timeframes}
+    histories = {timeframe: () for timeframe in active_timeframes}
     newly[Timeframe.M1] = (minute,)
     newly[Timeframe.M5] = (candle,)
     histories[Timeframe.M1] = (minute,)
     histories[Timeframe.M5] = (candle,)
-    return ReaderUpdate(candle.end, minute, newly, histories, ())
+    return ReaderUpdate(
+        asof=candle.end,
+        completed_1m=minute,
+        newly_completed=newly,
+        histories=histories,
+        anomalies=(),
+        active_timeframes=active_timeframes,
+        scale_specs=CORE_TEST_SCALE_SPECS,
+        scale_registry_id=CORE_TEST_SCALE_REGISTRY_ID,
+    )
 
 
-def test_episode_protocol_is_authoritative_after_real_blind_audit() -> None:
+def test_episode_protocol_is_typed_available_pending_natural_authority() -> None:
     protocol = _protocol()
     assert protocol.protocol_version == EPISODE_PROTOCOL_VERSION
     assert protocol.activation_max_bar == 0
@@ -136,6 +156,7 @@ def test_episode_protocol_is_authoritative_after_real_blind_audit() -> None:
 
     observer = CausalObserver(
         ObserverConfig(
+            scale_specs=CORE_TEST_SCALE_SPECS,
             structure_protocol=str(GROUP12_PATH),
             displacement_protocol=str(PROTOCOL_PATH),
             group3_protocol=str(GROUP3_PATH),
@@ -164,6 +185,40 @@ def test_first_candidate_starts_before_a_later_large_bar_and_keeps_identity() ->
     assert large_bar.state.entity_id == entity_id
     assert large_bar.state.started_at == candidate.state.started_at
     assert large_bar.state.protection_price == candidate.state.protection_price
+
+
+def test_descriptive_overlap_and_clv_metrics_accumulate_on_admitted_prefix() -> None:
+    tracker = CausalDisplacementTracker(_protocol())
+    index = _warm(tracker)
+    seed = tracker.on_completed_5m(
+        _candle(index, (100.0, 100.75, 99.75, 100.5))
+    )
+    assert seed.state is not None
+    assert seed.state.mean_overlap_ratio == 0.0
+    assert seed.state.max_overlap_ratio == 0.0
+    assert seed.state.mean_directional_clv == 0.75
+    assert seed.state.min_directional_clv == 0.75
+
+    active = tracker.on_completed_5m(
+        _candle(index + 1, (100.5, 101.5, 100.5, 101.5))
+    )
+    assert active.state is not None
+    assert active.state.mean_overlap_ratio == 0.25
+    assert active.state.max_overlap_ratio == 0.25
+    assert active.state.mean_directional_clv == 0.875
+    assert active.state.min_directional_clv == 0.75
+
+    pause = tracker.on_completed_5m(
+        _candle(index + 2, (101.5, 101.75, 101.25, 101.5))
+    )
+    assert pause.state is not None
+    assert pause.state.mean_overlap_ratio == 0.375
+    assert pause.state.max_overlap_ratio == 0.5
+    assert pause.state.mean_directional_clv == 0.75
+    assert pause.state.min_directional_clv == 0.5
+    assert 0.0 <= pause.state.mean_overlap_ratio <= 1.0
+    assert 0.0 <= pause.state.max_overlap_ratio <= 1.0
+    assert 0.0 <= pause.state.mean_directional_clv <= 1.0
 
 
 def test_active_episode_survives_one_doji_then_resumes() -> None:
@@ -248,6 +303,11 @@ def test_second_interruption_confirms_progress_loss_without_rewriting_prefix() -
     assert admitted.state is not None
     admitted_prefix = admitted.state.prefix_commitment
     admitted_count = admitted.state.real_episode_bar_count
+    admitted_descriptive_metrics = (
+        admitted.state.mean_overlap_ratio,
+        admitted.state.max_overlap_ratio,
+        admitted.state.mean_directional_clv,
+    )
 
     second = _candle(index + 1, (101.5, 101.75, 101.25, 101.5))
     terminal_update = tracker.on_completed_5m(second)
@@ -261,6 +321,11 @@ def test_second_interruption_confirms_progress_loss_without_rewriting_prefix() -
     assert terminal.real_episode_bar_count == admitted_count
     assert terminal.prefix_last_admitted_at == first.end
     assert terminal.terminal_evidence_candle_id == tracker._candle_id(second)
+    assert (
+        terminal.mean_overlap_ratio,
+        terminal.max_overlap_ratio,
+        terminal.mean_directional_clv,
+    ) == admitted_descriptive_metrics
 
 
 def test_protection_break_exhausts_without_admitting_evidence() -> None:
@@ -287,6 +352,63 @@ def test_single_strong_opposite_bar_is_only_a_pending_candidate() -> None:
     assert update.state.lifecycle is DisplacementLifecycle.ACTIVE
     assert update.state.interruption_run == 1
     assert tracker._reverse_probe is not None
+
+
+def test_reverse_probe_admits_one_interruption_then_recovers() -> None:
+    tracker, index, old_entity_id = _active()
+    reverse_seed = _candle(index, (101.5, 102.0, 100.0, 100.25))
+    seeded = tracker.on_completed_5m(reverse_seed)
+    assert seeded.state is not None
+    assert seeded.state.entity_id == old_entity_id
+    assert tracker._reverse_probe is not None
+    reverse_entity_id = tracker._reverse_probe.state.entity_id
+
+    reverse_interruption = _candle(
+        index + 1,
+        (100.25, 101.75, 100.25, 101.75),
+    )
+    interrupted = tracker.on_completed_5m(reverse_interruption)
+    assert interrupted.state is not None
+    assert interrupted.state.entity_id == old_entity_id
+    assert tracker._reverse_probe is not None
+    assert tracker._reverse_probe.state.entity_id == reverse_entity_id
+    assert tracker._reverse_probe.state.interruption_run == 1
+    assert tracker._reverse_probe.state.real_episode_bar_count == 2
+
+    reverse_recovery = _candle(
+        index + 2,
+        (101.75, 101.75, 100.0, 100.0),
+    )
+    recovered = tracker.on_completed_5m(reverse_recovery)
+    assert recovered.state is not None
+    assert recovered.state.entity_id == old_entity_id
+    assert tracker._reverse_probe is not None
+    assert tracker._reverse_probe.state.entity_id == reverse_entity_id
+    assert tracker._reverse_probe.state.interruption_run == 0
+    assert tracker._reverse_probe.state.real_episode_bar_count == 3
+
+
+def test_reverse_probe_clears_after_second_consecutive_interruption() -> None:
+    tracker, index, old_entity_id = _active()
+    tracker.on_completed_5m(
+        _candle(index, (101.5, 102.0, 100.0, 100.25))
+    )
+    assert tracker._reverse_probe is not None
+
+    first = tracker.on_completed_5m(
+        _candle(index + 1, (100.25, 101.75, 100.25, 101.75))
+    )
+    assert first.state is not None
+    assert first.state.entity_id == old_entity_id
+    assert tracker._reverse_probe is not None
+    assert tracker._reverse_probe.state.interruption_run == 1
+
+    second = tracker.on_completed_5m(
+        _candle(index + 2, (101.75, 102.0, 101.75, 102.0))
+    )
+    assert second.state is not None
+    assert second.state.entity_id == old_entity_id
+    assert tracker._reverse_probe is None
 
 
 def test_qualified_reverse_commits_exhausted_started_active_on_same_bar() -> None:
@@ -350,6 +472,15 @@ def test_observer_preserves_complete_same_update_transition_order_and_state() ->
         _reader_update(_candle(16, (100.5, 101.5, 100.5, 101.5)))
     )
     old_entity_id = active.current_entity_id
+    current_metrics = dict(active.current_metrics or ())
+    active_metrics = dict(active.transitions_this_update[-1].state_metrics)
+    for name in (
+        "mean_overlap_ratio",
+        "max_overlap_ratio",
+        "mean_directional_clv",
+    ):
+        assert name in current_metrics
+        assert name in active_metrics
 
     first_reverse = _candle(17, (101.5, 101.5, 100.25, 100.5))
     pending = eye.on_update(_reader_update(first_reverse))
@@ -416,22 +547,46 @@ def test_contract_data_and_synthetic_boundaries_censor_and_reset() -> None:
         assert tuple(tracker._trs) == ()
 
 
-def _bos(candle: Candle) -> Group3BOSSource:
+def test_boundary_clears_pending_reverse_probe() -> None:
+    tracker, index, entity_id = _active()
+    pending_candle = _candle(index, (101.5, 102.0, 100.0, 100.25))
+    tracker.on_completed_5m(pending_candle)
+    assert tracker._reverse_probe is not None
+
+    update = tracker.on_boundary(
+        "contract_change_history_reset",
+        pending_candle.end + pd.Timedelta(minutes=5),
+    )
+    assert update.state is None
+    assert len(update.transitions) == 1
+    assert update.transitions[0].state.entity_id == entity_id
+    assert tracker._reverse_probe is None
+
+
+def _bos(
+    candle: Candle,
+    *,
+    break_bar_id: str,
+    pending_at: pd.Timestamp,
+) -> Group3BOSSource:
     state = BreakOfStructureState(
         bos_id="bos-after-interruption",
         timeframe=Timeframe.M5,
         direction=Direction.LONG,
         lifecycle=BOSLifecycle.CONFIRMED,
-        scope=BOSScope.LOCAL,
+        scope=BOSScope.CONTINUATION,
         target_swing_id="swing-before-episode",
-        source_structure_id=None,
+        source_structure_id="bull-structure-before-episode",
         target_price=102.0,
         target_ticks=408,
-        pending_at=candle.end - pd.Timedelta(minutes=5),
+        pending_at=pending_at,
         resolved_at=candle.end,
         age_bars=1,
         failure_reason=None,
         strength=0.8,
+        break_bar_id=break_bar_id,
+        break_distance_atr=0.5,
+        post_break_state=BOSPostBreakState.PENDING,
     )
     return Group3BOSSource(
         state=state,
@@ -464,7 +619,7 @@ def test_group3_zones_keep_exact_episode_identity_across_interruption() -> None:
     for index in range(64):
         values = (
             (100.25, 100.5, 99.75, 100.0)
-            if index == 10
+            if index == 63
             else (100.0, 101.0, 100.0, 100.0)
         )
         _, update, output = send(index, values)
@@ -490,7 +645,13 @@ def test_group3_zones_keep_exact_episode_identity_across_interruption() -> None:
     _, resumed, output = send(
         67,
         (101.75, 102.5, 101.75, 102.5),
-        (_bos(trigger_candle),),
+        (
+            _bos(
+                trigger_candle,
+                break_bar_id=group3._candle_id(trigger_candle),
+                pending_at=started.state.started_at,
+            ),
+        ),
     )
     assert resumed.state is not None
     assert resumed.state.entity_id == entity_id

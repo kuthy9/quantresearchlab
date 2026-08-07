@@ -1,6 +1,11 @@
 {
   "schema_version": 1,
   "role": "repeatable_non_pnl_semantic_development",
+  "release_readiness": {
+    "active_model_natural_authority_validated": false,
+    "economic_validation_complete": false,
+    "live_execution_allowed": false
+  },
   "playbook_registry": "configs/playbooks.json",
   "calibration_artifact": null,
   "timezone": "America/New_York",
@@ -58,8 +63,6 @@
   ],
   "observer": {
     "atr_period": 14,
-    "swing_k": 2,
-    "external_liquidity_lookback": 80,
     "memory_events": 512,
     "structure_protocol": "configs/primitives_structure_liquidity.json",
     "liquidity_protocol": "configs/primitives_structure_liquidity.json",

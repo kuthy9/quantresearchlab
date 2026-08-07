@@ -885,7 +885,13 @@ def test_frozen_delivery_survives_brain_setup_rearm() -> None:
 
 @pytest.mark.parametrize(
     "terminal_reason",
-    ["trigger_opposed_or_ambiguous", "frozen_invalidation_breached"],
+    [
+        "trigger_opposed_or_ambiguous",
+        "frozen_invalidation_breached",
+        "micro_bos_opposed",
+        "mss_confirmed_after_first_pullback",
+        "manipulation_resolution_deadline",
+    ],
 )
 def test_invalid_terminal_trigger_does_not_create_samples(
     terminal_reason: str,

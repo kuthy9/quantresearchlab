@@ -1,11 +1,11 @@
 {
-  "protocol_version": "3.1.0-group4.0",
-  "status": "formalized_implementation_pending",
+  "protocol_version": "3.2.0-group4.1",
+  "status": "implementation_complete_natural_market_authority_pending",
   "role": "causal_descriptive_development_contract",
   "tick_size": 0.25,
   "upstream": {
-    "group12_protocol_version": "3.1.0-group12.4",
-    "group12_protocol_sha256": "189b6af3bff631c3985fa37bcf9f5f82528296800886d9c9bd4cbe123ea4c701",
+    "group12_protocol_version": "3.2.0-group12.7",
+    "group12_protocol_sha256": "ab3d2cde247f222900fb74c1b61f88c51b87b5056c15b51f003878042e18c457",
     "required_typed_sources": [
       "H1 SupportResistanceState",
       "LiquidityPoolState formation and lifecycle",
@@ -40,7 +40,9 @@
     "compression_early_real_h1_bars": 4,
     "compression_late_real_h1_bars": 4,
     "maximum_compression_ratio": 0.8,
-    "manipulation_resolution_delay_real_1m_bars": 1,
+    "reacceptance_hold_bars": 1,
+    "outside_acceptance_closes": 2,
+    "resolution_deadline_real_1m_bars": 5,
     "retained_dealing_range_states": 64,
     "retained_manipulation_states": 256
   },
@@ -55,7 +57,7 @@
     "maximum_width_atr_at_formation": "four formation-time H1 ATRs excludes broad directional areas while allowing a multi-hour balance to form",
     "compression_windows": "the first four and most recent four candidate bars are non-overlapping at first eligibility and remain bounded thereafter",
     "maximum_compression_ratio": "a late-to-early median true-range ratio no greater than 0.80 records a material twenty-percent contraction rather than minor bar noise",
-    "manipulation_resolution_delay": "one later real completed 1m bar is the minimum causal delay that prevents a sweep bar from resolving itself and matches the frozen upstream pool timing",
+    "manipulation_resolution": "the sweep bar cannot resolve itself; reentry needs one additional inside hold bar, outside acceptance needs two consecutive closes, and unresolved state is censored after five later real completed 1m bars",
     "retention_limits": "memory-safety limits only; they never qualify price structure or trading authority"
   },
   "clock": {
@@ -269,28 +271,32 @@
       "one_side_only": "if eligible candidates are crossed on both above and below in the same 1m bar, emit no ManipulationState, consume every crossed inventory item, and emit ambiguous_dual_side_sweep because OHLC cannot prove event order",
       "primary_source": "when one side has multiple crossed eligible sources, select the boundary with the smallest nonnegative distance from the prior real 1m close",
       "tie_order": [
-        "lexicographically smallest source_kind",
+        "mature_range_boundary before formed_liquidity_pool",
         "earliest source confirmed_at or mature_at",
         "lexicographically smallest source_id"
       ],
       "coincident_sources": "store the IDs of exact same-price tied eligible sources as coincident_source_ids, but emit one manipulation identity and never double-count their evidence"
     },
     "resolution": {
-      "earliest": "the first later real completed 1m bar; the sweep bar cannot resolve itself",
-      "mature_range_reaccepted": "the resolution close lies inside the full frozen range, including equality at either bound",
-      "mature_range_accepted_outside": "the resolution close lies strictly outside the full frozen range; resolved_side records above or below",
+      "earliest": "the sweep bar never resolves itself. REACCEPTED can first complete on the second later real completed 1m bar: the first inside close creates the candidate and the immediately following inside close supplies the one-bar hold. ACCEPTED_OUTSIDE can complete on the first later real completed 1m bar only when the sweep close and that immediately following real close are both outside; otherwise it completes on the second close of a later consecutive outside pair.",
+      "upper_boundary_reaccepted": "after an above-side pool or mature-range-boundary sweep, the first candidate close is <= the frozen swept upper boundary and one further real completed close must remain there",
+      "upper_boundary_accepted_outside": "after an above-side sweep, two consecutive closes strictly above the frozen upper boundary are accepted outside; the sweep close counts as the first when applicable",
+      "lower_boundary_reaccepted": "after a below-side pool or mature-range-boundary sweep, the first candidate close is >= the frozen swept lower boundary and one further real completed close must remain there",
+      "lower_boundary_accepted_outside": "after a below-side sweep, two consecutive closes strictly below the frozen lower boundary are accepted outside; the sweep close counts as the first when applicable",
       "above_pool_reaccepted": "resolution close <= frozen pool upper_bound",
       "above_pool_accepted_outside": "resolution close > frozen pool upper_bound",
       "below_pool_reaccepted": "resolution close >= frozen pool lower_bound",
       "below_pool_accepted_outside": "resolution close < frozen pool lower_bound",
-      "reentry_price": "the completed resolution close for reaccepted; null for accepted_outside",
+      "reentry_price": "the first candidate reentry close, frozen after the later hold bar confirms reaccepted; null for accepted_outside",
+      "reentry_failure": "an outside close before confirmation clears the candidate, records reentry_failed_at, and restarts the outside run",
+      "deadline": "if neither outcome resolves after five later real completed 1m bars, retain lifecycle swept and set deadline_elapsed, deadline_at and censored_at to the actual fifth real-bar clock; deadline_at is null beforehand because gaps and closures make that clock unknowable at sweep time; synthetic bars do not count and a terminal outcome on the fifth real bar takes precedence",
       "outside_completed_bars": "count of the sweep bar and later real completed 1m bars whose closes satisfy the source-specific outside rule through resolution",
-      "duration": "real completed 1m bars and event-memory market minutes from swept_at through resolved_at; synthetic and scheduled-closure minutes are excluded",
+      "duration": "real completed 1m bars and event-memory market minutes from swept_at through resolved_at or censored_at; synthetic and scheduled-closure minutes are excluded",
       "terminal": "reaccepted and accepted_outside are terminal; later extrema and closes cannot rewrite the result"
     },
     "same_1m_bar_priority": [
       "hard epoch boundary",
-      "resolve an already-swept manipulation from the completed close",
+      "advance or resolve an already-swept manipulation from the completed close",
       "project every prior-visible inventory crossing",
       "apply any current real completed H1 range transition",
       "if an older manipulation resolved on this bar, do not create another manipulation",
@@ -301,7 +307,7 @@
     "required_output": [
       "manipulation_id",
       "protocol_hash",
-      "source_group12_protocol_hash when applicable",
+      "source_group12_protocol_hash",
       "symbol",
       "instrument_id",
       "timeframe",
@@ -309,11 +315,16 @@
       "side",
       "source_kind",
       "source_id",
-      "source inventory item_id",
+      "source_protocol_hash",
+      "source_timeframe",
+      "source_inventory_item_id",
+      "source_inventory_lifecycle",
       "coincident_source_ids",
-      "source formed and eligibility clocks",
-      "source lower_bound",
-      "source upper_bound",
+      "crossed_source_ids",
+      "source_formed_at",
+      "source_eligible_at",
+      "source_lower_bound",
+      "source_upper_bound",
       "formed_at",
       "confirmed_at",
       "swept_at",
@@ -331,7 +342,15 @@
       "strength",
       "age_1m_bars",
       "transition_reason",
-      "censored_at"
+      "censored_at",
+      "reentry_candidate_at",
+      "reentry_candidate_price",
+      "inside_hold_bars",
+      "reentry_failed_at",
+      "outside_run",
+      "outside_run_side",
+      "deadline_at",
+      "deadline_elapsed"
     ]
   },
   "range_boundary_inventory": {
@@ -367,7 +386,7 @@
   },
   "cold_attach": {
     "dealing_range": "never infer a current range from one current S/R snapshot. Replay ordered real H1 candles with their exact Group1-2 typed zone snapshots from no later than the candidate selection clock, plus one predecessor and the 14-real-H1 ATR prefix. If unavailable, mark already-present source pairs ineligible until at least one source ID changes and wait for a fresh pair",
-    "manipulation": "for every eligible mature range boundary or formed pool, the retained real completed 1m prefix must begin no later than source eligibility and include one predecessor plus the 14-real-1m ATR prefix; reconstruct the first strict crossing and first later real-bar resolution",
+    "manipulation": "for every eligible mature range boundary or formed pool, the retained real completed 1m prefix must begin no later than source eligibility and include one predecessor plus the 14-real-1m ATR prefix; reconstruct the first strict crossing and replay every later real bar through candidate, hold, outside-run and deadline state up to the prefix cutoff",
     "inventory": "the same prefix reconstructs each range boundary's first crossing. A prefix beginning after confirmed_at cannot prove visibility and fails closed rather than declaring the boundary unswept",
     "checkpoint": "a hash-bound checkpoint containing the exact Group4 state and last committed source envelope resumes directly without rediscovery",
     "partial_recovery": "failure to reconstruct any one retained source rejects the entire cold attachment; partial range, manipulation or inventory projection is forbidden"
@@ -412,23 +431,25 @@
   },
   "event_memory_and_consumers": {
     "range_timeline": "range:<range_id> records forming, mature and broken with event time, duration, age, strength, frozen geometry, source IDs and transition reason",
-    "manipulation_timeline": "manipulation:<manipulation_id> records swept then reaccepted or accepted_outside; hard-boundary censorship uses only the typed boundary channel",
+    "manipulation_timeline": "manipulation:<manipulation_id> records swept then reaccepted, accepted_outside or deadline-censored; hard-boundary censorship uses only the typed boundary channel",
     "observation": "H1 exposes typed dealing-range state; top-level current state exposes completed-1m manipulations and authoritative range-boundary inventory without rewriting the H1 cutoff",
     "visualization": "draw frozen H1 bounds and midpoint/value, manipulation sweep extreme, outside duration, reentry price and source IDs without expanding the price axis",
     "brain": "Group4 outputs are descriptive inputs only. Consumers must require typed identity and lifecycle and may not reconstruct them from legacy metrics",
     "future_reveal": "future candles remain physically separate and cannot change any Group4 identity, clock, geometry or lifecycle"
   },
   "playbook_authority": {
-    "failed_auction_value_return": "remains shadow and inactive",
-    "no_trade_authority": "Group4 does not change playbook evidence, probability, phase, plan, action utility, invalidation, target, risk or execution",
-    "later_requirement": "FAVR may be reconsidered only after Group4 passes its primitive stopping conditions and Group5 supplies qualified reacceptance, entry location, micro BOS and path sequence"
+    "failed_auction_value_return": "implemented but runtime parked pending natural mature-range authority",
+    "no_trade_authority": "Group4 emits typed descriptive range, manipulation and range-boundary inventory state but never selects an action, stop, target, risk result or execution outcome. Typed playbooks may consume its frozen identities and lifecycles through their own causal gates; FAVR remains runtime parked pending natural mature-range authority",
+    "later_requirement": "FAVR may be reconsidered only after natural mature-range authority is established. Group4 owns range-boundary sweep and multi-bar reacceptance; after that event, Group5 may supply an entry location and ordered first-pullback/trigger path for the reverse-displacement FVG or order block"
   },
   "formalization_gate": {
-    "completed_scope": "one formal definition only",
-    "pending": [
+    "completed_scope": [
+      "formal definition",
       "implementation",
       "static self-review",
-      "unified synthetic and boundary tests",
+      "unified synthetic and boundary tests"
+    ],
+    "pending": [
       "finite real OHLCV replay",
       "stratified blind review",
       "primitive freeze or park"

@@ -34,8 +34,7 @@ class Timeframe(str, Enum):
     H1 = "1H"
     M5 = "5m"
     M1 = "1m"
-    # Optional context bridge.  It is deliberately not part of the legacy
-    # four-frame contract unless an enabled ScaleSpec registers it.
+    # Optional context bridge enabled through the explicit ScaleSpec registry.
     M15 = "15m"
 
 
@@ -81,6 +80,7 @@ class EventKind(str, Enum):
     SWING_STATE = "swing_state"
     STRUCTURE_STATE = "structure_state"
     BOS_STATE = "bos_state"
+    BOS_POST_BREAK_STATE = "bos_post_break_state"
     SUPPORT_RESISTANCE_STATE = "support_resistance_state"
     LIQUIDITY_POOL_STATE = "liquidity_pool_state"
     FVG_STATE = "fvg_state"
@@ -91,14 +91,9 @@ class EventKind(str, Enum):
     ENTRY_PATH_STEP = "entry_path_step"
     LIQUIDITY_SWEEP = "liquidity_sweep"
     LIQUIDITY_CONSUMED = "liquidity_consumed"
+    LIQUIDITY_RETIRED = "liquidity_retired"
     STRUCTURE_BREAK = "structure_break"
     STRUCTURE_BREAK_FAILED = "structure_break_failed"
-    REJECTION = "rejection"
-    IMPULSE = "impulse"
-    REACCEPTANCE = "reacceptance"
-    COMPRESSION = "compression"
-    TRIGGER_HELD = "trigger_held"
-    TRIGGER_LOST = "trigger_lost"
 
 
 class SwingSide(str, Enum):
@@ -143,6 +138,12 @@ class BOSScope(str, Enum):
     LOCAL = "local"
 
 
+class BOSPostBreakState(str, Enum):
+    PENDING = "pending"
+    ACCEPTED = "accepted"
+    REJECTED = "rejected"
+
+
 class SupportResistanceLifecycle(str, Enum):
     ACTIVE = "active"
     TESTED = "tested"
@@ -169,6 +170,11 @@ class FairValueGapLifecycle(str, Enum):
     PARTIAL = "partial"
     MITIGATED = "mitigated"
     INVALIDATED = "invalidated"
+
+
+class FVGQualification(str, Enum):
+    RAW = "raw"
+    DISPLACEMENT_LINKED = "displacement_linked"
 
 
 class OrderBlockLifecycle(str, Enum):
@@ -239,7 +245,8 @@ GROUP5_PATH_STEP_KINDS = frozenset(
         "micro_bos_ambiguous",
         "location_left",
         "pool_swept",
-        "sweep_rejection",
+        "opposite_displacement",
+        "opposite_displacement_ambiguous",
         "accepted_outside",
     }
 )
@@ -417,6 +424,42 @@ class Candle:
     @property
     def real_completed(self) -> bool:
         return bool(self.complete and self.synthetic_minutes == 0)
+
+
+def candle_identity(candle: Candle, *, tick_size: float) -> str:
+    """Return one shared candle identity for every semantic reducer."""
+
+    tick = float(tick_size)
+    if not math.isfinite(tick) or tick <= 0.0:
+        raise ValueError("candle identity requires a positive tick size")
+
+    def ticks(value: float) -> int:
+        scaled = float(value) / tick
+        rounded = round(scaled)
+        if not math.isfinite(scaled) or abs(scaled - rounded) > 1e-6:
+            raise ValueError("candle identity received an off-grid price")
+        return int(rounded)
+
+    parts = (
+        "candle-v1",
+        candle.timeframe.value,
+        candle.start.isoformat(),
+        candle.end.isoformat(),
+        str(ticks(candle.open)),
+        str(ticks(candle.high)),
+        str(ticks(candle.low)),
+        str(ticks(candle.close)),
+        format(float(candle.volume), ".17g"),
+        candle.symbol,
+        str(candle.instrument_id),
+        str(candle.observed_minutes),
+        str(candle.expected_minutes),
+        str(candle.real_minutes),
+        str(candle.synthetic_minutes),
+        str(candle.complete),
+    )
+    raw = json.dumps(parts, ensure_ascii=True, separators=(",", ":"))
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
 @dataclass(frozen=True)
@@ -739,6 +782,13 @@ class BreakOfStructureState:
     attempt_clocks: tuple[pd.Timestamp, ...] = ()
     failure_reason: str | None = None
     strength: float = 0.0
+    break_bar_id: str | None = None
+    break_distance_atr: float | None = None
+    source_displacement_id: str | None = None
+    mss_qualified: bool = False
+    post_break_state: BOSPostBreakState | None = None
+    accepted_at: pd.Timestamp | None = None
+    rejected_at: pd.Timestamp | None = None
 
     def __post_init__(self) -> None:
         if not self.bos_id or not self.target_swing_id:
@@ -750,7 +800,12 @@ class BreakOfStructureState:
             "pending_at",
             aware_timestamp(self.pending_at, name="bos.pending_at"),
         )
-        for name in ("resolved_at", "last_attempt_at"):
+        for name in (
+            "resolved_at",
+            "last_attempt_at",
+            "accepted_at",
+            "rejected_at",
+        ):
             value = getattr(self, name)
             if value is not None:
                 object.__setattr__(
@@ -848,6 +903,67 @@ class BreakOfStructureState:
                 "same-clock failed BOS requires supersession or "
                 "structural invalidation"
             )
+        confirmed = self.lifecycle is BOSLifecycle.CONFIRMED
+        break_distance = self.break_distance_atr
+        if confirmed:
+            if (
+                not self.break_bar_id
+                or break_distance is None
+                or not math.isfinite(float(break_distance))
+                or float(break_distance) <= 0.0
+                or not isinstance(self.post_break_state, BOSPostBreakState)
+            ):
+                raise ValueError(
+                    "confirmed BOS requires its break bar, distance and "
+                    "post-break state"
+                )
+        elif any(
+            value is not None
+            for value in (
+                self.break_bar_id,
+                break_distance,
+                self.source_displacement_id,
+                self.post_break_state,
+                self.accepted_at,
+                self.rejected_at,
+            )
+        ) or self.mss_qualified:
+            raise ValueError(
+                "unconfirmed BOS cannot carry break or MSS evidence"
+            )
+        if type(self.mss_qualified) is not bool:
+            raise ValueError("BOS MSS qualification must be boolean")
+        if bool(self.source_displacement_id) != self.mss_qualified:
+            raise ValueError(
+                "BOS MSS qualification and displacement identity disagree"
+            )
+        if self.source_displacement_id == "":
+            raise ValueError("BOS displacement identity cannot be empty")
+        if self.mss_qualified and self.scope is not BOSScope.OPPOSED:
+            raise ValueError("only an opposed BOS can qualify as MSS")
+        if confirmed:
+            if self.post_break_state is BOSPostBreakState.PENDING:
+                if self.accepted_at is not None or self.rejected_at is not None:
+                    raise ValueError(
+                        "pending post-break state cannot be resolved"
+                    )
+            elif self.post_break_state is BOSPostBreakState.ACCEPTED:
+                if (
+                    self.accepted_at is None
+                    or self.accepted_at <= self.resolved_at
+                    or self.rejected_at is not None
+                ):
+                    raise ValueError(
+                        "accepted BOS requires one later acceptance clock"
+                    )
+            elif (
+                self.rejected_at is None
+                or self.rejected_at <= self.resolved_at
+                or self.accepted_at is not None
+            ):
+                raise ValueError(
+                    "rejected BOS requires one later rejection clock"
+                )
 
 
 @dataclass(frozen=True)
@@ -868,6 +984,10 @@ class CandleStructureState:
     direction: int
     real_completed: bool
     zero_range: bool
+    body_class: str
+    range_class: str
+    dominant_wick: str
+    close_class: str
     anomalies: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
@@ -903,6 +1023,14 @@ class CandleStructureState:
             raise ValueError("candle structure contains invalid geometry")
         if self.direction not in {-1, 0, 1}:
             raise ValueError("candle structure direction must be -1, 0 or 1")
+        if self.body_class not in {"doji", "small", "normal", "large"}:
+            raise ValueError("candle structure body class is invalid")
+        if self.range_class not in {"compressed", "normal", "expanded"}:
+            raise ValueError("candle structure range class is invalid")
+        if self.dominant_wick not in {"upper", "lower", "balanced", "none"}:
+            raise ValueError("candle structure dominant wick is invalid")
+        if self.close_class not in {"near_high", "middle", "near_low"}:
+            raise ValueError("candle structure close class is invalid")
         if type(self.real_completed) is not bool or type(self.zero_range) is not bool:
             raise ValueError("candle structure provenance flags must be boolean")
         if (
@@ -934,6 +1062,10 @@ class CandleStructureState:
                 or self.lower_wick_ratio
                 or self.close_location != 0.5
                 or self.direction
+                or self.body_class != "doji"
+                or self.range_class != "compressed"
+                or self.dominant_wick != "none"
+                or self.close_class != "middle"
             ):
                 raise ValueError("zero-range candle structure is inconsistent")
         elif (
@@ -969,7 +1101,7 @@ class CandleStructureState:
 
 @dataclass(frozen=True)
 class SupportResistanceState:
-    """A frozen swing-anchored price cluster and its causal lifecycle."""
+    """A frozen reaction zone with an explicit causal source identity."""
 
     zone_id: str
     timeframe: Timeframe
@@ -991,10 +1123,41 @@ class SupportResistanceState:
     retired_at: pd.Timestamp | None = None
     transition_reason: str | None = None
     total_touch_count: int | None = None
+    source_kind: str = "structural_swing"
+    structural_rank: str = "internal"
+    is_protected_swing: bool = False
+    zone_role: str = "both"
+    visibility_strength: float = 0.0
+    reaction_quality: float = 0.0
+    freshness: float = 1.0
+    depletion_risk: float = 0.0
+    metadata_observed_at: pd.Timestamp | None = None
+    source_ids: tuple[str, ...] = ()
+    range_id: str | None = None
+    source_zone_id: str | None = None
 
     def __post_init__(self) -> None:
+        member_swing_ids = tuple(self.member_swing_ids)
+        source_ids = tuple(self.source_ids)
+        object.__setattr__(self, "member_swing_ids", member_swing_ids)
+        object.__setattr__(self, "source_ids", source_ids)
         if not self.zone_id or self.side not in {"support", "resistance"}:
             raise ValueError("support/resistance identity or side is invalid")
+        if (
+            self.source_kind
+            not in {
+                "structural_swing",
+                "previous_session",
+                "previous_day",
+                "previous_week",
+                "range_boundary",
+            }
+            or self.structural_rank not in {"internal", "external"}
+            or type(self.is_protected_swing) is not bool
+            or self.zone_role
+            not in {"reaction_zone", "liquidity_target", "both"}
+        ):
+            raise ValueError("support/resistance source metadata is invalid")
         if not (
             math.isfinite(float(self.lower_bound))
             and math.isfinite(float(self.upper_bound))
@@ -1009,6 +1172,7 @@ class SupportResistanceState:
             "broken_at",
             "reaccepted_at",
             "retired_at",
+            "metadata_observed_at",
         ):
             value = getattr(self, name)
             if value is not None:
@@ -1020,8 +1184,59 @@ class SupportResistanceState:
                         name=f"support_resistance.{name}",
                     ),
                 )
+        if self.metadata_observed_at is None:
+            object.__setattr__(
+                self, "metadata_observed_at", self.confirmed_at
+            )
+        elif self.metadata_observed_at < self.confirmed_at:
+            raise ValueError(
+                "support/resistance metadata cannot predate confirmation"
+            )
         if self.confirmed_at < self.formed_at:
             raise ValueError("zone confirmation cannot predate formation")
+        if (
+            len(member_swing_ids) != len(set(member_swing_ids))
+            or len(source_ids) != len(set(source_ids))
+            or any(
+                not isinstance(value, str) or not value
+                for value in (*member_swing_ids, *source_ids)
+            )
+        ):
+            raise ValueError("support/resistance source identity is invalid")
+        if self.source_kind == "structural_swing":
+            if (
+                not member_swing_ids
+                or source_ids
+                or self.range_id is not None
+                or self.source_zone_id is not None
+            ):
+                raise ValueError(
+                    "structural support/resistance requires real swing members"
+                )
+        elif self.source_kind in {
+            "previous_session",
+            "previous_day",
+            "previous_week",
+        }:
+            if (
+                member_swing_ids
+                or len(source_ids) != 1
+                or self.range_id is not None
+                or self.source_zone_id is not None
+            ):
+                raise ValueError(
+                    "reference support/resistance requires one non-swing source"
+                )
+        elif (
+            member_swing_ids
+            or not self.range_id
+            or not self.source_zone_id
+            or self.range_id == self.source_zone_id
+            or not {self.range_id, self.source_zone_id}.issubset(source_ids)
+        ):
+            raise ValueError(
+                "range-boundary support/resistance source identity is invalid"
+            )
         touches = tuple(
             aware_timestamp(value, name="support_resistance.touch_times")
             for value in self.touch_times
@@ -1045,9 +1260,11 @@ class SupportResistanceState:
             total_touch_count,
         )
         if (
-            not self.member_swing_ids
-            or len(self.member_swing_ids) != len(set(self.member_swing_ids))
-            or len(touches) != len(self.member_swing_ids)
+            not touches
+            or (
+                self.source_kind == "structural_swing"
+                and len(touches) != len(member_swing_ids)
+            )
             or len(self.reaction_magnitudes_atr) != len(touches)
             or touches != tuple(sorted(touches))
             or touches[0] != self.confirmed_at
@@ -1058,6 +1275,20 @@ class SupportResistanceState:
         ):
             raise ValueError("support/resistance touch history is invalid")
         object.__setattr__(self, "strength", clamp(self.strength))
+        for name in (
+            "visibility_strength",
+            "reaction_quality",
+            "freshness",
+            "depletion_risk",
+        ):
+            raw_value = float(getattr(self, name))
+            if not math.isfinite(raw_value):
+                raise ValueError(
+                    "support/resistance quality fields must be finite"
+                )
+            object.__setattr__(self, name, clamp(raw_value))
+        if self.is_protected_swing and self.structural_rank != "external":
+            raise ValueError("protected swing zone must be externally ranked")
         if self.tested_at is not None and (
             len(touches) < 2 or self.tested_at != touches[1]
         ):
@@ -1134,6 +1365,25 @@ class SupportResistanceState:
     @property
     def touch_count(self) -> int:
         return int(self.total_touch_count)
+
+    @property
+    def causal_source_ids(self) -> tuple[str, ...]:
+        """Return real upstream identities without manufacturing swing IDs."""
+
+        return tuple(
+            dict.fromkeys(
+                (
+                    *self.member_swing_ids,
+                    *self.source_ids,
+                    *((self.range_id,) if self.range_id is not None else ()),
+                    *(
+                        (self.source_zone_id,)
+                        if self.source_zone_id is not None
+                        else ()
+                    ),
+                )
+            )
+        )
 
 
 @dataclass(frozen=True)
@@ -1621,7 +1871,7 @@ class DealingRangeState:
 
 @dataclass(frozen=True)
 class ManipulationState:
-    """A typed completed-1m sweep and its first later-bar resolution."""
+    """A typed completed-1m sweep and its multi-bar resolution."""
 
     manipulation_id: str
     protocol_hash: str
@@ -1660,6 +1910,15 @@ class ManipulationState:
     age_1m_bars: int
     transition_reason: str | None
     censored_at: pd.Timestamp | None
+    reentry_candidate_at: pd.Timestamp | None
+    reentry_candidate_price: float | None
+    inside_hold_bars: int
+    reentry_failed_at: pd.Timestamp | None
+    outside_run: int
+    outside_run_side: str | None
+    deadline_at: pd.Timestamp | None
+    deadline_elapsed: bool
+    crossed_source_ids: tuple[str, ...]
 
     def __post_init__(self) -> None:
         coincident_ids = tuple(self.coincident_source_ids)
@@ -1668,6 +1927,8 @@ class ManipulationState:
             "coincident_source_ids",
             coincident_ids,
         )
+        crossed_ids = tuple(self.crossed_source_ids)
+        object.__setattr__(self, "crossed_source_ids", crossed_ids)
         if (
             any(
                 not isinstance(value, str) or not value
@@ -1708,6 +1969,15 @@ class ManipulationState:
         ):
             raise ValueError("manipulation coincident source ids are invalid")
         if (
+            len(crossed_ids) != len(set(crossed_ids))
+            or not crossed_ids
+            or crossed_ids[0] != self.source_id
+            or not {self.source_id, *coincident_ids}.issubset(
+                crossed_ids
+            )
+        ):
+            raise ValueError("manipulation crossed source ids are invalid")
+        if (
             self.source_kind == "mature_range_boundary"
             and self.source_timeframe is not Timeframe.H1
         ):
@@ -1742,6 +2012,9 @@ class ManipulationState:
             "accepted_outside_at",
             "resolved_at",
             "censored_at",
+            "reentry_candidate_at",
+            "reentry_failed_at",
+            "deadline_at",
         ):
             value = getattr(self, name)
             if value is not None:
@@ -1777,6 +2050,26 @@ class ManipulationState:
             or type(self.age_1m_bars) is not int
             or self.age_1m_bars < 0
             or self.outside_completed_bars > self.age_1m_bars + 1
+            or type(self.inside_hold_bars) is not int
+            or self.inside_hold_bars < 0
+            or type(self.outside_run) is not int
+            or self.outside_run < 0
+            or self.outside_run > self.outside_completed_bars
+            or self.outside_run_side not in {None, "above", "below"}
+            or (self.outside_run == 0) != (self.outside_run_side is None)
+            or (
+                self.outside_run_side is not None
+                and self.outside_run_side != self.side
+            )
+            or (
+                self.reentry_candidate_at is None
+                and self.inside_hold_bars != 0
+            )
+            or (
+                self.reentry_candidate_at is not None
+                and self.outside_run != 0
+            )
+            or type(self.deadline_elapsed) is not bool
             or not math.isfinite(float(self.penetration_atr))
             or self.penetration_atr <= 0.0
         ):
@@ -1798,6 +2091,17 @@ class ManipulationState:
             or self.reentry_price <= 0.0
         ):
             raise ValueError("manipulation reentry price is invalid")
+        if self.reentry_candidate_price is not None and (
+            not math.isfinite(float(self.reentry_candidate_price))
+            or self.reentry_candidate_price <= 0.0
+        ):
+            raise ValueError("manipulation reentry candidate is invalid")
+        if (self.reentry_candidate_at is None) != (
+            self.reentry_candidate_price is None
+        ):
+            raise ValueError(
+                "manipulation reentry candidate clock and price disagree"
+            )
         if self.resolved_side not in {None, "above", "below"}:
             raise ValueError("manipulation resolved side is invalid")
         if (
@@ -1831,6 +2135,32 @@ class ManipulationState:
             or self.censored_at > self.last_updated_at
         ):
             raise ValueError("manipulation censorship clock is invalid")
+        if any(
+            value is not None
+            and (value <= self.swept_at or value > self.last_updated_at)
+            for value in (
+                self.reentry_candidate_at,
+                self.reentry_failed_at,
+            )
+        ):
+            raise ValueError("manipulation reentry clock is invalid")
+        if self.deadline_elapsed != (
+            self.censored_at is not None
+            and self.transition_reason == "deadline_elapsed"
+        ):
+            raise ValueError("manipulation deadline state is inconsistent")
+        if (
+            (self.deadline_at is None) != (not self.deadline_elapsed)
+            or (
+                self.deadline_at is not None
+                and self.deadline_at != self.censored_at
+            )
+        ):
+            raise ValueError("manipulation deadline clock is inconsistent")
+        if self.deadline_elapsed and self.age_1m_bars != 5:
+            raise ValueError(
+                "deadline censorship requires five real completed bars"
+            )
         if self.transition_reason == "":
             raise ValueError("manipulation transition reason cannot be empty")
         if self.lifecycle is ManipulationLifecycle.SWEPT:
@@ -1856,7 +2186,10 @@ class ManipulationState:
                     and (
                         self.last_updated_at != self.censored_at
                         or self.transition_reason
-                        not in GROUP4_HARD_BOUNDARY_REASONS
+                        not in {
+                            *GROUP4_HARD_BOUNDARY_REASONS,
+                            "deadline_elapsed",
+                        }
                     )
                 )
             ):
@@ -1872,6 +2205,12 @@ class ManipulationState:
                 or self.resolved_side is not None
                 or self.censored_at is not None
                 or not self.transition_reason
+                or self.reentry_candidate_at is None
+                or self.reentry_candidate_at >= self.reaccepted_at
+                or self.reentry_candidate_price != self.reentry_price
+                or self.inside_hold_bars != 1
+                or self.outside_run != 0
+                or self.outside_run_side is not None
             ):
                 raise ValueError(
                     "reaccepted manipulation lifecycle is inconsistent"
@@ -1884,10 +2223,11 @@ class ManipulationState:
             or self.last_updated_at != self.resolved_at
             or self.reentry_price is not None
             or self.resolved_side is None
-            or (
-                self.source_kind == "formed_liquidity_pool"
-                and self.resolved_side != self.side
-            )
+            or self.resolved_side != self.side
+            or self.outside_run != 2
+            or self.reentry_candidate_at is not None
+            or self.reentry_candidate_price is not None
+            or self.inside_hold_bars != 0
             or self.censored_at is not None
             or not self.transition_reason
         ):
@@ -1898,7 +2238,7 @@ class ManipulationState:
 
 @dataclass(frozen=True)
 class FairValueGapState:
-    """A strict three-completed-bar gap linked to its creating displacement."""
+    """A strict three-completed-bar gap with frozen formation qualification."""
 
     fvg_id: str
     protocol_hash: str
@@ -1907,12 +2247,13 @@ class FairValueGapState:
     timeframe: Timeframe
     direction: Direction
     lifecycle: FairValueGapLifecycle
-    source_displacement_id: str
-    source_active_transition_id: str
-    source_displacement_protocol_hash: str
-    source_displacement_started_at: pd.Timestamp
-    source_displacement_active_at: pd.Timestamp
-    source_displacement_prefix_commitment: str
+    qualification: FVGQualification
+    source_displacement_id: str | None
+    source_active_transition_id: str | None
+    source_displacement_protocol_hash: str | None
+    source_displacement_started_at: pd.Timestamp | None
+    source_displacement_active_at: pd.Timestamp | None
+    source_displacement_prefix_commitment: str | None
     source_candle_ids: tuple[str, str, str]
     source_candle_starts: tuple[
         pd.Timestamp,
@@ -1925,6 +2266,7 @@ class FairValueGapState:
     invalidation_price: float
     width_points: float
     width_ticks: int
+    formation_atr: float
     width_atr: float
     strength: float
     formed_at: pd.Timestamp
@@ -1944,19 +2286,14 @@ class FairValueGapState:
         if (
             any(
                 not isinstance(value, str) or not value
-                for value in (
-                    self.fvg_id,
-                    self.symbol,
-                    self.source_displacement_id,
-                    self.source_active_transition_id,
-                    self.source_displacement_prefix_commitment,
-                )
+                for value in (self.fvg_id, self.symbol)
             )
             or type(self.instrument_id) is not int
             or self.instrument_id < 0
             or self.timeframe is not Timeframe.M5
             or not isinstance(self.direction, Direction)
             or not isinstance(self.lifecycle, FairValueGapLifecycle)
+            or not isinstance(self.qualification, FVGQualification)
             or len(source_ids) != 3
             or len(set(source_ids)) != 3
             or any(
@@ -1965,18 +2302,45 @@ class FairValueGapState:
             )
         ):
             raise ValueError("FVG identity or frozen source is invalid")
-        if not self.protocol_hash or not self.source_displacement_protocol_hash:
+        if not self.protocol_hash:
             raise ValueError("FVG protocol identity is required")
+        displacement_fields = (
+            self.source_displacement_id,
+            self.source_active_transition_id,
+            self.source_displacement_protocol_hash,
+            self.source_displacement_started_at,
+            self.source_displacement_active_at,
+            self.source_displacement_prefix_commitment,
+        )
+        if self.qualification is FVGQualification.RAW:
+            if any(value is not None for value in displacement_fields):
+                raise ValueError(
+                    "raw FVG cannot carry displacement qualification"
+                )
+        elif any(value is None for value in displacement_fields) or any(
+            not isinstance(value, str) or not value
+            for value in (
+                self.source_displacement_id,
+                self.source_active_transition_id,
+                self.source_displacement_protocol_hash,
+                self.source_displacement_prefix_commitment,
+            )
+        ):
+            raise ValueError(
+                "linked FVG requires complete displacement qualification"
+            )
         if not (
             math.isfinite(float(self.lower_bound))
             and math.isfinite(float(self.upper_bound))
             and math.isfinite(float(self.midpoint))
             and math.isfinite(float(self.invalidation_price))
             and math.isfinite(float(self.width_points))
+            and math.isfinite(float(self.formation_atr))
             and math.isfinite(float(self.width_atr))
             and 0 < self.lower_bound < self.upper_bound
             and self.invalidation_price > 0
             and self.width_points > 0
+            and self.formation_atr > 0
             and type(self.width_ticks) is int
             and self.width_ticks > 0
             and self.width_atr > 0
@@ -1995,6 +2359,12 @@ class FairValueGapState:
             and math.isclose(
                 self.width_points,
                 self.upper_bound - self.lower_bound,
+                rel_tol=1e-9,
+                abs_tol=1e-9,
+            )
+            and math.isclose(
+                self.width_atr,
+                self.width_points / self.formation_atr,
                 rel_tol=1e-9,
                 abs_tol=1e-9,
             )
@@ -2026,8 +2396,6 @@ class FairValueGapState:
         ):
             raise ValueError("FVG source candle clocks are invalid")
         for name in (
-            "source_displacement_started_at",
-            "source_displacement_active_at",
             "formed_at",
             "confirmed_at",
             "state_started_at",
@@ -2038,6 +2406,17 @@ class FairValueGapState:
                 name,
                 aware_timestamp(getattr(self, name), name=f"fvg.{name}"),
             )
+        for name in (
+            "source_displacement_started_at",
+            "source_displacement_active_at",
+        ):
+            value = getattr(self, name)
+            if value is not None:
+                object.__setattr__(
+                    self,
+                    name,
+                    aware_timestamp(value, name=f"fvg.{name}"),
+                )
         for name in (
             "partial_at",
             "mitigated_at",
@@ -2054,9 +2433,6 @@ class FairValueGapState:
             starts[-1] > self.formed_at
             or self.formed_at
             != starts[-1] + pd.Timedelta(minutes=5)
-            or self.source_displacement_started_at
-            > self.source_displacement_active_at
-            or self.source_displacement_active_at > self.formed_at
             or self.confirmed_at != self.formed_at
             or self.state_started_at < self.confirmed_at
             or self.last_updated_at < self.state_started_at
@@ -2064,6 +2440,17 @@ class FairValueGapState:
             or self.age_bars < 0
         ):
             raise ValueError("FVG formation, update clock or age is invalid")
+        if (
+            self.qualification is FVGQualification.DISPLACEMENT_LINKED
+            and (
+                self.source_displacement_started_at
+                > self.source_displacement_active_at
+                or self.source_displacement_active_at > self.formed_at
+            )
+        ):
+            raise ValueError(
+                "FVG displacement qualification clocks are invalid"
+            )
         transition_clocks = tuple(
             value
             for value in (
@@ -2176,14 +2563,20 @@ class OrderBlockState:
     source_bos_target_swing_id: str
     source_bos_structure_id: str | None
     source_bos_scope: BOSScope
+    source_bos_pending_at: pd.Timestamp
     source_bos_resolved_at: pd.Timestamp
+    source_bos_break_bar_id: str
+    source_bos_mss_qualified: bool
     anchor_candle_id: str
+    anchor_candle_ids: tuple[str, ...]
     anchor_start: pd.Timestamp
     anchor_end: pd.Timestamp
     anchor_open: float
     anchor_close: float
     lower_bound: float
     upper_bound: float
+    body_lower_bound: float
+    body_upper_bound: float
     midpoint: float
     invalidation_price: float
     width_points: float
@@ -2214,6 +2607,7 @@ class OrderBlockState:
                     self.source_bos_id,
                     self.source_bos_protocol_hash,
                     self.source_bos_target_swing_id,
+                    self.source_bos_break_bar_id,
                     self.anchor_candle_id,
                 )
             )
@@ -2234,18 +2628,32 @@ class OrderBlockState:
             raise ValueError(
                 "order-block identity or frozen source is invalid"
             )
+        anchor_ids = tuple(self.anchor_candle_ids)
+        object.__setattr__(self, "anchor_candle_ids", anchor_ids)
+        if (
+            not anchor_ids
+            or len(anchor_ids) != len(set(anchor_ids))
+            or any(not isinstance(value, str) or not value for value in anchor_ids)
+            or anchor_ids[-1] != self.anchor_candle_id
+        ):
+            raise ValueError("order-block anchor cluster identity is invalid")
         if not self.protocol_hash or not self.source_displacement_protocol_hash:
             raise ValueError("order-block protocol identity is required")
         if (
             self.source_bos_scope is BOSScope.LOCAL
-            and self.source_bos_structure_id is not None
-        ) or (
-            self.source_bos_scope
-            in {BOSScope.CONTINUATION, BOSScope.OPPOSED}
-            and self.source_bos_structure_id is None
+            or self.source_bos_structure_id is None
+            or (
+                self.source_bos_scope is BOSScope.OPPOSED
+                and not self.source_bos_mss_qualified
+            )
+            or (
+                self.source_bos_scope is BOSScope.CONTINUATION
+                and self.source_bos_mss_qualified
+            )
+            or type(self.source_bos_mss_qualified) is not bool
         ):
             raise ValueError(
-                "order-block BOS scope and structure source disagree"
+                "order-block requires continuation BOS or opposed MSS"
             )
         if not (
             math.isfinite(float(self.lower_bound))
@@ -2254,6 +2662,8 @@ class OrderBlockState:
             and math.isfinite(float(self.invalidation_price))
             and math.isfinite(float(self.anchor_open))
             and math.isfinite(float(self.anchor_close))
+            and math.isfinite(float(self.body_lower_bound))
+            and math.isfinite(float(self.body_upper_bound))
             and math.isfinite(float(self.width_points))
             and math.isfinite(float(self.width_atr))
             and 0 < self.lower_bound < self.upper_bound
@@ -2263,6 +2673,14 @@ class OrderBlockState:
             and self.lower_bound
             <= self.anchor_close
             <= self.upper_bound
+            and self.lower_bound
+            <= self.body_lower_bound
+            < self.body_upper_bound
+            <= self.upper_bound
+            and self.body_lower_bound
+            <= min(self.anchor_open, self.anchor_close)
+            <= max(self.anchor_open, self.anchor_close)
+            <= self.body_upper_bound
             and self.invalidation_price > 0
             and self.width_points > 0
             and type(self.width_ticks) is int
@@ -2315,6 +2733,7 @@ class OrderBlockState:
         for name in (
             "source_displacement_started_at",
             "source_displacement_active_at",
+            "source_bos_pending_at",
             "source_bos_resolved_at",
             "anchor_start",
             "anchor_end",
@@ -2347,12 +2766,10 @@ class OrderBlockState:
             self.anchor_end <= self.anchor_start
             or self.anchor_end > self.formed_at
             or self.anchor_end
-            > (
-                self.source_displacement_started_at
-                - pd.Timedelta(minutes=5)
-            )
+            != self.source_displacement_started_at - pd.Timedelta(minutes=5)
             or self.source_displacement_started_at
             > self.source_displacement_active_at
+            or self.source_bos_pending_at > self.source_displacement_started_at
             or self.source_displacement_active_at > self.formed_at
             or self.source_bos_resolved_at != self.formed_at
             or self.confirmed_at != self.formed_at
@@ -2730,7 +3147,6 @@ class QualifiedReacceptanceState:
     age_real_1m_bars: int
     state_duration_real_1m_bars: int
     required_later_hold_bars: int
-    source_reaccepted_at: pd.Timestamp | None = None
     hold_real_1m_bars: int = 0
     reclaimed_at: pd.Timestamp | None = None
     held_at: pd.Timestamp | None = None
@@ -2747,7 +3163,7 @@ class QualifiedReacceptanceState:
             or not self.symbol
             or type(self.instrument_id) is not int
             or self.instrument_id < 0
-            or self.context_kind not in {"entry_zone", "pool_sweep"}
+            or self.context_kind != "entry_zone"
             or not self.context_id
             or not self.source_entity_id
             or not isinstance(self.direction, Direction)
@@ -2776,7 +3192,6 @@ class QualifiedReacceptanceState:
             "state_started_at",
             "last_updated_at",
             "left_at",
-            "source_reaccepted_at",
             "reclaimed_at",
             "held_at",
             "failed_at",
@@ -2812,7 +3227,6 @@ class QualifiedReacceptanceState:
                     or value > self.last_updated_at
                 )
                 for name, value in (
-                    ("source_reaccepted_at", self.source_reaccepted_at),
                     ("reclaimed_at", self.reclaimed_at),
                     ("held_at", self.held_at),
                     ("failed_at", self.failed_at),
@@ -2824,18 +3238,6 @@ class QualifiedReacceptanceState:
                 and (
                     self.reclaimed_at is None
                     or self.held_at <= self.reclaimed_at
-                )
-            )
-            or (
-                self.context_kind == "entry_zone"
-                and self.source_reaccepted_at is not None
-            )
-            or (
-                self.context_kind == "pool_sweep"
-                and self.reclaimed_at is not None
-                and (
-                    self.source_reaccepted_at is None
-                    or self.source_reaccepted_at > self.reclaimed_at
                 )
             )
         ):
@@ -3178,14 +3580,30 @@ class LiquidityInventoryItem:
     targeted_at: pd.Timestamp | None = None
     consumed_at: pd.Timestamp | None = None
     lifecycle_reason: str | None = None
+    structural_rank: str = "internal"
+    is_protected_swing: bool = False
+    visibility_strength: float = 0.0
 
     def __post_init__(self) -> None:
         if (
             not self.item_id
             or self.side not in {"above", "below"}
             or self.kind
-            not in {"swing", "equal_highs", "equal_lows", "range_boundary"}
+            not in {
+                "swing",
+                "equal_highs",
+                "equal_lows",
+                "previous_session_high",
+                "previous_session_low",
+                "previous_day_high",
+                "previous_day_low",
+                "previous_week_high",
+                "previous_week_low",
+                "range_boundary",
+            }
             or not self.source_ids
+            or self.structural_rank not in {"internal", "external"}
+            or type(self.is_protected_swing) is not bool
         ):
             raise ValueError("liquidity inventory identity is invalid")
         if not (
@@ -3216,6 +3634,18 @@ class LiquidityInventoryItem:
         ):
             raise ValueError("liquidity inventory history is invalid")
         object.__setattr__(self, "strength", clamp(self.strength))
+        visibility = float(self.visibility_strength)
+        if not math.isfinite(visibility):
+            raise ValueError("liquidity visibility must be finite")
+        object.__setattr__(
+            self,
+            "visibility_strength",
+            clamp(visibility),
+        )
+        if self.is_protected_swing and self.structural_rank != "external":
+            raise ValueError(
+                "protected swing liquidity must be externally ranked"
+            )
         if self.lifecycle is LiquidityInventoryLifecycle.VISIBLE:
             if any(
                 value is not None
@@ -3241,6 +3671,7 @@ class LiquidityInventoryItem:
                 "close_beyond_swing",
                 "swing_swept",
                 "pool_swept",
+                "reference_level_swept",
                 "range_boundary_consumed",
             }
         ):
@@ -3287,6 +3718,12 @@ class DrawSelection:
                 "swing",
                 "equal_highs",
                 "equal_lows",
+                "previous_session_high",
+                "previous_session_low",
+                "previous_day_high",
+                "previous_day_low",
+                "previous_week_high",
+                "previous_week_low",
                 "range_boundary",
             }
             or self.side not in {"above", "below"}
@@ -3466,7 +3903,6 @@ class FrameObservation:
     cutoff: pd.Timestamp
     bars: int
     metrics: Mapping[str, float]
-    liquidity: tuple[LiquidityLevel, ...] = ()
     ready: bool = False
     swings: tuple[SwingPoint, ...] = ()
     structures: tuple[StructureSequenceState, ...] = ()
@@ -3522,13 +3958,6 @@ class FrameObservation:
                 raise ValueError(
                     "frame contains a dealing range from another timeframe"
                 )
-        for level in self.liquidity:
-            if level.timeframe is not self.timeframe:
-                raise ValueError(
-                    "frame contains legacy liquidity from another timeframe"
-                )
-            if level.confirmed_at > self.cutoff:
-                raise ValueError("frame contains future-confirmed liquidity")
         for swing in self.swings:
             if (
                 (
@@ -3940,7 +4369,6 @@ class MarketObservation:
     anomalies: tuple[str, ...] = ()
     displacement: DisplacementObservation | None = None
     liquidity_inventory: tuple[LiquidityInventoryItem, ...] = ()
-    liquidity_inventory_authoritative: bool = False
     liquidity_pool_states: tuple[LiquidityPoolState, ...] = ()
     event_ages_minutes: Mapping[str, int] = field(default_factory=dict)
     retained_entity_timelines: Mapping[
@@ -3967,7 +4395,7 @@ class MarketObservation:
     ] = ()
     group4_ambiguous_sweep_item_ids: tuple[str, ...] = ()
     group4_atr_unready_sweep_item_ids: tuple[str, ...] = ()
-    group5_authoritative: bool = False
+    group5_typed_available: bool = False
     entry_locations: tuple[EntryLocationState, ...] = ()
     qualified_reacceptances: tuple[
         QualifiedReacceptanceState,
@@ -3984,7 +4412,7 @@ class MarketObservation:
         ...,
     ] = ()
     active_timeframes: tuple[Timeframe, ...] = ()
-    scale_registry_id: str = "legacy-four-scale"
+    scale_registry_id: str = ""
     scene_revision_id: str | None = None
     scene_added_node_ids: tuple[str, ...] = ()
     scene_revised_node_ids: tuple[str, ...] = ()
@@ -3994,9 +4422,9 @@ class MarketObservation:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "asof", aware_timestamp(self.asof, name="observation.asof"))
-        active_timeframes = tuple(
-            self.active_timeframes or tuple(self.frames.keys())
-        )
+        active_timeframes = tuple(self.active_timeframes)
+        if not active_timeframes:
+            raise ValueError("observation requires an explicit scale registry")
         object.__setattr__(self, "active_timeframes", active_timeframes)
         for name in (
             "scene_added_node_ids",
@@ -4212,6 +4640,7 @@ class MarketObservation:
             state.lifecycle is not ManipulationLifecycle.SWEPT
             or state.censored_at != self.asof
             or state.last_updated_at != self.asof
+            or state.deadline_elapsed
             or state.transition_reason
             not in boundary_anomaly_by_reason
             or boundary_anomaly_by_reason[state.transition_reason]
@@ -4303,21 +4732,6 @@ class MarketObservation:
             and self.displacement.asof != self.asof
         ):
             raise ValueError("displacement and market observation clocks differ")
-        if type(self.liquidity_inventory_authoritative) is not bool:
-            raise ValueError(
-                "liquidity inventory authority flag must be boolean"
-            )
-        if (
-            not self.liquidity_inventory_authoritative
-            and (
-                self.liquidity_inventory
-                or self.liquidity_pool_states
-                or self.manipulations
-            )
-        ):
-            raise ValueError(
-                "typed liquidity state requires explicit authority"
-            )
         manipulation_ids = tuple(
             item.manipulation_id for item in self.manipulations
         )
@@ -4325,6 +4739,7 @@ class MarketObservation:
             len(manipulation_ids) != len(set(manipulation_ids))
             or sum(
                 item.lifecycle is ManipulationLifecycle.SWEPT
+                and item.censored_at is None
                 for item in self.manipulations
             )
             > 1
@@ -4336,7 +4751,10 @@ class MarketObservation:
             (item.symbol, item.instrument_id)
             != (self.symbol, self.instrument_id)
             or item.last_updated_at > self.frames[Timeframe.M1].cutoff
-            or item.censored_at is not None
+            or (
+                item.censored_at is not None
+                and not item.deadline_elapsed
+            )
             for item in self.manipulations
         ):
             raise ValueError(
@@ -4458,7 +4876,10 @@ class MarketObservation:
             if item.source_inventory_item_id in inventory_by_id:
                 continue
             if (
-                item.lifecycle is ManipulationLifecycle.SWEPT
+                (
+                    item.lifecycle is ManipulationLifecycle.SWEPT
+                    and item.censored_at is None
+                )
                 or item.last_updated_at == self.asof
             ):
                 continue
@@ -4466,10 +4887,10 @@ class MarketObservation:
                 raise ValueError(
                     "manipulation lacks its retained inventory identity"
                 )
-        if type(self.group5_authoritative) is not bool:
-            raise ValueError("Group 5 authority flag must be boolean")
+        if type(self.group5_typed_available) is not bool:
+            raise ValueError("Group 5 availability flag must be boolean")
         if (
-            not self.group5_authoritative
+            not self.group5_typed_available
             and (
                 self.entry_locations
                 or self.qualified_reacceptances
@@ -4480,7 +4901,7 @@ class MarketObservation:
             )
         ):
             raise ValueError(
-                "typed Group 5 state requires explicit authority"
+                "typed Group 5 state requires an available data contract"
             )
         location_ids = tuple(
             item.location_id for item in self.entry_locations
@@ -4734,12 +5155,18 @@ class FrozenRangeAuctionContext:
     manipulation_side: str
     swept_at: pd.Timestamp
     manipulation_extreme: float
+    reentry_candidate_at: pd.Timestamp
     reentered_at: pd.Timestamp
     reentry_price: float
     opposite_liquidity_id: str
 
     def __post_init__(self) -> None:
-        for name in ("mature_at", "swept_at", "reentered_at"):
+        for name in (
+            "mature_at",
+            "swept_at",
+            "reentry_candidate_at",
+            "reentered_at",
+        ):
             object.__setattr__(
                 self,
                 name,
@@ -4789,7 +5216,10 @@ class FrozenRangeAuctionContext:
                 self.manipulation_side == "below"
                 and self.manipulation_extreme >= self.lower_bound
             )
-            or not self.mature_at < self.swept_at < self.reentered_at
+            or not self.mature_at
+            < self.swept_at
+            < self.reentry_candidate_at
+            < self.reentered_at
         ):
             raise ValueError("frozen range-auction context is invalid")
 
