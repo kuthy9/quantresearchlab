@@ -107,6 +107,7 @@ class ObserverConfig:
     group4_protocol: str | None = None
     group5_protocol: str | None = None
     scale_specs: tuple[ScaleSpec, ...] = ()
+    project_scene_graph: bool = True
 
 
 @dataclass(frozen=True)
@@ -1444,6 +1445,8 @@ class CausalObserver:
 
     def __init__(self, config: ObserverConfig) -> None:
         self.config = config
+        if type(self.config.project_scene_graph) is not bool:
+            raise ValueError("scene-graph projection flag must be boolean")
         self.scale_specs = tuple(self.config.scale_specs)
         if not self.scale_specs:
             raise ValueError("observer requires an explicit scale registry")
@@ -4915,34 +4918,37 @@ class CausalObserver:
                 "last checkpoint"
             )
             raise
-        try:
-            self.last_scene_delta = self.scene_graph.update(observation)
-            observation = replace(
-                observation,
-                scene_revision_id=self.last_scene_delta.revision_id,
-                scene_added_node_ids=(
-                    self.last_scene_delta.added_node_ids
-                ),
-                scene_revised_node_ids=(
-                    self.last_scene_delta.revised_node_ids
-                ),
-                scene_added_edge_ids=(
-                    self.last_scene_delta.added_edge_ids
-                ),
-                scene_revised_edge_ids=(
-                    self.last_scene_delta.revised_edge_ids
-                ),
-                scene_resolution_event_ids=(
-                    self.last_scene_delta.resolution_event_ids
-                ),
-            )
-        except Exception:
-            self._terminal_failure = (
-                "scene-graph projection failed after semantic reducers "
-                "advanced; discard this observer and resume from the "
-                "last checkpoint"
-            )
-            raise
+        if self.config.project_scene_graph:
+            try:
+                self.last_scene_delta = self.scene_graph.update(observation)
+                observation = replace(
+                    observation,
+                    scene_revision_id=self.last_scene_delta.revision_id,
+                    scene_added_node_ids=(
+                        self.last_scene_delta.added_node_ids
+                    ),
+                    scene_revised_node_ids=(
+                        self.last_scene_delta.revised_node_ids
+                    ),
+                    scene_added_edge_ids=(
+                        self.last_scene_delta.added_edge_ids
+                    ),
+                    scene_revised_edge_ids=(
+                        self.last_scene_delta.revised_edge_ids
+                    ),
+                    scene_resolution_event_ids=(
+                        self.last_scene_delta.resolution_event_ids
+                    ),
+                )
+            except Exception:
+                self._terminal_failure = (
+                    "scene-graph projection failed after semantic reducers "
+                    "advanced; discard this observer and resume from the "
+                    "last checkpoint"
+                )
+                raise
+        else:
+            self.last_scene_delta = None
         self._boundary_terminal_breaks.clear()
         self._boundary_reset_identity = None
         self._group4_boundary_update = None

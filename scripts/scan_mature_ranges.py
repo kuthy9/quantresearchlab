@@ -316,6 +316,7 @@ def _build_observer(
             liquidity_protocol=str(ROOT / str(protocols["group12"])),
             group4_protocol=str(ROOT / str(protocols["group4"])),
             scale_specs=scale_specs,
+            project_scene_graph=False,
         )
     )
     return CausalMarketReader(scale_specs=scale_specs), observer
@@ -1342,6 +1343,7 @@ def aggregate_results(
             "risk_used": False,
             "observer_scope": "production_multiscale_group12_group4",
             "all_pool_source_timeframes": True,
+            "scene_graph_projection_used": False,
         },
         "identity": dict(run_identity or {}),
         "bar_counts": {
