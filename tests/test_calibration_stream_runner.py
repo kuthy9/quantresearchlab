@@ -14,12 +14,36 @@ import pytest
 from scripts.run_continuous_replay import (
     BRAIN_CALIBRATION_FIELD_TYPES,
     DECISION_FIELD_TYPES,
+    _calendar_warmup_start,
     _visualization_clocks,
 )
 from smc_trader.brain_calibration import BrainCalibrationRecord
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+@pytest.mark.parametrize(
+    ("start", "expected"),
+    (
+        (
+            "2023-11-05T18:00:00-05:00",
+            pd.Timestamp("2023-10-29 18:00", tz="America/New_York"),
+        ),
+        (
+            "2023-03-12T18:00:00-04:00",
+            pd.Timestamp("2023-03-05 18:00", tz="America/New_York"),
+        ),
+    ),
+)
+def test_calendar_warmup_preserves_market_wall_clock_across_dst(
+    start: str,
+    expected: pd.Timestamp,
+) -> None:
+    assert _calendar_warmup_start(
+        pd.Timestamp(start),
+        days=7,
+    ) == expected
 
 
 def test_stream_schemas_match_the_lightweight_contract() -> None:

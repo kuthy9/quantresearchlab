@@ -302,6 +302,17 @@ def _deadline(timestamp: pd.Timestamp) -> pd.Timestamp:
     return deadline
 
 
+def _calendar_warmup_start(
+    start: pd.Timestamp,
+    *,
+    days: int,
+) -> pd.Timestamp:
+    """Subtract local market-calendar days instead of fixed 24-hour blocks."""
+
+    local = start.tz_convert("America/New_York")
+    return local - pd.DateOffset(days=days)
+
+
 def _source_provenance(observation, source_id: str) -> dict[str, Any] | None:
     location = next(
         (
@@ -1030,7 +1041,10 @@ def _streamed_main(args: argparse.Namespace) -> None:
             "OHLCV source hash does not match the registered causal front"
         )
 
-    load_start = start - pd.Timedelta(days=args.warmup_days)
+    load_start = _calendar_warmup_start(
+        start,
+        days=args.warmup_days,
+    )
     loaded = load_ohlcv(source, start=load_start, end=end)
     if (
         not loaded.contract_selection_causal
@@ -1048,7 +1062,10 @@ def _streamed_main(args: argparse.Namespace) -> None:
 
     config_source = Path(args.config)
     config_payload = json.loads(config_source.read_text(encoding="utf-8"))
-    engine = ContinuousSMCEngine.from_config(config_source)
+    engine = ContinuousSMCEngine.from_config(
+        config_source,
+        runtime_mode="development",
+    )
     config_identity = sha256_file(config_source)
     brain_calibration_enabled = bool(args.brain_calibration)
     if brain_calibration_enabled and window.role not in {

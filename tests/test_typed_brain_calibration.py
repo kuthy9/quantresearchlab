@@ -147,19 +147,40 @@ def test_typed_artifact_fails_closed(
 def test_engine_accepts_current_typed_config_and_rejects_incomplete_current_config(
     tmp_path: Path,
 ) -> None:
-    engine = ContinuousSMCEngine.from_config("configs/model.json")
+    engine = ContinuousSMCEngine.from_config(
+        "configs/model.json",
+        runtime_mode="development",
+    )
 
     assert isinstance(engine.brain.calibrator, TypedBrainCalibrator)
+    assert engine.runtime_mode == "development"
+    with pytest.raises(TypeError, match="runtime_mode"):
+        ContinuousSMCEngine.from_config("configs/model.json")
+    with pytest.raises(RuntimeError, match="readiness gate"):
+        ContinuousSMCEngine(
+            reader=engine.reader,
+            observer=engine.observer,
+            brain=engine.brain,
+            decision=engine.decision,
+            risk=engine.risk,
+            runtime_mode="live",
+        )
     incomplete = tmp_path / "model.json"
     incomplete.write_text(json.dumps({"schema_version": 1}), encoding="utf-8")
     with pytest.raises(ValueError, match="model.scales"):
-        ContinuousSMCEngine.from_config(incomplete)
+        ContinuousSMCEngine.from_config(
+            incomplete,
+            runtime_mode="development",
+        )
 
     payload = json.loads(Path("configs/model.json").read_text(encoding="utf-8"))
     payload["observer"].pop("group5_protocol")
     incomplete.write_text(json.dumps(payload), encoding="utf-8")
     with pytest.raises(ValueError, match="group5_protocol"):
-        ContinuousSMCEngine.from_config(incomplete)
+        ContinuousSMCEngine.from_config(
+            incomplete,
+            runtime_mode="development",
+        )
 
 
 def test_engine_live_mode_has_one_fail_closed_release_gate(
@@ -195,6 +216,7 @@ def test_engine_live_mode_has_one_fail_closed_release_gate(
         runtime_mode="live",
     )
     assert isinstance(engine, ContinuousSMCEngine)
+    assert engine.runtime_mode == "live"
 
     with pytest.raises(ValueError, match="runtime_mode"):
         ContinuousSMCEngine.from_config(

@@ -35,7 +35,9 @@ class CalibrationSequentialReplay:
             raise ValueError(
                 "a portfolio cannot be supplied when execution simulation is disabled"
             )
-        self.engine = engine or ContinuousSMCEngine.from_config()
+        self.engine = engine or ContinuousSMCEngine.from_config(
+            runtime_mode="development"
+        )
         self.simulate_execution = bool(simulate_execution)
         self.portfolio = (
             (portfolio or SequentialPortfolio())

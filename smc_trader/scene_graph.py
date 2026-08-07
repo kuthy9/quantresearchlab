@@ -2208,6 +2208,15 @@ class TemporalMarketSceneGraph:
         status = _status(kind, lifecycle)
         if "ambiguous" in lifecycle or "ambiguous" in (event.transition_reason or ""):
             status = EvidenceStatus.AMBIGUOUS
+        semantic_attributes = dict(
+            _semantic_attributes(event.details)
+        )
+        if event.kind is EventKind.ENTRY_PATH_STEP:
+            step_kind = event.details.get("kind")
+            if step_kind:
+                semantic_attributes["path_step_kind"] = str(
+                    step_kind
+                )
         self.add_node(
             SceneNode(
                 node_id=node_id,
@@ -2239,7 +2248,9 @@ class TemporalMarketSceneGraph:
                 source_ids=sources,
                 entity_id=entity_id,
                 resolution_reason=resolution_reason,
-                semantic_attributes=_semantic_attributes(event.details),
+                semantic_attributes=tuple(
+                    sorted(semantic_attributes.items())
+                ),
                 descriptive_metrics=_descriptive_metrics(event.details),
                 market_epoch_id=self._market_epoch_id,
             )

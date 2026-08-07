@@ -455,7 +455,9 @@ class SequentialReplay:
         engine: ContinuousSMCEngine | None = None,
         portfolio: SequentialPortfolio | None = None,
     ) -> None:
-        self.engine = engine or ContinuousSMCEngine.from_config()
+        self.engine = engine or ContinuousSMCEngine.from_config(
+            runtime_mode="development"
+        )
         self.portfolio = portfolio or SequentialPortfolio()
 
     def on_bar(

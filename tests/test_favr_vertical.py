@@ -688,6 +688,15 @@ def test_favr_scene_graph_forms_continuously_via_public_update() -> None:
             source_kind="path_step",
             target_kind="path_sequence",
         )
+        step_node = next(
+            node
+            for node in graph.nodes
+            if node.kind == "path_step"
+            and node.entity_id == step.step_id
+        )
+        assert dict(step_node.semantic_attributes)[
+            "path_step_kind"
+        ] == step.kind
 
     hypothesis = _unparked_favr_brain().update(
         observation,

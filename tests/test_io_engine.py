@@ -139,7 +139,10 @@ def test_large_same_contract_gap_can_be_marked_for_causal_reset() -> None:
 
 
 def test_engine_runs_all_layers_once_per_completed_minute() -> None:
-    engine = ContinuousSMCEngine.from_config("configs/model.json")
+    engine = ContinuousSMCEngine.from_config(
+        "configs/model.json",
+        runtime_mode="development",
+    )
     snapshot = None
     for bar in session_bars(1)[:300]:
         open_price = round(bar.open / 0.25) * 0.25

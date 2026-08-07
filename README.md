@@ -52,8 +52,12 @@ Current primitive protocol status:
 synthetic/boundary tests exist. It is not a profitability or natural-market
 authority claim.
 
-`ContinuousSMCEngine.from_config()` defaults to development mode. Constructing
-it with `runtime_mode="live"` is rejected unless the single top-level release
+The bounded 2023 natural-market results and the reason FAVR remains parked are
+recorded in [`docs/natural_authority_2023.md`](docs/natural_authority_2023.md).
+
+`ContinuousSMCEngine.from_config(..., runtime_mode=...)` requires an explicit
+development or live mode. Constructing it with `runtime_mode="live"` is
+rejected unless the single top-level release
 readiness block, current Group5 natural authority, and economic validation are
 all explicitly complete. The current configuration intentionally fails that
 gate; typed DFP/LSR development actions are not live-trading authorization.
@@ -90,7 +94,8 @@ no current-session fallback.
 
 ## Runtime and replay
 
-The runtime API is `ContinuousSMCEngine.from_config("configs/model.json")`,
+The development runtime API is
+`ContinuousSMCEngine.from_config("configs/model.json", runtime_mode="development")`,
 followed by one `on_bar` call per newly completed 1m bar. Its fixed causal order
 is reader → observer/scene graph → Brain → Decision → Risk.
 

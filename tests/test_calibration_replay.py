@@ -58,10 +58,16 @@ def _on_grid_session_bars(count: int) -> list[Bar]:
 def test_lightweight_replay_preserves_causal_decisions_risk_and_execution() -> None:
     bars = _on_grid_session_bars(80)
     standard = SequentialReplay(
-        engine=ContinuousSMCEngine.from_config("configs/model.json")
+        engine=ContinuousSMCEngine.from_config(
+            "configs/model.json",
+            runtime_mode="development",
+        )
     )
     lightweight = CalibrationSequentialReplay(
-        engine=ContinuousSMCEngine.from_config("configs/model.json")
+        engine=ContinuousSMCEngine.from_config(
+            "configs/model.json",
+            runtime_mode="development",
+        )
     )
     for bar in bars:
         execution = _execution(bar.end)
@@ -85,9 +91,15 @@ def test_lightweight_replay_preserves_causal_decisions_risk_and_execution() -> N
 
 def test_non_simulating_replay_preserves_flat_causal_model_without_portfolio() -> None:
     bars = _on_grid_session_bars(40)
-    expected_engine = ContinuousSMCEngine.from_config("configs/model.json")
+    expected_engine = ContinuousSMCEngine.from_config(
+        "configs/model.json",
+        runtime_mode="development",
+    )
     replay = CalibrationSequentialReplay(
-        engine=ContinuousSMCEngine.from_config("configs/model.json"),
+        engine=ContinuousSMCEngine.from_config(
+            "configs/model.json",
+            runtime_mode="development",
+        ),
         simulate_execution=False,
     )
     assert replay.portfolio is None

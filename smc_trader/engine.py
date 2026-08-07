@@ -37,6 +37,7 @@ _REQUIRED_PRIMITIVE_PROTOCOLS = (
     "group4_protocol",
     "group5_protocol",
 )
+_LIVE_READINESS_TOKEN = object()
 
 
 class ContinuousSMCEngine:
@@ -50,12 +51,27 @@ class ContinuousSMCEngine:
         brain: PlaybookBrain,
         decision: UtilityDecisionLayer,
         risk: StructuralRiskEngine,
+        runtime_mode: str,
+        _readiness_token: object | None = None,
     ) -> None:
+        if runtime_mode not in {"development", "live"}:
+            raise ValueError(
+                "runtime_mode must be development or live"
+            )
+        if (
+            runtime_mode == "live"
+            and _readiness_token is not _LIVE_READINESS_TOKEN
+        ):
+            raise RuntimeError(
+                "live engine must be constructed through the "
+                "from_config readiness gate"
+            )
         self.reader = reader
         self.observer = observer
         self.brain = brain
         self.decision = decision
         self.risk = risk
+        self.runtime_mode = runtime_mode
         self._last_snapshot: EngineSnapshot | None = None
 
     @classmethod
@@ -63,7 +79,7 @@ class ContinuousSMCEngine:
         cls,
         path: str | Path = "configs/model.json",
         *,
-        runtime_mode: str = "development",
+        runtime_mode: str,
     ) -> "ContinuousSMCEngine":
         if runtime_mode not in {"development", "live"}:
             raise ValueError(
@@ -238,6 +254,8 @@ class ContinuousSMCEngine:
             brain=brain,
             decision=decision,
             risk=risk,
+            runtime_mode=runtime_mode,
+            _readiness_token=_LIVE_READINESS_TOKEN,
         )
 
     @property
