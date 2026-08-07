@@ -1,9 +1,9 @@
 {
   "protocol_version": "3.2.0-displacement-episode.3",
-  "status": "implementation_complete_natural_authority_pending",
+  "status": "implementation_complete_finite_real_replay_and_stratified_review_passed",
   "downstream_authoritative": true,
-  "natural_authority_validated": false,
-  "authority_semantics": "downstream_authoritative means the typed reducer contract is available to Group3; it does not claim that version .3 has current finite-real-replay or blind-review evidence",
+  "natural_authority_validated": true,
+  "authority_semantics": "version .3 passed bounded 2023 lifecycle replay and stratified outcome-blind visual review; this is descriptive primitive authority, not profitability or broad-regime stability",
   "timeframe": "5m",
   "tick_size": 0.25,
   "input_contract": {

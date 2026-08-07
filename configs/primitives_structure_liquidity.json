@@ -1,6 +1,11 @@
 {
   "protocol_version": "3.2.0-group12.7",
-  "status": "implementation_complete_current_version_real_replay_review_pending",
+  "status": "implementation_complete_finite_real_replay_and_stratified_review_passed",
+  "authority_review": {
+    "scope": "bounded 2023 natural lifecycle and visual review",
+    "passed": true,
+    "profitability_or_broad_regime_claim": false
+  },
   "role": "causal_descriptive_development_contract",
   "prohibited_inputs": [
     "future bars",

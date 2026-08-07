@@ -4,6 +4,8 @@
   "release_readiness": {
     "active_model_natural_authority_validated": false,
     "economic_validation_complete": false,
+    "rolling_oof_complete": false,
+    "mbo_stability_validated": false,
     "live_execution_allowed": false
   },
   "playbook_registry": "configs/playbooks.json",

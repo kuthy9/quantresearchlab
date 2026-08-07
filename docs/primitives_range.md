@@ -3,7 +3,7 @@
 The executable definition is `configs/primitives_range.json`.
 
 Current protocol: `3.2.0-group4.1`. Status:
-`implementation_complete_natural_market_authority_pending`.
+`implementation_complete_limited_natural_observation_passed_mature_range_coverage_sparse`.
 
 This contract freezes the causal meaning of:
 
@@ -565,11 +565,11 @@ Group 5 may register only the reverse-displacement FVG/OB entry location and
 its first-pullback/trigger path; it does not duplicate Group4 manipulation
 reacceptance.
 
-FAVR may be enabled only after a finite real OHLCV replay and stratified blind
-review show that natural mature ranges and their manipulations are observable
-without a systematic semantic misread. The complete causal sequence must then
-remain connected through range identity, manipulation identity, reverse
-displacement, zone identity, first pullback and trigger.
+Finite real OHLCV replay and stratified blind review showed that natural mature
+ranges and both manipulation resolutions are observable, but mature-range
+coverage was sparse. FAVR may be enabled only after the complete causal
+sequence naturally remains connected through range identity, manipulation
+identity, reverse displacement, zone identity, first pullback and trigger.
 
 If mature ranges remain unreliable after the one permitted concept repair,
 FAVR stays disabled and Group 4 is parked rather than threshold-tuned.
@@ -577,9 +577,9 @@ FAVR stays disabled and Group 4 is parked rather than threshold-tuned.
 ## Formalization gate
 
 Formal definition, incremental implementation, static review and the unified
-synthetic/boundary/causal suite are complete for `3.2.0-group4.1`. Pending work
-is one finite real OHLCV replay, one small stratified blind review, and then a
-single freeze-or-park decision.
+synthetic/boundary/causal suite, finite real OHLCV replay and small stratified
+review are complete for `3.2.0-group4.1`. Limited natural observation passed;
+broader mature-range stability remains pending and FAVR stays parked.
 
 Primitive profitability, MBO stability, rolling OOF and sealed holdout are not
 required at this gate.

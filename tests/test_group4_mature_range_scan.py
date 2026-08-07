@@ -1,16 +1,26 @@
 from types import SimpleNamespace
+import json
 
 import pandas as pd
+import pytest
 
 from scripts.scan_mature_ranges import (
     CoverageAccumulator,
+    DEFAULT_CONFIG,
+    _calendar_warmup_start,
+    _coverage_payload,
+    _validate_config,
     geometrically_valid_source_pairs,
     select_stratified_cases,
     unmet_maturity_gates,
 )
 from smc_trader.model import (
     DealingRangeLifecycle,
+    LiquidityInventoryItem,
+    LiquidityInventoryLifecycle,
+    ManipulationLifecycle,
     SupportResistanceLifecycle,
+    Timeframe,
 )
 
 
@@ -52,6 +62,62 @@ def _terminal(**changes: object) -> SimpleNamespace:
     }
     values.update(changes)
     return SimpleNamespace(**values)
+
+
+def _inventory(
+    identity: str,
+    timeframe: Timeframe,
+    *,
+    side: str,
+) -> LiquidityInventoryItem:
+    price = 101.0 if side == "above" else 99.0
+    kind = "equal_highs" if side == "above" else "equal_lows"
+    return LiquidityInventoryItem(
+        item_id=identity,
+        timeframe=timeframe,
+        side=side,
+        kind=kind,
+        price=price,
+        lower_bound=price,
+        upper_bound=price,
+        formed_at=START - pd.Timedelta(hours=2),
+        confirmed_at=START - pd.Timedelta(hours=1),
+        lifecycle=LiquidityInventoryLifecycle.VISIBLE,
+        source_ids=(f"pool-{identity}",),
+        age_bars=1,
+        strength=0.5,
+    )
+
+
+def _manipulation(
+    identity: str,
+    lifecycle: ManipulationLifecycle,
+    *,
+    censored_reason: str | None = None,
+) -> SimpleNamespace:
+    swept_at = START + pd.Timedelta(minutes=1)
+    resolved_at = swept_at + pd.Timedelta(minutes=2)
+    return SimpleNamespace(
+        manipulation_id=identity,
+        source_kind="formed_liquidity_pool",
+        source_timeframe=Timeframe.M5,
+        side="above",
+        swept_at=swept_at,
+        lifecycle=lifecycle,
+        reaccepted_at=(
+            resolved_at
+            if lifecycle is ManipulationLifecycle.REACCEPTED
+            else None
+        ),
+        accepted_outside_at=(
+            resolved_at
+            if lifecycle is ManipulationLifecycle.ACCEPTED_OUTSIDE
+            else None
+        ),
+        censored_at=(resolved_at if censored_reason else None),
+        deadline_elapsed=censored_reason == "deadline_elapsed",
+        transition_reason=censored_reason,
+    )
 
 
 def test_terminal_reason_and_unmet_gates_are_separate_and_deduplicated() -> None:
@@ -151,3 +217,139 @@ def test_stratified_selection_is_deterministic_and_allows_empty_strata() -> None
     assert first["near_mature_single_gate"] is not None
     assert first["mature_recognized"] is None
     assert first["natural_mature_range_manipulation"] is None
+
+
+def test_registered_2023_profile_is_exact_and_outcome_blind() -> None:
+    source = json.loads(DEFAULT_CONFIG.read_text(encoding="utf-8"))
+    payload = _coverage_payload(
+        source,
+        DEFAULT_CONFIG,
+        profile="group4_natural_authority_2023_full_year",
+    )
+
+    _validate_config(payload)
+    assert payload["allowed_ohlcv_role"] == "calibration"
+    assert payload["threshold_search"] is False
+    assert payload["outcome_fields_used"] is False
+    assert payload["pnl_used"] is False
+    assert payload["mbo_used"] is False
+    assert payload["include_all_pool_source_timeframes"] is True
+    assert len(payload["windows"]) == 1
+    assert payload["windows"][0] == {
+        "id": "2023-full-year",
+        "start": "2023-01-01T00:00:00-05:00",
+        "end_exclusive": "2024-01-01T00:00:00-05:00",
+    }
+
+    with pytest.raises(ValueError, match="unknown registered"):
+        _coverage_payload(
+            source,
+            DEFAULT_CONFIG,
+            profile="arbitrary-calibration-window",
+        )
+    invalid = dict(payload)
+    invalid["registered_calibration_exception"] = None
+    with pytest.raises(ValueError, match="registered outcome-blind"):
+        _validate_config(invalid)
+
+
+def test_calendar_warmup_preserves_wall_clock_across_dst() -> None:
+    assert _calendar_warmup_start(
+        pd.Timestamp("2023-11-05T18:00:00-05:00"),
+        days=7,
+        timezone="America/New_York",
+    ) == pd.Timestamp("2023-10-29 18:00", tz="America/New_York")
+
+
+def test_all_scale_source_inputs_and_unclassified_sources_are_counted() -> None:
+    accumulator = CoverageAccumulator("all-scales", START, END, _protocol())
+    items = tuple(
+        _inventory(
+            f"source-{timeframe.value}",
+            timeframe,
+            side="above" if index % 2 == 0 else "below",
+        )
+        for index, timeframe in enumerate(
+            (
+                Timeframe.H4,
+                Timeframe.H1,
+                Timeframe.M15,
+                Timeframe.M5,
+                Timeframe.M1,
+            )
+        )
+    )
+    candle = SimpleNamespace(
+        start=START,
+        high=102.0,
+        low=98.0,
+    )
+    accumulator.observe_source_inputs(items, candle=candle)
+    inventory = {item.item_id: item for item in items}
+    accumulator.observe_unclassified_sources(
+        (items[0].item_id,),
+        metric="ambiguous_dual_side",
+        inventory=inventory,
+    )
+    accumulator.observe_unclassified_sources(
+        (items[-1].item_id,),
+        metric="atr_unready",
+        inventory=inventory,
+    )
+
+    result = accumulator.result(source_rows=5, observed_updates=1)
+    funnel = result["manipulation_funnel"]
+    assert funnel["visible_eligible_sources"] == 5
+    assert funnel["crossed_sources"] == 5
+    assert funnel["ambiguous_dual_side"] == 1
+    assert funnel["atr_unready"] == 1
+    assert funnel["swept_created"] == 0
+    assert {
+        row["source_timeframe"]
+        for row in result["manipulation_by_source"]
+    } == {"4H", "1H", "15m", "5m", "1m"}
+
+
+def test_manipulation_created_cohort_has_exactly_one_outcome() -> None:
+    accumulator = CoverageAccumulator("outcomes", START, END, _protocol())
+    states = (
+        _manipulation("reaccepted", ManipulationLifecycle.REACCEPTED),
+        _manipulation(
+            "accepted",
+            ManipulationLifecycle.ACCEPTED_OUTSIDE,
+        ),
+        _manipulation(
+            "deadline",
+            ManipulationLifecycle.SWEPT,
+            censored_reason="deadline_elapsed",
+        ),
+        _manipulation(
+            "boundary",
+            ManipulationLifecycle.SWEPT,
+            censored_reason="data_gap_reset",
+        ),
+        _manipulation("right", ManipulationLifecycle.SWEPT),
+    )
+    for state in states:
+        accumulator.observe_manipulation(state)
+
+    result = accumulator.result(source_rows=10, observed_updates=10)
+    funnel = result["manipulation_funnel"]
+    assert funnel["swept_created"] == 5
+    assert {
+        name: funnel[name]
+        for name in (
+            "reaccepted",
+            "accepted_outside",
+            "deadline_censored",
+            "hard_boundary_censored",
+            "right_censored",
+        )
+    } == {
+        "reaccepted": 1,
+        "accepted_outside": 1,
+        "deadline_censored": 1,
+        "hard_boundary_censored": 1,
+        "right_censored": 1,
+    }
+    assert result["manipulation_conservation"]["balanced"] is True

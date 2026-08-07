@@ -42,11 +42,11 @@ Current primitive protocol status:
 
 | Family | Protocol | Status |
 |---|---|---|
-| Structure/liquidity | `3.2.0-group12.7` | implementation complete; current-version real replay/review pending |
-| Displacement | `3.2.0-displacement-episode.3` | implementation complete; natural authority pending |
-| FVG/order block | `3.2.0-group3.4` | implementation complete; real replay/review pending |
-| Range/manipulation | `3.2.0-group4.1` | implementation complete; natural market authority pending |
-| Entry/path | `3.2.0-group5.3` | typed state available; natural authority pending; FAVR disabled |
+| Structure/liquidity | `3.2.0-group12.7` | finite real replay and stratified review passed |
+| Displacement | `3.2.0-displacement-episode.3` | finite real replay and stratified review passed |
+| FVG/order block | `3.2.0-group3.4` | FVG finite replay passed; OB failure coverage sparse |
+| Range/manipulation | `3.2.0-group4.1` | limited natural observation passed; mature-range coverage sparse |
+| Entry/path | `3.2.0-group5.3` | DFP/LSR input authority enabled; FAVR authority disabled and parked |
 
 “Implementation complete” means the typed incremental contract and its
 synthetic/boundary tests exist. It is not a profitability or natural-market
@@ -58,9 +58,10 @@ recorded in [`docs/natural_authority_2023.md`](docs/natural_authority_2023.md).
 `ContinuousSMCEngine.from_config(..., runtime_mode=...)` requires an explicit
 development or live mode. Constructing it with `runtime_mode="live"` is
 rejected unless the single top-level release
-readiness block, current Group5 natural authority, and economic validation are
-all explicitly complete. The current configuration intentionally fails that
-gate; typed DFP/LSR development actions are not live-trading authorization.
+readiness block, DFP/LSR Group5 input authority, economic validation, rolling
+OOF and MBO stability are all explicitly complete. The current configuration
+intentionally fails that gate; typed DFP/LSR development actions are not
+live-trading authorization.
 
 Internal semantic event identities remain version/hash bound where needed, but
 the runtime does not select between historical product generations.

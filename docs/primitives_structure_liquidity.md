@@ -166,15 +166,11 @@ descriptive and must not be tuned against PnL.
 Current protocol: `3.2.0-group12.7`.
 
 The incremental implementation and unified synthetic, boundary, causality and
-resume tests are present. The older `3.1.0-group12.4` replay and blind-review
-claims do not establish natural authority for the current version, which also
-adds timeframe-specific swing spans, target-identity BOS scope, independent
-wick consumption, completed-period S/R/liquidity sources and richer candle/S/R
-descriptions.
+resume tests are present. The current version also completed the registered
+2023 finite real OHLCV replay and stratified outcome-blind review without a
+systematic lifecycle, identity or completed-bar error.
 
 Status is therefore
-`implementation_complete_current_version_real_replay_review_pending`. A
-bounded real OHLCV replay and small outcome-blind review of the current version
-remain required before a primitive-level natural-authority claim. This status
-does not prevent typed downstream development and is not a profitability,
-MBO, action or strategy-validation claim.
+`implementation_complete_finite_real_replay_and_stratified_review_passed`.
+This bounded descriptive authority does not claim profitability, MBO
+stability, broad-regime stability, action quality or strategy validation.

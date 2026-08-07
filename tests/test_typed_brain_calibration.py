@@ -195,7 +195,6 @@ def test_engine_live_mode_has_one_fail_closed_release_gate(
     group5 = json.loads(
         Path("configs/primitives_entry.json").read_text(encoding="utf-8")
     )
-    group5["authority"]["natural_authority_validated"] = True
     group5_path = tmp_path / "primitives_entry.json"
     group5_path.write_text(json.dumps(group5), encoding="utf-8")
 
@@ -206,6 +205,8 @@ def test_engine_live_mode_has_one_fail_closed_release_gate(
     model["release_readiness"] = {
         "active_model_natural_authority_validated": True,
         "economic_validation_complete": True,
+        "rolling_oof_complete": True,
+        "mbo_stability_validated": True,
         "live_execution_allowed": True,
     }
     model_path = tmp_path / "model-live.json"
@@ -217,6 +218,23 @@ def test_engine_live_mode_has_one_fail_closed_release_gate(
     )
     assert isinstance(engine, ContinuousSMCEngine)
     assert engine.runtime_mode == "live"
+
+    for field in (
+        "active_model_natural_authority_validated",
+        "economic_validation_complete",
+        "rolling_oof_complete",
+        "mbo_stability_validated",
+        "live_execution_allowed",
+    ):
+        blocked = json.loads(json.dumps(model))
+        blocked["release_readiness"][field] = False
+        blocked_path = tmp_path / f"model-live-missing-{field}.json"
+        blocked_path.write_text(json.dumps(blocked), encoding="utf-8")
+        with pytest.raises(RuntimeError, match=field):
+            ContinuousSMCEngine.from_config(
+                blocked_path,
+                runtime_mode="live",
+            )
 
     with pytest.raises(ValueError, match="runtime_mode"):
         ContinuousSMCEngine.from_config(

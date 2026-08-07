@@ -410,17 +410,19 @@ def test_group5_protocol_tracks_current_config_and_upstream_bindings() -> None:
     assert payload["authority"] == {
         "typed_state_available": True,
         "brain_input_allowed": True,
-        "natural_authority_validated": False,
+        "dfp_lsr_input_authority_validated": True,
+        "favr_natural_authority_validated": False,
         "independent_action_authority": False,
         "favr_enabled": False,
     }
     assert (
         protocol.typed_state_available,
         protocol.brain_input_allowed,
-        protocol.natural_authority_validated,
+        protocol.dfp_lsr_input_authority_validated,
+        protocol.favr_natural_authority_validated,
         protocol.independent_action_authority,
         protocol.favr_enabled,
-    ) == (True, True, False, False, False)
+    ) == (True, True, True, False, False, False)
 
     assert _sha256(PROTOCOL_PATH) == PROTOCOL_SHA
     assert protocol.protocol_hash == PROTOCOL_SHA

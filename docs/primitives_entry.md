@@ -3,8 +3,9 @@
 The executable companion is
 `configs/primitives_entry.json`.
 
-Current protocol: `3.2.0-group5.3`. Typed state is available to the Brain,
-but natural authority is not yet validated and FAVR remains disabled.
+Current protocol: `3.2.0-group5.3`. Typed state and DFP/LSR input authority are
+available to the Brain. Group5 still has no independent action authority, and
+FAVR natural authority remains disabled and parked.
 
 Group 5 closes four legacy semantic gaps with one incremental reducer:
 
@@ -451,9 +452,10 @@ bar fails before commit.
 ## Stopping rule
 
 Formalization, one incremental implementation, static review and the unified
-synthetic/edge/causal suite are complete for `3.2.0-group5.3`. One finite
-descriptive real OHLCV replay and one small stratified outcome-blind review of
-the current protocol remain pending before natural authority is validated.
+synthetic/edge/causal suite, finite descriptive OHLCV replay and small
+stratified outcome-blind review are complete for `3.2.0-group5.3`. This enables
+Group5 as typed DFP/LSR input. It does not validate the missing natural FAVR
+chain.
 
 At most one concept-level repair is allowed. A second systematic semantic
 failure parks the affected concept instead of starting threshold search.

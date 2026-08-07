@@ -174,12 +174,20 @@ class ContinuousSMCEngine:
                     and readiness.get("economic_validation_complete")
                     is True
                 ),
+                "rolling_oof_complete": bool(
+                    isinstance(readiness, Mapping)
+                    and readiness.get("rolling_oof_complete") is True
+                ),
+                "mbo_stability_validated": bool(
+                    isinstance(readiness, Mapping)
+                    and readiness.get("mbo_stability_validated") is True
+                ),
                 "live_execution_allowed": bool(
                     isinstance(readiness, Mapping)
                     and readiness.get("live_execution_allowed") is True
                 ),
-                "group5_natural_authority_validated": (
-                    group5_protocol.natural_authority_validated
+                "group5_dfp_lsr_input_authority_validated": (
+                    group5_protocol.dfp_lsr_input_authority_validated
                 ),
             }
             missing = tuple(

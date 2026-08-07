@@ -130,6 +130,60 @@
       ]
     }
   },
+  "authority_scan_profiles": {
+    "mature_range_development_junes": {
+      "purpose": "Outcome-blind Group4 range and all-scale manipulation coverage on the five registered development windows.",
+      "fixed_window_set": "mature_range_coverage",
+      "timezone": "America/New_York",
+      "warmup_calendar_days": 7,
+      "allowed_ohlcv_role": "development",
+      "allow_data_gap_reset": true,
+      "threshold_search": false,
+      "outcome_fields_used": false,
+      "pnl_used": false,
+      "mbo_used": false,
+      "include_all_pool_source_timeframes": true,
+      "pool_source_timeframes": ["4H", "1H", "15m", "5m", "1m"],
+      "model_config": "configs/model.json",
+      "protocols": {
+        "group12": "configs/primitives_structure_liquidity.json",
+        "displacement": "configs/primitives_displacement.json",
+        "group3": "configs/primitives_zones.json",
+        "group4": "configs/primitives_range.json",
+        "group5": "configs/primitives_entry.json"
+      }
+    },
+    "group4_natural_authority_2023_full_year": {
+      "purpose": "Registered outcome-blind 2023 Group4 natural-authority upper-bound scan; calibration-period prices may be used only for primitive lifecycle coverage.",
+      "timezone": "America/New_York",
+      "warmup_calendar_days": 7,
+      "allowed_ohlcv_role": "calibration",
+      "registered_calibration_exception": "outcome_blind_natural_authority_only",
+      "allow_data_gap_reset": true,
+      "threshold_search": false,
+      "outcome_fields_used": false,
+      "pnl_used": false,
+      "mbo_used": false,
+      "include_all_pool_source_timeframes": true,
+      "pool_source_timeframes": ["4H", "1H", "15m", "5m", "1m"],
+      "model_config": "configs/model.json",
+      "protocols": {
+        "group12": "configs/primitives_structure_liquidity.json",
+        "displacement": "configs/primitives_displacement.json",
+        "group3": "configs/primitives_zones.json",
+        "group4": "configs/primitives_range.json",
+        "group5": "configs/primitives_entry.json"
+      },
+      "permanent_result_path": "docs/evidence/group4_natural_authority_2023.json",
+      "windows": [
+        {
+          "id": "2023-full-year",
+          "start": "2023-01-01T00:00:00-05:00",
+          "end_exclusive": "2024-01-01T00:00:00-05:00"
+        }
+      ]
+    }
+  },
   "leakage_rules": [
     "Only completed bars at or before the decision clock may enter Observation, Scene Graph, Belief, Decision or Risk.",
     "MBO supplies execution reality only; it cannot define SMC primitives, market labels or future direction.",

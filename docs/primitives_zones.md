@@ -3,7 +3,7 @@
 The executable definition is `configs/primitives_zones.json`.
 
 Current protocol: `3.2.0-group3.4`. Status:
-`implementation_complete_real_replay_review_pending`.
+`implementation_complete_finite_real_replay_passed_ob_failure_coverage_sparse`.
 
 This contract freezes the causal meaning of the 5m fair value gap and order
 block. Both are descriptive location entities. Neither is an entry signal,
@@ -286,9 +286,11 @@ through their own causal gates; raw FVG remains descriptive geometry.
 ## Formalization gate
 
 Formalization, incremental implementation, static review and the unified
-synthetic/boundary/causal suite are complete for `3.2.0-group3.4`. A finite
-real OHLCV replay and small stratified outcome-blind review remain pending;
-there is no profitability claim.
+synthetic/boundary/causal suite are complete for `3.2.0-group3.4`. FVG natural
+lifecycle coverage passed the finite 2023 replay and stratified review. Order
+blocks also formed and mitigated naturally, but only one failed lifecycle was
+observed, so OB failure coverage remains sparse. There is no profitability or
+broad-regime claim.
 
 Any change to a gap inequality, source association, order-block search
 window, lifecycle transition, same-bar priority, boundary behavior or

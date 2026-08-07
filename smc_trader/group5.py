@@ -58,7 +58,8 @@ class Group5Protocol:
     protocol_version: str
     typed_state_available: bool
     brain_input_allowed: bool
-    natural_authority_validated: bool
+    dfp_lsr_input_authority_validated: bool
+    favr_natural_authority_validated: bool
     independent_action_authority: bool
     favr_enabled: bool
 
@@ -85,7 +86,8 @@ class Group5Protocol:
                 for value in (
                     self.typed_state_available,
                     self.brain_input_allowed,
-                    self.natural_authority_validated,
+                    self.dfp_lsr_input_authority_validated,
+                    self.favr_natural_authority_validated,
                     self.independent_action_authority,
                     self.favr_enabled,
                 )
@@ -95,7 +97,7 @@ class Group5Protocol:
             or self.independent_action_authority
             or (
                 self.favr_enabled
-                and not self.natural_authority_validated
+                and not self.favr_natural_authority_validated
             )
             or isinstance(self.tick_size, bool)
             or not isinstance(self.tick_size, (int, float))
@@ -147,8 +149,11 @@ class Group5Protocol:
                 "typed_state_available"
             ],
             brain_input_allowed=authority["brain_input_allowed"],
-            natural_authority_validated=authority[
-                "natural_authority_validated"
+            dfp_lsr_input_authority_validated=authority[
+                "dfp_lsr_input_authority_validated"
+            ],
+            favr_natural_authority_validated=authority[
+                "favr_natural_authority_validated"
             ],
             independent_action_authority=authority[
                 "independent_action_authority"

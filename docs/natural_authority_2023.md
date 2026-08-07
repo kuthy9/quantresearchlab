@@ -99,10 +99,11 @@ rejection without private node or edge insertion.
 
 The Engine factory now requires an explicit `development` or `live` runtime
 mode. Live construction is centralized and fail-closed on model natural
-authority, economic validation, live permission, and Group 5 natural authority;
-direct live construction cannot bypass the factory check. The current model
-keeps every release-readiness flag false, so development DFP/LSR evaluation can
-continue while real execution remains blocked.
+authority, economic validation, rolling OOF, MBO stability, live permission,
+and DFP/LSR Group5 input authority; direct live construction cannot bypass the
+factory check. DFP/LSR input authority is now enabled, while FAVR authority is
+separately false. The model-level release-readiness flags remain false, so
+development evaluation can continue while real execution remains blocked.
 
 No protocol threshold or playbook rule was changed by this review. The only
 post-replay corrections were the local-calendar warmup calculation and the

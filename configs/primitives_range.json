@@ -1,11 +1,17 @@
 {
   "protocol_version": "3.2.0-group4.1",
-  "status": "implementation_complete_natural_market_authority_pending",
+  "status": "implementation_complete_limited_natural_observation_passed_mature_range_coverage_sparse",
+  "authority_review": {
+    "implementation_complete": true,
+    "limited_natural_observation_passed": true,
+    "mature_range_coverage": "sparse",
+    "favr_authority_validated": false
+  },
   "role": "causal_descriptive_development_contract",
   "tick_size": 0.25,
   "upstream": {
     "group12_protocol_version": "3.2.0-group12.7",
-    "group12_protocol_sha256": "ab3d2cde247f222900fb74c1b61f88c51b87b5056c15b51f003878042e18c457",
+    "group12_protocol_sha256": "5a8913907b92b22c5ea67df7056b5464518329adcce883435aadf9008dc7e0e0",
     "required_typed_sources": [
       "H1 SupportResistanceState",
       "LiquidityPoolState formation and lifecycle",
@@ -438,21 +444,23 @@
     "future_reveal": "future candles remain physically separate and cannot change any Group4 identity, clock, geometry or lifecycle"
   },
   "playbook_authority": {
-    "failed_auction_value_return": "implemented but runtime parked pending natural mature-range authority",
-    "no_trade_authority": "Group4 emits typed descriptive range, manipulation and range-boundary inventory state but never selects an action, stop, target, risk result or execution outcome. Typed playbooks may consume its frozen identities and lifecycles through their own causal gates; FAVR remains runtime parked pending natural mature-range authority",
-    "later_requirement": "FAVR may be reconsidered only after natural mature-range authority is established. Group4 owns range-boundary sweep and multi-bar reacceptance; after that event, Group5 may supply an entry location and ordered first-pullback/trigger path for the reverse-displacement FVG or order block"
+    "failed_auction_value_return": "implemented but runtime parked because mature-range coverage is sparse and no complete identity-bound natural FAVR chain was observed",
+    "no_trade_authority": "Group4 emits typed descriptive range, manipulation and range-boundary inventory state but never selects an action, stop, target, risk result or execution outcome. Typed playbooks may consume its frozen identities and lifecycles through their own causal gates; FAVR remains runtime parked",
+    "later_requirement": "FAVR may be reconsidered only after an identity-bound natural mature-range, manipulation, opposite displacement, qualified zone, first-pullback and trigger chain is observed. Group4 remains the sole owner of range-boundary sweep and multi-bar reacceptance"
   },
   "formalization_gate": {
     "completed_scope": [
       "formal definition",
       "implementation",
       "static self-review",
-      "unified synthetic and boundary tests"
-    ],
-    "pending": [
+      "unified synthetic and boundary tests",
       "finite real OHLCV replay",
       "stratified blind review",
-      "primitive freeze or park"
+      "limited natural mature-range observation"
+    ],
+    "pending": [
+      "broader mature-range stability",
+      "FAVR natural authority; remains parked"
     ],
     "repair_limit": "after implementation, at most one concept-level repair; a second systematic semantic failure parks Group4 or the affected primitive instead of tuning thresholds",
     "not_required": [

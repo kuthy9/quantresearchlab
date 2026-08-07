@@ -1,15 +1,15 @@
 {
   "protocol_version": "3.2.0-group5.3",
-  "status": "implementation_complete_natural_authority_pending",
+  "status": "implementation_complete_finite_real_replay_passed_dfp_lsr_input_authority_enabled_favr_parked",
   "role": "causal_descriptive_development_contract",
   "tick_size": 0.25,
   "upstream": {
     "group12_protocol_version": "3.2.0-group12.7",
-    "group12_protocol_sha256": "ab3d2cde247f222900fb74c1b61f88c51b87b5056c15b51f003878042e18c457",
+    "group12_protocol_sha256": "5a8913907b92b22c5ea67df7056b5464518329adcce883435aadf9008dc7e0e0",
     "group3_protocol_version": "3.2.0-group3.4",
-    "group3_protocol_sha256": "1fb83f45c2b00a1c35c2644776e97669dfa614ef9ac9daf688b03523f4e19f64",
+    "group3_protocol_sha256": "0163d8fc3d41bcd6037bfab05b59e4a44b6558f01d1c73eb95955ea1e0bf8899",
     "group4_protocol_version": "3.2.0-group4.1",
-    "group4_protocol_sha256": "af04fc78133d43c4a643e26898b026ece9f0aafc5c51da4719437d9cb06d1d5b",
+    "group4_protocol_sha256": "9c5334e52bacd19a896cb326e02c77a3be4f932e9b09579929fdce7d9ccdbdf4",
     "required_typed_sources": [
       "5m FairValueGapState",
       "5m OrderBlockState",
@@ -453,7 +453,8 @@
   "authority": {
     "typed_state_available": true,
     "brain_input_allowed": true,
-    "natural_authority_validated": false,
+    "dfp_lsr_input_authority_validated": true,
+    "favr_natural_authority_validated": false,
     "independent_action_authority": false,
     "favr_enabled": false
   },
