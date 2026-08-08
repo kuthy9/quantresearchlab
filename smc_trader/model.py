@@ -184,6 +184,24 @@ class OrderBlockLifecycle(str, Enum):
     FAILED = "failed"
 
 
+class OrderBlockAttemptOutcome(str, Enum):
+    """Mutually exclusive result of one completed-5m OB eligibility pass."""
+
+    NO_ACTIVE_DISPLACEMENT = "no_active_displacement"
+    NO_COMPATIBLE_BOS = "no_compatible_bos"
+    BREAK_BAR_NOT_IN_DISPLACEMENT = (
+        "break_bar_not_in_displacement"
+    )
+    DUPLICATE_ELIGIBLE_BOS = "duplicate_eligible_bos"
+    REVERSE_ANCHOR_CLUSTER_MISSING = (
+        "reverse_anchor_cluster_missing"
+    )
+    ACTIVE_TRANSITION_MISSING = "active_transition_missing"
+    INVALID_ANCHOR_WIDTH = "invalid_anchor_width"
+    DUPLICATE_ORDER_BLOCK = "duplicate_order_block"
+    CREATED = "created"
+
+
 class DealingRangeLifecycle(str, Enum):
     FORMING = "forming"
     MATURE = "mature"
@@ -194,6 +212,31 @@ class ManipulationLifecycle(str, Enum):
     SWEPT = "swept"
     REACCEPTED = "reaccepted"
     ACCEPTED_OUTSIDE = "accepted_outside"
+
+
+class ManipulationSourceDispositionKind(str, Enum):
+    """One mutually-exclusive result for a raw crossed Group 4 source."""
+
+    REJECTED_PRIOR_CLOSE = "rejected_prior_close"
+    REJECTED_SOURCE_MISSING_OR_STALE = (
+        "rejected_source_missing_or_stale"
+    )
+    REJECTED_RANGE_INVALIDATED_SAME_CLOCK = (
+        "rejected_range_invalidated_same_clock"
+    )
+    AMBIGUOUS_DUAL_SIDE = "ambiguous_dual_side"
+    ATR_UNREADY = "atr_unready"
+    BLOCKED_EXISTING_LIVE = "blocked_existing_live"
+    BLOCKED_LIVE_RESOLVED_SAME_BAR = (
+        "blocked_live_resolved_same_bar"
+    )
+    SELECTED_PRIMARY = "selected_primary"
+    ATTACHED_COINCIDENT_SECONDARY = (
+        "attached_coincident_secondary"
+    )
+    ATTACHED_SAME_SIDE_SECONDARY = (
+        "attached_same_side_secondary"
+    )
 
 
 class EntryLocationLifecycle(str, Enum):
@@ -1523,6 +1566,149 @@ class LiquidityPoolState:
         return int(self.total_touch_count)
 
 
+RANGE_PAIR_FUNNEL_COUNTS = (
+    "live_structural_pairs",
+    "invalid_geometry_pairs",
+    "geometry_valid_pairs",
+    "close_outside_pair_pairs",
+    "already_admitted_pairs",
+    "cold_start_blocked_pairs",
+    "same_bar_terminal_blocked_pairs",
+    "live_range_blocked_pairs",
+    "atr_unready_pairs",
+    "eligible_pairs",
+    "forming_selected",
+)
+
+RANGE_MATURITY_GATE_NAMES = (
+    "duration",
+    "bilateral_touches",
+    "midpoint_crossing",
+    "inside_close_fraction",
+    "width",
+    "compression",
+)
+
+
+@dataclass(frozen=True)
+class RangeFormationFunnelSnapshot:
+    """One completed-H1 range-selection and maturity-gate diagnostic."""
+
+    observed_at: pd.Timestamp
+    pair_counts: tuple[tuple[str, int], ...]
+    selected_source_pair_ids: tuple[str, str] | None = None
+    selected_range_id: str | None = None
+    maturity_range_id: str | None = None
+    maturity_gates: tuple[
+        tuple[str, float, float, float],
+        ...,
+    ] = ()
+    unmet_maturity_gates: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "observed_at",
+            aware_timestamp(
+                self.observed_at,
+                name="range_formation_funnel.observed_at",
+            ),
+        )
+        counts = tuple(self.pair_counts)
+        gates = tuple(self.maturity_gates)
+        unmet = tuple(self.unmet_maturity_gates)
+        object.__setattr__(self, "pair_counts", counts)
+        object.__setattr__(self, "maturity_gates", gates)
+        object.__setattr__(self, "unmet_maturity_gates", unmet)
+        if (
+            tuple(name for name, _ in counts)
+            != RANGE_PAIR_FUNNEL_COUNTS
+            or any(type(value) is not int or value < 0 for _, value in counts)
+        ):
+            raise ValueError("range pair funnel counts are invalid")
+        values = dict(counts)
+        if (
+            values["live_structural_pairs"]
+            != values["invalid_geometry_pairs"]
+            + values["geometry_valid_pairs"]
+            or values["geometry_valid_pairs"]
+            != sum(
+                values[name]
+                for name in (
+                    "close_outside_pair_pairs",
+                    "already_admitted_pairs",
+                    "cold_start_blocked_pairs",
+                    "same_bar_terminal_blocked_pairs",
+                    "live_range_blocked_pairs",
+                    "atr_unready_pairs",
+                    "eligible_pairs",
+                )
+            )
+            or values["forming_selected"] not in {0, 1}
+            or values["forming_selected"] > values["eligible_pairs"]
+        ):
+            raise ValueError("range pair funnel is not conserved")
+        selected = self.selected_source_pair_ids
+        if selected is not None:
+            selected = tuple(selected)
+            object.__setattr__(self, "selected_source_pair_ids", selected)
+        if (
+            (selected is None) != (self.selected_range_id is None)
+            or (selected is not None)
+            != (values["forming_selected"] == 1)
+            or (
+                selected is not None
+                and (
+                    len(selected) != 2
+                    or len(set(selected)) != 2
+                    or any(
+                        not isinstance(value, str) or not value
+                        for value in selected
+                    )
+                    or not self.selected_range_id
+                )
+            )
+        ):
+            raise ValueError("selected forming range identity is invalid")
+        if self.maturity_range_id is None:
+            if gates or unmet:
+                raise ValueError(
+                    "unevaluated maturity gates cannot carry results"
+                )
+            return
+        if (
+            not self.maturity_range_id
+            or tuple(row[0] for row in gates)
+            != RANGE_MATURITY_GATE_NAMES
+            or any(
+                len(row) != 4
+                or any(
+                    not math.isfinite(float(value))
+                    for value in row[1:]
+                )
+                for row in gates
+            )
+            or any(
+                threshold <= 0.0
+                or not math.isclose(
+                    margin,
+                    (
+                        threshold - actual
+                        if name in {"width", "compression"}
+                        else actual - threshold
+                    )
+                    / threshold,
+                    rel_tol=1e-12,
+                    abs_tol=1e-12,
+                )
+                for name, actual, threshold, margin in gates
+            )
+            or unmet
+            != tuple(row[0] for row in gates if float(row[3]) < 0.0)
+        ):
+            raise ValueError("range maturity gate diagnostic is invalid")
+
+
 @dataclass(frozen=True)
 class DealingRangeState:
     """One H1 accumulation candidate and its frozen mature range."""
@@ -1867,6 +2053,36 @@ class DealingRangeState:
             or not self.transition_reason
         ):
             raise ValueError("broken dealing-range lifecycle is inconsistent")
+
+
+@dataclass(frozen=True)
+class ManipulationSourceDisposition:
+    """Per-crossing accounting emitted only for the current Group 4 update."""
+
+    source_inventory_item_id: str
+    observed_at: pd.Timestamp
+    disposition: ManipulationSourceDispositionKind
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.source_inventory_item_id, str)
+            or not self.source_inventory_item_id
+            or not isinstance(
+                self.disposition,
+                ManipulationSourceDispositionKind,
+            )
+        ):
+            raise ValueError(
+                "manipulation source disposition is invalid"
+            )
+        object.__setattr__(
+            self,
+            "observed_at",
+            aware_timestamp(
+                self.observed_at,
+                name="manipulation_source_disposition.observed_at",
+            ),
+        )
 
 
 @dataclass(frozen=True)
@@ -2233,6 +2449,73 @@ class ManipulationState:
         ):
             raise ValueError(
                 "accepted-outside manipulation lifecycle is inconsistent"
+            )
+
+
+ORDER_BLOCK_FUNNEL_STAGES = (
+    "active_displacement",
+    "compatible_bos",
+    "break_bar_belongs_to_displacement",
+    "reverse_anchor_cluster_found",
+    "unique_eligible_bos",
+    "ob_created",
+)
+
+
+@dataclass(frozen=True)
+class OrderBlockFunnelSnapshot:
+    """Lightweight producer-side diagnostics for one real completed 5m bar."""
+
+    observed_at: pd.Timestamp
+    stages: tuple[tuple[str, int], ...]
+    outcome: OrderBlockAttemptOutcome
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "observed_at",
+            aware_timestamp(
+                self.observed_at,
+                name="order_block_funnel.observed_at",
+            ),
+        )
+        stages = tuple(self.stages)
+        object.__setattr__(self, "stages", stages)
+        if (
+            tuple(name for name, _ in stages)
+            != ORDER_BLOCK_FUNNEL_STAGES
+            or any(
+                not isinstance(name, str)
+                or type(count) is not int
+                or count < 0
+                for name, count in stages
+            )
+            or not isinstance(self.outcome, OrderBlockAttemptOutcome)
+        ):
+            raise ValueError("order-block funnel snapshot is invalid")
+        counts = dict(stages)
+        if (
+            counts["active_displacement"] not in {0, 1}
+            or counts["break_bar_belongs_to_displacement"]
+            > counts["compatible_bos"]
+            or counts["reverse_anchor_cluster_found"]
+            > int(
+                counts["break_bar_belongs_to_displacement"] > 0
+            )
+            or counts["unique_eligible_bos"]
+            != int(
+                counts["break_bar_belongs_to_displacement"] == 1
+                and counts["reverse_anchor_cluster_found"] == 1
+            )
+            or counts["ob_created"]
+            > counts["unique_eligible_bos"]
+            or (
+                self.outcome is OrderBlockAttemptOutcome.CREATED
+            )
+            != (counts["ob_created"] == 1)
+        ):
+            raise ValueError(
+                "order-block funnel stages or outcome are inconsistent"
             )
 
 
@@ -3749,6 +4032,10 @@ class LiquidityRoute:
     terminal_draw_id: str | None
     path_blocker_ids: tuple[str, ...] = ()
     source_path_ids: tuple[str, ...] = ()
+    range_context_id: str | None = None
+    range_midpoint: float | None = None
+    swept_range_boundary_id: str | None = None
+    opposing_range_boundary_id: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -3774,6 +4061,41 @@ class LiquidityRoute:
             )
         ):
             raise ValueError("liquidity-route identity is invalid")
+        range_identity = (
+            self.range_context_id,
+            self.swept_range_boundary_id,
+        )
+        if any(value is not None for value in range_identity) != all(
+            value is not None for value in range_identity
+        ):
+            raise ValueError(
+                "liquidity-route range context is only partially identified"
+            )
+        if self.range_context_id is None:
+            if (
+                self.range_midpoint is not None
+                or self.opposing_range_boundary_id is not None
+            ):
+                raise ValueError(
+                    "liquidity-route range metadata lacks a range context"
+                )
+        elif (
+            any(
+                not isinstance(value, str) or not value
+                for value in range_identity
+            )
+            or self.range_midpoint is None
+            or not math.isfinite(float(self.range_midpoint))
+            or self.range_midpoint <= 0.0
+            or (
+                self.opposing_range_boundary_id is not None
+                and (
+                    not isinstance(self.opposing_range_boundary_id, str)
+                    or not self.opposing_range_boundary_id
+                )
+            )
+        ):
+            raise ValueError("liquidity-route range context is invalid")
 
 
 @dataclass(frozen=True)
@@ -4384,6 +4706,10 @@ class MarketObservation:
         OrderBlockState,
         ...,
     ] = ()
+    group3_order_block_funnel: tuple[
+        OrderBlockFunnelSnapshot,
+        ...,
+    ] = ()
     manipulations: tuple[ManipulationState, ...] = ()
     group4_boundary_range_transitions: tuple[
         DealingRangeState,
@@ -4395,6 +4721,14 @@ class MarketObservation:
     ] = ()
     group4_ambiguous_sweep_item_ids: tuple[str, ...] = ()
     group4_atr_unready_sweep_item_ids: tuple[str, ...] = ()
+    group4_source_dispositions: tuple[
+        ManipulationSourceDisposition,
+        ...,
+    ] = ()
+    group4_range_funnel: tuple[
+        RangeFormationFunnelSnapshot,
+        ...,
+    ] = ()
     group5_typed_available: bool = False
     entry_locations: tuple[EntryLocationState, ...] = ()
     qualified_reacceptances: tuple[
@@ -4446,6 +4780,11 @@ class MarketObservation:
         )
         object.__setattr__(
             self,
+            "group3_order_block_funnel",
+            tuple(self.group3_order_block_funnel),
+        )
+        object.__setattr__(
+            self,
             "manipulations",
             tuple(self.manipulations),
         )
@@ -4468,6 +4807,16 @@ class MarketObservation:
             self,
             "group4_atr_unready_sweep_item_ids",
             tuple(self.group4_atr_unready_sweep_item_ids),
+        )
+        object.__setattr__(
+            self,
+            "group4_source_dispositions",
+            tuple(self.group4_source_dispositions),
+        )
+        object.__setattr__(
+            self,
+            "group4_range_funnel",
+            tuple(self.group4_range_funnel),
         )
         object.__setattr__(
             self,
@@ -4567,6 +4916,23 @@ class MarketObservation:
                 )
         if any(event.observed_at > self.asof for event in self.recent_events):
             raise ValueError("observation contains a future market event")
+        if (
+            any(
+                not isinstance(item, OrderBlockFunnelSnapshot)
+                or item.observed_at > self.asof
+                for item in self.group3_order_block_funnel
+            )
+            or len(
+                {
+                    item.observed_at
+                    for item in self.group3_order_block_funnel
+                }
+            )
+            != len(self.group3_order_block_funnel)
+        ):
+            raise ValueError(
+                "observation contains an invalid Group 3 OB funnel"
+            )
         boundary_anomaly_by_reason = {
             "data_gap_reset": "data_gap_history_reset",
             "contract_change_reset": "contract_change_history_reset",
@@ -4767,6 +5133,53 @@ class MarketObservation:
             raise ValueError(
                 "observation contains duplicate liquidity inventory ids"
             )
+        if any(
+            not isinstance(item, ManipulationSourceDisposition)
+            for item in self.group4_source_dispositions
+        ):
+            raise TypeError(
+                "observation Group 4 source disposition is not typed"
+            )
+        if (
+            any(
+                not isinstance(item, RangeFormationFunnelSnapshot)
+                or item.observed_at > self.asof
+                for item in self.group4_range_funnel
+            )
+            or len(
+                {item.observed_at for item in self.group4_range_funnel}
+            )
+            != len(self.group4_range_funnel)
+        ):
+            raise ValueError(
+                "observation Group 4 range funnel is invalid"
+            )
+        disposition_ids = tuple(
+            item.source_inventory_item_id
+            for item in self.group4_source_dispositions
+        )
+        if (
+            any(
+                item.observed_at > self.asof
+                for item in self.group4_source_dispositions
+            )
+            or len(disposition_ids) != len(set(disposition_ids))
+        ):
+            raise ValueError(
+                "observation Group 4 source dispositions are invalid"
+            )
+        disposition_ambiguous_ids = {
+            item.source_inventory_item_id
+            for item in self.group4_source_dispositions
+            if item.disposition
+            is ManipulationSourceDispositionKind.AMBIGUOUS_DUAL_SIDE
+        }
+        disposition_atr_unready_ids = {
+            item.source_inventory_item_id
+            for item in self.group4_source_dispositions
+            if item.disposition
+            is ManipulationSourceDispositionKind.ATR_UNREADY
+        }
         if (
             len(self.group4_ambiguous_sweep_item_ids)
             != len(set(self.group4_ambiguous_sweep_item_ids))
@@ -4779,6 +5192,15 @@ class MarketObservation:
                 for value in (
                     *self.group4_ambiguous_sweep_item_ids,
                     *self.group4_atr_unready_sweep_item_ids,
+                )
+            )
+            or (
+                self.group4_source_dispositions
+                and (
+                    disposition_ambiguous_ids
+                    != set(self.group4_ambiguous_sweep_item_ids)
+                    or disposition_atr_unready_ids
+                    != set(self.group4_atr_unready_sweep_item_ids)
                 )
             )
         ):

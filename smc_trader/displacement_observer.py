@@ -63,6 +63,38 @@ _CURRENT_METRIC_FIELDS = (
     "body_continuity", "activation_gate_count",
     "activation_weakest_ratio",
 )
+_ACTIVATION_COMPONENT_RATIO_FIELDS = (
+    (
+        "activation_episode_bar_count_ratio",
+        "real_episode_bar_count",
+        "activation_min_bar",
+    ),
+    (
+        "activation_relative_atr_ratio",
+        "relative_atr",
+        "activation_relative_atr",
+    ),
+    (
+        "activation_efficiency_ratio",
+        "efficiency",
+        "activation_efficiency",
+    ),
+    (
+        "activation_speed_ratio",
+        "speed_atr_per_bar",
+        "activation_speed",
+    ),
+    (
+        "activation_mean_body_fraction_ratio",
+        "mean_body_fraction",
+        "activation_mean_body_fraction",
+    ),
+    (
+        "activation_body_continuity_ratio",
+        "body_continuity",
+        "activation_body_continuity",
+    ),
+)
 
 
 def _boundary_reason(anomalies: tuple[str, ...]) -> str | None:
@@ -92,6 +124,7 @@ def _transition_observation(
     transition: DisplacementTransition,
     asof: pd.Timestamp,
     ordinal: int,
+    protocol: DisplacementProtocol,
 ) -> DisplacementTransitionObservation:
     _validate_state_clocks(transition.state, asof)
     state = transition.state
@@ -110,18 +143,29 @@ def _transition_observation(
         prefix_last_admitted_at=state.prefix_last_admitted_at,
         terminal_evidence_candle_id=state.terminal_evidence_candle_id,
         admitted_candle_ids=state.admitted_candle_ids,
-        state_metrics=_current_metrics(state),
+        state_metrics=_current_metrics(state, protocol),
     )
 
 
 def _current_metrics(
     state: DisplacementState,
+    protocol: DisplacementProtocol,
 ) -> tuple[tuple[str, float], ...]:
-    return tuple(
+    state_metrics = tuple(
         (name, float(getattr(state, name)))
         for name in _CURRENT_METRIC_FIELDS
         if getattr(state, name) is not None
     )
+    activation_ratios = tuple(
+        (
+            output_name,
+            float(getattr(state, state_name))
+            / float(getattr(protocol, threshold_name)),
+        )
+        for output_name, state_name, threshold_name
+        in _ACTIVATION_COMPONENT_RATIO_FIELDS
+    )
+    return (*state_metrics, *activation_ratios)
 
 
 class CausalDisplacementEye:
@@ -201,7 +245,12 @@ class CausalDisplacementEye:
                 transitions.extend(result.transitions)
 
         projected = tuple(
-            _transition_observation(transition, asof, ordinal)
+            _transition_observation(
+                transition,
+                asof,
+                ordinal,
+                self._tracker.protocol,
+            )
             for ordinal, transition in enumerate(transitions)
         )
         recent = (tuple(self._transitions) + projected)[-64:]
@@ -228,7 +277,11 @@ class CausalDisplacementEye:
             current_last_admitted_at=(
                 None if state is None else state.prefix_last_admitted_at
             ),
-            current_metrics=None if state is None else _current_metrics(state),
+            current_metrics=(
+                None
+                if state is None
+                else _current_metrics(state, self._tracker.protocol)
+            ),
             latest_transition=recent[-1] if recent else None,
             recent_transitions=recent,
             transitions_this_update=projected,

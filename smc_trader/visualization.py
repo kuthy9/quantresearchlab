@@ -38,6 +38,13 @@ class VisualArtifact:
     entry_path_id: str | None
 
 
+@dataclass(frozen=True)
+class _ObservationSnapshot:
+    """Adapter for reusing causal overlays without constructing the Brain."""
+
+    observation: Any
+
+
 def _candles(axis, candles: Sequence[Candle]) -> None:
     from matplotlib.patches import Rectangle
 
@@ -299,7 +306,16 @@ def _selected_group5_entities(
     belief: Any,
 ) -> tuple[tuple[Any, ...], tuple[Any, ...], tuple[Any, ...], tuple[Any, ...]]:
     if belief is None:
-        return (), (), (), ()
+        # Eye-only audits have no Brain hypothesis to select a setup.  The
+        # renderer must still show the typed states actually emitted by the
+        # Observer; this changes presentation only and grants no action
+        # authority to Group 5.
+        return (
+            tuple(snapshot.observation.entry_locations),
+            tuple(snapshot.observation.path_sequences),
+            tuple(snapshot.observation.qualified_reacceptances),
+            tuple(snapshot.observation.micro_bos_references),
+        )
     plan = belief.plan
     location_ids = {
         value
@@ -1183,8 +1199,6 @@ def _group5_overlay(
     locations, paths, reacceptances, references = (
         _selected_group5_entities(snapshot, belief)
     )
-    if belief is None:
-        return
     visible_low, visible_high = axis.get_ylim()
     visible_locations = locations[-2:]
     for offset, item in enumerate(visible_locations):
@@ -2181,20 +2195,30 @@ def _liquidity_route_text(route: Any) -> str:
     def identities(values: Sequence[Any]) -> str:
         return ", ".join(str(value) for value in values) or "none"
 
-    return "\n".join(
-        (
-            f"FROZEN LIQUIDITY ROUTE {route.route_id}",
-            f"  selected {route.selected_at:%Y-%m-%d %H:%M %Z}",
-            f"  context draw {identity(route.context_draw_id)}",
-            "  intermediate liquidity "
-            f"{identities(route.intermediate_liquidity_ids)}",
-            "  primary deliverable "
-            f"{identity(route.primary_deliverable_target_id)}",
-            f"  terminal draw {identity(route.terminal_draw_id)}",
-            f"  path blockers {identities(route.path_blocker_ids)}",
-            f"  source paths {identities(route.source_path_ids)}",
+    rows = [
+        f"FROZEN LIQUIDITY ROUTE {route.route_id}",
+        f"  selected {route.selected_at:%Y-%m-%d %H:%M %Z}",
+        f"  context draw {identity(route.context_draw_id)}",
+        "  intermediate liquidity "
+        f"{identities(route.intermediate_liquidity_ids)}",
+        "  primary deliverable "
+        f"{identity(route.primary_deliverable_target_id)}",
+        f"  terminal draw {identity(route.terminal_draw_id)}",
+        f"  path blockers {identities(route.path_blocker_ids)}",
+        f"  source paths {identities(route.source_path_ids)}",
+    ]
+    if getattr(route, "range_context_id", None) is not None:
+        rows.extend(
+            (
+                f"  optional range context {route.range_context_id}",
+                f"  range midpoint/value {route.range_midpoint:.2f}",
+                "  swept range boundary "
+                f"{identity(route.swept_range_boundary_id)}",
+                "  opposing range liquidity "
+                f"{identity(route.opposing_range_boundary_id)}",
+            )
         )
-    )
+    return "\n".join(rows)
 
 
 def _partial_geometry_text(snapshot: EngineSnapshot, belief: Any) -> str:
@@ -2525,6 +2549,233 @@ class DecisionVisualizer:
         Timeframe.M5: 36,
         Timeframe.M1: 60,
     }
+
+    def render_observation(
+        self,
+        observation: Any,
+        histories: Mapping[Timeframe, Sequence[Candle]],
+        destination: str | Path,
+        *,
+        case_id: str | None = None,
+        scene_graph: Any = None,
+    ) -> VisualArtifact:
+        """Render one completed-data Eye audit without Brain or actions.
+
+        This entry is deliberately limited to sampled authority cases.  It
+        displays the same typed price overlays as the decision view, while
+        omitting every belief, utility, risk and execution interpretation.
+        """
+
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+
+        snapshot = _ObservationSnapshot(observation=observation)
+        asof = observation.asof
+        validated = validate_causal_histories(snapshot, histories)
+        active = active_causal_timeframes(observation)
+        unsupported = tuple(
+            timeframe
+            for timeframe in active
+            if timeframe not in self.PANEL_BARS
+        )
+        if unsupported:
+            raise ValueError(
+                "eye visualizer has no panel for an enabled timeframe"
+            )
+        panels = {
+            timeframe: validated[timeframe][
+                -self.PANEL_BARS[timeframe] :
+            ]
+            for timeframe in active
+        }
+        figure = plt.figure(
+            figsize=(19, max(16, len(active) * 4)),
+            dpi=110,
+            constrained_layout=True,
+        )
+        grid = figure.add_gridspec(
+            len(active),
+            2,
+            width_ratios=(3.4, 1.6),
+        )
+        axes = [
+            figure.add_subplot(grid[index, 0])
+            for index in range(len(active))
+        ]
+        info = figure.add_subplot(grid[:, 1])
+
+        for axis, timeframe in zip(axes, active):
+            values = panels[timeframe]
+            _candles(axis, values)
+            axis._smc_annotation_boxes = [(0.0, 0.69, 0.34, 0.99)]
+            axis._smc_annotation_budget = 8
+            axis._smc_annotation_count = 0
+            axis._smc_annotation_omitted = 0
+            _typed_structure_overlay(axis, snapshot, timeframe, values)
+            _liquidity_inventory_overlay(
+                axis,
+                snapshot,
+                timeframe,
+                values,
+            )
+            if timeframe is Timeframe.M5:
+                _group3_zone_overlay(axis, snapshot, values)
+                _displacement_overlay(axis, snapshot, values)
+            elif timeframe is Timeframe.H1:
+                _group4_range_overlay(axis, snapshot, values)
+            elif timeframe is Timeframe.M1:
+                _group4_manipulation_overlay(axis, snapshot, values)
+                _group5_overlay(axis, snapshot, values, None)
+            _event_markers(axis, snapshot, timeframe, values)
+            if values:
+                current_price = float(values[-1].close)
+                visible_low, visible_high = axis.get_ylim()
+                if visible_low <= current_price <= visible_high:
+                    axis.axhline(
+                        current_price,
+                        color="#111827",
+                        linewidth=0.65,
+                        linestyle="--",
+                        alpha=0.75,
+                    )
+                    _collision_safe_annotate(
+                        axis,
+                        f"NOW {current_price:.2f}",
+                        len(values) - 1,
+                        current_price,
+                        color="#111827",
+                        fontsize=5.4,
+                        preferred_side="left",
+                        priority=True,
+                    )
+            omitted = int(
+                getattr(axis, "_smc_annotation_omitted", 0)
+            )
+            if omitted:
+                axis.text(
+                    0.995,
+                    0.015,
+                    f"+{omitted} labels omitted; identities remain recorded",
+                    ha="right",
+                    va="bottom",
+                    fontsize=5.0,
+                    color="#475569",
+                    transform=axis.transAxes,
+                    bbox={
+                        "facecolor": "white",
+                        "edgecolor": "#cbd5e1",
+                        "alpha": 0.85,
+                    },
+                    zorder=10,
+                )
+            axis.axvline(
+                len(values) - 0.5,
+                color="#111827",
+                linewidth=1.0,
+            )
+            axis.text(
+                0.005,
+                0.98,
+                _metric_text(snapshot, timeframe, None),
+                ha="left",
+                va="top",
+                fontsize=6,
+                family="monospace",
+                transform=axis.transAxes,
+                bbox={
+                    "facecolor": "white",
+                    "edgecolor": "#cbd5e1",
+                    "alpha": 0.82,
+                },
+            )
+            axis.set_title(
+                f"{timeframe.value} · completed through "
+                f"{values[-1].end:%Y-%m-%d %H:%M %Z}",
+                loc="left",
+                fontsize=9,
+            )
+
+        graph_nodes = (
+            "not projected"
+            if scene_graph is None
+            else str(len(scene_graph.nodes))
+        )
+        graph_edges = (
+            "not projected"
+            if scene_graph is None
+            else str(len(scene_graph.edges))
+        )
+        body = _wrap_panel_text(
+            (
+                f"EYE CLOCK\n{asof:%Y-%m-%d %H:%M %Z}\n\n"
+                f"CASE\n{case_id or 'sampled-eye-audit'}\n\n"
+                "AUTHORITY\n"
+                "Observer only; no Brain, action, Risk, execution, PnL "
+                "or future path.\n\n"
+                f"SCENE GRAPH\nrevision "
+                f"{observation.scene_revision_id or 'none'}\n"
+                f"nodes {graph_nodes}; edges {graph_edges}\n\n"
+                f"EVENT MEMORY\n{_event_timeline(snapshot)}\n\n"
+                f"5M FVG / ORDER BLOCK\n{_group3_text(snapshot)}\n\n"
+                f"H1 RANGE / 1M MANIPULATION\n"
+                f"{_group4_text(snapshot)}\n\n"
+                f"EXACT ENTRY / 1M PATH\n"
+                f"{_group5_text(snapshot, None)}\n\n"
+                "ANOMALIES\n"
+                + (", ".join(observation.anomalies) or "none")
+            ),
+            width=60,
+        )
+        info.axis("off")
+        info.set_xlim(0.0, 1.0)
+        info.set_ylim(0.0, 1.0)
+        info.text(
+            0.0,
+            1.0,
+            body,
+            ha="left",
+            va="top",
+            family="monospace",
+            fontsize=6.5,
+            wrap=True,
+            transform=info.transAxes,
+            clip_on=True,
+        )
+        figure.suptitle(
+            "CAUSAL MARKET EYE VIEW — COMPLETED DATA ONLY",
+            fontsize=13,
+            weight="bold",
+        )
+        destination = Path(destination)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        figure.savefig(destination, bbox_inches="tight")
+        plt.close(figure)
+        maximum = max(
+            candle.end
+            for values in panels.values()
+            for candle in values
+        )
+        if maximum > asof:
+            raise AssertionError(
+                "saved Eye artifact contains a future candle"
+            )
+        return VisualArtifact(
+            path=destination,
+            kind="eye_observation",
+            decision_id=(
+                case_id
+                or f"{observation.symbol}:"
+                f"{observation.instrument_id}:"
+                f"{observation.asof.isoformat()}"
+            ),
+            maximum_market_time=maximum,
+            hypothesis_key=None,
+            setup_id=None,
+            entry_location_id=None,
+            entry_path_id=None,
+        )
 
     def render_decision(
         self,

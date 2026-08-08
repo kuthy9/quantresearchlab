@@ -22,7 +22,12 @@ from .model import (
     LiquidityInventoryLifecycle,
     LiquidityPoolState,
     ManipulationLifecycle,
+    ManipulationSourceDisposition,
+    ManipulationSourceDispositionKind,
     ManipulationState,
+    RANGE_MATURITY_GATE_NAMES,
+    RANGE_PAIR_FUNNEL_COUNTS,
+    RangeFormationFunnelSnapshot,
     SupportResistanceLifecycle,
     SupportResistanceState,
     Timeframe,
@@ -162,6 +167,8 @@ class Group4Update:
     manipulation_transitions: tuple[ManipulationState, ...] = ()
     ambiguous_sweep_item_ids: tuple[str, ...] = ()
     atr_unready_sweep_item_ids: tuple[str, ...] = ()
+    source_dispositions: tuple[ManipulationSourceDisposition, ...] = ()
+    range_funnel: tuple[RangeFormationFunnelSnapshot, ...] = ()
     boundary_reason: str | None = None
 
     def __post_init__(self) -> None:
@@ -173,6 +180,8 @@ class Group4Update:
             "manipulation_transitions",
             "ambiguous_sweep_item_ids",
             "atr_unready_sweep_item_ids",
+            "source_dispositions",
+            "range_funnel",
         ):
             object.__setattr__(self, name, tuple(getattr(self, name)))
         if (
@@ -189,6 +198,53 @@ class Group4Update:
             & set(self.atr_unready_sweep_item_ids)
         ):
             raise ValueError("Group 4 unclassified sweep identities repeat")
+        if any(
+            not isinstance(item, ManipulationSourceDisposition)
+            for item in self.source_dispositions
+        ):
+            raise TypeError(
+                "Group 4 source disposition is not typed"
+            )
+        disposition_ids = tuple(
+            item.source_inventory_item_id
+            for item in self.source_dispositions
+        )
+        if len(disposition_ids) != len(set(disposition_ids)):
+            raise ValueError(
+                "Group 4 source dispositions are not mutually exclusive"
+            )
+        ambiguous_ids = {
+            item.source_inventory_item_id
+            for item in self.source_dispositions
+            if item.disposition
+            is ManipulationSourceDispositionKind.AMBIGUOUS_DUAL_SIDE
+        }
+        atr_unready_ids = {
+            item.source_inventory_item_id
+            for item in self.source_dispositions
+            if item.disposition
+            is ManipulationSourceDispositionKind.ATR_UNREADY
+        }
+        if self.source_dispositions and (
+            ambiguous_ids != set(self.ambiguous_sweep_item_ids)
+            or atr_unready_ids != set(self.atr_unready_sweep_item_ids)
+        ):
+            raise ValueError(
+                "Group 4 compatibility sweep identities disagree with "
+                "source dispositions"
+            )
+        if any(
+            not isinstance(item, RangeFormationFunnelSnapshot)
+            for item in self.range_funnel
+        ):
+            raise TypeError("Group 4 range funnel record is not typed")
+        funnel_clocks = tuple(item.observed_at for item in self.range_funnel)
+        if (
+            funnel_clocks != tuple(sorted(funnel_clocks))
+            or len(funnel_clocks) != len(set(funnel_clocks))
+            or (self.boundary_reason is not None and funnel_clocks)
+        ):
+            raise ValueError("Group 4 range funnel clocks are invalid")
 
 
 @dataclass
@@ -204,6 +260,45 @@ class _RangeWork:
                 maxlen=self.true_ranges.maxlen,
             ),
         )
+
+
+@dataclass(frozen=True)
+class _RangePairPartition:
+    live_structural_pairs: tuple[
+        tuple[SupportResistanceState, SupportResistanceState],
+        ...,
+    ]
+    invalid_geometry_pairs: tuple[
+        tuple[SupportResistanceState, SupportResistanceState],
+        ...,
+    ]
+    geometry_valid_pairs: tuple[
+        tuple[SupportResistanceState, SupportResistanceState],
+        ...,
+    ]
+    close_outside_pairs: tuple[
+        tuple[SupportResistanceState, SupportResistanceState],
+        ...,
+    ]
+    admitted_pairs: tuple[
+        tuple[SupportResistanceState, SupportResistanceState],
+        ...,
+    ]
+    cold_blocked_pairs: tuple[
+        tuple[SupportResistanceState, SupportResistanceState],
+        ...,
+    ]
+    available_pairs: tuple[
+        tuple[SupportResistanceState, SupportResistanceState],
+        ...,
+    ]
+
+
+@dataclass(frozen=True)
+class _RangeGateEvaluation:
+    range_id: str
+    gates: tuple[tuple[str, float, float, float], ...]
+    unmet: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -378,6 +473,10 @@ class CausalGroup4Tracker:
         manipulation_transitions: Iterable[ManipulationState] = (),
         ambiguous: Iterable[str] = (),
         atr_unready: Iterable[str] = (),
+        source_dispositions: Iterable[
+            ManipulationSourceDisposition
+        ] = (),
+        range_funnel: Iterable[RangeFormationFunnelSnapshot] = (),
         boundary_reason: str | None = None,
     ) -> Group4Update:
         snapshot = self.snapshot()
@@ -395,6 +494,8 @@ class CausalGroup4Tracker:
             atr_unready_sweep_item_ids=tuple(
                 sorted(set(atr_unready))
             ),
+            source_dispositions=tuple(source_dispositions),
+            range_funnel=tuple(range_funnel),
             boundary_reason=boundary_reason,
         )
 
@@ -534,6 +635,71 @@ class CausalGroup4Tracker:
             "age_h1_bars": len(bars) - 1,
         }
 
+    def _range_gate_evaluation(
+        self,
+        state: DealingRangeState,
+        statistics: dict[str, object],
+    ) -> _RangeGateEvaluation:
+        actuals = {
+            "duration": float(statistics["candidate_real_h1_bars"]),
+            "bilateral_touches": float(
+                min(
+                    int(statistics["lower_touch_count"]),
+                    int(statistics["upper_touch_count"]),
+                )
+            ),
+            "midpoint_crossing": float(
+                statistics["midpoint_crossings"]
+            ),
+            "inside_close_fraction": float(
+                statistics["inside_close_fraction"]
+            ),
+            "width": float(state.width_atr_at_formation),
+            "compression": float(statistics["compression_ratio"]),
+        }
+        thresholds = {
+            "duration": float(
+                self.protocol.minimum_candidate_real_h1_bars
+            ),
+            "bilateral_touches": float(
+                self.protocol.minimum_boundary_touches_each
+            ),
+            "midpoint_crossing": float(
+                self.protocol.minimum_midpoint_crossings
+            ),
+            "inside_close_fraction": float(
+                self.protocol.minimum_inside_close_fraction
+            ),
+            "width": float(
+                self.protocol.maximum_width_atr_at_formation
+            ),
+            "compression": float(
+                self.protocol.maximum_compression_ratio
+            ),
+        }
+        maximum_gates = {"width", "compression"}
+        gates = tuple(
+            (
+                name,
+                actuals[name],
+                thresholds[name],
+                (
+                    thresholds[name] - actuals[name]
+                    if name in maximum_gates
+                    else actuals[name] - thresholds[name]
+                )
+                / thresholds[name],
+            )
+            for name in RANGE_MATURITY_GATE_NAMES
+        )
+        return _RangeGateEvaluation(
+            range_id=state.range_id,
+            gates=gates,
+            unmet=tuple(
+                name for name, _, _, margin in gates if margin < 0.0
+            ),
+        )
+
     @staticmethod
     def _source_is_live(
         state: SupportResistanceState | None,
@@ -576,10 +742,10 @@ class CausalGroup4Tracker:
         candle: Candle,
         zones_by_id: dict[str, SupportResistanceState],
         true_range: float,
-    ) -> DealingRangeState | None:
+    ) -> tuple[DealingRangeState | None, _RangeGateEvaluation | None]:
         state = self._live_range(self._ranges.values())
         if state is None:
-            return None
+            return None, None
         lower = zones_by_id.get(state.lower_source_zone_id)
         upper = zones_by_id.get(state.upper_source_zone_id)
         if state.lifecycle is DealingRangeLifecycle.MATURE:
@@ -592,14 +758,17 @@ class CausalGroup4Tracker:
                 candle.close < state.lower_bound
                 or candle.close > state.upper_bound
             ):
-                return self._terminal_range(
-                    updated,
-                    candle.end,
-                    "close_beyond_frozen_range",
+                return (
+                    self._terminal_range(
+                        updated,
+                        candle.end,
+                        "close_beyond_frozen_range",
+                    ),
+                    None,
                 )
             self._ranges[state.range_id] = updated
             self._sync_range_inventory(updated)
-            return None
+            return None, None
         work = self._range_work[state.range_id]
         if work.bars[-1].end < candle.end:
             work.bars.append(candle)
@@ -638,19 +807,26 @@ class CausalGroup4Tracker:
             candle.close < state.lower_bound
             or candle.close > state.upper_bound
         ):
-            return self._terminal_range(
-                state,
-                candle.end,
-                "close_beyond_frozen_range",
-                **update_fields,
+            return (
+                self._terminal_range(
+                    state,
+                    candle.end,
+                    "close_beyond_frozen_range",
+                    **update_fields,
+                ),
+                None,
             )
         if not self._source_is_live(lower) or not self._source_is_live(upper):
-            return self._terminal_range(
-                state,
-                candle.end,
-                "forming_source_invalidated",
-                **update_fields,
+            return (
+                self._terminal_range(
+                    state,
+                    candle.end,
+                    "forming_source_invalidated",
+                    **update_fields,
+                ),
+                None,
             )
+        gate_evaluation = self._range_gate_evaluation(state, statistics)
         mature = (
             statistics["candidate_real_h1_bars"]
             >= self.protocol.minimum_candidate_real_h1_bars
@@ -667,6 +843,10 @@ class CausalGroup4Tracker:
             and statistics["compression_ratio"]
             <= self.protocol.maximum_compression_ratio
         )
+        if mature != (not gate_evaluation.unmet):
+            raise RuntimeError(
+                "Group 4 maturity gate diagnostic disagrees with reducer"
+            )
         if mature:
             updated = replace(
                 state,
@@ -679,7 +859,7 @@ class CausalGroup4Tracker:
             self._ranges[state.range_id] = updated
             self._range_work.pop(state.range_id, None)
             self._create_range_inventory(updated)
-            return updated
+            return updated, gate_evaluation
         if (
             statistics["candidate_real_h1_bars"]
             >= self.protocol.maximum_forming_real_h1_bars
@@ -694,23 +874,32 @@ class CausalGroup4Tracker:
             )
             self._ranges[state.range_id] = terminal
             self._range_work.pop(state.range_id, None)
-            return terminal
+            return terminal, gate_evaluation
         updated = replace(
             state,
             **update_fields,
             transition_reason=None,
         )
         self._ranges[state.range_id] = updated
-        return None
+        return None, gate_evaluation
 
-    def _eligible_pairs(
+    @staticmethod
+    def _pair_sort_key(
+        pair: tuple[SupportResistanceState, SupportResistanceState],
+    ) -> tuple[float, int, str, str]:
+        lower, upper = pair
+        return (
+            upper.upper_bound - lower.lower_bound,
+            -max(lower.confirmed_at.value, upper.confirmed_at.value),
+            lower.zone_id,
+            upper.zone_id,
+        )
+
+    def _range_pair_partition(
         self,
         candle: Candle,
         zones: Sequence[SupportResistanceState],
-    ) -> tuple[
-        tuple[SupportResistanceState, SupportResistanceState],
-        ...,
-    ]:
+    ) -> _RangePairPartition:
         supports = tuple(
             zone
             for zone in zones
@@ -729,6 +918,29 @@ class CausalGroup4Tracker:
                 and self._source_is_live(zone)
             )
         )
+        live_structural = tuple(
+            (lower, upper)
+            for lower in supports
+            for upper in resistances
+        )
+        geometry_valid = tuple(
+            pair
+            for pair in live_structural
+            if pair[0].upper_bound < pair[1].lower_bound
+        )
+        invalid_geometry = tuple(
+            pair
+            for pair in live_structural
+            if pair[0].upper_bound >= pair[1].lower_bound
+        )
+        at_price = tuple(
+            pair
+            for pair in geometry_valid
+            if pair[0].lower_bound <= candle.close <= pair[1].upper_bound
+        )
+        close_outside = tuple(
+            pair for pair in geometry_valid if pair not in at_price
+        )
         admitted = {
             (
                 state.lower_source_zone_id,
@@ -736,34 +948,50 @@ class CausalGroup4Tracker:
             )
             for state in self._ranges.values()
         }
-        pairs = [
-            (lower, upper)
-            for lower in supports
-            for upper in resistances
-            if (
-                lower.upper_bound < upper.lower_bound
-                and lower.lower_bound
-                <= candle.close
-                <= upper.upper_bound
-                and (lower.zone_id, upper.zone_id) not in admitted
-                and (lower.zone_id, upper.zone_id)
-                not in self._blocked_cold_pairs
-            )
-        ]
-        return tuple(
-            sorted(
-                pairs,
-                key=lambda pair: (
-                    pair[1].upper_bound - pair[0].lower_bound,
-                    -max(
-                        pair[0].confirmed_at.value,
-                        pair[1].confirmed_at.value,
-                    ),
-                    pair[0].zone_id,
-                    pair[1].zone_id,
-                ),
-            )
+        admitted_pairs = tuple(
+            pair
+            for pair in at_price
+            if (pair[0].zone_id, pair[1].zone_id) in admitted
         )
+        not_admitted = tuple(
+            pair
+            for pair in at_price
+            if (pair[0].zone_id, pair[1].zone_id) not in admitted
+        )
+        cold_blocked = tuple(
+            pair
+            for pair in not_admitted
+            if (pair[0].zone_id, pair[1].zone_id)
+            in self._blocked_cold_pairs
+        )
+        available = tuple(
+            pair
+            for pair in not_admitted
+            if (pair[0].zone_id, pair[1].zone_id)
+            not in self._blocked_cold_pairs
+        )
+        ordered = lambda values: tuple(
+            sorted(values, key=self._pair_sort_key)
+        )
+        return _RangePairPartition(
+            live_structural_pairs=ordered(live_structural),
+            invalid_geometry_pairs=ordered(invalid_geometry),
+            geometry_valid_pairs=ordered(geometry_valid),
+            close_outside_pairs=ordered(close_outside),
+            admitted_pairs=ordered(admitted_pairs),
+            cold_blocked_pairs=ordered(cold_blocked),
+            available_pairs=ordered(available),
+        )
+
+    def _eligible_pairs(
+        self,
+        candle: Candle,
+        zones: Sequence[SupportResistanceState],
+    ) -> tuple[
+        tuple[SupportResistanceState, SupportResistanceState],
+        ...,
+    ]:
+        return self._range_pair_partition(candle, zones).available_pairs
 
     def _create_range(
         self,
@@ -997,11 +1225,28 @@ class CausalGroup4Tracker:
             )
         self._prior_h1_close = float(candle.close)
         zones_by_id = {zone.zone_id: zone for zone in zones}
-        transition = self._advance_live_range(
+        transition, gate_evaluation = self._advance_live_range(
             candle,
             zones_by_id,
             true_range,
         )
+        pair_partition = self._range_pair_partition(candle, zones)
+        available_count = len(pair_partition.available_pairs)
+        same_bar_terminal_blocked = 0
+        live_range_blocked = 0
+        atr_unready = 0
+        eligible_count = 0
+        if (
+            transition is not None
+            and transition.lifecycle is DealingRangeLifecycle.BROKEN
+        ):
+            same_bar_terminal_blocked = available_count
+        elif self._live_range(self._ranges.values()) is not None:
+            live_range_blocked = available_count
+        elif len(self._h1_true_ranges) < self.protocol.h1_atr_period:
+            atr_unready = available_count
+        else:
+            eligible_count = available_count
         created = None
         if transition is None or (
             transition.lifecycle is not DealingRangeLifecycle.BROKEN
@@ -1011,6 +1256,81 @@ class CausalGroup4Tracker:
                 zones,
                 true_range,
             )
+        if bool(created is not None) != bool(eligible_count):
+            raise RuntimeError(
+                "Group 4 range funnel disagrees with range creation"
+            )
+        if created is not None:
+            selected_pair = (
+                created.lower_source_zone_id,
+                created.upper_source_zone_id,
+            )
+            expected_pair = pair_partition.available_pairs[0]
+            if selected_pair != (
+                expected_pair[0].zone_id,
+                expected_pair[1].zone_id,
+            ):
+                raise RuntimeError(
+                    "Group 4 range selection disagrees with its funnel"
+                )
+        else:
+            selected_pair = None
+        range_funnel = RangeFormationFunnelSnapshot(
+            observed_at=candle.end,
+            pair_counts=(
+                (
+                    "live_structural_pairs",
+                    len(pair_partition.live_structural_pairs),
+                ),
+                (
+                    "invalid_geometry_pairs",
+                    len(pair_partition.invalid_geometry_pairs),
+                ),
+                (
+                    "geometry_valid_pairs",
+                    len(pair_partition.geometry_valid_pairs),
+                ),
+                (
+                    "close_outside_pair_pairs",
+                    len(pair_partition.close_outside_pairs),
+                ),
+                (
+                    "already_admitted_pairs",
+                    len(pair_partition.admitted_pairs),
+                ),
+                (
+                    "cold_start_blocked_pairs",
+                    len(pair_partition.cold_blocked_pairs),
+                ),
+                (
+                    "same_bar_terminal_blocked_pairs",
+                    same_bar_terminal_blocked,
+                ),
+                ("live_range_blocked_pairs", live_range_blocked),
+                ("atr_unready_pairs", atr_unready),
+                ("eligible_pairs", eligible_count),
+                ("forming_selected", int(created is not None)),
+            ),
+            selected_source_pair_ids=selected_pair,
+            selected_range_id=(
+                None if created is None else created.range_id
+            ),
+            maturity_range_id=(
+                None
+                if gate_evaluation is None
+                else gate_evaluation.range_id
+            ),
+            maturity_gates=(
+                ()
+                if gate_evaluation is None
+                else gate_evaluation.gates
+            ),
+            unmet_maturity_gates=(
+                ()
+                if gate_evaluation is None
+                else gate_evaluation.unmet
+            ),
+        )
         self._ensure_range_capacity(set(zones_by_id))
         self._last_h1_end = candle.end
         return self._output(
@@ -1018,7 +1338,8 @@ class CausalGroup4Tracker:
                 value
                 for value in (transition, created)
                 if value is not None
-            )
+            ),
+            range_funnel=(range_funnel,),
         )
 
     def on_completed_h1(
@@ -1120,12 +1441,18 @@ class CausalGroup4Tracker:
         pools: Sequence[LiquidityPoolState],
         candle: Candle,
         prior_close: float,
-    ) -> _ManipulationSource | None:
+    ) -> tuple[
+        _ManipulationSource | None,
+        ManipulationSourceDispositionKind | None,
+    ]:
         if (
             item.lifecycle is not LiquidityInventoryLifecycle.VISIBLE
             or item.confirmed_at > candle.start
         ):
-            return None
+            return (
+                None,
+                ManipulationSourceDispositionKind.REJECTED_SOURCE_MISSING_OR_STALE,
+            )
         if item.kind == "range_boundary":
             state = self._range_by_inventory(item)
             expected_zone_id = (
@@ -1159,48 +1486,68 @@ class CausalGroup4Tracker:
                     state.broken_at is not None
                     and state.broken_at <= candle.end
                 )
-                or not state.lower_bound
-                <= prior_close
-                <= state.upper_bound
             ):
-                return None
-            return _ManipulationSource(
-                side=item.side,
-                source_kind="mature_range_boundary",
-                source_id=state.range_id,
-                source_protocol_hash=state.protocol_hash,
-                source_timeframe=Timeframe.H1,
-                inventory=item,
-                formed_at=state.formed_at,
-                eligible_at=state.mature_at,
-                lower_bound=state.lower_bound,
-                upper_bound=state.upper_bound,
-                boundary_price=item.price,
+                return (
+                    None,
+                    ManipulationSourceDispositionKind.REJECTED_SOURCE_MISSING_OR_STALE,
+                )
+            if not state.lower_bound <= prior_close <= state.upper_bound:
+                return (
+                    None,
+                    ManipulationSourceDispositionKind.REJECTED_PRIOR_CLOSE,
+                )
+            return (
+                _ManipulationSource(
+                    side=item.side,
+                    source_kind="mature_range_boundary",
+                    source_id=state.range_id,
+                    source_protocol_hash=state.protocol_hash,
+                    source_timeframe=Timeframe.H1,
+                    inventory=item,
+                    formed_at=state.formed_at,
+                    eligible_at=state.mature_at,
+                    lower_bound=state.lower_bound,
+                    upper_bound=state.upper_bound,
+                    boundary_price=item.price,
+                ),
+                None,
             )
         if item.kind not in {"equal_highs", "equal_lows"}:
-            return None
+            return (
+                None,
+                ManipulationSourceDispositionKind.REJECTED_SOURCE_MISSING_OR_STALE,
+            )
         pool = self._pool_by_inventory(item, pools)
         if pool is None or pool.confirmed_at > candle.start:
-            return None
+            return (
+                None,
+                ManipulationSourceDispositionKind.REJECTED_SOURCE_MISSING_OR_STALE,
+            )
         if (
             (item.side == "above" and prior_close > pool.upper_bound)
             or (item.side == "below" and prior_close < pool.lower_bound)
         ):
-            return None
-        return _ManipulationSource(
-            side=item.side,
-            source_kind="formed_liquidity_pool",
-            source_id=pool.pool_id,
-            source_protocol_hash=(
-                self.protocol.source_group12_protocol_hash
+            return (
+                None,
+                ManipulationSourceDispositionKind.REJECTED_PRIOR_CLOSE,
+            )
+        return (
+            _ManipulationSource(
+                side=item.side,
+                source_kind="formed_liquidity_pool",
+                source_id=pool.pool_id,
+                source_protocol_hash=(
+                    self.protocol.source_group12_protocol_hash
+                ),
+                source_timeframe=pool.timeframe,
+                inventory=item,
+                formed_at=pool.formed_at,
+                eligible_at=pool.confirmed_at,
+                lower_bound=pool.lower_bound,
+                upper_bound=pool.upper_bound,
+                boundary_price=item.price,
             ),
-            source_timeframe=pool.timeframe,
-            inventory=item,
-            formed_at=pool.formed_at,
-            eligible_at=pool.confirmed_at,
-            lower_bound=pool.lower_bound,
-            upper_bound=pool.upper_bound,
-            boundary_price=item.price,
+            None,
         )
 
     @staticmethod
@@ -1545,10 +1892,15 @@ class CausalGroup4Tracker:
         self._last_m1_raw_end = candle.end
         if not candle.real_completed:
             range_transitions: tuple[DealingRangeState, ...] = ()
+            range_funnel: tuple[RangeFormationFunnelSnapshot, ...] = ()
             if completed_h1 is not None:
                 h1_output = self._apply_h1(completed_h1, h1_zones)
                 range_transitions = h1_output.range_transitions
-            return self._output(range_transitions=range_transitions)
+                range_funnel = h1_output.range_funnel
+            return self._output(
+                range_transitions=range_transitions,
+                range_funnel=range_funnel,
+            )
         self._compact_terminal_manipulations_without_sources(
             pools,
             current_end=candle.end,
@@ -1569,6 +1921,10 @@ class CausalGroup4Tracker:
         )
         resolved = self._resolve_live_manipulation(candle)
         candidate_sources: list[_ManipulationSource] = []
+        disposition_by_item_id: dict[
+            str,
+            ManipulationSourceDispositionKind,
+        ] = {}
         crossed_items = tuple(
             item
             for item in prior_inventory
@@ -1584,37 +1940,83 @@ class CausalGroup4Tracker:
                 )
             )
         )
-        if crossed_items and prior_close is None:
+        crossed_item_ids = tuple(item.item_id for item in crossed_items)
+        if len(crossed_item_ids) != len(set(crossed_item_ids)):
             raise ValueError(
-                "Group 4 source crossing lacks a real predecessor close"
+                "Group 4 raw crossed source identity repeats"
             )
-        if prior_close is not None:
+
+        def assign(
+            item_id: str,
+            disposition: ManipulationSourceDispositionKind,
+        ) -> None:
+            if item_id in disposition_by_item_id:
+                raise RuntimeError(
+                    "Group 4 source received multiple dispositions"
+                )
+            disposition_by_item_id[item_id] = disposition
+
+        if prior_close is None:
             for item in crossed_items:
-                source = self._source_from_item(
+                assign(
+                    item.item_id,
+                    ManipulationSourceDispositionKind.REJECTED_PRIOR_CLOSE,
+                )
+        else:
+            for item in crossed_items:
+                source, rejection = self._source_from_item(
                     item,
                     pools,
                     candle,
                     prior_close,
                 )
-                if source is not None and self._crossed(source, candle):
-                    candidate_sources.append(source)
+                if rejection is not None:
+                    assign(item.item_id, rejection)
+                    continue
+                if source is None or not self._crossed(source, candle):
+                    raise RuntimeError(
+                        "Group 4 admitted source disagrees with its raw "
+                        "crossing"
+                    )
+                candidate_sources.append(source)
         self._consume_range_crossings(crossed_items, candle)
         range_transitions: tuple[DealingRangeState, ...] = ()
+        range_funnel: tuple[RangeFormationFunnelSnapshot, ...] = ()
         if completed_h1 is not None:
             h1_output = self._apply_h1(completed_h1, h1_zones)
             range_transitions = h1_output.range_transitions
-        candidate_sources = [
-            source
-            for source in candidate_sources
+            range_funnel = h1_output.range_funnel
+        same_clock_invalidated_range_ids = {
+            state.range_id
+            for state in range_transitions
             if (
-                source.source_kind != "mature_range_boundary"
-                or (
-                    (state := self._ranges.get(source.source_id))
-                    is not None
-                    and state.lifecycle is DealingRangeLifecycle.MATURE
-                )
+                state.lifecycle is DealingRangeLifecycle.BROKEN
+                and state.broken_at == candle.end
             )
-        ]
+        }
+        retained_candidates: list[_ManipulationSource] = []
+        for source in candidate_sources:
+            if (
+                source.source_kind == "mature_range_boundary"
+                and source.source_id in same_clock_invalidated_range_ids
+            ):
+                assign(
+                    source.inventory.item_id,
+                    ManipulationSourceDispositionKind.REJECTED_RANGE_INVALIDATED_SAME_CLOCK,
+                )
+                continue
+            if source.source_kind == "mature_range_boundary":
+                state = self._ranges.get(source.source_id)
+                if (
+                    state is None
+                    or state.lifecycle is not DealingRangeLifecycle.MATURE
+                ):
+                    raise RuntimeError(
+                        "Group 4 range source changed without a same-clock "
+                        "terminal transition"
+                    )
+            retained_candidates.append(source)
+        candidate_sources = retained_candidates
         crossed_sides = {source.side for source in candidate_sources}
         ambiguous = (
             tuple(
@@ -1624,6 +2026,12 @@ class CausalGroup4Tracker:
             if len(crossed_sides) > 1
             else ()
         )
+        if ambiguous:
+            for source in candidate_sources:
+                assign(
+                    source.inventory.item_id,
+                    ManipulationSourceDispositionKind.AMBIGUOUS_DUAL_SIDE,
+                )
         # A cold causal prefix may encounter an already-visible liquidity
         # source before fourteen real predecessor minutes exist.  The sweep
         # cannot be normalized without its *prior* ATR, but that is a normal
@@ -1643,13 +2051,27 @@ class CausalGroup4Tracker:
             if atr_unready
             else ()
         )
+        if atr_unready:
+            for source in candidate_sources:
+                assign(
+                    source.inventory.item_id,
+                    ManipulationSourceDispositionKind.ATR_UNREADY,
+                )
         created = None
-        if (
-            not had_live_before
-            and candidate_sources
+        actionable_sources = bool(
+            candidate_sources
             and not ambiguous
             and prior_atr is not None
-        ):
+        )
+        if actionable_sources and had_live_before:
+            blocked_disposition = (
+                ManipulationSourceDispositionKind.BLOCKED_EXISTING_LIVE
+                if resolved is None
+                else ManipulationSourceDispositionKind.BLOCKED_LIVE_RESOLVED_SAME_BAR
+            )
+            for source in candidate_sources:
+                assign(source.inventory.item_id, blocked_disposition)
+        elif actionable_sources:
             ordered = sorted(
                 candidate_sources,
                 key=lambda source: (
@@ -1665,6 +2087,10 @@ class CausalGroup4Tracker:
                 ),
             )
             primary = ordered[0]
+            assign(
+                primary.inventory.item_id,
+                ManipulationSourceDispositionKind.SELECTED_PRIMARY,
+            )
             coincident = tuple(
                 source.source_id
                 for source in ordered[1:]
@@ -1675,6 +2101,20 @@ class CausalGroup4Tracker:
                     abs_tol=0.0,
                 )
             )
+            for source in ordered[1:]:
+                assign(
+                    source.inventory.item_id,
+                    (
+                        ManipulationSourceDispositionKind.ATTACHED_COINCIDENT_SECONDARY
+                        if math.isclose(
+                            source.boundary_price,
+                            primary.boundary_price,
+                            rel_tol=0.0,
+                            abs_tol=0.0,
+                        )
+                        else ManipulationSourceDispositionKind.ATTACHED_SAME_SIDE_SECONDARY
+                    ),
+                )
             created = self._create_manipulation(
                 primary,
                 coincident,
@@ -1693,6 +2133,18 @@ class CausalGroup4Tracker:
                 candle,
                 prior_atr,
             )
+        if set(disposition_by_item_id) != set(crossed_item_ids):
+            raise RuntimeError(
+                "Group 4 raw crossed source disposition is not conserved"
+            )
+        source_dispositions = tuple(
+            ManipulationSourceDisposition(
+                source_inventory_item_id=item_id,
+                observed_at=candle.end,
+                disposition=disposition_by_item_id[item_id],
+            )
+            for item_id in sorted(disposition_by_item_id)
+        )
         true_range = _true_range(candle, self._prior_m1_close)
         if self._prior_m1_close is not None and true_range > 0.0:
             self._m1_true_ranges.append(
@@ -1713,6 +2165,8 @@ class CausalGroup4Tracker:
             ),
             ambiguous=ambiguous,
             atr_unready=atr_unready_ids,
+            source_dispositions=source_dispositions,
+            range_funnel=range_funnel,
         )
 
     def on_completed_update(
@@ -1756,6 +2210,13 @@ class CausalGroup4Tracker:
                 for item in inventory
             ):
                 raise TypeError("Group 4 inventory source is not typed")
+            inventory_item_ids = tuple(
+                item.item_id for item in inventory
+            )
+            if len(inventory_item_ids) != len(set(inventory_item_ids)):
+                raise ValueError(
+                    "Group 4 inventory source identity repeats"
+                )
             if any(
                 not isinstance(pool, LiquidityPoolState)
                 for pool in pools
@@ -1894,6 +2355,9 @@ class CausalGroup4Tracker:
             transitions: list[ManipulationState] = []
             ambiguous: list[str] = []
             atr_unready: list[str] = []
+            source_dispositions: list[
+                ManipulationSourceDisposition
+            ] = []
             for candle in prefix:
                 inventory = tuple(
                     item
@@ -1918,6 +2382,7 @@ class CausalGroup4Tracker:
                 transitions.extend(output.manipulation_transitions)
                 ambiguous.extend(output.ambiguous_sweep_item_ids)
                 atr_unready.extend(output.atr_unready_sweep_item_ids)
+                source_dispositions.extend(output.source_dispositions)
                 for item in inventory:
                     if (
                         candle.real_completed
@@ -1942,6 +2407,7 @@ class CausalGroup4Tracker:
                 atr_unready_sweep_item_ids=tuple(
                     sorted(set(atr_unready))
                 ),
+                source_dispositions=tuple(source_dispositions),
             )
             candidate._last_m1_input = input_value
             candidate._last_m1_output = output

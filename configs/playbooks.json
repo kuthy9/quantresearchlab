@@ -1,12 +1,12 @@
 {
   "schema_version": 1,
-  "frozen_at": "2026-07-30T00:00:00-04:00",
+  "frozen_at": "2026-08-08T00:00:00-04:00",
   "change_policy": {
     "patch": "implementation correction before economic validation with a new full registry hash",
     "minor": "documentation or visualization that cannot alter eligibility",
     "major": "any playbook mechanism, ordered step, entry, invalidation, draw, target, or deadline change"
   },
-  "single_changed_concept_family": "typed playbook belief, location and trigger linkage",
+  "single_changed_concept_family": "LSR optional mature-range context linkage",
   "quality_dimensions": [
     "thesis_strength",
     "sequence_progress",
@@ -175,7 +175,7 @@
       "id": "liquidity_sweep_reversal",
       "schema_version": 1,
       "status": "typed_causal_development_no_economic_authority",
-      "thesis": "A formed liquidity pool is swept and fails to sustain outside acceptance, then a reverse-direction qualified 5m displacement leaves an FVG or OB, price first returns to that frozen zone, and a strictly-later aligned micro BOS confirms the reversal trigger.",
+      "thesis": "A formed liquidity pool is swept and fails to sustain outside acceptance, then a reverse-direction qualified 5m displacement leaves an FVG or OB, price first returns to that frozen zone, and a strictly-later aligned micro BOS confirms the reversal trigger. A separately identified mature range may add optional value and opposing-boundary context but is never a core LSR gate.",
       "required_sequence": [
         {
           "id": "formed_pool_sweep",
@@ -243,6 +243,8 @@
         "reverse_displacement_zone",
         "reversal_first_pullback",
         "aligned_micro_bos_trigger",
+        "mature_range_context_visible",
+        "opposing_range_boundary_visible",
         "opposing_draw_visible",
         "remaining_path_available",
         "execution_fillability"
@@ -259,6 +261,7 @@
       "evidence_groups": {
         "structure": [
           "pool_return_confirmed",
+          "mature_range_context_visible",
           "accepted_outside_or_failed"
         ],
         "displacement": [
@@ -271,6 +274,7 @@
         ],
         "liquidity": [
           "pool_liquidity_swept",
+          "opposing_range_boundary_visible",
           "opposing_draw_visible",
           "draw_consumed_or_missing"
         ],
@@ -305,7 +309,7 @@
       },
       "targets": {
         "source": "decision-time visible opposing liquidity inventory",
-        "selection": "the exact Group5 selected draw for the reversal direction"
+        "selection": "the nearest deliverable opposing liquidity remains the executable target; when an exact crossed mature-range identity exists, its visible opposing boundary becomes the optional contextual draw and its midpoint/value is retained in the liquidity route"
       },
       "deadline": {
         "rule": "registered session deadline",

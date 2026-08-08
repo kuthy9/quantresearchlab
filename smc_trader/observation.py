@@ -70,6 +70,7 @@ from .model import (
     PathSequenceState,
     StructureLifecycle,
     SupportResistanceLifecycle,
+    SupportResistanceState,
     SwingLifecycle,
     SwingRelation,
     Timeframe,
@@ -110,6 +111,7 @@ class ObserverConfig:
     project_scene_graph: bool = True
     materialize_event_view: bool = True
     group4_projection_only: bool = False
+    eye_authority_mode: bool = False
 
 
 @dataclass(frozen=True)
@@ -808,6 +810,7 @@ class EventMemory:
         self._entity_timelines: dict[str, list[MarketEvent]] = {}
         self._retained_entity_keys: set[str] = set()
         self._incomplete_entity_keys: set[str] = set()
+        self._boundary_cooling_entity_keys: set[str] = set()
 
     @property
     def last_minute_end(self) -> pd.Timestamp | None:
@@ -1202,6 +1205,7 @@ class EventMemory:
         self._entity_timelines = next_timelines
         self._retained_entity_keys = retained
         self._incomplete_entity_keys.intersection_update(retained)
+        self._boundary_cooling_entity_keys.intersection_update(retained)
         retained_event_ids = {
             event.event_id
             for event in self._events
@@ -1241,6 +1245,109 @@ class EventMemory:
                 & self._retained_entity_keys
             )
         )
+
+    def live_entity_keys(self) -> tuple[str, ...]:
+        """Return retained lifecycle prefixes which can still transition.
+
+        Reducer snapshots are bounded projections and may transiently omit an
+        entity before its later terminal transition is emitted.  The prefix is
+        therefore part of the hot causal state until its latest lifecycle has
+        no registered successor.  Terminal timelines remain eligible for the
+        normal snapshot-driven cooling performed by
+        :meth:`sync_retained_entity_timelines`.
+        """
+
+        output: list[str] = []
+        for entity_key, timeline in self._entity_timelines.items():
+            if (
+                not timeline
+                or entity_key in self._boundary_cooling_entity_keys
+            ):
+                continue
+            namespace = self._timeline_namespace(entity_key)
+            if self._TIMELINE_TRANSITIONS[namespace][timeline[-1].lifecycle]:
+                output.append(entity_key)
+        return tuple(sorted(output))
+
+    def retain_live_prefixes_from(
+        self,
+        prior: "EventMemory",
+        *,
+        asof: pd.Timestamp,
+    ) -> tuple[str, ...]:
+        """Carry only transitionable prefixes across one hard boundary.
+
+        Boundary reducers emit their terminal transitions after the Observer
+        has reset contract-local state.  Keeping the old recent deque or every
+        terminal timeline would turn EventMemory into an unbounded audit
+        archive; copying only live prefixes gives those same-clock terminal
+        events their causal history.  The imported keys are excluded from the
+        ordinary live-retention union, so a key not exposed by the new typed
+        snapshot cools on the next synchronization.
+        """
+
+        if not isinstance(prior, EventMemory) or prior is self:
+            raise TypeError("boundary EventMemory source is invalid")
+        clock = pd.Timestamp(asof)
+        if clock.tzinfo is None:
+            raise ValueError("boundary prefix cutoff must be timezone aware")
+        if self._entity_timelines or self._retained_entity_keys:
+            raise ValueError("boundary prefixes require an empty EventMemory")
+        keys = prior.live_entity_keys()
+        timelines = {
+            key: list(prior._entity_timelines[key])
+            for key in keys
+        }
+        if any(
+            event.observed_at > clock
+            for timeline in timelines.values()
+            for event in timeline
+        ):
+            raise ValueError("boundary prefix contains a future event")
+        if (
+            self._clock_coverage_start is not None
+            and any(
+                self._required_event_clock(event)
+                < self._clock_coverage_start
+                for timeline in timelines.values()
+                for event in timeline
+            )
+        ):
+            raise ValueError(
+                "boundary prefix predates retained 1m clock coverage"
+            )
+        self._entity_timelines = timelines
+        self._retained_entity_keys = set(keys)
+        self._incomplete_entity_keys = (
+            prior._incomplete_entity_keys & set(keys)
+        )
+        self._boundary_cooling_entity_keys = set(keys)
+        retained_event_ids = {
+            event.event_id
+            for timeline in timelines.values()
+            for event in timeline
+        }
+        self._closed_durations = {
+            event_id: duration
+            for event_id, duration in prior._closed_durations.items()
+            if event_id in retained_event_ids
+        }
+        self._latest_by_entity = {
+            entity_id: event
+            for entity_id, event in prior._latest_by_entity.items()
+            if event.event_id in retained_event_ids
+        }
+        retained_clocks = {
+            event.observed_at
+            for timeline in timelines.values()
+            for event in timeline
+        }
+        self._sequence_counts = {
+            event_clock: count
+            for event_clock, count in prior._sequence_counts.items()
+            if event_clock in retained_clocks
+        }
+        return keys
 
     def has_entity_lifecycle(
         self,
@@ -1453,7 +1560,29 @@ class CausalObserver:
             raise ValueError("event-view materialization flag must be boolean")
         if type(self.config.group4_projection_only) is not bool:
             raise ValueError("Group 4 projection-only flag must be boolean")
-        if not self.config.materialize_event_view and (
+        if type(self.config.eye_authority_mode) is not bool:
+            raise ValueError("eye-authority mode flag must be boolean")
+        if self.config.eye_authority_mode:
+            typed_protocols = (
+                self.config.structure_protocol,
+                self.config.liquidity_protocol,
+                self.config.displacement_protocol,
+                self.config.group3_protocol,
+                self.config.group4_protocol,
+                self.config.group5_protocol,
+            )
+            if (
+                self.config.materialize_event_view
+                or self.config.project_scene_graph
+                or self.config.group4_projection_only
+                or any(protocol is None for protocol in typed_protocols)
+            ):
+                raise ValueError(
+                    "eye-authority mode requires all typed protocols, "
+                    "a lightweight event view, Scene Graph disabled, and "
+                    "Group 4 projection-only mode disabled"
+                )
+        elif not self.config.materialize_event_view and (
             self.config.project_scene_graph
             or self.config.group4_protocol is None
             or self.config.displacement_protocol is not None
@@ -1831,6 +1960,10 @@ class CausalObserver:
             self.memory.set_clock_coverage_start(
                 prior_memory.clock_coverage_start
             )
+        self.memory.retain_live_prefixes_from(
+            prior_memory,
+            asof=observed_at,
+        )
         self._prior = None
         self._known_level_ids.clear()
         self._known_level_order.clear()
@@ -1973,6 +2106,22 @@ class CausalObserver:
             bid_size=reality.bid_size,
             ask_size=reality.ask_size,
             depth_imbalance=reality.depth_imbalance,
+        )
+
+    @staticmethod
+    def _execution_not_evaluated() -> ExecutionObservation:
+        """Return an inert contract value for Eye-only semantic replay."""
+
+        return ExecutionObservation(
+            spread_points=0.0,
+            expected_slippage_points=0.0,
+            expected_round_trip_cost_points=0.0,
+            minutes_to_deadline=0,
+            fillability=0.0,
+            data_age_seconds=0.0,
+            size_available=None,
+            anomalies=(),
+            source="not_evaluated",
         )
 
     def _prior_frame_if_unchanged(
@@ -2272,6 +2421,113 @@ class CausalObserver:
                 "the causal history tail"
             )
 
+    def _append_reference_zone_admission_prefixes(
+        self,
+        zone: SupportResistanceState,
+        *,
+        final_observed_at: pd.Timestamp,
+    ) -> None:
+        """Preserve same-admission reference-zone lifecycle order.
+
+        A completed previous-session/day/week source can be admitted and then
+        tested or broken by the first tradable bar before a public snapshot is
+        built.  This is not a general cold-start backfill: it applies only to a
+        reference S/R entity's first projection when its terminal/current
+        transition occurred at this exact projection clock.  Prefix events use
+        only frozen geometry and source identity, stay out of the recent deque,
+        and therefore cannot carry later reaction or extreme information into
+        an earlier clock.
+        """
+
+        if (
+            zone.source_kind == "structural_swing"
+            or zone.lifecycle is SupportResistanceLifecycle.ACTIVE
+        ):
+            return
+        final_clocks = {
+            SupportResistanceLifecycle.TESTED: zone.tested_at,
+            SupportResistanceLifecycle.BROKEN: zone.broken_at,
+            SupportResistanceLifecycle.REACCEPTED: zone.reaccepted_at,
+            SupportResistanceLifecycle.RETIRED: zone.retired_at,
+        }
+        final_clock = final_clocks.get(zone.lifecycle)
+        if final_clock is None or final_clock != final_observed_at:
+            return
+        entity_key = f"zone:{zone.zone_id}"
+        if self.memory.timeline(entity_key):
+            return
+        frozen_details = {
+            "causal_prefix_recovered": True,
+            "lower_bound": zone.lower_bound,
+            "upper_bound": zone.upper_bound,
+            "source_kind": zone.source_kind,
+            "source_ids": zone.source_ids,
+            "range_id": zone.range_id,
+            "source_zone_id": zone.source_zone_id,
+            "zone_role": zone.zone_role,
+            "structural_rank": zone.structural_rank,
+            "is_protected_swing": zone.is_protected_swing,
+        }
+
+        def append_prefix(
+            lifecycle: SupportResistanceLifecycle,
+            observed_at: pd.Timestamp,
+            transition_reason: str | None = None,
+        ) -> None:
+            self.memory.append(
+                _event(
+                    EventKind.SUPPORT_RESISTANCE_STATE,
+                    observed_at,
+                    zone.timeframe,
+                    "below" if zone.side == "support" else "above",
+                    zone.anchor_price,
+                    0.0,
+                    zone.causal_source_ids,
+                    frozen_details,
+                    entity_id=zone.zone_id,
+                    lifecycle=lifecycle.value,
+                    formed_at=zone.formed_at,
+                    confirmed_at=zone.confirmed_at,
+                    transition_reason=transition_reason,
+                ),
+                include_in_recent=False,
+            )
+
+        append_prefix(
+            SupportResistanceLifecycle.ACTIVE,
+            zone.confirmed_at,
+        )
+        prior_clock = zone.confirmed_at
+        broken_prefix_clock = (
+            zone.broken_at
+            if (
+                zone.lifecycle
+                in {
+                    SupportResistanceLifecycle.REACCEPTED,
+                    SupportResistanceLifecycle.RETIRED,
+                }
+                and zone.broken_at is not None
+                and zone.broken_at < final_observed_at
+            )
+            else None
+        )
+        tested_upper_bound = broken_prefix_clock or final_observed_at
+        if (
+            zone.tested_at is not None
+            and prior_clock < zone.tested_at < tested_upper_bound
+        ):
+            append_prefix(
+                SupportResistanceLifecycle.TESTED,
+                zone.tested_at,
+            )
+            prior_clock = zone.tested_at
+        if broken_prefix_clock is not None and prior_clock < broken_prefix_clock:
+            append_prefix(
+                SupportResistanceLifecycle.BROKEN,
+                broken_prefix_clock,
+                "close_beyond_frozen_zone",
+            )
+
     def _record_frame_events(
         self,
         frame: FrameObservation,
@@ -2450,7 +2706,6 @@ class CausalObserver:
             )
             if prior_revision == revision:
                 continue
-            self._liquidity_entity_revisions[zone.zone_id] = revision
             lifecycle_revision = bool(
                 prior_revision is None
                 or prior_revision[0] != zone.lifecycle.value
@@ -2472,6 +2727,12 @@ class CausalObserver:
                     observed_at,
                     zone.metadata_observed_at,
                 )
+            if prior_revision is None:
+                self._append_reference_zone_admission_prefixes(
+                    zone,
+                    final_observed_at=observed_at,
+                )
+            self._liquidity_entity_revisions[zone.zone_id] = revision
             self.memory.append(
                 _event(
                     EventKind.SUPPORT_RESISTANCE_STATE,
@@ -3303,6 +3564,7 @@ class CausalObserver:
         result = Group3Update(
             *self._group3_tracker.snapshot(),
         )
+        order_block_funnel = []
         bos_states = frames[Timeframe.M5].structure_breaks
         for candle, displacement_update in batch:
             result = self._group3_tracker.on_completed_5m(
@@ -3326,6 +3588,12 @@ class CausalObserver:
                         and bos.resolved_at == candle.end
                     )
                 ),
+            )
+            order_block_funnel.extend(result.order_block_funnel)
+        if order_block_funnel:
+            result = replace(
+                result,
+                order_block_funnel=tuple(order_block_funnel),
             )
         return self._visible_group3_update(result)
 
@@ -3361,13 +3629,18 @@ class CausalObserver:
             ),
         )
 
-    @staticmethod
     def _retained_timeline_keys(
+        self,
         frames: Mapping[Timeframe, FrameObservation],
         liquidity_pool_states: Sequence[LiquidityPoolState],
         manipulations: Sequence[ManipulationState] = (),
         path_sequences: Sequence[PathSequenceState] = (),
+        *,
+        terminal_entity_keys: Iterable[str] = (),
     ) -> set[str]:
+        terminal = set(terminal_entity_keys)
+        for key in terminal:
+            self.memory._timeline_namespace(key)
         keys: set[str] = set()
         for frame in frames.values():
             keys.update(
@@ -3415,6 +3688,17 @@ class CausalObserver:
             f"entry_path:{item.sequence_id}"
             for item in path_sequences
         )
+        # A public reducer snapshot is intentionally bounded and can omit an
+        # entity before a later lifecycle transition is emitted.  Keep only
+        # still-transitionable prefixes hot; terminal histories cool as soon
+        # as the current typed snapshot no longer exposes them.
+        keys.update(set(self.memory.live_entity_keys()) - terminal)
+        # A reducer boundary may expose its terminal transition through the
+        # dedicated boundary channel without appending that transition to the
+        # hot EventMemory timeline.  Such an entity must cool immediately;
+        # retaining its pre-boundary OPEN/CREATED prefix would make a
+        # terminal FVG/OB look live after a data anomaly.
+        keys.difference_update(terminal)
         return keys
 
     @staticmethod
@@ -4227,8 +4511,15 @@ class CausalObserver:
             raise ValueError(
                 "reader and observer scale registry contracts disagree"
             )
-        reality = reality or ExecutionRealityInput()
-        execution = self._execution(update, reality)
+        if self.config.eye_authority_mode:
+            if reality is not None:
+                raise ValueError(
+                    "eye-authority mode does not evaluate execution reality"
+                )
+            execution = self._execution_not_evaluated()
+        else:
+            reality = reality or ExecutionRealityInput()
+            execution = self._execution(update, reality)
         if self.memory.clock_coverage_start is None:
             m1_history = tuple(
                 update.histories.get(Timeframe.M1, ())
@@ -4810,6 +5101,27 @@ class CausalObserver:
                             if group5_update is None
                             else group5_update.path_sequences
                         ),
+                        terminal_entity_keys=(
+                            ()
+                            if (
+                                group3_update is None
+                                or group3_update.boundary_reason
+                                not in FVG_BOUNDARY_REASONS
+                            )
+                            else (
+                                *(
+                                    f"fvg:{state.fvg_id}"
+                                    for state in group3_update.fvg_transitions
+                                ),
+                                *(
+                                    "order_block:"
+                                    f"{state.order_block_id}"
+                                    for state in (
+                                        group3_update.order_block_transitions
+                                    )
+                                ),
+                            )
+                        ),
                     ),
                     asof=update.asof,
                 )
@@ -4851,12 +5163,17 @@ class CausalObserver:
             if not frame.ready:
                 anomalies.append(f"warmup_{timeframe.value}")
         anomalies.extend(execution.anomalies)
-        if self.config.materialize_event_view:
-            incomplete_timeline_keys = (
-                self.memory.incomplete_entity_keys()
+        incomplete_timeline_keys = (
+            self.memory.incomplete_entity_keys()
+            if (
+                self.config.materialize_event_view
+                or self.config.eye_authority_mode
             )
-            if incomplete_timeline_keys:
-                anomalies.append("clock_incomplete_entity_timeline")
+            else ()
+        )
+        if incomplete_timeline_keys:
+            anomalies.append("clock_incomplete_entity_timeline")
+        if self.config.materialize_event_view:
             event_durations_minutes, event_ages_minutes = (
                 self.memory.temporal_metrics(update.asof)
             )
@@ -4908,6 +5225,11 @@ class CausalObserver:
                     )
                     else ()
                 ),
+                group3_order_block_funnel=(
+                    ()
+                    if group3_update is None
+                    else group3_update.order_block_funnel
+                ),
                 manipulations=(
                     ()
                     if group4_update is None
@@ -4940,6 +5262,16 @@ class CausalObserver:
                     ()
                     if group4_update is None
                     else group4_update.atr_unready_sweep_item_ids
+                ),
+                group4_source_dispositions=(
+                    ()
+                    if group4_update is None
+                    else group4_update.source_dispositions
+                ),
+                group4_range_funnel=(
+                    ()
+                    if group4_update is None
+                    else group4_update.range_funnel
                 ),
                 group5_typed_available=(
                     self._group5_reducer is not None

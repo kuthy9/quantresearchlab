@@ -24,6 +24,9 @@ from smc_trader.model import (
     LiquidityPoolLifecycle,
     LiquidityPoolState,
     ManipulationLifecycle,
+    ManipulationSourceDispositionKind,
+    RANGE_MATURITY_GATE_NAMES,
+    RANGE_PAIR_FUNNEL_COUNTS,
     SupportResistanceLifecycle,
     SupportResistanceState,
     Timeframe,
@@ -313,6 +316,22 @@ def _frozen_range_geometry(
     )
 
 
+def _source_dispositions(
+    output: Group4Update,
+) -> dict[str, ManipulationSourceDispositionKind]:
+    result = {
+        item.source_inventory_item_id: item.disposition
+        for item in output.source_dispositions
+    }
+    assert len(result) == len(output.source_dispositions)
+    return result
+
+
+def _range_funnel(output: Group4Update):
+    assert len(output.range_funnel) == 1
+    return output.range_funnel[0]
+
+
 def test_group4_protocol_tracks_current_config_and_upstream_binding() -> None:
     protocol = _protocol()
     payload = json.loads(PROTOCOL_PATH.read_bytes())
@@ -423,6 +442,67 @@ def test_h1_range_forms_matures_breaks_and_never_rewrites_geometry() -> None:
     assert len(broken_output.range_boundary_inventory) == 2
 
 
+def test_range_funnel_conserves_pair_selection_and_actual_gate_margins() -> None:
+    tracker = CausalGroup4Tracker(_protocol())
+    zones = (_zone("support"), _zone("resistance"))
+    _warm_h1(tracker)
+
+    formed_output = tracker.on_completed_h1(
+        _h1(14, close=99.75, span=1.0),
+        zones,
+    )
+    formed = formed_output.dealing_ranges[-1]
+    funnel = _range_funnel(formed_output)
+    assert tuple(name for name, _ in funnel.pair_counts) == (
+        RANGE_PAIR_FUNNEL_COUNTS
+    )
+    assert dict(funnel.pair_counts) == {
+        "live_structural_pairs": 1,
+        "invalid_geometry_pairs": 0,
+        "geometry_valid_pairs": 1,
+        "close_outside_pair_pairs": 0,
+        "already_admitted_pairs": 0,
+        "cold_start_blocked_pairs": 0,
+        "same_bar_terminal_blocked_pairs": 0,
+        "live_range_blocked_pairs": 0,
+        "atr_unready_pairs": 0,
+        "eligible_pairs": 1,
+        "forming_selected": 1,
+    }
+    assert funnel.selected_source_pair_ids == (
+        zones[0].zone_id,
+        zones[1].zone_id,
+    )
+    assert funnel.selected_range_id == formed.range_id
+    assert funnel.maturity_range_id is None
+    assert funnel.maturity_gates == ()
+
+    continued_output = tracker.on_completed_h1(
+        _h1(15, close=100.25, span=1.0),
+        zones,
+    )
+    continued = continued_output.dealing_ranges[-1]
+    gate = _range_funnel(continued_output)
+    assert gate.selected_source_pair_ids is None
+    assert dict(gate.pair_counts)["already_admitted_pairs"] == 1
+    assert gate.maturity_range_id == formed.range_id
+    assert tuple(name for name, *_ in gate.maturity_gates) == (
+        RANGE_MATURITY_GATE_NAMES
+    )
+    rows = {
+        name: (actual, threshold, margin)
+        for name, actual, threshold, margin in gate.maturity_gates
+    }
+    assert rows["duration"] == pytest.approx((2.0, 8.0, -0.75))
+    assert rows["bilateral_touches"] == pytest.approx((2.0, 2.0, 0.0))
+    assert gate.unmet_maturity_gates == tuple(
+        name
+        for name in RANGE_MATURITY_GATE_NAMES
+        if rows[name][2] < 0.0
+    )
+    assert continued.lifecycle is DealingRangeLifecycle.FORMING
+
+
 def test_mature_range_owns_a_same_price_sweep_over_a_local_pool() -> None:
     tracker, _, mature = _mature_range(_protocol())
     pool, pool_inventory = _pool(
@@ -494,6 +574,11 @@ def test_cold_existing_range_pair_waits_for_a_new_source_identity() -> None:
         zones,
     )
     assert blocked.dealing_ranges == ()
+    blocked_funnel = _range_funnel(blocked)
+    assert dict(blocked_funnel.pair_counts)[
+        "cold_start_blocked_pairs"
+    ] == 1
+    assert dict(blocked_funnel.pair_counts)["forming_selected"] == 0
     still_blocked = tracker.on_completed_h1(
         _h1(15, close=100.0),
         zones,
@@ -510,6 +595,33 @@ def test_cold_existing_range_pair_waits_for_a_new_source_identity() -> None:
     ).dealing_ranges[-1]
     assert formed.lifecycle is DealingRangeLifecycle.FORMING
     assert formed.lower_source_zone_id == fresh_support.zone_id
+
+
+def test_range_funnel_counts_new_pair_blocked_by_existing_live_range() -> None:
+    tracker = CausalGroup4Tracker(_protocol())
+    support = _zone("support")
+    resistance = _zone("resistance")
+    _warm_h1(tracker)
+    tracker.on_completed_h1(
+        _h1(14, close=99.75, span=1.0),
+        (support, resistance),
+    )
+    fresh_support = replace(
+        support,
+        zone_id="zone:support:fresh-live-block",
+    )
+
+    output = tracker.on_completed_h1(
+        _h1(15, close=100.25, span=1.0),
+        (support, fresh_support, resistance),
+    )
+
+    counts = dict(_range_funnel(output).pair_counts)
+    assert counts["live_structural_pairs"] == 2
+    assert counts["geometry_valid_pairs"] == 2
+    assert counts["already_admitted_pairs"] == 1
+    assert counts["live_range_blocked_pairs"] == 1
+    assert counts["forming_selected"] == 0
 
 
 def test_pool_source_must_exist_before_bar_then_reentry_must_hold() -> None:
@@ -858,6 +970,248 @@ def test_dual_side_sweep_is_ambiguous_and_creates_no_manipulation() -> None:
     assert output.ambiguous_sweep_item_ids == tuple(
         sorted((upper_item.item_id, lower_item.item_id))
     )
+    assert _source_dispositions(output) == {
+        upper_item.item_id: (
+            ManipulationSourceDispositionKind.AMBIGUOUS_DUAL_SIDE
+        ),
+        lower_item.item_id: (
+            ManipulationSourceDispositionKind.AMBIGUOUS_DUAL_SIDE
+        ),
+    }
+
+
+def test_raw_crossed_sources_reject_missing_prior_or_stale_source() -> None:
+    confirmed_at = M1_BASE - pd.Timedelta(minutes=1)
+    pool, item = _pool(
+        "above",
+        confirmed_at=confirmed_at,
+        identity="cold-prior",
+    )
+    cold = CausalGroup4Tracker(_protocol()).on_completed_update(
+        _m1(0, close=100.0, high=101.25),
+        prior_inventory=(item,),
+        liquidity_pools=(pool,),
+    )
+    assert cold.manipulations == ()
+    assert _source_dispositions(cold) == {
+        item.item_id: (
+            ManipulationSourceDispositionKind.REJECTED_PRIOR_CLOSE
+        )
+    }
+
+    stale_tracker = CausalGroup4Tracker(_protocol())
+    _warm_m1(stale_tracker)
+    stale = stale_tracker.on_completed_update(
+        _m1(15, close=100.0, high=101.25),
+        prior_inventory=(item,),
+        liquidity_pools=(),
+    )
+    assert stale.manipulations == ()
+    assert _source_dispositions(stale) == {
+        item.item_id: (
+            ManipulationSourceDispositionKind.REJECTED_SOURCE_MISSING_OR_STALE
+        )
+    }
+
+
+def test_duplicate_source_identity_is_rejected_before_partial_commit() -> None:
+    confirmed_at = M1_BASE - pd.Timedelta(minutes=1)
+    pool, item = _pool(
+        "above",
+        confirmed_at=confirmed_at,
+        identity="duplicate-source",
+    )
+    tracker = CausalGroup4Tracker(_protocol())
+    _warm_m1(tracker)
+    last_end = tracker.last_m1_end
+
+    with pytest.raises(
+        ValueError,
+        match="inventory source identity repeats",
+    ):
+        tracker.on_completed_update(
+            _m1(15, close=100.0, high=101.25),
+            prior_inventory=(item, item),
+            liquidity_pools=(pool,),
+        )
+
+    assert tracker.last_m1_end == last_end
+
+
+def test_same_side_sources_are_conserved_as_primary_and_secondaries() -> None:
+    confirmed_at = M1_BASE - pd.Timedelta(minutes=1)
+    primary_pool, primary_item = _pool(
+        "above",
+        confirmed_at=confirmed_at,
+        identity="a-primary",
+    )
+    coincident_pool, coincident_item = _pool(
+        "above",
+        confirmed_at=confirmed_at,
+        identity="b-coincident",
+    )
+    far_pool, far_item = _pool(
+        "above",
+        confirmed_at=confirmed_at,
+        identity="c-far",
+    )
+    far_pool = replace(
+        far_pool,
+        lower_bound=101.25,
+        upper_bound=101.5,
+        midpoint=101.375,
+    )
+    far_item = replace(
+        far_item,
+        price=101.5,
+        lower_bound=101.25,
+        upper_bound=101.5,
+    )
+    tracker = CausalGroup4Tracker(_protocol())
+    _warm_m1(tracker)
+    output = tracker.on_completed_update(
+        _m1(15, close=100.0, high=102.0),
+        prior_inventory=(
+            primary_item,
+            coincident_item,
+            far_item,
+        ),
+        liquidity_pools=(
+            primary_pool,
+            coincident_pool,
+            far_pool,
+        ),
+    )
+
+    assert len(output.manipulation_transitions) == 1
+    assert _source_dispositions(output) == {
+        primary_item.item_id: (
+            ManipulationSourceDispositionKind.SELECTED_PRIMARY
+        ),
+        coincident_item.item_id: (
+            ManipulationSourceDispositionKind.ATTACHED_COINCIDENT_SECONDARY
+        ),
+        far_item.item_id: (
+            ManipulationSourceDispositionKind.ATTACHED_SAME_SIDE_SECONDARY
+        ),
+    }
+    assert len(output.source_dispositions) == 3
+
+
+def test_existing_live_and_same_bar_resolution_block_new_sources() -> None:
+    confirmed_at = M1_BASE - pd.Timedelta(minutes=1)
+    live_pool, live_item = _pool(
+        "above",
+        confirmed_at=confirmed_at,
+        identity="live-source",
+    )
+    pending_pool, pending_item = _pool(
+        "above",
+        confirmed_at=confirmed_at,
+        identity="pending-source",
+    )
+    pending_pool = replace(
+        pending_pool,
+        lower_bound=101.25,
+        upper_bound=101.5,
+        midpoint=101.375,
+    )
+    pending_item = replace(
+        pending_item,
+        price=101.5,
+        lower_bound=101.25,
+        upper_bound=101.5,
+    )
+    resolved_pool, resolved_item = _pool(
+        "above",
+        confirmed_at=confirmed_at,
+        identity="resolved-source",
+    )
+    resolved_pool = replace(
+        resolved_pool,
+        lower_bound=101.5,
+        upper_bound=101.75,
+        midpoint=101.625,
+    )
+    resolved_item = replace(
+        resolved_item,
+        price=101.75,
+        lower_bound=101.5,
+        upper_bound=101.75,
+    )
+    pools = (live_pool, pending_pool, resolved_pool)
+    tracker = CausalGroup4Tracker(_protocol())
+    _warm_m1(tracker)
+    created = tracker.on_completed_update(
+        _m1(15, close=101.25, high=101.5),
+        prior_inventory=(live_item,),
+        liquidity_pools=pools,
+    )
+    assert _source_dispositions(created) == {
+        live_item.item_id: (
+            ManipulationSourceDispositionKind.SELECTED_PRIMARY
+        )
+    }
+
+    still_live = tracker.on_completed_update(
+        _m1(16, close=100.0, high=101.75),
+        prior_inventory=(pending_item,),
+        liquidity_pools=pools,
+    )
+    assert _source_dispositions(still_live) == {
+        pending_item.item_id: (
+            ManipulationSourceDispositionKind.BLOCKED_EXISTING_LIVE
+        )
+    }
+
+    resolved_same_bar = tracker.on_completed_update(
+        _m1(17, close=100.0, high=102.0),
+        prior_inventory=(resolved_item,),
+        liquidity_pools=pools,
+    )
+    assert len(resolved_same_bar.manipulation_transitions) == 1
+    assert (
+        resolved_same_bar.manipulation_transitions[0].lifecycle
+        is ManipulationLifecycle.REACCEPTED
+    )
+    assert _source_dispositions(resolved_same_bar) == {
+        resolved_item.item_id: (
+            ManipulationSourceDispositionKind.BLOCKED_LIVE_RESOLVED_SAME_BAR
+        )
+    }
+
+
+def test_same_clock_range_invalidation_has_one_source_disposition() -> None:
+    tracker, _, mature = _mature_range(_protocol())
+    assert mature.mature_at is not None
+    completed_h1 = _h1(22, close=102.0, span=0.25)
+    base = completed_h1.end - pd.Timedelta(minutes=16)
+    inventory = tracker.snapshot().range_boundary_inventory
+    _warm_m1(
+        tracker,
+        base=base,
+        inventory=inventory,
+    )
+    upper = next(item for item in inventory if item.side == "above")
+    output = tracker.on_completed_update(
+        _m1(15, base=base, close=100.0, high=101.25),
+        prior_inventory=tracker.snapshot().range_boundary_inventory,
+        liquidity_pools=(),
+        completed_h1=completed_h1,
+        h1_support_resistance=(_zone("support"), _zone("resistance")),
+    )
+
+    assert output.manipulations == ()
+    assert any(
+        state.range_id == mature.range_id
+        and state.lifecycle is DealingRangeLifecycle.BROKEN
+        for state in output.range_transitions
+    )
+    assert _source_dispositions(output) == {
+        upper.item_id: (
+            ManipulationSourceDispositionKind.REJECTED_RANGE_INVALIDATED_SAME_CLOCK
+        )
+    }
 
 
 def test_range_inventory_sweep_and_hard_boundary_preserve_typed_terminals() -> None:
@@ -1019,6 +1373,10 @@ def test_cold_sweep_without_prior_atr_is_unclassified_and_advances() -> None:
     assert output.manipulations == ()
     assert output.ambiguous_sweep_item_ids == ()
     assert set(output.atr_unready_sweep_item_ids) == crossed_ids
+    assert _source_dispositions(output) == {
+        item_id: ManipulationSourceDispositionKind.ATR_UNREADY
+        for item_id in crossed_ids
+    }
     assert tracker.last_m1_end == sweep.end
     retained = {
         item.item_id: item

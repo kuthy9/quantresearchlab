@@ -556,6 +556,26 @@ def test_five_scale_visual_exposes_temporal_market_reading(
     assert artifact.path.is_file()
 
 
+def test_eye_only_visual_renders_typed_observation_without_brain(
+    tmp_path,
+) -> None:
+    snapshot = _scene_reading_snapshot()
+    histories = _scene_reading_histories()
+
+    artifact = DecisionVisualizer().render_observation(
+        snapshot.observation,
+        histories,
+        tmp_path / "eye-only-observation.png",
+        case_id="eye-case-001",
+    )
+
+    assert artifact.kind == "eye_observation"
+    assert artifact.decision_id == "eye-case-001"
+    assert artifact.maximum_market_time == snapshot.observation.asof
+    assert artifact.hypothesis_key is None
+    assert artifact.path.is_file()
+
+
 def test_five_scale_history_validation_fails_closed_when_m15_is_missing() -> None:
     snapshot = _scene_reading_snapshot()
     histories = _scene_reading_histories()
@@ -591,6 +611,10 @@ def test_visual_exposes_liquidity_route_roles() -> None:
         terminal_draw_id="draw:h4-terminal",
         path_blocker_ids=("blocker:h1-opposing-pool",),
         source_path_ids=("path:h4-to-h1-to-m15",),
+        range_context_id="range:h1-balance",
+        range_midpoint=100.0,
+        swept_range_boundary_id="range-boundary:upper",
+        opposing_range_boundary_id="range-boundary:lower",
     )
     routed_hypothesis = replace(
         hypothesis,
@@ -609,6 +633,10 @@ def test_visual_exposes_liquidity_route_roles() -> None:
     assert f"primary deliverable {target.level_id}" in text
     assert "terminal draw draw:h4-terminal" in text
     assert "path blockers blocker:h1-opposing-pool" in text
+    assert "optional range context range:h1-balance" in text
+    assert "range midpoint/value 100.00" in text
+    assert "swept range boundary range-boundary:upper" in text
+    assert "opposing range liquidity range-boundary:lower" in text
     assert _liquidity_route_text(route) in text
 
 

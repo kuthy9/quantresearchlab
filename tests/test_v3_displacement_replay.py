@@ -8,7 +8,14 @@ from smc_trader.calibration_replay import ReplayCheckpointStore
 from smc_trader.causal import CausalMarketReader, ReaderUpdate
 from smc_trader.displacement import DisplacementLifecycle, DisplacementProtocol
 from smc_trader.displacement_observer import CausalDisplacementEye, READER_ANOMALY_WHITELIST
-from smc_trader.model import Bar, Candle, EventKind, MarketEvent, Timeframe
+from smc_trader.model import (
+    Bar,
+    Candle,
+    EventKind,
+    MarketEvent,
+    OrderBlockAttemptOutcome,
+    Timeframe,
+)
 from smc_trader.observation import CausalObserver, EventMemory, ObserverConfig
 
 from .helpers import (
@@ -270,13 +277,22 @@ def test_group3_derived_data_anomaly_is_auditable_without_memory_leak() -> None:
         )
     )
     index = 0
+    warm_observation = None
     for _ in range(15):
         candle = _m5(
             index,
             (100.0, 101.0, 100.0, 100.0),
         )
-        observer.observe(_update(candle.end, m5=(candle,)))
+        warm_observation = observer.observe(
+            _update(candle.end, m5=(candle,))
+        )
         index += 1
+    assert warm_observation is not None
+    assert len(warm_observation.group3_order_block_funnel) == 1
+    assert (
+        warm_observation.group3_order_block_funnel[0].outcome
+        is OrderBlockAttemptOutcome.NO_ACTIVE_DISPLACEMENT
+    )
     for values in (
         (100.0, 100.5, 99.5, 100.0),
         (100.0, 101.5, 100.0, 101.5),

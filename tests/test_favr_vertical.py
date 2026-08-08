@@ -17,6 +17,7 @@ from smc_trader.model import (
     LiquidityInventoryLifecycle,
     ManipulationLifecycle,
     MarketEvent,
+    PathSequenceLifecycle,
     Playbook,
     PlaybookPhase,
     Timeframe,
@@ -41,7 +42,9 @@ from .test_v4_typed_vertical import (
     _execution,
     _fvg,
     _group5_protocol,
+    _brain,
     _m1,
+    _lsr_observation,
     _opposed_m5_bos,
 )
 
@@ -267,6 +270,208 @@ def _favr_fixture():
 def _favr_observation():
     observation, mature, manipulation, _, _, _, _ = _favr_fixture()
     return observation, mature, manipulation
+
+
+def test_lsr_optional_range_context_enriches_route_without_becoming_gate() -> None:
+    base = _lsr_observation()
+    tracker, _, mature = _mature_range(_group4_protocol())
+    range_inventory = tracker.snapshot().range_boundary_inventory
+    swept_boundary = next(
+        item for item in range_inventory if item.side == "above"
+    )
+    opposing_boundary = next(
+        item for item in range_inventory if item.side == "below"
+    )
+    manipulation = base.manipulations[0]
+    contextual_manipulation = replace(
+        manipulation,
+        coincident_source_ids=(mature.range_id,),
+        crossed_source_ids=(
+            manipulation.source_id,
+            mature.range_id,
+        ),
+    )
+    consumed_swept_boundary = replace(
+        swept_boundary,
+        lifecycle=LiquidityInventoryLifecycle.CONSUMED,
+        consumed_at=manipulation.swept_at,
+        lifecycle_reason="range_boundary_consumed",
+    )
+    frames = dict(base.frames)
+    frames[Timeframe.H1] = replace(
+        frames[Timeframe.H1],
+        dealing_ranges=(mature,),
+    )
+    contextual = replace(
+        base,
+        frames=frames,
+        liquidity_inventory=(
+            *base.liquidity_inventory,
+            consumed_swept_boundary,
+            opposing_boundary,
+        ),
+        manipulations=(contextual_manipulation,),
+    )
+
+    baseline = _brain().update(base).hypotheses[
+        "liquidity_sweep_reversal:short"
+    ]
+    hypothesis = _brain().update(contextual).hypotheses[
+        "liquidity_sweep_reversal:short"
+    ]
+
+    assert baseline.phase is PlaybookPhase.EXECUTABLE
+    assert hypothesis.phase is baseline.phase
+    assert hypothesis.hard_gate_results == baseline.hard_gate_results
+    assert all(hypothesis.hard_gate_results.values())
+    context_evidence = {
+        item.primitive: item.value for item in hypothesis.supporting
+    }
+    assert context_evidence["mature_range_context_visible"] > 0.0
+    assert context_evidence["opposing_range_boundary_visible"] == 1.0
+    assert hypothesis.liquidity_route is not None
+    route = hypothesis.liquidity_route
+    assert route.range_context_id == mature.range_id
+    assert route.range_midpoint == mature.midpoint
+    assert route.swept_range_boundary_id == swept_boundary.item_id
+    assert route.opposing_range_boundary_id == opposing_boundary.item_id
+    assert route.context_draw_id == opposing_boundary.item_id
+    assert mature.range_id in route.source_path_ids
+    assert opposing_boundary.item_id in route.source_path_ids
+    assert baseline.liquidity_route is not None
+    assert baseline.liquidity_route.range_context_id is None
+
+
+def test_lsr_optional_range_context_loss_does_not_invalidate_core_episode() -> None:
+    base = _lsr_observation()
+    tracker, _, mature = _mature_range(_group4_protocol())
+    range_inventory = tracker.snapshot().range_boundary_inventory
+    swept_boundary = next(
+        item for item in range_inventory if item.side == "above"
+    )
+    opposing_boundary = next(
+        item for item in range_inventory if item.side == "below"
+    )
+    manipulation = base.manipulations[0]
+    contextual_manipulation = replace(
+        manipulation,
+        coincident_source_ids=(mature.range_id,),
+        crossed_source_ids=(
+            manipulation.source_id,
+            mature.range_id,
+        ),
+    )
+    consumed_swept_boundary = replace(
+        swept_boundary,
+        lifecycle=LiquidityInventoryLifecycle.CONSUMED,
+        consumed_at=manipulation.swept_at,
+        lifecycle_reason="range_boundary_consumed",
+    )
+    frames = dict(base.frames)
+    frames[Timeframe.H1] = replace(
+        frames[Timeframe.H1],
+        dealing_ranges=(mature,),
+    )
+    location = replace(
+        base.entry_locations[0],
+        lifecycle=EntryLocationLifecycle.APPROACHING,
+        state_started_at=base.entry_locations[0].formed_at,
+        last_updated_at=base.entry_locations[0].formed_at,
+        age_real_1m_bars=0,
+        state_duration_real_1m_bars=0,
+        current_price=100.50,
+        distance_to_zone_points=0.50,
+        distance_to_failure_points=1.50,
+        first_entered_at=None,
+        entry_mode=None,
+        contact_reference_price=None,
+        first_penetration_fraction=0.0,
+        transition_reason="departure_confirmed",
+    )
+    pool_path = next(
+        path
+        for path in base.path_sequences
+        if path.context_kind == "pool_reversal"
+    )
+    zone_path = next(
+        path
+        for path in base.path_sequences
+        if path.context_kind == "zone_return"
+    )
+    waiting_zone_path = replace(
+        zone_path,
+        lifecycle=PathSequenceLifecycle.ACTIVE,
+        state_started_at=zone_path.formed_at,
+        last_updated_at=zone_path.formed_at,
+        age_real_1m_bars=0,
+        state_duration_real_1m_bars=0,
+        steps=zone_path.steps[:2],
+        ended_at=None,
+        transition_reason="departure_confirmed",
+    )
+    contextual = replace(
+        base,
+        frames=frames,
+        liquidity_inventory=(
+            *base.liquidity_inventory,
+            consumed_swept_boundary,
+            opposing_boundary,
+        ),
+        manipulations=(contextual_manipulation,),
+        entry_locations=(location,),
+        qualified_reacceptances=(),
+        micro_bos_references=tuple(
+            reference
+            for reference in base.micro_bos_references
+            if reference.context_kind == "pool_reversal"
+        ),
+        path_sequences=(pool_path, waiting_zone_path),
+    )
+    brain = _brain()
+    first = brain.update(contextual).hypotheses[
+        "liquidity_sweep_reversal:short"
+    ]
+    assert first.phase is PlaybookPhase.WAITING_LOCATION
+    assert first.liquidity_route is not None
+    assert first.liquidity_route.range_context_id == mature.range_id
+
+    later = contextual.asof + pd.Timedelta(minutes=24)
+    broken_range = replace(
+        mature,
+        lifecycle=DealingRangeLifecycle.BROKEN,
+        broken_at=later,
+        state_started_at=later,
+        last_updated_at=later,
+        transition_reason="close_beyond_frozen_range",
+    )
+    later_frames = {
+        timeframe: replace(
+            frame,
+            cutoff=later,
+            **(
+                {"dealing_ranges": (broken_range,)}
+                if timeframe is Timeframe.H1
+                else {}
+            ),
+        )
+        for timeframe, frame in contextual.frames.items()
+    }
+    without_optional_context = replace(
+        contextual,
+        asof=later,
+        frames=later_frames,
+        execution=_execution(later, cost=0.025),
+    )
+    updated = brain.update(without_optional_context).hypotheses[
+        "liquidity_sweep_reversal:short"
+    ]
+
+    assert updated.phase is PlaybookPhase.WAITING_LOCATION
+    assert updated.hard_gate_results == first.hard_gate_results
+    assert updated.invalidation == first.invalidation
+    assert updated.setup_context_id == first.setup_context_id
+    assert updated.liquidity_route is not None
+    assert updated.liquidity_route.range_context_id is None
 
 
 def _favr_causal_histories(observation):

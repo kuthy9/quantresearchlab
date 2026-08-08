@@ -29,6 +29,8 @@ from smc_trader.model import (
     Direction,
     FairValueGapLifecycle,
     FVGQualification,
+    ORDER_BLOCK_FUNNEL_STAGES,
+    OrderBlockAttemptOutcome,
     OrderBlockLifecycle,
     Timeframe,
 )
@@ -255,6 +257,11 @@ def _order_block_by_id(output, entity_id: str):
         for state in output.order_blocks
         if state.order_block_id == entity_id
     )
+
+
+def _order_block_attempt(output):
+    assert len(output.order_block_funnel) == 1
+    return output.order_block_funnel[0]
 
 
 def _confirmed_bos(
@@ -1101,6 +1108,12 @@ def test_order_block_uses_latest_reverse_bar_and_new_confirmed_bos(
         and creation_candle.high >= state.lower_bound
     )
     assert output.order_block_transitions == (state,)
+    attempt = _order_block_attempt(output)
+    assert attempt.observed_at == creation_candle.end
+    assert attempt.outcome is OrderBlockAttemptOutcome.CREATED
+    assert attempt.stages == tuple(
+        (name, 1) for name in ORDER_BLOCK_FUNNEL_STAGES
+    )
 
     retried = harness.group3.on_completed_5m(
         creation_candle,
@@ -1234,6 +1247,15 @@ def test_order_block_never_expands_seed_window_to_bar_65() -> None:
     )[-1]
     assert output.order_blocks == ()
     assert output.order_block_transitions == ()
+    attempt = _order_block_attempt(output)
+    assert (
+        attempt.outcome
+        is OrderBlockAttemptOutcome.REVERSE_ANCHOR_CLUSTER_MISSING
+    )
+    assert dict(attempt.stages)[
+        "break_bar_belongs_to_displacement"
+    ] == 1
+    assert dict(attempt.stages)["reverse_anchor_cluster_found"] == 0
 
 
 def test_order_block_started_displacement_is_not_qualified() -> None:
@@ -1262,6 +1284,15 @@ def test_order_block_started_displacement_is_not_qualified() -> None:
         is DisplacementLifecycle.STARTED
     )
     assert output.order_blocks == ()
+    attempt = _order_block_attempt(output)
+    assert (
+        attempt.outcome
+        is OrderBlockAttemptOutcome.NO_ACTIVE_DISPLACEMENT
+    )
+    assert dict(attempt.stages) == dict.fromkeys(
+        ORDER_BLOCK_FUNNEL_STAGES,
+        0,
+    )
 
 
 @pytest.mark.parametrize(
@@ -1307,6 +1338,10 @@ def test_order_block_bos_direction_and_clock_gates_fail_closed(
     )
     assert output.order_blocks == ()
     assert output.order_block_transitions == ()
+    attempt = _order_block_attempt(output)
+    assert attempt.outcome is OrderBlockAttemptOutcome.NO_COMPATIBLE_BOS
+    assert dict(attempt.stages)["active_displacement"] == 1
+    assert dict(attempt.stages)["compatible_bos"] == 0
 
 
 def test_order_block_rejects_future_or_wrong_timeframe_bos_source() -> None:
@@ -1332,6 +1367,44 @@ def test_order_block_rejects_future_or_wrong_timeframe_bos_source() -> None:
     )
     with pytest.raises(ValueError, match="contract-bound BOS"):
         _bos_source(wrong_timeframe, candle=candle)
+
+
+def test_order_block_funnel_separates_compatible_bos_from_membership() -> None:
+    harness, _, candle, displacement = _prepare_order_block_evidence()
+    source = _bos_source(
+        _confirmed_bos(
+            clock=candle.end,
+            direction=Direction.LONG,
+        ),
+        candle=candle,
+    )
+    source = replace(
+        source,
+        state=replace(
+            source.state,
+            break_bar_id="foreign-completed-break-bar",
+        ),
+    )
+
+    output = harness.group3.on_completed_5m(
+        candle,
+        displacement,
+        (source,),
+    )
+
+    attempt = _order_block_attempt(output)
+    assert (
+        attempt.outcome
+        is OrderBlockAttemptOutcome.BREAK_BAR_NOT_IN_DISPLACEMENT
+    )
+    assert dict(attempt.stages) == {
+        "active_displacement": 1,
+        "compatible_bos": 1,
+        "break_bar_belongs_to_displacement": 0,
+        "reverse_anchor_cluster_found": 0,
+        "unique_eligible_bos": 0,
+        "ob_created": 0,
+    }
 
 
 @pytest.mark.parametrize(
@@ -1396,6 +1469,19 @@ def test_order_block_ambiguous_bos_does_not_consume_displacement() -> None:
         tuple(_bos_source(bos, candle=candle) for bos in ambiguous),
     )
     assert first.order_blocks == ()
+    attempt = _order_block_attempt(first)
+    assert (
+        attempt.outcome
+        is OrderBlockAttemptOutcome.DUPLICATE_ELIGIBLE_BOS
+    )
+    assert dict(attempt.stages) == {
+        "active_displacement": 1,
+        "compatible_bos": 2,
+        "break_bar_belongs_to_displacement": 2,
+        "reverse_anchor_cluster_found": 1,
+        "unique_eligible_bos": 0,
+        "ob_created": 0,
+    }
 
     next_candle = _candle(
         harness.index,

@@ -182,6 +182,83 @@
           "end_exclusive": "2024-01-01T00:00:00-05:00"
         }
       ]
+    },
+    "eye_group1_5_natural_authority_2023_full_year": {
+      "purpose": "Registered outcome-blind 2023 full-eye natural-authority scan for Group1-5 plus Displacement; calibration-period prices are used only for primitive identity, lifecycle, ordering and transport coverage.",
+      "runner_mode": "eye_only_all_registered_semantics",
+      "timezone": "America/New_York",
+      "warmup_calendar_days": 7,
+      "allowed_ohlcv_role": "calibration",
+      "registered_calibration_exception": "outcome_blind_natural_authority_only",
+      "allow_data_gap_reset": true,
+      "threshold_search": false,
+      "outcome_fields_used": false,
+      "pnl_used": false,
+      "future_path_used": false,
+      "mbo_used": false,
+      "brain_used": false,
+      "decision_used": false,
+      "risk_used": false,
+      "execution_used": false,
+      "project_scene_graph": false,
+      "materialize_event_view": false,
+      "execution_reality_status": "not_evaluated",
+      "include_all_pool_source_timeframes": true,
+      "pool_source_timeframes": ["4H", "1H", "15m", "5m", "1m"],
+      "model_config": "configs/model.json",
+      "protocols": {
+        "group12": "configs/primitives_structure_liquidity.json",
+        "displacement": "configs/primitives_displacement.json",
+        "group3": "configs/primitives_zones.json",
+        "group4": "configs/primitives_range.json",
+        "group5": "configs/primitives_entry.json"
+      },
+      "mature_range_target": {
+        "semantic_name": "MatureBalanceRange",
+        "definition_class": "A",
+        "meaning": "rare high-quality persistent H1 balance or accumulation, not a generic H1 dealing range",
+        "systematic_miss_requires": [
+          "stable bilateral boundaries are visible",
+          "multiple internal rotations are visible",
+          "no sustained one-way delivery dominates the interval",
+          "the balance persists for multiple completed H1 bars",
+          "different-month cases are repeatedly rejected for the same gate or source-identity reason"
+        ]
+      },
+      "blind_case_sampling": {
+        "minimum_cases": 20,
+        "maximum_cases": 40,
+        "selection_method": "all_recognized_mature_first_smallest_sha256_then_registered_strata_round_robin_with_global_episode_uniqueness",
+        "future_hidden_on_first_review": true,
+        "categories": [
+          "all_recognized_mature",
+          "obvious_mature_looking_but_rejected",
+          "near_mature_single_gate",
+          "multiple_gate_rejected",
+          "forming_reasonably_broken",
+          "source_identity_or_reset_failure",
+          "mature_range_manipulation",
+          "group5_complete_path",
+          "group5_interrupted_path"
+        ]
+      },
+      "stopping_rules": [
+        "isolated anomalies do not change a definition",
+        "one repeated semantic miss across different months permits at most one conceptual repair",
+        "a repair is checked on a different frozen window rather than retuning 2023",
+        "a sparse but visually accurate MatureBalanceRange remains a rare context",
+        "an unstable MatureBalanceRange remains parked and FAVR may only become an optional LSR range context"
+      ],
+      "checkpoint_every_completed_1m": 25000,
+      "permanent_result_path": "docs/evidence/eye_group1_5_natural_authority_2023_summary.json",
+      "permanent_case_index_path": "docs/evidence/eye_group1_5_natural_authority_2023_cases.json",
+      "windows": [
+        {
+          "id": "2023-full-year-eye",
+          "start": "2023-01-01T00:00:00-05:00",
+          "end_exclusive": "2024-01-01T00:00:00-05:00"
+        }
+      ]
     }
   },
   "leakage_rules": [

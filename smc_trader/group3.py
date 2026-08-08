@@ -27,6 +27,9 @@ from .model import (
     FVGQualification,
     FairValueGapLifecycle,
     FairValueGapState,
+    ORDER_BLOCK_FUNNEL_STAGES,
+    OrderBlockAttemptOutcome,
+    OrderBlockFunnelSnapshot,
     OrderBlockLifecycle,
     OrderBlockState,
     Timeframe,
@@ -122,6 +125,7 @@ class Group3Update:
     order_blocks: tuple[OrderBlockState, ...]
     fvg_transitions: tuple[FairValueGapState, ...] = ()
     order_block_transitions: tuple[OrderBlockState, ...] = ()
+    order_block_funnel: tuple[OrderBlockFunnelSnapshot, ...] = ()
     boundary_reason: str | None = None
 
     def __post_init__(self) -> None:
@@ -130,6 +134,7 @@ class Group3Update:
             "order_blocks",
             "fvg_transitions",
             "order_block_transitions",
+            "order_block_funnel",
         ):
             object.__setattr__(self, name, tuple(getattr(self, name)))
         if (
@@ -139,7 +144,9 @@ class Group3Update:
         ):
             raise ValueError("unregistered Group 3 update boundary")
         if self.boundary_reason in WINDOW_RESET_REASONS and (
-            self.fvg_transitions or self.order_block_transitions
+            self.fvg_transitions
+            or self.order_block_transitions
+            or self.order_block_funnel
         ):
             raise ValueError(
                 "soft Group 3 boundary cannot emit terminal transitions"
@@ -160,6 +167,21 @@ class Group3Update:
             raise ValueError(
                 "hard Group 3 boundary transition is inconsistent"
             )
+        if any(
+            not isinstance(item, OrderBlockFunnelSnapshot)
+            for item in self.order_block_funnel
+        ):
+            raise TypeError("Group 3 OB funnel record is not typed")
+        if self.boundary_reason is not None and self.order_block_funnel:
+            raise ValueError("Group 3 boundary cannot emit an OB funnel")
+        funnel_clocks = tuple(
+            item.observed_at for item in self.order_block_funnel
+        )
+        if (
+            funnel_clocks != tuple(sorted(funnel_clocks))
+            or len(funnel_clocks) != len(set(funnel_clocks))
+        ):
+            raise ValueError("Group 3 OB funnel clocks are invalid")
 
 
 @dataclass(frozen=True)
@@ -367,6 +389,7 @@ class CausalGroup3Tracker:
         self,
         fvg_transitions: Iterable[FairValueGapState] = (),
         order_block_transitions: Iterable[OrderBlockState] = (),
+        order_block_funnel: Iterable[OrderBlockFunnelSnapshot] = (),
         *,
         boundary_reason: str | None = None,
     ) -> Group3Update:
@@ -376,6 +399,7 @@ class CausalGroup3Tracker:
             order_blocks=order_blocks,
             fvg_transitions=tuple(fvg_transitions),
             order_block_transitions=tuple(order_block_transitions),
+            order_block_funnel=tuple(order_block_funnel),
             boundary_reason=boundary_reason,
         )
 
@@ -1213,7 +1237,22 @@ class CausalGroup3Tracker:
         candle: Candle,
         displacement: DisplacementUpdate,
         bos_sources: Iterable[Group3BOSSource],
-    ) -> OrderBlockState | None:
+    ) -> tuple[OrderBlockState | None, OrderBlockFunnelSnapshot]:
+        stage_counts = dict.fromkeys(ORDER_BLOCK_FUNNEL_STAGES, 0)
+
+        def finish(
+            outcome: OrderBlockAttemptOutcome,
+            state: OrderBlockState | None = None,
+        ) -> tuple[OrderBlockState | None, OrderBlockFunnelSnapshot]:
+            return state, OrderBlockFunnelSnapshot(
+                observed_at=candle.end,
+                stages=tuple(
+                    (name, stage_counts[name])
+                    for name in ORDER_BLOCK_FUNNEL_STAGES
+                ),
+                outcome=outcome,
+            )
+
         source = displacement.state
         if (
             source is None
@@ -1221,8 +1260,11 @@ class CausalGroup3Tracker:
             or source.active_at is None
             or source.active_at > candle.end
         ):
-            return None
-        eligible = tuple(
+            return finish(
+                OrderBlockAttemptOutcome.NO_ACTIVE_DISPLACEMENT
+            )
+        stage_counts["active_displacement"] = 1
+        compatible = tuple(
             bos_source
             for bos_source in bos_sources
             if (
@@ -1241,25 +1283,47 @@ class CausalGroup3Tracker:
                     )
                 )
                 and bos_source.state.pending_at <= source.started_at
-                and bos_source.state.break_bar_id
-                in source.admitted_candle_ids
                 and source.started_at
                 <= bos_source.state.resolved_at
                 <= source.prefix_last_admitted_at
             )
         )
+        stage_counts["compatible_bos"] = len(compatible)
+        if not compatible:
+            return finish(OrderBlockAttemptOutcome.NO_COMPATIBLE_BOS)
+        eligible = tuple(
+            bos_source
+            for bos_source in compatible
+            if bos_source.state.break_bar_id
+            in source.admitted_candle_ids
+        )
+        stage_counts[
+            "break_bar_belongs_to_displacement"
+        ] = len(eligible)
         if not eligible:
-            return None
+            return finish(
+                OrderBlockAttemptOutcome.BREAK_BAR_NOT_IN_DISPLACEMENT
+            )
+        candidate = self._ob_candidates.get(source.entity_id)
+        if candidate is None:
+            return finish(
+                OrderBlockAttemptOutcome.REVERSE_ANCHOR_CLUSTER_MISSING
+            )
+        stage_counts["reverse_anchor_cluster_found"] = 1
         if len(eligible) != 1:
-            return None
+            return finish(
+                OrderBlockAttemptOutcome.DUPLICATE_ELIGIBLE_BOS
+            )
+        stage_counts["unique_eligible_bos"] = 1
         bos_source = eligible[0]
         bos = bos_source.state
-        candidate = self._ob_candidates.get(source.entity_id)
         active_transition_id = self._active_transition_ids.get(
             source.entity_id
         )
-        if candidate is None or active_transition_id is None:
-            return None
+        if active_transition_id is None:
+            return finish(
+                OrderBlockAttemptOutcome.ACTIVE_TRANSITION_MISSING
+            )
         anchor = candidate.candle
         lower_bound = min(float(item.low) for item in candidate.cluster)
         upper_bound = max(float(item.high) for item in candidate.cluster)
@@ -1276,7 +1340,9 @@ class CausalGroup3Tracker:
             lower_bound
         )
         if width_ticks <= 0:
-            return None
+            return finish(
+                OrderBlockAttemptOutcome.INVALID_ANCHOR_WIDTH
+            )
         order_block_id = _identity(
             "group3-order-block-v1",
             self.protocol.protocol_hash,
@@ -1289,7 +1355,9 @@ class CausalGroup3Tracker:
             bos.bos_id,
         )
         if order_block_id in self._order_blocks:
-            return None
+            return finish(
+                OrderBlockAttemptOutcome.DUPLICATE_ORDER_BLOCK
+            )
         self._admit_capacity(
             states=self._order_blocks,
             order=self._order_block_order,
@@ -1350,7 +1418,8 @@ class CausalGroup3Tracker:
         )
         self._order_blocks[order_block_id] = state
         self._order_block_order.append(order_block_id)
-        return state
+        stage_counts["ob_created"] = 1
+        return finish(OrderBlockAttemptOutcome.CREATED, state)
 
     def _trim_membership(self) -> None:
         retained_ids = {
@@ -1393,7 +1462,7 @@ class CausalGroup3Tracker:
         created_fvg = self._create_fvg(displacement)
         if created_fvg is not None:
             fvg_transitions.append(created_fvg)
-        created_order_block = self._create_order_block(
+        created_order_block, order_block_funnel = self._create_order_block(
             candle,
             displacement,
             bos_sources,
@@ -1405,6 +1474,7 @@ class CausalGroup3Tracker:
         output = self._update(
             fvg_transitions,
             order_block_transitions,
+            (order_block_funnel,),
         )
         self._mark_terminals_exposed()
         return output

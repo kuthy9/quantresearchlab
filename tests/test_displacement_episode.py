@@ -1,3 +1,4 @@
+import math
 from pathlib import Path
 
 import pandas as pd
@@ -44,6 +45,38 @@ STRUCTURE_HASH = "1" * 64
 
 def _protocol() -> DisplacementProtocol:
     return DisplacementProtocol.from_file(PROTOCOL_PATH)
+
+
+def _expected_activation_ratios(
+    metrics: dict[str, float],
+    protocol: DisplacementProtocol,
+) -> dict[str, float]:
+    return {
+        "activation_episode_bar_count_ratio": (
+            metrics["real_episode_bar_count"]
+            / protocol.activation_min_bar
+        ),
+        "activation_relative_atr_ratio": (
+            metrics["relative_atr"]
+            / protocol.activation_relative_atr
+        ),
+        "activation_efficiency_ratio": (
+            metrics["efficiency"]
+            / protocol.activation_efficiency
+        ),
+        "activation_speed_ratio": (
+            metrics["speed_atr_per_bar"]
+            / protocol.activation_speed
+        ),
+        "activation_mean_body_fraction_ratio": (
+            metrics["mean_body_fraction"]
+            / protocol.activation_mean_body_fraction
+        ),
+        "activation_body_continuity_ratio": (
+            metrics["body_continuity"]
+            / protocol.activation_body_continuity
+        ),
+    }
 
 
 def _candle(
@@ -460,12 +493,13 @@ def test_progress_loss_cannot_same_clock_reseed_same_direction() -> None:
 
 
 def test_observer_preserves_complete_same_update_transition_order_and_state() -> None:
-    eye = CausalDisplacementEye(_protocol())
+    protocol = _protocol()
+    eye = CausalDisplacementEye(protocol)
     for index in range(15):
         eye.on_update(
             _reader_update(_candle(index, (100.0, 101.0, 100.0, 100.0)))
         )
-    eye.on_update(
+    started_observation = eye.on_update(
         _reader_update(_candle(15, (100.0, 100.75, 99.75, 100.5)))
     )
     active = eye.on_update(
@@ -481,6 +515,22 @@ def test_observer_preserves_complete_same_update_transition_order_and_state() ->
     ):
         assert name in current_metrics
         assert name in active_metrics
+    for projected in (started_observation, active):
+        projected_current = dict(projected.current_metrics or ())
+        projected_transition = dict(
+            projected.transitions_this_update[-1].state_metrics
+        )
+        expected_activation_ratios = _expected_activation_ratios(
+            projected_current,
+            protocol,
+        )
+        for name, expected in expected_activation_ratios.items():
+            assert math.isclose(projected_current[name], expected)
+            assert math.isclose(projected_transition[name], expected)
+        assert math.isclose(
+            projected_current["activation_weakest_ratio"],
+            min(expected_activation_ratios.values()),
+        )
 
     first_reverse = _candle(17, (101.5, 101.5, 100.25, 100.5))
     pending = eye.on_update(_reader_update(first_reverse))

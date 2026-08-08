@@ -13,6 +13,7 @@ from .model import (
     BOSLifecycle,
     BOSPostBreakState,
     BOSScope,
+    DealingRangeState,
     DealingRangeLifecycle,
     Direction,
     DrawSelection,
@@ -25,11 +26,13 @@ from .model import (
     HypothesisBelief,
     HypothesisSequenceState,
     LiquidityInventoryLifecycle,
+    LiquidityInventoryItem,
     LiquidityLevel,
     LiquidityRoute,
     MarketBelief,
     MarketObservation,
     ManipulationLifecycle,
+    ManipulationState,
     MicroBOSReference,
     OrderBlockLifecycle,
     PathSequenceLifecycle,
@@ -119,6 +122,15 @@ class _SequenceSignal:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "value", clamp(self.value))
+
+
+@dataclass(frozen=True)
+class _LSRRangeContext:
+    """Optional mature-balance context around one core pool reversal."""
+
+    dealing_range: DealingRangeState
+    swept_boundary: LiquidityInventoryItem
+    opposing_boundary: LiquidityInventoryItem | None
 
 
 def _identity_tuple(*values: str | None) -> tuple[str, ...]:
@@ -491,6 +503,7 @@ def _liquidity_route(
     context_draw: LiquidityLevel | None,
     primary_target: LiquidityLevel | None,
     prior_route: LiquidityRoute | None = None,
+    range_context: _LSRRangeContext | None = None,
 ) -> LiquidityRoute | None:
     if primary_target is None:
         return None
@@ -539,6 +552,17 @@ def _liquidity_route(
         dict.fromkeys(
             value
             for value in (
+                *(
+                    ()
+                    if range_context is None
+                    else (
+                        range_context.dealing_range.range_id,
+                        range_context.swept_boundary.item_id,
+                        None
+                        if range_context.opposing_boundary is None
+                        else range_context.opposing_boundary.item_id,
+                    )
+                ),
                 None if context_draw is None else context_draw.level_id,
                 *intermediates,
                 primary_target.level_id,
@@ -557,12 +581,39 @@ def _liquidity_route(
         and prior_route.intermediate_liquidity_ids == intermediates
         and prior_route.path_blocker_ids == blockers
         and prior_route.source_path_ids == source_path
+        and prior_route.range_context_id
+        == (
+            None
+            if range_context is None
+            else range_context.dealing_range.range_id
+        )
+        and prior_route.range_midpoint
+        == (
+            None
+            if range_context is None
+            else range_context.dealing_range.midpoint
+        )
+        and prior_route.swept_range_boundary_id
+        == (
+            None
+            if range_context is None
+            else range_context.swept_boundary.item_id
+        )
+        and prior_route.opposing_range_boundary_id
+        == (
+            None
+            if (
+                range_context is None
+                or range_context.opposing_boundary is None
+            )
+            else range_context.opposing_boundary.item_id
+        )
     ):
         return prior_route
     raw = (
         f"{observation.asof.isoformat()}|{direction.value}|"
         f"{None if context_draw is None else context_draw.level_id}|"
-        f"{primary_target.level_id}|{terminal.level_id}"
+        f"{primary_target.level_id}|{terminal.level_id}|{source_path}"
     )
     return LiquidityRoute(
         route_id=f"route:{hashlib.sha256(raw.encode()).hexdigest()[:24]}",
@@ -575,6 +626,29 @@ def _liquidity_route(
         terminal_draw_id=terminal.level_id,
         path_blocker_ids=blockers,
         source_path_ids=source_path,
+        range_context_id=(
+            None
+            if range_context is None
+            else range_context.dealing_range.range_id
+        ),
+        range_midpoint=(
+            None
+            if range_context is None
+            else range_context.dealing_range.midpoint
+        ),
+        swept_range_boundary_id=(
+            None
+            if range_context is None
+            else range_context.swept_boundary.item_id
+        ),
+        opposing_range_boundary_id=(
+            None
+            if (
+                range_context is None
+                or range_context.opposing_boundary is None
+            )
+            else range_context.opposing_boundary.item_id
+        ),
     )
 
 
@@ -1812,6 +1886,108 @@ def _opposed_mss_for_displacement(
     )
 
 
+def _lsr_optional_range_context(
+    observation: MarketObservation,
+    direction: Direction,
+    manipulation: ManipulationState | None,
+) -> _LSRRangeContext | None:
+    """Join a pool reversal to a crossed mature range without gating LSR.
+
+    Group4 keeps S/R, pool liquidity and mature-range liquidity as separate
+    identities.  A pool-sourced manipulation may nevertheless record a
+    mature range ID among its exact crossed sources.  This join only exposes
+    that already-observed context; it never manufactures a range from the
+    pool and never changes the core LSR sequence.
+    """
+
+    if (
+        manipulation is None
+        or manipulation.source_kind != "formed_liquidity_pool"
+        or manipulation.side != direction.invalidation_side
+    ):
+        return None
+    crossed_ids = set(manipulation.crossed_source_ids)
+    ranges = tuple(
+        state
+        for state in observation.frame(Timeframe.H1).dealing_ranges
+        if (
+            state.lifecycle is DealingRangeLifecycle.MATURE
+            and state.mature_at is not None
+            and state.mature_at <= manipulation.swept_at
+            and state.range_id in crossed_ids
+        )
+    )
+    if not ranges:
+        return None
+    inventory = tuple(observation.liquidity_inventory)
+    candidates: list[_LSRRangeContext] = []
+    for state in ranges:
+        swept_boundary = next(
+            (
+                item
+                for item in inventory
+                if (
+                    item.kind == "range_boundary"
+                    and item.side == manipulation.side
+                    and state.range_id in item.source_ids
+                    and item.confirmed_at <= manipulation.swept_at
+                    and (
+                        manipulation.sweep_extreme > item.upper_bound
+                        if item.side == "above"
+                        else manipulation.sweep_extreme < item.lower_bound
+                    )
+                )
+            ),
+            None,
+        )
+        if swept_boundary is None:
+            continue
+        opposing = next(
+            (
+                item
+                for item in inventory
+                if (
+                    item.kind == "range_boundary"
+                    and item.side == direction.opposing_liquidity_side
+                    and item.lifecycle
+                    is LiquidityInventoryLifecycle.VISIBLE
+                    and state.range_id in item.source_ids
+                    and item.confirmed_at <= observation.asof
+                )
+            ),
+            None,
+        )
+        candidates.append(
+            _LSRRangeContext(
+                dealing_range=state,
+                swept_boundary=swept_boundary,
+                opposing_boundary=opposing,
+            )
+        )
+    if not candidates:
+        return None
+    source_boundary = (
+        manipulation.source_upper_bound
+        if manipulation.side == "above"
+        else manipulation.source_lower_bound
+    )
+    return min(
+        candidates,
+        key=lambda context: (
+            abs(
+                (
+                    context.dealing_range.upper_bound
+                    if manipulation.side == "above"
+                    else context.dealing_range.lower_bound
+                )
+                - source_boundary
+            ),
+            context.dealing_range.mature_at,
+            context.dealing_range.range_id,
+        ),
+    )
+
+
 def _typed_lsr(
     observation: MarketObservation,
     direction: Direction,
@@ -1835,6 +2011,11 @@ def _typed_lsr(
         )
         if pool_path is not None
         else None
+    )
+    range_context = _lsr_optional_range_context(
+        observation,
+        direction,
+        manipulation,
     )
     pool_swept = _path_step(pool_path, {"pool_swept"})
     sweep_return = _path_step(pool_path, {"reacceptance_held"})
@@ -1994,15 +2175,25 @@ def _typed_lsr(
         and location is not None
         and prior.plan.entry_location_id == location.location_id
     )
-    preferred_context_draw_id = (
-        prior.liquidity_route.context_draw_id
+    prior_route = (
+        prior.liquidity_route
         if (
             prior is not None
             and prior.phase not in _TERMINAL_PHASES
             and prior.setup_context_id == setup_identity
-            and prior.liquidity_route is not None
         )
         else None
+    )
+    prior_context_draw_was_optional_range = bool(
+        prior_route is not None
+        and prior_route.range_context_id is not None
+        and prior_route.context_draw_id
+        == prior_route.opposing_range_boundary_id
+    )
+    preferred_context_draw_id = (
+        None
+        if prior_route is None or prior_context_draw_was_optional_range
+        else prior_route.context_draw_id
     )
     preferred_primary_target_id = (
         prior.liquidity_route.primary_deliverable_target_id
@@ -2032,12 +2223,24 @@ def _typed_lsr(
             else location.near_edge
         )
     )
+    contextual_draw_id = (
+        preferred_context_draw_id
+        if preferred_context_draw_id is not None
+        else (
+            None
+            if (
+                range_context is None
+                or range_context.opposing_boundary is None
+            )
+            else range_context.opposing_boundary.item_id
+        )
+    )
     context_draw = _select_target(
         observation,
         direction,
         planned_entry,
         config,
-        preferred_id=preferred_context_draw_id,
+        preferred_id=contextual_draw_id,
         require_preferred=preferred_context_draw_id is not None,
     )
     primary_target = (
@@ -2077,9 +2280,8 @@ def _typed_lsr(
             planned_entry,
             context_draw=context_draw,
             primary_target=primary_target,
-            prior_route=(
-                None if prior is None else prior.liquidity_route
-            ),
+            prior_route=prior_route,
+            range_context=range_context,
         )
     )
     plan = _typed_plan(
@@ -2177,6 +2379,15 @@ def _typed_lsr(
             hard_gates["reversal_first_pullback"]
         ),
         "aligned_micro_bos_trigger": float(trigger_ready),
+        "mature_range_context_visible": (
+            0.0
+            if range_context is None
+            else clamp(range_context.dealing_range.strength)
+        ),
+        "opposing_range_boundary_visible": float(
+            range_context is not None
+            and range_context.opposing_boundary is not None
+        ),
         "opposing_draw_visible": float(context_draw is not None),
         "remaining_path_available": float(remaining_ok),
         "execution_fillability": (
@@ -2465,7 +2676,15 @@ def _typed_lsr(
         ),
         typed_uncertainty=_typed_market_uncertainty(
             observation,
-            support,
+            {
+                name: value
+                for name, value in support.items()
+                if name
+                not in {
+                    "mature_range_context_visible",
+                    "opposing_range_boundary_visible",
+                }
+            },
             contradict,
             semantic_authority_missing=float(
                 pool_ambiguity is not None
