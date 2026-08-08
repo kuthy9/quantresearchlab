@@ -108,6 +108,7 @@ class ObserverConfig:
     group5_protocol: str | None = None
     scale_specs: tuple[ScaleSpec, ...] = ()
     project_scene_graph: bool = True
+    materialize_event_view: bool = True
 
 
 @dataclass(frozen=True)
@@ -1447,6 +1448,19 @@ class CausalObserver:
         self.config = config
         if type(self.config.project_scene_graph) is not bool:
             raise ValueError("scene-graph projection flag must be boolean")
+        if type(self.config.materialize_event_view) is not bool:
+            raise ValueError("event-view materialization flag must be boolean")
+        if not self.config.materialize_event_view and (
+            self.config.project_scene_graph
+            or self.config.group4_protocol is None
+            or self.config.displacement_protocol is not None
+            or self.config.group3_protocol is not None
+            or self.config.group5_protocol is not None
+        ):
+            raise ValueError(
+                "a lightweight event view is limited to the Group 1-2 + "
+                "Group 4 authority scanner with Scene Graph disabled"
+            )
         self.scale_specs = tuple(self.config.scale_specs)
         if not self.scale_specs:
             raise ValueError("observer requires an explicit scale registry")
@@ -4789,14 +4803,26 @@ class CausalObserver:
             if not frame.ready:
                 anomalies.append(f"warmup_{timeframe.value}")
         anomalies.extend(execution.anomalies)
-        incomplete_timeline_keys = (
-            self.memory.incomplete_entity_keys()
-        )
-        if incomplete_timeline_keys:
-            anomalies.append("clock_incomplete_entity_timeline")
-        event_durations_minutes, event_ages_minutes = (
-            self.memory.temporal_metrics(update.asof)
-        )
+        if self.config.materialize_event_view:
+            incomplete_timeline_keys = (
+                self.memory.incomplete_entity_keys()
+            )
+            if incomplete_timeline_keys:
+                anomalies.append("clock_incomplete_entity_timeline")
+            event_durations_minutes, event_ages_minutes = (
+                self.memory.temporal_metrics(update.asof)
+            )
+            recent_events = self.memory.recent()
+            retained_entity_timelines = self.memory.entity_timelines()
+        else:
+            # Coverage scans retain and update the authoritative EventMemory
+            # clock/lifecycles, but do not need to copy its complete query
+            # view into every immutable observation.
+            incomplete_timeline_keys = ()
+            event_durations_minutes = {}
+            event_ages_minutes = {}
+            recent_events = ()
+            retained_entity_timelines = {}
         try:
             observation = MarketObservation(
                 asof=update.asof,
@@ -4804,7 +4830,7 @@ class CausalObserver:
                 instrument_id=update.completed_1m.instrument_id,
                 price=float(update.completed_1m.close),
                 frames=frames,
-                recent_events=self.memory.recent(),
+                recent_events=recent_events,
                 event_durations_minutes=event_durations_minutes,
                 execution=execution,
                 anomalies=tuple(dict.fromkeys(anomalies)),
@@ -4812,9 +4838,7 @@ class CausalObserver:
                 liquidity_inventory=liquidity_inventory,
                 liquidity_pool_states=liquidity_pool_states,
                 event_ages_minutes=event_ages_minutes,
-                retained_entity_timelines=(
-                    self.memory.entity_timelines()
-                ),
+                retained_entity_timelines=retained_entity_timelines,
                 incomplete_entity_timeline_keys=(
                     incomplete_timeline_keys
                 ),

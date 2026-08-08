@@ -24,6 +24,7 @@ from .helpers import MODEL_SCALE_SPECS, CORE_TEST_SCALE_SPECS, session_bars
 
 
 STRUCTURE_PROTOCOL = "configs/primitives_structure_liquidity.json"
+GROUP4_PROTOCOL = "configs/primitives_range.json"
 
 
 def _tick_aligned_bars(count: int) -> tuple[Bar, ...]:
@@ -127,6 +128,72 @@ def test_lightweight_observer_can_skip_only_scene_graph_projection() -> None:
     assert observation.scene_revision_id is None
     assert observer.last_scene_delta is None
     assert observer.scene_graph.last_asof is None
+
+
+def test_authority_scan_event_view_keeps_group4_state_identical() -> None:
+    full_reader = CausalMarketReader(scale_specs=MODEL_SCALE_SPECS)
+    light_reader = CausalMarketReader(scale_specs=MODEL_SCALE_SPECS)
+    common = {
+        "structure_protocol": STRUCTURE_PROTOCOL,
+        "liquidity_protocol": STRUCTURE_PROTOCOL,
+        "group4_protocol": GROUP4_PROTOCOL,
+        "scale_specs": MODEL_SCALE_SPECS,
+        "project_scene_graph": False,
+    }
+    full = CausalObserver(ObserverConfig(**common))
+    light = CausalObserver(
+        ObserverConfig(**common, materialize_event_view=False)
+    )
+
+    for bar in session_bars(1)[:240]:
+        full_observation = full.observe(full_reader.on_bar(bar))
+        light_observation = light.observe(light_reader.on_bar(bar))
+        assert light_observation.liquidity_inventory == (
+            full_observation.liquidity_inventory
+        )
+        assert light_observation.liquidity_pool_states == (
+            full_observation.liquidity_pool_states
+        )
+        assert light_observation.manipulations == (
+            full_observation.manipulations
+        )
+        assert light_observation.group4_boundary_range_transitions == (
+            full_observation.group4_boundary_range_transitions
+        )
+        assert (
+            light_observation.group4_boundary_manipulation_transitions
+            == full_observation.group4_boundary_manipulation_transitions
+        )
+        assert light_observation.group4_ambiguous_sweep_item_ids == (
+            full_observation.group4_ambiguous_sweep_item_ids
+        )
+        assert light_observation.group4_atr_unready_sweep_item_ids == (
+            full_observation.group4_atr_unready_sweep_item_ids
+        )
+        assert light_observation.frame(Timeframe.H1).dealing_ranges == (
+            full_observation.frame(Timeframe.H1).dealing_ranges
+        )
+        assert light_observation.frame(Timeframe.H1).support_resistance == (
+            full_observation.frame(Timeframe.H1).support_resistance
+        )
+
+    assert light.memory.last_minute_end == full.memory.last_minute_end
+    assert light.memory.clock_coverage_start == full.memory.clock_coverage_start
+    assert light_observation.recent_events == ()
+    assert light_observation.event_durations_minutes == {}
+    assert light_observation.event_ages_minutes == {}
+    assert light_observation.retained_entity_timelines == {}
+    assert light_observation.incomplete_entity_timeline_keys == ()
+
+
+def test_lightweight_event_view_is_rejected_outside_authority_scan() -> None:
+    with pytest.raises(ValueError, match="authority scanner"):
+        CausalObserver(
+            ObserverConfig(
+                scale_specs=MODEL_SCALE_SPECS,
+                materialize_event_view=False,
+            )
+        )
 
 
 def test_invalid_execution_reality_fails_before_observer_mutation() -> None:

@@ -317,6 +317,7 @@ def _build_observer(
             group4_protocol=str(ROOT / str(protocols["group4"])),
             scale_specs=scale_specs,
             project_scene_graph=False,
+            materialize_event_view=False,
         )
     )
     return CausalMarketReader(scale_specs=scale_specs), observer
@@ -1135,27 +1136,31 @@ def _scan_window(
             for state in observation.group4_boundary_range_transitions:
                 accumulator.observe_range(state)
             accumulator.observe_inventory(observation.liquidity_inventory)
-            inventory = {
-                item.item_id: item
-                for item in (
-                    *(
-                        ()
-                        if prior_observation is None
-                        else prior_observation.liquidity_inventory
-                    ),
-                    *observation.liquidity_inventory,
+            if (
+                observation.group4_ambiguous_sweep_item_ids
+                or observation.group4_atr_unready_sweep_item_ids
+            ):
+                inventory = {
+                    item.item_id: item
+                    for item in (
+                        *(
+                            ()
+                            if prior_observation is None
+                            else prior_observation.liquidity_inventory
+                        ),
+                        *observation.liquidity_inventory,
+                    )
+                }
+                accumulator.observe_unclassified_sources(
+                    observation.group4_ambiguous_sweep_item_ids,
+                    metric="ambiguous_dual_side",
+                    inventory=inventory,
                 )
-            }
-            accumulator.observe_unclassified_sources(
-                observation.group4_ambiguous_sweep_item_ids,
-                metric="ambiguous_dual_side",
-                inventory=inventory,
-            )
-            accumulator.observe_unclassified_sources(
-                observation.group4_atr_unready_sweep_item_ids,
-                metric="atr_unready",
-                inventory=inventory,
-            )
+                accumulator.observe_unclassified_sources(
+                    observation.group4_atr_unready_sweep_item_ids,
+                    metric="atr_unready",
+                    inventory=inventory,
+                )
             for state in observation.manipulations:
                 accumulator.observe_manipulation(state)
             for state in observation.group4_boundary_manipulation_transitions:
@@ -1334,6 +1339,17 @@ def aggregate_results(
         "profile": None if profile is None else profile.get("profile"),
         "run_context": {
             "window_count": len(results),
+            "timezone": None if profile is None else profile.get("timezone"),
+            "warmup_calendar_days": (
+                None
+                if profile is None
+                else profile.get("warmup_calendar_days")
+            ),
+            "pool_source_timeframes": (
+                []
+                if profile is None
+                else list(profile.get("pool_source_timeframes", ()))
+            ),
             "threshold_search": False,
             "outcome_fields_used": False,
             "pnl_used": False,
@@ -1342,6 +1358,12 @@ def aggregate_results(
             "decision_used": False,
             "risk_used": False,
             "observer_scope": "production_multiscale_group12_group4",
+            "executed_protocols": ["group12", "group4"],
+            "context_identity_only_protocols": [
+                "displacement",
+                "group3",
+                "group5",
+            ],
             "all_pool_source_timeframes": True,
             "scene_graph_projection_used": False,
         },
@@ -1419,6 +1441,7 @@ def aggregate_results(
                 "start": result["start"],
                 "end_exclusive": result["end_exclusive"],
                 "coverage_start": result["coverage_start"],
+                "warmup_start": result["coverage_start"],
             }
             for result in results
         ],

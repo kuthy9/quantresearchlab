@@ -253,6 +253,45 @@ def test_registered_2023_profile_is_exact_and_outcome_blind() -> None:
         _validate_config(invalid)
 
 
+def test_aggregate_records_self_describing_scan_scope() -> None:
+    profile = {
+        "profile": "registered-authority-window",
+        "timezone": "America/New_York",
+        "warmup_calendar_days": 7,
+        "pool_source_timeframes": ["4H", "1H", "15m", "5m", "1m"],
+    }
+    result = CoverageAccumulator(
+        "window",
+        START,
+        END,
+        _protocol(),
+        coverage_start=START - pd.Timedelta(days=7),
+    ).result(source_rows=10, observed_updates=5)
+
+    from scripts.scan_mature_ranges import aggregate_results
+
+    aggregate = aggregate_results((result,), profile=profile)
+    context = aggregate["run_context"]
+    assert context["timezone"] == "America/New_York"
+    assert context["warmup_calendar_days"] == 7
+    assert context["pool_source_timeframes"] == [
+        "4H",
+        "1H",
+        "15m",
+        "5m",
+        "1m",
+    ]
+    assert context["executed_protocols"] == ["group12", "group4"]
+    assert context["context_identity_only_protocols"] == [
+        "displacement",
+        "group3",
+        "group5",
+    ]
+    assert aggregate["windows"][0]["warmup_start"] == (
+        START - pd.Timedelta(days=7)
+    )
+
+
 def test_calendar_warmup_preserves_wall_clock_across_dst() -> None:
     assert _calendar_warmup_start(
         pd.Timestamp("2023-11-05T18:00:00-05:00"),
