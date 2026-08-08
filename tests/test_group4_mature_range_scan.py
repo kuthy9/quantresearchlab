@@ -303,6 +303,8 @@ def test_aggregate_records_self_describing_scan_scope() -> None:
         "group5",
     ]
     assert context["event_view_materialized"] is False
+    assert context["group4_projection_only"] is True
+    assert context["complete_group4_eligible_inventory"] is True
     assert aggregate["windows"][0]["warmup_start"] == (
         START - pd.Timedelta(days=7)
     )

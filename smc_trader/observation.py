@@ -109,6 +109,7 @@ class ObserverConfig:
     scale_specs: tuple[ScaleSpec, ...] = ()
     project_scene_graph: bool = True
     materialize_event_view: bool = True
+    group4_projection_only: bool = False
 
 
 @dataclass(frozen=True)
@@ -1450,6 +1451,8 @@ class CausalObserver:
             raise ValueError("scene-graph projection flag must be boolean")
         if type(self.config.materialize_event_view) is not bool:
             raise ValueError("event-view materialization flag must be boolean")
+        if type(self.config.group4_projection_only) is not bool:
+            raise ValueError("Group 4 projection-only flag must be boolean")
         if not self.config.materialize_event_view and (
             self.config.project_scene_graph
             or self.config.group4_protocol is None
@@ -1460,6 +1463,18 @@ class CausalObserver:
             raise ValueError(
                 "a lightweight event view is limited to the Group 1-2 + "
                 "Group 4 authority scanner with Scene Graph disabled"
+            )
+        if self.config.group4_projection_only and (
+            self.config.materialize_event_view
+            or self.config.project_scene_graph
+            or self.config.group4_protocol is None
+            or self.config.displacement_protocol is not None
+            or self.config.group3_protocol is not None
+            or self.config.group5_protocol is not None
+        ):
+            raise ValueError(
+                "Group 4 projection-only mode is limited to the authority "
+                "scanner"
             )
         self.scale_specs = tuple(self.config.scale_specs)
         if not self.scale_specs:
@@ -1835,7 +1850,9 @@ class CausalObserver:
         self._reference_inventory.clear()
         self._reference_last_end = None
         self._reference_coverage_start = None
-        for item in failed_bos:
+        for item in (
+            () if self.config.group4_projection_only else failed_bos
+        ):
             key = (item.bos_id, item.lifecycle)
             self._remember_bounded(
                 key,
@@ -2161,6 +2178,7 @@ class CausalObserver:
                         candle,
                         append_retirement_events=(
                             not reference_bootstrap
+                            and not self.config.group4_projection_only
                         ),
                     )
                     self._reference_last_end = candle.end
@@ -2184,7 +2202,12 @@ class CausalObserver:
                         and self._prior is None
                     ):
                         support_resistance, _, _ = (
-                            liquidity_tracker.snapshot()
+                            liquidity_tracker.snapshot(
+                                group4_sources_only=True,
+                                include_support_resistance=True,
+                            )
+                            if self.config.group4_projection_only
+                            else liquidity_tracker.snapshot()
                         )
                         coverage_start = (
                             self.memory.clock_coverage_start
@@ -3459,7 +3482,14 @@ class CausalObserver:
             and cached[0] == tracker.last_end
         ):
             return cached[1]
-        snapshot = tracker.snapshot()
+        snapshot = (
+            tracker.snapshot(
+                group4_sources_only=True,
+                include_support_resistance=(timeframe is Timeframe.H1),
+            )
+            if self.config.group4_projection_only
+            else tracker.snapshot()
+        )
         self._liquidity_snapshot_cache[timeframe] = (
             tracker.last_end,
             snapshot,
@@ -3685,6 +3715,8 @@ class CausalObserver:
         *,
         atr: float,
     ) -> None:
+        if self.config.group4_projection_only:
+            return
         outside = self._pool_close_outside(item, candle)
         extreme = candle.high if item.side == "above" else candle.low
         distance = (
@@ -3722,6 +3754,8 @@ class CausalObserver:
         *,
         atr: float,
     ) -> None:
+        if self.config.group4_projection_only:
+            return
         self._append_inventory_crossing_event(
             item,
             candle,
@@ -3755,6 +3789,8 @@ class CausalObserver:
         item: LiquidityInventoryItem,
         candle: Candle,
     ) -> None:
+        if self.config.group4_projection_only:
+            return
         outside = self._pool_close_outside(item, candle)
         self.memory.append(
             _event(
@@ -4468,22 +4504,24 @@ class CausalObserver:
                 )
             _, _, native_inventory = liquidity_snapshots[timeframe]
             base_inventory.extend(native_inventory)
-        base_inventory.extend(self._reference_inventory.values())
-        retained_liquidity_entities = {
-            item.zone_id
-            for frame in frames.values()
-            for item in frame.support_resistance
-        } | {
-            f"pool:{item.pool_id}"
-            for frame in frames.values()
-            for item in frame.liquidity_pools
-        }
-        self._liquidity_entity_revisions = {
-            entity_id: revision
-            for entity_id, revision
-            in self._liquidity_entity_revisions.items()
-            if entity_id in retained_liquidity_entities
-        }
+        if not self.config.group4_projection_only:
+            base_inventory.extend(self._reference_inventory.values())
+        if not self.config.group4_projection_only:
+            retained_liquidity_entities = {
+                item.zone_id
+                for frame in frames.values()
+                for item in frame.support_resistance
+            } | {
+                f"pool:{item.pool_id}"
+                for frame in frames.values()
+                for item in frame.liquidity_pools
+            }
+            self._liquidity_entity_revisions = {
+                entity_id: revision
+                for entity_id, revision
+                in self._liquidity_entity_revisions.items()
+                if entity_id in retained_liquidity_entities
+            }
         pre_projection_pool_states = tuple(
             sorted(
                 (
@@ -4547,12 +4585,13 @@ class CausalObserver:
                 # New SWEPT events carry a high same-clock sequence floor,
                 # so inventory, HTF sources and ranges still sort before
                 # creation; terminal resolutions keep the earliest sequence.
-                self._record_group4_events(
-                    group4_update,
-                    include_ranges=False,
-                    include_resolutions=True,
-                    include_creations=True,
-                )
+                if not self.config.group4_projection_only:
+                    self._record_group4_events(
+                        group4_update,
+                        include_ranges=False,
+                        include_resolutions=True,
+                        include_creations=True,
+                    )
             except Exception:
                 self._terminal_failure = (
                     "Group 4 update failed after a paired reducer may "
@@ -4561,11 +4600,12 @@ class CausalObserver:
                 )
                 raise
         try:
-            for item, candle in deferred_pool_resolution_events:
-                self._append_projected_pool_resolution_event(
-                    item,
-                    candle,
-                )
+            if not self.config.group4_projection_only:
+                for item, candle in deferred_pool_resolution_events:
+                    self._append_projected_pool_resolution_event(
+                        item,
+                        candle,
+                    )
             projected_pool_states: dict[str, LiquidityPoolState] = {}
             liquidity_inventory = self._project_inventory(
                 update,
@@ -4600,19 +4640,20 @@ class CausalObserver:
                 ),
                 frame.cutoff,
             )
-            try:
-                self._record_frame_events(
-                    frame,
-                    first_semantic_snapshot or newly_completed_real,
-                    event_clock=event_clock,
-                )
-            except Exception:
-                self._terminal_failure = (
-                    "event projection failed after state may have "
-                    "changed; discard this observer and resume from "
-                    "the last checkpoint"
-                )
-                raise
+            if not self.config.group4_projection_only:
+                try:
+                    self._record_frame_events(
+                        frame,
+                        first_semantic_snapshot or newly_completed_real,
+                        event_clock=event_clock,
+                    )
+                except Exception:
+                    self._terminal_failure = (
+                        "event projection failed after state may have "
+                        "changed; discard this observer and resume from "
+                        "the last checkpoint"
+                    )
+                    raise
             self._last_frame_cutoff[timeframe] = frame.cutoff
         if (
             group3_update is not None
@@ -4628,7 +4669,10 @@ class CausalObserver:
                     "from the last checkpoint"
                 )
                 raise
-        if self._group4_bootstrap_range_transitions:
+        if (
+            self._group4_bootstrap_range_transitions
+            and not self.config.group4_projection_only
+        ):
             try:
                 self._record_group4_events(
                     Group4Update(
@@ -4650,13 +4694,16 @@ class CausalObserver:
                     "resume from the last checkpoint"
                 )
                 raise
+        elif self.config.group4_projection_only:
+            self._group4_bootstrap_range_transitions.clear()
         if group4_update is not None:
             try:
-                self._record_group4_events(
-                    group4_update,
-                    include_resolutions=False,
-                    include_creations=False,
-                )
+                if not self.config.group4_projection_only:
+                    self._record_group4_events(
+                        group4_update,
+                        include_resolutions=False,
+                        include_creations=False,
+                    )
                 inventory_by_id = {
                     item.item_id: item
                     for item in (
@@ -4747,31 +4794,32 @@ class CausalObserver:
                     "from the last checkpoint"
                 )
                 raise
-        try:
-            self.memory.sync_retained_entity_timelines(
-                self._retained_timeline_keys(
-                    frames,
-                    liquidity_pool_states,
-                    (
-                        ()
-                        if group4_update is None
-                        else group4_update.manipulations
+        if not self.config.group4_projection_only:
+            try:
+                self.memory.sync_retained_entity_timelines(
+                    self._retained_timeline_keys(
+                        frames,
+                        liquidity_pool_states,
+                        (
+                            ()
+                            if group4_update is None
+                            else group4_update.manipulations
+                        ),
+                        (
+                            ()
+                            if group5_update is None
+                            else group5_update.path_sequences
+                        ),
                     ),
-                    (
-                        ()
-                        if group5_update is None
-                        else group5_update.path_sequences
-                    ),
-                ),
-                asof=update.asof,
-            )
-        except Exception:
-            self._terminal_failure = (
-                "entity timeline projection failed after state may have "
-                "changed; discard this observer and resume from the "
-                "last checkpoint"
-            )
-            raise
+                    asof=update.asof,
+                )
+            except Exception:
+                self._terminal_failure = (
+                    "entity timeline projection failed after state may have "
+                    "changed; discard this observer and resume from the "
+                    "last checkpoint"
+                )
+                raise
 
         anomalies = list(update.anomalies)
         if (

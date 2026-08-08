@@ -1120,6 +1120,21 @@ def test_equal_pool_and_zone_lifecycles_are_incremental_and_frozen() -> None:
     assert pool.touch_count == 2
     assert (pool.lower_bound, pool.upper_bound) == (100.0, 100.25)
     assert any(item.kind == "equal_highs" for item in inventory)
+    compact = tracker.snapshot(
+        group4_sources_only=True,
+        include_support_resistance=False,
+    )
+    assert compact[0] == ()
+    assert compact[1] == pools
+    assert compact[2] == tuple(
+        item
+        for item in inventory
+        if item.kind in {"equal_highs", "equal_lows"}
+    )
+    assert tracker.snapshot(
+        group4_sources_only=True,
+        include_support_resistance=False,
+    ) is compact
 
     checkpoint = pickle.loads(pickle.dumps(tracker))
     sweep = _candle(
@@ -1141,6 +1156,12 @@ def test_equal_pool_and_zone_lifecycles_are_incremental_and_frozen() -> None:
     assert next(
         item for item in inventory if item.kind == "equal_highs"
     ).lifecycle is LiquidityInventoryLifecycle.CONSUMED
+    compact = tracker.snapshot(
+        group4_sources_only=True,
+        include_support_resistance=False,
+    )
+    assert compact[1][0].lifecycle is LiquidityPoolLifecycle.SWEPT
+    assert compact[2][0].lifecycle is LiquidityInventoryLifecycle.CONSUMED
 
     reclaim = _candle(
         3,

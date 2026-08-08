@@ -321,6 +321,7 @@ def _build_observer(
             scale_specs=scale_specs,
             project_scene_graph=False,
             materialize_event_view=False,
+            group4_projection_only=True,
         )
     )
     return CausalMarketReader(scale_specs=scale_specs), observer
@@ -1424,6 +1425,8 @@ def aggregate_results(
             "all_pool_source_timeframes": True,
             "scene_graph_projection_used": False,
             "event_view_materialized": False,
+            "group4_projection_only": True,
+            "complete_group4_eligible_inventory": True,
         },
         "identity": dict(run_identity or {}),
         "bar_counts": {

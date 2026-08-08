@@ -220,6 +220,10 @@ class CausalLiquidityTracker:
         self._live_reference_source_ids: set[str] = set()
         self._contract: tuple[str, int] | None = None
         self._bar_index = -1
+        self._group4_source_snapshot_cache: dict[
+            bool,
+            tuple[tuple[object, ...], tuple],
+        ] = {}
 
     @property
     def last_end(self) -> pd.Timestamp | None:
@@ -353,32 +357,51 @@ class CausalLiquidityTracker:
             external = (
                 protected or state.structural_rank == "external"
             )
-            record.state = replace(
-                state,
-                structural_rank=("external" if external else "internal"),
-                is_protected_swing=protected,
-                visibility_strength=self._visibility_strength(
-                    external=external,
-                ),
-                reaction_quality=self._reaction_quality(
-                    record.total_touches,
-                    record.reaction_total_atr,
-                ),
-                depletion_risk=self._depletion_risk(
-                    record.total_touches,
-                ),
+            structural_rank = "external" if external else "internal"
+            visibility_strength = self._visibility_strength(
+                external=external,
             )
+            reaction_quality = self._reaction_quality(
+                record.total_touches,
+                record.reaction_total_atr,
+            )
+            depletion_risk = self._depletion_risk(record.total_touches)
+            if (
+                state.structural_rank != structural_rank
+                or state.is_protected_swing != protected
+                or state.visibility_strength != visibility_strength
+                or state.reaction_quality != reaction_quality
+                or state.depletion_risk != depletion_risk
+            ):
+                record.state = replace(
+                    state,
+                    structural_rank=structural_rank,
+                    is_protected_swing=protected,
+                    visibility_strength=visibility_strength,
+                    reaction_quality=reaction_quality,
+                    depletion_risk=depletion_risk,
+                )
         for record in self._pools.values():
             source_zone = self._zones.get(record.zone_id)
             if source_zone is None:
                 continue
-            record.structural_rank = source_zone.state.structural_rank
-            record.is_protected_swing = (
-                source_zone.state.is_protected_swing
-            )
-            record.visibility_strength = (
-                source_zone.state.visibility_strength
-            )
+            source_state = source_zone.state
+            if record.structural_rank != source_state.structural_rank:
+                record.structural_rank = source_state.structural_rank
+            if (
+                record.is_protected_swing
+                != source_state.is_protected_swing
+            ):
+                record.is_protected_swing = (
+                    source_state.is_protected_swing
+                )
+            if (
+                record.visibility_strength
+                != source_state.visibility_strength
+            ):
+                record.visibility_strength = (
+                    source_state.visibility_strength
+                )
 
     def _bounded_touch_history(
         self,
@@ -1700,43 +1723,97 @@ class CausalLiquidityTracker:
 
     def snapshot(
         self,
+        *,
+        group4_sources_only: bool = False,
+        include_support_resistance: bool = True,
     ) -> tuple[
         tuple[SupportResistanceState, ...],
         tuple[LiquidityPoolState, ...],
         tuple[LiquidityInventoryItem, ...],
     ]:
-        zones = tuple(
-            replace(
-                record.state,
-                age_bars=(
-                    age := max(0, self._bar_index - record.formed_index)
-                ),
-                freshness=self._freshness(age),
-                depletion_risk=self._depletion_risk(
-                    record.total_touches,
-                ),
-                metadata_observed_at=(
-                    self._last_end or record.state.confirmed_at
-                ),
+        if type(group4_sources_only) is not bool:
+            raise TypeError("Group 4 source-only flag must be boolean")
+        if type(include_support_resistance) is not bool:
+            raise TypeError("support/resistance inclusion flag must be boolean")
+        if not group4_sources_only and not include_support_resistance:
+            raise ValueError(
+                "support/resistance may be omitted only from a Group 4 "
+                "source projection"
             )
-            for record in sorted(
-                self._zones.values(),
-                key=lambda item: (
-                    item.state.confirmed_at,
-                    item.state.zone_id,
-                ),
+
+        pool_records = tuple(self._pools.values())
+        if group4_sources_only:
+            pool_signature = tuple(
+                (
+                    record.state,
+                    record.structural_rank,
+                    record.is_protected_swing,
+                    record.visibility_strength,
+                )
+                for record in pool_records
             )
+            zone_signature = (
+                tuple(record.state for record in self._zones.values())
+                if include_support_resistance
+                else ()
+            )
+            signature: tuple[object, ...] = (
+                pool_signature,
+                zone_signature,
+            )
+            cached = self._group4_source_snapshot_cache.get(
+                include_support_resistance
+            )
+            if cached is not None and cached[0] == signature:
+                return cached[1]
+
+        zones = (
+            tuple(
+                (
+                    record.state
+                    if group4_sources_only
+                    else replace(
+                        record.state,
+                        age_bars=(
+                            age := max(
+                                0,
+                                self._bar_index - record.formed_index,
+                            )
+                        ),
+                        freshness=self._freshness(age),
+                        depletion_risk=self._depletion_risk(
+                            record.total_touches,
+                        ),
+                        metadata_observed_at=(
+                            self._last_end or record.state.confirmed_at
+                        ),
+                    )
+                )
+                for record in sorted(
+                    self._zones.values(),
+                    key=lambda item: (
+                        item.state.confirmed_at,
+                        item.state.zone_id,
+                    ),
+                )
+            )
+            if include_support_resistance
+            else ()
         )
         pools = tuple(
-            replace(
-                record.state,
-                age_bars=max(
-                    0,
-                    self._bar_index - record.confirmed_index,
-                ),
+            (
+                record.state
+                if group4_sources_only
+                else replace(
+                    record.state,
+                    age_bars=max(
+                        0,
+                        self._bar_index - record.confirmed_index,
+                    ),
+                )
             )
             for record in sorted(
-                self._pools.values(),
+                pool_records,
                 key=lambda item: (
                     item.state.confirmed_at,
                     item.state.pool_id,
@@ -1744,6 +1821,52 @@ class CausalLiquidityTracker:
             )
         )
         inventory: list[LiquidityInventoryItem] = []
+        if group4_sources_only:
+            for pool in pools:
+                consumed = pool.swept_at is not None
+                record = self._pools[pool.pool_id]
+                inventory.append(
+                    LiquidityInventoryItem(
+                        item_id=f"pool:{pool.pool_id}",
+                        timeframe=self.timeframe,
+                        side=pool.side,
+                        kind=(
+                            "equal_highs"
+                            if pool.side == "above"
+                            else "equal_lows"
+                        ),
+                        price=(
+                            pool.upper_bound
+                            if pool.side == "above"
+                            else pool.lower_bound
+                        ),
+                        lower_bound=pool.lower_bound,
+                        upper_bound=pool.upper_bound,
+                        formed_at=pool.formed_at,
+                        confirmed_at=pool.confirmed_at,
+                        lifecycle=(
+                            LiquidityInventoryLifecycle.CONSUMED
+                            if consumed
+                            else LiquidityInventoryLifecycle.VISIBLE
+                        ),
+                        source_ids=pool.member_swing_ids,
+                        age_bars=pool.age_bars,
+                        strength=pool.strength,
+                        consumed_at=pool.swept_at,
+                        lifecycle_reason=(
+                            "pool_swept" if consumed else None
+                        ),
+                        structural_rank=record.structural_rank,
+                        is_protected_swing=record.is_protected_swing,
+                        visibility_strength=record.visibility_strength,
+                    )
+                )
+            result = (zones, pools, tuple(inventory))
+            self._group4_source_snapshot_cache[
+                include_support_resistance
+            ] = (signature, result)
+            return result
+
         zone_by_swing: dict[str, SupportResistanceState] = {}
         for zone in zones:
             for swing_id in zone.member_swing_ids:

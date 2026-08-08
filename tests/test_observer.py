@@ -130,7 +130,7 @@ def test_lightweight_observer_can_skip_only_scene_graph_projection() -> None:
     assert observer.scene_graph.last_asof is None
 
 
-def test_authority_scan_event_view_keeps_group4_state_identical() -> None:
+def test_authority_scan_projection_keeps_group4_state_identical() -> None:
     full_reader = CausalMarketReader(scale_specs=MODEL_SCALE_SPECS)
     light_reader = CausalMarketReader(scale_specs=MODEL_SCALE_SPECS)
     common = {
@@ -142,17 +142,86 @@ def test_authority_scan_event_view_keeps_group4_state_identical() -> None:
     }
     full = CausalObserver(ObserverConfig(**common))
     light = CausalObserver(
-        ObserverConfig(**common, materialize_event_view=False)
+        ObserverConfig(
+            **common,
+            materialize_event_view=False,
+            group4_projection_only=True,
+        )
     )
 
-    for bar in session_bars(1)[:240]:
+    for bar in session_bars(1)[:600]:
         full_observation = full.observe(full_reader.on_bar(bar))
         light_observation = light.observe(light_reader.on_bar(bar))
-        assert light_observation.liquidity_inventory == (
-            full_observation.liquidity_inventory
+        full_group4_inventory = tuple(
+            item
+            for item in full_observation.liquidity_inventory
+            if item.kind in {"equal_highs", "equal_lows", "range_boundary"}
         )
-        assert light_observation.liquidity_pool_states == (
-            full_observation.liquidity_pool_states
+        assert tuple(
+            (
+                item.item_id,
+                item.timeframe,
+                item.side,
+                item.kind,
+                item.price,
+                item.lower_bound,
+                item.upper_bound,
+                item.formed_at,
+                item.confirmed_at,
+                item.lifecycle,
+                item.source_ids,
+                item.consumed_at,
+                item.lifecycle_reason,
+            )
+            for item in light_observation.liquidity_inventory
+        ) == tuple(
+            (
+                item.item_id,
+                item.timeframe,
+                item.side,
+                item.kind,
+                item.price,
+                item.lower_bound,
+                item.upper_bound,
+                item.formed_at,
+                item.confirmed_at,
+                item.lifecycle,
+                item.source_ids,
+                item.consumed_at,
+                item.lifecycle_reason,
+            )
+            for item in full_group4_inventory
+        )
+        assert tuple(
+            (
+                item.pool_id,
+                item.timeframe,
+                item.side,
+                item.lower_bound,
+                item.upper_bound,
+                item.formed_at,
+                item.confirmed_at,
+                item.lifecycle,
+                item.member_swing_ids,
+                item.swept_at,
+                item.resolved_at,
+            )
+            for item in light_observation.liquidity_pool_states
+        ) == tuple(
+            (
+                item.pool_id,
+                item.timeframe,
+                item.side,
+                item.lower_bound,
+                item.upper_bound,
+                item.formed_at,
+                item.confirmed_at,
+                item.lifecycle,
+                item.member_swing_ids,
+                item.swept_at,
+                item.resolved_at,
+            )
+            for item in full_observation.liquidity_pool_states
         )
         assert light_observation.manipulations == (
             full_observation.manipulations
@@ -173,17 +242,53 @@ def test_authority_scan_event_view_keeps_group4_state_identical() -> None:
         assert light_observation.frame(Timeframe.H1).dealing_ranges == (
             full_observation.frame(Timeframe.H1).dealing_ranges
         )
-        assert light_observation.frame(Timeframe.H1).support_resistance == (
-            full_observation.frame(Timeframe.H1).support_resistance
+        assert tuple(
+            (
+                item.zone_id,
+                item.source_kind,
+                item.side,
+                item.lifecycle,
+                item.lower_bound,
+                item.upper_bound,
+                item.confirmed_at,
+                item.total_touch_count,
+                item.member_swing_ids,
+                item.source_ids,
+            )
+            for item in light_observation.frame(
+                Timeframe.H1
+            ).support_resistance
+        ) == tuple(
+            (
+                item.zone_id,
+                item.source_kind,
+                item.side,
+                item.lifecycle,
+                item.lower_bound,
+                item.upper_bound,
+                item.confirmed_at,
+                item.total_touch_count,
+                item.member_swing_ids,
+                item.source_ids,
+            )
+            for item in full_observation.frame(
+                Timeframe.H1
+            ).support_resistance
         )
 
     assert light.memory.last_minute_end == full.memory.last_minute_end
     assert light.memory.clock_coverage_start == full.memory.clock_coverage_start
+    assert light.memory.recent() == ()
     assert light_observation.recent_events == ()
     assert light_observation.event_durations_minutes == {}
     assert light_observation.event_ages_minutes == {}
     assert light_observation.retained_entity_timelines == {}
     assert light_observation.incomplete_entity_timeline_keys == ()
+    assert light_observation.active_timeframes == tuple(
+        spec.native_timeframe
+        for spec in MODEL_SCALE_SPECS
+        if spec.enabled and spec.native_timeframe is not None
+    )
 
 
 def test_lightweight_event_view_is_rejected_outside_authority_scan() -> None:
