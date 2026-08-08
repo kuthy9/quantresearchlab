@@ -331,7 +331,7 @@
     {
       "id": "failed_auction_value_return",
       "schema_version": 1,
-      "status": "typed_causal_implemented_parked_pending_real_mature_range",
+      "status": "typed_causal_implemented_parked_sparse_mature_range_no_natural_identity_bound_full_chain",
       "thesis": "A mature frozen dealing range suffers a failed auction through one boundary, re-enters the range, creates an opposite-direction 5m displacement zone inside the range, returns to that exact zone for the first time, and confirms an aligned 1m trigger toward the opposite range liquidity.",
       "required_sequence": [
         {

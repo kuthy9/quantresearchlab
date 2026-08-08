@@ -22,6 +22,14 @@ Typed playbooks may consume its exact identities and lifecycles through their
 own causal gates. The legacy H1 dealing range, H1 acceptance/rejection, H4
 range position, 5m compression and 1m path scores are not Group 4 sources.
 
+The registered outcome-blind 2023 full-year coverage result is stored in
+[`evidence/group4_natural_authority_2023.json`](evidence/group4_natural_authority_2023.json).
+It records 448 in-window range formations, two mature ranges and 19,465 typed
+manipulations from all five enabled pool-source timeframes plus mature-range
+boundaries. Manipulation outcome conservation passed. Mature-range coverage is
+still only two cases, so this evidence does not change the sparse-coverage
+status or enable FAVR.
+
 ## Minimal implementation boundary
 
 The implementation uses one incremental Group 4 reducer, not separate
@@ -567,7 +575,8 @@ reacceptance.
 
 Finite real OHLCV replay and stratified blind review showed that natural mature
 ranges and both manipulation resolutions are observable, but mature-range
-coverage was sparse. FAVR may be enabled only after the complete causal
+coverage was sparse: the registered full-year scan found only two mature
+ranges. FAVR may be enabled only after the complete causal
 sequence naturally remains connected through range identity, manipulation
 identity, reverse displacement, zone identity, first pullback and trigger.
 
@@ -579,7 +588,8 @@ FAVR stays disabled and Group 4 is parked rather than threshold-tuned.
 Formal definition, incremental implementation, static review and the unified
 synthetic/boundary/causal suite, finite real OHLCV replay and small stratified
 review are complete for `3.2.0-group4.1`. Limited natural observation passed;
-broader mature-range stability remains pending and FAVR stays parked.
+the permanent full-year coverage evidence is linked above, broader
+mature-range stability remains pending, and FAVR stays parked.
 
 Primitive profitability, MBO stability, rolling OOF and sealed holdout are not
 required at this gate.

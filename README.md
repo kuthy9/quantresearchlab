@@ -52,8 +52,21 @@ Current primitive protocol status:
 synthetic/boundary tests exist. It is not a profitability or natural-market
 authority claim.
 
-The bounded 2023 natural-market results and the reason FAVR remains parked are
+The bounded 2023 natural-market review and the reason FAVR remains parked are
 recorded in [`docs/natural_authority_2023.md`](docs/natural_authority_2023.md).
+The reproducible, lightweight full-year Group 4 result is stored separately in
+[`docs/evidence/group4_natural_authority_2023.json`](docs/evidence/group4_natural_authority_2023.json).
+It can be regenerated only through its registered outcome-blind profile:
+
+```bash
+python3 scripts/scan_mature_ranges.py \
+  --profile group4_natural_authority_2023_full_year \
+  --force
+```
+
+That scan executes the production Group 1–2 and Group 4 reducers with all five
+enabled liquidity-pool source timeframes. It does not use Brain, Decision,
+Risk, PnL, MBO, future paths or threshold search.
 
 `ContinuousSMCEngine.from_config(..., runtime_mode=...)` requires an explicit
 development or live mode. Constructing it with `runtime_mode="live"` is
