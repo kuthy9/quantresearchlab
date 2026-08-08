@@ -99,6 +99,7 @@ def _manipulation(
     resolved_at = swept_at + pd.Timedelta(minutes=2)
     return SimpleNamespace(
         manipulation_id=identity,
+        source_inventory_item_id=f"pool:{identity}",
         source_kind="formed_liquidity_pool",
         source_timeframe=Timeframe.M5,
         side="above",
@@ -251,6 +252,20 @@ def test_registered_2023_profile_is_exact_and_outcome_blind() -> None:
     invalid["registered_calibration_exception"] = None
     with pytest.raises(ValueError, match="registered outcome-blind"):
         _validate_config(invalid)
+    custom_config = dict(payload)
+    custom_config["validation_protocol"] = "configs/custom_splits.json"
+    with pytest.raises(ValueError, match="canonical registered profile"):
+        _validate_config(custom_config)
+    altered_window = dict(payload)
+    altered_window["windows"] = [
+        {
+            "id": "not-2023",
+            "start": "2022-06-01T00:00:00-04:00",
+            "end_exclusive": "2022-07-01T00:00:00-04:00",
+        }
+    ]
+    with pytest.raises(ValueError, match="differs from the canonical"):
+        _validate_config(altered_window)
 
 
 def test_aggregate_records_self_describing_scan_scope() -> None:
@@ -287,6 +302,7 @@ def test_aggregate_records_self_describing_scan_scope() -> None:
         "group3",
         "group5",
     ]
+    assert context["event_view_materialized"] is False
     assert aggregate["windows"][0]["warmup_start"] == (
         START - pd.Timedelta(days=7)
     )
@@ -392,3 +408,26 @@ def test_manipulation_created_cohort_has_exactly_one_outcome() -> None:
         "right_censored": 1,
     }
     assert result["manipulation_conservation"]["balanced"] is True
+
+
+def test_unclassified_source_cannot_enter_created_cohort() -> None:
+    accumulator = CoverageAccumulator("conflict", START, END, _protocol())
+    item = _inventory(
+        "pool:conflict",
+        Timeframe.M5,
+        side="above",
+    )
+    accumulator.observe_unclassified_sources(
+        (item.item_id,),
+        metric="atr_unready",
+        inventory={item.item_id: item},
+    )
+    accumulator.observe_manipulation(
+        _manipulation("conflict", ManipulationLifecycle.REACCEPTED)
+    )
+
+    with pytest.raises(
+        AssertionError,
+        match="ATR-unready source created",
+    ):
+        accumulator.result(source_rows=10, observed_updates=10)

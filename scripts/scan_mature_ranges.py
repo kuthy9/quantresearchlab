@@ -50,6 +50,9 @@ from smc_trader.validation import load_validation_protocol  # noqa: E402
 
 DEFAULT_CONFIG = ROOT / "configs/data_splits.json"
 DEFAULT_OUTPUT = ROOT / "outputs/development/mature_range_coverage"
+CANONICAL_CALIBRATION_PROFILE = (
+    "group4_natural_authority_2023_full_year"
+)
 LIVE_ZONE_STATES = {
     SupportResistanceLifecycle.ACTIVE,
     SupportResistanceLifecycle.TESTED,
@@ -829,6 +832,24 @@ class CoverageAccumulator:
             raise AssertionError(
                 "manipulation created/outcome cohort is not conserved"
             )
+        unclassified_source_ids = set().union(
+            *(
+                values[metric]
+                for values in self.source_metric_ids.values()
+                for metric in ("ambiguous_dual_side", "atr_unready")
+            ),
+        )
+        created_source_ids = {
+            self.latest_manipulations[identity].source_inventory_item_id
+            for identity in created
+        }
+        unclassified_created_overlap = (
+            unclassified_source_ids & created_source_ids
+        )
+        if unclassified_created_overlap:
+            raise AssertionError(
+                "ambiguous or ATR-unready source created a manipulation"
+            )
 
         grouped: dict[
             tuple[str, str, str],
@@ -885,7 +906,9 @@ class CoverageAccumulator:
                 len(values) for values in outcomes.values()
             ),
             "balanced": len(created) == len(union) and overlap == 0,
-            "ambiguous_and_atr_unready_excluded_from_created": True,
+            "ambiguous_and_atr_unready_excluded_from_created": (
+                not unclassified_created_overlap
+            ),
         }
         return global_counts, rows, conservation
 
@@ -1003,6 +1026,40 @@ def _validate_config(payload: Mapping[str, Any]) -> None:
             "calibration data requires the registered outcome-blind "
             "authority exception"
         )
+    if payload.get("allowed_ohlcv_role") == "calibration":
+        if (
+            payload.get("validation_protocol")
+            != str(DEFAULT_CONFIG.relative_to(ROOT))
+            or payload.get("profile") != CANONICAL_CALIBRATION_PROFILE
+        ):
+            raise ValueError(
+                "calibration authority scan requires the canonical "
+                "registered profile"
+            )
+        canonical = _coverage_payload(
+            _json(DEFAULT_CONFIG),
+            DEFAULT_CONFIG,
+            profile=CANONICAL_CALIBRATION_PROFILE,
+        )
+        frozen_fields = (
+            "source",
+            "source_sha256",
+            "model_config",
+            "protocols",
+            "timezone",
+            "warmup_calendar_days",
+            "pool_source_timeframes",
+            "permanent_result_path",
+            "windows",
+        )
+        if any(
+            payload.get(field) != canonical.get(field)
+            for field in frozen_fields
+        ):
+            raise ValueError(
+                "calibration authority scan differs from the canonical "
+                "registered profile"
+            )
     expected_timeframes = {"4H", "1H", "15m", "5m", "1m"}
     if set(payload.get("pool_source_timeframes") or ()) != expected_timeframes:
         raise ValueError("authority scan must include every enabled pool scale")
@@ -1366,6 +1423,7 @@ def aggregate_results(
             ],
             "all_pool_source_timeframes": True,
             "scene_graph_projection_used": False,
+            "event_view_materialized": False,
         },
         "identity": dict(run_identity or {}),
         "bar_counts": {
