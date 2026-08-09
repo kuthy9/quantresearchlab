@@ -83,6 +83,8 @@ def test_registered_profile_is_exact_and_fail_closed() -> None:
     assert payload["profile_name"] == scan.CANONICAL_PROFILE
     assert profile["windows"] == [scan.EXPECTED_WINDOW]
     assert profile["warmup_calendar_days"] == 7
+    assert scan._PROGRESS_EVERY_COMPLETED_1M == 5000
+    assert scan._PROGRESS_EVERY_SECONDS == 60.0
     assert profile["protocols"] == scan.EXPECTED_PROTOCOLS
     assert profile["project_scene_graph"] is False
     assert profile["materialize_event_view"] is False
@@ -157,6 +159,20 @@ def test_eye_builder_enables_only_lightweight_typed_observer() -> None:
     assert observer._group5_reducer is not None
 
 
+def test_macos_authority_scan_rejects_rosetta_python(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(scan.sys, "platform", "darwin")
+    monkeypatch.setattr(scan.platform, "machine", lambda: "x86_64")
+    with pytest.raises(RuntimeError, match="native arm64 Python"):
+        scan._runtime_environment()
+
+    monkeypatch.setattr(scan.platform, "machine", lambda: "arm64")
+    runtime = scan._runtime_environment()
+    assert runtime["machine"] == "arm64"
+    assert runtime["native_arm64_required"] is True
+
+
 def test_checkpoint_resume_matches_uninterrupted_partial_smoke(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
@@ -180,6 +196,14 @@ def test_checkpoint_resume_matches_uninterrupted_partial_smoke(
 
     assert interrupted is None
     assert (resumed_output / "checkpoint.pkl").is_file()
+    interrupted_progress = json.loads(
+        (resumed_output / "progress.json").read_text(encoding="utf-8")
+    )
+    assert interrupted_progress["emitted_bars"] == 5
+    assert interrupted_progress["in_window_bars"] == 5
+    assert interrupted_progress["checkpoint_bars"] == 5
+    assert interrupted_progress["complete"] is False
+    assert not (resumed_output / ".progress.json.tmp").exists()
     assert not (resumed_output / "checkpoint.json").exists()
     encoded = (resumed_output / "checkpoint.pkl").read_bytes()
     assert encoded.startswith(scan._CHECKPOINT_MAGIC)
@@ -223,6 +247,14 @@ def test_checkpoint_resume_matches_uninterrupted_partial_smoke(
     assert not (resumed_output / "checkpoint.json").exists()
     assert (resumed_output / "summary.json").is_file()
     assert (resumed_output / "case_index.json").is_file()
+    resumed_progress = json.loads(
+        (resumed_output / "progress.json").read_text(encoding="utf-8")
+    )
+    assert resumed_progress["emitted_bars"] == 12
+    assert resumed_progress["in_window_bars"] == 12
+    assert resumed_progress["checkpoint_bars"] == 5
+    assert resumed_progress["complete"] is False
+    assert not tuple(resumed_output.glob("*.tmp"))
 
 
 def test_max_bars_limits_only_in_window_observations(
@@ -427,3 +459,7 @@ def test_full_scan_integrity_failure_is_not_permanent_evidence(
     assert summary["scan_status"]["scan_completed"] is True
     assert summary["scan_status"]["evidence_integrity_passed"] is False
     assert summary["scan_status"]["complete"] is False
+    progress = json.loads(
+        (output / "progress.json").read_text(encoding="utf-8")
+    )
+    assert progress["complete"] is False

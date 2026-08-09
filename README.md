@@ -66,10 +66,15 @@ artifacts. Its permanent outputs are:
 It can be reproduced only through the registered profile:
 
 ```bash
-python3 scripts/run_eye_authority_scan.py \
+.venv/bin/python scripts/run_eye_authority_scan.py \
   --profile eye_group1_5_natural_authority_2023_full_year \
   --force
 ```
+
+On macOS this runner fails closed unless the interpreter is native arm64;
+the repository `.venv` is the supported entry point. During a long run it
+atomically refreshes a small, non-evidence `progress.json` independently of
+the less frequent checkpoint.
 
 Execution reality in this Eye-only path is `not_evaluated`, not an Eye anomaly.
 The sampled transport review is also complete: 30 frozen clocks were replayed,

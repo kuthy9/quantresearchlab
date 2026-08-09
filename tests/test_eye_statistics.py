@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import copy, deepcopy
 import pickle
 from types import SimpleNamespace
 
@@ -99,6 +100,38 @@ def _observation(
         group5_boundary_path_transitions=(),
         group5_boundary_reacceptance_transitions=(),
     )
+
+
+def _delta_observation(
+    observation: SimpleNamespace,
+    *,
+    inventory: tuple[object, ...] = (),
+    pools: tuple[object, ...] = (),
+    fvgs: tuple[object, ...] = (),
+    order_blocks: tuple[object, ...] = (),
+    ranges: tuple[object, ...] = (),
+    manipulations: tuple[object, ...] = (),
+    entry_locations: tuple[object, ...] = (),
+    reacceptances: tuple[object, ...] = (),
+    micro_bos: tuple[object, ...] = (),
+    paths: tuple[object, ...] = (),
+) -> SimpleNamespace:
+    """Attach the production typed-delta transport to a test snapshot."""
+
+    result = copy(observation)
+    result.typed_transition_delta_available = True
+    result.liquidity_inventory_transitions_this_update = inventory
+    result.liquidity_pool_transitions_this_update = pools
+    result.group3_fvg_transitions_this_update = fvgs
+    result.group3_order_block_transitions_this_update = order_blocks
+    result.group4_range_transitions_this_update = ranges
+    result.group4_manipulation_transitions_this_update = manipulations
+    result.group5_entry_location_transitions_this_update = entry_locations
+    result.group5_reacceptance_transitions_this_update = reacceptances
+    result.group5_micro_bos_transitions_this_update = micro_bos
+    result.group5_path_transitions_this_update = paths
+    result.group5_step_transitions_this_update = ()
+    return result
 
 
 def _update(
@@ -224,6 +257,52 @@ def test_window_baseline_dispositions_and_execution_anomaly_filter() -> None:
             _update(warmup + pd.Timedelta(seconds=30)),
             _observation(warmup + pd.Timedelta(seconds=30)),
         )
+
+
+def test_warmup_baseline_indexes_join_metadata_without_counting_lifecycle() -> None:
+    warmup = pd.Timestamp("2023-01-08 23:59", tz="UTC")
+    start = warmup + pd.Timedelta(minutes=1)
+    statistics = EyeAuthorityStatistics(
+        start=start,
+        end_exclusive=start + pd.Timedelta(minutes=1),
+        coverage_start=warmup,
+    )
+    inventory = _inventory("pool:pool-warmup", warmup)
+    pool = SimpleNamespace(pool_id="pool-warmup", lifecycle="formed")
+    manipulation = _manipulation(
+        "manipulation-warmup",
+        "swept",
+        warmup,
+        warmup,
+    )
+    manipulation.source_inventory_item_id = inventory.item_id
+    baseline = _observation(
+        warmup,
+        inventory=(inventory,),
+        manipulations=(manipulation,),
+    )
+    baseline.liquidity_pool_states = (pool,)
+    statistics.observe(_update(warmup), baseline)
+    statistics.observe(
+        _update(start),
+        _delta_observation(_observation(start)),
+        previous_observation=baseline,
+    )
+
+    summary = statistics.finalize()
+    assert summary["group12"]["liquidity_pool_structural_metadata"] == {
+        "denominator_status": "fully_exposed",
+        "pool_entities_seen": 1,
+        "structural_rank_exposed": 1,
+        "structural_rank_missing": 0,
+    }
+    assert summary["group5"][
+        "group4_manipulations_by_source_timeframe"
+    ] == {"1H": 1}
+    assert not any(
+        row["primitive"] in {"liquidity_pool", "manipulation"}
+        for row in summary["funnels"]
+    )
 
 
 def test_source_disposition_rejects_conflict_at_same_source_clock() -> None:
@@ -1763,3 +1842,399 @@ def test_group5_repeated_snapshot_processes_only_appended_steps_with_summary_par
         "complete": 1,
         "interrupted": 0,
     }
+
+
+def test_typed_delta_matches_snapshot_and_compacts_only_terminal_stats() -> None:
+    start = pd.Timestamp("2023-07-10 14:00", tz="UTC")
+    end = start + pd.Timedelta(minutes=4)
+    snapshot_stats = EyeAuthorityStatistics(
+        start=start,
+        end_exclusive=end,
+        coverage_start=start,
+    )
+    delta_stats = EyeAuthorityStatistics(
+        start=start,
+        end_exclusive=end,
+        coverage_start=start,
+    )
+
+    source = _inventory("delta-liquidity", start)
+    fvg = _fvg("delta-fvg", start, qualification="displacement_linked")
+    forming_range = _range_state("delta-range", start, "forming")
+    manipulation = _manipulation("delta-manipulation", "swept", start, start)
+    location = _entry_location(
+        "delta-location",
+        "delta-fvg",
+        "fvg",
+        start,
+    )
+    active_path = _path(
+        "delta-path",
+        start,
+        reason="context_registered",
+        trigger=False,
+        context_id="delta-location",
+        lifecycle="active",
+        context_kind="zone_return",
+    )
+    active_path.ended_at = None
+
+    snapshots: list[SimpleNamespace] = []
+    deltas: list[SimpleNamespace] = []
+    first = _observation(
+        start,
+        inventory=(source,),
+        fvgs=(fvg,),
+        ranges=(forming_range,),
+        manipulations=(manipulation,),
+        entry_locations=(location,),
+        paths=(active_path,),
+    )
+    snapshots.append(first)
+    deltas.append(
+        _delta_observation(
+            first,
+            inventory=(source,),
+            fvgs=(fvg,),
+            ranges=(forming_range,),
+            manipulations=(manipulation,),
+            entry_locations=(location,),
+            paths=(active_path,),
+        )
+    )
+
+    unchanged_at = start + pd.Timedelta(minutes=1)
+    unchanged = _observation(
+        unchanged_at,
+        inventory=(source,),
+        fvgs=(fvg,),
+        ranges=(forming_range,),
+        manipulations=(manipulation,),
+        entry_locations=(location,),
+        paths=(active_path,),
+    )
+    snapshots.append(unchanged)
+    deltas.append(_delta_observation(unchanged))
+
+    terminal_at = start + pd.Timedelta(minutes=2)
+    consumed = copy(source)
+    consumed.lifecycle = "consumed"
+    consumed.consumed_at = terminal_at
+    consumed.lifecycle_reason = "strict_price_cross"
+    mitigated = copy(fvg)
+    mitigated.lifecycle = "mitigated"
+    mitigated.mitigated_at = terminal_at
+    mitigated.state_started_at = terminal_at
+    mitigated.transition_reason = "full_gap_fill"
+    mature_range = _range_state(
+        "delta-range",
+        terminal_at,
+        "mature",
+        formed_at=start,
+    )
+    reaccepted = _manipulation(
+        "delta-manipulation",
+        "reaccepted",
+        start,
+        terminal_at,
+    )
+    left = copy(location)
+    left.lifecycle = "left"
+    left.left_at = terminal_at
+    left.state_started_at = terminal_at
+    left.transition_reason = "zone_left_after_return"
+    closed_path = _path(
+        "delta-path",
+        terminal_at,
+        reason="micro_bos_aligned",
+        trigger=True,
+        context_id="delta-location",
+        formed_at=start,
+        context_kind="zone_return",
+    )
+    terminal = _observation(
+        terminal_at,
+        inventory=(consumed,),
+        fvgs=(mitigated,),
+        ranges=(mature_range,),
+        manipulations=(reaccepted,),
+        entry_locations=(left,),
+        paths=(closed_path,),
+    )
+    snapshots.append(terminal)
+    deltas.append(
+        _delta_observation(
+            terminal,
+            inventory=(consumed,),
+            fvgs=(mitigated,),
+            ranges=(mature_range,),
+            manipulations=(reaccepted,),
+            entry_locations=(left,),
+            paths=(closed_path,),
+        )
+    )
+
+    final_at = start + pd.Timedelta(minutes=3)
+    broken_range = _range_state(
+        "delta-range",
+        final_at,
+        "broken",
+        reason="close_beyond_frozen_range",
+        formed_at=start,
+    )
+    broken_range.mature_at = terminal_at
+    broken_range.broken_at = final_at
+    final_snapshot = _observation(
+        final_at,
+        inventory=(consumed,),
+        fvgs=(mitigated,),
+        ranges=(broken_range,),
+        manipulations=(reaccepted,),
+        entry_locations=(left,),
+        paths=(closed_path,),
+    )
+    snapshots.append(final_snapshot)
+    deltas.append(_delta_observation(final_snapshot, ranges=(broken_range,)))
+
+    previous_snapshot = None
+    previous_delta = None
+    for snapshot, delta in zip(snapshots, deltas):
+        snapshot_stats.observe(
+            _update(snapshot.asof),
+            snapshot,
+            previous_observation=previous_snapshot,
+        )
+        delta_stats.observe(
+            _update(delta.asof),
+            delta,
+            previous_observation=previous_delta,
+        )
+        previous_snapshot = snapshot
+        previous_delta = delta
+
+    snapshot_summary = snapshot_stats.finalize(
+        final_observation=final_snapshot,
+    )
+    delta_summary = delta_stats.finalize(final_observation=deltas[-1])
+    snapshot_semantics = deepcopy(snapshot_summary)
+    delta_semantics = deepcopy(delta_summary)
+    snapshot_semantics.pop("statistics_transport")
+    delta_semantics.pop("statistics_transport")
+    assert delta_semantics == snapshot_semantics
+    assert delta_summary["statistics_transport"]["counts"] == {
+        "final_snapshot_reconciliations": 1,
+        "initial_or_fallback_snapshot_observations": 1,
+        "transition_delta_observations": 3,
+    }
+
+    for primitive, identity in (
+        ("liquidity_inventory", "delta-liquidity"),
+        ("fvg", "delta-fvg"),
+        ("dealing_range", "delta-range"),
+        ("manipulation", "delta-manipulation"),
+        ("entry_location", "delta-location"),
+        ("path_sequence", "delta-path"),
+    ):
+        group = {
+            "liquidity_inventory": "group12",
+            "fvg": "group3",
+            "dealing_range": "group4",
+            "manipulation": "group4",
+            "entry_location": "group5",
+            "path_sequence": "group5",
+        }[primitive]
+        key = (group, primitive, identity)
+        assert key not in delta_stats._open_latest
+        assert key not in delta_stats._last_transition_by_entity
+        assert key in delta_stats._terminal_transition_by_entity
+
+    # The aggregate drops full terminal state payloads but retains the minimal
+    # cross-component identities needed for Group 5/FAVR conservation joins.
+    assert delta_stats._group5_entry_source_zone_by_id == {
+        "delta-location": "delta-fvg"
+    }
+    assert delta_stats._group5_zone_path_location_by_id == {
+        "delta-path": "delta-location"
+    }
+    assert delta_stats._path_steps_by_id["delta-path"][-1][1] == (
+        "micro_bos_confirmed"
+    )
+
+
+def test_hard_boundary_delta_matches_dedicated_snapshot_transitions() -> None:
+    start = pd.Timestamp("2023-07-11 14:00", tz="UTC")
+    boundary_at = start + pd.Timedelta(minutes=1)
+    end = boundary_at + pd.Timedelta(minutes=1)
+    snapshot_stats = EyeAuthorityStatistics(
+        start=start,
+        end_exclusive=end,
+        coverage_start=start,
+    )
+    delta_stats = EyeAuthorityStatistics(
+        start=start,
+        end_exclusive=end,
+        coverage_start=start,
+    )
+
+    open_fvg = _fvg(
+        "boundary-fvg",
+        start,
+        qualification="displacement_linked",
+    )
+    live_range = _range_state("boundary-range", start, "forming")
+    live_manipulation = _manipulation(
+        "boundary-manipulation",
+        "swept",
+        start,
+        start,
+    )
+    live_path = _path(
+        "boundary-path",
+        start,
+        reason="context_registered",
+        trigger=False,
+        context_id="boundary-fvg",
+        lifecycle="active",
+        context_kind="zone_return",
+    )
+    first = _observation(
+        start,
+        fvgs=(open_fvg,),
+        ranges=(live_range,),
+        manipulations=(live_manipulation,),
+        paths=(live_path,),
+    )
+    first_delta = _delta_observation(
+        first,
+        fvgs=(open_fvg,),
+        ranges=(live_range,),
+        manipulations=(live_manipulation,),
+        paths=(live_path,),
+    )
+
+    invalidated_fvg = copy(open_fvg)
+    invalidated_fvg.lifecycle = "invalidated"
+    invalidated_fvg.invalidated_at = boundary_at
+    invalidated_fvg.state_started_at = boundary_at
+    invalidated_fvg.transition_reason = "data_gap_reset"
+    broken_range = _range_state(
+        "boundary-range",
+        boundary_at,
+        "broken",
+        reason="data_gap_reset",
+        formed_at=start,
+    )
+    broken_range.broken_at = boundary_at
+    censored_manipulation = copy(live_manipulation)
+    censored_manipulation.censored_at = boundary_at
+    censored_manipulation.transition_reason = "data_gap_reset"
+    censored_path = _path(
+        "boundary-path",
+        boundary_at,
+        reason="data_gap_reset",
+        trigger=False,
+        context_id="boundary-fvg",
+        lifecycle="censored",
+        formed_at=start,
+        context_kind="zone_return",
+    )
+    boundary_snapshot = _observation(
+        boundary_at,
+        fvgs=(invalidated_fvg,),
+        anomalies=("data_gap_reset",),
+    )
+    boundary_snapshot.group4_boundary_range_transitions = (broken_range,)
+    boundary_snapshot.group4_boundary_manipulation_transitions = (
+        censored_manipulation,
+    )
+    boundary_snapshot.group5_boundary_path_transitions = (censored_path,)
+    boundary_delta = _delta_observation(
+        boundary_snapshot,
+        fvgs=(invalidated_fvg,),
+        ranges=(broken_range,),
+        manipulations=(censored_manipulation,),
+        paths=(censored_path,),
+    )
+
+    snapshot_stats.observe(_update(start), first)
+    delta_stats.observe(_update(start), first_delta)
+    snapshot_stats.observe(
+        _update(boundary_at, anomalies=("data_gap_reset",)),
+        boundary_snapshot,
+        previous_observation=first,
+    )
+    delta_stats.observe(
+        _update(boundary_at, anomalies=("data_gap_reset",)),
+        boundary_delta,
+        previous_observation=first_delta,
+    )
+
+    snapshot_summary = snapshot_stats.finalize(
+        final_observation=boundary_snapshot,
+    )
+    delta_summary = delta_stats.finalize(
+        final_observation=boundary_delta,
+    )
+    snapshot_summary.pop("statistics_transport")
+    delta_summary.pop("statistics_transport")
+    assert delta_summary == snapshot_summary
+
+
+def test_authoritative_pool_delta_ignores_stale_frame_projection() -> None:
+    start = pd.Timestamp("2023-07-11 14:00", tz="UTC")
+    resolved_at = start + pd.Timedelta(minutes=1)
+    formed = SimpleNamespace(
+        pool_id="pool-stale-frame",
+        lifecycle="formed",
+        timeframe=Timeframe.M1,
+        side="above",
+        formed_at=start,
+        resolved_at=None,
+        resolution_reason=None,
+    )
+    accepted = copy(formed)
+    accepted.lifecycle = "accepted"
+    accepted.resolved_at = resolved_at
+    accepted.resolution_reason = "completed_close_outside"
+    statistics = EyeAuthorityStatistics(
+        start=start,
+        end_exclusive=start + pd.Timedelta(minutes=3),
+        coverage_start=start,
+    )
+
+    first = _observation(start)
+    first.frames[Timeframe.M1].liquidity_pools = (formed,)
+    first.liquidity_pool_states = (formed,)
+    statistics.observe(
+        _update(start),
+        _delta_observation(first, pools=(formed,)),
+    )
+
+    second = _observation(resolved_at)
+    second.frames[Timeframe.M1].liquidity_pools = (formed,)
+    second.liquidity_pool_states = (accepted,)
+    statistics.observe(
+        _update(resolved_at),
+        _delta_observation(second, pools=(accepted,)),
+    )
+
+    repeated_at = start + pd.Timedelta(minutes=2)
+    repeated = _observation(repeated_at)
+    repeated.frames[Timeframe.M1].liquidity_pools = (formed,)
+    repeated.liquidity_pool_states = (accepted,)
+    statistics.observe(
+        _update(repeated_at),
+        _delta_observation(repeated),
+    )
+
+    row = next(
+        item
+        for item in statistics.finalize(final_observation=repeated)["funnels"]
+        if item["group"] == "group12"
+        and item["primitive"] == "liquidity_pool"
+        and not item["strata"]
+    )
+    assert row["entities"] == 1
+    assert row["lifecycle_transitions"] == {"accepted": 1, "formed": 1}
+    assert row["latest_lifecycle_counts"] == {"accepted": 1}
+    assert row["conservation"]["balanced"]

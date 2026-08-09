@@ -267,6 +267,36 @@ _OPEN_LIFECYCLES: dict[str, frozenset[str]] = {
     "path_sequence": frozenset({"active"}),
 }
 
+# A terminal here means that the producer contract forbids another lifecycle
+# for the same identity.  S/R ``reaccepted`` is intentionally absent because
+# that entity may still retire later.
+_TERMINAL_LIFECYCLES: dict[str, frozenset[str]] = {
+    "swing": frozenset({"broken", "formation_failed"}),
+    "structure": frozenset({"broken", "formation_failed"}),
+    "bos": frozenset({"confirmed", "failed"}),
+    "bos_post_break": frozenset({"accepted", "rejected"}),
+    "support_resistance": frozenset({"retired"}),
+    "liquidity_pool": frozenset({"accepted", "rejected"}),
+    "liquidity_inventory": frozenset({"consumed"}),
+    "displacement": frozenset({"exhausted", "censored"}),
+    "fvg": frozenset({"mitigated", "invalidated"}),
+    "order_block": frozenset({"mitigated", "failed"}),
+    "dealing_range": frozenset({"broken"}),
+    "manipulation": frozenset(
+        {
+            "reaccepted",
+            "accepted_outside",
+            "deadline_censored",
+            "hard_boundary_censored",
+        }
+    ),
+    "entry_location": frozenset({"left"}),
+    "qualified_reacceptance": frozenset({"held", "failed", "censored"}),
+    "path_sequence": frozenset({"closed", "censored"}),
+}
+
+_IMMUTABLE_EVENT_PRIMITIVES = frozenset({"micro_bos", "path_step"})
+
 
 class EyeAuthorityStatistics:
     """Incrementally aggregate typed Eye authority evidence.
@@ -342,7 +372,16 @@ class EyeAuthorityStatistics:
         self._reason_counts: Counter[
             tuple[str, str, tuple[tuple[str, str], ...], str]
         ] = Counter()
-        self._seen_transitions: set[tuple[str, str, str, str, str]] = set()
+        # One fingerprint per currently transitionable entity replaces the
+        # former all-history transition set.  Terminal identities retain only
+        # their final lifecycle/clock tombstone so a repeated fallback
+        # snapshot remains idempotent without keeping full state payloads.
+        self._last_transition_by_entity: dict[
+            tuple[str, str, str], tuple[str, str]
+        ] = {}
+        self._terminal_transition_by_entity: dict[
+            tuple[str, str, str], tuple[str, str]
+        ] = {}
         # Identities which are live in the final warmup snapshot belong to a
         # left-truncated cohort.  Keep this separate from the identities which
         # are actually encountered and suppressed inside the report window so
@@ -350,15 +389,23 @@ class EyeAuthorityStatistics:
         self._warmup_entity_keys: set[tuple[str, str, str]] = set()
         self._left_boundary_entities: set[tuple[str, str, str]] = set()
         self._left_boundary_counts: Counter[tuple[str, str]] = Counter()
-        self._latest: dict[
+        self._open_latest: dict[
             tuple[str, str, str],
             tuple[int, str, tuple[tuple[str, str], ...], str | None],
         ] = {}
+        self._terminal_latest_counts: Counter[
+            tuple[str, str, tuple[tuple[str, str], ...], str]
+        ] = Counter()
         self._cohort_strata_by_entity: dict[
             tuple[str, str, str], tuple[tuple[str, str], ...]
         ] = {}
         self._cohort_strata_revision_counts: Counter[tuple[str, str]] = Counter()
         self._sequence = 0
+        self._pending_warmup_observation: MarketObservation | None = None
+        self._inventory_state_by_id: dict[str, Any] = {}
+        self._window_inventory_primed = False
+        self._transport_counts: Counter[str] = Counter()
+        self._final_reconciled_observation_key: tuple[str, int, str] | None = None
 
         self._mature_months: Counter[str] = Counter()
         self._seen_mature_ranges: set[str] = set()
@@ -705,18 +752,19 @@ class EyeAuthorityStatistics:
             state=state,
         ):
             return False
-        transition_key = (
-            group,
-            primitive,
-            identity,
-            lifecycle_text,
-            event_clock.isoformat(),
-        )
-        if transition_key in self._seen_transitions:
-            return False
-        self._seen_transitions.add(transition_key)
-        observed_strata = _strata_key(strata)
         entity_key = (group, primitive, identity)
+        fingerprint = (lifecycle_text, event_clock.isoformat())
+        terminal = self._terminal_transition_by_entity.get(entity_key)
+        if terminal is not None:
+            if terminal != fingerprint:
+                raise ValueError(
+                    "eye statistics received a lifecycle after a terminal "
+                    f"transition: {entity_key} ({terminal}, {fingerprint})"
+                )
+            return False
+        if self._last_transition_by_entity.get(entity_key) == fingerprint:
+            return False
+        observed_strata = _strata_key(strata)
         exact_strata = self._cohort_strata_by_entity.setdefault(
             entity_key,
             observed_strata,
@@ -725,16 +773,33 @@ class EyeAuthorityStatistics:
             self._cohort_strata_revision_counts[(group, primitive)] += 1
         reason_text = _value(reason)
         self._sequence += 1
-        self._latest[(group, primitive, identity)] = (
+        latest = (
             self._sequence,
             lifecycle_text,
             exact_strata,
             reason_text,
         )
+        is_terminal = (
+            primitive in _IMMUTABLE_EVENT_PRIMITIVES
+            or lifecycle_text
+            in _TERMINAL_LIFECYCLES.get(primitive, frozenset())
+        )
+        if is_terminal:
+            self._terminal_transition_by_entity[entity_key] = fingerprint
+            self._last_transition_by_entity.pop(entity_key, None)
+            self._open_latest.pop(entity_key, None)
+            self._cohort_strata_by_entity.pop(entity_key, None)
+        else:
+            self._last_transition_by_entity[entity_key] = fingerprint
+            self._open_latest[entity_key] = latest
         for key in self._funnel_keys(group, primitive, exact_strata):
             self._cohort_entities[key].add(identity)
             self._lifecycle_entities[(*key, lifecycle_text)].add(identity)
             self._lifecycle_transitions[(*key, lifecycle_text)] += 1
+            if is_terminal:
+                self._terminal_latest_counts[
+                    (key[0], key[1], key[2], lifecycle_text)
+                ] += 1
             if reason_text:
                 self._reason_counts[(*key, reason_text)] += 1
         if case_candidate:
@@ -993,7 +1058,6 @@ class EyeAuthorityStatistics:
                     "support_resistance",
                     "zone_id",
                 ),
-                ("liquidity_pool", "liquidity_pools", "pool_id"),
                 ("fvg", "fair_value_gaps", "fvg_id"),
                 ("order_block", "order_blocks", "order_block_id"),
                 ("dealing_range", "dealing_ranges", "range_id"),
@@ -1077,6 +1141,10 @@ class EyeAuthorityStatistics:
             ("group5", "path_sequence", "path_sequences", "sequence_id"),
         ):
             for state in tuple(_mapping_value(observation, collection_name, ())):
+                if primitive == "liquidity_pool":
+                    self._index_pool_metadata(state)
+                elif primitive == "manipulation":
+                    self._index_manipulation_metadata(state)
                 self._remember_warmup_entity(
                     group=group,
                     primitive=primitive,
@@ -1229,17 +1297,22 @@ class EyeAuthorityStatistics:
                 state=state,
             )
 
-        for state in frame.liquidity_pools:
-            self._observe_pool(state, asof)
+        # Frame pool projections can lag the all-scale 1m crossing projection
+        # carried by ``MarketObservation.liquidity_pool_states``.  Counting
+        # both paths can replay a stale FORMED frame after the authoritative
+        # aggregate has already reached ACCEPTED/REJECTED.  Pools therefore
+        # have one statistics authority: the observation-level collection (or
+        # its typed transition delta) consumed by ``observe()``.
 
-    def _observe_pool(self, state: Any, asof: pd.Timestamp) -> None:
-        lifecycle = _value(state.lifecycle)
-        if lifecycle is None:
-            return
+    def _index_pool_metadata(self, state: Any) -> tuple[str, str]:
+        """Retain descriptive source rank without counting a lifecycle."""
+
         pool_id = str(_mapping_value(state, "pool_id") or "")
         metadata = self._source_metadata.get(f"pool:{pool_id}")
         structural_rank = (
-            "unknown" if metadata is None else metadata.get("structural_rank", "unknown")
+            "unknown"
+            if metadata is None
+            else metadata.get("structural_rank", "unknown")
         )
         internal_external = (
             structural_rank
@@ -1251,6 +1324,13 @@ class EyeAuthorityStatistics:
         else:
             self._pool_rank_exposed.add(pool_id)
             self._pool_rank_missing.discard(pool_id)
+        return structural_rank, internal_external
+
+    def _observe_pool(self, state: Any, asof: pd.Timestamp) -> None:
+        lifecycle = _value(state.lifecycle)
+        if lifecycle is None:
+            return
+        structural_rank, internal_external = self._index_pool_metadata(state)
         self._record_entity(
             group="group12",
             primitive="liquidity_pool",
@@ -1765,34 +1845,46 @@ class EyeAuthorityStatistics:
                 return "hard_boundary_censored"
         return lifecycle
 
-    def _observe_manipulation(self, state: Any, asof: pd.Timestamp) -> None:
-        bucket = self._manipulation_bucket(state)
+    def _index_manipulation_metadata(
+        self,
+        state: Any,
+    ) -> tuple[str, dict[str, Any]]:
+        """Retain source identity context without counting a lifecycle."""
+
         source_inventory_id = str(
             _mapping_value(state, "source_inventory_item_id") or ""
         )
-        metadata = self._source_metadata.get(source_inventory_id, {})
-        structural_rank = metadata.get("structural_rank", "unknown")
+        source_metadata = self._source_metadata.get(source_inventory_id, {})
+        structural_rank = source_metadata.get("structural_rank", "unknown")
         internal_external = (
             structural_rank
             if structural_rank in {"internal", "external"}
             else "unknown"
         )
         manipulation_id = str(_mapping_value(state, "manipulation_id") or "")
-        self._manipulation_metadata[manipulation_id] = {
+        metadata = {
             "source_timeframe": (
                 _value(_mapping_value(state, "source_timeframe")) or "unknown"
             ),
-            "source_kind": _value(_mapping_value(state, "source_kind")) or "unknown",
+            "source_kind": (
+                _value(_mapping_value(state, "source_kind")) or "unknown"
+            ),
             "source_id": str(_mapping_value(state, "source_id") or ""),
             "source_inventory_item_id": source_inventory_id,
             "side": _value(_mapping_value(state, "side")) or "unknown",
             "swept_at": _clock(_mapping_value(state, "swept_at")),
-            "reaccepted_at": _clock(
-                _mapping_value(state, "reaccepted_at")
-            ),
+            "reaccepted_at": _clock(_mapping_value(state, "reaccepted_at")),
             "structural_rank": structural_rank,
             "internal_external": internal_external,
         }
+        self._manipulation_metadata[manipulation_id] = metadata
+        return manipulation_id, metadata
+
+    def _observe_manipulation(self, state: Any, asof: pd.Timestamp) -> None:
+        bucket = self._manipulation_bucket(state)
+        manipulation_id, metadata = self._index_manipulation_metadata(state)
+        structural_rank = metadata["structural_rank"]
+        internal_external = metadata["internal_external"]
         clock_value = (
             _mapping_value(state, "censored_at")
             if bucket.endswith("censored")
@@ -1817,7 +1909,6 @@ class EyeAuthorityStatistics:
         )
         if new and manipulation_id not in self._manipulation_cohort_ids:
             self._manipulation_cohort_ids.add(manipulation_id)
-            metadata = self._manipulation_metadata[manipulation_id]
             self._group5_manipulation_funnel_ids[
                 (
                     metadata["source_kind"],
@@ -1828,7 +1919,7 @@ class EyeAuthorityStatistics:
         if (
             new
             and bucket == "reaccepted"
-            and self._manipulation_metadata[manipulation_id]["source_kind"]
+            and metadata["source_kind"]
             == "mature_range_boundary"
         ):
             self._favr_reaccepted_manipulation_ids.add(manipulation_id)
@@ -2254,6 +2345,7 @@ class EyeAuthorityStatistics:
         *,
         asof: pd.Timestamp,
         in_window: bool,
+        replace_current: bool = True,
     ) -> dict[str, Any]:
         """Index and aggregate one inventory snapshot in one traversal."""
 
@@ -2305,7 +2397,28 @@ class EyeAuthorityStatistics:
                     entity_id=source_id,
                     lifecycle=_mapping_value(state, "lifecycle"),
                 )
-        return inventory_by_id
+        if replace_current:
+            self._inventory_state_by_id = inventory_by_id
+        else:
+            self._inventory_state_by_id.update(inventory_by_id)
+        return self._inventory_state_by_id
+
+    def _prime_warmup_baseline(self) -> None:
+        baseline = self._pending_warmup_observation
+        if baseline is None:
+            return
+        baseline_asof = _clock(baseline.asof)
+        if baseline_asof is None:
+            raise ValueError("warmup baseline lacks an as-of clock")
+        self._process_inventory_snapshot(
+            baseline.liquidity_inventory,
+            asof=baseline_asof,
+            in_window=False,
+            replace_current=True,
+        )
+        self._cache_baseline(baseline)
+        self._pending_warmup_observation = None
+        self._transport_counts["warmup_baselines"] += 1
 
     def observe(
         self,
@@ -2329,14 +2442,45 @@ class EyeAuthorityStatistics:
         self._last_observation_key = key
         self._last_input_asof = asof
         in_window = self._in_window(asof)
-        inventory_by_id = self._process_inventory_snapshot(
-            observation.liquidity_inventory,
-            asof=asof,
-            in_window=in_window,
-        )
         if not in_window:
-            self._cache_baseline(observation)
+            # A single retained immutable snapshot is sufficient to establish
+            # the left-truncated live cohort.  Re-scanning every warmup minute
+            # adds no authority evidence and dominated long replay cost.
+            self._pending_warmup_observation = observation
+            self._transport_counts["warmup_observations_retained"] += 1
             return True
+
+        self._prime_warmup_baseline()
+        delta_mode = bool(
+            _mapping_value(
+                observation,
+                "typed_transition_delta_available",
+                False,
+            )
+        )
+        if delta_mode and self._window_inventory_primed:
+            inventory_by_id = self._process_inventory_snapshot(
+                _mapping_value(
+                    observation,
+                    "liquidity_inventory_transitions_this_update",
+                    (),
+                ),
+                asof=asof,
+                in_window=True,
+                replace_current=False,
+            )
+            self._transport_counts["transition_delta_observations"] += 1
+        else:
+            inventory_by_id = self._process_inventory_snapshot(
+                observation.liquidity_inventory,
+                asof=asof,
+                in_window=True,
+                replace_current=True,
+            )
+            self._window_inventory_primed = True
+            self._transport_counts[
+                "initial_or_fallback_snapshot_observations"
+            ] += 1
 
         self._observation_count += 1
         self._first_asof = self._first_asof or asof
@@ -2364,19 +2508,47 @@ class EyeAuthorityStatistics:
             if cutoff_text is not None:
                 self._last_typed_frame_cutoff[timeframe] = cutoff_text
             self._observe_group12_frame(frame, asof)
-            for state in frame.fair_value_gaps:
-                self._observe_fvg(state, asof)
-            for state in frame.order_blocks:
-                self._observe_order_block(state, asof)
-            for state in frame.dealing_ranges:
-                self._observe_range(state, asof)
+            if not delta_mode:
+                for state in frame.fair_value_gaps:
+                    self._observe_fvg(state, asof)
+                for state in frame.order_blocks:
+                    self._observe_order_block(state, asof)
+                for state in frame.dealing_ranges:
+                    self._observe_range(state, asof)
 
         self._observe_displacement(observation.displacement)
-        for state in observation.liquidity_pool_states:
+        pool_values = (
+            _mapping_value(
+                observation,
+                "liquidity_pool_transitions_this_update",
+                (),
+            )
+            if delta_mode
+            else observation.liquidity_pool_states
+        )
+        for state in pool_values:
             self._observe_pool(state, asof)
-        for state in observation.group3_boundary_fvg_transitions:
+        fvg_values = (
+            _mapping_value(
+                observation,
+                "group3_fvg_transitions_this_update",
+                (),
+            )
+            if delta_mode
+            else observation.group3_boundary_fvg_transitions
+        )
+        for state in fvg_values:
             self._observe_fvg(state, asof)
-        for state in observation.group3_boundary_order_block_transitions:
+        order_block_values = (
+            _mapping_value(
+                observation,
+                "group3_order_block_transitions_this_update",
+                (),
+            )
+            if delta_mode
+            else observation.group3_boundary_order_block_transitions
+        )
+        for state in order_block_values:
             self._observe_order_block(state, asof)
         self._observe_order_block_funnel(
             _mapping_value(observation, "group3_order_block_funnel", ())
@@ -2384,10 +2556,27 @@ class EyeAuthorityStatistics:
         self._ob_funnel_contract_seen = self._ob_funnel_contract_seen or hasattr(
             observation, "group3_order_block_funnel"
         )
-        for state in observation.manipulations:
+        manipulation_values = (
+            _mapping_value(
+                observation,
+                "group4_manipulation_transitions_this_update",
+                (),
+            )
+            if delta_mode
+            else observation.manipulations
+        )
+        for state in manipulation_values:
             self._observe_manipulation(state, asof)
-        for state in observation.group4_boundary_range_transitions:
-            self._observe_range(state, asof)
+        if delta_mode:
+            for state in _mapping_value(
+                observation,
+                "group4_range_transitions_this_update",
+                (),
+            ):
+                self._observe_range(state, asof)
+        else:
+            for state in observation.group4_boundary_range_transitions:
+                self._observe_range(state, asof)
         self._observe_range_funnel(
             _mapping_value(observation, "group4_range_funnel", ())
         )
@@ -2395,20 +2584,58 @@ class EyeAuthorityStatistics:
             self._range_funnel_contract_seen
             or hasattr(observation, "group4_range_funnel")
         )
-        for state in observation.group4_boundary_manipulation_transitions:
-            self._observe_manipulation(state, asof)
-        for state in observation.entry_locations:
+        if not delta_mode:
+            for state in observation.group4_boundary_manipulation_transitions:
+                self._observe_manipulation(state, asof)
+        entry_values = (
+            _mapping_value(
+                observation,
+                "group5_entry_location_transitions_this_update",
+                (),
+            )
+            if delta_mode
+            else observation.entry_locations
+        )
+        for state in entry_values:
             self._observe_entry_location(state, asof)
-        for state in observation.qualified_reacceptances:
+        reacceptance_values = (
+            _mapping_value(
+                observation,
+                "group5_reacceptance_transitions_this_update",
+                (),
+            )
+            if delta_mode
+            else observation.qualified_reacceptances
+        )
+        for state in reacceptance_values:
             self._observe_reacceptance(state, asof)
-        for state in observation.micro_bos_references:
+        micro_values = (
+            _mapping_value(
+                observation,
+                "group5_micro_bos_transitions_this_update",
+                (),
+            )
+            if delta_mode
+            else observation.micro_bos_references
+        )
+        for state in micro_values:
             self._observe_micro_bos(state)
-        for state in observation.path_sequences:
+        path_values = (
+            _mapping_value(
+                observation,
+                "group5_path_transitions_this_update",
+                (),
+            )
+            if delta_mode
+            else observation.path_sequences
+        )
+        for state in path_values:
             self._observe_path(state, asof)
-        for state in observation.group5_boundary_path_transitions:
-            self._observe_path(state, asof)
-        for state in observation.group5_boundary_reacceptance_transitions:
-            self._observe_reacceptance(state, asof)
+        if not delta_mode:
+            for state in observation.group5_boundary_path_transitions:
+                self._observe_path(state, asof)
+            for state in observation.group5_boundary_reacceptance_transitions:
+                self._observe_reacceptance(state, asof)
         self._group5_contract_seen = (
             self._group5_contract_seen
             or bool(_mapping_value(observation, "group5_typed_available", False))
@@ -2532,12 +2759,24 @@ class EyeAuthorityStatistics:
                 if (g, p, s) == key
             }
             latest_counts: Counter[str] = Counter()
-            for (g, p, entity_id), (_, lifecycle, entity_strata, _) in self._latest.items():
+            for (
+                g,
+                p,
+                entity_id,
+            ), (_, lifecycle, entity_strata, _) in self._open_latest.items():
                 if g != group or p != primitive or entity_id not in entity_ids:
                     continue
                 if strata and entity_strata != strata:
                     continue
                 latest_counts[lifecycle] += 1
+            for (
+                g,
+                p,
+                terminal_strata,
+                lifecycle,
+            ), count in self._terminal_latest_counts.items():
+                if g == group and p == primitive and terminal_strata == strata:
+                    latest_counts[lifecycle] += count
             latest_total = sum(latest_counts.values())
             reasons = {
                 reason: int(count)
@@ -2583,8 +2822,14 @@ class EyeAuthorityStatistics:
             }
         )
         for entity_id in entity_ids:
-            latest = self._latest.get(("group4", "manipulation", entity_id))
-            lifecycle = None if latest is None else latest[1]
+            entity_key = ("group4", "manipulation", entity_id)
+            latest = self._open_latest.get(entity_key)
+            terminal = self._terminal_transition_by_entity.get(entity_key)
+            lifecycle = (
+                terminal[0]
+                if terminal is not None
+                else None if latest is None else latest[1]
+            )
             if lifecycle in outcomes and lifecycle != "right_censored":
                 outcomes[lifecycle] += 1
             else:
@@ -3227,8 +3472,59 @@ class EyeAuthorityStatistics:
             "by_status": by_status,
         }
 
-    def finalize(self) -> dict[str, Any]:
+    def _reconcile_final_snapshot(
+        self,
+        observation: MarketObservation,
+    ) -> None:
+        """Reconcile open/right-censored state once at the scan boundary."""
+
+        asof = _clock(observation.asof)
+        if asof is None:
+            raise ValueError("final eye snapshot lacks an as-of clock")
+        key = (
+            str(observation.symbol),
+            int(observation.instrument_id),
+            asof.isoformat(),
+        )
+        if key == self._final_reconciled_observation_key:
+            return
+        for frame in observation.frames.values():
+            self._observe_group12_frame(frame, asof)
+            for state in frame.fair_value_gaps:
+                self._observe_fvg(state, asof)
+            for state in frame.order_blocks:
+                self._observe_order_block(state, asof)
+            for state in frame.dealing_ranges:
+                self._observe_range(state, asof)
+        self._process_inventory_snapshot(
+            observation.liquidity_inventory,
+            asof=asof,
+            in_window=True,
+            replace_current=True,
+        )
+        for state in observation.liquidity_pool_states:
+            self._observe_pool(state, asof)
+        for state in observation.manipulations:
+            self._observe_manipulation(state, asof)
+        for state in observation.entry_locations:
+            self._observe_entry_location(state, asof)
+        for state in observation.qualified_reacceptances:
+            self._observe_reacceptance(state, asof)
+        for state in observation.micro_bos_references:
+            self._observe_micro_bos(state)
+        for state in observation.path_sequences:
+            self._observe_path(state, asof)
+        self._final_reconciled_observation_key = key
+        self._transport_counts["final_snapshot_reconciliations"] += 1
+
+    def finalize(
+        self,
+        final_observation: MarketObservation | None = None,
+    ) -> dict[str, Any]:
         """Return a deterministic, JSON-serializable lightweight summary."""
+
+        if final_observation is not None:
+            self._reconcile_final_snapshot(final_observation)
 
         cases, case_status = self._selected_cases()
         clock_rows = [
@@ -3506,6 +3802,17 @@ class EyeAuthorityStatistics:
                 "observations": self._observation_count,
                 "left_boundary_censored_total": left_boundary_total,
                 "left_boundary_censored_entities": left_boundary_rows,
+            },
+            "statistics_transport": {
+                "mode": "authoritative_delta_with_cutoff_snapshot_fallback",
+                "counts": dict(sorted(self._transport_counts.items())),
+                "active_transition_fingerprints": len(
+                    self._last_transition_by_entity
+                ),
+                "terminal_identity_tombstones": len(
+                    self._terminal_transition_by_entity
+                ),
+                "open_latest_states": len(self._open_latest),
             },
             "data_clock": {
                 "by_timeframe": clock_rows,

@@ -16,8 +16,10 @@ import hashlib
 import json
 from pathlib import Path
 import pickle
+import platform
 import subprocess
 import sys
+import time
 from typing import Any, Iterator, Mapping
 
 import pandas as pd
@@ -140,6 +142,9 @@ RUNTIME_SWITCHES = {
     "per_minute_trace": False,
     "per_minute_snapshot": False,
 }
+_PROGRESS_SCHEMA_VERSION = 1
+_PROGRESS_EVERY_COMPLETED_1M = 5000
+_PROGRESS_EVERY_SECONDS = 60.0
 
 
 def _json(path: Path) -> dict[str, Any]:
@@ -446,6 +451,63 @@ def _write_json(path: Path, value: Any) -> None:
         + "\n"
     ).encode("utf-8")
     atomic_bytes(path, encoded)
+
+
+def _runtime_environment() -> dict[str, Any]:
+    """Fail fast when a macOS authority scan is launched through Rosetta."""
+
+    machine = platform.machine().lower()
+    if sys.platform == "darwin" and machine != "arm64":
+        raise RuntimeError(
+            "eye authority scan requires native arm64 Python on macOS; "
+            "run .venv/bin/python rather than an x86 conda interpreter"
+        )
+    return {
+        "python_executable": str(Path(sys.executable).resolve()),
+        "python_version": platform.python_version(),
+        "machine": machine,
+        "native_arm64_required": sys.platform == "darwin",
+    }
+
+
+def _progress_payload(
+    *,
+    emitted_bars: int,
+    in_window_bars: int,
+    last_asof: Any,
+    start: pd.Timestamp,
+    end_exclusive: pd.Timestamp,
+    elapsed_seconds: float,
+    invocation_bars: int,
+    checkpoint_bars: int,
+    complete: bool,
+) -> dict[str, Any]:
+    if last_asof is None:
+        percent = 0.0
+    else:
+        clock = _aware(last_asof, name="progress last_asof")
+        percent = 100.0 * float((clock - start) / (end_exclusive - start))
+        percent = min(100.0, max(0.0, percent))
+    if complete:
+        percent = 100.0
+    elapsed = max(0.0, float(elapsed_seconds))
+    return {
+        "schema_version": _PROGRESS_SCHEMA_VERSION,
+        "emitted_bars": int(emitted_bars),
+        "in_window_bars": int(in_window_bars),
+        "last_asof": (
+            None
+            if last_asof is None
+            else _aware(last_asof, name="progress last_asof").isoformat()
+        ),
+        "percent": round(percent, 3),
+        "elapsed_seconds": round(elapsed, 3),
+        "bars_per_second": (
+            0.0 if elapsed <= 0.0 else round(invocation_bars / elapsed, 3)
+        ),
+        "checkpoint_bars": int(checkpoint_bars),
+        "complete": bool(complete),
+    }
 
 
 def _write_checkpoint(
@@ -788,6 +850,7 @@ def _augment_summary(
         "profile": payload["profile_name"],
         "scan_identity": scan_identity,
         "runtime_switches": RUNTIME_SWITCHES,
+        "runtime_environment": _runtime_environment(),
         "identity": dict(run_identity),
     }
     case_index = {
@@ -818,6 +881,7 @@ def run_scan(
         type(stop_after_bars) is not int or stop_after_bars < 1
     ):
         raise ValueError("stop-after-bars must be a positive integer")
+    _runtime_environment()
     payload = _registered_payload(profile=profile)
     _validate_registered_payload(payload)
     profile_payload = payload["profile"]
@@ -847,11 +911,13 @@ def run_scan(
     )
     output = output.resolve()
     checkpoint_path = output / "checkpoint.pkl"
+    progress_path = output / "progress.json"
     summary_path = output / "summary.json"
     cases_path = output / "case_index.json"
     if force:
         for path in (
             checkpoint_path,
+            progress_path,
             summary_path,
             cases_path,
         ):
@@ -908,6 +974,37 @@ def run_scan(
 
     checkpoint_every = int(profile_payload["checkpoint_every_completed_1m"])
     invocation_bars = 0
+    invocation_start_bars = emitted_bars
+    run_started = time.monotonic()
+    last_progress_at = run_started
+    last_progress_bars = emitted_bars
+    last_checkpoint_bars = emitted_bars if checkpoint_path.is_file() else 0
+
+    def write_progress(*, complete: bool = False) -> None:
+        nonlocal last_progress_at, last_progress_bars
+        now = time.monotonic()
+        _write_json(
+            progress_path,
+            _progress_payload(
+                emitted_bars=emitted_bars,
+                in_window_bars=in_window_bars,
+                last_asof=(
+                    None
+                    if previous_observation is None
+                    else previous_observation.asof
+                ),
+                start=start,
+                end_exclusive=end,
+                elapsed_seconds=now - run_started,
+                invocation_bars=emitted_bars - invocation_start_bars,
+                checkpoint_bars=last_checkpoint_bars,
+                complete=complete,
+            ),
+        )
+        last_progress_at = now
+        last_progress_bars = emitted_bars
+
+    write_progress()
     next_progress = 5
     if (
         previous_observation is not None
@@ -937,6 +1034,13 @@ def run_scan(
             previous_observation=previous_observation,
         )
         previous_observation = observation
+        now = time.monotonic()
+        if (
+            emitted_bars - last_progress_bars
+            >= _PROGRESS_EVERY_COMPLETED_1M
+            or now - last_progress_at >= _PROGRESS_EVERY_SECONDS
+        ):
+            write_progress()
         if emitted_bars % checkpoint_every == 0:
             _write_checkpoint(
                 checkpoint_path,
@@ -950,6 +1054,8 @@ def run_scan(
                     "previous_observation": previous_observation,
                 },
             )
+            last_checkpoint_bars = emitted_bars
+            write_progress()
             print(f"checkpoint: {emitted_bars:,} emitted bars", flush=True)
         # The report-window cap is the semantic boundary of a smoke run.  It
         # must win over a simulated interruption on the same bar; otherwise a
@@ -973,11 +1079,19 @@ def run_scan(
                     "previous_observation": previous_observation,
                 },
             )
+            last_checkpoint_bars = emitted_bars
+            write_progress()
             print(f"simulated stop: {emitted_bars:,} emitted bars", flush=True)
             return None
 
     scan_completed = bool(source_exhausted and max_bars is None)
-    raw_summary = statistics.finalize()
+    # Reaching source exhaustion is not yet successful completion: final
+    # reconciliation, integrity checks, and summary persistence must finish
+    # before progress may advertise ``complete=true``.
+    write_progress()
+    raw_summary = statistics.finalize(
+        final_observation=previous_observation,
+    )
     integrity_checks: dict[str, bool] = {}
     if scan_completed:
         expected_tail = _expected_last_observation_asof(
@@ -1021,6 +1135,7 @@ def run_scan(
         _write_json(cases_path, case_index)
     checkpoint_path.unlink(missing_ok=True)
     if scan_completed and not integrity_passed:
+        write_progress()
         failed = sorted(
             name for name, passed in integrity_checks.items() if not passed
         )
@@ -1028,6 +1143,7 @@ def run_scan(
             "full-year eye scan completed but evidence integrity failed: "
             + ", ".join(failed)
         )
+    write_progress(complete=scan_completed)
     return summary
 
 

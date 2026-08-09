@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from bisect import bisect_right
 from collections import deque
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field, fields, is_dataclass, replace
 import hashlib
 import math
 from typing import Iterable, Mapping, Sequence
@@ -52,8 +52,10 @@ from .model import (
     DealingRangeLifecycle,
     DealingRangeState,
     Direction,
+    EntryLocationState,
     EventKind,
     ExecutionObservation,
+    FairValueGapState,
     FairValueGapLifecycle,
     FrameObservation,
     GROUP4_HARD_BOUNDARY_REASONS,
@@ -65,9 +67,13 @@ from .model import (
     ManipulationState,
     MarketEvent,
     MarketObservation,
+    MicroBOSReference,
+    OrderBlockState,
     OrderBlockLifecycle,
+    PathSequenceStep,
     PathSequenceLifecycle,
     PathSequenceState,
+    QualifiedReacceptanceState,
     StructureLifecycle,
     SupportResistanceLifecycle,
     SupportResistanceState,
@@ -130,6 +136,94 @@ class ExecutionRealityInput:
     ask_size: float | None = None
     depth_imbalance: float | None = None
     anomalies: tuple[str, ...] = ()
+
+
+# These fields advance mechanically while an entity remains in the same
+# semantic state. They belong in the authoritative snapshot but must not
+# create a transition-delta heartbeat every minute/bar.
+_TYPED_DELTA_HEARTBEAT_FIELDS = frozenset(
+    {
+        "age_bars",
+        "age_h1_bars",
+        "age_1m_bars",
+        "age_real_1m_bars",
+        "state_duration_real_1m_bars",
+        "last_updated_at",
+        "freshness",
+    }
+)
+_ENTRY_LOCATION_VIEW_FIELDS = frozenset(
+    {
+        "current_price",
+        "distance_to_zone_points",
+        "distance_to_failure_points",
+        "nearest_visible_draw_distance_points",
+    }
+)
+
+
+def _typed_semantic_signature(
+    state: object,
+    *,
+    excluded_fields: frozenset[str] = frozenset(),
+) -> tuple[tuple[str, object], ...]:
+    """Stable state signature without descriptive clock heartbeats."""
+
+    if not is_dataclass(state):
+        raise TypeError("typed transition state must be a dataclass")
+    ignored = _TYPED_DELTA_HEARTBEAT_FIELDS | excluded_fields
+    return tuple(
+        (item.name, getattr(state, item.name))
+        for item in fields(state)
+        if item.name not in ignored
+    )
+
+
+def _typed_state_delta_from_cache(
+    *,
+    candidates: Sequence[object],
+    signatures: dict[str, tuple[tuple[str, object], ...]],
+    identity_field: str,
+    excluded_fields: frozenset[str] = frozenset(),
+    retained_identities: frozenset[str] | None = None,
+) -> tuple[object, ...]:
+    """Compare candidate states with a compact observer-local signature map.
+
+    This never rescans the prior immutable Observation. Candidates may contain
+    multiple same-clock revisions of one entity; they are emitted in reducer
+    order and update the cache in order.
+    """
+
+    output: list[object] = []
+    for state in candidates:
+        identity = str(getattr(state, identity_field))
+        signature = _typed_semantic_signature(
+            state,
+            excluded_fields=excluded_fields,
+        )
+        if signatures.get(identity) == signature:
+            continue
+        output.append(state)
+        signatures[identity] = signature
+    if retained_identities is not None:
+        for identity in tuple(signatures):
+            if identity not in retained_identities:
+                signatures.pop(identity, None)
+    return tuple(output)
+
+
+def _typed_native_transitions_or_baseline(
+    *,
+    current: Sequence[object],
+    transitions: Sequence[object],
+    first_observation: bool,
+    boundary_reason: str | None,
+) -> tuple[object, ...]:
+    """Use one cold-start snapshot, but never hide boundary terminals."""
+
+    if first_observation and boundary_reason is None:
+        return tuple(current)
+    return tuple(transitions)
 
 
 @dataclass(frozen=True)
@@ -1883,6 +1977,12 @@ class CausalObserver:
         self._reference_inventory: dict[str, LiquidityInventoryItem] = {}
         self._reference_last_end: pd.Timestamp | None = None
         self._reference_coverage_start: pd.Timestamp | None = None
+        # Authority-scan-only transport cache.  Production Engine observers
+        # never populate it and therefore pay no typed-delta comparison cost.
+        self._typed_delta_signatures: dict[
+            str,
+            dict[str, tuple[tuple[str, object], ...]],
+        ] = {}
 
     @property
     def group5_protocol(self) -> Group5Protocol | None:
@@ -1916,6 +2016,9 @@ class CausalObserver:
         boundary_symbol: str,
         boundary_instrument_id: int,
     ) -> None:
+        # Delta transport is an authority-scan projection, not causal state.
+        # A hard epoch boundary must not retain prior-contract signatures.
+        self._typed_delta_signatures.clear()
         self._group5_boundary_update = (
             self._group5_reducer.on_boundary(
                 reason,
@@ -5226,6 +5329,246 @@ class CausalObserver:
             event_ages_minutes = {}
             recent_events = ()
             retained_entity_timelines = {}
+
+        prior_observation = self._prior
+        current_fvgs = frames[Timeframe.M5].fair_value_gaps
+        current_order_blocks = frames[Timeframe.M5].order_blocks
+        current_ranges = frames[Timeframe.H1].dealing_ranges
+        current_manipulations = (
+            ()
+            if group4_update is None
+            else group4_update.manipulations
+        )
+        current_entry_locations = (
+            ()
+            if group5_update is None
+            else group5_update.entry_locations
+        )
+        current_reacceptances = (
+            ()
+            if group5_update is None
+            else group5_update.qualified_reacceptances
+        )
+        current_micro_bos = (
+            ()
+            if group5_update is None
+            else group5_update.micro_bos_references
+        )
+        current_paths = (
+            ()
+            if group5_update is None
+            else group5_update.path_sequences
+        )
+        typed_delta_available = self.config.eye_authority_mode
+        liquidity_inventory_delta: tuple[object, ...] = ()
+        liquidity_pool_delta: tuple[object, ...] = ()
+        group3_fvg_delta: tuple[object, ...] = ()
+        group3_order_block_delta: tuple[object, ...] = ()
+        group4_range_delta: tuple[object, ...] = ()
+        group4_manipulation_delta: tuple[object, ...] = ()
+        group5_entry_location_delta: tuple[object, ...] = ()
+        group5_reacceptance_delta: tuple[object, ...] = ()
+        group5_micro_bos_delta: tuple[object, ...] = ()
+        group5_path_delta: tuple[object, ...] = ()
+        group5_step_delta: tuple[tuple[str, PathSequenceStep], ...] = ()
+        if typed_delta_available:
+            baseline = prior_observation is None
+            group4_boundary = bool(
+                group4_update is not None
+                and group4_update.boundary_reason is not None
+            )
+            group5_boundary = bool(
+                group5_update is not None
+                and group5_update.boundary_reason is not None
+            )
+
+            def cached(
+                name: str,
+                candidates: Sequence[object],
+                identity_field: str,
+                *,
+                excluded_fields: frozenset[str] = frozenset(),
+                retained_states: Sequence[object] | None = None,
+            ) -> tuple[object, ...]:
+                return _typed_state_delta_from_cache(
+                    candidates=candidates,
+                    signatures=self._typed_delta_signatures.setdefault(
+                        name,
+                        {},
+                    ),
+                    identity_field=identity_field,
+                    excluded_fields=excluded_fields,
+                    retained_identities=(
+                        None
+                        if retained_states is None
+                        else frozenset(
+                            str(getattr(state, identity_field))
+                            for state in retained_states
+                        )
+                    ),
+                )
+
+            # Inventory and pool reducers do not yet expose a complete
+            # ordinary transition batch.  Compare only the current view with
+            # an observer-local signature cache; never rescan the prior
+            # immutable Observation.
+            liquidity_inventory_delta = cached(
+                "liquidity_inventory",
+                liquidity_inventory,
+                "item_id",
+                retained_states=liquidity_inventory,
+            )
+            liquidity_pool_delta = cached(
+                "liquidity_pool",
+                liquidity_pool_states,
+                "pool_id",
+                retained_states=liquidity_pool_states,
+            )
+
+            # Groups 3 and 4 expose authoritative reducer transitions.  The
+            # full state is read once as a warmup baseline; subsequent bars
+            # consume only the native transition batch.  A live swept
+            # manipulation is the sole snapshot fallback because its
+            # reclaim/outside counters are meaningful ordinary revisions.
+            group3_fvg_delta = _typed_native_transitions_or_baseline(
+                current=current_fvgs,
+                transitions=(
+                    ()
+                    if group3_update is None
+                    else group3_update.fvg_transitions
+                ),
+                first_observation=baseline,
+                boundary_reason=(
+                    None
+                    if group3_update is None
+                    else group3_update.boundary_reason
+                ),
+            )
+            group3_order_block_delta = _typed_native_transitions_or_baseline(
+                current=current_order_blocks,
+                transitions=(
+                    ()
+                    if group3_update is None
+                    else group3_update.order_block_transitions
+                ),
+                first_observation=baseline,
+                boundary_reason=(
+                    None
+                    if group3_update is None
+                    else group3_update.boundary_reason
+                ),
+            )
+            group4_range_delta = _typed_native_transitions_or_baseline(
+                current=current_ranges,
+                transitions=(
+                    ()
+                    if group4_update is None
+                    else group4_update.range_transitions
+                ),
+                first_observation=baseline,
+                boundary_reason=(
+                    None
+                    if group4_update is None
+                    else group4_update.boundary_reason
+                ),
+            )
+            live_manipulation = next(
+                (
+                    state
+                    for state in reversed(current_manipulations)
+                    if (
+                        state.lifecycle is ManipulationLifecycle.SWEPT
+                        and state.censored_at is None
+                    )
+                ),
+                None,
+            )
+            live_manipulations = (
+                ()
+                if live_manipulation is None
+                else (live_manipulation,)
+            )
+            group4_manipulation_delta = cached(
+                "group4_manipulation",
+                (
+                    current_manipulations
+                    if baseline and not group4_boundary
+                    else (
+                        *(
+                            ()
+                            if group4_update is None
+                            else group4_update.manipulation_transitions
+                        ),
+                        *live_manipulations,
+                    )
+                ),
+                "manipulation_id",
+                retained_states=current_manipulations,
+            )
+
+            # Group 5 has complete path/step transitions.  Entry location,
+            # qualified reacceptance and micro-BOS remain bounded semantic
+            # snapshot fallbacks until their reducer exposes ordinary deltas.
+            group5_entry_location_delta = cached(
+                "group5_entry_location",
+                current_entry_locations,
+                "location_id",
+                excluded_fields=_ENTRY_LOCATION_VIEW_FIELDS,
+                retained_states=current_entry_locations,
+            )
+            group5_reacceptance_delta = cached(
+                "group5_reacceptance",
+                (
+                    *current_reacceptances,
+                    *(
+                        ()
+                        if group5_update is None
+                        else group5_update.reacceptance_transitions
+                    ),
+                ),
+                "reacceptance_id",
+                retained_states=current_reacceptances,
+            )
+            group5_micro_bos_delta = cached(
+                "group5_micro_bos",
+                current_micro_bos,
+                "reference_id",
+                retained_states=current_micro_bos,
+            )
+            if baseline and not group5_boundary:
+                path_candidates = current_paths
+                group5_step_delta = tuple(
+                    (path.sequence_id, step)
+                    for path in current_paths
+                    for step in path.steps
+                )
+            else:
+                group5_step_delta = (
+                    ()
+                    if group5_update is None
+                    else group5_update.step_transitions
+                )
+                step_path_ids = {
+                    sequence_id
+                    for sequence_id, _ in group5_step_delta
+                }
+                path_candidates = (
+                    *(
+                        ()
+                        if group5_update is None
+                        else group5_update.path_transitions
+                    ),
+                    *(
+                        state
+                        for state in current_paths
+                        if state.sequence_id in step_path_ids
+                    ),
+                )
+            group5_path_delta = _typed_state_delta_from_cache(
+                candidates=path_candidates,
+                signatures={},
+                identity_field="sequence_id",
+            )
         try:
             observation = MarketObservation(
                 asof=update.asof,
@@ -5245,6 +5588,38 @@ class CausalObserver:
                 incomplete_entity_timeline_keys=(
                     incomplete_timeline_keys
                 ),
+                typed_transition_delta_available=typed_delta_available,
+                liquidity_inventory_transitions_this_update=(
+                    liquidity_inventory_delta
+                ),
+                liquidity_pool_transitions_this_update=(
+                    liquidity_pool_delta
+                ),
+                group3_fvg_transitions_this_update=(
+                    group3_fvg_delta
+                ),
+                group3_order_block_transitions_this_update=(
+                    group3_order_block_delta
+                ),
+                group4_range_transitions_this_update=(
+                    group4_range_delta
+                ),
+                group4_manipulation_transitions_this_update=(
+                    group4_manipulation_delta
+                ),
+                group5_entry_location_transitions_this_update=(
+                    group5_entry_location_delta
+                ),
+                group5_reacceptance_transitions_this_update=(
+                    group5_reacceptance_delta
+                ),
+                group5_micro_bos_transitions_this_update=(
+                    group5_micro_bos_delta
+                ),
+                group5_path_transitions_this_update=(
+                    group5_path_delta
+                ),
+                group5_step_transitions_this_update=group5_step_delta,
                 group3_boundary_fvg_transitions=(
                     group3_update.fvg_transitions
                     if (

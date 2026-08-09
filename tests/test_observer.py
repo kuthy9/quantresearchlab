@@ -9,6 +9,7 @@ import pytest
 from smc_trader.causal import CausalMarketReader
 from smc_trader.model import (
     Bar,
+    Direction,
     EventKind,
     FrameObservation,
     LiquidityInventoryItem,
@@ -17,6 +18,9 @@ from smc_trader.model import (
     LiquidityPoolState,
     ManipulationSourceDisposition,
     ManipulationSourceDispositionKind,
+    PathSequenceLifecycle,
+    PathSequenceState,
+    PathSequenceStep,
     SupportResistanceLifecycle,
     SupportResistanceState,
     Timeframe,
@@ -26,6 +30,8 @@ from smc_trader.observation import (
     ExecutionRealityInput,
     ObserverConfig,
     _event,
+    _typed_native_transitions_or_baseline,
+    _typed_state_delta_from_cache,
 )
 
 from .helpers import MODEL_SCALE_SPECS, CORE_TEST_SCALE_SPECS, session_bars
@@ -341,6 +347,7 @@ def test_eye_authority_mode_preserves_all_typed_state_and_internal_memory() -> N
         full_observation = full.observe(full_reader.on_bar(bar))
         light_observation = light.observe(light_reader.on_bar(bar))
 
+        assert not full_observation.typed_transition_delta_available
         assert light_observation == replace(
             full_observation,
             execution=light_observation.execution,
@@ -358,6 +365,46 @@ def test_eye_authority_mode_preserves_all_typed_state_and_internal_memory() -> N
             event_ages_minutes={},
             retained_entity_timelines={},
             incomplete_entity_timeline_keys=(),
+            typed_transition_delta_available=True,
+            liquidity_inventory_transitions_this_update=(
+                light_observation
+                .liquidity_inventory_transitions_this_update
+            ),
+            liquidity_pool_transitions_this_update=(
+                light_observation.liquidity_pool_transitions_this_update
+            ),
+            group3_fvg_transitions_this_update=(
+                light_observation.group3_fvg_transitions_this_update
+            ),
+            group3_order_block_transitions_this_update=(
+                light_observation
+                .group3_order_block_transitions_this_update
+            ),
+            group4_range_transitions_this_update=(
+                light_observation.group4_range_transitions_this_update
+            ),
+            group4_manipulation_transitions_this_update=(
+                light_observation
+                .group4_manipulation_transitions_this_update
+            ),
+            group5_entry_location_transitions_this_update=(
+                light_observation
+                .group5_entry_location_transitions_this_update
+            ),
+            group5_reacceptance_transitions_this_update=(
+                light_observation
+                .group5_reacceptance_transitions_this_update
+            ),
+            group5_micro_bos_transitions_this_update=(
+                light_observation
+                .group5_micro_bos_transitions_this_update
+            ),
+            group5_path_transitions_this_update=(
+                light_observation.group5_path_transitions_this_update
+            ),
+            group5_step_transitions_this_update=(
+                light_observation.group5_step_transitions_this_update
+            ),
         )
         assert light.memory.__dict__ == full.memory.__dict__
 
@@ -371,6 +418,49 @@ def test_eye_authority_mode_preserves_all_typed_state_and_internal_memory() -> N
     assert light_observation.execution.expected_round_trip_cost_points == 0.0
     assert light.memory.recent()
     assert light.memory.entity_timelines()
+
+
+def test_normal_observer_skips_typed_delta_signature_generation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import smc_trader.observation as observation_module
+
+    calls = 0
+    original = observation_module._typed_semantic_signature
+
+    def counted(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(
+        observation_module,
+        "_typed_semantic_signature",
+        counted,
+    )
+    reader = CausalMarketReader(scale_specs=MODEL_SCALE_SPECS)
+    observer = CausalObserver(_all_typed_observer_config())
+
+    for bar in _tick_aligned_bars(20):
+        observation = observer.observe(reader.on_bar(bar))
+
+    assert calls == 0
+    assert not observation.typed_transition_delta_available
+    assert not any(
+        (
+            observation.liquidity_inventory_transitions_this_update,
+            observation.liquidity_pool_transitions_this_update,
+            observation.group3_fvg_transitions_this_update,
+            observation.group3_order_block_transitions_this_update,
+            observation.group4_range_transitions_this_update,
+            observation.group4_manipulation_transitions_this_update,
+            observation.group5_entry_location_transitions_this_update,
+            observation.group5_reacceptance_transitions_this_update,
+            observation.group5_micro_bos_transitions_this_update,
+            observation.group5_path_transitions_this_update,
+            observation.group5_step_transitions_this_update,
+        )
+    )
 
 
 def test_observer_keeps_hidden_live_zone_timeline_until_terminal_cooling() -> None:
@@ -937,9 +1027,14 @@ def test_projected_pool_state_overrides_preprojection_snapshot(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     reader = CausalMarketReader(scale_specs=MODEL_SCALE_SPECS)
-    observer = _typed_liquidity_observer()
-    bars = _tick_aligned_bars(5)
-    for bar in bars[:-1]:
+    observer = CausalObserver(
+        _all_typed_observer_config(
+            materialize_event_view=False,
+            eye_authority_mode=True,
+        )
+    )
+    bars = _tick_aligned_bars(6)
+    for bar in bars[:-2]:
         prior = observer.observe(reader.on_bar(bar))
 
     formed_at = prior.asof - pd.Timedelta(minutes=2)
@@ -984,7 +1079,7 @@ def test_projected_pool_state_overrides_preprojection_snapshot(
 
     monkeypatch.setattr(m1_tracker, "snapshot", formation_snapshot)
 
-    update = reader.on_bar(bars[-1])
+    update = reader.on_bar(bars[-2])
     swept = replace(
         formed,
         lifecycle=LiquidityPoolLifecycle.SWEPT,
@@ -1015,3 +1110,107 @@ def test_projected_pool_state_overrides_preprojection_snapshot(
     assert observation.frame(Timeframe.M1).liquidity_pools == (formed,)
     assert observation.liquidity_pool_states == (swept,)
     assert observation.liquidity_inventory == (consumed,)
+    assert observation.typed_transition_delta_available
+    assert observation.liquidity_pool_transitions_this_update == (swept,)
+    assert observation.liquidity_inventory_transitions_this_update == (
+        consumed,
+    )
+
+    # Repeating the same lifecycle and frozen geometry on the next completed
+    # minute is not another semantic transition.
+    unchanged = observer.observe(reader.on_bar(bars[-1]))
+    assert unchanged.liquidity_pool_states == (swept,)
+    assert unchanged.liquidity_inventory == (consumed,)
+    assert unchanged.liquidity_pool_transitions_this_update == ()
+    assert unchanged.liquidity_inventory_transitions_this_update == ()
+
+
+def test_group5_semantic_delta_keeps_steps_but_ignores_age_heartbeat() -> None:
+    formed_at = pd.Timestamp(
+        "2025-01-06 09:30",
+        tz="America/New_York",
+    )
+    first_step = PathSequenceStep(
+        step_id="step-zone-visible",
+        kind="zone_visible",
+        observed_at=formed_at,
+        source_event_id="fvg-source",
+        source_entity_id="fvg-source",
+        predecessor_step_ids=(),
+        same_clock_relation="origin",
+        direction=Direction.LONG,
+        strength=0.5,
+        reason="typed_entry_zone_registered",
+    )
+    baseline = PathSequenceState(
+        sequence_id="path-zone-return",
+        protocol_hash="protocol",
+        symbol="NQH5",
+        instrument_id=1,
+        context_kind="zone_return",
+        context_id="location-1",
+        direction=Direction.LONG,
+        lifecycle=PathSequenceLifecycle.ACTIVE,
+        formed_at=formed_at,
+        state_started_at=formed_at,
+        last_updated_at=formed_at,
+        age_real_1m_bars=0,
+        state_duration_real_1m_bars=0,
+        steps=(first_step,),
+    )
+    signatures: dict[str, tuple[tuple[str, object], ...]] = {}
+    assert _typed_state_delta_from_cache(
+        candidates=(baseline,),
+        signatures=signatures,
+        identity_field="sequence_id",
+    ) == (baseline,)
+
+    next_at = formed_at + pd.Timedelta(minutes=1)
+    heartbeat = replace(
+        baseline,
+        last_updated_at=next_at,
+        age_real_1m_bars=1,
+        state_duration_real_1m_bars=1,
+    )
+    assert _typed_state_delta_from_cache(
+        candidates=(heartbeat,),
+        signatures=signatures,
+        identity_field="sequence_id",
+    ) == ()
+
+    trigger = PathSequenceStep(
+        step_id="step-micro-bos",
+        kind="micro_bos_confirmed",
+        observed_at=next_at,
+        source_event_id="bos-1",
+        source_entity_id="bos-reference-1",
+        predecessor_step_ids=(first_step.step_id,),
+        same_clock_relation="strictly_after",
+        direction=Direction.LONG,
+        strength=0.75,
+        reason="aligned_micro_bos",
+    )
+    appended = replace(
+        heartbeat,
+        steps=(first_step, trigger),
+    )
+    assert _typed_state_delta_from_cache(
+        candidates=(appended,),
+        signatures=signatures,
+        identity_field="sequence_id",
+    ) == (appended,)
+
+
+def test_typed_cold_start_baseline_never_masks_boundary_terminals() -> None:
+    assert _typed_native_transitions_or_baseline(
+        current=("open",),
+        transitions=(),
+        first_observation=True,
+        boundary_reason=None,
+    ) == ("open",)
+    assert _typed_native_transitions_or_baseline(
+        current=(),
+        transitions=("hard-boundary-terminal",),
+        first_observation=True,
+        boundary_reason="data_gap_reset",
+    ) == ("hard-boundary-terminal",)

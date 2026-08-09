@@ -4698,6 +4698,55 @@ class MarketObservation:
         tuple[MarketEvent, ...],
     ] = field(default_factory=dict)
     incomplete_entity_timeline_keys: tuple[str, ...] = ()
+    # One transport-level semantic delta for lightweight causal consumers.
+    # Reducer snapshots remain the authoritative current state; these tuples
+    # contain only baseline entities or entities whose lifecycle/evidence
+    # changed on this completed update.  Age/freshness heartbeats are omitted.
+    typed_transition_delta_available: bool = False
+    liquidity_inventory_transitions_this_update: tuple[
+        LiquidityInventoryItem,
+        ...,
+    ] = ()
+    liquidity_pool_transitions_this_update: tuple[
+        LiquidityPoolState,
+        ...,
+    ] = ()
+    group3_fvg_transitions_this_update: tuple[
+        FairValueGapState,
+        ...,
+    ] = ()
+    group3_order_block_transitions_this_update: tuple[
+        OrderBlockState,
+        ...,
+    ] = ()
+    group4_range_transitions_this_update: tuple[
+        DealingRangeState,
+        ...,
+    ] = ()
+    group4_manipulation_transitions_this_update: tuple[
+        ManipulationState,
+        ...,
+    ] = ()
+    group5_entry_location_transitions_this_update: tuple[
+        EntryLocationState,
+        ...,
+    ] = ()
+    group5_reacceptance_transitions_this_update: tuple[
+        QualifiedReacceptanceState,
+        ...,
+    ] = ()
+    group5_micro_bos_transitions_this_update: tuple[
+        MicroBOSReference,
+        ...,
+    ] = ()
+    group5_path_transitions_this_update: tuple[
+        PathSequenceState,
+        ...,
+    ] = ()
+    group5_step_transitions_this_update: tuple[
+        tuple[str, PathSequenceStep],
+        ...,
+    ] = ()
     group3_boundary_fvg_transitions: tuple[
         FairValueGapState,
         ...,
@@ -4766,6 +4815,20 @@ class MarketObservation:
             "scene_added_edge_ids",
             "scene_revised_edge_ids",
             "scene_resolution_event_ids",
+        ):
+            object.__setattr__(self, name, tuple(getattr(self, name)))
+        for name in (
+            "liquidity_inventory_transitions_this_update",
+            "liquidity_pool_transitions_this_update",
+            "group3_fvg_transitions_this_update",
+            "group3_order_block_transitions_this_update",
+            "group4_range_transitions_this_update",
+            "group4_manipulation_transitions_this_update",
+            "group5_entry_location_transitions_this_update",
+            "group5_reacceptance_transitions_this_update",
+            "group5_micro_bos_transitions_this_update",
+            "group5_path_transitions_this_update",
+            "group5_step_transitions_this_update",
         ):
             object.__setattr__(self, name, tuple(getattr(self, name)))
         object.__setattr__(
@@ -4849,6 +4912,87 @@ class MarketObservation:
             tuple(self.group5_boundary_reacceptance_transitions),
         )
         object.__setattr__(self, "anomalies", tuple(self.anomalies))
+        if type(self.typed_transition_delta_available) is not bool:
+            raise ValueError(
+                "typed transition delta availability must be boolean"
+            )
+        typed_transition_collections = (
+            self.liquidity_inventory_transitions_this_update,
+            self.liquidity_pool_transitions_this_update,
+            self.group3_fvg_transitions_this_update,
+            self.group3_order_block_transitions_this_update,
+            self.group4_range_transitions_this_update,
+            self.group4_manipulation_transitions_this_update,
+            self.group5_entry_location_transitions_this_update,
+            self.group5_reacceptance_transitions_this_update,
+            self.group5_micro_bos_transitions_this_update,
+            self.group5_path_transitions_this_update,
+            self.group5_step_transitions_this_update,
+        )
+        if (
+            not self.typed_transition_delta_available
+            and any(typed_transition_collections)
+        ):
+            raise ValueError(
+                "typed transition delta payload requires availability"
+            )
+        typed_transition_contracts = (
+            (
+                self.liquidity_inventory_transitions_this_update,
+                LiquidityInventoryItem,
+            ),
+            (
+                self.liquidity_pool_transitions_this_update,
+                LiquidityPoolState,
+            ),
+            (
+                self.group3_fvg_transitions_this_update,
+                FairValueGapState,
+            ),
+            (
+                self.group3_order_block_transitions_this_update,
+                OrderBlockState,
+            ),
+            (
+                self.group4_range_transitions_this_update,
+                DealingRangeState,
+            ),
+            (
+                self.group4_manipulation_transitions_this_update,
+                ManipulationState,
+            ),
+            (
+                self.group5_entry_location_transitions_this_update,
+                EntryLocationState,
+            ),
+            (
+                self.group5_reacceptance_transitions_this_update,
+                QualifiedReacceptanceState,
+            ),
+            (
+                self.group5_micro_bos_transitions_this_update,
+                MicroBOSReference,
+            ),
+            (
+                self.group5_path_transitions_this_update,
+                PathSequenceState,
+            ),
+        )
+        if any(
+            not isinstance(item, expected_type)
+            for collection, expected_type in typed_transition_contracts
+            for item in collection
+        ):
+            raise TypeError("typed transition delta contains an invalid state")
+        if any(
+            not isinstance(item, tuple)
+            or len(item) != 2
+            or not isinstance(item[0], str)
+            or not item[0]
+            or not isinstance(item[1], PathSequenceStep)
+            for item in self.group5_step_transitions_this_update
+        ):
+            raise TypeError("Group 5 step delta contains an invalid transition")
         if not self.symbol or int(self.instrument_id) < 0:
             raise ValueError("observation contract identity is invalid")
         if not math.isfinite(float(self.price)):
@@ -5320,6 +5464,11 @@ class MarketObservation:
                 or self.path_sequences
                 or self.group5_boundary_path_transitions
                 or self.group5_boundary_reacceptance_transitions
+                or self.group5_entry_location_transitions_this_update
+                or self.group5_reacceptance_transitions_this_update
+                or self.group5_micro_bos_transitions_this_update
+                or self.group5_path_transitions_this_update
+                or self.group5_step_transitions_this_update
             )
         ):
             raise ValueError(
@@ -5359,6 +5508,21 @@ class MarketObservation:
             )
         ):
             raise ValueError("Group 5 observation identities repeat")
+        delta_paths_by_id: dict[str, list[PathSequenceState]] = {}
+        for state in self.group5_path_transitions_this_update:
+            delta_paths_by_id.setdefault(state.sequence_id, []).append(state)
+        if any(
+            sequence_id not in delta_paths_by_id
+            or not any(
+                step in state.steps
+                for state in delta_paths_by_id[sequence_id]
+            )
+            for sequence_id, step
+            in self.group5_step_transitions_this_update
+        ):
+            raise ValueError(
+                "Group 5 step delta lacks its path-state transition"
+            )
         if set(sequence_ids) & set(boundary_sequence_ids):
             raise ValueError(
                 "ordinary and boundary Group 5 paths overlap"
