@@ -9,12 +9,14 @@ from types import SimpleNamespace
 import pandas as pd
 import pytest
 
+from smc_trader.causal import CausalMarketReader
 from smc_trader.group4 import (
     CausalGroup4Tracker,
     Group4Protocol,
     Group4Update,
 )
 from smc_trader.model import (
+    Bar,
     Candle,
     DealingRangeLifecycle,
     DealingRangeState,
@@ -1270,6 +1272,181 @@ def test_range_inventory_sweep_and_hard_boundary_preserve_typed_terminals() -> N
     assert censored.last_updated_at == boundary_at
     assert censored.transition_reason == "data_gap_reset"
     assert tracker.on_boundary("data_gap_reset", boundary_at) is boundary
+
+
+@pytest.mark.parametrize(
+    (
+        "boundary_reason",
+        "boundary_anomaly",
+        "boundary_symbol",
+        "boundary_instrument_id",
+        "data_gap_before_minutes",
+        "prior_offset_minutes",
+    ),
+    (
+        pytest.param(
+            "contract_change_reset",
+            "contract_change_history_reset",
+            "NQM5",
+            2,
+            0,
+            2,
+            id="contract-reset",
+        ),
+        pytest.param(
+            "data_gap_reset",
+            "data_gap_history_reset",
+            "NQH5",
+            1,
+            6,
+            8,
+            id="data-boundary",
+        ),
+    ),
+)
+def test_observer_records_group4_range_terminal_only_at_boundary_clock(
+    boundary_reason: str,
+    boundary_anomaly: str,
+    boundary_symbol: str,
+    boundary_instrument_id: int,
+    data_gap_before_minutes: int,
+    prior_offset_minutes: int,
+) -> None:
+    tracker, formed, mature = _mature_range(_protocol())
+    assert mature.mature_at is not None
+    base = mature.mature_at + pd.Timedelta(minutes=1)
+    inventory = tracker.snapshot().range_boundary_inventory
+    _warm_m1(tracker, base=base, inventory=inventory)
+    swept_update = tracker.on_completed_update(
+        _m1(
+            15,
+            base=base,
+            close=100.5,
+            high=101.25,
+            low=99.75,
+        ),
+        prior_inventory=inventory,
+        liquidity_pools=(),
+    )
+    swept = swept_update.manipulations[-1]
+
+    observer = CausalObserver(
+        ObserverConfig(
+            structure_protocol=str(GROUP12_PROTOCOL_PATH),
+            liquidity_protocol=str(GROUP12_PROTOCOL_PATH),
+            group4_protocol=str(PROTOCOL_PATH),
+            scale_specs=CORE_TEST_SCALE_SPECS,
+            project_scene_graph=False,
+        )
+    )
+    observer._group4_tracker = tracker
+    observer.memory.set_clock_coverage_start(formed.formed_at)
+    for state in (formed, mature):
+        observer._record_group4_events(
+            Group4Update(
+                dealing_ranges=(state,),
+                manipulations=(),
+                range_boundary_inventory=(),
+                range_transitions=(state,),
+            )
+        )
+    observer._record_group4_events(
+        swept_update,
+        include_ranges=False,
+    )
+    range_key = f"range:{mature.range_id}"
+    manipulation_key = f"manipulation:{swept.manipulation_id}"
+    observer.memory.sync_retained_entity_timelines(
+        {range_key, manipulation_key},
+        asof=swept.swept_at,
+    )
+
+    boundary_at = swept.swept_at + pd.Timedelta(minutes=1)
+    reader = CausalMarketReader(scale_specs=CORE_TEST_SCALE_SPECS)
+    reader.on_bar(
+        Bar(
+            start=boundary_at
+            - pd.Timedelta(minutes=prior_offset_minutes),
+            open=100.0,
+            high=100.25,
+            low=99.75,
+            close=100.0,
+            volume=10.0,
+            symbol="NQH5",
+            instrument_id=1,
+        )
+    )
+    boundary_update = reader.on_bar(
+        Bar(
+            start=boundary_at - pd.Timedelta(minutes=1),
+            open=100.0,
+            high=100.25,
+            low=99.75,
+            close=100.0,
+            volume=10.0,
+            symbol=boundary_symbol,
+            instrument_id=boundary_instrument_id,
+            data_gap_before_minutes=data_gap_before_minutes,
+        )
+    )
+    assert boundary_update.anomalies == (boundary_anomaly,)
+
+    boundary_observation = observer.observe(boundary_update)
+
+    (terminal_range,) = (
+        boundary_observation.group4_boundary_range_transitions
+    )
+    assert terminal_range.range_id == mature.range_id
+    assert terminal_range.symbol == mature.symbol
+    assert terminal_range.instrument_id == mature.instrument_id
+    assert terminal_range.lifecycle is DealingRangeLifecycle.BROKEN
+    assert terminal_range.broken_at == boundary_at
+    assert terminal_range.transition_reason == boundary_reason
+    timeline = boundary_observation.retained_entity_timelines[range_key]
+    assert tuple(event.lifecycle for event in timeline) == (
+        "forming",
+        "mature",
+        "broken",
+    )
+    terminal_event = timeline[-1]
+    assert terminal_event.kind is EventKind.DEALING_RANGE_STATE
+    assert terminal_event.entity_id == terminal_range.range_id
+    assert terminal_event.observed_at == boundary_at
+    assert terminal_event.ended_at == boundary_at
+    assert terminal_event.transition_reason == boundary_reason
+    assert boundary_observation.incomplete_entity_timeline_keys == ()
+
+    (censored_manipulation,) = (
+        boundary_observation.group4_boundary_manipulation_transitions
+    )
+    assert censored_manipulation.manipulation_id == swept.manipulation_id
+    assert censored_manipulation.censored_at == boundary_at
+    assert censored_manipulation.transition_reason == boundary_reason
+    assert manipulation_key not in (
+        boundary_observation.retained_entity_timelines
+    )
+
+    next_observation = observer.observe(
+        reader.on_bar(
+            Bar(
+                start=boundary_at,
+                open=100.0,
+                high=100.25,
+                low=99.75,
+                close=100.0,
+                volume=10.0,
+                symbol=boundary_symbol,
+                instrument_id=boundary_instrument_id,
+            )
+        )
+    )
+    assert next_observation.group4_boundary_range_transitions == ()
+    assert range_key not in next_observation.retained_entity_timelines
+    assert observer.memory.timeline(range_key) == ()
+    assert all(
+        state.range_id != mature.range_id
+        for state in next_observation.frame(Timeframe.H1).dealing_ranges
+    )
 
 
 def test_exact_retry_is_cached_and_same_clock_or_older_input_fails() -> None:

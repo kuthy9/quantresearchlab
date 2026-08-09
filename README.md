@@ -54,7 +54,31 @@ authority claim.
 
 The bounded 2023 natural-market review and the reason FAVR remains parked are
 recorded in [`docs/natural_authority_2023.md`](docs/natural_authority_2023.md).
-The reproducible, lightweight full-year Group 4 result is stored separately in
+The registered outcome-blind full-eye 2023 scan is complete. It ran
+Reader -> Observer -> Group 1-5 + Displacement -> lightweight statistics and
+retained 353,445 in-window observations without Brain, Decision, Risk,
+execution, MBO, PnL, future paths, annual Scene Graph projection or per-minute
+artifacts. Its permanent outputs are:
+
+- [`docs/evidence/eye_group1_5_natural_authority_2023_summary.json`](docs/evidence/eye_group1_5_natural_authority_2023_summary.json)
+- [`docs/evidence/eye_group1_5_natural_authority_2023_cases.json`](docs/evidence/eye_group1_5_natural_authority_2023_cases.json)
+
+It can be reproduced only through the registered profile:
+
+```bash
+python3 scripts/run_eye_authority_scan.py \
+  --profile eye_group1_5_natural_authority_2023_full_year \
+  --force
+```
+
+Execution reality in this Eye-only path is `not_evaluated`, not an Eye anomaly.
+The sampled transport review is also complete: 30 frozen clocks were replayed,
+seven of seven exactly evaluable strict cases passed, and two dependent July
+cases remain explicitly prefix-censored because a seven-day cold prefix cannot
+reproduce their annual parent identities. MatureBalanceRange is retained as rare
+context, while FAVR remains parked.
+The earlier reproducible, lightweight Group 4-only result remains separately
+frozen historical evidence in
 [`docs/evidence/group4_natural_authority_2023.json`](docs/evidence/group4_natural_authority_2023.json).
 It can be regenerated only through its registered outcome-blind profile:
 

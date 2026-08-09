@@ -146,14 +146,65 @@ def validate_causal_histories(
                 "causal history is duplicated, unordered or has an "
                 "unexplained gap"
             )
-        if not values or values[-1].end != frame.cutoff:
+        if not values:
+            if (
+                frame.bars != 0
+                or frame.ready
+                or frame.cutoff != snapshot.observation.asof
+            ):
+                raise ValueError(
+                    "empty causal history disagrees with observation frame"
+                )
+            output[timeframe] = values
+            continue
+        if values[-1].end != frame.cutoff:
             raise ValueError(
                 "causal history cutoff disagrees with observation"
             )
         output[timeframe] = values
-    if output[Timeframe.M1][-1].end != snapshot.observation.asof:
+    if (
+        not output[Timeframe.M1]
+        or output[Timeframe.M1][-1].end != snapshot.observation.asof
+    ):
         raise ValueError("causal M1 history does not reach the decision clock")
     return output
+
+
+def _blank_causal_panel(
+    axis: Any,
+    timeframe: Timeframe,
+    cutoff: pd.Timestamp,
+    *,
+    title_suffix: str = "",
+) -> None:
+    """Render an explicit no-history state after a causal reset."""
+
+    axis.set_xlim(0.0, 1.0)
+    axis.set_ylim(0.0, 1.0)
+    axis.set_xticks(())
+    axis.set_yticks(())
+    axis.grid(False)
+    axis.text(
+        0.5,
+        0.5,
+        (
+            "BLANK / WARMUP\n"
+            f"0 completed {timeframe.value} candles in current causal history"
+        ),
+        ha="center",
+        va="center",
+        fontsize=9,
+        color="#64748b",
+        transform=axis.transAxes,
+    )
+    axis.set_title(
+        (
+            f"{timeframe.value}{title_suffix} · blank/warmup · "
+            f"causal cutoff {cutoff:%Y-%m-%d %H:%M %Z}"
+        ),
+        loc="left",
+        fontsize=9,
+    )
 
 
 def _selected_hypothesis(snapshot: EngineSnapshot):
@@ -304,18 +355,65 @@ def _format_evidence(
 def _selected_group5_entities(
     snapshot: EngineSnapshot,
     belief: Any,
+    focus_entity_id: str | None = None,
 ) -> tuple[tuple[Any, ...], tuple[Any, ...], tuple[Any, ...], tuple[Any, ...]]:
     if belief is None:
         # Eye-only audits have no Brain hypothesis to select a setup.  The
         # renderer must still show the typed states actually emitted by the
         # Observer; this changes presentation only and grants no action
         # authority to Group 5.
-        return (
-            tuple(snapshot.observation.entry_locations),
-            tuple(snapshot.observation.path_sequences),
-            tuple(snapshot.observation.qualified_reacceptances),
-            tuple(snapshot.observation.micro_bos_references),
+        locations = tuple(snapshot.observation.entry_locations)
+        paths = tuple(snapshot.observation.path_sequences)
+        reacceptances = tuple(snapshot.observation.qualified_reacceptances)
+        micro_bos = tuple(snapshot.observation.micro_bos_references)
+        if focus_entity_id is None:
+            return locations, paths, reacceptances, micro_bos
+
+        def promote(values: tuple[Any, ...], predicate: Any) -> tuple[Any, ...]:
+            return (
+                *(value for value in values if not predicate(value)),
+                *(value for value in values if predicate(value)),
+            )
+
+        focused_paths = tuple(
+            path
+            for path in paths
+            if (
+                path.sequence_id == focus_entity_id
+                or path.context_id == focus_entity_id
+            )
         )
+        focus_context_ids = {
+            focus_entity_id,
+            *(path.context_id for path in focused_paths),
+        }
+        locations = promote(
+            locations,
+            lambda item: item.location_id in focus_context_ids,
+        )
+        paths = promote(
+            paths,
+            lambda item: (
+                item.sequence_id == focus_entity_id
+                or item.context_id in focus_context_ids
+            ),
+        )
+        # A context may own several live or terminal paths.  Context peers are
+        # useful surrounding evidence, but the exact frozen audit identity must
+        # remain the final item consumed by the compact overlay/text views.
+        paths = promote(
+            paths,
+            lambda item: item.sequence_id == focus_entity_id,
+        )
+        reacceptances = promote(
+            reacceptances,
+            lambda item: item.context_id in focus_context_ids,
+        )
+        micro_bos = promote(
+            micro_bos,
+            lambda item: item.context_id in focus_context_ids,
+        )
+        return locations, paths, reacceptances, micro_bos
     plan = belief.plan
     location_ids = {
         value
@@ -368,6 +466,7 @@ def _metric_text(
     snapshot: EngineSnapshot,
     timeframe: Timeframe,
     belief: Any,
+    focus_entity_id: str | None = None,
 ) -> str:
     metrics = snapshot.observation.frame(timeframe).metrics
     if (
@@ -398,6 +497,7 @@ def _metric_text(
         locations, _, _, _ = _selected_group5_entities(
             snapshot,
             belief,
+            focus_entity_id,
         )
         if locations:
             latest = locations[-1]
@@ -419,6 +519,7 @@ def _metric_text(
             _selected_group5_entities(
                 snapshot,
                 belief,
+                focus_entity_id,
             )
         )
         path = None if not paths else paths[-1]
@@ -1191,13 +1292,14 @@ def _group5_overlay(
     snapshot: EngineSnapshot,
     candles: Sequence[Candle],
     belief: Any,
+    focus_entity_id: str | None = None,
 ) -> None:
     """Mark exact first-pullback, reacceptance, micro-BOS and path order."""
 
     if not candles or not snapshot.observation.group5_typed_available:
         return
     locations, paths, reacceptances, references = (
-        _selected_group5_entities(snapshot, belief)
+        _selected_group5_entities(snapshot, belief, focus_entity_id)
     )
     visible_low, visible_high = axis.get_ylim()
     visible_locations = locations[-2:]
@@ -1822,7 +1924,10 @@ def _group4_manipulation_overlay(
     axis.set_ylim(visible_low, visible_high)
 
 
-def _group4_text(snapshot: EngineSnapshot) -> str:
+def _group4_text(
+    snapshot: EngineSnapshot,
+    focus_entity_id: str | None = None,
+) -> str:
     rows = []
     ranges = snapshot.observation.frame(Timeframe.H1).dealing_ranges
     for state in ranges[-1:]:
@@ -1900,13 +2005,45 @@ def _group4_text(snapshot: EngineSnapshot) -> str:
                 .group4_atr_unready_sweep_item_ids
             )
         )
+    if focus_entity_id is not None:
+        diagnostic = next(
+            (
+                item
+                for item in snapshot.observation.group4_range_funnel
+                if (
+                    item.maturity_range_id == focus_entity_id
+                    and item.observed_at == snapshot.observation.asof
+                )
+            ),
+            None,
+        )
+        if diagnostic is not None:
+            rows.append(
+                "range diagnostic "
+                f"id={_short_identity(focus_entity_id)} "
+                "unmet="
+                + (
+                    ",".join(diagnostic.unmet_maturity_gates)
+                    or "none"
+                )
+            )
+            rows.extend(
+                f"  {name}: actual={actual:.3f} "
+                f"threshold={threshold:.3f} margin={margin:+.3f}"
+                for name, actual, threshold, margin
+                in diagnostic.maturity_gates
+            )
     return "\n".join(rows) if rows else "none"
 
 
-def _group5_text(snapshot: EngineSnapshot, belief: Any) -> str:
+def _group5_text(
+    snapshot: EngineSnapshot,
+    belief: Any,
+    focus_entity_id: str | None = None,
+) -> str:
     rows: list[str] = []
     locations, paths, reacceptances, micro_bos = (
-        _selected_group5_entities(snapshot, belief)
+        _selected_group5_entities(snapshot, belief, focus_entity_id)
     )
     for item in locations[-2:]:
         rows.append(
@@ -2557,6 +2694,7 @@ class DecisionVisualizer:
         destination: str | Path,
         *,
         case_id: str | None = None,
+        case_entity_id: str | None = None,
         scene_graph: Any = None,
     ) -> VisualArtifact:
         """Render one completed-data Eye audit without Brain or actions.
@@ -2608,6 +2746,13 @@ class DecisionVisualizer:
 
         for axis, timeframe in zip(axes, active):
             values = panels[timeframe]
+            if not values:
+                _blank_causal_panel(
+                    axis,
+                    timeframe,
+                    observation.frame(timeframe).cutoff,
+                )
+                continue
             _candles(axis, values)
             axis._smc_annotation_boxes = [(0.0, 0.69, 0.34, 0.99)]
             axis._smc_annotation_budget = 8
@@ -2627,7 +2772,13 @@ class DecisionVisualizer:
                 _group4_range_overlay(axis, snapshot, values)
             elif timeframe is Timeframe.M1:
                 _group4_manipulation_overlay(axis, snapshot, values)
-                _group5_overlay(axis, snapshot, values, None)
+                _group5_overlay(
+                    axis,
+                    snapshot,
+                    values,
+                    None,
+                    case_entity_id,
+                )
             _event_markers(axis, snapshot, timeframe, values)
             if values:
                 current_price = float(values[-1].close)
@@ -2678,7 +2829,12 @@ class DecisionVisualizer:
             axis.text(
                 0.005,
                 0.98,
-                _metric_text(snapshot, timeframe, None),
+                _metric_text(
+                    snapshot,
+                    timeframe,
+                    None,
+                    case_entity_id,
+                ),
                 ha="left",
                 va="top",
                 fontsize=6,
@@ -2720,9 +2876,9 @@ class DecisionVisualizer:
                 f"EVENT MEMORY\n{_event_timeline(snapshot)}\n\n"
                 f"5M FVG / ORDER BLOCK\n{_group3_text(snapshot)}\n\n"
                 f"H1 RANGE / 1M MANIPULATION\n"
-                f"{_group4_text(snapshot)}\n\n"
+                f"{_group4_text(snapshot, case_entity_id)}\n\n"
                 f"EXACT ENTRY / 1M PATH\n"
-                f"{_group5_text(snapshot, None)}\n\n"
+                f"{_group5_text(snapshot, None, case_entity_id)}\n\n"
                 "ANOMALIES\n"
                 + (", ".join(observation.anomalies) or "none")
             ),
@@ -2774,7 +2930,14 @@ class DecisionVisualizer:
             hypothesis_key=None,
             setup_id=None,
             entry_location_id=None,
-            entry_path_id=None,
+            entry_path_id=(
+                case_entity_id
+                if any(
+                    path.sequence_id == case_entity_id
+                    for path in observation.path_sequences
+                )
+                else None
+            ),
         )
 
     def render_decision(
@@ -2875,6 +3038,29 @@ class DecisionVisualizer:
         )
         for axis, timeframe in zip(axes, display_timeframes):
             values = panels[timeframe]
+            focus_label = (
+                " · PRIMARY FOCUS"
+                if timeframe.value in primary_focus
+                else " · SUPPLEMENTAL FOCUS"
+                if timeframe.value in supplemental_focus
+                else ""
+            )
+            if timeframe.value in primary_focus:
+                for spine in axis.spines.values():
+                    spine.set_color("#2563eb")
+                    spine.set_linewidth(1.8)
+            elif timeframe.value in supplemental_focus:
+                for spine in axis.spines.values():
+                    spine.set_color("#d97706")
+                    spine.set_linewidth(1.3)
+            if not values:
+                _blank_causal_panel(
+                    axis,
+                    timeframe,
+                    snapshot.observation.frame(timeframe).cutoff,
+                    title_suffix=focus_label,
+                )
+                continue
             _candles(axis, values)
             # Reserve the metric summary footprint before any event/structure
             # label requests a lane on the same axes.
@@ -2920,21 +3106,6 @@ class DecisionVisualizer:
                     selected_belief,
                 )
             _event_markers(axis, snapshot, timeframe, values)
-            focus_label = (
-                " · PRIMARY FOCUS"
-                if timeframe.value in primary_focus
-                else " · SUPPLEMENTAL FOCUS"
-                if timeframe.value in supplemental_focus
-                else ""
-            )
-            if timeframe.value in primary_focus:
-                for spine in axis.spines.values():
-                    spine.set_color("#2563eb")
-                    spine.set_linewidth(1.8)
-            elif timeframe.value in supplemental_focus:
-                for spine in axis.spines.values():
-                    spine.set_color("#d97706")
-                    spine.set_linewidth(1.3)
             axis.set_title(
                 (
                     f"{timeframe.value}{focus_label} · completed through "

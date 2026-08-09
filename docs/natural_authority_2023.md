@@ -1,6 +1,89 @@
 # 2023 Group 1–5 natural-authority review
 
-## Scope and frozen identity
+## Evidence layers
+
+This document retains three distinct outcome-blind evidence layers:
+
+1. the current full-eye 2023 annual scan at commit `f64427f31bb61066fe69dc6cd25349cf721d8b15`;
+2. the earlier focused Group4-only annual scan at commit `d1a2671057f7dc8cd805904c90762646b23f8316`;
+3. the earlier fixed-week Group 1-5 review at commit `7ac42735bf42b43e7731493f765342ae458a90e7`.
+
+The full-eye aggregate supersedes only comparable aggregate coverage claims. It
+does not rewrite the earlier artifacts, commands, identities or case observations.
+
+## Current full-eye 2023 annual scan
+
+The production Reader -> Observer path ran every completed pre-registered Eye
+module (Group 1-5 plus Displacement) and a lightweight statistics consumer. The
+scan identity is
+`effe9ab4c0045ad41303cce64c9d5a2672ac92f760f61ad7ecac713f828a221b`;
+the causal source SHA-256 is
+`84c9ed4d1de379382bdc41e0fe02e3611373ba182cfeebe09e3832d29cbafd7b`.
+Protocol versions and run-bound hashes are recorded once in the permanent
+[`summary JSON`](evidence/eye_group1_5_natural_authority_2023_summary.json), and
+the 40 future-hidden clocks are frozen in the separate
+[`case index`](evidence/eye_group1_5_natural_authority_2023_cases.json).
+
+The scan retained 353,445 in-window observations. Its principal funnels were:
+
+| Component | Full-eye annual result |
+|---|---|
+| Group 1-2 | 155,653 confirmed swings; 189,002 BOS identities, of which 53,592 confirmed and 135,404 failed; 25,690 formed pools and 25,412 swept pools; 182,559 inventory items and 170,491 consumed items |
+| Displacement | 15,702 started -> 2,836 ever active -> 15,498 exhausted; 4,024 same-bar terminal -> restart transitions |
+| Group 3 | 13,693 FVG geometries, including 4,904 displacement-linked; 531 order blocks created, 494 mitigated and 36 failed |
+| MatureBalanceRange | 225,102 geometry-valid pair evaluations -> 15,640 eligible -> 448 forming -> 2 mature; 447 later broke and 1 was right-censored |
+| Manipulation | 25,719 visible eligible sources -> 25,445 crossed source IDs -> 19,465 created episodes -> 8,840 reaccepted / 10,549 accepted outside / 76 deadline-censored |
+| Group 5 | 5,435 qualified zones -> exactly 5,435 EntryLocation/path identities; 5,325 first pullbacks, 3,710 with trigger; 6,468 complete and 18,413 interrupted paths; 0 sequence-order errors |
+| FAVR | No complete natural identity-bound chain; FAVR remains parked |
+
+The 5,980-source gap between crossed identities and created episodes is fully
+accounted for: 2,311 same-side secondaries, 749 coincident secondaries, 1,641
+blocked by a live episode resolved on the same bar, 1,132 blocked by an existing
+live episode, 145 ambiguous dual-side sources and 2 missing/stale sources. Thus
+both source disposition and episode outcome conservation hold exactly.
+
+Brain, Decision, Risk, execution/MBO, PnL, future paths, full-year Scene Graph,
+images and per-minute snapshots were disabled. Internal reducer identity,
+lifecycle and ordering remained enabled. `TARGETED` liquidity and execution
+reality are therefore `not_evaluated`, not Eye failures.
+
+Only two mature episodes occurred, so the current definition was sparse for the
+registered 2023 source and window. The completed blinded review found both natural
+mature ranges visually credible and no repeated same-gate miss among the selected
+near-mature and multi-gate cases. It is therefore treated as a rare
+MatureBalanceRange context rather than a generic H1 dealing range. The zero
+complete FAVR chain keeps FAVR parked. This Eye-only run cannot justify merging
+FAVR into LSR because it did not construct comparable invalidations or targets;
+optional LSR `range_context` remains non-gating.
+
+### Current sampled transport result
+
+Thirty unique frozen clocks were replayed through EventMemory, the public Scene
+Graph and the Eye renderer. Twenty-nine distinct images were produced and 28 were
+reviewed with future price, PnL and later extrema hidden. The reviewed range,
+reset, manipulation and Group5 categories matched their frozen classifications;
+no systematic range miss, path-order error or identity mixing was found.
+
+The strict nine-case subset produced nine observations and nine images. Seven
+cases were exactly evaluable and all seven passed; this includes hard-boundary
+terminal/no-revival handling, an exact November mature-range manipulation, and
+complete/interrupted Group5 paths with 8/8 and 2/2 typed steps transported through
+EventMemory and Scene Graph.
+
+Two dependent July cases were not evaluable for exact annual identity under an
+isolated seven-calendar-day prefix. The local replay used the same S/R source pair
+and geometry but formed the sibling range one hour earlier, cascading into new
+range-boundary and manipulation IDs. These cases remain `prefix_censored`: they
+are not passes, but they are also not evidence of a reducer semantic failure.
+Reproducing those annual IDs requires an annual reducer checkpoint or an earlier
+causal prefix; it does not authorize changing a primitive or threshold.
+
+The earlier Group4-only artifact reported 25,724 visible eligible sources,
+whereas the production full-eye path reports 25,719. Both report 25,445 crossed
+sources and 19,465 created episodes. The five-source difference remains bound to
+the earlier artifact's own commit/profile and is not rewritten.
+
+## Earlier fixed-week review: scope and frozen identity
 
 This review is descriptive and outcome-blind. It did not inspect PnL, reveal
 future paths, load MBO, or search primitive thresholds. The frozen pre-replay
@@ -17,7 +100,7 @@ code commit was `7ac42735bf42b43e7731493f765342ae458a90e7`; the tested protocol 
 The causal OHLCV source was the registered previous-session front at SHA-256
 `84c9ed4d1de379382bdc41e0fe02e3611373ba182cfeebe09e3832d29cbafd7b`.
 
-### Reproducible full-year Group 4 scan
+### Earlier focused full-year Group4-only scan
 
 The fixed-week Group 1–5 replay and image review above remain bound to commit
 `7ac4273`. The full-year Group 4 coverage scan was rerun separately at commit

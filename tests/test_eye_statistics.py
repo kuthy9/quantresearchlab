@@ -183,6 +183,18 @@ def test_window_baseline_dispositions_and_execution_anomaly_filter() -> None:
     assert conservation["raw_crossed_source_clock_ids"] == 2
     assert conservation["raw_crossed_unique_source_ids"] == 1
     assert conservation["sum_across_ten_dispositions"] == 2
+    assert conservation["totals_by_disposition"] == {
+        "ambiguous_dual_side": 0,
+        "atr_unready": 0,
+        "attached_coincident_secondary": 0,
+        "attached_same_side_secondary": 1,
+        "blocked_existing_live": 0,
+        "blocked_live_resolved_same_bar": 0,
+        "rejected_prior_close": 0,
+        "rejected_range_invalidated_same_clock": 0,
+        "rejected_source_missing_or_stale": 0,
+        "selected_primary": 1,
+    }
     assert sum(
         row["source_clock_decisions"]
         for row in summary["group4"]["source_dispositions"]
@@ -198,6 +210,13 @@ def test_window_baseline_dispositions_and_execution_anomaly_filter() -> None:
             "unique_sources": 1,
         }
     ]
+    assert summary["group4"]["visible_eligible_sources_by_strata_row_sum"] == 1
+    assert (
+        summary["group4"][
+            "visible_eligible_sources_excess_assignments_above_union"
+        ]
+        == 0
+    )
     assert not summary["group4"]["selected_primary_to_episode_join"]["balanced"]
 
     with pytest.raises(ValueError, match="strictly increasing"):
@@ -737,6 +756,10 @@ def test_case_index_is_bounded_deterministic_and_pickle_safe() -> None:
 
     assert summary["case_selection"]["selected"] == 40
     assert summary["case_selection"]["status"] == "complete"
+    assert summary["case_selection"]["selected_by_stratum"] == {
+        stratum: (40 if stratum == "all_recognized_mature" else 0)
+        for stratum in summary["case_selection"]["frozen_strata"]
+    }
     assert {case["stratum"] for case in summary["case_index"]} == {
         "all_recognized_mature"
     }
@@ -848,6 +871,12 @@ def test_profile_case_categories_and_group5_trigger_accounting() -> None:
         "location_left": 1,
         "pool_reversal_sequence_observed": 1,
     }
+    assert summary["group5"][
+        "group4_in_window_manipulation_cohort_by_source_timeframe"
+    ] == {"1H": 1}
+    assert "registered_window" in summary["group5"][
+        "group4_in_window_manipulation_cohort_counting_basis"
+    ]
     assert summary["group5"]["terminal_classification"] == {
         "complete": 1,
         "interrupted": 1,

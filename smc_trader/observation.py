@@ -1563,6 +1563,14 @@ class CausalObserver:
         if type(self.config.eye_authority_mode) is not bool:
             raise ValueError("eye-authority mode flag must be boolean")
         if self.config.eye_authority_mode:
+            if (
+                self.config.project_scene_graph
+                and not self.config.materialize_event_view
+            ):
+                raise ValueError(
+                    "Scene Graph projection requires a materialized "
+                    "EventMemory view"
+                )
             typed_protocols = (
                 self.config.structure_protocol,
                 self.config.liquidity_protocol,
@@ -1572,15 +1580,12 @@ class CausalObserver:
                 self.config.group5_protocol,
             )
             if (
-                self.config.materialize_event_view
-                or self.config.project_scene_graph
-                or self.config.group4_projection_only
+                self.config.group4_projection_only
                 or any(protocol is None for protocol in typed_protocols)
             ):
                 raise ValueError(
                     "eye-authority mode requires all typed protocols, "
-                    "a lightweight event view, Scene Graph disabled, and "
-                    "Group 4 projection-only mode disabled"
+                    "and Group 4 projection-only mode disabled"
                 )
         elif not self.config.materialize_event_view and (
             self.config.project_scene_graph
@@ -3173,9 +3178,21 @@ class CausalObserver:
             )
         ):
             raise TypeError("Group 4 event phase flags must be boolean")
-        if update.boundary_reason is not None:
-            return
-        if include_creations and self._prior is not None:
+        boundary_reason = update.boundary_reason
+        if boundary_reason is not None and any(
+            state.lifecycle is not DealingRangeLifecycle.BROKEN
+            or state.broken_at != state.state_started_at
+            or state.transition_reason != boundary_reason
+            for state in update.range_transitions
+        ):
+            raise ValueError(
+                "Group 4 boundary range transition is not an exact terminal"
+            )
+        if (
+            boundary_reason is None
+            and include_creations
+            and self._prior is not None
+        ):
             prior_manipulations = {
                 state.manipulation_id: state
                 for state in self._prior.manipulations
@@ -3313,6 +3330,14 @@ class CausalObserver:
                 ),
                 include_in_recent=False,
             )
+
+        # A hard reset has already replaced EventMemory and imported only
+        # transitionable old-epoch prefixes.  Join a range's BROKEN transition
+        # to that exact identity at the boundary clock, but do not reinterpret
+        # a boundary-censored manipulation (whose reducer lifecycle is still
+        # SWEPT) as a new creation in the fresh epoch.
+        if boundary_reason is not None:
+            return
 
         for state in update.manipulation_transitions:
             terminal = state.lifecycle in {
@@ -5087,6 +5112,18 @@ class CausalObserver:
                 raise
         if not self.config.group4_projection_only:
             try:
+                group4_boundary_range_keys = {
+                    f"range:{state.range_id}"
+                    for state in (
+                        ()
+                        if (
+                            group4_update is None
+                            or group4_update.boundary_reason
+                            not in GROUP4_HARD_BOUNDARY_REASONS
+                        )
+                        else group4_update.range_transitions
+                    )
+                }
                 self.memory.sync_retained_entity_timelines(
                     self._retained_timeline_keys(
                         frames,
@@ -5122,7 +5159,8 @@ class CausalObserver:
                                 ),
                             )
                         ),
-                    ),
+                    )
+                    | group4_boundary_range_keys,
                     asof=update.asof,
                 )
             except Exception:

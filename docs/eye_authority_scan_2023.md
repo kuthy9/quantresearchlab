@@ -1,6 +1,6 @@
 # 2023 full-eye natural-authority scan
 
-Status: **registered before replay; outcome blind**.
+Status: **annual lightweight scan and sampled transport review complete**.
 
 This scan evaluates the causal market eye only:
 
@@ -57,13 +57,101 @@ micro BOS -> entry. Optional range context may explain the mature range identity
 swept boundary, midpoint/value and opposing boundary liquidity; it may enhance
 thesis, target selection and delivery context, but is never an LSR hard gate.
 
+## Completed annual pass
+
+The annual pass ran from clean commit
+`f64427f31bb61066fe69dc6cd25349cf721d8b15`; its scan identity is
+`effe9ab4c0045ad41303cce64c9d5a2672ac92f760f61ad7ecac713f828a221b`.
+The registered causal source SHA-256 is
+`84c9ed4d1de379382bdc41e0fe02e3611373ba182cfeebe09e3832d29cbafd7b`.
+The permanent artifacts are
+[`eye_group1_5_natural_authority_2023_summary.json`](evidence/eye_group1_5_natural_authority_2023_summary.json)
+and
+[`eye_group1_5_natural_authority_2023_cases.json`](evidence/eye_group1_5_natural_authority_2023_cases.json).
+
+The run read 358,917 source rows, emitted 358,965 completed 1m clocks including
+synthetic boundary bars, and retained 353,445 observations inside the registered
+2023 interval. Duplicate, out-of-order, data-gap reset, reducer exception and
+fatal exception counts were all zero; four contract resets were processed.
+
+| Timeframe | Real completed bars | Synthetic completed bars |
+|---|---:|---:|
+| 4H | 1,499 | 38 |
+| 1H | 5,850 | 43 |
+| 15m | 23,519 | 44 |
+| 5m | 70,644 | 45 |
+| 1m | 353,400 | 45 |
+
+| Module | Annual funnel |
+|---|---|
+| Group 1-2 | 155,653 confirmed swings; 189,002 BOS identities -> 53,592 confirmed / 135,404 failed / 6 right-censored pending; 25,690 pools formed -> 25,412 swept; 182,559 liquidity items -> 170,491 consumed |
+| Displacement | 15,702 started -> 2,836 ever active -> 15,498 exhausted; 203 boundary-censored, 1 right-censored and 4,024 same-bar terminal -> restart |
+| FVG | 13,693 raw geometries -> 4,904 displacement-linked and 8,789 raw-only; 6,029 partial, 7,453 mitigated and 6,214 invalidated transitions |
+| Order block | 70,644 attempts -> 10,707 active-displacement candidates -> 875 compatible BOS/break-member candidates -> 531 created; 494 mitigated and 36 failed, so failure coverage remains sparse |
+| MatureBalanceRange | 225,102 geometry-valid pair evaluations -> 15,640 eligible -> 448 forming; 2 reached mature, 447 later broke and 1 remained right-censored |
+| Manipulation | 25,719 visible eligible sources -> 25,445 crossed source IDs -> 19,465 episodes -> 8,840 reaccepted / 10,549 accepted outside / 76 deadline-censored |
+| Group 5 | 5,435 qualified zones = 4,904 FVG + 531 OB -> exactly 5,435 EntryLocation and path identities; 5,325 first pullbacks, 3,710 with trigger; 6,468 complete and 18,413 interrupted paths; 0 path-order errors |
+| FAVR | 0 complete natural identity-bound chains; the sole reaccepted mature-range root stopped at `opposite_displacement_zone_inside_range`, so FAVR remains parked |
+
+The crossed-source difference is fully classified. The 25,445 identities equal
+19,465 selected primary sources + 2,311 same-side secondaries + 749 coincident
+secondaries + 1,641 sources blocked by a live episode resolved on the same bar +
+1,132 blocked by an existing live episode + 145 ambiguous dual-side sources + 2
+missing/stale sources. ATR-unready, prior-close rejection and same-clock range
+invalidation were all zero. Episode outcomes also conserve exactly:
+`19,465 = 8,840 + 10,549 + 76`.
+
+`TARGETED` liquidity is a Brain/Plan overlay. Brain was disabled, so that state
+is `not_evaluated`, not an Eye failure. Likewise, execution reality is explicitly
+`not_evaluated`; missing spread or fillability was not injected as a primitive
+anomaly.
+
+In the registered 2023 scan, only 2 of 448 forming episodes reached mature
+(0.45%), so the current definition is sparse. The blinded sampled review found
+both natural mature ranges visually credible and found no repeated same-gate miss
+across the selected near-mature and multi-gate cases. The correct verdict is
+therefore **rare context, not a generic H1 dealing range**, rather than
+systematically over-strict. The zero complete FAVR chain keeps FAVR parked. This
+Eye-only pass cannot decide whether FAVR and LSR share an invalidation or target
+because it did not construct those plans.
+
+## Sampled transport and blinded image result
+
+Thirty unique frozen clocks were replayed with EventMemory and the public Scene
+Graph enabled; 29 distinct images were rendered and 28 were reviewed without
+future price, PnL or later extrema. This stays inside the registered 20–40 case
+range and covers every available stratum. No visual category mismatch, systematic
+MatureBalanceRange miss or Group5 path-order error was found. Representative
+complete Group5 paths preserved 8/8 and 2/2 typed steps through EventMemory and
+Scene Graph, including exact step clocks and order.
+
+A stricter nine-case identity audit observed and rendered all nine clocks. Seven
+were exactly evaluable and all seven passed their full transport contracts. Two
+dependent July cases (`c1555fbdada20e3a` and `1031ba5242f70bd8`) are explicitly
+`prefix_censored`: the isolated seven-day replay reconstructed the same S/R source
+pair and frozen geometry, but selected the range one hour earlier than the annual
+continuous prefix. Because range, boundary and manipulation IDs bind their parent
+identity and formation clock, the annual frozen IDs were absent. They are neither
+counted as exact-ID passes nor interpreted as reducer semantic failures. Exact
+reproduction would require an annual reducer checkpoint or replay from the earliest
+relevant causal ancestor, not a threshold change.
+
+The independent November case passed exactly: the mature range, boundary source
+and manipulation identities were preserved through `swept -> reaccepted`,
+EventMemory and two `SWEEPS` graph relations. This proves that the natural
+mature-range manipulation transport chain is reachable; it does not create the
+missing opposite displacement/entry sequence and therefore does not unpark FAVR.
+No concept or threshold repair was authorized. Optional LSR `range_context`
+remains non-gating, and this Eye-only evidence does not justify merging FAVR into
+LSR.
+
 ## Evidence retained
 
 The annual run retains one summary JSON and one compact blinded case index. It does
-not retain observations, minute traces or future outcomes. After the annual pass,
-20-40 predeclared stratified clocks are replayed with EventMemory, Scene Graph and
-images enabled solely to check information transport. Future price is hidden in the
-first review.
+not retain observations, minute traces or future outcomes. Sampled images and one
+small transmission-audit JSON remain only in the ignored development output
+directory; they are not additional annual minute artifacts. Future price remained
+hidden throughout the first review.
 
 The nine frozen sampling categories are:
 

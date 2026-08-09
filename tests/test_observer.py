@@ -777,6 +777,20 @@ def test_eye_authority_mode_rejects_group4_projection_only() -> None:
         )
 
 
+def test_eye_authority_mode_rejects_graph_without_event_view() -> None:
+    with pytest.raises(
+        ValueError,
+        match="Scene Graph projection requires a materialized EventMemory",
+    ):
+        CausalObserver(
+            _all_typed_observer_config(
+                project_scene_graph=True,
+                materialize_event_view=False,
+                eye_authority_mode=True,
+            )
+        )
+
+
 def test_eye_authority_mode_rejects_execution_reality_input() -> None:
     reader = CausalMarketReader(scale_specs=MODEL_SCALE_SPECS)
     observer = CausalObserver(
@@ -794,6 +808,30 @@ def test_eye_authority_mode_rejects_execution_reality_input() -> None:
 
     assert observer._prior is None
     assert observer.memory.last_minute_end is None
+
+
+def test_eye_authority_mode_can_materialize_memory_and_scene_graph() -> None:
+    reader = CausalMarketReader(scale_specs=MODEL_SCALE_SPECS)
+    observer = CausalObserver(
+        _all_typed_observer_config(
+            project_scene_graph=True,
+            materialize_event_view=True,
+            eye_authority_mode=True,
+        )
+    )
+
+    observation = observer.observe(reader.on_bar(_tick_aligned_bars(1)[0]))
+
+    assert observation.execution.source == "not_evaluated"
+    assert observation.execution.anomalies == ()
+    assert "spread_missing_used_one_tick" not in observation.anomalies
+    assert "deadline_missing" not in observation.anomalies
+    assert observation.recent_events == observer.memory.recent()
+    assert (
+        observation.retained_entity_timelines
+        == observer.memory.entity_timelines()
+    )
+    assert observation.scene_revision_id == observer.scene_graph.revision_id
 
 
 def test_group4_disposition_can_reference_prior_inventory_only() -> None:

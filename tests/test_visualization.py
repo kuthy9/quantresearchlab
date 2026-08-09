@@ -32,12 +32,14 @@ from smc_trader.visualization import (
     _belief_geometry_overlay,
     _collision_safe_annotate,
     _event_timeline,
+    _group4_text,
     _liquidity_route_text,
     _metric_text,
     _partial_geometry_text,
     _plan_display_context,
     _plan_overlay,
     _sequence_text,
+    _selected_group5_entities,
     _selected_hypothesis,
     _short_identity,
     _support_resistance_style,
@@ -101,6 +103,72 @@ def test_h4_and_m5_rolling_metrics_are_labeled_as_descriptive_proxies() -> None:
     assert "not typed displacement" in h4_text
     assert "descriptive proxy: compression" in m5_text
     assert "not mature range" in m5_text
+
+
+def test_eye_only_group5_selection_prioritizes_sampled_case_identity() -> None:
+    paths = (
+        SimpleNamespace(sequence_id="path:old", context_id="zone:old"),
+        SimpleNamespace(sequence_id="path:focus", context_id="zone:focus"),
+        SimpleNamespace(sequence_id="path:new", context_id="pool:new"),
+        SimpleNamespace(sequence_id="path:peer", context_id="zone:focus"),
+    )
+    observation = SimpleNamespace(
+        entry_locations=(
+            SimpleNamespace(location_id="zone:old"),
+            SimpleNamespace(location_id="zone:focus"),
+        ),
+        path_sequences=paths,
+        qualified_reacceptances=(
+            SimpleNamespace(context_id="zone:old"),
+            SimpleNamespace(context_id="zone:focus"),
+        ),
+        micro_bos_references=(
+            SimpleNamespace(context_id="zone:old"),
+            SimpleNamespace(context_id="zone:focus"),
+        ),
+    )
+    selected = _selected_group5_entities(
+        SimpleNamespace(observation=observation),
+        None,
+        "path:focus",
+    )
+
+    assert selected[0][-1].location_id == "zone:focus"
+    assert selected[1][-1].sequence_id == "path:focus"
+    assert selected[2][-1].context_id == "zone:focus"
+    assert selected[3][-1].context_id == "zone:focus"
+
+
+def test_eye_range_diagnostic_lists_failed_gates_and_margins() -> None:
+    asof = pd.Timestamp("2023-07-19T21:00:00-04:00")
+    diagnostic = SimpleNamespace(
+        observed_at=asof,
+        maturity_range_id="range:focus",
+        unmet_maturity_gates=("duration", "compression"),
+        maturity_gates=(
+            ("duration", 2.0, 19.0, -17.0),
+            ("compression", -0.2, 0.4, -0.6),
+        ),
+    )
+    observation = SimpleNamespace(
+        asof=asof,
+        frame=lambda _timeframe: SimpleNamespace(dealing_ranges=()),
+        manipulations=(),
+        group4_boundary_range_transitions=(),
+        group4_boundary_manipulation_transitions=(),
+        group4_ambiguous_sweep_item_ids=(),
+        group4_atr_unready_sweep_item_ids=(),
+        group4_range_funnel=(diagnostic,),
+    )
+
+    text = _group4_text(
+        SimpleNamespace(observation=observation),
+        "range:focus",
+    )
+
+    assert "unmet=duration,compression" in text
+    assert "duration: actual=2.000 threshold=19.000 margin=-17.000" in text
+    assert "compression: actual=-0.200 threshold=0.400 margin=-0.600" in text
 
 
 @pytest.mark.parametrize(
@@ -345,6 +413,41 @@ def _scene_reading_histories():
     }
 
 
+def _hard_boundary_visual_fixture():
+    snapshot = engine_snapshot()
+    asof = snapshot.observation.asof
+    frames = dict(snapshot.observation.frames)
+    for timeframe in (Timeframe.H4, Timeframe.H1, Timeframe.M5):
+        frames[timeframe] = replace(
+            frames[timeframe],
+            cutoff=asof,
+            bars=0,
+            ready=False,
+        )
+    frames[Timeframe.M1] = replace(
+        frames[Timeframe.M1],
+        cutoff=asof,
+        bars=1,
+        ready=False,
+    )
+    observation = replace(
+        snapshot.observation,
+        frames=frames,
+        anomalies=("data_gap_history_reset",),
+    )
+    return (
+        replace(snapshot, observation=observation),
+        {
+            Timeframe.H4: (),
+            Timeframe.H1: (),
+            Timeframe.M5: (),
+            Timeframe.M1: (
+                candle(Timeframe.M1, "2025-01-06 09:59", 100.0),
+            ),
+        },
+    )
+
+
 
 
 
@@ -574,6 +677,213 @@ def test_eye_only_visual_renders_typed_observation_without_brain(
     assert artifact.maximum_market_time == snapshot.observation.asof
     assert artifact.hypothesis_key is None
     assert artifact.path.is_file()
+
+
+def test_eye_only_visual_artifact_binds_sampled_group5_path(
+    tmp_path,
+) -> None:
+    snapshot = _snapshot_with_sequence()
+    asof = snapshot.observation.asof
+    histories = {
+        Timeframe.H4: (
+            candle(
+                Timeframe.H4,
+                f"{asof - pd.Timedelta(hours=4):%Y-%m-%d %H:%M}",
+                99.0,
+            ),
+        ),
+        Timeframe.H1: (
+            candle(
+                Timeframe.H1,
+                f"{asof - pd.Timedelta(hours=1):%Y-%m-%d %H:%M}",
+                99.5,
+            ),
+        ),
+        Timeframe.M5: (
+            candle(
+                Timeframe.M5,
+                f"{asof - pd.Timedelta(minutes=5):%Y-%m-%d %H:%M}",
+                99.8,
+            ),
+        ),
+        Timeframe.M1: (
+            candle(
+                Timeframe.M1,
+                f"{asof - pd.Timedelta(minutes=1):%Y-%m-%d %H:%M}",
+                100.0,
+            ),
+        ),
+    }
+
+    artifact = DecisionVisualizer().render_observation(
+        snapshot.observation,
+        histories,
+        tmp_path / "eye-focused-path.png",
+        case_id="eye-group5-case",
+        case_entity_id="visual-setup",
+    )
+
+    assert artifact.entry_path_id == "visual-setup"
+    assert artifact.path.is_file()
+
+
+def test_hard_boundary_blank_higher_timeframe_histories_are_valid() -> None:
+    snapshot, histories = _hard_boundary_visual_fixture()
+
+    validated = validate_causal_histories(snapshot, histories)
+
+    assert validated[Timeframe.H4] == ()
+    assert validated[Timeframe.H1] == ()
+    assert validated[Timeframe.M5] == ()
+    assert validated[Timeframe.M1][-1].end == snapshot.observation.asof
+
+
+@pytest.mark.parametrize(
+    "invalid_frame_state",
+    ("bars", "ready", "cutoff"),
+)
+def test_empty_history_requires_exact_blank_frame_state(
+    invalid_frame_state: str,
+) -> None:
+    snapshot, histories = _hard_boundary_visual_fixture()
+    asof = snapshot.observation.asof
+    frame = snapshot.observation.frame(Timeframe.H4)
+    updates = {
+        "bars": {"bars": 1},
+        "ready": {"ready": True},
+        "cutoff": {"cutoff": asof - pd.Timedelta(minutes=1)},
+    }
+    frames = dict(snapshot.observation.frames)
+    frames[Timeframe.H4] = replace(
+        frame,
+        **updates[invalid_frame_state],
+    )
+    snapshot = replace(
+        snapshot,
+        observation=replace(snapshot.observation, frames=frames),
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="empty causal history disagrees with observation frame",
+    ):
+        validate_causal_histories(snapshot, histories)
+
+
+def test_blank_m1_history_still_fails_the_decision_clock() -> None:
+    snapshot, histories = _hard_boundary_visual_fixture()
+    frames = dict(snapshot.observation.frames)
+    frames[Timeframe.M1] = replace(
+        frames[Timeframe.M1],
+        bars=0,
+        ready=False,
+    )
+    snapshot = replace(
+        snapshot,
+        observation=replace(snapshot.observation, frames=frames),
+    )
+    histories = {**histories, Timeframe.M1: ()}
+
+    with pytest.raises(
+        ValueError,
+        match="causal M1 history does not reach the decision clock",
+    ):
+        validate_causal_histories(snapshot, histories)
+
+
+def test_nonempty_history_still_requires_exact_frame_cutoff() -> None:
+    snapshot = engine_snapshot()
+    histories = {
+        Timeframe.H4: (
+            candle(Timeframe.H4, "2025-01-06 06:00", 99.0),
+        ),
+        Timeframe.H1: (
+            candle(Timeframe.H1, "2025-01-06 09:00", 99.5),
+        ),
+        Timeframe.M5: (
+            candle(Timeframe.M5, "2025-01-06 09:55", 100.0),
+        ),
+        Timeframe.M1: (
+            candle(Timeframe.M1, "2025-01-06 09:59", 100.0),
+        ),
+    }
+    frames = dict(snapshot.observation.frames)
+    frames[Timeframe.H4] = replace(
+        frames[Timeframe.H4],
+        cutoff=snapshot.observation.asof - pd.Timedelta(hours=1),
+    )
+    snapshot = replace(
+        snapshot,
+        observation=replace(snapshot.observation, frames=frames),
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="causal history cutoff disagrees with observation",
+    ):
+        validate_causal_histories(snapshot, histories)
+
+
+def test_hard_boundary_visuals_label_blank_panels_as_warmup(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    import matplotlib
+    import smc_trader.visualization as visualization
+
+    matplotlib.use("Agg")
+    from matplotlib.axes import Axes
+
+    snapshot, histories = _hard_boundary_visual_fixture()
+    titles: list[str] = []
+    plan_overlay_histories = []
+    original_set_title = Axes.set_title
+    original_plan_overlay = visualization._plan_overlay
+
+    def recording_set_title(self, label, *args, **kwargs):
+        titles.append(str(label))
+        return original_set_title(self, label, *args, **kwargs)
+
+    def recording_plan_overlay(axis, plan, candles, **kwargs):
+        plan_overlay_histories.append(tuple(candles))
+        return original_plan_overlay(axis, plan, candles, **kwargs)
+
+    monkeypatch.setattr(Axes, "set_title", recording_set_title)
+    monkeypatch.setattr(
+        visualization,
+        "_plan_overlay",
+        recording_plan_overlay,
+    )
+    visualizer = DecisionVisualizer()
+
+    eye_artifact = visualizer.render_observation(
+        snapshot.observation,
+        histories,
+        tmp_path / "hard-boundary-eye.png",
+    )
+    eye_titles = tuple(titles)
+    titles.clear()
+    decision_artifact = visualizer.render_decision(
+        snapshot,
+        histories,
+        tmp_path / "hard-boundary-decision.png",
+    )
+    decision_titles = tuple(titles)
+
+    for rendered_titles in (eye_titles, decision_titles):
+        for timeframe in (Timeframe.H4, Timeframe.H1, Timeframe.M5):
+            assert any(
+                title.startswith(timeframe.value)
+                and "blank/warmup" in title
+                and "causal cutoff" in title
+                for title in rendered_titles
+            )
+    assert eye_artifact.maximum_market_time == snapshot.observation.asof
+    assert decision_artifact.maximum_market_time == snapshot.observation.asof
+    assert plan_overlay_histories
+    assert all(plan_overlay_histories)
+    assert eye_artifact.path.is_file()
+    assert decision_artifact.path.is_file()
 
 
 def test_five_scale_history_validation_fails_closed_when_m15_is_missing() -> None:

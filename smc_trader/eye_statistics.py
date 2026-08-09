@@ -3299,6 +3299,14 @@ class EyeAuthorityStatistics:
         disposition_sum = sum(
             len(ids) for ids in self._disposition_ids.values()
         )
+        disposition_totals = {
+            disposition: sum(
+                len(ids)
+                for key, ids in self._disposition_ids.items()
+                if key[-1] == disposition
+            )
+            for disposition in sorted(_GROUP4_SOURCE_DISPOSITIONS)
+        }
         selected_primary_identities = {
             source_clock
             for source_clock, disposition in (
@@ -3374,6 +3382,12 @@ class EyeAuthorityStatistics:
             stratum: len(self._case_pools.get(stratum, {}))
             for stratum in _FROZEN_CASE_STRATA
         }
+        selected_case_counts = {
+            stratum: sum(
+                str(case["stratum"]) == stratum for case in cases
+            )
+            for stratum in _FROZEN_CASE_STRATA
+        }
         left_boundary_rows = [
             {
                 "group": group,
@@ -3424,6 +3438,13 @@ class EyeAuthorityStatistics:
             metadata["source_timeframe"]
             for metadata in self._manipulation_metadata.values()
         )
+        cohort_manipulations_by_source_timeframe = Counter(
+            metadata["source_timeframe"]
+            for manipulation_id in self._manipulation_cohort_ids
+            if (
+                metadata := self._manipulation_metadata.get(manipulation_id)
+            ) is not None
+        )
         group5_manipulations_by_source_timeframe = Counter(
             self._group5_manipulation_paths.values()
         )
@@ -3457,6 +3478,9 @@ class EyeAuthorityStatistics:
                 for ids in self._visible_eligible_source_ids.values()
                 for source_id in ids
             }
+        )
+        visible_eligible_row_sum = sum(
+            row["unique_sources"] for row in visible_eligible_rows
         )
         manipulation_path_funnel = self._identity_funnel_rows(
             self._group5_manipulation_funnel_ids,
@@ -3692,6 +3716,16 @@ class EyeAuthorityStatistics:
                 "range_transition_reasons": range_reasons,
                 "visible_eligible_sources": visible_eligible_unique,
                 "visible_eligible_sources_by_strata": visible_eligible_rows,
+                "visible_eligible_sources_by_strata_counting_basis": (
+                    "unique_within_each_stratum_non_additive_when_a_source_"
+                    "identity_changes_reported_structural_metadata"
+                ),
+                "visible_eligible_sources_by_strata_row_sum": (
+                    visible_eligible_row_sum
+                ),
+                "visible_eligible_sources_excess_assignments_above_union": (
+                    visible_eligible_row_sum - visible_eligible_unique
+                ),
                 "source_dispositions": disposition_rows,
                 "source_disposition_conservation": {
                     "raw_crossed_source_ids": disposition_total,
@@ -3701,6 +3735,7 @@ class EyeAuthorityStatistics:
                     "expected_disposition_kinds": sorted(
                         _GROUP4_SOURCE_DISPOSITIONS
                     ),
+                    "totals_by_disposition": disposition_totals,
                     "balanced": disposition_total == disposition_sum,
                 },
                 "manipulation_conservation": manipulation_conservation,
@@ -3751,6 +3786,15 @@ class EyeAuthorityStatistics:
                 "group4_manipulations_by_source_timeframe": dict(
                     sorted(manipulations_by_source_timeframe.items())
                 ),
+                "group4_manipulations_by_source_timeframe_basis": (
+                    "all_observed_identities_including_left_warmup_context"
+                ),
+                "group4_in_window_manipulation_cohort_by_source_timeframe": dict(
+                    sorted(cohort_manipulations_by_source_timeframe.items())
+                ),
+                "group4_in_window_manipulation_cohort_counting_basis": (
+                    "unique_manipulation_identity_created_inside_registered_window"
+                ),
                 "manipulations_entering_group5_by_source_timeframe": dict(
                     sorted(group5_manipulations_by_source_timeframe.items())
                 ),
@@ -3777,6 +3821,7 @@ class EyeAuthorityStatistics:
                 "future_or_pnl_used": False,
                 "frozen_strata": list(_FROZEN_CASE_STRATA),
                 "retained_by_stratum": case_counts,
+                "selected_by_stratum": selected_case_counts,
                 "category_coverage": category_coverage,
                 "category_status": {
                     "obvious_mature_looking_but_rejected": (
@@ -3789,6 +3834,11 @@ class EyeAuthorityStatistics:
                 "minimum_requested": _CASE_MINIMUM,
                 "maximum": _CASE_LIMIT,
                 "status": case_status,
+                "status_scope": (
+                    "selected_case_count_only; category coverage is reported "
+                    "separately and visual maturity classification is not "
+                    "inferred by the scanner"
+                ),
             },
             "case_index": cases,
         }

@@ -1,0 +1,726 @@
+{
+  "cases": [
+    {
+      "case_id": "9bb285acfaddd145",
+      "entity_id": "5fc0ec6fa12cf2df58caf336e9e32ccc2741c0dcf1fb17cd05d4b5e3c9498036",
+      "event_clock": "2023-11-20T04:00:00-05:00",
+      "group": "group4",
+      "lifecycle_or_outcome": "mature",
+      "primitive": "dealing_range",
+      "source_ids": [
+        "0cf4120257fa3dfcc6a34ca1",
+        "4d90936961aa354afa0d62d2"
+      ],
+      "strata": {
+        "timeframe": "1H"
+      },
+      "stratum": "all_recognized_mature"
+    },
+    {
+      "case_id": "c1555fbdada20e3a",
+      "entity_id": "c35b59e3dd37140e9666c32f73dc440374564e2ad961d639304c5324a2101aff",
+      "event_clock": "2023-07-04T01:00:00-04:00",
+      "group": "group4",
+      "lifecycle_or_outcome": "mature",
+      "primitive": "dealing_range",
+      "source_ids": [
+        "b996c6570236a2463acfc551",
+        "b586a7bf4b3934546cb2c538"
+      ],
+      "strata": {
+        "timeframe": "1H"
+      },
+      "stratum": "all_recognized_mature"
+    },
+    {
+      "case_id": "0f35744e20f2af6f",
+      "entity_id": "8974e7f188d4961ef171ffc9541d27151f264871bbd1f554221536bf9b5a7553",
+      "event_clock": "2023-10-11T16:00:00-04:00",
+      "group": "group4",
+      "lifecycle_or_outcome": "compression",
+      "primitive": "range_maturity_evaluation",
+      "source_ids": [],
+      "strata": {
+        "timeframe": "1H"
+      },
+      "stratum": "near_mature_single_gate"
+    },
+    {
+      "case_id": "0037526de4a05f26",
+      "entity_id": "11eef5420d4bb1ea8e6ffe8a17b4b96834279b3024cfcd0e334a94bc83d6103d",
+      "event_clock": "2023-09-29T12:00:00-04:00",
+      "group": "group4",
+      "lifecycle_or_outcome": "duration+bilateral_touches+midpoint_crossing+width+compression",
+      "primitive": "range_maturity_evaluation",
+      "source_ids": [],
+      "strata": {
+        "timeframe": "1H"
+      },
+      "stratum": "multiple_gate_rejected"
+    },
+    {
+      "case_id": "00af415442b778ff",
+      "entity_id": "2b1dac2f4e9b84cde704420f7d5e626c8a4be2e14337f78678d91b9a3be104d1",
+      "event_clock": "2023-10-25T10:00:00-04:00",
+      "group": "group4",
+      "lifecycle_or_outcome": "broken",
+      "primitive": "dealing_range",
+      "source_ids": [
+        "54b22df4c56c822e9272bcda",
+        "a703d460c8a6a25b627bb471"
+      ],
+      "strata": {
+        "timeframe": "1H"
+      },
+      "stratum": "forming_reasonably_broken"
+    },
+    {
+      "case_id": "825c48500c354f65",
+      "entity_id": "43b8194cb4a6789f0e9c6ed14165aea653f958cab92270c81f97af9a5cea18f7",
+      "event_clock": "2023-09-11T18:01:00-04:00",
+      "group": "group4",
+      "lifecycle_or_outcome": "broken",
+      "primitive": "dealing_range",
+      "source_ids": [
+        "3277e9d1ad9033761c6d38d6",
+        "36c0ace605f090284b977d46"
+      ],
+      "strata": {
+        "timeframe": "1H"
+      },
+      "stratum": "source_identity_or_reset_failure"
+    },
+    {
+      "case_id": "1031ba5242f70bd8",
+      "entity_id": "19bfa0af62b39c205aaca49203e0266244bc6c8648a2b9544df1f50f832428f3",
+      "event_clock": "2023-07-05T02:52:00-04:00",
+      "group": "group4",
+      "lifecycle_or_outcome": "swept",
+      "primitive": "manipulation",
+      "source_ids": [
+        "c35b59e3dd37140e9666c32f73dc440374564e2ad961d639304c5324a2101aff",
+        "range_boundary:53db6fcc66cc5e5a89a6b5e5b589c59c88fc9184bb525f519a0eb8ef58fded71"
+      ],
+      "strata": {
+        "internal_external": "internal",
+        "side": "below",
+        "source_kind": "mature_range_boundary",
+        "source_timeframe": "1H",
+        "structural_rank": "internal",
+        "timeframe": "1m"
+      },
+      "stratum": "mature_range_manipulation"
+    },
+    {
+      "case_id": "000758572d3a2cfe",
+      "entity_id": "f00a3590e3ccb7d3c8c07b8c1447373a807d2f78b21224791e81c45d4fcc31e3",
+      "event_clock": "2023-09-07T00:41:00-04:00",
+      "group": "group5",
+      "lifecycle_or_outcome": "closed",
+      "primitive": "path_sequence",
+      "source_ids": [
+        "5d14b0fc9f4e763f73a9d64d8255b954fd6d4aecc3a5dcfc1e9ee9970feebd0c"
+      ],
+      "strata": {
+        "context_kind": "pool_reversal",
+        "direction": "short"
+      },
+      "stratum": "group5_complete_path"
+    },
+    {
+      "case_id": "0002ae47cd3d0d07",
+      "entity_id": "cf2b8fcdbb72b039fbdb0c83e169380a2ca97abe51105cddd1fcfbfa6a7bdd4b",
+      "event_clock": "2023-07-07T12:34:00-04:00",
+      "group": "group5",
+      "lifecycle_or_outcome": "closed",
+      "primitive": "path_sequence",
+      "source_ids": [
+        "010c6be28900f8eb0bc2348132d0e952b32c8b5ea01dc64727471f21af6163f5"
+      ],
+      "strata": {
+        "context_kind": "pool_reversal",
+        "direction": "short"
+      },
+      "stratum": "group5_interrupted_path"
+    },
+    {
+      "case_id": "14cd437dcda33171",
+      "entity_id": "fb4ce23b694acc1ba0475f1a68b2d7fd6baf761d8fbcbf1763f2ffb2a8bffd4b",
+      "event_clock": "2023-10-23T01:00:00-04:00",
+      "group": "group4",
+      "lifecycle_or_outcome": "bilateral_touches",
+      "primitive": "range_maturity_evaluation",
+      "source_ids": [],
+      "strata": {
+        "timeframe": "1H"
+      },
+      "stratum": "near_mature_single_gate"
+    },
+    {
+      "case_id": "00ee97e704a662c0",
+      "entity_id": "e88ea79ab6ac0cdb2b8e6c7be0b1ae376dd48a7266bb6e4ce2ca49af3c099dcf",
+      "event_clock": "2023-08-11T11:00:00-04:00",
+      "group": "group4",
+      "lifecycle_or_outcome": "duration+bilateral_touches+midpoint_crossing+width+compression",
+      "primitive": "range_maturity_evaluation",
+      "source_ids": [],
+      "strata": {
+        "timeframe": "1H"
+      },
+      "stratum": "multiple_gate_rejected"
+    },
+    {
+      "case_id": "00ece7c0d7815f41",
+      "entity_id": "7da406f43a2ff1688be274b332a5e08c11ec29f3a47b7f23c18e3f7d7d292665",
+      "event_clock": "2023-07-14T10:00:00-04:00",
+      "group": "group4",
+      "lifecycle_or_outcome": "broken",
+      "primitive": "dealing_range",
+      "source_ids": [
+        "6b52a6d9d4c30f5c4325f429",
+        "b114b65895d8003c56129a97"
+      ],
+      "strata": {
+        "timeframe": "1H"
+      },
+      "stratum": "forming_reasonably_broken"
+    },
+    {
+      "case_id": "c6a3b246859ed4f7",
+      "entity_id": "59807f134f2efa332f1d6965180dc28e468168a434f88b3a32e93110b43ee2e5",
+      "event_clock": "2023-03-13T18:01:00-04:00",
+      "group": "group4",
+      "lifecycle_or_outcome": "broken",
+      "primitive": "dealing_range",
+      "source_ids": [
+        "6ea53262f3f7fa3bef9f928d",
+        "9b165b5698f8fcbd5bd46755"
+      ],
+      "strata": {
+        "timeframe": "1H"
+      },
+      "stratum": "source_identity_or_reset_failure"
+    },
+    {
+      "case_id": "9262d16e2c8c968b",
+      "entity_id": "ffbd7d2f606c1bada7038b5fb3f4c2ac9922faed2dca692a525df877cd538d18",
+      "event_clock": "2023-11-20T04:52:00-05:00",
+      "group": "group4",
+      "lifecycle_or_outcome": "reaccepted",
+      "primitive": "manipulation",
+      "source_ids": [
+        "5fc0ec6fa12cf2df58caf336e9e32ccc2741c0dcf1fb17cd05d4b5e3c9498036",
+        "range_boundary:d7f67fd368ec5e5423950699e0c6221b51b75e08f39bbc0a1b626440317ad04c"
+      ],
+      "strata": {
+        "internal_external": "internal",
+        "side": "above",
+        "source_kind": "mature_range_boundary",
+        "source_timeframe": "1H",
+        "structural_rank": "internal",
+        "timeframe": "1m"
+      },
+      "stratum": "mature_range_manipulation"
+    },
+    {
+      "case_id": "00107f2ceee56b1d",
+      "entity_id": "0ac4f36d54521e2dc042979f1cb87f613f071f1387169d39ce3617d7aeff849c",
+      "event_clock": "2023-07-17T08:09:00-04:00",
+      "group": "group5",
+      "lifecycle_or_outcome": "closed",
+      "primitive": "path_sequence",
+      "source_ids": [
+        "a9d189559c2607c0a193a3e48328c49d8d0e961a76da9d4d371b1193370aa39b"
+      ],
+      "strata": {
+        "context_kind": "zone_return",
+        "direction": "short"
+      },
+      "stratum": "group5_complete_path"
+    },
+    {
+      "case_id": "0004afb527ea3477",
+      "entity_id": "780ac9e7577b995bf35a61d94ffef6b921dfd6787ecb185983441f6c957af846",
+      "event_clock": "2023-06-19T03:46:00-04:00",
+      "group": "group5",
+      "lifecycle_or_outcome": "closed",
+      "primitive": "path_sequence",
+      "source_ids": [
+        "da1b0a6b7b2f7b44eca2ca5e4ad8571d48a2acf328c6bfdf3318362f223af206"
+      ],
+      "strata": {
+        "context_kind": "zone_return",
+        "direction": "long"
+      },
+      "stratum": "group5_interrupted_path"
+    },
+    {
+      "case_id": "337fffb2f03c3e3b",
+      "entity_id": "3e3696b834ec5679e88d28f94b8f3927d2d0216d8bcf639c72fd3bedfa02b6ab",
+      "event_clock": "2023-06-05T04:00:00-04:00",
+      "group": "group4",
+      "lifecycle_or_outcome": "bilateral_touches",
+      "primitive": "range_maturity_evaluation",
+      "source_ids": [],
+      "strata": {
+        "timeframe": "1H"
+      },
+      "stratum": "near_mature_single_gate"
+    },
+    {
+      "case_id": "00ff3cc9eba77650",
+      "entity_id": "011ce4807987dbbaa6f872779e070dab60169a3567db33321d34d501237286d9",
+      "event_clock": "2023-08-10T16:00:00-04:00",
+      "group": "group4",
+      "lifecycle_or_outcome": "duration+bilateral_touches+midpoint_crossing+width+compression",
+      "primitive": "range_maturity_evaluation",
+      "source_ids": [],
+      "strata": {
+        "timeframe": "1H"
+      },
+      "stratum": "multiple_gate_rejected"
+    },
+    {
+      "case_id": "010b2df6ee623541",
+      "entity_id": "d666379eacfe3b64a60befc22f4b3b3db2ebac92459cb4e4fb183dfec584b721",
+      "event_clock": "2023-09-25T08:00:00-04:00",
+      "group": "group4",
+      "lifecycle_or_outcome": "broken",
+      "primitive": "dealing_range",
+      "source_ids": [
+        "8feffc4d4d0539120f3baedd",
+        "4157e9749a8534e8b9e81f5d"
+      ],
+      "strata": {
+        "timeframe": "1H"
+      },
+      "stratum": "forming_reasonably_broken"
+    },
+    {
+      "case_id": "d380a60f2310d6ae",
+      "entity_id": "f0678bc4811712b8bed075e6168f3991ca1b691a3a45eca46dc636949baef655",
+      "event_clock": "2023-02-21T23:00:00-05:00",
+      "group": "group4",
+      "lifecycle_or_outcome": "broken",
+      "primitive": "dealing_range",
+      "source_ids": [
+        "9ae12eec6e36c8b885e21bb6",
+        "95afa242e98096ed64e0359f"
+      ],
+      "strata": {
+        "timeframe": "1H"
+      },
+      "stratum": "source_identity_or_reset_failure"
+    },
+    {
+      "case_id": "001904cec7aae3bd",
+      "entity_id": "fcca479c28662c436bf05c1c2f23c5272c7457d709ef6c4461359f1a65e3a60d",
+      "event_clock": "2023-01-18T03:35:00-05:00",
+      "group": "group5",
+      "lifecycle_or_outcome": "closed",
+      "primitive": "path_sequence",
+      "source_ids": [
+        "34db8a6a6db4803d070c040cb26c5f5d5e67cf917f2e165208f03ab4b673e53a"
+      ],
+      "strata": {
+        "context_kind": "pool_reversal",
+        "direction": "short"
+      },
+      "stratum": "group5_complete_path"
+    },
+    {
+      "case_id": "0006add576c31c67",
+      "entity_id": "27a5c6cf0c6c66877fd117f4944143887f36bbfce32be6503e756d1d928a5a01",
+      "event_clock": "2023-05-30T15:14:00-04:00",
+      "group": "group5",
+      "lifecycle_or_outcome": "closed",
+      "primitive": "path_sequence",
+      "source_ids": [
+        "3f26ded740de129080a8b267b81d9fafa4d8c887eb0b692b4b2ca211dd8d00a9"
+      ],
+      "strata": {
+        "context_kind": "zone_return",
+        "direction": "long"
+      },
+      "stratum": "group5_interrupted_path"
+    },
+    {
+      "case_id": "3542571ab6c179ed",
+      "entity_id": "cb53da2511bf13a4a6031b72e1547d3b113b333e7cc8ff15450476025ae37965",
+      "event_clock": "2023-11-01T07:00:00-04:00",
+      "group": "group4",
+      "lifecycle_or_outcome": "bilateral_touches",
+      "primitive": "range_maturity_evaluation",
+      "source_ids": [],
+      "strata": {
+        "timeframe": "1H"
+      },
+      "stratum": "near_mature_single_gate"
+    },
+    {
+      "case_id": "021abacaad94c514",
+      "entity_id": "5cc6c1dd89fb762f88c2c0b5fed04cf8a781503ffbd09161577d2ea2ddd135c2",
+      "event_clock": "2023-07-19T21:00:00-04:00",
+      "group": "group4",
+      "lifecycle_or_outcome": "duration+bilateral_touches+midpoint_crossing+width+compression",
+      "primitive": "range_maturity_evaluation",
+      "source_ids": [],
+      "strata": {
+        "timeframe": "1H"
+      },
+      "stratum": "multiple_gate_rejected"
+    },
+    {
+      "case_id": "012708fd68bea65b",
+      "entity_id": "f4f74fd51f9e82bab460d4aa75b07435dc9e69abe598a6225e8aaeb9f664a1ec",
+      "event_clock": "2023-10-17T10:00:00-04:00",
+      "group": "group4",
+      "lifecycle_or_outcome": "broken",
+      "primitive": "dealing_range",
+      "source_ids": [
+        "236e255f717ed7bed85b88de",
+        "4224b0be8a1444f0f4dc12e1"
+      ],
+      "strata": {
+        "timeframe": "1H"
+      },
+      "stratum": "forming_reasonably_broken"
+    },
+    {
+      "case_id": "001d26ab829a2664",
+      "entity_id": "b0e20b6a6384677f0a071267615b205700ddcef3742e6eb11729eb9b6191ddab",
+      "event_clock": "2023-12-26T15:46:00-05:00",
+      "group": "group5",
+      "lifecycle_or_outcome": "closed",
+      "primitive": "path_sequence",
+      "source_ids": [
+        "734431bb2c581d343a1f82a07d51b607c9c15b89f1f4f7934b57cb9b7b3a4d4b"
+      ],
+      "strata": {
+        "context_kind": "pool_reversal",
+        "direction": "short"
+      },
+      "stratum": "group5_complete_path"
+    },
+    {
+      "case_id": "0007c8b5be2134aa",
+      "entity_id": "204e3447d1a384e03736d534531c65d8e07dd9f68a58d282962105b30d0038f9",
+      "event_clock": "2023-09-15T09:08:00-04:00",
+      "group": "group5",
+      "lifecycle_or_outcome": "closed",
+      "primitive": "path_sequence",
+      "source_ids": [
+        "9884fdc59464189efa44f686824307023fa2068bdc01e55dbc7da96ca5cc7dbd"
+      ],
+      "strata": {
+        "context_kind": "pool_reversal",
+        "direction": "short"
+      },
+      "stratum": "group5_interrupted_path"
+    },
+    {
+      "case_id": "3ce06d5726030705",
+      "entity_id": "43878634ddb5fe77fda54ec6891cc907dd56072128063c8e36258d0df0d36291",
+      "event_clock": "2023-06-30T00:00:00-04:00",
+      "group": "group4",
+      "lifecycle_or_outcome": "bilateral_touches",
+      "primitive": "range_maturity_evaluation",
+      "source_ids": [],
+      "strata": {
+        "timeframe": "1H"
+      },
+      "stratum": "near_mature_single_gate"
+    },
+    {
+      "case_id": "053780b5695e17e0",
+      "entity_id": "63b0d16e0f75d8c16a44187c2560460cb06ce69653f0fab42cc774093d75cffb",
+      "event_clock": "2023-05-12T15:00:00-04:00",
+      "group": "group4",
+      "lifecycle_or_outcome": "duration+bilateral_touches+midpoint_crossing+width+compression",
+      "primitive": "range_maturity_evaluation",
+      "source_ids": [],
+      "strata": {
+        "timeframe": "1H"
+      },
+      "stratum": "multiple_gate_rejected"
+    },
+    {
+      "case_id": "01423547a852c97d",
+      "entity_id": "cfe98debe8aa2458f64a01e2cc713cbe30990d7b68c8bc552d1f8d59dff61a7f",
+      "event_clock": "2023-09-22T16:00:00-04:00",
+      "group": "group4",
+      "lifecycle_or_outcome": "broken",
+      "primitive": "dealing_range",
+      "source_ids": [
+        "cf9a4b9860d390dea32105c2",
+        "babb88395979224f0be6f97b"
+      ],
+      "strata": {
+        "timeframe": "1H"
+      },
+      "stratum": "forming_reasonably_broken"
+    },
+    {
+      "case_id": "0023bbf512ef5624",
+      "entity_id": "dc5b751d47a49d0f4667e47061d51b1d8f853ed238412d99ef66792a2f9bf1ad",
+      "event_clock": "2023-06-21T00:25:00-04:00",
+      "group": "group5",
+      "lifecycle_or_outcome": "closed",
+      "primitive": "path_sequence",
+      "source_ids": [
+        "911d941aece410befb99103196c28a6e144e987b5efa90e61682515b36b13b08"
+      ],
+      "strata": {
+        "context_kind": "pool_reversal",
+        "direction": "long"
+      },
+      "stratum": "group5_complete_path"
+    },
+    {
+      "case_id": "000cf4105b8601d4",
+      "entity_id": "058dd1dbeeb686b2a3a45d2bbfcc584a39d96b5edc1cfac21056837d31303ca5",
+      "event_clock": "2023-01-09T14:20:00-05:00",
+      "group": "group5",
+      "lifecycle_or_outcome": "closed",
+      "primitive": "path_sequence",
+      "source_ids": [
+        "748ce5963eeeedeff5ed278a7bebe04d6dd9bd968bbc318e7fc638457c4fc9e3"
+      ],
+      "strata": {
+        "context_kind": "zone_return",
+        "direction": "short"
+      },
+      "stratum": "group5_interrupted_path"
+    },
+    {
+      "case_id": "4ae8699b1c6d9229",
+      "entity_id": "26d0e1eb50ebe78cf46ab87d2d23b656587391a77008d11e490b7241963d1a2a",
+      "event_clock": "2023-03-13T05:00:00-04:00",
+      "group": "group4",
+      "lifecycle_or_outcome": "bilateral_touches",
+      "primitive": "range_maturity_evaluation",
+      "source_ids": [],
+      "strata": {
+        "timeframe": "1H"
+      },
+      "stratum": "near_mature_single_gate"
+    },
+    {
+      "case_id": "0616c8458bc70a14",
+      "entity_id": "9b067f35c9dc5459c1f480b86db46ccad5f02480562cd83e5c8fb51bd3fb2af5",
+      "event_clock": "2023-01-06T07:00:00-05:00",
+      "group": "group4",
+      "lifecycle_or_outcome": "duration+bilateral_touches+midpoint_crossing+width+compression",
+      "primitive": "range_maturity_evaluation",
+      "source_ids": [],
+      "strata": {
+        "timeframe": "1H"
+      },
+      "stratum": "multiple_gate_rejected"
+    },
+    {
+      "case_id": "01dfaa9b8f7f2be1",
+      "entity_id": "cef2a92b86a3c42b53e190db20272f1e17f206aa0706642852f9678d86cf7c51",
+      "event_clock": "2023-04-12T16:00:00-04:00",
+      "group": "group4",
+      "lifecycle_or_outcome": "broken",
+      "primitive": "dealing_range",
+      "source_ids": [
+        "b11eeb1f02ba87e5cf9ec04a",
+        "7b3454bb4aed8a5ff6ff9297"
+      ],
+      "strata": {
+        "timeframe": "1H"
+      },
+      "stratum": "forming_reasonably_broken"
+    },
+    {
+      "case_id": "00261bd582642ecf",
+      "entity_id": "cb36054fc40ddb40101abee9b85333cae0ed6992944cb73e228cbd4298559784",
+      "event_clock": "2023-09-19T08:03:00-04:00",
+      "group": "group5",
+      "lifecycle_or_outcome": "closed",
+      "primitive": "path_sequence",
+      "source_ids": [
+        "9b0fdf4d3e77ca998293f7a00b9e1004bc34dc80699a5c97b9ea99e258711d81"
+      ],
+      "strata": {
+        "context_kind": "zone_return",
+        "direction": "short"
+      },
+      "stratum": "group5_complete_path"
+    },
+    {
+      "case_id": "0010bf9a8bc00ba1",
+      "entity_id": "e506d95feb3c281a384cfae1d909f1b46692abfe36d6fe12159804a2afd73d1d",
+      "event_clock": "2023-02-06T10:47:00-05:00",
+      "group": "group5",
+      "lifecycle_or_outcome": "closed",
+      "primitive": "path_sequence",
+      "source_ids": [
+        "ba54598ae16d59f5cbcf523305e734d32f6f60517af938b50254fab864a44def"
+      ],
+      "strata": {
+        "context_kind": "zone_return",
+        "direction": "short"
+      },
+      "stratum": "group5_interrupted_path"
+    },
+    {
+      "case_id": "58e4ee7e24739563",
+      "entity_id": "157e0f5cc5c7961373378a22bc3e961a6c1694bbc8f156849fb7f225533ecb68",
+      "event_clock": "2023-07-31T17:00:00-04:00",
+      "group": "group4",
+      "lifecycle_or_outcome": "bilateral_touches",
+      "primitive": "range_maturity_evaluation",
+      "source_ids": [],
+      "strata": {
+        "timeframe": "1H"
+      },
+      "stratum": "near_mature_single_gate"
+    },
+    {
+      "case_id": "06333bfaccc5f4df",
+      "entity_id": "9859f5b390806da298f64bb383aea6b90fb095a3954344c0211eb4924ede288d",
+      "event_clock": "2023-11-24T12:00:00-05:00",
+      "group": "group4",
+      "lifecycle_or_outcome": "duration+bilateral_touches+midpoint_crossing+compression",
+      "primitive": "range_maturity_evaluation",
+      "source_ids": [],
+      "strata": {
+        "timeframe": "1H"
+      },
+      "stratum": "multiple_gate_rejected"
+    },
+    {
+      "case_id": "0260763978e669a3",
+      "entity_id": "68b5c70b8689564520e65de7d020dc84003fc19e2da83c064eb9d121dd7173c2",
+      "event_clock": "2023-04-14T10:00:00-04:00",
+      "group": "group4",
+      "lifecycle_or_outcome": "broken",
+      "primitive": "dealing_range",
+      "source_ids": [
+        "eee23305ffc4dae3737542b1",
+        "7b3454bb4aed8a5ff6ff9297"
+      ],
+      "strata": {
+        "timeframe": "1H"
+      },
+      "stratum": "forming_reasonably_broken"
+    }
+  ],
+  "future_hidden_on_first_review": true,
+  "profile": "eye_group1_5_natural_authority_2023_full_year",
+  "post_run_review_clarifications": {
+    "derived_only_from_frozen_case_index": true,
+    "market_replay_used": false,
+    "fields": [
+      "selection.selected_by_stratum",
+      "selection.status_scope"
+    ]
+  },
+  "registered_window": {
+    "end_exclusive": "2024-01-01T00:00:00-05:00",
+    "id": "2023-full-year-eye",
+    "start": "2023-01-01T00:00:00-05:00",
+    "timezone": "America/New_York",
+    "warmup_calendar_days": 7,
+    "warmup_start": "2022-12-25T00:00:00-05:00"
+  },
+  "scan_identity": "effe9ab4c0045ad41303cce64c9d5a2672ac92f760f61ad7ecac713f828a221b",
+  "schema_version": 1,
+  "selection": {
+    "candidate_events_seen": 25746,
+    "category_coverage": {
+      "all_recognized_mature": {
+        "covered": true,
+        "retained_cases": 2,
+        "status": "covered"
+      },
+      "forming_reasonably_broken": {
+        "covered": true,
+        "retained_cases": 40,
+        "status": "covered"
+      },
+      "group5_complete_path": {
+        "covered": true,
+        "retained_cases": 40,
+        "status": "covered"
+      },
+      "group5_interrupted_path": {
+        "covered": true,
+        "retained_cases": 40,
+        "status": "covered"
+      },
+      "mature_range_manipulation": {
+        "covered": true,
+        "retained_cases": 4,
+        "status": "covered"
+      },
+      "multiple_gate_rejected": {
+        "covered": true,
+        "retained_cases": 40,
+        "status": "covered"
+      },
+      "near_mature_single_gate": {
+        "covered": true,
+        "retained_cases": 26,
+        "status": "covered"
+      },
+      "obvious_mature_looking_but_rejected": {
+        "covered": false,
+        "retained_cases": 0,
+        "status": "requires_blind_image_classification_not_inferred"
+      },
+      "source_identity_or_reset_failure": {
+        "covered": true,
+        "retained_cases": 3,
+        "status": "covered"
+      }
+    },
+    "category_status": {
+      "obvious_mature_looking_but_rejected": "requires_blind_image_classification_not_inferred"
+    },
+    "frozen_strata": [
+      "all_recognized_mature",
+      "obvious_mature_looking_but_rejected",
+      "near_mature_single_gate",
+      "multiple_gate_rejected",
+      "forming_reasonably_broken",
+      "source_identity_or_reset_failure",
+      "mature_range_manipulation",
+      "group5_complete_path",
+      "group5_interrupted_path"
+    ],
+    "future_or_pnl_used": false,
+    "maximum": 40,
+    "method": "all_recognized_mature_first_smallest_sha256_then_registered_strata_round_robin_with_global_episode_uniqueness",
+    "minimum_requested": 20,
+    "retained_by_stratum": {
+      "all_recognized_mature": 2,
+      "forming_reasonably_broken": 40,
+      "group5_complete_path": 40,
+      "group5_interrupted_path": 40,
+      "mature_range_manipulation": 4,
+      "multiple_gate_rejected": 40,
+      "near_mature_single_gate": 26,
+      "obvious_mature_looking_but_rejected": 0,
+      "source_identity_or_reset_failure": 3
+    },
+    "retained_candidates": 195,
+    "selected": 40,
+    "selected_by_stratum": {
+      "all_recognized_mature": 2,
+      "forming_reasonably_broken": 7,
+      "group5_complete_path": 6,
+      "group5_interrupted_path": 6,
+      "mature_range_manipulation": 2,
+      "multiple_gate_rejected": 7,
+      "near_mature_single_gate": 7,
+      "obvious_mature_looking_but_rejected": 0,
+      "source_identity_or_reset_failure": 3
+    },
+    "status": "complete",
+    "status_scope": "selected_case_count_only; category coverage is reported separately and visual maturity classification is not inferred by the scanner"
+  }
+}

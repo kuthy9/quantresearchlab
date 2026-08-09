@@ -902,6 +902,8 @@ def test_favr_scene_graph_forms_continuously_via_public_update() -> None:
         assert dict(step_node.semantic_attributes)[
             "path_step_kind"
         ] == step.kind
+        assert step.source_entity_id in step_node.source_ids
+        assert set(step.predecessor_step_ids).issubset(step_node.source_ids)
 
     hypothesis = _unparked_favr_brain().update(
         observation,
