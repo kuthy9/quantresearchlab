@@ -7,9 +7,11 @@ trading model. It does not predict a complete future path and then choose a
 strategy. Each newly completed 1m bar advances one shared vertical chain:
 
 ```text
-causal 4H / 1H / 5m / 1m observation + ordered event memory
+causal 4H / 1H / 15m / 5m / 1m observation + ordered event memory
     ↓
-Temporal Market Scene Graph + typed DFP / LSR / FAVR beliefs
+Temporal Market Scene Graph + GlobalMarketContext + FocusState
+    ↓
+typed DFP / LSR / parked FAVR beliefs
     ↓
 enter / wait / hold / protect / exit / abstain utility comparison
     ↓

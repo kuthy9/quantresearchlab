@@ -423,6 +423,30 @@ class UtilityDecisionLayer:
         )
         selected = best.action
         reasons = [best.reason]
+        global_context = belief.global_context
+        unexplained = (
+            ()
+            if global_context is None
+            else global_context.unexplained_structured_episode_ids
+        )
+        active_explanation = any(
+            hypothesis.eligible
+            and hypothesis.setup_context_id is not None
+            for hypothesis in belief.hypotheses.values()
+        )
+        if unexplained:
+            reasons.append(
+                "unexplained_structured_episode="
+                + ",".join(unexplained)
+                + "; no ad-hoc playbook was created"
+            )
+            if not active_explanation:
+                selected = Action.ABSTAIN
+                reasons.insert(
+                    0,
+                    "no fixed playbook explains the current "
+                    "high-salience structured episode",
+                )
         if belief.focus_state is not None:
             focus = belief.focus_state
             reasons.append(

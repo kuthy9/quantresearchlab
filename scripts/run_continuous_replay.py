@@ -41,6 +41,7 @@ from smc_trader.engine import ContinuousSMCEngine  # noqa: E402
 from smc_trader.io import load_ohlcv  # noqa: E402
 from smc_trader.model import (  # noqa: E402
     Action,
+    Playbook,
     Timeframe,
     to_primitive,
 )
@@ -190,6 +191,17 @@ DECISION_FIELD_TYPES = {
     "top_setup_id": "large_string",
     "top_episode_id": "large_string",
     "top_entry_location_id": "large_string",
+    "top_context_metadata": "large_string",
+    "top_competing_episode_ids": "large_string",
+    "global_market_mode": "large_string",
+    "global_authority_timeframe": "large_string",
+    "global_authority_direction": "large_string",
+    "global_authority_source_ids": "large_string",
+    "global_dislocated": "bool",
+    "global_scale_relations": "large_string",
+    "global_path_blocker_ids": "large_string",
+    "global_material_conflicts": "large_string",
+    "global_unexplained_episode_ids": "large_string",
     "decision_hypothesis_key": "large_string",
     "decision_playbook": "large_string",
     "decision_direction": "large_string",
@@ -236,6 +248,28 @@ DECISION_FIELD_TYPES = {
     "vetoes": "large_string",
     "risk_reasons": "large_string",
 }
+
+
+LSR_REACH_STAGES = (
+    "forming",
+    "armed",
+    "waiting_location",
+    "waiting_trigger",
+    "executable",
+    "trigger_ready",
+)
+_LSR_REACH_BITS = {
+    stage: 1 << index for index, stage in enumerate(LSR_REACH_STAGES)
+}
+_LSR_STRATA_FIELDS = (
+    "direction",
+    "manipulation_tier",
+    "source_timeframe",
+    "structural_rank",
+    "global_context_connected",
+    "nesting",
+    "stage",
+)
 
 BRAIN_CALIBRATION_FIELD_TYPES = {
     "sample_id": "large_string",
@@ -510,6 +544,90 @@ def _load_mbo_execution(
     )
 
 
+def _compact_json(value: Any) -> str:
+    return json.dumps(
+        to_primitive(value),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def _lsr_reach_key(values: tuple[str, ...]) -> str:
+    return json.dumps(values, separators=(",", ":"))
+
+
+def _update_lsr_episode_phase_funnel(
+    state: dict[str, Any],
+    belief: Any,
+) -> None:
+    """Count each LSR episode's first arrival at a phase exactly once."""
+
+    masks = state.setdefault("lsr_episode_reach_masks", {})
+    counts = state.setdefault("lsr_episode_phase_counts", {})
+    if not isinstance(masks, dict) or not isinstance(counts, dict):
+        raise ValueError("checkpoint LSR phase funnel state is invalid")
+    for hypothesis in belief.hypotheses.values():
+        if (
+            hypothesis.playbook is not Playbook.LIQUIDITY_SWEEP_REVERSAL
+            or hypothesis.episode_id is None
+        ):
+            continue
+        metadata = hypothesis.context_metadata
+        stages = [hypothesis.phase.value]
+        if bool(
+            hypothesis.hard_gate_results.get(
+                "aligned_micro_bos_trigger",
+                False,
+            )
+        ):
+            stages.append("trigger_ready")
+        episode_key = _lsr_reach_key(
+            (hypothesis.direction.value, hypothesis.episode_id)
+        )
+        prior_mask = int(masks.get(episode_key, 0))
+        updated_mask = prior_mask
+        for stage in stages:
+            bit = _LSR_REACH_BITS.get(stage)
+            if bit is None or prior_mask & bit:
+                continue
+            strata = (
+                hypothesis.direction.value,
+                metadata.get("manipulation_tier", "unknown"),
+                metadata.get("source_timeframe", "unknown"),
+                metadata.get("structural_rank", "unknown"),
+                metadata.get("global_context_connected", "unknown"),
+                metadata.get("nesting", "unknown"),
+                stage,
+            )
+            count_key = _lsr_reach_key(strata)
+            counts[count_key] = int(counts.get(count_key, 0)) + 1
+            updated_mask |= bit
+        masks[episode_key] = updated_mask
+
+
+def _lsr_episode_phase_summary(state: dict[str, Any]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    counts = state.get("lsr_episode_phase_counts", {})
+    if not isinstance(counts, dict):
+        raise ValueError("checkpoint LSR phase counts are invalid")
+    for encoded, count in counts.items():
+        values = json.loads(encoded)
+        if not isinstance(values, list) or len(values) != len(_LSR_STRATA_FIELDS):
+            raise ValueError("checkpoint LSR phase strata are invalid")
+        row = dict(zip(_LSR_STRATA_FIELDS, values, strict=True))
+        row["episodes_first_reached"] = int(count)
+        rows.append(row)
+    stage_rank = {stage: index for index, stage in enumerate(LSR_REACH_STAGES)}
+    return sorted(
+        rows,
+        key=lambda row: (
+            *(str(row[field]) for field in _LSR_STRATA_FIELDS[:-1]),
+            stage_rank[str(row["stage"])],
+        ),
+    )
+
+
 def _row(
     snapshot,
     *,
@@ -580,6 +698,7 @@ def _row(
                 "reason": utility.reason,
             }
     asof = snapshot.observation.asof
+    global_context = snapshot.belief.global_context
     return {
         "decision_id": (
             f"{snapshot.observation.symbol}:"
@@ -635,6 +754,59 @@ def _row(
         ),
         "top_episode_id": None if top is None else top.episode_id,
         "top_entry_location_id": None if top is None else top.entry_location_id,
+        "top_context_metadata": (
+            None if top is None else _compact_json(top.context_metadata)
+        ),
+        "top_competing_episode_ids": (
+            None
+            if top is None
+            else _compact_json(top.competing_episode_ids)
+        ),
+        "global_market_mode": (
+            None if global_context is None else global_context.market_mode.value
+        ),
+        "global_authority_timeframe": (
+            None
+            if global_context is None
+            or global_context.authority_timeframe is None
+            else global_context.authority_timeframe.value
+        ),
+        "global_authority_direction": (
+            None
+            if global_context is None
+            or global_context.authority_direction is None
+            else global_context.authority_direction.value
+        ),
+        "global_authority_source_ids": (
+            None
+            if global_context is None
+            else _compact_json(global_context.authority_source_ids)
+        ),
+        "global_dislocated": (
+            None if global_context is None else global_context.dislocated
+        ),
+        "global_scale_relations": (
+            None
+            if global_context is None
+            else _compact_json(global_context.scale_relations)
+        ),
+        "global_path_blocker_ids": (
+            None
+            if global_context is None
+            else _compact_json(global_context.path_blocker_ids)
+        ),
+        "global_material_conflicts": (
+            None
+            if global_context is None
+            else _compact_json(global_context.material_conflicts)
+        ),
+        "global_unexplained_episode_ids": (
+            None
+            if global_context is None
+            else _compact_json(
+                global_context.unexplained_structured_episode_ids
+            )
+        ),
         "decision_hypothesis_key": snapshot.decision.best_hypothesis_key,
         "decision_playbook": (
             None
@@ -1253,6 +1425,8 @@ def _streamed_main(args: argparse.Namespace) -> None:
             "resume_count": 0,
             "finalized": False,
             "visual_artifacts": {},
+            "lsr_episode_reach_masks": {},
+            "lsr_episode_phase_counts": {},
             "peak_buffer_rows": {name: 0 for name in stream_keys},
             "next_shard_index": 0,
             "committed_shards": streams["decision_shards"][
@@ -1260,6 +1434,20 @@ def _streamed_main(args: argparse.Namespace) -> None:
             ],
         }
     args._streamed_output_owned = True
+
+    lsr_episode_reach_masks = state.setdefault(
+        "lsr_episode_reach_masks",
+        {},
+    )
+    lsr_episode_phase_counts = state.setdefault(
+        "lsr_episode_phase_counts",
+        {},
+    )
+    if not isinstance(lsr_episode_reach_masks, dict) or not isinstance(
+        lsr_episode_phase_counts,
+        dict,
+    ):
+        raise ValueError("checkpoint LSR phase funnel state is invalid")
 
     replay: CalibrationSequentialReplay = state["replay"]
     brain_calibration: BrainCalibrationRecorder | None = state.get(
@@ -1471,6 +1659,10 @@ def _streamed_main(args: argparse.Namespace) -> None:
 
                 if snapshot.observation.asof >= start:
                     render_requested_visual(snapshot)
+                    _update_lsr_episode_phase_funnel(
+                        state,
+                        snapshot.belief,
+                    )
                     if brain_calibration is not None:
                         brain_calibration.observe(
                             snapshot,
@@ -1697,6 +1889,15 @@ def _streamed_main(args: argparse.Namespace) -> None:
             sorted(state["model_action_counts"].items())
         ),
         "action_counts": dict(sorted(state["risk_action_counts"].items())),
+        "lsr_episode_phase_funnel": {
+            "counting_basis": (
+                "unique_episode_first_reach_per_stage"
+            ),
+            "strata": list(_LSR_STRATA_FIELDS[:-1]),
+            "stage_order": list(LSR_REACH_STAGES),
+            "episodes_observed": len(state["lsr_episode_reach_masks"]),
+            "rows": _lsr_episode_phase_summary(state),
+        },
         "approved_entry_attempts": len(entry_attempt_rows),
         "filled_entry_attempts": sum(
             row["outcome"] == "filled" for row in entry_attempt_rows

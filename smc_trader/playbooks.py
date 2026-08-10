@@ -1,6 +1,7 @@
 """Small preregistered playbook set with continuous belief/state updates."""
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass, field, replace
 import hashlib
 import math
@@ -23,6 +24,8 @@ from .model import (
     EventKind,
     FairValueGapLifecycle,
     FrozenRangeAuctionContext,
+    GlobalConflictEvidence,
+    GlobalMarketContext,
     HypothesisBelief,
     HypothesisSequenceState,
     LiquidityInventoryLifecycle,
@@ -30,6 +33,7 @@ from .model import (
     LiquidityLevel,
     LiquidityRoute,
     MarketBelief,
+    MarketMode,
     MarketObservation,
     ManipulationLifecycle,
     ManipulationState,
@@ -60,6 +64,7 @@ from .scene_graph import (
     build_hypothesis_states,
     select_focus,
     supplement_focus_once,
+    update_global_market_context,
 )
 
 
@@ -112,6 +117,13 @@ class _Evaluation:
     entry_window_expired: bool = False
     terminal_reason: str | None = None
     terminal_source_ids: tuple[str, ...] = ()
+    authority_tier: str | None = None
+    authority_source_timeframe: str | None = None
+    authority_structural_rank: str | None = None
+    global_context_connected: bool = False
+    authority_latched: bool = False
+    source_nested: bool = False
+    competing_episode_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -131,6 +143,43 @@ class _LSRRangeContext:
     dealing_range: DealingRangeState
     swept_boundary: LiquidityInventoryItem
     opposing_boundary: LiquidityInventoryItem | None
+
+
+@dataclass(frozen=True)
+class _LSRCandidate:
+    """One exact pool-reversal path and its downstream authority reading."""
+
+    path: PathSequenceState
+    manipulation: ManipulationState
+    tier: str
+    eligible_root: bool
+    connected_to_global: bool
+    nested_source: bool
+    source_inventory: LiquidityInventoryItem | None
+    source_pool: object | None
+    structural_rank: str
+    stage: int
+    authority_latched: bool = False
+
+
+_LSR_TIER_RANK = {"A": 0, "B": 1, "C": 2, "ineligible": 3}
+_LSR_STRUCTURAL_RANK = {
+    "external": 0,
+    "intermediate": 1,
+    "internal": 2,
+    "unknown": 3,
+}
+_LSR_CONTEXT_RELATIONS = frozenset(
+    {
+        SceneEdgeKind.ANCHORS.value,
+        SceneEdgeKind.LOCATED_AT.value,
+        SceneEdgeKind.SOURCED_FROM.value,
+        SceneEdgeKind.PROMOTED_FROM.value,
+        SceneEdgeKind.CONTAINED_BY.value,
+        SceneEdgeKind.ALIGNS_WITH.value,
+        SceneEdgeKind.SWEEPS.value,
+    }
+)
 
 
 def _identity_tuple(*values: str | None) -> tuple[str, ...]:
@@ -495,6 +544,90 @@ def _select_primary_deliverable_target(
     )
 
 
+def _higher_authority_opposes(
+    global_context: GlobalMarketContext | None,
+    direction: Direction,
+) -> bool:
+    return bool(
+        global_context is not None
+        and global_context.authority_timeframe
+        in {Timeframe.H4, Timeframe.H1}
+        and global_context.authority_direction is not None
+        and global_context.authority_direction is not direction
+    )
+
+
+def _select_countertrend_lsr_target(
+    observation: MarketObservation,
+    direction: Direction,
+    entry: float,
+    config: BrainConfig,
+    global_context: GlobalMarketContext,
+    *,
+    context_draw: LiquidityLevel | None,
+    preferred_id: str | None = None,
+) -> LiquidityLevel | None:
+    """Cap a local LSR at visible M1/M5/M15 delivery.
+
+    An intact H4/H1 authority does not invalidate the local reversal thesis,
+    but it forbids assuming delivery through that authority.  A global path
+    blocker may itself be the candidate target; only a target beyond a nearer
+    blocker is rejected.
+    """
+
+    levels = _visible_level_map(observation)
+    inventory = _inventory_item_map(observation)
+    blocker_levels = tuple(
+        level
+        for blocker_id in global_context.path_blocker_ids
+        for level in (levels.get(blocker_id),)
+        if level is not None
+        and _target_is_deliverable(
+            level,
+            direction,
+            entry,
+            config.tick_size,
+        )
+    )
+
+    def eligible(level: LiquidityLevel) -> bool:
+        item = inventory.get(level.level_id)
+        return bool(
+            item is not None
+            and item.timeframe in {Timeframe.M15, Timeframe.M5, Timeframe.M1}
+            and _target_is_deliverable(
+                level,
+                direction,
+                entry,
+                config.tick_size,
+            )
+            and (
+                context_draw is None
+                or direction.sign * (level.price - context_draw.price) <= 0.0
+            )
+            and not any(
+                blocker.level_id != level.level_id
+                and direction.sign * (blocker.price - entry) > 0.0
+                and direction.sign * (level.price - blocker.price) > 0.0
+                for blocker in blocker_levels
+            )
+        )
+
+    if preferred_id is not None:
+        preferred = levels.get(preferred_id)
+        return preferred if preferred is not None and eligible(preferred) else None
+    candidates = tuple(level for level in levels.values() if eligible(level))
+    if not candidates:
+        return None
+    return min(
+        candidates,
+        key=lambda level: (
+            abs(level.price - entry),
+            _draw_rank(observation, level, entry),
+        ),
+    )
+
+
 def _liquidity_route(
     observation: MarketObservation,
     direction: Direction,
@@ -797,10 +930,10 @@ def _select_planned_entry(
             continue
         risk_points = abs(candidate - invalidation.price)
         reward_points = direction.sign * (target.price - candidate)
-        net_space = (
-            reward_points
-            - observation.execution.expected_round_trip_cost_points
-        )
+        # This is a market-location comparison.  Spread and execution cost
+        # belong to Decision/Risk and must not change the Brain's selected
+        # structural entry or its five market-quality dimensions.
+        net_space = reward_points
         if (
             risk_points < config.tick_size
             or reward_points <= 0.0
@@ -1815,43 +1948,397 @@ def _typed_dfp(
     )
 
 
+def _global_identity_values(context: object | None, name: str) -> tuple[str, ...]:
+    if context is None:
+        return ()
+    raw = getattr(context, name, ())
+    if isinstance(raw, Mapping):
+        values = tuple(value for group in raw.values() for value in group)
+    elif isinstance(raw, str):
+        values = (raw,)
+    else:
+        values = tuple(raw or ())
+    return tuple(
+        dict.fromkeys(
+            identity
+            for value in values
+            for identity in (
+                value
+                if isinstance(value, str)
+                else getattr(value, "item_id", None)
+                or getattr(value, "level_id", None)
+                or getattr(value, "draw_id", None),
+            )
+            if isinstance(identity, str) and identity
+        )
+    )
+
+
+def _lsr_context_ids(global_context: object | None) -> tuple[str, ...]:
+    return tuple(
+        dict.fromkeys(
+            (
+                *_global_identity_values(
+                    global_context,
+                    "authority_source_ids",
+                ),
+                *_global_identity_values(
+                    global_context,
+                    "external_draw_candidates",
+                ),
+            )
+        )
+    )
+
+
+def _whitelisted_global_connection(
+    source_ids: Sequence[str],
+    context_ids: Sequence[str],
+    scene_graph: TemporalMarketSceneGraph | None,
+    *,
+    asof: pd.Timestamp,
+) -> bool:
+    """Use only bounded current-epoch semantic adjacency.
+
+    The public historical path query is deliberately not used here: LSR root
+    authority is a live Brain concern, so a closed edge or an earlier market
+    epoch cannot promote a current M15/M5 sweep.  Relations are traversed in
+    either orientation because source identities may sit on either endpoint of
+    ``LOCATED_AT``/``SOURCED_FROM`` while the relation itself remains explicit.
+    """
+
+    sources = tuple(dict.fromkeys(value for value in source_ids if value))
+    targets = tuple(dict.fromkeys(value for value in context_ids if value))
+    if not sources or not targets:
+        return False
+    if not set(sources).isdisjoint(targets):
+        return True
+    if scene_graph is None:
+        return False
+    if scene_graph.last_asof is None or asof != scene_graph.last_asof:
+        return False
+    current_epoch = scene_graph._market_epoch_id
+    start_nodes = tuple(
+        dict.fromkeys(
+            node_id
+            for source_id in sources
+            for node_id in (
+                scene_graph._node_id_for_source(source_id, asof=asof),
+            )
+            if node_id is not None
+            and node_id in scene_graph._nodes
+            and scene_graph._nodes[node_id].market_epoch_id == current_epoch
+        )
+    )
+    target_nodes = {
+        node_id
+        for target_id in targets
+        for node_id in (
+            scene_graph._node_id_for_source(target_id, asof=asof),
+        )
+        if node_id is not None
+        and node_id in scene_graph._nodes
+        and scene_graph._nodes[node_id].market_epoch_id == current_epoch
+    }
+    if not start_nodes or not target_nodes:
+        return False
+    queue = deque((node_id, 0) for node_id in start_nodes)
+    seen = set(start_nodes)
+    while queue:
+        node_id, depth = queue.popleft()
+        if node_id in target_nodes:
+            return True
+        if depth >= 5:
+            continue
+        adjacent_edge_ids = (
+            scene_graph._outgoing.get(node_id, set())
+            | scene_graph._incoming.get(node_id, set())
+        )
+        for edge_id in adjacent_edge_ids:
+            edge = scene_graph._edges.get(edge_id)
+            if (
+                edge is None
+                or edge.lifecycle != "active"
+                or edge.observed_at > asof
+                or edge.relation.value not in _LSR_CONTEXT_RELATIONS
+            ):
+                continue
+            neighbor = (
+                edge.target_node_id
+                if edge.source_node_id == node_id
+                else edge.source_node_id
+            )
+            node = scene_graph._nodes.get(neighbor)
+            if (
+                node is None
+                or node.market_epoch_id != current_epoch
+                or neighbor in seen
+            ):
+                continue
+            seen.add(neighbor)
+            queue.append((neighbor, depth + 1))
+    return False
+
+
+def _lsr_path_stage(path: PathSequenceState) -> int:
+    kinds = {step.kind for step in path.steps}
+    ordered = (
+        {"pool_swept"},
+        {"reacceptance_held"},
+        {"opposite_displacement"},
+        {"micro_bos_confirmed"},
+    )
+    stage = 0
+    for expected in ordered:
+        if not kinds.intersection(expected):
+            break
+        stage += 1
+    return stage
+
+
+def _lsr_candidate(
+    observation: MarketObservation,
+    path: PathSequenceState,
+    *,
+    global_context: object | None,
+    scene_graph: TemporalMarketSceneGraph | None,
+) -> _LSRCandidate | None:
+    manipulation = next(
+        (
+            item
+            for item in observation.manipulations
+            if (
+                item.manipulation_id == path.context_id
+                and item.source_kind == "formed_liquidity_pool"
+            )
+        ),
+        None,
+    )
+    if manipulation is None:
+        return None
+    inventory = next(
+        (
+            item
+            for item in observation.liquidity_inventory
+            if item.item_id == manipulation.source_inventory_item_id
+        ),
+        None,
+    )
+    pool = next(
+        (
+            item
+            for item in observation.liquidity_pool_states
+            if item.pool_id == manipulation.source_id
+        ),
+        None,
+    )
+    context_ids = _lsr_context_ids(global_context)
+    source_ids = tuple(
+        dict.fromkeys(
+            (
+                manipulation.manipulation_id,
+                manipulation.source_id,
+                manipulation.source_inventory_item_id,
+                *manipulation.crossed_source_ids,
+                *manipulation.coincident_source_ids,
+                *(inventory.source_ids if inventory is not None else ()),
+            )
+        )
+    )
+    connected = _whitelisted_global_connection(
+        source_ids,
+        context_ids,
+        scene_graph,
+        asof=observation.asof,
+    )
+    structural_rank = str(
+        getattr(inventory, "structural_rank", "unknown") or "unknown"
+    )
+    if structural_rank not in _LSR_STRUCTURAL_RANK:
+        structural_rank = "unknown"
+    timeframe = manipulation.source_timeframe
+    rank_has_independent_authority = bool(
+        inventory is not None
+        and structural_rank in {"external", "intermediate"}
+    )
+    if (
+        timeframe in {Timeframe.H4, Timeframe.H1}
+        or rank_has_independent_authority
+    ):
+        tier = "A"
+        eligible_root = True
+    elif timeframe in {Timeframe.M15, Timeframe.M5}:
+        tier = "B" if connected else "ineligible"
+        eligible_root = connected
+    elif timeframe is Timeframe.M1:
+        # A one-minute source remains trigger/refinement evidence even when it
+        # is nested in a higher-scale graph.  External metadata alone must not
+        # promote it into a standalone reversal thesis.
+        tier = "C"
+        eligible_root = False
+    else:
+        tier = "ineligible"
+        eligible_root = False
+    return _LSRCandidate(
+        path=path,
+        manipulation=manipulation,
+        tier=tier,
+        eligible_root=eligible_root,
+        connected_to_global=connected,
+        nested_source=bool(connected),
+        source_inventory=inventory,
+        source_pool=pool,
+        structural_rank=structural_rank,
+        stage=_lsr_path_stage(path),
+    )
+
+
+def _lsr_candidate_rank(candidate: _LSRCandidate) -> tuple[object, ...]:
+    timeframe_rank = {
+        Timeframe.H4: 0,
+        Timeframe.H1: 1,
+        Timeframe.M15: 2,
+        Timeframe.M5: 3,
+        Timeframe.M1: 4,
+    }.get(candidate.manipulation.source_timeframe, 9)
+    touches = int(
+        getattr(candidate.source_pool, "total_touch_count", 0)
+        or len(getattr(candidate.source_pool, "touch_times", ()) or ())
+    )
+    pool_strength = float(
+        getattr(candidate.source_pool, "strength", 0.0) or 0.0
+    )
+    source_age = int(
+        getattr(candidate.source_pool, "age_bars", 0) or 0
+    )
+    return (
+        _LSR_TIER_RANK[candidate.tier],
+        -int(candidate.connected_to_global),
+        -candidate.stage,
+        timeframe_rank,
+        _LSR_STRUCTURAL_RANK[candidate.structural_rank],
+        -touches,
+        -pool_strength,
+        source_age,
+        candidate.path.formed_at,
+        candidate.path.sequence_id,
+    )
+
+
 def _select_pool_path(
     observation: MarketObservation,
     direction: Direction,
     prior: HypothesisBelief | None,
-) -> PathSequenceState | None:
+    *,
+    global_context: object | None = None,
+    scene_graph: TemporalMarketSceneGraph | None = None,
+) -> tuple[_LSRCandidate | None, tuple[str, ...]]:
     paths = {
         path.sequence_id: path
         for path in observation.path_sequences
         if (
             path.context_kind == "pool_reversal"
             and path.direction is direction
+            and (
+                path.lifecycle is PathSequenceLifecycle.ACTIVE
+                or path.ended_at == observation.asof
+                or (
+                    prior is not None
+                    and prior.phase not in _TERMINAL_PHASES
+                    and prior.setup_context_id == path.sequence_id
+                )
+            )
         )
     }
+    all_candidates = tuple(
+        candidate
+        for path in paths.values()
+        for candidate in (
+            _lsr_candidate(
+                observation,
+                path,
+                global_context=global_context,
+                scene_graph=scene_graph,
+            ),
+        )
+        if candidate is not None
+    )
     if (
         prior is not None
         and prior.phase not in _TERMINAL_PHASES
         and prior.setup_context_id is not None
     ):
-        return paths.get(prior.setup_context_id)
+        selected = next(
+            (
+                candidate
+                for candidate in all_candidates
+                if candidate.path.sequence_id == prior.setup_context_id
+            ),
+            None,
+        )
+        authority_latched = bool(
+            selected is not None
+            and selected.manipulation.source_timeframe
+            in {Timeframe.M15, Timeframe.M5}
+            and not selected.eligible_root
+            and bool(prior.hard_gate_results.get("formed_pool_sweep", False))
+        )
+        if authority_latched and selected is not None:
+            # Root authority belongs to the frozen episode history.  A live
+            # graph connection may later affect delivery/uncertainty, but its
+            # absence cannot silently replace or terminalize that episode.
+            selected = replace(
+                selected,
+                tier="B",
+                eligible_root=True,
+                authority_latched=True,
+            )
+        selected_rank = (
+            _LSR_TIER_RANK["ineligible"]
+            if selected is None
+            else _LSR_TIER_RANK[selected.tier]
+        )
+        competing = tuple(
+            candidate.path.sequence_id
+            for candidate in sorted(all_candidates, key=_lsr_candidate_rank)
+            if (
+                candidate.eligible_root
+                and candidate.path.sequence_id != prior.setup_context_id
+                and _LSR_TIER_RANK[candidate.tier] < selected_rank
+            )
+        )
+        return selected, competing
     terminal_cutoff = (
         prior.phase_started_at
         if prior is not None and prior.phase in _TERMINAL_PHASES
         else None
     )
     candidates = [
-        path
-        for path in paths.values()
+        candidate
+        for candidate in all_candidates
         if (
-            terminal_cutoff is None
-            or path.formed_at > terminal_cutoff
+            candidate.eligible_root
+            and (
+                candidate.path.lifecycle is PathSequenceLifecycle.ACTIVE
+                or candidate.path.ended_at == observation.asof
+            )
+            and (
+                terminal_cutoff is None
+                or candidate.path.formed_at > terminal_cutoff
+                or (
+                    candidate.path.sequence_id
+                    in getattr(prior, "competing_episode_ids", ())
+                    and candidate.path.lifecycle
+                    is PathSequenceLifecycle.ACTIVE
+                )
+            )
         )
     ]
     if not candidates:
-        return None
-    return min(
-        candidates,
-        key=lambda path: (path.formed_at, path.sequence_id),
+        return None, ()
+    ordered = sorted(candidates, key=_lsr_candidate_rank)
+    return ordered[0], tuple(
+        candidate.path.sequence_id for candidate in ordered[1:]
     )
 
 
@@ -1994,23 +2481,28 @@ def _typed_lsr(
     protocol: PlaybookProtocol,
     prior: HypothesisBelief | None,
     config: BrainConfig,
+    *,
+    global_context: GlobalMarketContext | None = None,
+    scene_graph: TemporalMarketSceneGraph | None = None,
 ) -> _Evaluation:
-    pool_path = _select_pool_path(observation, direction, prior)
+    selected_candidate, competing_episode_ids = _select_pool_path(
+        observation,
+        direction,
+        prior,
+        global_context=global_context,
+        scene_graph=scene_graph,
+    )
+    pool_path = (
+        None if selected_candidate is None else selected_candidate.path
+    )
     manipulation = (
-        next(
-            (
-                item
-                for item in observation.manipulations
-                if (
-                    pool_path is not None
-                    and item.manipulation_id == pool_path.context_id
-                    and item.source_kind == "formed_liquidity_pool"
-                )
-            ),
-            None,
-        )
-        if pool_path is not None
-        else None
+        None
+        if selected_candidate is None
+        else selected_candidate.manipulation
+    )
+    authority_root_allowed = bool(
+        selected_candidate is not None
+        and selected_candidate.eligible_root
     )
     range_context = _lsr_optional_range_context(
         observation,
@@ -2243,18 +2735,31 @@ def _typed_lsr(
         preferred_id=contextual_draw_id,
         require_preferred=preferred_context_draw_id is not None,
     )
-    primary_target = (
-        None
-        if location is None
-        else _select_primary_deliverable_target(
-            observation,
-            direction,
-            planned_entry,
-            config,
-            context_draw=context_draw,
-            preferred_id=preferred_primary_target_id,
+    primary_target = None
+    if location is not None:
+        primary_target = (
+            _select_countertrend_lsr_target(
+                observation,
+                direction,
+                planned_entry,
+                config,
+                global_context,
+                context_draw=context_draw,
+                preferred_id=preferred_primary_target_id,
+            )
+            if (
+                global_context is not None
+                and _higher_authority_opposes(global_context, direction)
+            )
+            else _select_primary_deliverable_target(
+                observation,
+                direction,
+                planned_entry,
+                config,
+                context_draw=context_draw,
+                preferred_id=preferred_primary_target_id,
+            )
         )
-    )
     selected_planned_entry = _select_planned_entry(
         observation,
         direction,
@@ -2339,6 +2844,7 @@ def _typed_lsr(
             pool_path is not None
             and pool_swept is not None
             and manipulation is not None
+            and authority_root_allowed
         ),
         "outside_acceptance_failed": bool(
             sweep_return is not None
@@ -2453,8 +2959,6 @@ def _typed_lsr(
                 and pool_path.transition_reason
                 in {
                     "accepted_outside",
-                    "opposite_displacement_ambiguous_same_clock",
-                    "micro_bos_ambiguous_same_clock",
                     "micro_bos_opposed",
                     "manipulation_resolution_deadline",
                 }
@@ -2712,6 +3216,32 @@ def _typed_lsr(
         entry_window_expired=stale_trigger,
         terminal_reason=terminal_reason,
         terminal_source_ids=terminal_source_ids,
+        authority_tier=(
+            None if selected_candidate is None else selected_candidate.tier
+        ),
+        authority_source_timeframe=(
+            None
+            if selected_candidate is None
+            else selected_candidate.manipulation.source_timeframe.value
+        ),
+        authority_structural_rank=(
+            None
+            if selected_candidate is None
+            else selected_candidate.structural_rank
+        ),
+        global_context_connected=bool(
+            selected_candidate is not None
+            and selected_candidate.connected_to_global
+        ),
+        source_nested=bool(
+            selected_candidate is not None
+            and selected_candidate.nested_source
+        ),
+        authority_latched=bool(
+            selected_candidate is not None
+            and selected_candidate.authority_latched
+        ),
+        competing_episode_ids=competing_episode_ids,
     )
 
 
@@ -3601,6 +4131,9 @@ def _typed_evaluate(
     protocol: PlaybookProtocol,
     prior: HypothesisBelief | None,
     config: BrainConfig,
+    *,
+    global_context: GlobalMarketContext | None = None,
+    scene_graph: TemporalMarketSceneGraph | None = None,
 ) -> _Evaluation:
     if playbook is Playbook.FAILED_AUCTION_VALUE_RETURN:
         return _typed_favr(
@@ -3626,7 +4159,204 @@ def _typed_evaluate(
         protocol,
         prior,
         config,
+        global_context=global_context,
+        scene_graph=scene_graph,
     )
+
+
+def _evaluation_source_ids(
+    prior: HypothesisBelief | None,
+    evaluation: _Evaluation,
+) -> frozenset[str]:
+    """Collect exact frozen identities; never infer relevance by direction."""
+
+    values: list[str | None] = [
+        evaluation.setup_identity,
+        evaluation.context_identity,
+        evaluation.episode_identity,
+        evaluation.initiating_event_id,
+        evaluation.entry_location_id,
+        evaluation.entry_path_id,
+        None
+        if evaluation.invalidation is None
+        else evaluation.invalidation.source_level_id,
+        None
+        if evaluation.selected_draw is None
+        else evaluation.selected_draw.level_id,
+        *evaluation.terminal_source_ids,
+    ]
+    values.extend(
+        source_id
+        for signal in evaluation.sequence_signals.values()
+        for source_id in signal.source_ids
+    )
+    if evaluation.liquidity_route is not None:
+        route = evaluation.liquidity_route
+        values.extend(
+            (
+                route.context_draw_id,
+                route.primary_deliverable_target_id,
+                route.range_context_id,
+                route.swept_range_boundary_id,
+                route.opposing_range_boundary_id,
+                *route.intermediate_liquidity_ids,
+                *route.path_blocker_ids,
+            )
+        )
+    if prior is not None:
+        values.extend(
+            (
+                prior.key,
+                prior.setup_context_id,
+                prior.context_id,
+                prior.episode_id,
+                prior.initiating_event_id,
+                prior.entry_location_id,
+                None
+                if prior.invalidation is None
+                else prior.invalidation.source_level_id,
+                *prior.terminal_source_ids,
+            )
+        )
+        if prior.sequence is not None:
+            values.extend(
+                source_id
+                for step in prior.sequence.steps
+                for source_id in step.source_ids
+            )
+    return frozenset(value for value in values if value)
+
+
+def _conflict_is_relevant(
+    conflict: GlobalConflictEvidence,
+    hypothesis_key: str,
+    source_ids: frozenset[str],
+) -> bool:
+    affected = set(conflict.affected_hypothesis_ids)
+    if hypothesis_key not in affected:
+        return False
+    conflict_sources = (
+        conflict.event_id,
+        conflict.source_node_id,
+        conflict.target_node_id,
+    )
+    return any(
+        conflict_id == source_id
+        or conflict_id.endswith(f":{source_id}")
+        or source_id.endswith(f":{conflict_id}")
+        for conflict_id in conflict_sources
+        for source_id in source_ids
+    )
+
+
+def _route_global_context(
+    playbook: Playbook,
+    direction: Direction,
+    prior: HypothesisBelief | None,
+    evaluation: _Evaluation,
+    global_context: GlobalMarketContext | None,
+) -> _Evaluation:
+    """Route global facts to independent dimensions deterministically.
+
+    Historical sequence signals are intentionally untouched.  This function
+    changes only current validity/readiness/delivery, and it never consumes
+    spread, depth, cost or execution deadline fields.
+    """
+
+    if global_context is None:
+        return evaluation
+    key = f"{playbook.value}:{direction.value}"
+    source_ids = _evaluation_source_ids(prior, evaluation)
+    invalidated = tuple(
+        source_id
+        for source_id in global_context.invalidated_source_ids
+        if source_id in source_ids
+    )
+    if invalidated:
+        return replace(
+            evaluation,
+            trigger_ready=False,
+            plan=None,
+            thesis_target=0.0,
+            location_quality=0.0,
+            entry_readiness=0.0,
+            delivery_quality=0.0,
+            hard_gate_results={
+                gate_id: False
+                for gate_id in evaluation.hard_gate_results
+            },
+            invalidated=True,
+            terminal_reason="global_frozen_source_invalidated",
+            terminal_source_ids=invalidated,
+        )
+
+    relevant_conflicts = tuple(
+        conflict
+        for conflict in global_context.material_conflicts
+        if _conflict_is_relevant(conflict, key, source_ids)
+    )
+    ambiguous_ids = tuple(
+        source_id
+        for source_id in global_context.ambiguous_evidence
+        if source_id in source_ids
+    )
+    routed = evaluation
+    if ambiguous_ids:
+        # Ambiguity is absence of a directional conclusion, not evidence for
+        # the opposite thesis.  Keep episode history and wait for resolution.
+        routed = replace(
+            routed,
+            trigger_ready=False,
+            entry_readiness=0.0,
+            typed_uncertainty=max(routed.typed_uncertainty, 0.75),
+        )
+
+    authority_opposes = _higher_authority_opposes(
+        global_context,
+        direction,
+    )
+    if authority_opposes and playbook is Playbook.DISPLACEMENT_FIRST_PULLBACK:
+        # A DFP against confirmed H4/H1 authority loses thesis and delivery
+        # quality, but only an exact frozen-source failure is terminal.
+        routed = replace(
+            routed,
+            thesis_target=min(routed.thesis_target, 0.25),
+            delivery_quality=0.0,
+        )
+    elif authority_opposes and playbook is Playbook.LIQUIDITY_SWEEP_REVERSAL:
+        # LSR may express a local countertrend auction.  Its target selector
+        # has already capped delivery at M1/M5/M15 liquidity.
+        routed = replace(
+            routed,
+            delivery_quality=(
+                0.0 if routed.plan is None else routed.delivery_quality
+            ),
+        )
+
+    routed_blockers = set(global_context.path_blocker_ids).intersection(
+        ()
+        if routed.liquidity_route is None
+        else routed.liquidity_route.path_blocker_ids
+    )
+    if routed_blockers:
+        routed = replace(routed, delivery_quality=0.0)
+
+    unresolved_authority = bool(
+        global_context.market_mode is MarketMode.UNCERTAIN
+        or (
+            global_context.market_mode is MarketMode.TRANSITION
+            and (
+                not global_context.material_conflicts
+                or relevant_conflicts
+            )
+        )
+    )
+    if unresolved_authority:
+        routed = replace(
+            routed,
+            typed_uncertainty=max(routed.typed_uncertainty, 0.75),
+        )
+    return routed
 
 
 def _favr_graph_broken_index(
@@ -3876,13 +4606,17 @@ def _terminal_candidate_is_new(
         )
     )
     terminal_at = prior.terminal_at or prior.phase_started_at
-    return bool(
-        candidate_clock > terminal_at
-        and (
-            prior_identity is None
-            or candidate_id != prior_identity
-        )
+    different_identity = bool(
+        prior_identity is None or candidate_id != prior_identity
     )
+    if not different_identity:
+        return False
+    if candidate_id in prior.competing_episode_ids:
+        # This candidate formed while the prior episode owned the slot.  It
+        # may acquire authority after terminal without rewriting its original
+        # causal clock or requiring the same event to be emitted again.
+        return True
+    return candidate_clock > terminal_at
 
 
 def _sequence_state(
@@ -4213,12 +4947,6 @@ def _typed_phase(
         frozen_invalidation,
     ):
         return PlaybookPhase.INVALIDATED
-    if (
-        setup_is_live
-        and episode_deadline is not None
-        and observation.asof >= episode_deadline
-    ):
-        return PlaybookPhase.INVALIDATED
     if setup_is_live and _entry_zone_beyond_frozen_invalidation(
         observation,
         evaluation,
@@ -4232,8 +4960,6 @@ def _typed_phase(
     ) and (
         prior_had_setup or current_has_setup
     ):
-        return PlaybookPhase.INVALIDATED
-    if plan is not None and observation.asof >= plan.deadline:
         return PlaybookPhase.INVALIDATED
     if not current_has_setup:
         return PlaybookPhase.INACTIVE
@@ -4263,7 +4989,11 @@ def _typed_phase(
         and thesis_strength > 0.0
     ):
         return PlaybookPhase.EXECUTABLE
-    return PlaybookPhase.INVALIDATED
+    # A completed historical sequence does not make every current condition
+    # executable.  Ambiguity, a blocked/insufficient delivery path, or a gate
+    # that is no longer current remains a wait.  Only the explicit terminal
+    # checks above may freeze INVALIDATED.
+    return PlaybookPhase.WAITING_TRIGGER
 
 
 def _typed_terminal_closure(
@@ -4331,17 +5061,6 @@ def _typed_terminal_closure(
         )
     elif (
         phase is PlaybookPhase.INVALIDATED
-        and episode_deadline is not None
-        and observation.asof >= episode_deadline
-    ):
-        reason = "episode_deadline_elapsed"
-        sources = _identity_tuple(
-            sequence.setup_id,
-            evaluation.entry_location_id,
-            evaluation.entry_path_id,
-        )
-    elif (
-        phase is PlaybookPhase.INVALIDATED
         and _entry_zone_beyond_frozen_invalidation(
             observation,
             evaluation,
@@ -4360,14 +5079,6 @@ def _typed_terminal_closure(
     elif evaluation.terminal_reason is not None:
         reason = evaluation.terminal_reason
         sources = evaluation.terminal_source_ids
-    elif plan is not None and observation.asof >= plan.deadline:
-        reason = "deadline_elapsed"
-        sources = _identity_tuple(
-            plan.setup_id,
-            plan.entry_location_id,
-            plan.entry_path_id,
-            plan.selected_draw_id,
-        )
     else:
         reason = (
             "completed"
@@ -4391,6 +5102,328 @@ def _typed_terminal_closure(
             sequence.setup_id,
             structural_source,
         ),
+    )
+
+
+def _belief_bound_source_ids(
+    hypotheses: Mapping[str, HypothesisBelief],
+) -> frozenset[str]:
+    values: list[str | None] = []
+    for hypothesis in hypotheses.values():
+        values.extend(
+            (
+                hypothesis.setup_context_id,
+                hypothesis.context_id,
+                hypothesis.episode_id,
+                hypothesis.initiating_event_id,
+                hypothesis.entry_location_id,
+                None
+                if hypothesis.invalidation is None
+                else hypothesis.invalidation.source_level_id,
+            )
+        )
+        values.extend(hypothesis.competing_episode_ids)
+        if hypothesis.sequence is not None:
+            values.extend(
+                source_id
+                for step in hypothesis.sequence.steps
+                for source_id in step.source_ids
+            )
+        if hypothesis.liquidity_route is not None:
+            route = hypothesis.liquidity_route
+            values.extend(
+                (
+                    route.context_draw_id,
+                    route.primary_deliverable_target_id,
+                    route.range_context_id,
+                    *route.intermediate_liquidity_ids,
+                    *route.path_blocker_ids,
+                )
+            )
+    return frozenset(value for value in values if value)
+
+
+def _identity_is_bound(identity: str, bound_ids: frozenset[str]) -> bool:
+    return any(
+        identity == bound
+        or identity.endswith(f":{bound}")
+        or bound.endswith(f":{identity}")
+        for bound in bound_ids
+    )
+
+
+_THESIS_INVALIDATING_NODE_LIFECYCLES: Mapping[str, frozenset[str]] = {
+    "swing": frozenset({"broken", "formation_failed"}),
+    "structure": frozenset({"broken", "formation_failed"}),
+    "bos": frozenset({"failed"}),
+    "support_resistance": frozenset({"retired"}),
+    "liquidity": frozenset({"consumed", "retired"}),
+    "fvg": frozenset({"invalidated"}),
+    "order_block": frozenset({"failed"}),
+    "range": frozenset({"broken"}),
+    "manipulation": frozenset({"accepted_outside", "censored"}),
+    "entry_location": frozenset({"left"}),
+    "reacceptance": frozenset({"failed", "censored"}),
+    "path_sequence": frozenset({"censored"}),
+    "swing_projection": frozenset({"broken", "censored"}),
+}
+
+
+def _hypothesis_terminal_role_ids(
+    hypothesis: HypothesisBelief,
+    node_kind: str,
+) -> tuple[str, ...]:
+    """Return only identities whose terminal state invalidates this thesis.
+
+    Scene Graph ``INVALIDATED`` also describes normal event completion such as
+    displacement exhaustion and consumed path blockers.  Those facts must not
+    be promoted into a frozen-thesis failure merely because they remain in the
+    episode's historical sequence.
+    """
+
+    invalidation_id = (
+        None
+        if hypothesis.invalidation is None
+        else hypothesis.invalidation.source_level_id
+    )
+    sequence_ids = tuple(
+        source_id
+        for step in (() if hypothesis.sequence is None else hypothesis.sequence.steps)
+        for source_id in step.source_ids
+    )
+    core_ids = _identity_tuple(
+        hypothesis.setup_context_id,
+        hypothesis.context_id,
+        hypothesis.episode_id,
+        hypothesis.initiating_event_id,
+    )
+    entry_ids = _identity_tuple(
+        hypothesis.entry_location_id,
+        invalidation_id,
+    )
+    route = hypothesis.liquidity_route
+    if node_kind == "liquidity":
+        return _identity_tuple(
+            None
+            if hypothesis.draw_selection is None
+            else hypothesis.draw_selection.draw_id,
+            None if hypothesis.plan is None else hypothesis.plan.selected_draw_id,
+            None if route is None else route.context_draw_id,
+            None if route is None else route.primary_deliverable_target_id,
+            None if route is None else route.terminal_draw_id,
+        )
+    if node_kind in {"swing", "support_resistance"}:
+        return _identity_tuple(invalidation_id)
+    if node_kind in {"structure", "bos", "swing_projection"}:
+        return _identity_tuple(invalidation_id, *sequence_ids)
+    if node_kind in {"fvg", "order_block"}:
+        return _identity_tuple(*entry_ids, *sequence_ids)
+    if node_kind == "range":
+        if hypothesis.playbook is not Playbook.FAILED_AUCTION_VALUE_RETURN:
+            return ()
+        return _identity_tuple(
+            None if route is None else route.range_context_id,
+            *core_ids,
+            *sequence_ids,
+        )
+    if node_kind == "manipulation":
+        return _identity_tuple(
+            invalidation_id,
+            *core_ids,
+            *sequence_ids,
+        )
+    if node_kind == "entry_location":
+        return _identity_tuple(*entry_ids, *core_ids, *sequence_ids)
+    if node_kind == "reacceptance":
+        return _identity_tuple(*core_ids, *sequence_ids)
+    if node_kind == "path_sequence":
+        return _identity_tuple(
+            hypothesis.setup_context_id,
+            hypothesis.episode_id,
+        )
+    return _identity_tuple(invalidation_id)
+
+
+def _route_terminal_delta_to_global_context(
+    context: GlobalMarketContext,
+    previous_belief: MarketBelief | None,
+    scene_delta: SceneGraphDelta,
+    scene_graph: TemporalMarketSceneGraph,
+) -> GlobalMarketContext:
+    """Bind terminal graph changes to prior frozen hypothesis identities."""
+
+    if previous_belief is None:
+        return context
+    bound_ids = _belief_bound_source_ids(previous_belief.hypotheses)
+    if not bound_ids:
+        return context
+    previous_context = previous_belief.global_context
+    if (
+        previous_context is not None
+        and previous_context.market_epoch_id != context.market_epoch_id
+    ):
+        invalidated = bound_ids
+    else:
+        invalidated_values: list[str] = []
+        for node_id in dict.fromkeys(
+            (*scene_delta.added_node_ids, *scene_delta.revised_node_ids)
+        ):
+            node = scene_graph._nodes.get(node_id)
+            if (
+                node is None
+                or node.market_epoch_id != context.market_epoch_id
+                or node.ambiguity_state is not EvidenceStatus.INVALIDATED
+            ):
+                continue
+            invalidating_lifecycles = _THESIS_INVALIDATING_NODE_LIFECYCLES.get(
+                node.kind,
+                frozenset(),
+            )
+            if node.lifecycle not in invalidating_lifecycles:
+                continue
+            terminal_ids = frozenset(
+                value
+                for value in (
+                    node.node_id,
+                    node.entity_id,
+                    *node.source_ids,
+                )
+                if value
+            )
+            for hypothesis in previous_belief.hypotheses.values():
+                invalidated_values.extend(
+                    role_id
+                    for role_id in _hypothesis_terminal_role_ids(
+                        hypothesis,
+                        node.kind,
+                    )
+                    if _identity_is_bound(role_id, terminal_ids)
+                )
+        invalidated = frozenset(invalidated_values)
+    if not invalidated:
+        return context
+    return replace(
+        context,
+        invalidated_source_ids=tuple(
+            dict.fromkeys(
+                (*context.invalidated_source_ids, *sorted(invalidated))
+            )
+        ),
+    )
+
+
+def _candidate_requires_explanation(
+    candidate_id: str,
+    observation: MarketObservation,
+    global_context: GlobalMarketContext,
+    scene_graph: TemporalMarketSceneGraph,
+) -> bool:
+    """Keep only high-authority structured roots, never isolated M1 noise."""
+
+    manipulation = next(
+        (
+            item
+            for item in observation.manipulations
+            if item.manipulation_id == candidate_id
+        ),
+        None,
+    )
+    if manipulation is not None:
+        if manipulation.lifecycle is not ManipulationLifecycle.REACCEPTED:
+            return False
+        if manipulation.source_timeframe in {Timeframe.H4, Timeframe.H1}:
+            return True
+        if manipulation.source_timeframe is Timeframe.M1:
+            return False
+        path = next(
+            (
+                item
+                for item in observation.path_sequences
+                if item.context_kind == "pool_reversal"
+                and item.context_id == manipulation.manipulation_id
+            ),
+            None,
+        )
+        return bool(
+            path is not None
+            and (
+                candidate := _lsr_candidate(
+                    observation,
+                    path,
+                    global_context=global_context,
+                    scene_graph=scene_graph,
+                )
+            )
+            is not None
+            and candidate.eligible_root
+        )
+    path = next(
+        (
+            item
+            for item in observation.path_sequences
+            if item.sequence_id == candidate_id
+        ),
+        None,
+    )
+    if path is None:
+        return False
+    if path.context_kind != "pool_reversal":
+        return True
+    candidate = _lsr_candidate(
+        observation,
+        path,
+        global_context=global_context,
+        scene_graph=scene_graph,
+    )
+    return bool(candidate is not None and candidate.eligible_root)
+
+
+def _finalize_global_context(
+    context: GlobalMarketContext,
+    observation: MarketObservation,
+    scene_graph: TemporalMarketSceneGraph,
+    hypotheses: Mapping[str, HypothesisBelief],
+) -> GlobalMarketContext:
+    """Resolve changed structured roots against the six fixed playbooks."""
+
+    bound_ids = _belief_bound_source_ids(hypotheses)
+    retained = tuple(
+        dict.fromkeys(
+            (
+                *context.unexplained_structured_episode_ids,
+                *context.candidate_structured_episode_ids,
+            )
+        )
+    )
+    unexplained: list[str] = []
+    for candidate_id in retained:
+        if _identity_is_bound(candidate_id, bound_ids):
+            continue
+        node_id = scene_graph._node_id_for_source(
+            candidate_id,
+            asof=observation.asof,
+        )
+        node = (
+            None
+            if node_id is None
+            else scene_graph._nodes.get(node_id)
+        )
+        if (
+            node is None
+            or node.market_epoch_id != context.market_epoch_id
+            or node.ambiguity_state is EvidenceStatus.INVALIDATED
+        ):
+            continue
+        if _candidate_requires_explanation(
+            candidate_id,
+            observation,
+            context,
+            scene_graph,
+        ):
+            unexplained.append(candidate_id)
+    return replace(
+        context,
+        unexplained_structured_episode_ids=tuple(unexplained),
     )
 
 
@@ -4440,6 +5473,24 @@ class PlaybookBrain:
             if previous_belief is not None
             else {}
         )
+        global_context = None
+        if scene_graph is not None and scene_delta is not None:
+            global_context = update_global_market_context(
+                (
+                    None
+                    if previous_belief is None
+                    else previous_belief.global_context
+                ),
+                observation,
+                scene_delta,
+                scene_graph,
+            )
+            global_context = _route_terminal_delta_to_global_context(
+                global_context,
+                previous_belief,
+                scene_delta,
+                scene_graph,
+            )
         focus_state = (
             None
             if scene_graph is None
@@ -4448,35 +5499,7 @@ class PlaybookBrain:
                 observation,
                 scene_delta,
                 scene_graph,
-            )
-        )
-        focused_scene = (
-            None
-            if scene_graph is None or focus_state is None
-            else scene_graph.query(
-                focus_state,
-                context_ids=(
-                    ()
-                    if previous_belief is None
-                    else tuple(
-                        dict.fromkeys(
-                            value
-                            for hypothesis in previous_belief.hypotheses.values()
-                            for value in (
-                                hypothesis.context_id,
-                                hypothesis.setup_context_id,
-                                hypothesis.initiating_event_id,
-                            )
-                            if value is not None
-                        )
-                    )
-                ),
-                completed_only=True,
-                ready_timeframes=tuple(
-                    timeframe.value
-                    for timeframe in observation.active_timeframes
-                    if observation.frame(timeframe).ready
-                ),
+                global_context,
             )
         )
         for playbook in Playbook:
@@ -4501,6 +5524,8 @@ class PlaybookBrain:
                     protocol,
                     prior,
                     self.config,
+                    global_context=global_context,
+                    scene_graph=scene_graph,
                 )
                 evaluation = _require_connected_graph_sequence(
                     playbook,
@@ -4508,6 +5533,13 @@ class PlaybookBrain:
                     evaluation,
                     scene_graph,
                     prior,
+                )
+                evaluation = _route_global_context(
+                    playbook,
+                    direction,
+                    prior,
+                    evaluation,
+                    global_context,
                 )
                 _validate_evidence_contract(protocol, evaluation.evidence)
                 sequence = _sequence_state(
@@ -4796,10 +5828,14 @@ class PlaybookBrain:
                     )
                 else:
                     calibrated_dimensions = {
-                        name: self.calibrator.apply(
-                            playbook,
-                            name,
-                            value,
+                        name: (
+                            value
+                            if name == "sequence_progress"
+                            else self.calibrator.apply(
+                                playbook,
+                                name,
+                                value,
+                            )
                         )
                         for name, value in raw_quality_dimensions.items()
                     }
@@ -4927,10 +5963,47 @@ class PlaybookBrain:
                         else evaluation.liquidity_route
                     ),
                     raw_quality_dimensions=raw_quality_dimensions,
+                    context_metadata=(
+                        {}
+                        if evaluation.authority_tier is None
+                        else {
+                            "manipulation_tier": evaluation.authority_tier,
+                            "source_timeframe": (
+                                evaluation.authority_source_timeframe
+                                or "unknown"
+                            ),
+                            "structural_rank": (
+                                evaluation.authority_structural_rank
+                                or "unknown"
+                            ),
+                            "global_context_connected": str(
+                                evaluation.global_context_connected
+                            ).lower(),
+                            "nesting": (
+                                "nested"
+                                if evaluation.source_nested
+                                else "isolated"
+                            ),
+                            "authority_latched": str(
+                                evaluation.authority_latched
+                            ).lower(),
+                        }
+                    ),
+                    competing_episode_ids=(
+                        evaluation.competing_episode_ids
+                    ),
                 )
+        if global_context is not None and scene_graph is not None:
+            global_context = _finalize_global_context(
+                global_context,
+                observation,
+                scene_graph,
+                hypotheses,
+            )
         base_belief = MarketBelief(
             asof=observation.asof,
             hypotheses=hypotheses,
+            global_context=global_context,
         )
         if scene_graph is not None and focus_state is not None:
             current_top = (
@@ -4950,6 +6023,40 @@ class PlaybookBrain:
                 current_top,
                 observation.active_timeframes,
             )
+            active_explanation = any(
+                hypothesis.eligible
+                and hypothesis.setup_context_id is not None
+                for hypothesis in hypotheses.values()
+            )
+            if (
+                global_context is not None
+                and global_context.unexplained_structured_episode_ids
+                and not active_explanation
+            ):
+                focus_state = replace(
+                    focus_state,
+                    reason_codes=tuple(
+                        dict.fromkeys(
+                            (
+                                *focus_state.reason_codes,
+                                "unexplained_structured_episode",
+                            )
+                        )
+                    ),
+                    trigger_event_ids=tuple(
+                        dict.fromkeys(
+                            (
+                                *focus_state.trigger_event_ids,
+                                *global_context.unexplained_structured_episode_ids,
+                            )
+                        )
+                    ),
+                    question=(
+                        "which fixed playbook, if any, explains the "
+                        "identity-bound structured episode"
+                    ),
+                    resolution_status=EvidenceStatus.UNKNOWN,
+                )
             focused_scene = scene_graph.query(
                 focus_state,
                 context_ids=tuple(
@@ -5098,6 +6205,7 @@ class PlaybookBrain:
                 ),
                 unresolved_ambiguities=unresolved,
                 scene_revision_id=scene_graph.revision_id,
+                global_context=global_context,
             )
         else:
             self._belief = base_belief

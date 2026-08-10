@@ -11,7 +11,9 @@ causal 1m / 5m / 15m / 1H / 4H aggregation
         ↓
 descriptive primitives + ordered event memory
         ↓
-Temporal Market Scene Graph + FocusState
+Temporal Market Scene Graph + GlobalMarketContext
+        ↓
+FocusState
         ↓
 Belief(t) = update(Belief(t-1), Observation(t), SceneDelta(t))
         ↓
@@ -56,7 +58,10 @@ order and duration, not just current scores. In particular:
 - planned entry is a frozen zone price and need not equal the current close.
 
 The scene graph links events, zones, draws, invalidations and competing
-interpretations. Focus identifies what the Brain is currently following while
+interpretations. `GlobalMarketContext` incrementally summarizes structural
+authority, cross-scale relations, external draw candidates, path blockers and
+identity-bound conflicts from the current graph delta. It does not choose a
+draw or action. Focus identifies what the Brain should inspect next while
 preserving ambiguity and unknown authority. The eyes and graph cannot choose an
 action.
 
@@ -96,6 +101,12 @@ The common phase vocabulary is:
 Episode, terminal and rearm semantics prevent a later event from silently
 rewriting the active thesis. A stable evidence revision is assimilated once,
 not repeatedly every minute.
+
+LSR source authority is tiered without deleting 1m observations: H4/H1 or
+typed external/intermediate liquidity may establish Tier A; connected 15m/5m
+internal liquidity may establish Tier B; isolated or nested 1m internal
+liquidity is Tier C trigger/refinement evidence only. A mature balance range is
+rare optional context for LSR, never its hard gate, and FAVR remains parked.
 
 ## Decision, risk and execution
 

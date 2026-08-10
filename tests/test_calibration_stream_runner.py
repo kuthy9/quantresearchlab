@@ -7,6 +7,7 @@ from pathlib import Path
 import pickle
 import subprocess
 import sys
+from types import SimpleNamespace
 
 import pandas as pd
 import pytest
@@ -15,9 +16,12 @@ from scripts.run_continuous_replay import (
     BRAIN_CALIBRATION_FIELD_TYPES,
     DECISION_FIELD_TYPES,
     _calendar_warmup_start,
+    _lsr_episode_phase_summary,
+    _update_lsr_episode_phase_funnel,
     _visualization_clocks,
 )
 from smc_trader.brain_calibration import BrainCalibrationRecord
+from smc_trader.model import Direction, Playbook, PlaybookPhase
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -55,6 +59,10 @@ def test_stream_schemas_match_the_lightweight_contract() -> None:
     assert DECISION_FIELD_TYPES["invalidation_source_id"] == "large_string"
     assert DECISION_FIELD_TYPES["target_ids"] == "large_string"
     assert DECISION_FIELD_TYPES["top_episode_id"] == "large_string"
+    assert DECISION_FIELD_TYPES["global_market_mode"] == "large_string"
+    assert DECISION_FIELD_TYPES["global_dislocated"] == "bool"
+    assert DECISION_FIELD_TYPES["global_material_conflicts"] == "large_string"
+    assert DECISION_FIELD_TYPES["top_context_metadata"] == "large_string"
     assert "snapshot_hash" not in DECISION_FIELD_TYPES
     assert "group3_boundary_transitions" not in DECISION_FIELD_TYPES
     assert "group4_state" not in DECISION_FIELD_TYPES
@@ -66,6 +74,63 @@ def test_stream_schemas_match_the_lightweight_contract() -> None:
         "brain_input_contract_hash",
     ):
         assert repeated_identity not in BRAIN_CALIBRATION_FIELD_TYPES
+
+
+def _lsr_hypothesis(
+    phase: PlaybookPhase,
+    *,
+    trigger_ready: bool = False,
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        playbook=Playbook.LIQUIDITY_SWEEP_REVERSAL,
+        direction=Direction.SHORT,
+        episode_id="lsr:episode:1",
+        phase=phase,
+        entry_readiness=0.8 if trigger_ready else 0.0,
+        hard_gate_results={"aligned_micro_bos_trigger": trigger_ready},
+        context_metadata={
+            "manipulation_tier": "B",
+            "source_timeframe": "5m",
+            "structural_rank": "intermediate",
+            "global_context_connected": "true",
+            "nesting": "nested",
+        },
+    )
+
+
+def test_lsr_phase_funnel_counts_first_reach_and_survives_checkpoint() -> None:
+    state: dict[str, object] = {}
+    forming = SimpleNamespace(
+        hypotheses={
+            "liquidity_sweep_reversal:short": _lsr_hypothesis(
+                PlaybookPhase.FORMING
+            )
+        }
+    )
+    _update_lsr_episode_phase_funnel(state, forming)
+    _update_lsr_episode_phase_funnel(state, forming)
+
+    resumed = pickle.loads(pickle.dumps(state))
+    executable = SimpleNamespace(
+        hypotheses={
+            "liquidity_sweep_reversal:short": _lsr_hypothesis(
+                PlaybookPhase.EXECUTABLE,
+                trigger_ready=True,
+            )
+        }
+    )
+    _update_lsr_episode_phase_funnel(resumed, executable)
+    _update_lsr_episode_phase_funnel(resumed, executable)
+
+    rows = _lsr_episode_phase_summary(resumed)
+    assert [row["stage"] for row in rows] == [
+        "forming",
+        "executable",
+        "trigger_ready",
+    ]
+    assert all(row["episodes_first_reached"] == 1 for row in rows)
+    assert all(row["manipulation_tier"] == "B" for row in rows)
+    assert all(row["global_context_connected"] == "true" for row in rows)
 
 
 def _write_source(tmp_path: Path, *, periods: int = 32) -> Path:
@@ -195,12 +260,31 @@ def test_default_replay_is_lightweight_resumable_and_deterministic(
         (uninterrupted_output / "summary.json").read_text()
     )
     assert resumed_summary["decision_rows"] == uninterrupted_summary["decision_rows"]
+    assert (
+        resumed_summary["lsr_episode_phase_funnel"]
+        == uninterrupted_summary["lsr_episode_phase_funnel"]
+    )
     pd.testing.assert_frame_equal(
         _decision_rows(resumed_output),
         _decision_rows(uninterrupted_output),
     )
     assert resumed_summary["resume_count"] == 1
     assert max(resumed_summary["peak_buffer_rows"].values()) <= 7
+    decision_rows = _decision_rows(resumed_output)
+    for field in (
+        "global_market_mode",
+        "global_authority_timeframe",
+        "global_authority_direction",
+        "global_authority_source_ids",
+        "global_dislocated",
+        "global_scale_relations",
+        "global_path_blocker_ids",
+        "global_material_conflicts",
+        "global_unexplained_episode_ids",
+        "top_context_metadata",
+        "top_competing_episode_ids",
+    ):
+        assert field in decision_rows
 
     run_manifest = json.loads((resumed_output / "run_manifest.json").read_text())
     assert len(run_manifest["source"]["sha256"]) == 64

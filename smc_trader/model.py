@@ -66,6 +66,24 @@ class PlaybookPhase(str, Enum):
     INVALIDATED = "invalidated"
 
 
+class MarketMode(str, Enum):
+    """Small, descriptive state space for the market-wide context."""
+
+    DIRECTIONAL = "directional"
+    BALANCED = "balanced"
+    TRANSITION = "transition"
+    UNCERTAIN = "uncertain"
+
+
+class ScaleRelation(str, Enum):
+    """How one completed scale relates to the current structural authority."""
+
+    ALIGNED = "aligned"
+    NORMAL_PULLBACK = "normal_pullback"
+    MATERIAL_OPPOSITION = "material_opposition"
+    UNKNOWN = "unknown"
+
+
 class Action(str, Enum):
     ENTER = "enter"
     WAIT = "wait"
@@ -6002,6 +6020,8 @@ class HypothesisBelief:
         default_factory=dict
     )
     liquidity_route: LiquidityRoute | None = None
+    context_metadata: Mapping[str, str] = field(default_factory=dict)
+    competing_episode_ids: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -6033,10 +6053,23 @@ class HypothesisBelief:
         group_scores = dict(self.evidence_group_scores)
         hard_gates = dict(self.hard_gate_results)
         raw_dimensions = dict(self.raw_quality_dimensions)
+        context_metadata = {
+            str(name): str(value)
+            for name, value in self.context_metadata.items()
+        }
         object.__setattr__(
             self,
             "raw_quality_dimensions",
             raw_dimensions,
+        )
+        object.__setattr__(self, "context_metadata", context_metadata)
+        competing_episode_ids = tuple(
+            dict.fromkeys(self.competing_episode_ids)
+        )
+        object.__setattr__(
+            self,
+            "competing_episode_ids",
+            competing_episode_ids,
         )
         expected_groups = {
             "structure",
@@ -6092,6 +6125,14 @@ class HypothesisBelief:
             raise ValueError(
                 "belief raw quality dimensions are invalid"
             )
+        if (
+            any(not name or not value for name, value in context_metadata.items())
+            or any(
+                not isinstance(value, str) or not value
+                for value in competing_episode_ids
+            )
+        ):
+            raise ValueError("belief context diagnostics are invalid")
         if self.setup_context_id == "" or self.entry_location_id == "":
             raise ValueError("belief typed context identity cannot be empty")
         for name in (
@@ -6281,6 +6322,207 @@ class HypothesisBelief:
 
 
 @dataclass(frozen=True)
+class GlobalConflictEvidence:
+    """One material, causally clocked cross-scale conflict.
+
+    The object records graph identities rather than a generic conflict flag so
+    downstream hypothesis routing can distinguish relevant opposition from an
+    unrelated graph fact.
+    """
+
+    conflict_id: str
+    event_id: str
+    observed_at: pd.Timestamp
+    source_node_id: str
+    target_node_id: str
+    source_timeframe: Timeframe
+    target_timeframe: Timeframe
+    source_direction: Direction | None
+    target_direction: Direction | None
+    structural_scale: str
+    reason: str
+    affected_hypothesis_ids: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "observed_at",
+            aware_timestamp(
+                self.observed_at,
+                name="global_conflict.observed_at",
+            ),
+        )
+        object.__setattr__(
+            self,
+            "source_timeframe",
+            Timeframe(self.source_timeframe),
+        )
+        object.__setattr__(
+            self,
+            "target_timeframe",
+            Timeframe(self.target_timeframe),
+        )
+        if self.source_direction is not None:
+            object.__setattr__(
+                self,
+                "source_direction",
+                Direction(self.source_direction),
+            )
+        if self.target_direction is not None:
+            object.__setattr__(
+                self,
+                "target_direction",
+                Direction(self.target_direction),
+            )
+        affected = tuple(dict.fromkeys(self.affected_hypothesis_ids))
+        object.__setattr__(self, "affected_hypothesis_ids", affected)
+        if (
+            any(
+                not isinstance(value, str) or not value
+                for value in (
+                    self.conflict_id,
+                    self.event_id,
+                    self.source_node_id,
+                    self.target_node_id,
+                    self.structural_scale,
+                    self.reason,
+                )
+            )
+            or self.source_node_id == self.target_node_id
+            or (
+                self.source_direction is not None
+                and self.target_direction is not None
+                and self.source_direction is self.target_direction
+            )
+            or self.structural_scale
+            not in {"internal", "intermediate", "external"}
+            or not affected
+            or any(
+                not isinstance(value, str) or not value
+                for value in affected
+            )
+        ):
+            raise ValueError("global conflict evidence is invalid")
+
+
+@dataclass(frozen=True)
+class GlobalMarketContext:
+    """Compact market-wide interpretation of the current scene graph.
+
+    This is descriptive context.  It neither chooses a playbook draw nor owns
+    an action, and execution observations never enter this contract.
+    """
+
+    updated_at: pd.Timestamp
+    scene_revision_id: str
+    market_epoch_id: str
+    authority_timeframe: Timeframe | None
+    authority_direction: Direction | None
+    authority_source_ids: tuple[str, ...]
+    market_mode: MarketMode
+    scale_relations: Mapping[str, ScaleRelation]
+    external_draw_candidates: Mapping[str, tuple[str, ...]]
+    path_blocker_ids: tuple[str, ...]
+    material_conflicts: tuple[GlobalConflictEvidence, ...]
+    unknown_evidence: tuple[str, ...]
+    ambiguous_evidence: tuple[str, ...]
+    dislocated: bool = False
+    invalidated_source_ids: tuple[str, ...] = ()
+    candidate_structured_episode_ids: tuple[str, ...] = ()
+    unexplained_structured_episode_ids: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "updated_at",
+            aware_timestamp(
+                self.updated_at,
+                name="global_context.updated_at",
+            ),
+        )
+        if self.authority_timeframe is not None:
+            object.__setattr__(
+                self,
+                "authority_timeframe",
+                Timeframe(self.authority_timeframe),
+            )
+        if self.authority_direction is not None:
+            object.__setattr__(
+                self,
+                "authority_direction",
+                Direction(self.authority_direction),
+            )
+        object.__setattr__(self, "market_mode", MarketMode(self.market_mode))
+        relations = {
+            str(key): ScaleRelation(value)
+            for key, value in self.scale_relations.items()
+        }
+        draws = {
+            str(side): tuple(dict.fromkeys(values))
+            for side, values in self.external_draw_candidates.items()
+        }
+        object.__setattr__(self, "scale_relations", relations)
+        object.__setattr__(self, "external_draw_candidates", draws)
+        tuple_fields = (
+            "authority_source_ids",
+            "path_blocker_ids",
+            "unknown_evidence",
+            "ambiguous_evidence",
+            "invalidated_source_ids",
+            "candidate_structured_episode_ids",
+            "unexplained_structured_episode_ids",
+        )
+        for name in tuple_fields:
+            values = tuple(dict.fromkeys(getattr(self, name)))
+            object.__setattr__(self, name, values)
+            if any(
+                not isinstance(value, str) or not value
+                for value in values
+            ):
+                raise ValueError(
+                    f"global context {name} contains an invalid identity"
+                )
+        conflicts = tuple(self.material_conflicts)
+        object.__setattr__(self, "material_conflicts", conflicts)
+        expected_scales = {timeframe.value for timeframe in Timeframe}
+        if (
+            not self.scene_revision_id
+            or not self.market_epoch_id
+            or set(relations) != expected_scales
+            or set(draws) != {"above", "below"}
+            or any(
+                len(values) != len(set(values))
+                or any(
+                    not isinstance(value, str) or not value
+                    for value in values
+                )
+                for values in draws.values()
+            )
+            or (
+                self.authority_timeframe is None
+                and self.authority_direction is not None
+            )
+            or (
+                self.authority_direction is not None
+                and not self.authority_source_ids
+            )
+            or (
+                self.market_mode is MarketMode.DIRECTIONAL
+                and self.authority_direction is None
+            )
+            or type(self.dislocated) is not bool
+            or any(
+                not isinstance(conflict, GlobalConflictEvidence)
+                or conflict.observed_at > self.updated_at
+                for conflict in conflicts
+            )
+            or len({conflict.conflict_id for conflict in conflicts})
+            != len(conflicts)
+        ):
+            raise ValueError("global market context is invalid")
+
+
+@dataclass(frozen=True)
 class MarketBelief:
     asof: pd.Timestamp
     hypotheses: Mapping[str, HypothesisBelief]
@@ -6291,6 +6533,7 @@ class MarketBelief:
     cross_scale_conflicts: tuple[str, ...] = ()
     unresolved_ambiguities: tuple[str, ...] = ()
     scene_revision_id: str | None = None
+    global_context: GlobalMarketContext | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "asof", aware_timestamp(self.asof, name="belief.asof"))
@@ -6389,6 +6632,17 @@ class MarketBelief:
             raise ValueError("belief focus and belief clocks disagree")
         if self.scene_revision_id is not None and not self.scene_revision_id:
             raise ValueError("belief scene revision cannot be empty")
+        if self.global_context is not None:
+            if self.global_context.updated_at != self.asof:
+                raise ValueError("belief global context and belief clocks disagree")
+            if (
+                self.scene_revision_id is not None
+                and self.global_context.scene_revision_id
+                != self.scene_revision_id
+            ):
+                raise ValueError(
+                    "belief global context and scene revisions disagree"
+                )
 
     def candidates(self) -> tuple[HypothesisBelief, ...]:
         """Action-facing dominant candidates; context projections stay diagnostic."""

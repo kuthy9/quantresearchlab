@@ -145,13 +145,19 @@ def _update(
     )
 
 
-def _inventory(item_id: str, formed_at: pd.Timestamp) -> SimpleNamespace:
+def _inventory(
+    item_id: str,
+    formed_at: pd.Timestamp,
+    *,
+    timeframe: Timeframe = Timeframe.H1,
+    structural_rank: str = "external",
+) -> SimpleNamespace:
     return SimpleNamespace(
         item_id=item_id,
         kind="equal_highs",
-        timeframe=Timeframe.H1,
+        timeframe=timeframe,
         side="above",
-        structural_rank="external",
+        structural_rank=structural_rank,
         lifecycle="visible",
         confirmed_at=formed_at,
         formed_at=formed_at,
@@ -257,6 +263,131 @@ def test_window_baseline_dispositions_and_execution_anomaly_filter() -> None:
             _update(warmup + pd.Timedelta(seconds=30)),
             _observation(warmup + pd.Timedelta(seconds=30)),
         )
+
+
+def test_manipulation_source_timeframe_rates_use_unique_real_denominators() -> None:
+    start = pd.Timestamp("2023-01-03 14:00", tz="UTC")
+    first_at = start + pd.Timedelta(minutes=2)
+    second_at = start + pd.Timedelta(minutes=3)
+    statistics = EyeAuthorityStatistics(
+        start=start,
+        end_exclusive=start + pd.Timedelta(minutes=4),
+        coverage_start=start,
+    )
+    h1_first = _inventory("liq-h1-first", start)
+    h1_second = _inventory("liq-h1-second", start)
+    m5_source = _inventory(
+        "liq-m5",
+        start,
+        timeframe=Timeframe.M5,
+    )
+    first = _observation(
+        first_at,
+        inventory=(h1_first, h1_second, m5_source),
+    )
+    first.frames = {
+        Timeframe.M1: _frame(first_at),
+        Timeframe.H1: _frame(first_at, timeframe=Timeframe.H1),
+        Timeframe.M5: _frame(first_at, timeframe=Timeframe.M5),
+    }
+    first_update = _update(first_at)
+    first_update.newly_completed = {
+        Timeframe.M1: (_candle(first_at),),
+        Timeframe.H1: (
+            _candle(first_at),
+            _candle(first_at),
+            _candle(first_at, real=False),
+        ),
+        Timeframe.M5: (),
+    }
+    assert statistics.observe(first_update, first)
+
+    # The same source later appears under revised descriptive metadata.  The
+    # additive strata rows may contain it twice, but the new conversion
+    # denominator must still count its identity once within H1.
+    h1_first_revised = _inventory(
+        h1_first.item_id,
+        start,
+        structural_rank="internal",
+    )
+    h1_manipulation = _manipulation(
+        "manipulation-h1",
+        "swept",
+        second_at,
+        second_at,
+        source_inventory_item_id=h1_first.item_id,
+    )
+    m5_manipulation = _manipulation(
+        "manipulation-m5",
+        "swept",
+        second_at,
+        second_at,
+        source_timeframe=Timeframe.M5,
+        source_inventory_item_id=m5_source.item_id,
+    )
+    missing_h4_source = _manipulation(
+        "manipulation-h4-missing-source",
+        "swept",
+        second_at,
+        second_at,
+        source_timeframe=Timeframe.H4,
+        source_inventory_item_id="liq-h4-not-observed",
+    )
+    second = _observation(
+        second_at,
+        inventory=(h1_first_revised, h1_second, m5_source),
+        manipulations=(
+            h1_manipulation,
+            m5_manipulation,
+            missing_h4_source,
+        ),
+    )
+    second.frames = {
+        Timeframe.M1: _frame(second_at),
+        Timeframe.H1: _frame(first_at, timeframe=Timeframe.H1),
+        Timeframe.M5: _frame(first_at, timeframe=Timeframe.M5),
+    }
+    assert statistics.observe(_update(second_at), second)
+
+    summary = statistics.finalize()
+    rows = {
+        row["source_timeframe"]: row
+        for row in summary["group4"][
+            "manipulation_rates_by_source_timeframe"
+        ]
+    }
+    assert summary["group4"]["visible_eligible_sources"] == 3
+    assert (
+        summary["group4"][
+            "visible_eligible_sources_excess_assignments_above_union"
+        ]
+        == 1
+    )
+    assert rows["1H"] == {
+        "source_timeframe": "1H",
+        "unique_eligible_sources": 2,
+        "unique_eligible_sources_creating_manipulation": 1,
+        "created_manipulations": 1,
+        "created_per_unique_eligible_source": 0.5,
+        "source_timeframe_real_completed_bars": 2,
+        "created_manipulations_per_1000_real_completed_bars": 500.0,
+    }
+    assert rows["5m"]["unique_eligible_sources"] == 1
+    assert rows["5m"]["created_per_unique_eligible_source"] == 1.0
+    assert rows["5m"]["source_timeframe_real_completed_bars"] == 0
+    assert (
+        rows["5m"]["created_manipulations_per_1000_real_completed_bars"]
+        is None
+    )
+    assert rows["4H"]["unique_eligible_sources"] == 0
+    assert rows["4H"][
+        "unique_eligible_sources_creating_manipulation"
+    ] == 0
+    assert rows["4H"]["created_per_unique_eligible_source"] is None
+    assert (
+        rows["4H"]["created_manipulations_per_1000_real_completed_bars"]
+        is None
+    )
 
 
 def test_warmup_baseline_indexes_join_metadata_without_counting_lifecycle() -> None:
@@ -487,6 +618,9 @@ def _manipulation(
     lifecycle: str,
     swept_at: pd.Timestamp,
     asof: pd.Timestamp,
+    *,
+    source_timeframe: Timeframe = Timeframe.H1,
+    source_inventory_item_id: str = "liq-1",
 ) -> SimpleNamespace:
     return SimpleNamespace(
         manipulation_id=entity,
@@ -494,7 +628,7 @@ def _manipulation(
         timeframe=Timeframe.M1,
         side="above",
         source_kind="formed_liquidity_pool",
-        source_timeframe=Timeframe.H1,
+        source_timeframe=source_timeframe,
         swept_at=swept_at,
         state_started_at=asof,
         reaccepted_at=asof if lifecycle == "reaccepted" else None,
@@ -503,7 +637,7 @@ def _manipulation(
         censored_at=None,
         deadline_elapsed=False,
         transition_reason=("reaccepted_after_hold" if lifecycle == "reaccepted" else None),
-        source_inventory_item_id="liq-1",
+        source_inventory_item_id=source_inventory_item_id,
         source_id="pool-1",
         source_formed_at=swept_at - pd.Timedelta(hours=2),
         source_eligible_at=swept_at - pd.Timedelta(hours=1),

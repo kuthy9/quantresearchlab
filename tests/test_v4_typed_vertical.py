@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 import hashlib
 from pathlib import Path
+from types import SimpleNamespace
 
 import pandas as pd
 import pytest
@@ -35,6 +36,8 @@ from smc_trader.model import (
     ManipulationLifecycle,
     ManipulationState,
     MarketObservation,
+    MarketMode,
+    PathSequenceLifecycle,
     Playbook,
     PlaybookPhase,
     PositionSnapshot,
@@ -46,7 +49,17 @@ from smc_trader.model import (
     Timeframe,
 )
 from smc_trader.playbook_registry import load_playbook_registry
-from smc_trader.playbooks import PlaybookBrain
+from smc_trader.playbooks import (
+    BrainConfig,
+    PlaybookBrain,
+    _Evaluation,
+    _SequenceSignal,
+    _lsr_candidate,
+    _route_global_context,
+    _select_countertrend_lsr_target,
+    _select_pool_path,
+    _terminal_candidate_is_new,
+)
 from smc_trader.risk import StructuralRiskEngine
 
 from .helpers import market_observation
@@ -1168,7 +1181,7 @@ def _pool_manipulation(swept_at: pd.Timestamp) -> ManipulationState:
         source_kind="formed_liquidity_pool",
         source_id="pool-above",
         source_protocol_hash=GROUP12_SHA,
-        source_timeframe=Timeframe.M1,
+        source_timeframe=Timeframe.H1,
         source_inventory_item_id="pool:pool-above",
         source_inventory_lifecycle=LiquidityInventoryLifecycle.VISIBLE,
         coincident_source_ids=(),
@@ -1305,7 +1318,7 @@ def _lsr_pool_source(
     touch_two = swept_at - pd.Timedelta(minutes=1)
     pool = LiquidityPoolState(
         pool_id="pool-above",
-        timeframe=Timeframe.M1,
+        timeframe=Timeframe.H1,
         side="above",
         lower_bound=100.75,
         upper_bound=101.0,
@@ -1325,7 +1338,7 @@ def _lsr_pool_source(
     )
     inventory = LiquidityInventoryItem(
         item_id="pool:pool-above",
-        timeframe=Timeframe.M1,
+        timeframe=Timeframe.H1,
         side="above",
         kind="equal_highs",
         price=101.0,
@@ -1473,6 +1486,7 @@ def _lsr_observation() -> MarketObservation:
         frames[Timeframe.H1],
         cutoff=trigger.end,
         swings=(swing,),
+        liquidity_pools=(pool,),
     )
     frames[Timeframe.M5] = replace(
         frames[Timeframe.M5],
@@ -1490,7 +1504,6 @@ def _lsr_observation() -> MarketObservation:
         frames[Timeframe.M1],
         cutoff=trigger.end,
         structure_breaks=(trigger_bos,),
-        liquidity_pools=(pool,),
     )
     return replace(
         base,
@@ -1630,6 +1643,371 @@ def test_insufficient_remaining_path_stays_in_delivery_not_uncertainty() -> None
         < _brain().config.minimum_remaining_path_R
     )
     assert hypothesis.uncertainty == 0.0
+    assert hypothesis.phase is PlaybookPhase.WAITING_TRIGGER
+
+
+def _lsr_source_at(
+    observation: MarketObservation,
+    timeframe: Timeframe,
+) -> MarketObservation:
+    manipulation = replace(
+        observation.manipulations[0],
+        source_timeframe=timeframe,
+    )
+    pool = replace(
+        observation.liquidity_pool_states[0],
+        timeframe=timeframe,
+    )
+    pool_inventory = replace(
+        observation.liquidity_inventory[1],
+        timeframe=timeframe,
+    )
+    frames = {
+        key: replace(
+            frame,
+            liquidity_pools=(pool,) if key is timeframe else (),
+        )
+        for key, frame in observation.frames.items()
+    }
+    return replace(
+        observation,
+        frames=frames,
+        manipulations=(manipulation,),
+        liquidity_pool_states=(pool,),
+        liquidity_inventory=(
+            observation.liquidity_inventory[0],
+            pool_inventory,
+        ),
+    )
+
+
+def test_lsr_authority_tiers_keep_internal_m1_non_root_but_allow_external_rank() -> None:
+    base = _lsr_observation()
+    h1_candidate, _ = _select_pool_path(base, Direction.SHORT, None)
+    assert h1_candidate is not None
+    assert h1_candidate.tier == "A"
+    assert h1_candidate.eligible_root
+    assert h1_candidate.structural_rank == "internal"
+
+    context = SimpleNamespace(
+        authority_source_ids=("pool:pool-above",),
+        external_draw_candidates={"above": (), "below": ()},
+    )
+    isolated_m1 = _lsr_source_at(base, Timeframe.M1)
+    pool_path = next(
+        path
+        for path in isolated_m1.path_sequences
+        if path.context_kind == "pool_reversal"
+    )
+    isolated = _lsr_candidate(
+        isolated_m1,
+        pool_path,
+        global_context=None,
+        scene_graph=None,
+    )
+    nested = _lsr_candidate(
+        isolated_m1,
+        pool_path,
+        global_context=context,
+        scene_graph=None,
+    )
+    assert isolated is not None and isolated.tier == "C"
+    assert not isolated.eligible_root and not isolated.nested_source
+    assert nested is not None and nested.tier == "C"
+    assert not nested.eligible_root and nested.nested_source
+
+    external_inventory = replace(
+        isolated_m1.liquidity_inventory[1],
+        structural_rank="external",
+    )
+    external_m1 = replace(
+        isolated_m1,
+        liquidity_inventory=(
+            isolated_m1.liquidity_inventory[0],
+            external_inventory,
+        ),
+    )
+    external = _lsr_candidate(
+        external_m1,
+        pool_path,
+        global_context=None,
+        scene_graph=None,
+    )
+    assert external is not None and external.tier == "A"
+    assert external.eligible_root
+
+
+def test_lsr_tier_b_requires_global_identity_connection() -> None:
+    observation = _lsr_source_at(_lsr_observation(), Timeframe.M5)
+    selected, _ = _select_pool_path(
+        observation,
+        Direction.SHORT,
+        None,
+    )
+    assert selected is None
+
+    connected, _ = _select_pool_path(
+        observation,
+        Direction.SHORT,
+        None,
+        global_context=SimpleNamespace(
+            authority_source_ids=("pool:pool-above",),
+            external_draw_candidates={"above": (), "below": ()},
+        ),
+    )
+    assert connected is not None
+    assert connected.tier == "B"
+    assert connected.eligible_root
+
+    external_inventory = replace(
+        observation.liquidity_inventory[1],
+        structural_rank="external",
+    )
+    external_observation = replace(
+        observation,
+        liquidity_inventory=(
+            observation.liquidity_inventory[0],
+            external_inventory,
+        ),
+    )
+    external, _ = _select_pool_path(
+        external_observation,
+        Direction.SHORT,
+        None,
+    )
+    assert external is not None and external.tier == "A"
+    assert external.eligible_root
+
+
+def test_lsr_active_identity_is_frozen_and_higher_tier_is_competing() -> None:
+    clock = BASE + pd.Timedelta(minutes=20)
+    path_b = SimpleNamespace(
+        sequence_id="path-b",
+        context_kind="pool_reversal",
+        context_id="manip-b",
+        direction=Direction.SHORT,
+        lifecycle=PathSequenceLifecycle.ACTIVE,
+        ended_at=None,
+        formed_at=clock - pd.Timedelta(minutes=2),
+        steps=(),
+    )
+    path_a = SimpleNamespace(
+        sequence_id="path-a",
+        context_kind="pool_reversal",
+        context_id="manip-a",
+        direction=Direction.SHORT,
+        lifecycle=PathSequenceLifecycle.ACTIVE,
+        ended_at=None,
+        formed_at=clock - pd.Timedelta(minutes=1),
+        steps=(),
+    )
+    manipulation_b = SimpleNamespace(
+        manipulation_id="manip-b",
+        source_kind="formed_liquidity_pool",
+        source_timeframe=Timeframe.M5,
+        source_id="pool-b",
+        source_inventory_item_id="inventory-b",
+        crossed_source_ids=("pool-b",),
+        coincident_source_ids=(),
+    )
+    manipulation_a = SimpleNamespace(
+        manipulation_id="manip-a",
+        source_kind="formed_liquidity_pool",
+        source_timeframe=Timeframe.H1,
+        source_id="pool-a",
+        source_inventory_item_id="inventory-a",
+        crossed_source_ids=("pool-a",),
+        coincident_source_ids=(),
+    )
+    observation = SimpleNamespace(
+        asof=clock,
+        path_sequences=(path_b, path_a),
+        manipulations=(manipulation_b, manipulation_a),
+        liquidity_inventory=(
+            SimpleNamespace(
+                item_id="inventory-b",
+                source_ids=("pool-b",),
+                structural_rank="internal",
+            ),
+            SimpleNamespace(
+                item_id="inventory-a",
+                source_ids=("pool-a",),
+                structural_rank="external",
+            ),
+        ),
+        liquidity_pool_states=(),
+    )
+    prior = SimpleNamespace(
+        phase=PlaybookPhase.WAITING_TRIGGER,
+        setup_context_id="path-b",
+        hard_gate_results={"formed_pool_sweep": True},
+    )
+
+    selected, competing = _select_pool_path(
+        observation,
+        Direction.SHORT,
+        prior,
+    )
+    assert selected is not None
+    assert selected.path.sequence_id == "path-b"
+    assert selected.tier == "B"
+    assert selected.authority_latched
+    assert competing == ("path-a",)
+
+    terminal_prior = SimpleNamespace(
+        phase=PlaybookPhase.INVALIDATED,
+        phase_started_at=clock,
+        terminal_at=clock,
+        episode_id="path-b",
+        setup_context_id="path-b",
+        sequence=None,
+        competing_episode_ids=competing,
+    )
+    promoted, remaining = _select_pool_path(
+        observation,
+        Direction.SHORT,
+        terminal_prior,
+    )
+    assert promoted is not None
+    assert promoted.path.sequence_id == "path-a"
+    assert remaining == ()
+    assert _terminal_candidate_is_new(
+        terminal_prior,
+        promoted.path.sequence_id,
+        promoted.path.formed_at,
+    )
+
+
+def test_countertrend_lsr_uses_local_target_and_stops_before_blocker() -> None:
+    observation = _lsr_observation()
+    local = replace(
+        observation.liquidity_inventory[0],
+        item_id="local-m5-low",
+        timeframe=Timeframe.M5,
+        kind="previous_session_low",
+        price=99.5,
+        lower_bound=99.5,
+        upper_bound=99.5,
+        source_ids=("local-m5-low",),
+    )
+    target_observation = replace(
+        observation,
+        liquidity_inventory=(local, *observation.liquidity_inventory),
+    )
+    context = SimpleNamespace(path_blocker_ids=())
+    selected = _select_countertrend_lsr_target(
+        target_observation,
+        Direction.SHORT,
+        101.0,
+        BrainConfig(),
+        context,
+        context_draw=None,
+    )
+    assert selected is not None
+    assert selected.level_id == "local-m5-low"
+
+    blocker = replace(
+        observation.liquidity_inventory[0],
+        item_id="h1-protected-blocker",
+        kind="previous_day_low",
+        price=100.0,
+        lower_bound=100.0,
+        upper_bound=100.0,
+        source_ids=("h1-protected-blocker",),
+    )
+    blocked_observation = replace(
+        target_observation,
+        liquidity_inventory=(
+            local,
+            blocker,
+            *observation.liquidity_inventory,
+        ),
+    )
+    assert _select_countertrend_lsr_target(
+        blocked_observation,
+        Direction.SHORT,
+        101.0,
+        BrainConfig(),
+        SimpleNamespace(path_blocker_ids=(blocker.item_id,)),
+        context_draw=None,
+    ) is None
+
+
+def test_global_routing_preserves_sequence_and_distinguishes_ambiguity() -> None:
+    signal = _SequenceSignal(1.0, BASE, ("frozen-source",))
+    evaluation = _Evaluation(
+        evidence=(),
+        trigger_ready=True,
+        setup_clock=BASE,
+        sequence_signals={"step": signal},
+        setup_identity="episode",
+        thesis_target=0.8,
+        location_quality=0.7,
+        entry_readiness=0.9,
+        delivery_quality=0.8,
+        typed_uncertainty=0.1,
+        hard_gate_results={"gate": True},
+    )
+    base_context = dict(
+        material_conflicts=(),
+        authority_timeframe=Timeframe.H4,
+        authority_direction=Direction.SHORT,
+        market_mode=MarketMode.DIRECTIONAL,
+        path_blocker_ids=(),
+    )
+    ambiguous = _route_global_context(
+        Playbook.LIQUIDITY_SWEEP_REVERSAL,
+        Direction.SHORT,
+        None,
+        evaluation,
+        SimpleNamespace(
+            **base_context,
+            invalidated_source_ids=(),
+            ambiguous_evidence=("frozen-source",),
+        ),
+    )
+    assert not ambiguous.invalidated
+    assert ambiguous.sequence_signals == evaluation.sequence_signals
+    assert ambiguous.entry_readiness == 0.0
+    assert ambiguous.typed_uncertainty >= 0.75
+
+    invalidated = _route_global_context(
+        Playbook.LIQUIDITY_SWEEP_REVERSAL,
+        Direction.SHORT,
+        None,
+        evaluation,
+        SimpleNamespace(
+            **base_context,
+            invalidated_source_ids=("frozen-source",),
+            ambiguous_evidence=(),
+        ),
+    )
+    assert invalidated.invalidated
+    assert invalidated.sequence_signals == evaluation.sequence_signals
+    assert invalidated.thesis_target == 0.0
+    assert invalidated.location_quality == 0.0
+    assert invalidated.entry_readiness == 0.0
+    assert invalidated.delivery_quality == 0.0
+    assert invalidated.typed_uncertainty == evaluation.typed_uncertainty
+
+    unresolved = _route_global_context(
+        Playbook.LIQUIDITY_SWEEP_REVERSAL,
+        Direction.SHORT,
+        None,
+        evaluation,
+        SimpleNamespace(
+            **{
+                **base_context,
+                "market_mode": MarketMode.UNCERTAIN,
+            },
+            invalidated_source_ids=(),
+            ambiguous_evidence=(),
+        ),
+    )
+    assert unresolved.sequence_signals == evaluation.sequence_signals
+    assert unresolved.thesis_target == evaluation.thesis_target
+    assert unresolved.entry_readiness == evaluation.entry_readiness
+    assert unresolved.typed_uncertainty >= 0.75
 
 
 def _lsr_without_plan_or_trigger() -> MarketObservation:
@@ -1693,7 +2071,7 @@ def test_pre_entry_episode_freezes_invalidation_and_closes_on_breach() -> None:
     assert reclaimed is terminal
 
 
-def test_pre_entry_episode_deadline_is_frozen_without_a_plan() -> None:
+def test_execution_deadline_is_frozen_but_does_not_terminalize_market_episode() -> None:
     observation = _lsr_observation()
     pool_paths = tuple(
         path
@@ -1724,12 +2102,49 @@ def test_pre_entry_episode_deadline_is_frozen_without_a_plan() -> None:
         armed_observation,
         active.episode_deadline,
     )
-    terminal = brain.update(deadline_observation).hypotheses[key]
+    still_armed = brain.update(deadline_observation).hypotheses[key]
 
-    assert terminal.phase is PlaybookPhase.INVALIDATED
-    assert terminal.terminal_reason == "episode_deadline_elapsed"
-    assert terminal.episode_deadline == active.episode_deadline
-    assert not terminal.eligible
+    assert still_armed.phase is PlaybookPhase.ARMED
+    assert still_armed.terminal_at is None
+    assert still_armed.terminal_reason is None
+    assert still_armed.episode_deadline == active.episode_deadline
+    assert still_armed.eligible
+
+
+def test_execution_reality_does_not_change_market_dimensions_or_phase() -> None:
+    observation = _lsr_observation()
+    missing_execution = replace(
+        observation.execution,
+        source="missing",
+        spread_points=20.0,
+        expected_round_trip_cost_points=40.0,
+        minutes_to_deadline=1,
+        fillability=0.0,
+        anomalies=(
+            "spread_missing_used_one_tick",
+            "deadline_missing",
+            "insufficient_top_of_book_depth",
+        ),
+    )
+
+    authoritative = _brain().update(observation).hypotheses[
+        "liquidity_sweep_reversal:short"
+    ]
+    unavailable = _brain().update(
+        replace(observation, execution=missing_execution)
+    ).hypotheses["liquidity_sweep_reversal:short"]
+
+    assert unavailable.phase is authoritative.phase
+    assert unavailable.sequence == authoritative.sequence
+    assert unavailable.thesis_strength == authoritative.thesis_strength
+    assert unavailable.sequence_progress == authoritative.sequence_progress
+    assert unavailable.location_quality == authoritative.location_quality
+    assert unavailable.entry_readiness == authoritative.entry_readiness
+    assert unavailable.delivery_quality == authoritative.delivery_quality
+    assert unavailable.uncertainty == authoritative.uncertainty
+    assert unavailable.raw_quality_dimensions == authoritative.raw_quality_dimensions
+    assert unavailable.evidence_group_scores["execution"] == 0.0
+    assert authoritative.evidence_group_scores["execution"] > 0.0
 
 
 def test_entry_zone_cannot_cross_the_frozen_invalidation() -> None:

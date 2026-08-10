@@ -16,10 +16,13 @@ from smc_trader.model import (
     Action,
     ActionUtility,
     Direction,
+    GlobalMarketContext,
     MarketBelief,
+    MarketMode,
     Playbook,
     PlaybookPhase,
     PositionSnapshot,
+    ScaleRelation,
     Timeframe,
 )
 from smc_trader.playbooks import BrainConfig, PlaybookBrain
@@ -66,6 +69,28 @@ def _utility(
 
 def _empty_belief(observation) -> MarketBelief:
     return MarketBelief(observation.asof, {})
+
+
+def _unexplained_context(observation) -> GlobalMarketContext:
+    return GlobalMarketContext(
+        updated_at=observation.asof,
+        scene_revision_id="scene:r000000000001",
+        market_epoch_id="epoch:0",
+        authority_timeframe=None,
+        authority_direction=None,
+        authority_source_ids=(),
+        market_mode=MarketMode.UNCERTAIN,
+        scale_relations={
+            timeframe.value: ScaleRelation.UNKNOWN
+            for timeframe in Timeframe
+        },
+        external_draw_candidates={"above": (), "below": ()},
+        path_blocker_ids=(),
+        material_conflicts=(),
+        unknown_evidence=(),
+        ambiguous_evidence=(),
+        unexplained_structured_episode_ids=("episode:unexplained",),
+    )
 
 
 def _two_plan_belief(observation, *, second_plan=None) -> MarketBelief:
@@ -441,6 +466,62 @@ def test_warmup_anomaly_still_hard_overrides_distinct_action_margin() -> None:
         flat_account(),
     )
     assert risk.requested_action is Action.ABSTAIN
+
+
+def test_unexplained_structured_episode_abstains_without_inventing_playbook() -> None:
+    observation = market_observation()
+    belief = MarketBelief(
+        observation.asof,
+        {},
+        global_context=_unexplained_context(observation),
+    )
+    decision = _ScriptedUtilityDecisionLayer(
+        (
+            _utility(Action.WAIT, 0.50, "unknown"),
+            _utility(Action.ABSTAIN, 0.0, None),
+        )
+    ).decide(observation, belief, flat_account())
+
+    assert decision.selected_action is Action.ABSTAIN
+    assert decision.best_hypothesis_key == "unknown"
+    assert decision.reasons[0] == (
+        "no fixed playbook explains the current high-salience structured episode"
+    )
+    assert any(
+        "no ad-hoc playbook was created" in reason
+        for reason in decision.reasons
+    )
+
+
+def test_unexplained_competing_episode_does_not_override_active_fixed_playbook() -> None:
+    observation = market_observation()
+    base = executable_belief(
+        observation,
+        probability=0.95,
+        uncertainty=0.02,
+    )
+    hypothesis = replace(
+        next(iter(base.hypotheses.values())),
+        setup_context_id="episode:active-fixed-playbook",
+    )
+    belief = replace(
+        base,
+        hypotheses={hypothesis.key: hypothesis},
+        global_context=_unexplained_context(observation),
+    )
+    decision = _ScriptedUtilityDecisionLayer(
+        (
+            _utility(Action.ENTER, 0.50, hypothesis.key),
+            _utility(Action.ABSTAIN, 0.0, None),
+        )
+    ).decide(observation, belief, flat_account())
+
+    assert decision.selected_action is Action.ENTER
+    assert decision.best_hypothesis_key == hypothesis.key
+    assert any(
+        "episode:unexplained" in reason
+        for reason in decision.reasons
+    )
 
 
 def test_single_enter_without_plan_is_explicitly_fail_closed() -> None:

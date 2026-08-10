@@ -3778,6 +3778,84 @@ class EyeAuthorityStatistics:
         visible_eligible_row_sum = sum(
             row["unique_sources"] for row in visible_eligible_rows
         )
+        eligible_source_ids_by_timeframe: dict[str, set[str]] = defaultdict(
+            set
+        )
+        for (
+            _source_kind,
+            source_timeframe,
+            _side,
+            _structural_rank,
+            _internal_external,
+        ), source_ids in self._visible_eligible_source_ids.items():
+            eligible_source_ids_by_timeframe[source_timeframe].update(source_ids)
+        created_manipulation_ids_by_timeframe: dict[str, set[str]] = defaultdict(
+            set
+        )
+        created_source_ids_by_timeframe: dict[str, set[str]] = defaultdict(set)
+        for manipulation_id in self._manipulation_cohort_ids:
+            metadata = self._manipulation_metadata.get(manipulation_id)
+            if metadata is None:
+                continue
+            source_timeframe = str(metadata["source_timeframe"])
+            created_manipulation_ids_by_timeframe[source_timeframe].add(
+                manipulation_id
+            )
+            source_inventory_item_id = str(
+                metadata.get("source_inventory_item_id") or ""
+            )
+            if source_inventory_item_id:
+                created_source_ids_by_timeframe[source_timeframe].add(
+                    source_inventory_item_id
+                )
+        manipulation_rates_by_source_timeframe: list[dict[str, Any]] = []
+        for source_timeframe in sorted(
+            set(eligible_source_ids_by_timeframe)
+            | set(created_manipulation_ids_by_timeframe)
+        ):
+            eligible_count = len(
+                eligible_source_ids_by_timeframe[source_timeframe]
+            )
+            created_source_count = len(
+                created_source_ids_by_timeframe[source_timeframe]
+                & eligible_source_ids_by_timeframe[source_timeframe]
+            )
+            created_manipulation_count = len(
+                created_manipulation_ids_by_timeframe[source_timeframe]
+            )
+            real_completed_bars = int(
+                self._clocks.get(source_timeframe, {}).get(
+                    "real_completed",
+                    0,
+                )
+            )
+            manipulation_rates_by_source_timeframe.append(
+                {
+                    "source_timeframe": source_timeframe,
+                    "unique_eligible_sources": eligible_count,
+                    "unique_eligible_sources_creating_manipulation": (
+                        created_source_count
+                    ),
+                    "created_manipulations": created_manipulation_count,
+                    "created_per_unique_eligible_source": (
+                        None
+                        if eligible_count == 0
+                        else created_source_count / eligible_count
+                    ),
+                    "source_timeframe_real_completed_bars": (
+                        real_completed_bars
+                    ),
+                    "created_manipulations_per_1000_real_completed_bars": (
+                        None
+                        if real_completed_bars == 0
+                        else (
+                            1000.0
+                            * created_manipulation_count
+                            / real_completed_bars
+                        )
+                    ),
+                }
+            )
         manipulation_path_funnel = self._identity_funnel_rows(
             self._group5_manipulation_funnel_ids,
             denominator_stage="manipulation",
@@ -4033,6 +4111,25 @@ class EyeAuthorityStatistics:
                 "visible_eligible_sources_excess_assignments_above_union": (
                     visible_eligible_row_sum - visible_eligible_unique
                 ),
+                "manipulation_rates_by_source_timeframe": (
+                    manipulation_rates_by_source_timeframe
+                ),
+                "manipulation_rate_counting_basis": {
+                    "eligible_sources": (
+                        "unique source inventory identities unioned across "
+                        "all reported strata within each source timeframe"
+                    ),
+                    "conversion": (
+                        "unique eligible primary source inventory identities "
+                        "which created an in-window manipulation divided by "
+                        "unique eligible source identities"
+                    ),
+                    "per_1000_bars": (
+                        "in-window created manipulation identities per 1000 "
+                        "real completed bars of the corresponding source "
+                        "timeframe; synthetic bars are excluded"
+                    ),
+                },
                 "source_dispositions": disposition_rows,
                 "source_disposition_conservation": {
                     "raw_crossed_source_ids": disposition_total,
