@@ -3,7 +3,7 @@
 The executable companion is
 `configs/primitives_entry.json`.
 
-Current protocol: `3.2.0-group5.3`. Typed state and DFP/LSR input authority are
+Current protocol: `3.2.0-group5.4`. Typed state and DFP/LSR input authority are
 available to the Brain. Group5 still has no independent action authority, and
 FAVR natural authority remains disabled and parked.
 
@@ -37,6 +37,14 @@ The reducer maintains two bounded context kinds:
 Overlapping FVG and order-block zones remain distinct. Their shared
 `source_displacement_id` is retained so downstream evidence grouping can
 avoid counting the same displacement twice.
+
+For `pool_reversal`, the context milestone freezes only the manipulation
+root, reverse displacement ID, displacement active clock and direction.  Its
+`observed_at` remains the first completed-bar clock at which an eligible
+linked zone made that displacement causally visible; `source_active_at`
+preserves the displacement's earlier-or-equal active clock.  No zone ID is
+stored in that context step.  Each linked FVG/OB continues to own a separate
+`EntryLocationState` and `zone_return` path.
 
 FAVR remains disabled. A forming or broken range midpoint is not value.
 Mature ranges and range-boundary manipulations remain Group4/Brain context;
@@ -428,7 +436,8 @@ timestamps use timezone-aware ISO-8601.
   `context_id`;
 - step:
   `group5-step-v1|protocol_hash|sequence_id|ordinal|kind|observed_at|`
-  `source_entity_id`.
+  `source_entity_id`, plus `source_active_at` only for an
+  `opposite_displacement` step.
 
 The reacceptance identity's `context_kind` is exactly `entry_zone`; it never
 encodes the path aliases `zone_return` or `pool_reversal`.
@@ -453,9 +462,12 @@ bar fails before commit.
 
 Formalization, one incremental implementation, static review and the unified
 synthetic/edge/causal suite, finite descriptive OHLCV replay and small
-stratified outcome-blind review are complete for `3.2.0-group5.3`. This enables
-Group5 as typed DFP/LSR input. It does not validate the missing natural FAVR
-chain.
+stratified outcome-blind review were completed for `3.2.0-group5.3`.  Protocol
+`3.2.0-group5.4` changes the pool-reversal displacement wire identity and is
+therefore intentionally incompatible with those checkpoints.  Its code-level
+contract must pass the pre-registered five-session LSR multi-zone diagnostic
+before the new evidence is described as replay-validated.  This does not
+validate the missing natural FAVR chain.
 
 At most one concept-level repair is allowed. A second systematic semantic
 failure parks the affected concept instead of starting threshold search.

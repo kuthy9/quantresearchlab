@@ -211,7 +211,19 @@ def verify_stream_shards(
             raise ValueError(f"committed shard row count is invalid: {path}")
         if expected_schema is not None:
             actual_schema = pq.read_schema(path).remove_metadata()
-            if not actual_schema.equals(expected_schema, check_metadata=False):
+            # JSON object keys are canonicalized when the manifest is
+            # written, while Parquet preserves the recorder's column order.
+            # Stream identity is the exact field-name/type set; ordering is
+            # enforced by the writer and is not a semantic schema mismatch.
+            expected_fields = {
+                field.name: (field.type, field.nullable)
+                for field in expected_schema
+            }
+            actual_fields = {
+                field.name: (field.type, field.nullable)
+                for field in actual_schema
+            }
+            if actual_fields != expected_fields:
                 raise ValueError(f"committed shard schema is invalid: {path}")
         total += rows
         expected_index += 1

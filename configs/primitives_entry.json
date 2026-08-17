@@ -1,6 +1,6 @@
 {
-  "protocol_version": "3.2.0-group5.3",
-  "status": "implementation_complete_finite_real_replay_passed_dfp_lsr_input_authority_enabled_favr_parked",
+  "protocol_version": "3.2.0-group5.4",
+  "status": "implementation_complete_finite_real_replay_passed_dfp_lsr_context_displacement_and_entry_zone_identity_separated_favr_parked",
   "role": "causal_descriptive_development_contract",
   "tick_size": 0.25,
   "upstream": {
@@ -60,12 +60,18 @@
     "source_registration": "a new open FVG or created order block is registered only on the real completed 1m bar whose end equals source.confirmed_at, after that bar has been processed for older states; partial and untested are continuation states only",
     "source_visit_gate": "a registered zone can be visited only by a later real completed 1m bar, so source.confirmed_at <= current_bar.start",
     "cold_start": "a zone first seen after its confirmation clock is ineligible because the reducer cannot prove that an earlier first visit did not occur",
-    "pool_registration": "a pool_reversal context is registered only when a formed_liquidity_pool manipulation is first received as live swept with swept_at equal to current_bar.end; Group4 alone owns reentry and hold, then Group5 requires a strictly later aligned displacement-linked FVG/OB and only then binds a strictly later 1m micro BOS; terminal or causal steps cannot be backfilled",
+    "pool_registration": "a pool_reversal context is registered only when a formed_liquidity_pool manipulation is first received as live swept with swept_at equal to current_bar.end; Group4 alone owns reentry and hold, then Group5 binds the root, direction, displacement identity and displacement active clock when the first strictly later aligned displacement-linked FVG/OB makes that displacement causally visible; the context step never freezes that zone identity, later zones from the same displacement remain independent EntryLocation states, and terminal or causal steps cannot be backfilled",
     "synthetic": "synthetic or partially synthetic candles may advance raw cutoff but cannot alter semantic state, age, hold count, strength or steps",
     "same_clock": "steps derived from one completed candle retain explicit same_clock_known or same_clock_unknown relation; unavailable intrabar ordering is never invented",
     "boundary_identity": "censored states retain the old epoch symbol and instrument_id; for contract_change_reset that pair must differ from the boundary observation pair, while data_gap_reset, data_anomaly and tick_size_mismatch require the same pair",
     "exact_retry": "an identical retry returns the exact committed update; a non-identical input at the same clock is rejected before mutation",
     "out_of_order": "a clock earlier than the last committed clock is rejected before mutation"
+  },
+  "pool_reversal_context": {
+    "opposite_displacement_identity": "the immutable manipulation/root ID, reverse displacement ID, displacement active clock and context direction; no FVG or order-block ID belongs to this context milestone",
+    "knowledge_clock": "opposite_displacement.observed_at is the completed-bar clock at which an eligible linked zone first made the displacement visible; source_active_at separately preserves the earlier-or-equal displacement active clock and may never exceed observed_at",
+    "child_locations": "every later qualifying FVG/OB with the exact frozen displacement identity remains a separate EntryLocation and zone_return path; Group5 does not rank or select among them",
+    "optional_opposed_mss": "an accepted OPPOSED MSS remains supporting evidence for the already observed reverse displacement and is not a new entry context or substitute zone"
   },
   "entry_location": {
     "state_name": "EntryLocationState",

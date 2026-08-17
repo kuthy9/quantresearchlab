@@ -143,6 +143,14 @@ def _canonical_json_bytes(payload: Mapping[str, Any]) -> bytes:
     ).encode("utf-8")
 
 
+def _streaming_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 class ReplayCheckpointStore:
     """Hash-bound atomic local checkpoint storage.
 
@@ -255,6 +263,45 @@ class ReplayCheckpointStore:
         if not isinstance(state.get("replay"), expected_replay_type):
             raise ValueError("checkpoint does not contain the expected replay state")
         return state
+
+    def retire_completed(self) -> None:
+        """Delete only the completed run's bound pickle and retain a marker.
+
+        Interrupted and failed runs never call this method, so their exact
+        resume state remains available.  A completed replay is already
+        protected by its stream manifests and ``COMPLETED.json``; retaining
+        the large in-memory engine pickle would provide no usable resume path.
+        """
+
+        if self.manifest_path.is_symlink() or not self.manifest_path.is_file():
+            raise ValueError("completed checkpoint manifest is missing")
+        manifest = json.loads(
+            self.manifest_path.read_text(encoding="utf-8")
+        )
+        state_file = str(manifest.get("state_file", ""))
+        if re.fullmatch(r"state-[0-9a-f]{64}\.pkl", state_file) is None:
+            raise ValueError("completed checkpoint has an unsafe state filename")
+        state_path = self.root / state_file
+        if state_path.is_symlink() or not state_path.is_file():
+            raise ValueError("completed checkpoint state is missing")
+        if _streaming_sha256(state_path) != manifest.get("state_sha256"):
+            raise ValueError("completed checkpoint state hash is invalid")
+        state_path.unlink()
+        retired = {
+            key: value
+            for key, value in manifest.items()
+            if key not in {"state_file", "state_sha256"}
+        }
+        retired.update(
+            {
+                "status": "complete",
+                "resume_supported": False,
+            }
+        )
+        _atomic_bytes(
+            self.manifest_path,
+            _canonical_json_bytes(retired),
+        )
 
 
 __all__ = [

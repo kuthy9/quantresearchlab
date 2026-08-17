@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 
+from .calibration import TYPED_ACTIVE_PLAYBOOKS
 from .model import (
     AccountState,
     Action,
@@ -77,6 +79,98 @@ def _is_typed(belief: HypothesisBelief) -> bool:
     )
 
 
+def _graph_ambiguity_count(belief: HypothesisBelief) -> int:
+    """Return the typed Brain's contemporaneous graph ambiguity count."""
+
+    raw = belief.context_metadata.get("ambiguity_count", "0")
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        # An unreadable typed diagnostic is not safe directional evidence.
+        return 1
+    return max(0, value)
+
+
+def _frozen_primary_target_R(hypothesis: HypothesisBelief) -> float | None:
+    """Derive reward/R from frozen prices rather than a cached score."""
+
+    plan = hypothesis.plan
+    if plan is None or not plan.targets:
+        return None
+    risk_points = abs(plan.planned_entry - plan.invalidation.price)
+    if not math.isfinite(risk_points) or risk_points <= 0.0:
+        return None
+    reward_points = plan.direction.sign * (
+        plan.targets[0].price - plan.planned_entry
+    )
+    reward_R = reward_points / risk_points
+    if not math.isfinite(reward_R) or reward_R <= 0.0:
+        return None
+    return float(reward_R)
+
+
+def _action_candidate_items(
+    belief: MarketBelief,
+) -> tuple[tuple[str, HypothesisBelief], ...]:
+    """Return the strict action-facing candidate contract.
+
+    ``MarketBelief.action_candidate_items`` is the authoritative interface for
+    root-specific candidates.  A belief without that interface is not a valid
+    production action source and therefore fails closed.  Graph-free fixtures
+    may provide an explicit test-only implementation of the same interface.
+    """
+
+    provider = getattr(belief, "action_candidate_items", None)
+    if callable(provider):
+        items = tuple(provider())
+    else:
+        items = ()
+    if any(
+        not isinstance(candidate_id, str)
+        or not candidate_id
+        or not isinstance(hypothesis, HypothesisBelief)
+        for candidate_id, hypothesis in items
+    ):
+        raise ValueError(
+            "action candidates must be (non-empty candidate_id, "
+            "HypothesisBelief) pairs"
+        )
+    if len({candidate_id for candidate_id, _ in items}) != len(items):
+        raise ValueError("action candidate IDs must be unique")
+    return items
+
+
+def _position_candidate_items(
+    belief: MarketBelief,
+) -> tuple[tuple[str, HypothesisBelief], ...]:
+    """Return candidates allowed to manage an already-frozen position.
+
+    Graph-backed beliefs may retain one closed-root candidate for
+    HOLD/PROTECT/EXIT resolution.  That candidate is intentionally absent
+    from ``_action_candidate_items`` and therefore cannot authorize ENTER.
+    """
+
+    provider = getattr(belief, "position_candidate_items", None)
+    items = (
+        tuple(provider())
+        if callable(provider)
+        else _action_candidate_items(belief)
+    )
+    if any(
+        not isinstance(candidate_id, str)
+        or not candidate_id
+        or not isinstance(hypothesis, HypothesisBelief)
+        for candidate_id, hypothesis in items
+    ):
+        raise ValueError(
+            "position candidates must be (non-empty candidate_id, "
+            "HypothesisBelief) pairs"
+        )
+    if len({candidate_id for candidate_id, _ in items}) != len(items):
+        raise ValueError("position candidate IDs must be unique")
+    return items
+
+
 def _concrete_action_identity(
     utility: ActionUtility,
     belief: MarketBelief,
@@ -138,12 +232,260 @@ def _concrete_action_identity(
         plan.selected_draw_id,
         getattr(plan, "draw_selection", None),
         getattr(plan, "range_auction", None),
+        getattr(plan, "lsr_context", None),
     )
 
 
 class UtilityDecisionLayer:
-    def __init__(self, config: DecisionConfig | None = None) -> None:
+    def __init__(
+        self,
+        config: DecisionConfig | None = None,
+        *,
+        calibration_ready: bool = False,
+        calibration_version: str = "identity-unvalidated",
+    ) -> None:
         self.config = config or DecisionConfig()
+        version = str(calibration_version).strip()
+        if not version:
+            raise ValueError("decision calibration version is required")
+        if calibration_ready and version == "identity-unvalidated":
+            raise ValueError(
+                "a ready decision layer requires an explicit calibration version"
+            )
+        self.calibration_ready = bool(calibration_ready)
+        self.calibration_version = version
+
+    def _causal_entry_gate(
+        self,
+        belief: MarketBelief,
+        candidate_id: str,
+        observation: MarketObservation,
+        hypothesis: HypothesisBelief,
+    ) -> tuple[bool, tuple[str, ...]]:
+        """Validate causal eligibility without interpreting quality scores.
+
+        Thesis, location and readiness are descriptive/calibrated dimensions,
+        not probabilities and not duplicate gates.  The phase, current hard
+        gates, exact identities and frozen plan are the action authority.
+        """
+
+        reasons: list[str] = []
+        context_thesis_id = hypothesis.context_thesis_id
+        episode_id = hypothesis.episode_id
+        if not isinstance(context_thesis_id, str) or not context_thesis_id:
+            reasons.append("context_thesis_id_missing")
+        if not isinstance(episode_id, str) or not episode_id:
+            reasons.append("entry_episode_id_missing")
+        if hypothesis.parent_context_thesis_id != context_thesis_id:
+            reasons.append("entry_episode_parent_mismatch")
+        if (
+            hypothesis.plan is None
+            or not isinstance(episode_id, str)
+            or not episode_id
+            or hypothesis.plan.setup_id != episode_id
+        ):
+            reasons.append("entry_episode_plan_setup_mismatch")
+        ownership = getattr(belief, "owns_actionable_entry_episode", None)
+        if not callable(ownership) or not ownership(candidate_id, hypothesis):
+            reasons.append("entry_episode_projection_mismatch")
+        if hypothesis.playbook not in TYPED_ACTIVE_PLAYBOOKS:
+            reasons.append("playbook_not_action_calibrated")
+        if hypothesis.phase is not PlaybookPhase.EXECUTABLE:
+            reasons.append("phase_not_executable")
+        failed_gates = tuple(
+            name
+            for name, passed in hypothesis.hard_gate_results.items()
+            if not passed
+        )
+        if not hypothesis.hard_gate_results:
+            reasons.append("current_hard_gates_missing")
+        elif failed_gates:
+            reasons.append("current_hard_gates_failed:" + ",".join(failed_gates))
+        plan = hypothesis.plan
+        if plan is None:
+            reasons.append("frozen_plan_missing")
+        else:
+            trigger = hypothesis.selected_trigger
+            if (
+                plan.playbook is not hypothesis.playbook
+                or plan.direction is not hypothesis.direction
+                or plan.setup_id is None
+                or plan.setup_id != hypothesis.setup_context_id
+                or hypothesis.sequence is None
+                or hypothesis.sequence.setup_id != plan.setup_id
+                or plan.entry_location_id is None
+                or plan.entry_location_id != hypothesis.entry_location_id
+                or plan.entry_path_id is None
+                or plan.entry_path_id != hypothesis.entry_path_id
+                or trigger is None
+                or trigger.setup_id != plan.setup_id
+                or trigger.entry_location_id != plan.entry_location_id
+                or trigger.entry_path_id != plan.entry_path_id
+                or trigger.direction is not plan.direction
+                or hypothesis.invalidation != plan.invalidation
+                or hypothesis.deliverable_targets != plan.targets
+            ):
+                reasons.append("frozen_plan_hypothesis_identity_mismatch")
+            frozen_target_R = _frozen_primary_target_R(hypothesis)
+            if plan.deadline <= observation.asof:
+                reasons.append("frozen_plan_deadline_elapsed")
+            if (
+                not math.isfinite(float(plan.risk_points))
+                or plan.risk_points <= 0.0
+                or not math.isclose(
+                    float(plan.risk_points),
+                    abs(plan.planned_entry - plan.invalidation.price),
+                    rel_tol=1e-9,
+                    abs_tol=1e-9,
+                )
+                or not math.isfinite(float(plan.primary_target_R))
+                or plan.primary_target_R <= 0.0
+                or frozen_target_R is None
+                or not math.isclose(
+                    float(plan.primary_target_R),
+                    frozen_target_R,
+                    rel_tol=1e-9,
+                    abs_tol=1e-9,
+                )
+                or not math.isfinite(float(plan.remaining_path_R))
+                or plan.remaining_path_R <= 0.0
+            ):
+                reasons.append("frozen_plan_delivery_invalid")
+            if (
+                not plan.targets
+                or plan.selected_draw_id is None
+                or plan.targets[0].level_id != plan.selected_draw_id
+            ):
+                reasons.append("frozen_draw_target_invalid")
+            if (
+                plan.liquidity_route is not None
+                and plan.liquidity_route.path_blocker_ids
+            ):
+                reasons.append("hard_barrier_before_target")
+        if _graph_ambiguity_count(hypothesis) > 0:
+            reasons.append("graph_ambiguity")
+        if hypothesis.market_thesis_binding_required and not (
+            hypothesis.market_thesis_action_bound
+            and hypothesis.market_thesis_match_status == "exact_root_bound"
+            and hypothesis.bound_market_thesis_id
+            == hypothesis.market_thesis_id
+        ):
+            reasons.append("market_thesis_exact_root_unbound")
+        required_root_id = getattr(hypothesis, "required_root_id", None)
+        if (
+            required_root_id is not None
+            and required_root_id != hypothesis.market_thesis_root_id
+        ):
+            reasons.append("market_thesis_required_root_mismatch")
+        return not reasons, tuple(reasons)
+
+    def _delivery_probability(
+        self,
+        hypothesis: HypothesisBelief,
+    ) -> tuple[bool, float, tuple[str, ...]]:
+        """Return calibrated delivery probability and its availability.
+
+        The observed value remains visible for audit even when a causal gate
+        fails.  Only readiness/version/range errors make the probability
+        unavailable; they never rewrite the observed value to zero.
+        """
+
+        reasons: list[str] = []
+        raw = hypothesis.delivery_quality
+        try:
+            probability = float(raw)
+        except (TypeError, ValueError):
+            probability = 0.0
+            reasons.append("delivery_probability_missing_or_invalid")
+        else:
+            if not math.isfinite(probability) or not 0.0 <= probability <= 1.0:
+                probability = 0.0
+                reasons.append("delivery_probability_missing_or_invalid")
+        if not self.calibration_ready:
+            reasons.append("calibration_not_ready")
+        elif hypothesis.calibration_version != self.calibration_version:
+            reasons.append("calibration_version_mismatch")
+        return not reasons, probability, tuple(reasons)
+
+    def _entry_qualification(
+        self,
+        belief: MarketBelief,
+        candidate_id: str,
+        observation: MarketObservation,
+        hypothesis: HypothesisBelief,
+    ) -> tuple[bool, tuple[str, ...]]:
+        """Compatibility composition of causal and probability authority."""
+
+        causal_eligible, causal_reasons = self._causal_entry_gate(
+            belief,
+            candidate_id,
+            observation,
+            hypothesis,
+        )
+        probability_available, _, probability_reasons = (
+            self._delivery_probability(hypothesis)
+        )
+        return (
+            causal_eligible and probability_available,
+            causal_reasons + probability_reasons,
+        )
+
+    def _executable_wait_utility(
+        self,
+        belief: MarketBelief,
+        observation: MarketObservation,
+        hypothesis: HypothesisBelief,
+        candidate_id: str,
+        *,
+        uncertainty_cost: float,
+        deadline_cost: float,
+    ) -> ActionUtility | None:
+        """Offer WAIT only for a concrete, still-valid price improvement."""
+
+        causal_eligible, _ = self._causal_entry_gate(
+            belief,
+            candidate_id,
+            observation,
+            hypothesis,
+        )
+        probability_available, _, _ = self._delivery_probability(hypothesis)
+        if not (causal_eligible and probability_available):
+            return None
+        plan = hypothesis.plan
+        assert plan is not None
+        if (
+            plan.entry_zone_lower is None
+            or plan.entry_zone_upper is None
+            or not plan.entry_zone_lower
+            <= observation.price
+            <= plan.entry_zone_upper
+        ):
+            return None
+        improvement_points = hypothesis.direction.sign * (
+            observation.price - plan.planned_entry
+        )
+        if improvement_points <= 0.0:
+            return None
+        improvement_R = improvement_points / plan.risk_points
+        if not math.isfinite(improvement_R) or improvement_R <= 0.0:
+            return None
+        option_value = min(self.config.maximum_reward_R, improvement_R)
+        wait = option_value - 0.55 * uncertainty_cost - 0.65 * deadline_cost
+        return ActionUtility(
+            action=Action.WAIT,
+            utility=float(wait),
+            components={
+                "frozen_entry_improvement_R": option_value,
+                "uncertainty": -0.55 * uncertainty_cost,
+                "deadline": -0.65 * deadline_cost,
+            },
+            hypothesis_key=candidate_id,
+            reason=(
+                "wait only for the still-valid frozen planned entry, which "
+                f"improves location by {option_value:.3f}R; "
+                f"{_evidence_reason(hypothesis)}"
+            ),
+        )
 
     def _flat_utilities(
         self,
@@ -160,83 +502,102 @@ class UtilityDecisionLayer:
             )
         ]
         deadline = _deadline_penalty(observation, self.config)
-        fill_penalty = 1.0 - observation.execution.fillability
-        for hypothesis in belief.candidates():
+        for candidate_id, hypothesis in _action_candidate_items(belief):
             plan = hypothesis.plan
-            if not _is_typed(hypothesis):
-                continue
-            thesis = float(hypothesis.thesis_strength)
-            sequence = float(hypothesis.sequence_progress)
-            location = float(hypothesis.location_quality)
-            readiness = float(hypothesis.entry_readiness)
-            delivery = float(hypothesis.delivery_quality)
-            wait_option = (
-                thesis
-                * sequence
-                * ((1.0 - location) + (1.0 - readiness))
-                / 2.0
-                * self.config.maximum_reward_R
-                * 0.42
-            )
+            typed = _is_typed(hypothesis)
+            thesis = float(hypothesis.thesis_strength or 0.0)
+            sequence = float(hypothesis.sequence_progress or 0.0)
+            location = float(hypothesis.location_quality or 0.0)
+            readiness = float(hypothesis.entry_readiness or 0.0)
             uncertainty = (
                 self.config.uncertainty_penalty
                 * hypothesis.uncertainty
             )
-            wait = wait_option - 0.55 * uncertainty - 0.65 * deadline
-            if hypothesis.phase not in {
-                PlaybookPhase.FORMING,
-                PlaybookPhase.ARMED,
-                PlaybookPhase.WAITING_LOCATION,
-                PlaybookPhase.WAITING_TRIGGER,
-                PlaybookPhase.EXECUTABLE,
-            }:
-                wait = min(wait, -1.0)
-            output.append(
-                ActionUtility(
-                    action=Action.WAIT,
-                    utility=float(wait),
-                    components={
-                        "thesis_strength": thesis,
-                        "sequence_progress": sequence,
-                        "location_gap": -(1.0 - location),
-                        "trigger_gap": -(1.0 - readiness),
-                        "option_value_R": wait_option,
-                        "uncertainty": -0.55 * uncertainty,
-                        "deadline": -0.65 * deadline,
-                    },
-                    hypothesis_key=hypothesis.key,
-                    reason=(
-                        "retain the causal setup while location or "
-                        f"trigger is incomplete; {_evidence_reason(hypothesis)}"
-                    ),
-                )
-            )
-            if plan is None:
-                continue
-            reward = min(self.config.maximum_reward_R, max(0.0, plan.primary_target_R))
-            cost = _cost_R(observation, plan.risk_points)
-            uncertainty = self.config.uncertainty_penalty * hypothesis.uncertainty
-            effective_probability = min(
-                thesis,
-                sequence,
-                location,
-                readiness,
-                delivery,
-            )
-            gross = (
-                effective_probability * reward
-                - (1.0 - effective_probability)
-            )
-            enter = gross - cost - uncertainty - deadline - 0.35 * fill_penalty
-            gates_pass = bool(
-                hypothesis.hard_gate_results
-                and all(hypothesis.hard_gate_results.values())
+            ownership = getattr(
+                belief,
+                "owns_actionable_entry_episode",
+                None,
             )
             if (
-                hypothesis.phase is not PlaybookPhase.EXECUTABLE
-                or not gates_pass
+                typed
+                and hypothesis.phase
+                in {
+                    PlaybookPhase.FORMING,
+                    PlaybookPhase.ARMED,
+                    PlaybookPhase.WAITING_LOCATION,
+                    PlaybookPhase.WAITING_TRIGGER,
+                }
+                and callable(ownership)
+                and ownership(candidate_id, hypothesis)
             ):
-                enter = min(enter, -1.0)
+                wait_option = (
+                    thesis
+                    * sequence
+                    * ((1.0 - location) + (1.0 - readiness))
+                    / 2.0
+                    * self.config.maximum_reward_R
+                    * 0.42
+                )
+                wait = wait_option - 0.55 * uncertainty - 0.65 * deadline
+                output.append(
+                    ActionUtility(
+                        action=Action.WAIT,
+                        utility=float(wait),
+                        components={
+                            "thesis_strength": thesis,
+                            "sequence_progress": sequence,
+                            "location_gap": -(1.0 - location),
+                            "trigger_gap": -(1.0 - readiness),
+                            "option_value_R": wait_option,
+                            "uncertainty": -0.55 * uncertainty,
+                            "deadline": -0.65 * deadline,
+                        },
+                        hypothesis_key=candidate_id,
+                        reason=(
+                            "retain the causal setup while location or "
+                            f"trigger is incomplete; {_evidence_reason(hypothesis)}"
+                        ),
+                    )
+                )
+            elif hypothesis.phase is PlaybookPhase.EXECUTABLE:
+                executable_wait = self._executable_wait_utility(
+                    belief,
+                    observation,
+                    hypothesis,
+                    candidate_id,
+                    uncertainty_cost=uncertainty,
+                    deadline_cost=deadline,
+                )
+                if executable_wait is not None:
+                    output.append(executable_wait)
+            frozen_target_R = _frozen_primary_target_R(hypothesis)
+            reward = 0.0 if frozen_target_R is None else frozen_target_R
+            cost = (
+                0.0
+                if plan is None
+                else _cost_R(observation, plan.risk_points)
+            )
+            causal_eligible, causal_reasons = self._causal_entry_gate(
+                belief,
+                candidate_id,
+                observation,
+                hypothesis,
+            )
+            (
+                probability_available,
+                delivery_probability,
+                probability_reasons,
+            ) = self._delivery_probability(hypothesis)
+            action_authorized = causal_eligible and probability_available
+            gross = 0.0
+            enter = -1.0
+            if action_authorized:
+                gross = (
+                    delivery_probability * reward
+                    - (1.0 - delivery_probability)
+                )
+                enter = gross - cost
+            ineligible_reasons = causal_reasons + probability_reasons
             output.append(
                 ActionUtility(
                     action=Action.ENTER,
@@ -244,14 +605,22 @@ class UtilityDecisionLayer:
                     components={
                         "expected_gross_R": gross,
                         "cost_R": -cost,
-                        "uncertainty": -uncertainty,
-                        "deadline": -deadline,
-                        "fillability": -0.35 * fill_penalty,
-                        "effective_readiness": effective_probability,
-                        "hard_gates_pass": float(gates_pass),
+                        "uncertainty_observed": hypothesis.uncertainty,
+                        "causal_eligible": float(causal_eligible),
+                        "probability_available": float(probability_available),
+                        "p_delivery": delivery_probability,
+                        "action_authorized": float(action_authorized),
                     },
-                    hypothesis_key=hypothesis.key,
-                    reason=_evidence_reason(hypothesis),
+                    hypothesis_key=candidate_id,
+                    reason=(
+                        "calibrated delivery expected utility; "
+                        + _evidence_reason(hypothesis)
+                        if action_authorized
+                        else "entry ineligible: "
+                        + "; ".join(ineligible_reasons)
+                        + "; "
+                        + _evidence_reason(hypothesis)
+                    ),
                 )
             )
         return output
@@ -262,123 +631,200 @@ class UtilityDecisionLayer:
         belief: MarketBelief,
         account: AccountState,
     ) -> list[ActionUtility]:
+        """Choose management verbs from frozen structure, never a pseudo-p.
+
+        Once a position exists, entry delivery calibration is no longer a
+        probability of the management action.  Frozen stop/deadline/target,
+        exact episode identity and newly confirmed protection structure decide
+        EXIT/PROTECT/HOLD directly.  Missing or ambiguous identity fails closed.
+        """
+
         position = account.position
         if position is None:
             raise ValueError("position utilities require an open position")
-        key = f"{position.playbook.value}:{position.direction.value}"
-        hypothesis = belief.resolve_hypothesis(key)
-        setup_matches = bool(
-            hypothesis is not None
-            and (
-                position.setup_id is None
-                or (
-                    hypothesis.setup_context_id == position.setup_id
-                    and hypothesis.entry_location_id
-                    == position.entry_location_id
-                    and hypothesis.plan is not None
-                    and hypothesis.plan.entry_path_id
-                    == position.entry_path_id
-                )
-            )
+        original_risk = abs(
+            position.entry_price - position.original_invalidation.price
         )
-        probability = (
-            min(
-                float(hypothesis.thesis_strength),
-                float(hypothesis.delivery_quality),
-            )
-            if setup_matches
-            and hypothesis is not None
-            and _is_typed(hypothesis)
-            else 0.0
-        )
-        uncertainty = (
-            hypothesis.uncertainty
-            if setup_matches and hypothesis is not None
-            else 1.0
-        )
-        original_risk = abs(position.entry_price - position.original_invalidation.price)
         if original_risk <= 0:
             raise ValueError("open position has invalid original risk")
         sign = position.direction.sign
-        mark_R = sign * (observation.price - position.entry_price) / original_risk
-        target_R = sign * (position.primary_target.price - position.entry_price) / original_risk
-        remaining = max(0.0, target_R - mark_R)
-        stop_R = sign * (position.current_stop - position.entry_price) / original_risk
-        giveback = max(0.0, mark_R - stop_R)
-        cost = observation.execution.expected_round_trip_cost_points / original_risk
-        deadline = _deadline_penalty(observation, self.config)
-        uncertainty_cost = self.config.uncertainty_penalty * uncertainty
-
-        hold = (
-            mark_R
-            + probability * remaining
-            - (1.0 - probability) * giveback
-            - uncertainty_cost
-            - deadline
+        mark_R = (
+            sign * (observation.price - position.entry_price) / original_risk
         )
-        exit_now = mark_R - 0.5 * cost
-        utilities = [
-            ActionUtility(
-                Action.HOLD,
-                float(hold),
-                {
-                    "mark_R": mark_R,
-                    "delivery_option_R": probability * remaining,
-                    "giveback_risk_R": -(1.0 - probability) * giveback,
-                    "uncertainty": -uncertainty_cost,
-                    "deadline": -deadline,
-                },
-                key,
-                "keep the frozen thesis unchanged while expected delivery exceeds giveback",
-            ),
-            ActionUtility(
+        cost = (
+            observation.execution.expected_round_trip_cost_points
+            / original_risk
+        )
+        priority = max(
+            0.25,
+            self.config.minimum_utility_advantage + 0.01,
+        )
+
+        identity_complete = all(
+            isinstance(value, str) and bool(value)
+            for value in (
+                position.setup_id,
+                position.entry_location_id,
+                position.entry_path_id,
+            )
+        )
+        exact_matches: list[tuple[str, HypothesisBelief]] = []
+        if identity_complete:
+            for candidate_id, candidate in _position_candidate_items(belief):
+                plan = candidate.plan
+                if (
+                    candidate.playbook is position.playbook
+                    and candidate.direction is position.direction
+                    and candidate.setup_context_id == position.setup_id
+                    and candidate.entry_location_id
+                    == position.entry_location_id
+                    and plan is not None
+                    and plan.setup_id == position.setup_id
+                    and plan.entry_location_id == position.entry_location_id
+                    and plan.entry_path_id == position.entry_path_id
+                ):
+                    exact_matches.append((candidate_id, candidate))
+        candidate_id: str | None
+        hypothesis: HypothesisBelief | None
+        if len(exact_matches) == 1:
+            candidate_id, hypothesis = exact_matches[0]
+        else:
+            candidate_id, hypothesis = None, None
+
+        identity_uncertain = bool(
+            hypothesis is None
+            or _graph_ambiguity_count(hypothesis) > 0
+            or (
+                hypothesis.market_thesis_binding_required
+                and not (
+                    hypothesis.market_thesis_action_bound
+                    and hypothesis.market_thesis_match_status
+                    == "exact_root_bound"
+                    and hypothesis.bound_market_thesis_id
+                    == hypothesis.market_thesis_id
+                )
+            )
+        )
+        stop_touched = sign * (
+            observation.price - position.current_stop
+        ) <= 0.0
+        target_touched = sign * (
+            position.primary_target.price - observation.price
+        ) <= 0.0
+        deadline_elapsed = observation.asof >= position.deadline
+        terminal_phase = bool(
+            hypothesis is not None
+            and hypothesis.phase
+            in {PlaybookPhase.INVALIDATED, PlaybookPhase.COMPLETED}
+        )
+        position_not_open = position.status != "open"
+        hard_exit_reasons = tuple(
+            reason
+            for reason, present in (
+                ("frozen_stop_touched", stop_touched),
+                ("frozen_deadline_elapsed", deadline_elapsed),
+                ("frozen_target_reached", target_touched),
+                ("hypothesis_terminal", terminal_phase),
+                ("position_not_open", position_not_open),
+            )
+            if present
+        )
+
+        def deterministic_pair(
+            action: Action,
+            *,
+            action_utility: float,
+            components: dict[str, float],
+            reason: str,
+        ) -> list[ActionUtility]:
+            return [
+                ActionUtility(
+                    action,
+                    float(action_utility),
+                    components,
+                    candidate_id,
+                    reason,
+                ),
+                ActionUtility(
+                    Action.ABSTAIN,
+                    float(action_utility - priority),
+                    {
+                        "no_new_instruction_mark_R": mark_R,
+                        "structural_action_priority_R": -priority,
+                    },
+                    candidate_id,
+                    "do not leave a managed position without a clear "
+                    "structural instruction",
+                ),
+            ]
+
+        if hard_exit_reasons:
+            return deterministic_pair(
                 Action.EXIT,
-                float(exit_now),
-                {"locked_mark_R": mark_R, "exit_cost_R": -0.5 * cost},
-                key,
-                "close at the current observable mark and stop thesis exposure",
-            ),
-            ActionUtility(
-                Action.ABSTAIN,
-                float(mark_R),
-                {"no_new_instruction_mark_R": mark_R},
-                key,
-                "issue no management instruction while utilities are ambiguous",
-            ),
-        ]
+                action_utility=mark_R - 0.5 * cost,
+                components={
+                    "locked_mark_R": mark_R,
+                    "exit_cost_R": -0.5 * cost,
+                    "structural_exit": 1.0,
+                },
+                reason="exit on " + ",".join(hard_exit_reasons),
+            )
+        if identity_uncertain:
+            return deterministic_pair(
+                Action.EXIT,
+                action_utility=mark_R - 0.5 * cost,
+                components={
+                    "locked_mark_R": mark_R,
+                    "exit_cost_R": -0.5 * cost,
+                    "identity_fail_closed": 1.0,
+                },
+                reason=(
+                    "exit because the frozen setup/location/path identity is "
+                    "missing, non-unique, or unresolved"
+                ),
+            )
+
+        assert hypothesis is not None and candidate_id is not None
         candidate = causal_protection_candidate(position, observation)
         if candidate is not None:
-            candidate_R = sign * (candidate.price - position.entry_price) / original_risk
             tighter = (
                 candidate.price > position.current_stop
                 if position.direction is Direction.LONG
                 else candidate.price < position.current_stop
             )
-            reduced_giveback = max(0.0, mark_R - candidate_R)
-            protect = (
-                mark_R
-                + probability * remaining
-                - (1.0 - probability) * reduced_giveback
-                - uncertainty_cost
-                - 0.25 * cost
-                - (0.0 if tighter else 2.0)
-            )
-            utilities.append(
-                ActionUtility(
-                    Action.PROTECT,
-                    float(protect),
-                    {
-                        "mark_R": mark_R,
-                        "delivery_option_R": probability * remaining,
-                        "protected_giveback_R": -(1.0 - probability) * reduced_giveback,
-                        "amendment_cost_R": -0.25 * cost,
-                        "structurally_tighter": 1.0 if tighter else -2.0,
-                    },
-                    key,
-                    "tighten only to a newly confirmed causal structural level",
+            if tighter:
+                candidate_R = (
+                    sign
+                    * (candidate.price - position.entry_price)
+                    / original_risk
                 )
-            )
-        return utilities
+                return deterministic_pair(
+                    Action.PROTECT,
+                    action_utility=mark_R - 0.25 * cost,
+                    components={
+                        "mark_R": mark_R,
+                        "protected_level_R": candidate_R,
+                        "amendment_cost_R": -0.25 * cost,
+                        "qualified_structural_protection": 1.0,
+                    },
+                    reason=(
+                        "protect at newly confirmed causal level "
+                        + candidate.source_level_id
+                    ),
+                )
+        return deterministic_pair(
+            Action.HOLD,
+            action_utility=mark_R,
+            components={
+                "mark_R": mark_R,
+                "frozen_thesis_valid": 1.0,
+                "hard_exit_absent": 1.0,
+            },
+            reason=(
+                "hold because the exact frozen thesis remains valid and no "
+                "hard exit or qualified protection event occurred"
+            ),
+        )
 
     def decide(
         self,
@@ -429,24 +875,15 @@ class UtilityDecisionLayer:
             if global_context is None
             else global_context.unexplained_structured_episode_ids
         )
-        active_explanation = any(
-            hypothesis.eligible
-            and hypothesis.setup_context_id is not None
-            for hypothesis in belief.hypotheses.values()
-        )
         if unexplained:
+            diagnostic_ids = unexplained[:3]
             reasons.append(
-                "unexplained_structured_episode="
-                + ",".join(unexplained)
+                "unexplained_structured_episodes="
+                f"count:{len(unexplained)};"
+                " ids:"
+                + ",".join(diagnostic_ids)
                 + "; no ad-hoc playbook was created"
             )
-            if not active_explanation:
-                selected = Action.ABSTAIN
-                reasons.insert(
-                    0,
-                    "no fixed playbook explains the current "
-                    "high-salience structured episode",
-                )
         if belief.focus_state is not None:
             focus = belief.focus_state
             reasons.append(
@@ -468,6 +905,8 @@ class UtilityDecisionLayer:
                 f"context:{route.context_draw_id};"
                 f"primary:{route.primary_deliverable_target_id};"
                 f"terminal:{route.terminal_draw_id};"
+                f"authority_barrier:{route.authority_barrier_id}@"
+                f"{route.authority_barrier_price};"
                 f"blockers:{','.join(route.path_blocker_ids) or 'none'}"
             )
         if selected is not Action.ABSTAIN and advantage < self.config.minimum_utility_advantage:
@@ -483,9 +922,35 @@ class UtilityDecisionLayer:
                 0,
                 "enter requires a resolvable frozen execution plan",
             )
-        if any(name.startswith("warmup_") for name in observation.anomalies):
+        if (
+            account.position is None
+            and any(
+                name.startswith("warmup_")
+                for name in observation.anomalies
+            )
+        ):
             selected = Action.ABSTAIN
             reasons.insert(0, "multitimeframe observer is still warming up")
+        if selected is Action.ABSTAIN and account.position is None:
+            qualification_blocks = []
+            for candidate_id, hypothesis in _action_candidate_items(belief):
+                if hypothesis.phase is not PlaybookPhase.EXECUTABLE:
+                    continue
+                eligible, blocked_by = self._entry_qualification(
+                    belief,
+                    candidate_id,
+                    observation,
+                    hypothesis,
+                )
+                if not eligible:
+                    qualification_blocks.append(
+                        candidate_id + "=" + ",".join(blocked_by)
+                    )
+            if qualification_blocks:
+                reasons.append(
+                    "executable entry qualification failed: "
+                    + " | ".join(qualification_blocks)
+                )
         return Decision(
             asof=observation.asof,
             selected_action=selected,

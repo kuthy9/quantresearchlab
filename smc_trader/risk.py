@@ -19,6 +19,8 @@ from .model import (
     EntryLocationState,
     EventKind,
     FairValueGapLifecycle,
+    FVGQualification,
+    FrozenLSRContext,
     FrozenThesis,
     LiquidityInventoryLifecycle,
     LiquidityLevel,
@@ -74,6 +76,7 @@ def _freeze(plan: TradePlan, created_at) -> FrozenThesis:
         "deadline": plan.deadline,
         "draw_selection": plan.draw_selection,
         "range_auction": plan.range_auction,
+        "lsr_context": plan.lsr_context,
         "liquidity_route": plan.liquidity_route,
     }
     if plan.setup_id is not None:
@@ -99,6 +102,7 @@ def _freeze(plan: TradePlan, created_at) -> FrozenThesis:
         entry_path_id=plan.entry_path_id,
         draw_selection=plan.draw_selection,
         range_auction=plan.range_auction,
+        lsr_context=plan.lsr_context,
         liquidity_route=plan.liquidity_route,
     )
 
@@ -378,6 +382,169 @@ def _canonical_stop_sources(
             ),
         )
     return sources
+
+
+def _current_lsr_manipulation_matches(
+    context: FrozenLSRContext,
+    observation: MarketObservation,
+) -> bool:
+    """Validate a materialized parent without requiring bounded retention.
+
+    The frozen Context is the decision-time custody record.  If Group5/Group4
+    still exposes the exact manipulation, it must agree byte-for-byte on the
+    causal fields; its absence alone is not a reason to reject a late child
+    zone after the bounded diagnostic path was compacted.
+    """
+
+    matches = tuple(
+        item
+        for item in observation.manipulations
+        if item.manipulation_id == context.manipulation_id
+    )
+    if not matches:
+        return True
+    if len(matches) != 1:
+        return False
+    manipulation = matches[0]
+    lifecycle_clock_matches = bool(
+        (
+            manipulation.lifecycle is ManipulationLifecycle.REACCEPTED
+            and manipulation.reaccepted_at == context.reaccepted_at
+        )
+        or (
+            manipulation.lifecycle
+            is ManipulationLifecycle.ACCEPTED_OUTSIDE
+            and manipulation.accepted_outside_at is not None
+            and manipulation.accepted_outside_at
+            > context.displacement_observed_at
+        )
+    )
+    return bool(
+        manipulation.source_kind == "formed_liquidity_pool"
+        and lifecycle_clock_matches
+        and manipulation.protocol_hash == context.manipulation_protocol_hash
+        and manipulation.source_id == context.source_pool_id
+        and manipulation.swept_at == context.swept_at
+        and _same_price(
+            manipulation.sweep_extreme,
+            context.sweep_extreme,
+        )
+        and manipulation.side
+        == (
+            "below"
+            if context.direction is Direction.LONG
+            else "above"
+        )
+    )
+
+
+def _materialized_lsr_pool_path_matches(
+    context: FrozenLSRContext,
+    observation: MarketObservation,
+) -> bool:
+    """Validate an exact current pool path when it is still materialized."""
+
+    matches = tuple(
+        item
+        for item in observation.path_sequences
+        if item.sequence_id == context.pool_path_id
+    )
+    if not matches:
+        return True
+    if len(matches) != 1:
+        return False
+    path = matches[0]
+    return_steps = tuple(
+        step for step in path.steps if step.kind == "reacceptance_held"
+    )
+    displacement_steps = tuple(
+        step for step in path.steps if step.kind == "opposite_displacement"
+    )
+    return bool(
+        path.context_kind == "pool_reversal"
+        and path.context_id == context.manipulation_id
+        and path.direction is context.direction
+        and path.protocol_hash == context.pool_path_protocol_hash
+        and path.symbol == observation.symbol
+        and path.instrument_id == observation.instrument_id
+        # The Context freezes the causal reacceptance/displacement prefix.
+        # Later diagnostic resolution steps cannot retrospectively erase it;
+        # only a censored/source-invalidated path loses provenance custody.
+        and path.lifecycle is not PathSequenceLifecycle.CENSORED
+        and len(return_steps) == 1
+        and len(displacement_steps) == 1
+        and return_steps[0].source_event_id == context.manipulation_id
+        and return_steps[0].source_entity_id == context.manipulation_id
+        and return_steps[0].observed_at == context.reaccepted_at
+        and displacement_steps[0].source_event_id
+        == context.manipulation_id
+        and displacement_steps[0].source_entity_id == context.displacement_id
+        and displacement_steps[0].source_active_at
+        == context.displacement_active_at
+        and displacement_steps[0].observed_at
+        == context.displacement_observed_at
+    )
+
+
+def _valid_lsr_trigger_family(
+    path,
+    location: EntryLocationState,
+    first_pullback,
+    plan: TradePlan,
+    observation: MarketObservation,
+) -> bool:
+    """Validate the registered zone-bound LSR trigger OR family."""
+
+    expected_trigger = {
+        "zone_rejection_observed": "wick_rejection",
+        "qualified_reacceptance_held": "reacceptance_held",
+        "micro_bos_aligned": "micro_bos_confirmed",
+    }.get(path.transition_reason)
+    if expected_trigger is None:
+        return False
+    trigger_steps = tuple(
+        step for step in path.steps if step.kind == expected_trigger
+    )
+    if not trigger_steps:
+        return False
+    trigger = trigger_steps[-1]
+    if expected_trigger == "wick_rejection":
+        return bool(
+            path.lifecycle is PathSequenceLifecycle.ACTIVE
+            and trigger.source_entity_id == location.location_id
+            and trigger.observed_at > first_pullback.observed_at
+            and location.rejected_at == trigger.observed_at
+        )
+    if expected_trigger == "reacceptance_held":
+        return bool(
+            path.lifecycle is PathSequenceLifecycle.ACTIVE
+            and trigger.observed_at > first_pullback.observed_at
+            and any(
+                state.context_kind == "entry_zone"
+                and state.context_id == location.location_id
+                and state.reacceptance_id == trigger.source_entity_id
+                and state.direction is plan.direction
+                and state.lifecycle is QualifiedReacceptanceLifecycle.HELD
+                and state.held_at == trigger.observed_at
+                for state in observation.qualified_reacceptances
+            )
+        )
+    return bool(
+        path.lifecycle is PathSequenceLifecycle.CLOSED
+        and path.ended_at == observation.asof
+        and trigger.observed_at > first_pullback.observed_at
+        and any(
+            reference.context_kind == "zone_return"
+            and reference.context_id == location.location_id
+            and reference.expected_direction is plan.direction
+            and reference.qualified
+            and reference.bos_id == trigger.source_event_id
+            and reference.target_swing_id == trigger.source_entity_id
+            and reference.resolved_at == trigger.observed_at
+            and _micro_reference_has_exact_source(reference, observation)
+            for reference in observation.micro_bos_references
+        )
+    )
 
 
 def _valid_typed_entry_location(
@@ -662,119 +829,36 @@ def _valid_typed_entry_location(
         )
     if plan.playbook is not Playbook.LIQUIDITY_SWEEP_REVERSAL:
         return False
+    context = plan.lsr_context
+    zone_source = _exact_entry_zone_source(location, observation)
     if (
-        path.transition_reason != "micro_bos_aligned"
-        or "micro_bos_confirmed" not in step_kinds
-        or path.lifecycle is not PathSequenceLifecycle.CLOSED
-        or path.ended_at != observation.asof
+        context is None
+        or zone_source is None
+        or plan.setup_id
+        != context.entry_episode_id(location.source_zone_id)
+        or context.direction is not plan.direction
+        or location.source_displacement_id != context.displacement_id
+        or zone_source.source_displacement_id != context.displacement_id
+        or zone_source.source_displacement_active_at
+        != context.displacement_active_at
+        or location.formed_at < context.displacement_observed_at
+        or first_pullback.observed_at < location.formed_at
+        or path.protocol_hash != context.pool_path_protocol_hash
+        or (
+            location.source_zone_kind == "fvg"
+            and zone_source.qualification
+            is not FVGQualification.DISPLACEMENT_LINKED
+        )
+        or not _current_lsr_manipulation_matches(context, observation)
+        or not _materialized_lsr_pool_path_matches(context, observation)
     ):
         return False
-    micro_steps = [
-        step for step in path.steps if step.kind == "micro_bos_confirmed"
-    ]
-    aligned_references = [
-        reference
-        for reference in observation.micro_bos_references
-        if (
-            reference.context_kind == "zone_return"
-            and reference.context_id == location.location_id
-            and reference.expected_direction is plan.direction
-            and reference.qualified
-            and reference.resolved_at > first_pullback.observed_at
-            and any(
-                step.source_event_id == reference.bos_id
-                and step.source_entity_id
-                == reference.target_swing_id
-                and step.observed_at == reference.resolved_at
-                for step in micro_steps
-            )
-            and _micro_reference_has_exact_source(
-                reference,
-                observation,
-            )
-        )
-    ]
-    if not aligned_references:
-        return False
-    pool_path = next(
-        (
-            item
-            for item in observation.path_sequences
-            if (
-                item.sequence_id == plan.setup_id
-                and item.context_kind == "pool_reversal"
-            )
-        ),
-        None,
-    )
-    if (
-        pool_path is None
-        or pool_path.direction is not plan.direction
-        or pool_path.protocol_hash != path.protocol_hash
-        or pool_path.symbol != observation.symbol
-        or pool_path.instrument_id != observation.instrument_id
-        or any(
-            step.kind
-            in {
-                "accepted_outside",
-                "reacceptance_failed",
-                "micro_bos_opposed",
-                "micro_bos_ambiguous",
-            }
-            for step in pool_path.steps
-        )
-    ):
-        return False
-    return_steps = [
-        step
-        for step in pool_path.steps
-        if step.kind == "reacceptance_held"
-    ]
-    displacement_steps = [
-        step
-        for step in pool_path.steps
-        if step.kind == "opposite_displacement"
-    ]
-    if len(return_steps) != 1 or len(displacement_steps) != 1:
-        return False
-    return_step = return_steps[0]
-    displacement_step = displacement_steps[0]
-    manipulation = next(
-        (
-            state
-            for state in observation.manipulations
-            if (
-                state.manipulation_id == pool_path.context_id
-                and state.source_kind == "formed_liquidity_pool"
-            )
-        ),
-        None,
-    )
-    return bool(
-        manipulation is not None
-        and manipulation.lifecycle is ManipulationLifecycle.REACCEPTED
-        and manipulation.reaccepted_at == return_step.observed_at
-        and return_step.source_event_id == manipulation.manipulation_id
-        and return_step.source_entity_id == manipulation.manipulation_id
-        and return_step.observed_at < displacement_step.observed_at
-        <= location.formed_at
-        and displacement_step.source_event_id == location.source_zone_id
-        and displacement_step.source_entity_id
-        == location.source_displacement_id
-        and (
-            (zone_source := _exact_entry_zone_source(location, observation))
-            is not None
-        )
-        and zone_source.source_displacement_active_at is not None
-        and zone_source.source_displacement_active_at
-        > return_step.observed_at
-        and _has_opposed_mss(
-            observation,
-            plan.direction,
-            location.source_displacement_id,
-            after=return_step.observed_at,
-            before=first_pullback.observed_at,
-        )
+    return _valid_lsr_trigger_family(
+        path,
+        location,
+        first_pullback,
+        plan,
+        observation,
     )
 
 
@@ -816,6 +900,27 @@ def _valid_stop(
     stop = plan.invalidation
     if stop.observed_at > observation.asof or not stop.source_level_id:
         return False
+    # LSR freezes the exact parent manipulation and sweep extreme in the
+    # plan.  Bounded Scene-Graph/Group5 retention may legitimately remove the
+    # materialized manipulation before a later child becomes executable, so
+    # absence alone cannot erase that already causal stop.  When the parent is
+    # still materialized, the helpers below continue to require an exact,
+    # unambiguous match; no fallback stop or relaxed geometry is introduced.
+    if plan.playbook is Playbook.LIQUIDITY_SWEEP_REVERSAL:
+        context = plan.lsr_context
+        if (
+            context is None
+            or plan.entry_location_id is None
+            or stop.source_level_id != context.manipulation_id
+            or stop.observed_at != context.swept_at
+            or not _same_price(stop.price, context.sweep_extreme)
+            or not _current_lsr_manipulation_matches(context, observation)
+            or not _materialized_lsr_pool_path_matches(context, observation)
+        ):
+            return False
+        if plan.direction is Direction.LONG:
+            return stop.side == "below" and stop.price < plan.planned_entry
+        return stop.side == "above" and stop.price > plan.planned_entry
     source = _canonical_stop_sources(observation).get(stop.source_level_id)
     if source is None:
         return False
@@ -864,70 +969,6 @@ def _valid_stop(
                 )
             ):
                 return False
-        elif plan.playbook is Playbook.LIQUIDITY_SWEEP_REVERSAL:
-            pool_path = next(
-                (
-                    item
-                    for item in observation.path_sequences
-                    if (
-                        item.sequence_id == plan.setup_id
-                        and item.context_kind == "pool_reversal"
-                    )
-                ),
-                None,
-            )
-            if pool_path is None:
-                return False
-            if (
-                pool_path.direction is not plan.direction
-                or any(
-                    step.kind
-                    in {
-                        "accepted_outside",
-                        "reacceptance_failed",
-                        "micro_bos_opposed",
-                        "micro_bos_ambiguous",
-                    }
-                    for step in pool_path.steps
-                )
-                or not any(
-                    step.kind
-                    == "reacceptance_held"
-                    for step in pool_path.steps
-                )
-            ):
-                return False
-            manipulation = next(
-                (
-                    item
-                    for item in observation.manipulations
-                    if (
-                        item.manipulation_id == pool_path.context_id
-                        and item.source_kind
-                        == "formed_liquidity_pool"
-                    )
-                ),
-                None,
-            )
-            if (
-                manipulation is None
-                or stop.source_level_id
-                != manipulation.manipulation_id
-                or not pool_path.steps
-                or pool_path.steps[0].kind != "pool_swept"
-                or pool_path.steps[0].observed_at
-                != manipulation.swept_at
-                or pool_path.steps[0].source_event_id
-                != manipulation.manipulation_id
-                or pool_path.steps[0].source_entity_id
-                != manipulation.manipulation_id
-                or not _same_price(
-                    stop.price,
-                    manipulation.sweep_extreme,
-                )
-                or stop.observed_at != manipulation.swept_at
-            ):
-                return False
     if plan.direction is Direction.LONG:
         return stop.side == "below" and stop.price < plan.planned_entry
     return stop.side == "above" and stop.price > plan.planned_entry
@@ -936,11 +977,51 @@ def _valid_stop(
 def _valid_targets(
     plan: TradePlan,
     observation: MarketObservation,
+    *,
+    tick_size: float = 0.25,
 ) -> bool:
     route = plan.liquidity_route
     visible = _canonical_visible_levels(observation)
+    conservative_contact_basis = bool(
+        route is not None
+        and route.primary_target_price_basis == "conservative_contact"
+    )
+    if (
+        conservative_contact_basis
+        and plan.playbook is not Playbook.LIQUIDITY_SWEEP_REVERSAL
+    ):
+        return False
+    contact_prices: dict[str, float] = {}
+    ambiguous_contact_ids: set[str] = set()
+    if conservative_contact_basis:
+        for item in observation.liquidity_inventory:
+            if (
+                item.lifecycle is not LiquidityInventoryLifecycle.VISIBLE
+                or item.confirmed_at > observation.asof
+                or item.side != plan.direction.opposing_liquidity_side
+                or item.item_id in ambiguous_contact_ids
+            ):
+                continue
+            contact = float(
+                item.lower_bound
+                if plan.direction is Direction.LONG
+                else item.upper_bound
+            )
+            prior = contact_prices.get(item.item_id)
+            if prior is None:
+                contact_prices[item.item_id] = contact
+            elif not _same_price(prior, contact):
+                contact_prices.pop(item.item_id, None)
+                ambiguous_contact_ids.add(item.item_id)
+
+    def target_price(level_id: str, inventory_price: float) -> float | None:
+        if not conservative_contact_basis:
+            return inventory_price
+        return contact_prices.get(level_id)
+
     if route is not None:
         target = plan.targets[0]
+        barrier_price = route.authority_barrier_price
         if (
             route.primary_deliverable_target_id != target.level_id
             or route.context_draw_id is None
@@ -948,20 +1029,34 @@ def _valid_targets(
             or target.level_id not in route.source_path_ids
             or route.context_draw_id not in route.source_path_ids
             or route.terminal_draw_id not in route.source_path_ids
+            # Brain freezes only price-geometric hard barriers here.  A plan
+            # crossing one cannot be approved; ordinary nearer liquidity is
+            # a waypoint/draw and is intentionally not inferred as a blocker.
             or route.path_blocker_ids
             or route.context_draw_id not in visible
             or route.terminal_draw_id not in visible
-            or any(
-                level_id != target.level_id
-                and level.side == plan.direction.opposing_liquidity_side
+            or (
+                barrier_price is not None
                 and (
-                    level.price > plan.planned_entry
-                    if plan.direction is Direction.LONG
-                    else level.price < plan.planned_entry
+                    (
+                        plan.direction is Direction.LONG
+                        and not (
+                            plan.planned_entry
+                            < target.price
+                            and target.price + tick_size
+                            < float(barrier_price)
+                        )
+                    )
+                    or (
+                        plan.direction is Direction.SHORT
+                        and not (
+                            plan.planned_entry
+                            > target.price
+                            and target.price - tick_size
+                            > float(barrier_price)
+                        )
+                    )
                 )
-                and abs(level.price - plan.planned_entry)
-                < abs(target.price - plan.planned_entry)
-                for level_id, level in visible.items()
             )
         ):
             return False
@@ -1026,10 +1121,14 @@ def _valid_targets(
         source = visible.get(target.level_id)
         if source is None:
             return False
+        expected_price = (
+            target_price(target.level_id, source.price)
+        )
         if (
-            target.timeframe is not source.timeframe
+            expected_price is None
+            or target.timeframe is not source.timeframe
             or target.side != source.side
-            or not _same_price(target.price, source.price)
+            or not _same_price(target.price, expected_price)
             or target.formed_at != source.formed_at
             or target.confirmed_at != source.confirmed_at
             or target.confirmed_at > observation.asof
@@ -1356,7 +1455,11 @@ class StructuralRiskEngine:
                 reasons.append(
                     "planned entry is not bound to its frozen Group 5 zone"
                 )
-            if not _valid_targets(plan, observation):
+            if not _valid_targets(
+                plan,
+                observation,
+                tick_size=self.limits.tick_size,
+            ):
                 vetoes.append(VetoCode.INVALID_TARGET)
                 reasons.append("target is not in current causal liquidity inventory")
             actual_primary_R = (

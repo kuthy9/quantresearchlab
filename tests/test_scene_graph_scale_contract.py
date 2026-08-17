@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import pickle
 from types import SimpleNamespace
 
 import pandas as pd
@@ -12,6 +13,7 @@ from smc_trader.model import (
     CandleStructureState,
     Direction,
     EventKind,
+    GlobalConflictRole,
     LiquidityInventoryItem,
     LiquidityInventoryLifecycle,
     LiquidityPoolLifecycle,
@@ -39,7 +41,7 @@ from smc_trader.scene_graph import (
     parse_scale_specs,
     scale_registry_id,
     select_focus,
-    supplement_focus_once,
+    update_global_market_context,
 )
 
 from .helpers import (
@@ -69,6 +71,7 @@ def _node(
     source_ids: tuple[str, ...] = (),
     entity_id: str | None = None,
     bounds: tuple[float, float] | None = (99.0, 101.0),
+    semantic_attributes: tuple[tuple[str, str], ...] = (),
 ) -> SceneNode:
     formed = formed_at or observed_at
     return SceneNode(
@@ -96,6 +99,122 @@ def _node(
         ambiguity_state=status,
         source_ids=source_ids,
         entity_id=entity_id,
+        semantic_attributes=semantic_attributes,
+    )
+
+
+def test_current_kind_cache_is_revision_bounded_and_pickle_safe() -> None:
+    graph = TemporalMarketSceneGraph()
+    asof = _clock("2025-01-06 10:00")
+    first_node = _node(
+        "cache-structure-1",
+        "structure",
+        Timeframe.H1,
+        asof,
+        entity_id="cache-structure-1",
+    )
+    graph.add_node(first_node)
+
+    first = graph._current_kind_nodes("structure")
+    first_context = graph._current_nonterminal_kind_nodes("structure")
+    assert graph._current_kind_nodes("structure") is first
+    assert graph._current_nonterminal_kind_nodes("structure") is first_context
+
+    graph.add_node(
+        _node(
+            "cache-structure-2",
+            "structure",
+            Timeframe.H1,
+            asof + pd.Timedelta(minutes=1),
+            entity_id="cache-structure-2",
+        )
+    )
+    revised = graph._current_kind_nodes("structure")
+    assert revised is not first
+    assert {node.entity_id for node in revised} == {
+        "cache-structure-1",
+        "cache-structure-2",
+    }
+
+    resumed = pickle.loads(pickle.dumps(graph))
+    resumed_first = resumed._current_nonterminal_kind_nodes("structure")
+    assert resumed._current_nonterminal_kind_nodes("structure") is resumed_first
+    assert resumed_first == graph._current_nonterminal_kind_nodes(
+        "structure"
+    )
+
+
+def test_current_neighbor_cache_tracks_permanent_and_dynamic_generations() -> None:
+    graph = TemporalMarketSceneGraph()
+    asof = _clock("2025-01-06 10:00")
+    source = graph.add_node(
+        _node("neighbor-source", "structure", Timeframe.H1, asof)
+    )
+    first_target = graph.add_node(
+        _node("neighbor-first", "displacement", Timeframe.M5, asof)
+    )
+    graph.add_edge(
+        SceneEdge(
+            edge_id="edge:neighbor-first",
+            source_node_id=source.node_id,
+            relation=SceneEdgeKind.ALIGNS_WITH,
+            target_node_id=first_target.node_id,
+            observed_at=asof,
+            source_ids=(source.node_id, first_target.node_id),
+        )
+    )
+    first = tuple(graph._neighbors(source.node_id))
+    assert graph._current_neighbors_cache[source.node_id] == first
+
+    second_target = graph.add_node(
+        _node("neighbor-second", "displacement", Timeframe.M5, asof)
+    )
+    graph.add_edge(
+        SceneEdge(
+            edge_id="edge:neighbor-second",
+            source_node_id=source.node_id,
+            relation=SceneEdgeKind.CONFIRMS,
+            target_node_id=second_target.node_id,
+            observed_at=asof,
+            source_ids=(source.node_id, second_target.node_id),
+        )
+    )
+    assert not graph._current_neighbors_cache
+    assert {value[0] for value in graph._neighbors(source.node_id)} == {
+        first_target.node_id,
+        second_target.node_id,
+    }
+
+    liquidity = []
+    for index, price in enumerate((101.0, 102.0, 103.0), start=1):
+        liquidity.append(
+            graph.add_node(
+                _node(
+                    f"neighbor-liquidity-{index}",
+                    "liquidity",
+                    Timeframe.M5,
+                    asof,
+                    lifecycle=LiquidityInventoryLifecycle.VISIBLE.value,
+                    bounds=(price, price),
+                )
+            )
+        )
+    assert tuple(graph._neighbors(liquidity[0].node_id)) == ()
+    graph._refresh_current_path_block_edges(
+        SimpleNamespace(price=100.0, asof=asof)
+    )
+    dynamic = tuple(graph._neighbors(liquidity[0].node_id))
+    assert len(dynamic) == 1
+    assert dynamic[0][1].relation is SceneEdgeKind.BLOCKS_PATH_TO
+    graph._refresh_current_path_block_edges(
+        SimpleNamespace(price=102.5, asof=asof + pd.Timedelta(minutes=1))
+    )
+    assert tuple(graph._neighbors(liquidity[0].node_id)) == ()
+
+    resumed = pickle.loads(pickle.dumps(graph))
+    resumed.__dict__.pop("_current_neighbors_cache")
+    assert tuple(resumed._neighbors(source.node_id)) == tuple(
+        graph._neighbors(source.node_id)
     )
 
 
@@ -1177,13 +1296,10 @@ def test_candle_structure_is_an_explicit_transient_scene_view() -> None:
     focus = FocusState(
         asof=t0,
         primary_timeframes=(Timeframe.M1.value,),
-        supplemental_timeframes=(),
         reason_codes=("test_default_query",),
-        trigger_event_ids=(),
         question="verify default semantic query",
         resolution_status=EvidenceStatus.CONFIRMED,
         switched=False,
-        switched_at=None,
     )
     assert not any(
         value.kind == "candle_structure"
@@ -1652,44 +1768,6 @@ def test_focus_and_hypothesis_ambiguity_stay_in_active_context() -> None:
         {timeframe.value for timeframe in observation.active_timeframes}
     )
     assert Timeframe.M15.value not in focus.primary_timeframes
-    stage_focus = replace(
-        focus,
-        primary_timeframes=(Timeframe.M5.value, Timeframe.M1.value),
-        prior_timeframes=(Timeframe.H1.value, Timeframe.M5.value),
-        phase_at_selection=PlaybookPhase.WAITING_TRIGGER.value,
-        hypothesis_id="hyp:context-a",
-    )
-    prior_stage = SimpleNamespace(
-        phase=PlaybookPhase.WAITING_TRIGGER,
-        key="displacement_first_pullback:long",
-    )
-    current_stage = SimpleNamespace(
-        phase=PlaybookPhase.DELIVERING,
-        key="displacement_first_pullback:long",
-    )
-    five_scale = supplement_focus_once(
-        stage_focus,
-        prior_stage,
-        current_stage,
-        tuple(
-            spec.native_timeframe
-            for spec in MODEL_SCALE_SPECS
-            if spec.enabled and spec.native_timeframe is not None
-        ),
-    )
-    assert Timeframe.M15.value in five_scale.supplemental_timeframes
-    core_only = supplement_focus_once(
-        stage_focus,
-        prior_stage,
-        current_stage,
-        tuple(
-            spec.native_timeframe
-            for spec in CORE_TEST_SCALE_SPECS
-            if spec.enabled and spec.native_timeframe is not None
-        ),
-    )
-    assert Timeframe.M15.value not in core_only.supplemental_timeframes
-    assert five_scale.hypothesis_id == "hyp:context-a"
 
     graph = TemporalMarketSceneGraph()
     asof = observation.asof
@@ -1742,7 +1820,7 @@ def test_focus_and_hypothesis_ambiguity_stay_in_active_context() -> None:
         graph,
         focused,
     )
-    assert len(contexts) <= 2
+    assert len(contexts) == 1
     primary = next(iter(contexts.values()))
     assert primary.ambiguous_evidence == {}
     assert primary.missing_evidence["m5_displacement"] is EvidenceStatus.NOT_OBSERVED
@@ -1756,9 +1834,9 @@ def test_select_focus_uses_current_epoch_conflict_and_ambiguity_indexes(
     graph = TemporalMarketSceneGraph()
     parent = graph.add_node(
         _node(
-            "epoch:0:structure:1H:index-parent",
+            "epoch:0:structure:4H:index-parent",
             "structure",
-            Timeframe.H1,
+            Timeframe.H4,
             asof,
             direction=Direction.LONG,
             source_ids=("index-parent",),
@@ -1767,13 +1845,17 @@ def test_select_focus_uses_current_epoch_conflict_and_ambiguity_indexes(
     )
     displacement = graph.add_node(
         _node(
-            "epoch:0:displacement:5m:index-opposition",
-            "displacement",
-            Timeframe.M5,
+            "epoch:0:bos:1H:index-opposition",
+            "bos",
+            Timeframe.H1,
             asof,
             direction=Direction.SHORT,
             source_ids=("index-opposition",),
             entity_id="index-opposition",
+            semantic_attributes=(
+                ("scope", "opposed"),
+                ("post_break_state", "accepted"),
+            ),
         )
     )
     ambiguous = graph.add_node(
@@ -1811,7 +1893,7 @@ def test_select_focus_uses_current_epoch_conflict_and_ambiguity_indexes(
     )
     prior_focus = replace(
         ambiguous_focus,
-        primary_timeframes=(Timeframe.M5.value, Timeframe.M1.value),
+        primary_timeframes=(Timeframe.H1.value, Timeframe.M1.value),
         resolution_status=EvidenceStatus.UNKNOWN,
         hypothesis_id="hyp:index-parent",
     )
@@ -1833,16 +1915,28 @@ def test_select_focus_uses_current_epoch_conflict_and_ambiguity_indexes(
         },
         ranked=lambda: [hypothesis],
     )
+    global_context = update_global_market_context(
+        None,
+        observation,
+        SceneGraphDelta(
+            asof=asof,
+            revision_id=graph.revision_id,
+            added_node_ids=(parent.node_id, displacement.node_id, ambiguous.node_id),
+            added_edge_ids=(opposition.edge_id,),
+        ),
+        graph,
+    )
     conflicting_focus = select_focus(
         previous,
         observation,
         None,
         graph,
+        global_context,
     )
     assert opposition.edge_id in (
         graph._current_epoch_active_opposes_edge_ids
     )
-    assert "cross_scale_conflict" in conflicting_focus.reason_codes
+    assert "root_related_cross_scale_conflict" in conflicting_focus.reason_codes
     assert conflicting_focus.resolution_status is EvidenceStatus.CONFLICTING
 
     resolved_at = asof + pd.Timedelta(minutes=1)
@@ -1864,7 +1958,24 @@ def test_select_focus_uses_current_epoch_conflict_and_ambiguity_indexes(
     )
     graph._last_asof = resolved_at
     resolved_observation = market_observation(asof=resolved_at)
-    resolved_focus = select_focus(None, resolved_observation, None, graph)
+    resolved_context = update_global_market_context(
+        global_context,
+        resolved_observation,
+        SceneGraphDelta(
+            asof=resolved_at,
+            revision_id=graph.revision_id,
+            revised_node_ids=(ambiguous.node_id,),
+            revised_edge_ids=(opposition.edge_id,),
+        ),
+        graph,
+    )
+    resolved_focus = select_focus(
+        None,
+        resolved_observation,
+        None,
+        graph,
+        resolved_context,
+    )
     assert opposition.edge_id not in (
         graph._current_epoch_active_opposes_edge_ids
     )
@@ -1878,7 +1989,7 @@ def test_select_focus_uses_current_epoch_conflict_and_ambiguity_indexes(
     assert historical_focus.resolution_status is EvidenceStatus.AMBIGUOUS
 
 
-def test_focus_resolution_unsticks_but_unrelated_conflict_does_not_switch() -> None:
+def test_focus_retains_root_candidate_for_unrelated_conflict() -> None:
     observation = market_observation()
     graph = TemporalMarketSceneGraph()
     asof = observation.asof
@@ -1914,17 +2025,15 @@ def test_focus_resolution_unsticks_but_unrelated_conflict_does_not_switch() -> N
     prior_focus = FocusState(
         asof=asof - pd.Timedelta(minutes=1),
         primary_timeframes=(Timeframe.M5.value, Timeframe.M1.value),
-        supplemental_timeframes=(),
         reason_codes=("new_key_event",),
-        trigger_event_ids=(),
         question="is the prior question resolved",
         resolution_status=EvidenceStatus.CONFIRMED,
         switched=False,
-        switched_at=None,
         hypothesis_id="hyp:focus-root",
-        phase_at_selection=PlaybookPhase.FORMING.value,
     )
     hypothesis = SimpleNamespace(
+        candidate_id="hyp:focus-root",
+        required_root_id="focus-root",
         phase=PlaybookPhase.FORMING,
         plan=None,
         key="displacement_first_pullback:long",
@@ -1942,10 +2051,21 @@ def test_focus_resolution_unsticks_but_unrelated_conflict_does_not_switch() -> N
         },
         ranked=lambda: [hypothesis],
     )
-    updated = select_focus(previous, observation, None, graph)
-    assert "focus_question_resolved_or_invalidated" in updated.reason_codes
-    assert "cross_scale_conflict" not in updated.reason_codes
-    assert updated.switched
+    unrelated_delta = SceneGraphDelta(
+        asof=asof,
+        revision_id=graph.revision_id,
+        added_node_ids=(left.node_id, right.node_id),
+        added_edge_ids=("edge:unrelated-opposes",),
+    )
+    updated = select_focus(
+        previous,
+        observation,
+        unrelated_delta,
+        graph,
+    )
+    assert updated.primary_timeframes == prior_focus.primary_timeframes
+    assert updated.reason_codes == ("new_key_event",)
+    assert not updated.switched
     unresolved_previous = SimpleNamespace(
         **{
             **vars(previous),
@@ -1957,17 +2077,399 @@ def test_focus_resolution_unsticks_but_unrelated_conflict_does_not_switch() -> N
     )
     retained = select_focus(unresolved_previous, observation, None, graph)
     assert retained.primary_timeframes == prior_focus.primary_timeframes
-    assert retained.reason_codes == ("focus_retained_no_switch_event",)
+    assert retained.reason_codes == ("new_key_event",)
+    assert not retained.switched
 
 
-def test_focus_conflict_excludes_internal_pullback_but_keeps_displacement() -> None:
+def test_focus_reselects_when_current_root_evidence_revision_changes() -> None:
+    observation = market_observation()
+    graph = TemporalMarketSceneGraph()
+    asof = observation.asof
+    root = graph.add_node(
+        _node(
+            "epoch:0:displacement:5m:focus-root",
+            "displacement",
+            Timeframe.M5,
+            asof,
+            source_ids=("focus-root",),
+            entity_id="focus-root",
+        )
+    )
+    graph._last_asof = asof
+    prior_focus = FocusState(
+        asof=asof - pd.Timedelta(minutes=1),
+        primary_timeframes=(Timeframe.M5.value, Timeframe.M1.value),
+        reason_codes=("root_market_thesis",),
+        question="what exact causal event is required next",
+        resolution_status=EvidenceStatus.FORMING,
+        hypothesis_id="hyp:focus-root",
+        switched=False,
+    )
+    hypothesis = SimpleNamespace(
+        candidate_id="hyp:focus-root",
+        required_root_id="focus-root",
+        market_thesis_root_id="focus-root",
+        phase=PlaybookPhase.FORMING,
+        plan=None,
+        key="displacement_first_pullback:long",
+        context_id="focus-root",
+        setup_context_id=None,
+        episode_id=None,
+        initiating_event_id=None,
+        entry_location_id=None,
+        invalidation=None,
+        sequence=None,
+        liquidity_route=None,
+    )
+    prior_thesis = SimpleNamespace(
+        root_id="focus-root",
+        evidence_revision_id="thesis-evidence:prior",
+        ambiguous_evidence=(),
+        source_timeframe=Timeframe.M5,
+    )
+    current_thesis = SimpleNamespace(
+        root_id="focus-root",
+        evidence_revision_id="thesis-evidence:current",
+        ambiguous_evidence=(),
+        source_timeframe=Timeframe.M5,
+    )
+    prior_context = SimpleNamespace(
+        open_market_theses=(prior_thesis,),
+        material_conflicts=(),
+    )
+    current_context = SimpleNamespace(
+        updated_at=asof,
+        scene_revision_id=graph.revision_id,
+        open_market_theses=(current_thesis,),
+        material_conflicts=(),
+        authority_timeframe=None,
+        invalidated_source_ids=(),
+        path_blocker_ids=(),
+    )
+    previous = SimpleNamespace(
+        focus_state=prior_focus,
+        global_context=prior_context,
+        ranked=lambda: [hypothesis],
+        resolve_hypothesis=lambda _: hypothesis,
+    )
+
+    updated = select_focus(
+        previous,
+        observation,
+        SceneGraphDelta(
+            asof=asof,
+            revision_id=graph.revision_id,
+            revised_node_ids=(root.node_id,),
+        ),
+        graph,
+        current_context,
+        preferred_candidate=hypothesis,
+    )
+
+    assert updated.hypothesis_id == hypothesis.candidate_id
+    assert "root_market_thesis_revised" in updated.reason_codes
+    assert updated.switched
+
+
+def _lsr_focus_candidate(
+    *,
+    candidate_id: str = "lsr-candidate:zone-a",
+    episode_id: str = "lsr-episode:zone-a",
+    location_id: str = "entry-location:zone-a",
+    path_id: str = "entry-path:zone-a",
+    trigger_path_id: str | None = None,
+    evidence_revision_id: str = "lsr-context-evidence:1",
+) -> SimpleNamespace:
+    trigger_path_id = path_id if trigger_path_id is None else trigger_path_id
+    return SimpleNamespace(
+        candidate_id=candidate_id,
+        required_root_id="manipulation:shared-root",
+        market_thesis_root_id="manipulation:shared-root",
+        context_id="pool-path:shared-root",
+        context_thesis_id="lsr-context:shared-root",
+        parent_context_thesis_id="lsr-context:shared-root",
+        setup_context_id=episode_id,
+        episode_id=episode_id,
+        initiating_event_id="manipulation:shared-root",
+        entry_location_id=location_id,
+        entry_path_id=path_id,
+        context_metadata={
+            "lsr_manipulation_id": "manipulation:shared-root",
+            "lsr_pool_path_id": "pool-path:shared-root",
+            "lsr_displacement_id": "displacement:shared-root",
+            "lsr_entry_zone_id": f"zone:{location_id}",
+        },
+        selected_trigger=SimpleNamespace(
+            trigger_id=f"trigger:{location_id}",
+            setup_id=episode_id,
+            entry_location_id=location_id,
+            entry_path_id=trigger_path_id,
+            source_entity_id=f"trigger-entity:{location_id}",
+            source_event_id=f"trigger-event:{location_id}",
+        ),
+        sequence=SimpleNamespace(setup_id=episode_id, steps=()),
+        liquidity_route=None,
+        invalidation=None,
+        plan=None,
+        playbook=Playbook.LIQUIDITY_SWEEP_REVERSAL,
+        direction=Direction.SHORT,
+        phase=PlaybookPhase.WAITING_TRIGGER,
+        key=candidate_id,
+        evidence_revision_id=evidence_revision_id,
+    )
+
+
+def _focus_context(
+    graph: TemporalMarketSceneGraph,
+    asof: pd.Timestamp,
+    *,
+    open_market_theses: tuple[SimpleNamespace, ...] = (),
+    material_conflicts: tuple[SimpleNamespace, ...] = (),
+    invalidated_source_ids: tuple[str, ...] = (),
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        updated_at=asof,
+        scene_revision_id=graph.revision_id,
+        open_market_theses=open_market_theses,
+        material_conflicts=material_conflicts,
+        invalidated_source_ids=invalidated_source_ids,
+        path_blocker_ids=(),
+        authority_timeframe=None,
+    )
+
+
+def _prior_focus_belief(
+    candidate: SimpleNamespace,
+    context: SimpleNamespace,
+    asof: pd.Timestamp,
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        focus_state=FocusState(
+            asof=asof - pd.Timedelta(minutes=1),
+            primary_timeframes=(Timeframe.M5.value, Timeframe.M1.value),
+            reason_codes=("exact_episode_focus",),
+            question="has the exact child path produced its trigger",
+            resolution_status=EvidenceStatus.FORMING,
+            hypothesis_id=candidate.candidate_id,
+            switched=False,
+        ),
+        global_context=context,
+        ranked=lambda: [candidate],
+        resolve_hypothesis=lambda _: candidate,
+    )
+
+
+def test_lsr_focus_uses_stable_context_revision_after_scene_root_projection_closes() -> None:
+    observation = market_observation()
+    asof = observation.asof
+    graph = TemporalMarketSceneGraph()
+    candidate = _lsr_focus_candidate()
+    prior_thesis = SimpleNamespace(
+        root_id=candidate.required_root_id,
+        evidence_revision_id="scene-thesis:transient",
+        ambiguous_evidence=(),
+        source_timeframe=Timeframe.H1,
+    )
+    prior_context = _focus_context(
+        graph,
+        asof - pd.Timedelta(minutes=1),
+        open_market_theses=(prior_thesis,),
+    )
+    previous = _prior_focus_belief(candidate, prior_context, asof)
+    current_context = _focus_context(graph, asof)
+
+    retained = select_focus(
+        previous,
+        observation,
+        None,
+        graph,
+        current_context,
+        preferred_candidate=candidate,
+    )
+
+    assert retained.reason_codes == ("exact_episode_focus",)
+    assert retained.hypothesis_id == candidate.candidate_id
+    assert not retained.switched
+
+    revised_candidate = SimpleNamespace(
+        **{
+            **vars(candidate),
+            "evidence_revision_id": "lsr-context-evidence:2",
+        }
+    )
+    revised = select_focus(
+        previous,
+        observation,
+        None,
+        graph,
+        current_context,
+        preferred_candidate=revised_candidate,
+    )
+    assert "root_market_thesis_revised" in revised.reason_codes
+    assert revised.switched
+
+
+def test_lsr_focus_reselects_for_exact_path_not_sibling_path_invalidation() -> None:
+    observation = market_observation()
+    asof = observation.asof
+    graph = TemporalMarketSceneGraph()
+    candidate = _lsr_focus_candidate()
+    prior_context = _focus_context(
+        graph,
+        asof - pd.Timedelta(minutes=1),
+    )
+    previous = _prior_focus_belief(candidate, prior_context, asof)
+
+    sibling_only = select_focus(
+        previous,
+        observation,
+        None,
+        graph,
+        _focus_context(
+            graph,
+            asof,
+            invalidated_source_ids=("entry-path:zone-b",),
+        ),
+        preferred_candidate=candidate,
+    )
+    assert sibling_only.reason_codes == ("exact_episode_focus",)
+    assert not sibling_only.switched
+
+    exact = select_focus(
+        previous,
+        observation,
+        None,
+        graph,
+        _focus_context(
+            graph,
+            asof,
+            invalidated_source_ids=(candidate.entry_path_id,),
+        ),
+        preferred_candidate=candidate,
+    )
+    assert "active_thesis_source_invalidated" in exact.reason_codes
+    assert exact.question == "which frozen source closed the active thesis"
+    assert exact.switched
+
+
+def test_lsr_focus_rejects_mixed_episode_path_and_trigger_binding() -> None:
+    observation = market_observation()
+    asof = observation.asof
+    graph = TemporalMarketSceneGraph()
+    malformed = _lsr_focus_candidate(trigger_path_id="entry-path:zone-b")
+    prior_context = _focus_context(
+        graph,
+        asof - pd.Timedelta(minutes=1),
+    )
+    previous = _prior_focus_belief(malformed, prior_context, asof)
+
+    retained = select_focus(
+        previous,
+        observation,
+        None,
+        graph,
+        _focus_context(
+            graph,
+            asof,
+            invalidated_source_ids=(
+                malformed.entry_path_id,
+                malformed.selected_trigger.entry_path_id,
+            ),
+        ),
+        preferred_candidate=malformed,
+    )
+
+    assert retained.reason_codes == ("exact_episode_focus",)
+    assert not retained.switched
+
+    contexts = build_hypothesis_states(
+        {malformed.candidate_id: malformed},
+        None,
+        None,
+    )
+    roots = contexts[malformed.candidate_id].context_root_ids
+    assert malformed.entry_path_id not in roots
+    assert malformed.selected_trigger.entry_path_id not in roots
+
+
+def test_lsr_hypothesis_state_roots_include_only_the_exact_child_path() -> None:
+    candidate = _lsr_focus_candidate()
+    contexts = build_hypothesis_states(
+        {candidate.candidate_id: candidate},
+        None,
+        None,
+    )
+
+    roots = contexts[candidate.candidate_id].context_root_ids
+    assert candidate.episode_id in roots
+    assert candidate.entry_location_id in roots
+    assert candidate.entry_path_id in roots
+    assert "entry-path:zone-b" not in roots
+
+
+def test_lsr_focus_conflict_binds_summary_namespace_to_exact_child_path() -> None:
+    observation = market_observation()
+    asof = observation.asof
+    graph = TemporalMarketSceneGraph()
+    candidate = _lsr_focus_candidate()
+    prior_context = _focus_context(
+        graph,
+        asof - pd.Timedelta(minutes=1),
+    )
+    previous = _prior_focus_belief(candidate, prior_context, asof)
+
+    def conflict(path_id: str) -> SimpleNamespace:
+        return SimpleNamespace(
+            conflict_id=f"conflict:{path_id}",
+            event_id=path_id,
+            source_node_id=f"epoch:0:path_sequence:1m:{path_id}",
+            target_node_id="epoch:0:structure:4H:unrelated",
+            role=GlobalConflictRole.AUTHORITY_TRANSITION_CANDIDATE,
+            affected_hypothesis_ids=(
+                "liquidity_sweep_reversal:short",
+            ),
+        )
+
+    sibling_only = select_focus(
+        previous,
+        observation,
+        None,
+        graph,
+        _focus_context(
+            graph,
+            asof,
+            material_conflicts=(conflict("entry-path:zone-b"),),
+        ),
+        preferred_candidate=candidate,
+    )
+    assert sibling_only.reason_codes == ("exact_episode_focus",)
+    assert not sibling_only.switched
+
+    exact = select_focus(
+        previous,
+        observation,
+        None,
+        graph,
+        _focus_context(
+            graph,
+            asof,
+            material_conflicts=(conflict(candidate.entry_path_id),),
+        ),
+        preferred_candidate=candidate,
+    )
+    assert "root_related_cross_scale_conflict" in exact.reason_codes
+    assert exact.resolution_status is EvidenceStatus.CONFLICTING
+    assert exact.switched
+
+
+def test_focus_conflict_excludes_internal_pullback_but_keeps_h1_transition() -> None:
     graph = TemporalMarketSceneGraph()
     asof = _clock("2025-01-06 10:00")
     parent = graph.add_node(
         _node(
-            "epoch:0:structure:1H:parent",
+            "epoch:0:structure:4H:parent",
             "structure",
-            Timeframe.H1,
+            Timeframe.H4,
             asof,
             direction=Direction.LONG,
             source_ids=("parent",),
@@ -1987,14 +2489,18 @@ def test_focus_conflict_excludes_internal_pullback_but_keeps_displacement() -> N
     )
     displacement = graph.add_node(
         _node(
-            "epoch:0:displacement:5m:opposite",
-            "displacement",
-            Timeframe.M5,
+            "epoch:0:bos:1H:opposite",
+            "bos",
+            Timeframe.H1,
             asof,
             direction=Direction.SHORT,
-            lifecycle="active",
+            lifecycle="confirmed",
             source_ids=("opposite",),
             entity_id="opposite",
+            semantic_attributes=(
+                ("scope", "opposed"),
+                ("post_break_state", "accepted"),
+            ),
         )
     )
     for source in (pullback, displacement):
@@ -2009,16 +2515,25 @@ def test_focus_conflict_excludes_internal_pullback_but_keeps_displacement() -> N
             )
         )
     graph._last_asof = asof
+    observation = market_observation(asof=asof)
+    update_global_market_context(
+        None,
+        observation,
+        SceneGraphDelta(
+            asof=asof,
+            revision_id=graph.revision_id,
+            added_node_ids=(parent.node_id, pullback.node_id, displacement.node_id),
+            added_edge_ids=("edge:pullback", "edge:opposite"),
+        ),
+        graph,
+    )
     focus = FocusState(
         asof=asof,
         primary_timeframes=(Timeframe.H1.value, Timeframe.M5.value, Timeframe.M1.value),
-        supplemental_timeframes=(),
         reason_codes=("initial_context",),
-        trigger_event_ids=(),
         question="is the higher structure materially opposed",
         resolution_status=EvidenceStatus.FORMING,
         switched=False,
-        switched_at=None,
     )
     focused = graph.query(focus, context_ids=("parent",))
     assert focused.cross_scale_conflicts == ("edge:opposite",)
@@ -2064,13 +2579,10 @@ def test_current_bounded_query_uses_hot_indexes_and_keeps_old_root(
     focus = FocusState(
         asof=asof,
         primary_timeframes=(Timeframe.M1.value,),
-        supplemental_timeframes=(),
         reason_codes=("bounded_query_test",),
-        trigger_event_ids=(),
         question="retain the frozen root",
         resolution_status=EvidenceStatus.FORMING,
         switched=False,
-        switched_at=None,
     )
 
     def no_history_scan(_: pd.Timestamp):
@@ -2119,13 +2631,10 @@ def test_m15_query_marks_unsupported_group3_evidence_unknown_not_false() -> None
     focus = FocusState(
         asof=observation.asof,
         primary_timeframes=(Timeframe.M15.value,),
-        supplemental_timeframes=(),
         reason_codes=("bridge_query",),
-        trigger_event_ids=(),
         question="what bridge evidence is causally observable",
         resolution_status=EvidenceStatus.FORMING,
         switched=False,
-        switched_at=None,
     )
     focused = graph.query(focus)
     assert focused.missing_evidence["15m.displacement"] is EvidenceStatus.UNKNOWN
@@ -2216,3 +2725,126 @@ def test_observer_transfers_revised_edge_ids_into_observation() -> None:
     observer.scene_graph = SimpleNamespace(update=lambda observation: delta)
     observation = observer.observe(update)
     assert observation.scene_revised_edge_ids == ("edge:closed-test",)
+
+
+def test_runtime_compaction_bounds_cold_history_and_fails_closed() -> None:
+    graph = TemporalMarketSceneGraph()
+    start = _clock("2025-01-06 10:00")
+    current = market_observation(asof=start, price=100.0)
+    graph.update(current)
+    initial_revision = graph.revision_id
+    old_node = graph.add_node(
+        _node(
+            "cold-terminal",
+            "displacement",
+            Timeframe.M5,
+            start,
+            lifecycle="exhausted",
+            status=EvidenceStatus.INVALIDATED,
+            source_ids=("cold-terminal",),
+            entity_id="cold-terminal",
+        )
+    )
+    counts = []
+    for cycle in range(2):
+        for minute in range(1, 81):
+            asof = start + pd.Timedelta(
+                minutes=cycle * 80 + minute
+            )
+            current = replace(current, asof=asof)
+            graph.update(current)
+            graph.add_node(
+                _node(
+                    f"cold-terminal:{cycle}:{minute}",
+                    "displacement",
+                    Timeframe.M5,
+                    asof,
+                    lifecycle="exhausted",
+                    status=EvidenceStatus.INVALIDATED,
+                    source_ids=(f"cold-terminal:{cycle}:{minute}",),
+                    entity_id=f"cold-terminal:{cycle}:{minute}",
+                )
+            )
+        result = graph.compact_runtime_history(current)
+        counts.append(result["after"]["nodes"])
+    assert graph.revision_id != initial_revision
+    assert graph.revision_id.startswith("scene:r")
+    assert graph.last_asof == current.asof
+    assert graph.history_retention_floor == (
+        current.asof - pd.Timedelta(minutes=60)
+    )
+    assert max(counts) <= counts[0] + 4
+    assert old_node.node_id not in {node.node_id for node in graph.nodes}
+    with pytest.raises(ValueError, match="predates the retained"):
+        graph.nodes_asof(start)
+    with pytest.raises(ValueError, match="predates the retained"):
+        graph.edges_asof(start)
+    with pytest.raises(ValueError, match="complete node history"):
+        graph.node_history(next(iter(graph._nodes)))
+    with pytest.raises(ValueError, match="complete edge history"):
+        graph.edge_history("edge:any")
+    with pytest.raises(ValueError, match="complete scene graph export"):
+        graph.write_parquet("unused-after-compaction")
+
+
+def test_runtime_compaction_retains_current_and_materialized_terminal_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    graph = TemporalMarketSceneGraph()
+    asof = _clock("2025-01-06 12:00")
+    observation = market_observation(asof=asof, price=100.0)
+    graph.update(observation)
+
+    hot = graph.add_node(
+        _node(
+            "long-lived-hot",
+            "liquidity",
+            Timeframe.H1,
+            asof - pd.Timedelta(hours=4),
+            lifecycle="visible",
+            source_ids=("long-lived-hot",),
+            entity_id="long-lived-hot",
+        )
+    )
+    terminal_state = SimpleNamespace(
+        zone_id="cooled-but-materialized",
+        timeframe=Timeframe.M15,
+        lifecycle="reaccepted",
+        side="support",
+        formed_at=asof - pd.Timedelta(hours=5),
+        confirmed_at=asof - pd.Timedelta(hours=4),
+        broken_at=asof - pd.Timedelta(hours=3),
+        reaccepted_at=asof - pd.Timedelta(hours=2),
+        lower_bound=99.0,
+        upper_bound=99.5,
+        member_swing_ids=("terminal-source-swing",),
+        source_kind="structural_swing",
+        structural_rank="intermediate",
+        is_protected_swing=False,
+        zone_role="both",
+    )
+    terminal = graph._adapt_snapshot_state(
+        terminal_state,
+        asof=asof,
+        frame_state=True,
+    )
+    assert terminal is not None
+    monkeypatch.setattr(
+        graph,
+        "_state_records",
+        lambda _: ((terminal_state, True),),
+    )
+
+    result = graph.compact_runtime_history(observation)
+    retained_ids = {node.node_id for node in graph.nodes}
+    assert hot.node_id in retained_ids
+    assert terminal.node_id in retained_ids
+
+    next_observation = replace(
+        observation,
+        asof=asof + pd.Timedelta(minutes=1),
+    )
+    delta = graph.update(next_observation)
+    assert terminal.node_id not in delta.added_node_ids
+    assert hot.node_id not in delta.added_node_ids
+    assert result["after"]["nodes"] <= result["before"]["nodes"]

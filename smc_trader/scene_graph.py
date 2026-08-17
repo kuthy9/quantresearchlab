@@ -1,14 +1,17 @@
-"""Append-only temporal market scene graph and explainable scale focus.
+"""Temporal market scene graph and explainable scale focus.
 
 The graph is an in-memory semantic index over the already-causal primitive
 reducers.  It does not detect trades and it never stores every candle.  A
 node revision may close a lifecycle or resolve ambiguity, while every prior
-revision remains available for decision-time reconstruction.
+revision normally remains available for decision-time reconstruction.  An
+explicit calibration-only runtime mode may discard cold revisions after all
+current-bar consumers have run; historical access then fails closed at the
+reported retention floor.
 """
 from __future__ import annotations
 
 from collections import defaultdict, deque
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, fields as dataclass_fields, replace
 from enum import Enum
 import hashlib
 import math
@@ -18,20 +21,33 @@ from typing import Any, Iterable, Mapping, Sequence
 import pandas as pd
 
 from .model import (
+    AuthorityLayer,
+    BalanceContext,
     CORE_TIMEFRAMES,
+    DeliveryObstruction,
     Direction,
+    DirectionalObstructionView,
     EventKind,
     GlobalConflictEvidence,
+    GlobalConflictRole,
     GlobalMarketContext,
     LiquidityInventoryLifecycle,
+    MarketEpisodeState,
     MarketMode,
     MarketObservation,
     MarketEvent,
+    NEUTRAL_MARKET_STATE_SCHEMA_VERSION,
+    NeutralMarketState,
+    OpenMarketThesis,
+    OpenMarketThesisClaimRelation,
+    PathSequenceLifecycle,
     Playbook,
     PlaybookPhase,
     ScaleRelation,
+    ScaleRelationState,
     StructureLifecycle,
     SwingLifecycle,
+    ThesisEvidenceState,
     Timeframe,
     aware_timestamp,
     content_hash,
@@ -403,29 +419,18 @@ class SceneGraphDelta:
 class FocusState:
     asof: pd.Timestamp
     primary_timeframes: tuple[str, ...]
-    supplemental_timeframes: tuple[str, ...]
     reason_codes: tuple[str, ...]
-    trigger_event_ids: tuple[str, ...]
     question: str
     resolution_status: EvidenceStatus
-    switched: bool
-    switched_at: pd.Timestamp | None
-    prior_timeframes: tuple[str, ...] = ()
     hypothesis_id: str | None = None
-    phase_at_selection: str | None = None
-    supplemental_query_used: bool = False
+    switched: bool = False
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "asof", aware_timestamp(self.asof, name="focus.asof"))
-        if self.switched_at is not None:
-            object.__setattr__(self, "switched_at", aware_timestamp(self.switched_at, name="focus.switched_at"))
         object.__setattr__(self, "resolution_status", EvidenceStatus(self.resolution_status))
         for name in (
             "primary_timeframes",
-            "supplemental_timeframes",
             "reason_codes",
-            "trigger_event_ids",
-            "prior_timeframes",
         ):
             values = tuple(dict.fromkeys(getattr(self, name)))
             object.__setattr__(self, name, values)
@@ -433,8 +438,8 @@ class FocusState:
             not self.primary_timeframes
             or not self.reason_codes
             or not self.question
-            or self.switched != bool(self.switched_at)
-            or self.supplemental_query_used and not self.supplemental_timeframes
+            or type(self.switched) is not bool
+            or self.hypothesis_id == ""
         ):
             raise ValueError("invalid focus state")
 @dataclass(frozen=True)
@@ -469,16 +474,29 @@ class HypothesisState:
     sequence_stage: str
     next_expected_event: str | None
     supporting_graph_paths: tuple[tuple[str, ...], ...]
-    contradicting_graph_paths: tuple[tuple[str, ...], ...]
+    material_conflict_ids: tuple[str, ...]
     missing_evidence: Mapping[str, EvidenceStatus]
     ambiguous_evidence: Mapping[str, EvidenceStatus]
     context_draw_id: str | None
     primary_target_id: str | None
     invalidation_id: str | None
     evidence_revision_id: str | None = None
+    source_market_thesis_ids: tuple[str, ...] = ()
+    playbook_match_strength: float = 0.0
+    market_thesis_action_bound: bool = False
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "context_root_ids", tuple(dict.fromkeys(self.context_root_ids)))
+        object.__setattr__(
+            self,
+            "material_conflict_ids",
+            tuple(dict.fromkeys(self.material_conflict_ids)),
+        )
+        object.__setattr__(
+            self,
+            "source_market_thesis_ids",
+            tuple(dict.fromkeys(self.source_market_thesis_ids)),
+        )
         for mapping_name in ("missing_evidence", "ambiguous_evidence"):
             normalized = {
                 str(name): EvidenceStatus(value)
@@ -492,6 +510,15 @@ class HypothesisState:
             or not self.trigger_timeframe
             or not self.sequence_stage
             or len(self.context_root_ids) != len(set(self.context_root_ids))
+            or any(not value for value in self.material_conflict_ids)
+            or any(not value for value in self.source_market_thesis_ids)
+            or not math.isfinite(float(self.playbook_match_strength))
+            or not 0.0 <= float(self.playbook_match_strength) <= 1.0
+            or type(self.market_thesis_action_bound) is not bool
+            or (
+                self.market_thesis_action_bound
+                and not self.source_market_thesis_ids
+            )
         ):
             raise ValueError("invalid competing hypothesis state")
 
@@ -757,6 +784,8 @@ _LIGHTWEIGHT_STATE_FIELDS: Mapping[str, tuple[str, ...]] = {
         "lower_source_member_swing_ids", "upper_source_member_swing_ids",
         "formed_at", "mature_at", "broken_at", "lower_bound",
         "upper_bound", "value_price", "transition_reason",
+        "lower_touch_count", "upper_touch_count", "midpoint_crossings",
+        "inside_close_fraction", "compression_ratio",
     ),
     "manipulation": (
         "lifecycle", "direction", "source_inventory_item_id",
@@ -875,12 +904,17 @@ def _semantic_attributes(item: Any) -> tuple[tuple[str, str], ...]:
         "qualification": "qualification",
         "scope": "scope",
         "source_bos_scope": "source_bos_scope",
+        "source_structure_id": "source_structure_id",
         "post_break_state": "post_break_state",
         "mss_qualified": "mss_qualified",
         "source_bos_mss_qualified": "source_bos_mss_qualified",
         "source_kind": "source_kind",
+        "source_timeframe": "source_timeframe",
         "structural_rank": "structural_rank",
         "is_protected_swing": "is_protected_swing",
+        "protected_swing_id": "protected_swing_id",
+        "lower_source_zone_id": "lower_source_zone_id",
+        "upper_source_zone_id": "upper_source_zone_id",
         "zone_role": "zone_role",
         "resolved_side": "resolved_side",
         "close_outside_on_sweep": "close_outside_on_sweep",
@@ -940,6 +974,11 @@ def _descriptive_metrics(item: Any) -> tuple[tuple[str, float], ...]:
         "outside_run",
         "outside_completed_bars",
         "reentry_candidate_price",
+        "lower_touch_count",
+        "upper_touch_count",
+        "midpoint_crossings",
+        "inside_close_fraction",
+        "compression_ratio",
     )
     output = []
     for name in names:
@@ -1067,20 +1106,20 @@ def _is_terminal(kind: str, lifecycle: str) -> bool:
     }.get(kind, {"invalidated", "failed", "censored", "completed"})
 
 
-def _is_material_cross_scale_conflict(
+def _cross_scale_conflict_role(
     edge: SceneEdge,
     node_by_id: Mapping[str, SceneNode],
     *,
     ready_timeframes: set[str] | frozenset[str] | None = None,
-) -> bool:
-    """Distinguish structural conflict from an ordinary internal pullback."""
+) -> GlobalConflictRole | None:
+    """Classify an OPPOSES fact without promoting local delivery to authority."""
 
     if edge.relation is not SceneEdgeKind.OPPOSES or edge.lifecycle != "active":
-        return False
+        return None
     source = node_by_id.get(edge.source_node_id)
     target = node_by_id.get(edge.target_node_id)
     if source is None or target is None:
-        return False
+        return None
     if ready_timeframes is not None and (
         source.timeframe not in ready_timeframes
         or target.timeframe not in ready_timeframes
@@ -1088,28 +1127,41 @@ def _is_material_cross_scale_conflict(
         # Keep the raw OPPOSES fact in the graph, but do not give an
         # under-warmed scale authority to contradict a completed semantic
         # context.  Its interpretation remains explicitly UNKNOWN below.
-        return False
+        return None
     if (
         source.timeframe == target.timeframe
         or source.kind not in {"structure", "bos", "displacement"}
         or target.kind != "structure"
-        or source.ambiguity_state is not EvidenceStatus.CONFIRMED
-        or target.ambiguity_state is not EvidenceStatus.CONFIRMED
         or _is_terminal(source.kind, source.lifecycle)
         or _is_terminal(target.kind, target.lifecycle)
         or source.direction is None
         or target.direction is None
         or source.direction is target.direction
     ):
-        return False
-    # A qualified displacement can oppose a higher structure from an internal
-    # setup scale.  Bare internal swings/BOS/structures describe pullbacks and
-    # stay in the graph without globally putting Focus into CONFLICTING.
-    return (
-        source.kind == "displacement"
-        or source.structural_scale
-        in {StructuralScale.INTERMEDIATE, StructuralScale.EXTERNAL}
-    )
+        return None
+    if (
+        source.ambiguity_state is not EvidenceStatus.CONFIRMED
+        or target.ambiguity_state is not EvidenceStatus.CONFIRMED
+    ):
+        return None
+    # A displacement or an opposite structure without accepted BOS evidence
+    # is a real local opposition fact, not an authority transfer.
+    if source.kind == "displacement":
+        return GlobalConflictRole.LOCAL_COUNTERTREND_DELIVERY
+    attributes = dict(source.semantic_attributes)
+    if source.kind != "bos":
+        return GlobalConflictRole.LOCAL_COUNTERTREND_DELIVERY
+    if attributes.get("post_break_state") != "accepted":
+        return GlobalConflictRole.LOCAL_COUNTERTREND_DELIVERY
+    if (
+        source.timeframe == Timeframe.H1.value
+        and source.structural_scale in {
+        StructuralScale.INTERMEDIATE,
+        StructuralScale.EXTERNAL,
+        }
+    ):
+        return GlobalConflictRole.AUTHORITY_TRANSITION_CANDIDATE
+    return GlobalConflictRole.LOCAL_COUNTERTREND_DELIVERY
 
 
 class TemporalMarketSceneGraph:
@@ -1170,6 +1222,7 @@ class TemporalMarketSceneGraph:
         ] = defaultdict(set)
         self._current_epoch_ambiguous_node_ids: set[str] = set()
         self._current_epoch_active_opposes_edge_ids: set[str] = set()
+        self._current_global_material_conflict_ids: set[str] = set()
         self._visible_liquidity_node_ids_by_side: dict[str, set[str]] = {
             "above": set(),
             "below": set(),
@@ -1178,6 +1231,29 @@ class TemporalMarketSceneGraph:
             str,
             deque[str],
         ] = defaultdict(deque)
+        # Current-kind/context reads are repeated several times while one
+        # immutable graph revision is interpreted by GlobalMarketContext and
+        # the Brain.  Cache only those bounded hot views; every semantic graph
+        # mutation advances ``_revision`` and clears the cache below.
+        self._current_kind_nodes_cache: dict[
+            tuple[int, str, str, bool],
+            tuple[SceneNode, ...],
+        ] = {}
+        # Neighbor traversals dominate the current Brain interpretation hot
+        # path.  Cache only the current graph view for the duration of one
+        # fully derived update; historical ``asof`` queries remain uncached.
+        # Permanent revisions and the current-price BLOCKS_PATH_TO refresh
+        # both invalidate this derived view below.
+        self._current_neighbors_cache: dict[
+            str,
+            tuple[tuple[str, SceneEdge], ...],
+        ] = {}
+        # ``None`` means the graph still owns its complete in-process
+        # history.  Calibration-only replay may explicitly compact cold
+        # history after every consumer has read the current Engine snapshot.
+        # Historical queries older than this floor must then fail closed;
+        # returning an incomplete reconstruction would be worse than raising.
+        self._history_retention_floor: pd.Timestamp | None = None
 
     @property
     def revision_id(self) -> str:
@@ -1186,6 +1262,10 @@ class TemporalMarketSceneGraph:
     @property
     def last_asof(self) -> pd.Timestamp | None:
         return self._last_asof
+
+    @property
+    def history_retention_floor(self) -> pd.Timestamp | None:
+        return self._history_retention_floor
 
     @property
     def nodes(self) -> tuple[SceneNode, ...]:
@@ -1205,6 +1285,7 @@ class TemporalMarketSceneGraph:
 
     def nodes_asof(self, asof: pd.Timestamp) -> tuple[SceneNode, ...]:
         clock = aware_timestamp(asof, name="scene_graph.nodes_asof")
+        self._require_retained_history(clock)
         if self._last_asof is not None and clock >= self._last_asof:
             # Dict insertion order is deterministic because updates are
             # causally ordered before admission.  Current-time queries do not
@@ -1222,6 +1303,7 @@ class TemporalMarketSceneGraph:
 
     def edges_asof(self, asof: pd.Timestamp) -> tuple[SceneEdge, ...]:
         clock = aware_timestamp(asof, name="scene_graph.edges_asof")
+        self._require_retained_history(clock)
         if self._last_asof is not None and clock >= self._last_asof:
             return (
                 *self._edges.values(),
@@ -1237,17 +1319,39 @@ class TemporalMarketSceneGraph:
         )
 
     def node_history(self, node_id: str) -> tuple[SceneNode, ...]:
+        if self._history_retention_floor is not None:
+            raise ValueError(
+                "complete node history is unavailable after runtime compaction"
+            )
         return tuple(self._node_revisions.get(node_id, ()))
 
     def edge_history(self, edge_id: str) -> tuple[SceneEdge, ...]:
+        if self._history_retention_floor is not None:
+            raise ValueError(
+                "complete edge history is unavailable after runtime compaction"
+            )
         return tuple(self._edge_revisions.get(edge_id, ()))
 
     def _next_revision(self) -> str:
         self._revision += 1
         self._revision_id = f"scene:r{self._revision:012d}"
+        # Old checkpoints predate this derived cache, hence ``getattr``.
+        # The cache is never authoritative and must not survive a revision.
+        getattr(self, "_current_kind_nodes_cache", {}).clear()
+        getattr(self, "_current_neighbors_cache", {}).clear()
         return self._revision_id
 
+    def _require_retained_history(self, asof: pd.Timestamp) -> None:
+        floor = self._history_retention_floor
+        if floor is not None and asof < floor:
+            raise ValueError(
+                "scene graph history predates the retained runtime window"
+            )
+
     def _epoch_asof(self, asof: pd.Timestamp) -> str:
+        self._require_retained_history(
+            aware_timestamp(asof, name="scene_graph.epoch_asof")
+        )
         epoch = "epoch:0"
         for boundary, candidate in self._epoch_boundaries:
             if boundary > asof:
@@ -1258,7 +1362,15 @@ class TemporalMarketSceneGraph:
     def _current_kind_nodes(self, kind: str) -> tuple[SceneNode, ...]:
         """Return current-epoch nodes of one kind without scanning history."""
 
-        return tuple(
+        cache = getattr(self, "_current_kind_nodes_cache", None)
+        if cache is None:
+            cache = {}
+            self._current_kind_nodes_cache = cache
+        key = (self._revision, self._market_epoch_id, str(kind), False)
+        cached = cache.get(key)
+        if cached is not None:
+            return cached
+        values = tuple(
             sorted(
                 (
                     self._nodes[node_id]
@@ -1273,6 +1385,31 @@ class TemporalMarketSceneGraph:
                 key=lambda value: (value.observed_at, value.node_id),
             )
         )
+        cache[key] = values
+        return values
+
+    def _current_nonterminal_kind_nodes(
+        self,
+        kind: str,
+    ) -> tuple[SceneNode, ...]:
+        """Return one cached nonterminal current-kind interpretation view."""
+
+        cache = getattr(self, "_current_kind_nodes_cache", None)
+        if cache is None:
+            cache = {}
+            self._current_kind_nodes_cache = cache
+        key = (self._revision, self._market_epoch_id, str(kind), True)
+        cached = cache.get(key)
+        if cached is not None:
+            return cached
+        values = tuple(
+            node
+            for node in self._current_kind_nodes(kind)
+            if node.market_epoch_id == self._market_epoch_id
+            and not _is_terminal(node.kind, node.lifecycle)
+        )
+        cache[key] = values
+        return values
 
     def _current_kind_nodes_asof(
         self,
@@ -1399,11 +1536,14 @@ class TemporalMarketSceneGraph:
             self._visible_liquidity_node_ids_by_side[side].add(node.node_id)
 
     def _clear_current_epoch_indexes(self) -> None:
+        getattr(self, "_current_kind_nodes_cache", {}).clear()
+        getattr(self, "_current_neighbors_cache", {}).clear()
         self._current_epoch_node_ids = set()
         self._current_epoch_node_ids_by_kind = defaultdict(set)
         self._current_epoch_node_ids_by_timeframe = defaultdict(set)
         self._current_epoch_ambiguous_node_ids = set()
         self._current_epoch_active_opposes_edge_ids = set()
+        self._current_global_material_conflict_ids = set()
         self._visible_liquidity_node_ids_by_side = {
             "above": set(),
             "below": set(),
@@ -1427,6 +1567,8 @@ class TemporalMarketSceneGraph:
         if source in self._node_revisions:
             candidates.add(source)
         clock = None if asof is None else aware_timestamp(asof, name="scene source lookup")
+        if clock is not None:
+            self._require_retained_history(clock)
         revisions: dict[str, SceneNode] = {}
         for candidate in candidates:
             eligible = [
@@ -1783,6 +1925,17 @@ class TemporalMarketSceneGraph:
             or getattr(item, "lifecycle_reason", None)
             or getattr(item, "resolution_reason", None)
         )
+        range_balance_evidence = (
+            (
+                getattr(item, "lower_touch_count", None),
+                getattr(item, "upper_touch_count", None),
+                getattr(item, "midpoint_crossings", None),
+                getattr(item, "inside_close_fraction", None),
+                getattr(item, "compression_ratio", None),
+            )
+            if kind == "range"
+            else ()
+        )
         # This is an adaptation trigger, not a serialized copy of the node.
         # In particular, structural rank/visibility and descriptive quality
         # can be refreshed by a retained tracker snapshot without a new
@@ -1806,6 +1959,7 @@ class TemporalMarketSceneGraph:
             _invalidation_rule(kind, item),
             _source_ids(item),
             resolution_reason,
+            range_balance_evidence,
             _semantic_event_clocks(item),
         )
 
@@ -2314,11 +2468,21 @@ class TemporalMarketSceneGraph:
         """Read unseen recent events plus only each retained timeline tail."""
 
         candidates: dict[str, MarketEvent] = {}
+        retention_floor = self._history_retention_floor
+
+        def retained(event: MarketEvent) -> bool:
+            return (
+                retention_floor is None
+                or event.observed_at >= retention_floor
+            )
+
         if bootstrap:
             for timeline in observation.retained_entity_timelines.values():
                 for event in timeline:
                     if (
-                        event.event_id not in self._seen_market_event_ids
+                        retained(event)
+                        and event.event_id
+                        not in self._seen_market_event_ids
                         and (
                             minimum_observed_at is None
                             or event.observed_at >= minimum_observed_at
@@ -2329,6 +2493,8 @@ class TemporalMarketSceneGraph:
             for timeline in observation.retained_entity_timelines.values():
                 unseen_tail: list[MarketEvent] = []
                 for event in reversed(timeline):
+                    if not retained(event):
+                        break
                     if event.event_id in self._seen_market_event_ids:
                         break
                     if (
@@ -2340,6 +2506,8 @@ class TemporalMarketSceneGraph:
                     candidates[event.event_id] = event
         for event in observation.recent_events:
             if (
+                retained(event)
+                and
                 event.event_id not in self._seen_market_event_ids
                 and (
                     minimum_observed_at is None
@@ -2462,6 +2630,20 @@ class TemporalMarketSceneGraph:
             if (kind, timeframe, entity_id) in boundary_state_keys:
                 continue
             prior = self._nodes.get(node_id)
+            lifecycle = _value(
+                getattr(item, "lifecycle", "observed")
+            )
+            if (
+                prior is None
+                and self._history_retention_floor is not None
+                and _is_terminal(kind, lifecycle)
+                and _semantic_clock(item, default=observation.asof)
+                < self._history_retention_floor
+            ):
+                # The observer may retain a compact terminal snapshot longer
+                # than the runtime graph's explicitly bounded history.  Once
+                # compacted, that stale snapshot cannot reopen the cold fact.
+                continue
             if prior is not None and _is_terminal(
                 prior.kind,
                 prior.lifecycle,
@@ -2591,13 +2773,39 @@ class TemporalMarketSceneGraph:
                 (structure.protected_swing_id, StructuralScale.EXTERNAL),
             )
             for swing_id, structural_scale in projections:
+                source_clock = structure.confirmed_at
+                if (
+                    self._history_retention_floor is not None
+                    and source_clock < self._history_retention_floor
+                ):
+                    projection_prefix = (
+                        f"{self._market_epoch_id}:swing_projection:"
+                        f"{structure.timeframe.value}:{swing_id}:"
+                    )
+                    if any(
+                        node_id.startswith(projection_prefix)
+                        and structure.structure_id
+                        in self._nodes[node_id].source_ids
+                        for node_id in self._current_epoch_node_ids
+                    ):
+                        # The old structure/projection is already current and
+                        # unchanged.  Its historical source revision is below
+                        # the retention floor, so there is nothing to derive
+                        # this minute.  A genuinely new structure is always
+                        # confirmed at/after the current floor and follows the
+                        # normal causal as-of path below.
+                        continue
+                    # A compacted runtime cannot prove a previously unseen
+                    # projection whose source clock predates retained history.
+                    # Fail closed rather than bind it to a newer swing state.
+                    continue
                 raw_node_id = (
                     None
                     if swing_id is None
                     else self._node_id_for_source(
                         swing_id,
                         kind="swing",
-                        asof=structure.confirmed_at,
+                        asof=source_clock,
                     )
                 )
                 if raw_node_id is None:
@@ -2607,7 +2815,7 @@ class TemporalMarketSceneGraph:
                     for value in reversed(
                         self._node_revisions[raw_node_id]
                     )
-                    if value.observed_at <= structure.confirmed_at
+                    if value.observed_at <= source_clock
                 )
                 projection_id = (
                     f"{self._market_epoch_id}:swing_projection:"
@@ -3032,6 +3240,9 @@ class TemporalMarketSceneGraph:
                     source_ids=(near.node_id, far.node_id),
                 )
         self._current_path_block_edges = current
+        # BLOCKS_PATH_TO is deliberately outside permanent graph revision
+        # history, so its own refresh must invalidate current neighbors.
+        getattr(self, "_current_neighbors_cache", {}).clear()
 
     def _close_epoch(self, *, observed_at: pd.Timestamp, reason: str) -> None:
         """Censor open semantic state before a hard history boundary."""
@@ -3139,6 +3350,9 @@ class TemporalMarketSceneGraph:
         self._current_revised_edges = []
         self._current_resolutions = []
         self._current_path_block_edges = {}
+        # The current-price obstruction view changed even if this update adds
+        # no permanent semantic revision.
+        getattr(self, "_current_neighbors_cache", {}).clear()
         self._last_price = float(observation.price)
         boundary_reasons = {
             "contract_change_history_reset",
@@ -3204,6 +3418,33 @@ class TemporalMarketSceneGraph:
             if current_view
             else {edge.edge_id: edge for edge in self.edges_asof(asof)}
         )
+        if current_view:
+            cache = getattr(self, "_current_neighbors_cache", None)
+            if cache is None:
+                cache = {}
+                self._current_neighbors_cache = cache
+            cached = cache.get(node_id)
+            if cached is not None:
+                yield from cached
+                return
+            values: list[tuple[str, SceneEdge]] = []
+            for edge_id in self._outgoing.get(node_id, ()):
+                edge = edge_by_id.get(edge_id)
+                if edge is not None and edge.lifecycle == "active":
+                    values.append((edge.target_node_id, edge))
+            for edge_id in self._incoming.get(node_id, ()):
+                edge = edge_by_id.get(edge_id)
+                if edge is not None and edge.lifecycle == "active":
+                    values.append((edge.source_node_id, edge))
+            for edge in self._current_path_block_edges.values():
+                if edge.source_node_id == node_id:
+                    values.append((edge.target_node_id, edge))
+                elif edge.target_node_id == node_id:
+                    values.append((edge.source_node_id, edge))
+            cached = tuple(values)
+            cache[node_id] = cached
+            yield from cached
+            return
         for edge_id in self._outgoing.get(node_id, ()):
             edge = edge_by_id.get(edge_id)
             if edge is None:
@@ -3216,12 +3457,6 @@ class TemporalMarketSceneGraph:
                 continue
             if edge.lifecycle == "active":
                 yield edge.source_node_id, edge
-        if current_view:
-            for edge in self._current_path_block_edges.values():
-                if edge.source_node_id == node_id:
-                    yield edge.target_node_id, edge
-                elif edge.target_node_id == node_id:
-                    yield edge.source_node_id, edge
 
     def current_candle_structure_nodes(
         self,
@@ -3443,7 +3678,7 @@ class TemporalMarketSceneGraph:
             raise ValueError("focus query is ahead of the scene graph")
         if type(maximum_nodes) is not int or maximum_nodes < 1:
             raise ValueError("maximum_nodes must be a positive integer")
-        focus_frames = set(focus_state.primary_timeframes) | set(focus_state.supplemental_timeframes)
+        focus_frames = set(focus_state.primary_timeframes)
         ready_frames = (
             None
             if ready_timeframes is None
@@ -3605,13 +3840,27 @@ class TemporalMarketSceneGraph:
             for node in nodes
             if node.ambiguity_state in {EvidenceStatus.AMBIGUOUS, EvidenceStatus.UNKNOWN}
         )
+        # GlobalMarketContext is the sole authority for conflict
+        # classification.  A focused view only projects the already-derived
+        # IDs that are present in this bounded query; it never reinterprets an
+        # OPPOSES edge on its own.
+        authoritative_conflict_ids = (
+            self._current_global_material_conflict_ids
+            if current_view
+            else set()
+        )
         conflicts = tuple(
             edge.edge_id
             for edge in edges
-            if _is_material_cross_scale_conflict(
-                edge,
-                node_by_id,
-                ready_timeframes=ready_frames,
+            if edge.edge_id in authoritative_conflict_ids
+            and (
+                ready_frames is None
+                or (
+                    node_by_id[edge.source_node_id].timeframe
+                    in ready_frames
+                    and node_by_id[edge.target_node_id].timeframe
+                    in ready_frames
+                )
             )
         )
         missing = {
@@ -3662,8 +3911,395 @@ class TemporalMarketSceneGraph:
             missing_evidence=missing,
         )
 
+    def compact_runtime_history(
+        self,
+        observation: MarketObservation,
+        *,
+        protected_source_ids: Sequence[str] = (),
+    ) -> Mapping[str, Any]:
+        """Drop cold graph history for an explicitly bounded runtime replay.
+
+        This is deliberately not called by :meth:`update`.  The calibration
+        runner invokes it only after the complete Engine snapshot and every
+        enabled recorder/diagnostic have consumed the current bar.  The live
+        graph, current reducer state, open root/position identities, current
+        delta and sixty minutes of terminal context remain available.
+
+        The revision counter is never renumbered.  Once history is removed,
+        as-of queries before :attr:`history_retention_floor` raise instead of
+        silently returning a partial graph.
+        """
+
+        asof = aware_timestamp(
+            observation.asof,
+            name="scene_graph.compaction_asof",
+        )
+        if self._last_asof is None or asof != self._last_asof:
+            raise ValueError(
+                "scene graph compaction requires the latest Engine observation"
+            )
+        requested_floor = asof - pd.Timedelta(minutes=60)
+        floor = max(
+            (
+                value
+                for value in (
+                    self._history_retention_floor,
+                    requested_floor,
+                )
+                if value is not None
+            )
+        )
+        before = {
+            "nodes": len(self._nodes),
+            "node_revisions": sum(
+                len(values) for values in self._node_revisions.values()
+            ),
+            "edges": len(self._edges),
+            "edge_revisions": sum(
+                len(values) for values in self._edge_revisions.values()
+            ),
+            "seen_events": len(self._seen_market_event_ids),
+            "seen_displacement_transitions": len(
+                self._seen_displacement_transition_ids
+            ),
+        }
+
+        keep_node_ids = {
+            node_id
+            for node_id, node in self._nodes.items()
+            if node.observed_at >= floor
+        }
+        keep_node_ids.update(
+            node_id
+            for node_id in (
+                *self._current_added_nodes,
+                *self._current_revised_nodes,
+                *self._current_resolutions,
+            )
+            if node_id in self._nodes
+        )
+        # These indexes are the authoritative long-lived current scene, not
+        # a cache that can be reconstructed from one Observation snapshot.
+        # In particular, external draws and unresolved ambiguity may remain
+        # semantically current long after their reducer stopped emitting a
+        # transition.  Dropping them causes the next bar to re-admit facts,
+        # drift the revision counter and change Brain context.
+        keep_node_ids.update(
+            node_id
+            for node_id in (
+                *self._current_epoch_node_ids,
+                *self._current_epoch_ambiguous_node_ids,
+            )
+            if node_id in self._nodes
+        )
+
+        # Every state still materialized by the current Observation must keep
+        # its graph identity, including terminal snapshots.  Some reducers
+        # intentionally expose terminal states until their own bounded
+        # cooling/retention policy expires; deleting those nodes here makes
+        # the unchanged snapshot look new on the next bar and drifts both the
+        # graph revision and transition delta.  The Observer, not this storage
+        # compactor, owns that semantic retention decision.
+        for item, _ in self._state_records(observation):
+            identity = _entity_id(item)
+            if identity is None:
+                continue
+            kind, entity_id = identity
+            lifecycle = _value(getattr(item, "lifecycle", "observed"))
+            if kind == "manipulation" and bool(
+                getattr(item, "deadline_elapsed", False)
+            ):
+                lifecycle = "censored"
+            timeframe = _value(
+                getattr(item, "timeframe", Timeframe.M1)
+            )
+            node_id = (
+                f"{self._market_epoch_id}:{kind}:{timeframe}:{entity_id}"
+            )
+            if node_id in self._nodes:
+                keep_node_ids.add(node_id)
+        if (
+            observation.displacement is not None
+            and observation.displacement.current_entity_id is not None
+        ):
+            displacement_node_id = (
+                f"{self._market_epoch_id}:displacement:"
+                f"{Timeframe.M5.value}:"
+                f"{observation.displacement.current_entity_id}"
+            )
+            if displacement_node_id in self._nodes:
+                keep_node_ids.add(displacement_node_id)
+
+        protected_node_ids: set[str] = set()
+        protected_edge_ids: set[str] = set()
+        for source_id in tuple(
+            dict.fromkeys(
+                str(value)
+                for value in protected_source_ids
+                if isinstance(value, str) and value
+            )
+        ):
+            if source_id in self._edges:
+                protected_edge_ids.add(source_id)
+                edge = self._edges[source_id]
+                protected_node_ids.update(
+                    (edge.source_node_id, edge.target_node_id)
+                )
+            node_id = self._node_id_for_source(source_id, asof=asof)
+            if node_id is not None:
+                protected_node_ids.add(node_id)
+        for edge_id in (
+            *self._current_added_edges,
+            *self._current_revised_edges,
+            *self._current_epoch_active_opposes_edge_ids,
+            *self._current_global_material_conflict_ids,
+        ):
+            edge = self._edges.get(edge_id)
+            if edge is None:
+                continue
+            protected_edge_ids.add(edge_id)
+            protected_node_ids.update(
+                (edge.source_node_id, edge.target_node_id)
+            )
+        keep_node_ids.update(protected_node_ids)
+
+        # Preserve the bounded graph neighborhood used by root binding and
+        # connected-sequence checks.  This starts only from explicitly
+        # protected roots, not every historical hot node.
+        frontier = deque((node_id, 0) for node_id in protected_node_ids)
+        traversed = set(protected_node_ids)
+        while frontier:
+            node_id, depth = frontier.popleft()
+            if depth >= 8:
+                continue
+            for edge_id in (
+                *self._outgoing.get(node_id, ()),
+                *self._incoming.get(node_id, ()),
+            ):
+                edge = self._edges.get(edge_id)
+                if edge is None or edge.lifecycle != "active":
+                    continue
+                protected_edge_ids.add(edge_id)
+                other = (
+                    edge.target_node_id
+                    if edge.source_node_id == node_id
+                    else edge.source_node_id
+                )
+                if other in traversed:
+                    continue
+                traversed.add(other)
+                keep_node_ids.add(other)
+                frontier.append((other, depth + 1))
+
+        # Frozen source identities are often more precise than a persistent
+        # edge (for example an active FVG sourced from an exhausted episode).
+        # Retain one causally selected source node per dependency recursively.
+        dependency_frontier = deque(keep_node_ids)
+        dependency_seen = set(keep_node_ids)
+        while dependency_frontier:
+            node_id = dependency_frontier.popleft()
+            node = self._nodes.get(node_id)
+            if node is None:
+                continue
+            for source_id in node.source_ids:
+                source_node_id = self._node_id_for_source(
+                    source_id,
+                    asof=asof,
+                )
+                if (
+                    source_node_id is None
+                    or source_node_id in dependency_seen
+                ):
+                    continue
+                source_node = self._nodes[source_node_id]
+                if source_node.market_epoch_id != node.market_epoch_id:
+                    continue
+                dependency_seen.add(source_node_id)
+                keep_node_ids.add(source_node_id)
+                dependency_frontier.append(source_node_id)
+
+        def retained_revisions(values: Sequence[Any]) -> list[Any]:
+            before_floor = [
+                value for value in values if value.observed_at < floor
+            ]
+            within_window = [
+                value for value in values if value.observed_at >= floor
+            ]
+            return [
+                *((before_floor[-1],) if before_floor else ()),
+                *within_window,
+            ]
+
+        retained_node_revisions: dict[str, list[SceneNode]] = {}
+        for node_id in sorted(keep_node_ids):
+            values = retained_revisions(
+                self._node_revisions.get(node_id, ())
+            )
+            if values:
+                retained_node_revisions[node_id] = values
+
+        keep_edge_ids = {
+            edge_id
+            for edge_id, edge in self._edges.items()
+            if edge.source_node_id in retained_node_revisions
+            and edge.target_node_id in retained_node_revisions
+        }
+        keep_edge_ids.update(
+            edge_id
+            for edge_id in protected_edge_ids
+            if edge_id in self._edges
+            and self._edges[edge_id].source_node_id
+            in retained_node_revisions
+            and self._edges[edge_id].target_node_id
+            in retained_node_revisions
+        )
+        retained_edge_revisions: dict[str, list[SceneEdge]] = {}
+        for edge_id in sorted(keep_edge_ids):
+            values = retained_revisions(
+                self._edge_revisions.get(edge_id, ())
+            )
+            if values:
+                retained_edge_revisions[edge_id] = values
+
+        self._node_revisions = defaultdict(
+            list,
+            retained_node_revisions,
+        )
+        self._nodes = {
+            node_id: values[-1]
+            for node_id, values in retained_node_revisions.items()
+        }
+        self._edge_revisions = defaultdict(
+            list,
+            retained_edge_revisions,
+        )
+        self._edges = {
+            edge_id: values[-1]
+            for edge_id, values in retained_edge_revisions.items()
+        }
+        self._current_path_block_edges = {
+            edge_id: edge
+            for edge_id, edge in self._current_path_block_edges.items()
+            if edge.source_node_id in self._nodes
+            and edge.target_node_id in self._nodes
+        }
+
+        retained_signature_ids = set(self._nodes)
+        retained_signatures = {
+            key: value
+            for key, value in self._state_semantic_signatures.items()
+            if key in retained_signature_ids
+        }
+        retained_tokens = {
+            key: value
+            for key, value in self._state_lightweight_tokens.items()
+            if key in retained_signature_ids
+        }
+        prior_material_conflict_ids = set(
+            self._current_global_material_conflict_ids
+        )
+        self._outgoing = defaultdict(set)
+        self._incoming = defaultdict(set)
+        self._source_index = defaultdict(set)
+        self._entity_index = defaultdict(set)
+        self._clear_current_epoch_indexes()
+        for node in sorted(
+            self._nodes.values(),
+            key=lambda value: (value.observed_at, value.node_id),
+        ):
+            for source_id in (node.node_id, *node.source_ids):
+                self._source_index[source_id].add(node.node_id)
+            if node.entity_id is not None:
+                self._entity_index[node.entity_id].add(node.node_id)
+            self._reindex_current_node(node, prior=None)
+        for edge in self._edges.values():
+            self._outgoing[edge.source_node_id].add(edge.edge_id)
+            self._incoming[edge.target_node_id].add(edge.edge_id)
+            if (
+                edge.relation is SceneEdgeKind.OPPOSES
+                and edge.lifecycle == "active"
+                and self._nodes[edge.source_node_id].market_epoch_id
+                == self._market_epoch_id
+                and self._nodes[edge.target_node_id].market_epoch_id
+                == self._market_epoch_id
+            ):
+                self._current_epoch_active_opposes_edge_ids.add(
+                    edge.edge_id
+                )
+        self._current_global_material_conflict_ids = (
+            prior_material_conflict_ids.intersection(self._edges)
+        )
+        self._state_semantic_signatures = retained_signatures
+        self._state_lightweight_tokens = retained_tokens
+        self._state_catalog = {}
+
+        observed_events = {
+            event.event_id: event
+            for event in observation.recent_events
+        }
+        for timeline in observation.retained_entity_timelines.values():
+            for event in timeline:
+                observed_events[event.event_id] = event
+        self._seen_market_event_ids = {
+            event_id
+            for event_id, event in observed_events.items()
+            if event.observed_at >= floor
+            and event_id in self._seen_market_event_ids
+        }
+        observed_transitions = (
+            ()
+            if observation.displacement is None
+            else observation.displacement.recent_transitions
+        )
+        self._seen_displacement_transition_ids = {
+            transition.transition_id
+            for transition in observed_transitions
+            if transition.observed_at >= floor
+            and transition.transition_id
+            in self._seen_displacement_transition_ids
+        }
+
+        earlier_boundaries = [
+            value for value in self._epoch_boundaries if value[0] < floor
+        ]
+        self._epoch_boundaries = [
+            *((earlier_boundaries[-1],) if earlier_boundaries else ()),
+            *(
+                value
+                for value in self._epoch_boundaries
+                if value[0] >= floor
+            ),
+        ]
+        self._history_retention_floor = floor
+        after = {
+            "nodes": len(self._nodes),
+            "node_revisions": sum(
+                len(values) for values in self._node_revisions.values()
+            ),
+            "edges": len(self._edges),
+            "edge_revisions": sum(
+                len(values) for values in self._edge_revisions.values()
+            ),
+            "seen_events": len(self._seen_market_event_ids),
+            "seen_displacement_transitions": len(
+                self._seen_displacement_transition_ids
+            ),
+        }
+        return {
+            "asof": asof,
+            "history_retention_floor": floor,
+            "revision_id": self._revision_id,
+            "before": before,
+            "after": after,
+        }
+
     def write_parquet(self, destination: str | Path) -> Mapping[str, Path]:
         """Materialize node/edge revision ledgers without introducing a DB."""
+
+        if self._history_retention_floor is not None:
+            raise ValueError(
+                "complete scene graph export is unavailable after runtime compaction"
+            )
 
         root = Path(destination)
         root.mkdir(parents=True, exist_ok=True)
@@ -3690,9 +4326,14 @@ _GLOBAL_SCALE_RANK: Mapping[str, int] = {
 _GLOBAL_CONTEXT_NODE_KINDS = frozenset(
     {
         "structure",
+        "bos",
         "displacement",
         "range",
         "liquidity",
+        "support_resistance",
+        "fvg",
+        "order_block",
+        "manipulation",
         "manipulation_candidate",
         "micro_bos",
     }
@@ -3709,19 +4350,17 @@ def _current_context_nodes(
 ) -> tuple[SceneNode, ...]:
     """Read one bounded hot-state index, never the historical ledger."""
 
-    return tuple(
-        node
-        for node in graph._current_kind_nodes(kind)
-        if node.market_epoch_id == graph._market_epoch_id
-        and not _is_terminal(node.kind, node.lifecycle)
-    )
+    return graph._current_nonterminal_kind_nodes(kind)
 
 
 def _global_authority(
     graph: TemporalMarketSceneGraph,
     *,
     ready_timeframes: frozenset[str],
-) -> tuple[Timeframe | None, Direction | None, tuple[str, ...], tuple[SceneNode, ...]]:
+) -> tuple[AuthorityLayer, ...]:
+    """Build a bounded H4/H1/M15 authority stack from current indexes."""
+
+    authority_frames = (Timeframe.H4, Timeframe.H1, Timeframe.M15)
     structures = tuple(
         node
         for node in _current_context_nodes(graph, "structure")
@@ -3729,45 +4368,175 @@ def _global_authority(
         and node.ambiguity_state is EvidenceStatus.CONFIRMED
         and node.direction is not None
         and node.timeframe in ready_timeframes
+        and node.timeframe in {value.value for value in authority_frames}
     )
-    for timeframe in _GLOBAL_SCALE_ORDER:
-        candidates = tuple(
+    accepted_boses = tuple(
+        node
+        for node in _current_context_nodes(graph, "bos")
+        if node.lifecycle == "confirmed"
+        and node.ambiguity_state is EvidenceStatus.CONFIRMED
+        and node.direction is not None
+        and node.timeframe in ready_timeframes
+        and node.timeframe in {value.value for value in authority_frames}
+        and node.structural_scale
+        in {StructuralScale.INTERMEDIATE, StructuralScale.EXTERNAL}
+        and dict(node.semantic_attributes).get("post_break_state")
+        == "accepted"
+    )
+
+    def connected(source: SceneNode, target: SceneNode) -> bool:
+        target_ids = {
+            target.node_id,
+            _context_identity(target),
+            *target.source_ids,
+        }
+        if not set(source.source_ids).isdisjoint(target_ids):
+            return True
+        for edge_id in (
+            graph._outgoing.get(source.node_id, set())
+            | graph._incoming.get(source.node_id, set())
+        ):
+            edge = graph._edges.get(edge_id)
+            if edge is None or edge.lifecycle != "active":
+                continue
+            peer_id = (
+                edge.target_node_id
+                if edge.source_node_id == source.node_id
+                else edge.source_node_id
+            )
+            peer = graph._nodes.get(peer_id)
+            if peer is not None and not target_ids.isdisjoint(
+                {peer.node_id, _context_identity(peer), *peer.source_ids}
+            ):
+                return True
+        return False
+
+    layers: list[tuple[AuthorityLayer, SceneNode]] = []
+    dominant_node: SceneNode | None = None
+    h1_challenger_node: SceneNode | None = None
+    for timeframe in authority_frames:
+        frame_structures = tuple(
             node for node in structures if node.timeframe == timeframe.value
         )
-        if not candidates:
-            continue
-        directions = {node.direction for node in candidates}
-        if len(directions) != 1:
-            source_ids = tuple(
-                dict.fromkeys(
-                    source_id
-                    for node in sorted(
-                        candidates,
-                        key=lambda value: (
-                            value.confirmed_at or value.formed_at,
-                            value.node_id,
-                        ),
-                    )
-                    for source_id in (
-                        _context_identity(node),
-                        *node.source_ids,
-                    )
-                )
+        structure_directions = {node.direction for node in frame_structures}
+        structure_owner = (
+            None
+            if len(structure_directions) != 1
+            else max(
+                frame_structures,
+                key=lambda value: (
+                    value.confirmed_at or value.formed_at,
+                    value.observed_at,
+                    value.node_id,
+                ),
+                default=None,
             )
-            return timeframe, None, source_ids, candidates
-        owner = max(
-            candidates,
-            key=lambda value: (
-                value.confirmed_at or value.formed_at,
-                value.observed_at,
-                value.node_id,
-            ),
         )
+        frame_boses = tuple(
+            node for node in accepted_boses if node.timeframe == timeframe.value
+        )
+        challenger = None
+        comparison_node = (
+            h1_challenger_node
+            if timeframe is Timeframe.M15
+            and h1_challenger_node is not None
+            else dominant_node
+        )
+        if comparison_node is not None and timeframe is Timeframe.H1:
+            challenger = max(
+                (
+                    node
+                    for node in frame_boses
+                    if node.direction is not comparison_node.direction
+                    and connected(node, comparison_node)
+                ),
+                key=lambda value: (
+                    value.confirmed_at or value.formed_at,
+                    value.observed_at,
+                    value.node_id,
+                ),
+                default=None,
+            )
+        m15_bridge = None
+        if timeframe is Timeframe.M15 and h1_challenger_node is not None:
+            m15_bridge = max(
+                (
+                    node
+                    for node in frame_boses
+                    if node.direction is h1_challenger_node.direction
+                    and connected(node, h1_challenger_node)
+                ),
+                key=lambda value: (
+                    value.confirmed_at or value.formed_at,
+                    value.observed_at,
+                    value.node_id,
+                ),
+                default=None,
+            )
+        # A newly accepted M15 bridge must not be hidden by an older M15
+        # structure snapshot.  It can confirm the H1 challenger, but never
+        # replaces the H4 incumbent by itself.
+        owner = challenger or m15_bridge or structure_owner
+        if owner is None and dominant_node is None:
+            owner = max(
+                frame_boses,
+                key=lambda value: (
+                    value.confirmed_at or value.formed_at,
+                    value.observed_at,
+                    value.node_id,
+                ),
+                default=None,
+            )
+        if owner is None:
+            continue
+        attributes = dict(owner.semantic_attributes)
+        acceptance = (
+            attributes.get("post_break_state")
+            if owner.kind == "bos"
+            else "confirmed"
+        ) or "unknown"
+        status = "intact"
+        if (
+            timeframe is Timeframe.M15
+            and h1_challenger_node is not None
+            and owner.direction is h1_challenger_node.direction
+            and connected(owner, h1_challenger_node)
+        ):
+            status = "challenging"
+        elif (
+            dominant_node is not None
+            and owner.direction is not dominant_node.direction
+        ):
+            if challenger is not None:
+                status = "challenging"
+        protected = attributes.get("protected_swing_id")
         source_ids = tuple(
             dict.fromkeys((_context_identity(owner), *owner.source_ids))
         )
-        return timeframe, owner.direction, source_ids, (owner,)
-    return None, None, (), ()
+        layer = AuthorityLayer(
+            timeframe=timeframe,
+            direction=owner.direction,
+            structure_id=(
+                attributes.get("source_structure_id")
+                or _context_identity(owner)
+            ),
+            confirmed_at=(
+                owner.observed_at
+                if owner.kind == "bos" and acceptance == "accepted"
+                else owner.confirmed_at or owner.formed_at
+            ),
+            protected_level_id=protected,
+            structural_scope=owner.structural_scale.value,
+            acceptance_state=acceptance,
+            status=status,
+            source_ids=source_ids,
+        )
+        layers.append((layer, owner))
+        if dominant_node is None and status == "intact":
+            dominant_node = owner
+        if timeframe is Timeframe.H1 and status == "challenging":
+            h1_challenger_node = owner
+    return tuple(layer for layer, _ in layers)
 
 
 def _global_material_conflicts(
@@ -3778,11 +4547,14 @@ def _global_material_conflicts(
     output: list[GlobalConflictEvidence] = []
     for edge_id in sorted(graph._current_epoch_active_opposes_edge_ids):
         edge = graph._edges.get(edge_id)
-        if edge is None or not _is_material_cross_scale_conflict(
+        if edge is None:
+            continue
+        role = _cross_scale_conflict_role(
             edge,
             graph._nodes,
             ready_timeframes=ready_timeframes,
-        ):
+        )
+        if role is None:
             continue
         source = graph._nodes[edge.source_node_id]
         target = graph._nodes[edge.target_node_id]
@@ -3803,6 +4575,91 @@ def _global_material_conflicts(
             GlobalConflictEvidence(
                 conflict_id=edge.edge_id,
                 event_id=_context_identity(source),
+                observed_at=(
+                    max(edge.observed_at, source.observed_at)
+                    if role
+                    is GlobalConflictRole.AUTHORITY_TRANSITION_CANDIDATE
+                    else edge.observed_at
+                ),
+                source_node_id=source.node_id,
+                target_node_id=target.node_id,
+                source_timeframe=Timeframe(source.timeframe),
+                target_timeframe=Timeframe(target.timeframe),
+                source_direction=source.direction,
+                target_direction=target.direction,
+                structural_scale=source.structural_scale.value,
+                role=role,
+                reason=role.value,
+                affected_hypothesis_ids=affected,
+            )
+        )
+    return tuple(
+        sorted(output, key=lambda value: (value.observed_at, value.conflict_id))
+    )
+
+
+def _global_terminal_authority_conflicts(
+    graph: TemporalMarketSceneGraph,
+    delta: SceneGraphDelta,
+    *,
+    ready_timeframes: frozenset[str],
+) -> tuple[GlobalConflictEvidence, ...]:
+    """Recover authority invalidation from OPPOSES edges closed this update.
+
+    Terminal node admission correctly removes an OPPOSES edge from the live
+    index.  The closed edge revision still carries the exact causal endpoints,
+    so consume only this minute's revised-edge delta instead of reopening it or
+    scanning graph history.
+    """
+
+    output: list[GlobalConflictEvidence] = []
+    changed_node_ids = set(
+        (*delta.added_node_ids, *delta.revised_node_ids)
+    )
+    for edge_id in dict.fromkeys(delta.revised_edge_ids):
+        edge = graph._edges.get(edge_id)
+        if (
+            edge is None
+            or edge.relation is not SceneEdgeKind.OPPOSES
+            or edge.lifecycle != "closed"
+            or edge.observed_at != delta.asof
+        ):
+            continue
+        revisions = graph._edge_revisions.get(edge_id, ())
+        if len(revisions) < 2 or revisions[-2].lifecycle != "active":
+            continue
+        source = graph._nodes.get(edge.source_node_id)
+        target = graph._nodes.get(edge.target_node_id)
+        if (
+            source is None
+            or target is None
+            or target.node_id not in changed_node_ids
+            or source.market_epoch_id != graph._market_epoch_id
+            or target.market_epoch_id != graph._market_epoch_id
+            or source.timeframe not in ready_timeframes
+            or target.timeframe not in ready_timeframes
+            or source.kind not in {"structure", "bos", "displacement"}
+            or target.kind != "structure"
+            or _is_terminal(source.kind, source.lifecycle)
+            or source.ambiguity_state is not EvidenceStatus.CONFIRMED
+            or target.structural_scale is not StructuralScale.EXTERNAL
+            or not _is_terminal(target.kind, target.lifecycle)
+            or source.direction is None
+            or target.direction is None
+            or source.direction is target.direction
+        ):
+            continue
+        affected = tuple(
+            dict.fromkeys(
+                f"{playbook.value}:{direction.value}"
+                for direction in (source.direction, target.direction)
+                for playbook in Playbook
+            )
+        )
+        output.append(
+            GlobalConflictEvidence(
+                conflict_id=edge.edge_id,
+                event_id=_context_identity(source),
                 observed_at=edge.observed_at,
                 source_node_id=source.node_id,
                 target_node_id=target.node_id,
@@ -3811,7 +4668,8 @@ def _global_material_conflicts(
                 source_direction=source.direction,
                 target_direction=target.direction,
                 structural_scale=source.structural_scale.value,
-                reason="material_cross_scale_opposition",
+                role=GlobalConflictRole.AUTHORITY_INVALIDATION,
+                reason=GlobalConflictRole.AUTHORITY_INVALIDATION.value,
                 affected_hypothesis_ids=affected,
             )
         )
@@ -3849,26 +4707,688 @@ def _global_external_draws(
     return output
 
 
-def _global_path_blockers(
+def _global_dislocations_by_scale(
     graph: TemporalMarketSceneGraph,
-) -> tuple[str, ...]:
-    """Return current blockers as liquidity entity IDs, not graph edge IDs."""
-
-    blockers: list[str] = []
-    for edge in sorted(
-        graph._current_path_block_edges.values(),
-        key=lambda value: (value.source_node_id, value.target_node_id),
-    ):
-        source = graph._nodes.get(edge.source_node_id)
+) -> Mapping[str, tuple[str, ...]]:
+    output: dict[str, tuple[str, ...]] = {
+        timeframe.value: () for timeframe in Timeframe
+    }
+    grouped: dict[str, list[str]] = defaultdict(list)
+    for node in _current_context_nodes(graph, "displacement"):
         if (
-            source is None
-            or source.kind != "liquidity"
-            or source.market_epoch_id != graph._market_epoch_id
-            or source.entity_id is None
+            node.lifecycle == "active"
+            and node.ambiguity_state is EvidenceStatus.CONFIRMED
+            and node.timeframe in output
+        ):
+            grouped[node.timeframe].append(_context_identity(node))
+    for timeframe, identities in grouped.items():
+        output[timeframe] = tuple(dict.fromkeys(sorted(identities)))
+    return output
+
+
+def _current_entity_node(
+    graph: TemporalMarketSceneGraph,
+    identity: str,
+) -> SceneNode | None:
+    """Resolve one identity from the bounded current epoch only."""
+
+    candidates = tuple(
+        graph._nodes[node_id]
+        for node_id in graph._entity_index.get(identity, set())
+        if node_id in graph._nodes
+        and graph._nodes[node_id].market_epoch_id == graph._market_epoch_id
+    )
+    if not candidates:
+        return None
+    return max(
+        candidates,
+        key=lambda node: (node.observed_at, node.node_id),
+    )
+
+
+def _global_balance_context(
+    observation: MarketObservation,
+    graph: TemporalMarketSceneGraph,
+) -> BalanceContext | None:
+    """Summarize current Group4 state without granting FAVR authority."""
+
+    ranges = tuple(
+        state
+        for timeframe in (Timeframe.H4, Timeframe.H1, Timeframe.M15)
+        if timeframe in observation.active_timeframes
+        for state in observation.frame(timeframe).dealing_ranges
+        if state.lifecycle.value in {"forming", "mature", "broken"}
+    )
+    if not ranges:
+        range_nodes = tuple(
+            node
+            for node in _current_context_nodes(graph, "range")
+            if node.timeframe in {
+                Timeframe.H4.value,
+                Timeframe.H1.value,
+                Timeframe.M15.value,
+            }
+            and node.lifecycle in {"forming", "mature"}
+            and node.ambiguity_state
+            in {EvidenceStatus.CONFIRMED, EvidenceStatus.FORMING}
+        )
+        if not range_nodes:
+            return None
+        node = max(
+            range_nodes,
+            key=lambda value: (
+                value.lifecycle == "mature",
+                value.confirmed_at or value.formed_at,
+                value.node_id,
+            ),
+        )
+        identity = _context_identity(node)
+        attributes = dict(node.semantic_attributes)
+        metrics = dict(node.descriptive_metrics)
+        bilateral = bool(
+            attributes.get("lower_source_zone_id")
+            and attributes.get("upper_source_zone_id")
+            and metrics.get("lower_touch_count", 0.0) > 0.0
+            and metrics.get("upper_touch_count", 0.0) > 0.0
+        )
+        internal_crossing = metrics.get("midpoint_crossings", 0.0) > 0.0
+        status = (
+            "authoritative"
+            if node.lifecycle == "mature"
+            else "descriptive"
+            if bilateral
+            and internal_crossing
+            and metrics.get("inside_close_fraction", 0.0) > 0.0
+            else "candidate"
+        )
+        return BalanceContext(
+            context_id=identity,
+            timeframe=Timeframe(node.timeframe),
+            status=status,
+            source_ids=tuple(
+                dict.fromkeys((identity, node.node_id, *node.source_ids))
+            ),
+            bilateral_boundaries=(
+                True if status == "authoritative" else bilateral
+            ),
+            internal_crossing=(
+                True if status == "authoritative" else internal_crossing
+            ),
+            accepted_external_break=False,
+            value_authoritative=status == "authoritative",
+        )
+    state = max(
+        ranges,
+        key=lambda value: (
+            value.lifecycle.value == "mature",
+            value.mature_at or value.formed_at,
+            value.range_id,
+        ),
+    )
+    bilateral = bool(
+        state.lower_source_zone_id
+        and state.upper_source_zone_id
+        and state.lower_touch_count > 0
+        and state.upper_touch_count > 0
+    )
+    internal_crossing = state.midpoint_crossings > 0
+    accepted_break = (
+        state.lifecycle.value == "broken"
+        and state.transition_reason == "close_beyond_frozen_range"
+    )
+    if state.lifecycle.value == "mature":
+        status = "authoritative"
+    elif (
+        bilateral
+        and internal_crossing
+        and state.inside_close_fraction > 0.0
+        and not accepted_break
+    ):
+        status = "descriptive"
+    else:
+        status = "candidate"
+    return BalanceContext(
+        context_id=state.range_id,
+        timeframe=state.timeframe,
+        status=status,
+        source_ids=tuple(
+            dict.fromkeys(
+                (
+                    state.range_id,
+                    state.lower_source_zone_id,
+                    state.upper_source_zone_id,
+                    *state.lower_source_member_swing_ids,
+                    *state.upper_source_member_swing_ids,
+                )
+            )
+        ),
+        bilateral_boundaries=bilateral,
+        internal_crossing=internal_crossing,
+        accepted_external_break=accepted_break,
+        value_authoritative=status == "authoritative",
+    )
+
+
+def _global_obstruction_views(
+    graph: TemporalMarketSceneGraph,
+    observation: MarketObservation,
+    draws: Mapping[str, tuple[str, ...]],
+    authority_stack: Sequence[AuthorityLayer] = (),
+) -> Mapping[str, DirectionalObstructionView]:
+    """Build clustered obstruction facts; Brain applies plan-specific gates.
+
+    ``BLOCKS_PATH_TO`` is only a current-price ordering relation.  It must not
+    promote every nearer liquidity item to structural authority.  Hard facts
+    are limited to current protected authority, mature-range boundaries and
+    accepted structural breaks (plus zones causally owned by those breaks).
+    """
+
+    candidates: dict[str, DeliveryObstruction] = {}
+
+    timeframe_rank = {
+        Timeframe.H4: 5,
+        Timeframe.H1: 4,
+        Timeframe.M15: 3,
+        Timeframe.M5: 2,
+        Timeframe.M1: 1,
+    }
+    scope_rank = {"internal": 1, "intermediate": 2, "external": 3}
+
+    authority_source_ids = {
+        identity
+        for layer in authority_stack
+        for identity in (
+            layer.structure_id,
+            layer.protected_level_id,
+            *layer.source_ids,
+        )
+        if identity is not None
+    }
+    mature_range_source_ids = {
+        identity
+        for node in _current_context_nodes(graph, "range")
+        if node.lifecycle == "mature"
+        for identity in (
+            _context_identity(node),
+            node.node_id,
+            *node.source_ids,
+        )
+    }
+
+    def accepted_structural_bos(node: SceneNode) -> bool:
+        attributes = dict(node.semantic_attributes)
+        scope = attributes.get("scope")
+        return bool(
+            attributes.get("post_break_state") == "accepted"
+            and (
+                scope == "continuation"
+                or (
+                    scope == "opposed"
+                    and attributes.get("mss_qualified") == "true"
+                )
+            )
+        )
+
+    accepted_bos_nodes = tuple(
+        node
+        for node in _current_context_nodes(graph, "bos")
+        if (
+            node.lifecycle == "confirmed"
+            and node.direction is not None
+            and node.timeframe
+            in {
+                Timeframe.H4.value,
+                Timeframe.H1.value,
+                Timeframe.M15.value,
+            }
+            and node.structural_scale
+            in {StructuralScale.INTERMEDIATE, StructuralScale.EXTERNAL}
+            and accepted_structural_bos(node)
+            and any(
+                _node_connected_to_layer(graph, node, layer)
+                for layer in authority_stack
+            )
+        )
+    )
+    # A completed accepted BOS remains a fact, but older same-role breaks do
+    # not all remain independent barriers.  Keep the latest current identity
+    # for each structural role.
+    latest_accepted_bos: dict[tuple[str, Direction, StructuralScale], SceneNode] = {}
+    for node in accepted_bos_nodes:
+        key = (node.timeframe, node.direction, node.structural_scale)
+        incumbent = latest_accepted_bos.get(key)
+        if incumbent is None or (node.observed_at, node.node_id) > (
+            incumbent.observed_at,
+            incumbent.node_id,
+        ):
+            latest_accepted_bos[key] = node
+    accepted_bos_nodes = tuple(latest_accepted_bos.values())
+    def add_candidate(node: SceneNode, *, hard: bool, source_kind: str) -> None:
+        if node.price_bounds is None or node.timeframe not in {
+            timeframe.value for timeframe in Timeframe
+        }:
+            return
+        lower, upper = node.price_bounds
+        side = (
+            "above"
+            if (lower + upper) / 2.0 >= observation.price
+            else "below"
+        )
+        attributes = dict(node.semantic_attributes)
+        identity = _context_identity(node)
+        candidates[identity] = DeliveryObstruction(
+            obstruction_id=identity,
+            timeframe=Timeframe(node.timeframe),
+            direction=node.direction,
+            side=side,
+            lower_bound=lower,
+            upper_bound=upper,
+            hard=hard,
+            source_kind=source_kind,
+            source_ids=tuple(
+                dict.fromkeys((identity, node.node_id, *node.source_ids))
+            ),
+            structural_scope=node.structural_scale.value,
+            acceptance_state=(
+                attributes.get("post_break_state")
+                or ("confirmed" if node.confirmed_at is not None else "pending")
+            ),
+        )
+
+    # Protection is a current structural fact, not a liquidity lifecycle.
+    # A wick may consume the corresponding draw without closing the confirmed
+    # structure, and the liquidity node may also retain pre-promotion metadata.
+    # Resolve the frozen raw swing directly from each intact authority layer so
+    # neither condition can silently remove the structural path boundary.
+    for layer in authority_stack:
+        if (
+            layer.status != "intact"
+            or layer.timeframe
+            not in {Timeframe.H4, Timeframe.H1, Timeframe.M15}
+            or layer.protected_level_id is None
         ):
             continue
-        blockers.append(source.entity_id)
-    return tuple(dict.fromkeys(blockers))
+        swing_node_id = graph._node_id_for_source(
+            layer.protected_level_id,
+            kind="swing",
+        )
+        swing = (
+            None
+            if swing_node_id is None
+            else graph._nodes.get(swing_node_id)
+        )
+        if (
+            swing is None
+            or swing.market_epoch_id != graph._market_epoch_id
+            or swing.timeframe != layer.timeframe.value
+            or swing.lifecycle != SwingLifecycle.CONFIRMED.value
+            or swing.ambiguity_state is not EvidenceStatus.CONFIRMED
+            or swing.price_bounds is None
+        ):
+            continue
+        lower, upper = swing.price_bounds
+        identity = (
+            "authority_protected_boundary:"
+            f"{layer.timeframe.value}:{layer.structure_id}:"
+            f"{layer.protected_level_id}"
+        )
+        candidates[identity] = DeliveryObstruction(
+            obstruction_id=identity,
+            timeframe=layer.timeframe,
+            direction=layer.direction,
+            side=(
+                "above"
+                if (lower + upper) / 2.0 >= observation.price
+                else "below"
+            ),
+            lower_bound=lower,
+            upper_bound=upper,
+            hard=True,
+            source_kind="authority_protected_boundary",
+            source_ids=tuple(
+                dict.fromkeys(
+                    (
+                        identity,
+                        layer.structure_id,
+                        layer.protected_level_id,
+                        *layer.source_ids,
+                        swing.node_id,
+                        *swing.source_ids,
+                    )
+                )
+            ),
+            structural_scope="external",
+            acceptance_state="confirmed",
+        )
+
+    for node in _current_context_nodes(graph, "liquidity"):
+        attributes = dict(node.semantic_attributes)
+        inventory_kind = attributes.get("inventory_kind", "liquidity")
+        protected = attributes.get("is_protected_swing") == "true"
+        identities = {
+            _context_identity(node),
+            node.node_id,
+            *node.source_ids,
+        }
+        hard = (
+            protected
+            and node.timeframe
+            in {
+                Timeframe.H4.value,
+                Timeframe.H1.value,
+                Timeframe.M15.value,
+            }
+            and not identities.isdisjoint(authority_source_ids)
+        ) or (
+            inventory_kind == "range_boundary"
+            and not identities.isdisjoint(mature_range_source_ids)
+        )
+        if hard:
+            add_candidate(node, hard=True, source_kind=inventory_kind)
+    for node in accepted_bos_nodes:
+        add_candidate(node, hard=True, source_kind="accepted_bos")
+
+    def zone_has_accepted_consequence(node: SceneNode) -> bool:
+        """Resolve the zone's causal owners through graph identities.
+
+        FVG/OB source identities are deliberately stored on nodes/edges; they
+        are not duplicated into presentation metadata.  A zone becomes a hard
+        candidate only when one of those frozen owners also belongs to a
+        current, authority-connected accepted non-local BOS.
+        """
+
+        zone_owner_ids = {
+            node.node_id,
+            _context_identity(node),
+            *node.source_ids,
+        }
+        for edge_id in graph._incoming.get(node.node_id, set()):
+            edge = graph._edges.get(edge_id)
+            if (
+                edge is None
+                or edge.lifecycle != "active"
+                or edge.relation is not SceneEdgeKind.CREATES
+            ):
+                continue
+            owner = graph._nodes.get(edge.source_node_id)
+            if owner is None or owner.kind not in {"bos", "displacement"}:
+                continue
+            zone_owner_ids.update(
+                (owner.node_id, _context_identity(owner), *owner.source_ids)
+            )
+        return any(
+            not zone_owner_ids.isdisjoint(
+                {
+                    bos.node_id,
+                    _context_identity(bos),
+                    *bos.source_ids,
+                }
+            )
+            for bos in accepted_bos_nodes
+        )
+
+    for kind in ("fvg", "order_block"):
+        for node in _current_context_nodes(graph, kind):
+            attributes = dict(node.semantic_attributes)
+            qualified = (
+                kind == "order_block"
+                or (
+                    attributes.get("qualification")
+                    == "displacement_linked"
+                )
+            )
+            if qualified:
+                add_candidate(
+                    node,
+                    hard=zone_has_accepted_consequence(node),
+                    source_kind=kind,
+                )
+    for node in _current_context_nodes(graph, "support_resistance"):
+        if node.lifecycle == "tested":
+            add_candidate(
+                node,
+                hard=False,
+                source_kind="support_resistance",
+            )
+
+    def priority(item: DeliveryObstruction) -> tuple[int, int, int, int, str]:
+        return (
+            int(item.hard),
+            timeframe_rank[item.timeframe],
+            scope_rank[item.structural_scope],
+            int(item.acceptance_state in {"accepted", "confirmed"}),
+            item.obstruction_id,
+        )
+
+    price_epsilon = max(1e-9, abs(float(observation.price)) * 1e-10)
+
+    def consolidate(
+        values: Sequence[DeliveryObstruction],
+    ) -> tuple[DeliveryObstruction, ...]:
+        """Collapse co-located/nested facts into one conservative zone."""
+
+        clusters: list[list[DeliveryObstruction]] = []
+        cluster_upper_bounds: list[float] = []
+        for item in sorted(
+            values,
+            key=lambda value: (
+                value.lower_bound,
+                value.upper_bound,
+                value.obstruction_id,
+            ),
+        ):
+            # Values are ordered by lower bound.  Comparing with the current
+            # cluster's union upper edge gives transitive interval/tick
+            # clustering without an all-pairs scan.
+            cluster = clusters[-1] if clusters else None
+            if (
+                cluster is None
+                or item.lower_bound
+                > cluster_upper_bounds[-1] + price_epsilon
+            ):
+                clusters.append([item])
+                cluster_upper_bounds.append(item.upper_bound)
+            else:
+                cluster.append(item)
+                cluster_upper_bounds[-1] = max(
+                    cluster_upper_bounds[-1],
+                    item.upper_bound,
+                )
+        output: list[DeliveryObstruction] = []
+        for cluster in clusters:
+            representative = max(cluster, key=priority)
+            sources = tuple(
+                dict.fromkeys(
+                    identity
+                    for item in sorted(cluster, key=priority, reverse=True)
+                    for identity in (item.obstruction_id, *item.source_ids)
+                )
+            )
+            output.append(
+                replace(
+                    representative,
+                    lower_bound=min(item.lower_bound for item in cluster),
+                    upper_bound=max(item.upper_bound for item in cluster),
+                    hard=any(item.hard for item in cluster),
+                    source_ids=sources,
+                )
+            )
+        return tuple(output)
+
+    output: dict[str, DirectionalObstructionView] = {}
+    for direction, side in (
+        (Direction.LONG, "above"),
+        (Direction.SHORT, "below"),
+    ):
+        draw_pairs = tuple(
+            (identity, _current_entity_node(graph, identity))
+            for identity in draws[side]
+        )
+        nearest_pair = next(
+            (
+                (identity, node)
+                for identity, node in draw_pairs
+                if node is not None and node.price_bounds is not None
+            ),
+            None,
+        )
+        direction_candidates = consolidate(
+            sorted(
+                (
+                    item
+                    for item in candidates.values()
+                    if (
+                        item.source_kind
+                        not in {"accepted_bos", "fvg", "order_block"}
+                        or item.direction is None
+                        or item.direction is not direction
+                    )
+                ),
+                key=lambda item: (
+                    abs(item.contact_price(direction) - observation.price),
+                    item.obstruction_id,
+                ),
+            )
+        )
+        ranked_candidates = tuple(
+            sorted(
+                direction_candidates,
+                key=lambda item: (
+                    abs(
+                        item.contact_price(direction)
+                        - observation.price
+                    ),
+                    item.obstruction_id,
+                ),
+            )
+        )
+        output[direction.value] = DirectionalObstructionView(
+            direction=direction,
+            nearest_draw_id=(None if nearest_pair is None else nearest_pair[0]),
+            nearest_draw_price=(
+                None
+                if nearest_pair is None
+                else (
+                    nearest_pair[1].price_bounds[0]
+                    if direction is Direction.LONG
+                    else nearest_pair[1].price_bounds[1]
+                )
+            ),
+            hard_barriers=tuple(item for item in ranked_candidates if item.hard),
+            soft_frictions=tuple(item for item in ranked_candidates if not item.hard),
+        )
+    return output
+
+
+def _refresh_obstruction_draws(
+    graph: TemporalMarketSceneGraph,
+    views: Mapping[str, DirectionalObstructionView],
+    draws: Mapping[str, tuple[str, ...]],
+) -> Mapping[str, DirectionalObstructionView]:
+    """Refresh price-ranked draw heads without rebuilding obstruction facts."""
+
+    output: dict[str, DirectionalObstructionView] = {}
+    for direction, side in (
+        (Direction.LONG, "above"),
+        (Direction.SHORT, "below"),
+    ):
+        nearest: tuple[str, SceneNode] | None = None
+        for identity in draws[side]:
+            node = _current_entity_node(graph, identity)
+            if node is not None and node.price_bounds is not None:
+                nearest = (identity, node)
+                break
+        prior = views[direction.value]
+        output[direction.value] = replace(
+            prior,
+            nearest_draw_id=None if nearest is None else nearest[0],
+            nearest_draw_price=(
+                None
+                if nearest is None
+                else (
+                    nearest[1].price_bounds[0]
+                    if direction is Direction.LONG
+                    else nearest[1].price_bounds[1]
+                )
+            ),
+        )
+    return output
+
+
+def _dominant_authority_layer(
+    stack: Sequence[AuthorityLayer],
+) -> AuthorityLayer | None:
+    return next((layer for layer in stack if layer.status == "intact"), None)
+
+
+def _timeframe_age_bars(
+    since: pd.Timestamp | None,
+    asof: pd.Timestamp,
+    timeframe: Timeframe,
+) -> int:
+    """Query-time descriptive age; it never creates a graph revision."""
+
+    if since is None:
+        return 0
+    seconds = {
+        Timeframe.H4: 4 * 60 * 60,
+        Timeframe.H1: 60 * 60,
+        Timeframe.M15: 15 * 60,
+        Timeframe.M5: 5 * 60,
+        Timeframe.M1: 60,
+    }[timeframe]
+    return max(0, int((asof - since).total_seconds() // seconds))
+
+
+def _relation_evidence_since(
+    node: SceneNode,
+    *,
+    conflict_observed_at: pd.Timestamp | None = None,
+) -> pd.Timestamp:
+    """Use acceptance, not pre-acceptance BOS confirmation, as evidence time."""
+
+    attributes = dict(node.semantic_attributes)
+    if node.kind == "bos" and attributes.get("post_break_state") == "accepted":
+        return max(
+            value
+            for value in (node.observed_at, conflict_observed_at)
+            if value is not None
+        )
+    return node.confirmed_at or node.formed_at
+
+
+def _node_connected_to_layer(
+    graph: TemporalMarketSceneGraph,
+    node: SceneNode,
+    layer: AuthorityLayer,
+) -> bool:
+    layer_ids = {
+        layer.structure_id,
+        *layer.source_ids,
+        *((layer.protected_level_id,) if layer.protected_level_id else ()),
+    }
+    if not set((node.node_id, _context_identity(node), *node.source_ids)).isdisjoint(
+        layer_ids
+    ):
+        return True
+    for edge_id in (
+        graph._outgoing.get(node.node_id, set())
+        | graph._incoming.get(node.node_id, set())
+    ):
+        edge = graph._edges.get(edge_id)
+        if edge is None or edge.lifecycle != "active":
+            continue
+        peer_id = (
+            edge.target_node_id
+            if edge.source_node_id == node.node_id
+            else edge.source_node_id
+        )
+        peer = graph._nodes.get(peer_id)
+        if peer is not None and not layer_ids.isdisjoint(
+            {peer.node_id, _context_identity(peer), *peer.source_ids}
+        ):
+            return True
+    return False
 
 
 def _global_scale_relations(
@@ -3876,77 +5396,317 @@ def _global_scale_relations(
     *,
     observation: MarketObservation,
     ready_timeframes: frozenset[str],
-    authority_timeframe: Timeframe | None,
-    authority_direction: Direction | None,
+    authority_stack: tuple[AuthorityLayer, ...],
     conflicts: tuple[GlobalConflictEvidence, ...],
-) -> tuple[Mapping[str, ScaleRelation], tuple[str, ...], tuple[str, ...]]:
+) -> tuple[Mapping[str, ScaleRelationState], tuple[str, ...], tuple[str, ...]]:
     active = {timeframe.value for timeframe in observation.active_timeframes}
-    material_source_frames = {
-        conflict.source_timeframe.value for conflict in conflicts
-    }
-    material_target_frames = {
-        conflict.target_timeframe.value
-        for conflict in conflicts
-        if graph._nodes[conflict.target_node_id].direction
-        is not authority_direction
-    }
-    structures = _current_context_nodes(graph, "structure")
-    displacements = _current_context_nodes(graph, "displacement")
-    relations: dict[str, ScaleRelation] = {}
+    dominant = _dominant_authority_layer(authority_stack)
+    authority_direction = None if dominant is None else dominant.direction
+    authority_ids = (
+        set()
+        if dominant is None
+        else {
+            dominant.structure_id,
+            *dominant.source_ids,
+            *((dominant.protected_level_id,) if dominant.protected_level_id else ()),
+        }
+    )
+    current_candidates = tuple(
+        node
+        for kind in ("bos", "structure", "displacement")
+        for node in _current_context_nodes(graph, kind)
+        if node.ambiguity_state
+        in {EvidenceStatus.CONFIRMED, EvidenceStatus.AMBIGUOUS}
+        and node.direction is not None
+    )
+    details: dict[str, ScaleRelationState] = {}
     unknown: list[str] = []
     ambiguous: list[str] = []
     for timeframe in _GLOBAL_SCALE_ORDER:
         key = timeframe.value
-        if key not in active or key not in ready_timeframes:
-            relations[key] = ScaleRelation.UNKNOWN
-            unknown.append(f"scale:{key}:not_ready")
-            continue
-        if authority_timeframe is None or authority_direction is None:
-            relations[key] = ScaleRelation.UNKNOWN
-            unknown.append(f"scale:{key}:authority_unresolved")
-            continue
-        if key == authority_timeframe.value:
-            relations[key] = ScaleRelation.ALIGNED
-            continue
-        if key in material_source_frames or key in material_target_frames:
-            relations[key] = ScaleRelation.MATERIAL_OPPOSITION
-            continue
-        candidates = tuple(
-            node
-            for node in structures
-            if node.timeframe == key
-            and node.lifecycle == StructureLifecycle.CONFIRMED.value
-            and node.ambiguity_state is EvidenceStatus.CONFIRMED
-            and node.direction is not None
+        layer = next(
+            (value for value in authority_stack if value.timeframe is timeframe),
+            None,
         )
-        if not candidates:
-            candidates = tuple(
-                node
-                for node in displacements
-                if node.timeframe == key
-                and node.lifecycle == "active"
-                and node.ambiguity_state is EvidenceStatus.CONFIRMED
-                and node.direction is not None
+        frame_candidates = tuple(
+            node for node in current_candidates if node.timeframe == key
+        )
+        ambiguous_nodes = tuple(
+            node
+            for node in frame_candidates
+            if node.ambiguity_state is EvidenceStatus.AMBIGUOUS
+        )
+        priority = {"bos": 3, "structure": 2, "displacement": 1}
+        current_clock_candidates = tuple(
+            node
+            for node in frame_candidates
+            if node.observed_at == observation.asof
+        )
+        current_priority = max(
+            (priority.get(node.kind, 0) for node in current_clock_candidates),
+            default=0,
+        )
+        same_clock_top = tuple(
+            node
+            for node in current_clock_candidates
+            if priority.get(node.kind, 0) == current_priority
+        )
+        same_clock_ambiguous = len(
+            {node.direction for node in same_clock_top}
+        ) > 1
+        if ambiguous_nodes or same_clock_ambiguous:
+            evidence = tuple(
+                dict.fromkeys(_context_identity(node) for node in frame_candidates)
             )
-        directions = {node.direction for node in candidates}
-        if not directions:
-            relations[key] = ScaleRelation.UNKNOWN
+            ambiguous.extend(evidence)
+            details[key] = ScaleRelationState(
+                timeframe=timeframe,
+                relation=ScaleRelation.UNKNOWN,
+                direction=None,
+                authority_layer_id=(None if dominant is None else dominant.structure_id),
+                evidence_ids=evidence,
+                evidence_kind=None,
+                structural_scope=None,
+                acceptance_state=None,
+                since=min(
+                    (node.confirmed_at or node.formed_at for node in frame_candidates),
+                    default=None,
+                ),
+                age_bars=0,
+                graph_connected=False,
+                ambiguous=True,
+            )
+            continue
+        if key not in active or key not in ready_timeframes:
+            unknown.append(f"scale:{key}:not_ready")
+            details[key] = ScaleRelationState(
+                timeframe=timeframe,
+                relation=ScaleRelation.UNKNOWN,
+                direction=None,
+                authority_layer_id=(None if dominant is None else dominant.structure_id),
+                evidence_ids=(),
+                evidence_kind=None,
+                structural_scope=None,
+                acceptance_state=None,
+                since=None,
+                age_bars=0,
+                graph_connected=False,
+                ambiguous=False,
+            )
+            continue
+        if dominant is None or authority_direction is None:
+            unknown.append(f"scale:{key}:authority_unresolved")
+            details[key] = ScaleRelationState(
+                timeframe=timeframe,
+                relation=ScaleRelation.UNKNOWN,
+                direction=(None if layer is None else layer.direction),
+                authority_layer_id=None,
+                evidence_ids=(() if layer is None else (layer.structure_id,)),
+                evidence_kind=(None if layer is None else "structure"),
+                structural_scope=(None if layer is None else layer.structural_scope),
+                acceptance_state=(None if layer is None else layer.acceptance_state),
+                since=(None if layer is None else layer.confirmed_at),
+                age_bars=(
+                    0
+                    if layer is None
+                    else _timeframe_age_bars(layer.confirmed_at, observation.asof, timeframe)
+                ),
+                graph_connected=False,
+                ambiguous=False,
+            )
+            continue
+        if key == dominant.timeframe.value:
+            details[key] = ScaleRelationState(
+                timeframe=timeframe,
+                relation=ScaleRelation.ALIGNED,
+                direction=dominant.direction,
+                authority_layer_id=dominant.structure_id,
+                evidence_ids=(dominant.structure_id,),
+                evidence_kind="structure",
+                structural_scope=dominant.structural_scope,
+                acceptance_state=dominant.acceptance_state,
+                since=dominant.confirmed_at,
+                age_bars=_timeframe_age_bars(
+                    dominant.confirmed_at, observation.asof, timeframe
+                ),
+                graph_connected=True,
+                ambiguous=False,
+            )
+            continue
+        relevant_conflicts = tuple(
+            conflict
+            for conflict in conflicts
+            if conflict.source_timeframe is timeframe
+            and not authority_ids.isdisjoint(
+                {
+                    conflict.target_node_id,
+                    _context_identity(graph._nodes[conflict.target_node_id]),
+                    *graph._nodes[conflict.target_node_id].source_ids,
+                }
+            )
+        )
+        if relevant_conflicts:
+            conflict = max(
+                relevant_conflicts,
+                key=lambda value: (
+                    {
+                        GlobalConflictRole.AUTHORITY_INVALIDATION: 3,
+                        GlobalConflictRole.AUTHORITY_TRANSITION_CANDIDATE: 2,
+                        GlobalConflictRole.LOCAL_COUNTERTREND_DELIVERY: 1,
+                    }[value.role],
+                    value.observed_at,
+                    value.conflict_id,
+                ),
+            )
+            source = graph._nodes[conflict.source_node_id]
+            relation = (
+                ScaleRelation.MATERIAL_OPPOSITION
+                if conflict.role
+                in {
+                    GlobalConflictRole.AUTHORITY_TRANSITION_CANDIDATE,
+                    GlobalConflictRole.AUTHORITY_INVALIDATION,
+                }
+                else ScaleRelation.NORMAL_PULLBACK
+            )
+            attributes = dict(source.semantic_attributes)
+            since = _relation_evidence_since(
+                source,
+                conflict_observed_at=conflict.observed_at,
+            )
+            details[key] = ScaleRelationState(
+                timeframe=timeframe,
+                relation=relation,
+                direction=source.direction,
+                authority_layer_id=dominant.structure_id,
+                evidence_ids=tuple(
+                    dict.fromkeys(
+                        (_context_identity(source), conflict.conflict_id)
+                    )
+                ),
+                evidence_kind=source.kind,
+                structural_scope=source.structural_scale.value,
+                acceptance_state=(
+                    attributes.get("post_break_state")
+                    or ("confirmed" if source.confirmed_at is not None else "pending")
+                ),
+                since=since,
+                age_bars=_timeframe_age_bars(
+                    since,
+                    observation.asof,
+                    timeframe,
+                ),
+                graph_connected=True,
+                ambiguous=False,
+            )
+            continue
+        candidate = max(
+            frame_candidates,
+            key=lambda node: (
+                priority.get(node.kind, 0),
+                node.confirmed_at or node.formed_at,
+                node.node_id,
+            ),
+            default=None,
+        )
+        if candidate is None:
             unknown.append(f"scale:{key}:no_structural_evidence")
-        elif len(directions) > 1:
-            relations[key] = ScaleRelation.UNKNOWN
-            ambiguous.extend(_context_identity(node) for node in candidates)
-        elif authority_direction in directions:
-            relations[key] = ScaleRelation.ALIGNED
-        elif (
-            _GLOBAL_SCALE_RANK[key]
-            < _GLOBAL_SCALE_RANK[authority_timeframe.value]
-        ):
-            relations[key] = ScaleRelation.NORMAL_PULLBACK
+            details[key] = ScaleRelationState(
+                timeframe=timeframe,
+                relation=ScaleRelation.UNKNOWN,
+                direction=(None if layer is None else layer.direction),
+                authority_layer_id=dominant.structure_id,
+                evidence_ids=(() if layer is None else (layer.structure_id,)),
+                evidence_kind=(None if layer is None else "structure"),
+                structural_scope=(None if layer is None else layer.structural_scope),
+                acceptance_state=(None if layer is None else layer.acceptance_state),
+                since=(None if layer is None else layer.confirmed_at),
+                age_bars=(
+                    0
+                    if layer is None
+                    else _timeframe_age_bars(layer.confirmed_at, observation.asof, timeframe)
+                ),
+                graph_connected=False,
+                ambiguous=False,
+            )
         else:
-            relations[key] = ScaleRelation.UNKNOWN
-            unknown.append(f"scale:{key}:unresolved_opposition")
+            challenger_layer = next(
+                (
+                    value
+                    for value in authority_stack
+                    if value.status == "challenging"
+                    and value.timeframe is Timeframe.H1
+                    and candidate.direction is value.direction
+                    and _node_connected_to_layer(graph, candidate, value)
+                ),
+                None,
+            )
+            if challenger_layer is not None and timeframe is Timeframe.M15:
+                attributes = dict(candidate.semantic_attributes)
+                since = _relation_evidence_since(candidate)
+                details[key] = ScaleRelationState(
+                    timeframe=timeframe,
+                    relation=ScaleRelation.MATERIAL_OPPOSITION,
+                    direction=candidate.direction,
+                    authority_layer_id=challenger_layer.structure_id,
+                    evidence_ids=(_context_identity(candidate),),
+                    evidence_kind=candidate.kind,
+                    structural_scope=candidate.structural_scale.value,
+                    acceptance_state=(
+                        attributes.get("post_break_state")
+                        or (
+                            "confirmed"
+                            if candidate.confirmed_at is not None
+                            else "pending"
+                        )
+                    ),
+                    since=since,
+                    age_bars=_timeframe_age_bars(
+                        since,
+                        observation.asof,
+                        timeframe,
+                    ),
+                    graph_connected=True,
+                    ambiguous=False,
+                )
+                continue
+            connected_layer = (
+                dominant
+                if _node_connected_to_layer(graph, candidate, dominant)
+                else None
+            )
+            connected = connected_layer is not None
+            attributes = dict(candidate.semantic_attributes)
+            since = _relation_evidence_since(candidate)
+            acceptance = attributes.get("post_break_state") or (
+                "confirmed" if candidate.confirmed_at is not None else "pending"
+            )
+            if not connected:
+                relation = ScaleRelation.UNKNOWN
+                unknown.append(f"scale:{key}:graph_disconnected")
+            elif candidate.direction is authority_direction:
+                relation = ScaleRelation.ALIGNED
+            else:
+                relation = ScaleRelation.NORMAL_PULLBACK
+            details[key] = ScaleRelationState(
+                timeframe=timeframe,
+                relation=relation,
+                direction=candidate.direction,
+                authority_layer_id=dominant.structure_id,
+                evidence_ids=(_context_identity(candidate),),
+                evidence_kind=candidate.kind,
+                structural_scope=candidate.structural_scale.value,
+                acceptance_state=acceptance,
+                since=since,
+                age_bars=_timeframe_age_bars(
+                    since,
+                    observation.asof,
+                    timeframe,
+                ),
+                graph_connected=connected,
+                ambiguous=False,
+            )
     return (
-        relations,
+        details,
         tuple(dict.fromkeys(unknown)),
         tuple(dict.fromkeys(ambiguous)),
     )
@@ -3970,7 +5730,49 @@ def _high_salience_episode_ids(
             and node.ambiguity_state
             not in {EvidenceStatus.INVALIDATED, EvidenceStatus.UNKNOWN}
         )
-        active_typed_path = (
+        successful_terminal_path = _successful_terminal_path_pulse(node)
+        typed_path_pulse = (
+            node.kind == "path_sequence"
+            and (
+                node.lifecycle == "active"
+                or successful_terminal_path
+            )
+            and attributes.get("context_kind")
+            in {"pool_reversal", "zone_return"}
+            and node.ambiguity_state
+            not in {EvidenceStatus.INVALIDATED, EvidenceStatus.UNKNOWN}
+        )
+        directional_displacement = (
+            node.kind == "displacement"
+            and node.timeframe
+            in {
+                Timeframe.H4.value,
+                Timeframe.H1.value,
+                Timeframe.M15.value,
+                Timeframe.M5.value,
+            }
+            and node.lifecycle in {"started", "active"}
+            and node.direction is not None
+            and node.ambiguity_state
+            not in {EvidenceStatus.INVALIDATED, EvidenceStatus.UNKNOWN}
+        )
+        if manipulation_root or typed_path_pulse or directional_displacement:
+            output.append(_context_identity(node))
+    return tuple(dict.fromkeys(output))
+
+
+def _persistent_explanation_candidate(node: SceneNode) -> bool:
+    """Whether a prior candidate is still a live structured episode root."""
+
+    attributes = dict(node.semantic_attributes)
+    return bool(
+        (
+            node.kind == "manipulation"
+            and node.lifecycle == "swept"
+            and node.ambiguity_state
+            not in {EvidenceStatus.INVALIDATED, EvidenceStatus.UNKNOWN}
+        )
+        or (
             node.kind == "path_sequence"
             and node.lifecycle == "active"
             and attributes.get("context_kind")
@@ -3978,9 +5780,1295 @@ def _high_salience_episode_ids(
             and node.ambiguity_state
             not in {EvidenceStatus.INVALIDATED, EvidenceStatus.UNKNOWN}
         )
-        if manipulation_root or active_typed_path:
-            output.append(_context_identity(node))
-    return tuple(dict.fromkeys(output))
+        or (
+            node.kind == "displacement"
+            and node.timeframe
+            in {
+                Timeframe.H4.value,
+                Timeframe.H1.value,
+                Timeframe.M15.value,
+                Timeframe.M5.value,
+            }
+            and node.lifecycle in {"started", "active"}
+            and node.direction is not None
+            and node.ambiguity_state
+            not in {EvidenceStatus.INVALIDATED, EvidenceStatus.UNKNOWN}
+        )
+    )
+
+
+def _successful_terminal_path_pulse(node: SceneNode) -> bool:
+    """Keep a completed trigger path visible for its resolution clock only."""
+
+    return bool(
+        node.kind == "path_sequence"
+        and node.lifecycle == "closed"
+        and node.ambiguity_state
+        not in {EvidenceStatus.INVALIDATED, EvidenceStatus.UNKNOWN}
+        and node.resolution_reason
+        in {"micro_bos_aligned", "pool_reversal_sequence_observed"}
+    )
+
+
+def _accepted_h1_continuation_root_ids(
+    nodes: Sequence[SceneNode],
+    *,
+    market_epoch_id: str,
+) -> tuple[str, ...]:
+    """Emit an H1 continuation-BOS pulse for outcome-blind funnel counting."""
+
+    return tuple(
+        dict.fromkeys(
+            _context_identity(node)
+            for node in nodes
+            if node.market_epoch_id == market_epoch_id
+            and node.kind == "bos"
+            and node.timeframe == Timeframe.H1.value
+            and node.lifecycle == "confirmed"
+            and node.ambiguity_state is EvidenceStatus.CONFIRMED
+            and node.structural_scale
+            in {StructuralScale.INTERMEDIATE, StructuralScale.EXTERNAL}
+            and dict(node.semantic_attributes).get("scope") == "continuation"
+            and dict(node.semantic_attributes).get("post_break_state")
+            == "accepted"
+        )
+    )
+
+
+def _open_thesis_mechanism(node: SceneNode) -> str:
+    attributes = dict(node.semantic_attributes)
+    if node.kind == "displacement":
+        return "directional_displacement"
+    if node.kind == "manipulation":
+        source_kind = attributes.get("source_kind", "")
+        return (
+            "range_failed_auction"
+            if "range" in source_kind
+            else "liquidity_sweep"
+        )
+    if node.kind == "path_sequence":
+        return {
+            "pool_reversal": "liquidity_sweep_reversal",
+            "zone_return": "frozen_zone_return",
+        }.get(attributes.get("context_kind", ""), "structured_path")
+    if node.kind == "bos":
+        return "structural_break"
+    return "structured_episode"
+
+
+def _open_thesis_authority_relation(
+    node: SceneNode,
+    source_timeframe: Timeframe,
+    context: GlobalMarketContext,
+    *,
+    direction: Direction | None = None,
+) -> str:
+    effective_direction = node.direction if direction is None else direction
+    if effective_direction is None:
+        return "unknown"
+    relation = context.scale_relation_details.get(source_timeframe.value)
+    if (
+        relation is not None
+        and relation.direction is effective_direction
+    ):
+        if relation.ambiguous:
+            return "ambiguous"
+        if not relation.graph_connected:
+            return "unknown"
+        if relation.relation is ScaleRelation.MATERIAL_OPPOSITION:
+            return "challenges_incumbent"
+        if relation.relation is ScaleRelation.NORMAL_PULLBACK:
+            return "local_countertrend"
+        if relation.relation is ScaleRelation.ALIGNED:
+            return "aligned"
+    authority_direction = context.authority_direction
+    if authority_direction is None:
+        return "unbound"
+    if effective_direction is authority_direction:
+        return "aligned"
+    if node.kind == "manipulation":
+        return "local_countertrend"
+    if node.timeframe in {Timeframe.M5.value, Timeframe.M1.value}:
+        return "local_countertrend"
+    return "challenges_incumbent"
+
+
+def _open_thesis_direction(
+    root: SceneNode,
+    candidates: Sequence[SceneNode],
+) -> Direction | None:
+    """Resolve the thesis direction, not the source sweep direction."""
+
+    candidate_direction = next(
+        (
+            candidate.direction
+            for candidate in sorted(
+                candidates,
+                key=lambda value: (
+                    0 if value.kind == "path_sequence" else 1,
+                    value.formed_at,
+                    value.node_id,
+                ),
+            )
+            if candidate.kind in {"path_sequence", "displacement"}
+            and candidate.direction is not None
+        ),
+        None,
+    )
+    if candidate_direction is not None:
+        return candidate_direction
+    if root.kind == "manipulation" and root.direction is not None:
+        return (
+            Direction.SHORT
+            if root.direction is Direction.LONG
+            else Direction.LONG
+        )
+    return root.direction
+
+
+_OPEN_THESIS_CAUSAL_RELATIONS = frozenset(
+    {
+        SceneEdgeKind.BREAKS,
+        SceneEdgeKind.CREATES,
+        SceneEdgeKind.SWEEPS,
+        SceneEdgeKind.RETURNS_TO,
+        SceneEdgeKind.CONFIRMS,
+        SceneEdgeKind.SOURCED_FROM,
+        SceneEdgeKind.RESOLVES,
+        SceneEdgeKind.PRECEDES,
+    }
+)
+_OPEN_THESIS_LEAF_KINDS = frozenset(
+    {
+        "structure",
+        "swing",
+        "swing_projection",
+        "support_resistance",
+        "liquidity",
+        "liquidity_pool",
+        "range",
+    }
+)
+
+
+def _open_thesis_closure(
+    graph: TemporalMarketSceneGraph,
+    root: SceneNode,
+    *,
+    max_depth: int = 4,
+) -> tuple[SceneNode, ...]:
+    """Resolve one bounded current-epoch closure without scanning history."""
+
+    visited = {root.node_id}
+    frontier = deque(((root.node_id, 0),))
+    while frontier and len(visited) < 64:
+        node_id, depth = frontier.popleft()
+        current = graph._nodes.get(node_id)
+        if (
+            depth >= max_depth
+            or (
+                depth > 0
+                and current is not None
+                and current.kind in _OPEN_THESIS_LEAF_KINDS
+            )
+        ):
+            continue
+        neighbors = sorted(
+            graph._neighbors(node_id),
+            key=lambda value: (
+                value[1].relation.value,
+                value[0],
+                value[1].edge_id,
+            ),
+        )
+        for neighbor_id, edge in neighbors:
+            if (
+                edge.relation not in _OPEN_THESIS_CAUSAL_RELATIONS
+                or neighbor_id in visited
+            ):
+                continue
+            neighbor = graph._nodes.get(neighbor_id)
+            if (
+                neighbor is None
+                or neighbor.market_epoch_id != graph._market_epoch_id
+            ):
+                continue
+            visited.add(neighbor_id)
+            frontier.append((neighbor_id, depth + 1))
+            if len(visited) >= 64:
+                break
+    return tuple(
+        sorted(
+            (graph._nodes[node_id] for node_id in visited),
+            key=lambda value: (value.formed_at, value.node_id),
+        )
+    )
+
+
+def _preceding_manipulation_id(
+    graph: TemporalMarketSceneGraph,
+    displacement: SceneNode,
+) -> str | None:
+    candidates = []
+    for neighbor_id, edge in graph._neighbors(displacement.node_id):
+        if (
+            edge.relation is not SceneEdgeKind.PRECEDES
+            or edge.target_node_id != displacement.node_id
+        ):
+            continue
+        neighbor = graph._nodes.get(neighbor_id)
+        if neighbor is not None and neighbor.kind == "manipulation":
+            candidates.append(neighbor)
+    if not candidates:
+        return None
+    return _context_identity(
+        min(candidates, key=lambda value: (value.formed_at, value.node_id))
+    )
+
+
+def _canonical_open_thesis_root_id(
+    candidate: SceneNode,
+    observation: MarketObservation,
+    graph: TemporalMarketSceneGraph,
+) -> str:
+    """Collapse later path/zone roots into their initiating episode root."""
+
+    if candidate.kind == "displacement":
+        return _preceding_manipulation_id(graph, candidate) or _context_identity(
+            candidate
+        )
+    if candidate.kind != "path_sequence":
+        return _context_identity(candidate)
+    path = next(
+        (
+            item
+            for item in observation.path_sequences
+            if item.sequence_id == _context_identity(candidate)
+        ),
+        None,
+    )
+    if path is None:
+        return _context_identity(candidate)
+    if path.context_kind == "pool_reversal":
+        return path.context_id
+    location = next(
+        (
+            item
+            for item in observation.entry_locations
+            if item.location_id == path.context_id
+        ),
+        None,
+    )
+    if location is None:
+        return _context_identity(candidate)
+    displacement = _current_entity_node(
+        graph,
+        location.source_displacement_id,
+    )
+    if displacement is None:
+        return location.source_displacement_id
+    return _preceding_manipulation_id(graph, displacement) or (
+        location.source_displacement_id
+    )
+
+
+def _is_supporting_open_thesis_trigger(node: SceneNode) -> bool:
+    if node.kind == "path_step":
+        return dict(node.semantic_attributes).get("path_step_kind") in {
+            "wick_rejection",
+            "reacceptance_held",
+            "micro_bos_confirmed",
+        }
+    if node.kind == "reacceptance":
+        return node.lifecycle == "held"
+    if node.kind == "micro_bos":
+        attributes = dict(node.semantic_attributes)
+        return bool(
+            node.ambiguity_state is EvidenceStatus.CONFIRMED
+            and attributes.get("outcome", "aligned") == "aligned"
+        )
+    return False
+
+
+def build_open_market_theses(
+    previous: Sequence[OpenMarketThesis],
+    observation: MarketObservation,
+    delta: SceneGraphDelta,
+    graph: TemporalMarketSceneGraph,
+    context: GlobalMarketContext,
+) -> tuple[OpenMarketThesis, ...]:
+    """Bind active graph roots into playbook-neutral, identity-only theses.
+
+    Evidence identities are latched for the lifetime of the same root.  Draws,
+    blockers and conflicts remain current views.  Nothing here chooses a
+    playbook, score or action.
+    """
+
+    if (
+        delta.asof != observation.asof
+        or context.updated_at != observation.asof
+        or delta.revision_id != context.scene_revision_id
+        or context.market_epoch_id != graph._market_epoch_id
+    ):
+        raise ValueError("open thesis clocks or market epoch disagree")
+    prior_by_root = {
+        thesis.root_id: thesis
+        for thesis in previous
+        if thesis.market_epoch_id == context.market_epoch_id
+    }
+    output: list[OpenMarketThesis] = []
+    mechanism_kinds = {
+        "bos",
+        "displacement",
+        "fvg",
+        "order_block",
+        "range",
+        "manipulation",
+        "path_sequence",
+    }
+    candidate_groups: dict[str, list[SceneNode]] = defaultdict(list)
+    for root_id in context.candidate_structured_episode_ids:
+        candidate = _current_entity_node(graph, root_id)
+        if candidate is None or (
+            _is_terminal(candidate.kind, candidate.lifecycle)
+            and not (
+                candidate.kind == "manipulation"
+                and candidate.lifecycle == "reaccepted"
+            )
+            and not _successful_terminal_path_pulse(candidate)
+        ):
+            continue
+        canonical_id = _canonical_open_thesis_root_id(
+            candidate,
+            observation,
+            graph,
+        )
+        candidate_groups[canonical_id].append(candidate)
+    visible_inventory = tuple(
+        sorted(
+            (
+                item
+                for item in observation.liquidity_inventory
+                if item.lifecycle is LiquidityInventoryLifecycle.VISIBLE
+                and item.confirmed_at <= observation.asof
+            ),
+            key=lambda item: (
+                abs(float(item.price) - float(observation.price)),
+                item.item_id,
+            ),
+        )
+    )
+    visible_draws_by_side = {
+        side: tuple(
+            item.item_id
+            for item in visible_inventory
+            if item.side == side
+        )
+        for side in ("above", "below")
+    }
+    visible_all_draws = tuple(item.item_id for item in visible_inventory)
+    for root_id, candidates in sorted(candidate_groups.items()):
+        root = _current_entity_node(graph, root_id) or min(
+            candidates,
+            key=lambda value: (value.formed_at, value.node_id),
+        )
+        closure_by_id: dict[str, SceneNode] = {root.node_id: root}
+        for candidate in sorted(candidates, key=lambda value: value.node_id):
+            for node in _open_thesis_closure(graph, candidate):
+                closure_by_id[node.node_id] = node
+        closure = tuple(
+            sorted(
+                closure_by_id.values(),
+                key=lambda value: (value.formed_at, value.node_id),
+            )
+        )
+        closure_node_ids = {node.node_id for node in closure}
+        identities = tuple(
+            dict.fromkeys(
+                _context_identity(node) for node in closure
+            )
+        )
+        prior = prior_by_root.get(root_id)
+        mechanism_ids = tuple(
+            dict.fromkeys(
+                (
+                    root_id,
+                    *(
+                        ()
+                        if prior is None
+                        else prior.mechanism_event_ids
+                    ),
+                    *(
+                        _context_identity(node)
+                        for node in closure
+                        if node.kind in mechanism_kinds
+                    ),
+                )
+            )
+        )
+        location_ids = tuple(
+            dict.fromkeys(
+                (
+                    *(() if prior is None else prior.entry_location_ids),
+                    *(
+                        _context_identity(node)
+                        for node in closure
+                        if node.kind == "entry_location"
+                    ),
+                )
+            )
+        )
+        trigger_ids = tuple(
+            dict.fromkeys(
+                (
+                    *(() if prior is None else prior.trigger_event_ids),
+                    *(
+                        identity
+                        for node in closure
+                        if _is_supporting_open_thesis_trigger(node)
+                        for identity in (
+                            _context_identity(node),
+                            *node.source_ids,
+                        )
+                    ),
+                )
+            )
+        )
+        direction = _open_thesis_direction(root, candidates)
+        draw_sides = (
+            ("above",)
+            if direction is Direction.LONG
+            else ("below",)
+            if direction is Direction.SHORT
+            else ("above", "below")
+        )
+        visible_directional_draws = (
+            visible_draws_by_side["above"]
+            if direction is Direction.LONG
+            else visible_draws_by_side["below"]
+            if direction is Direction.SHORT
+            else visible_all_draws
+        )
+        visible_directional_draw_ids = frozenset(
+            visible_directional_draws
+        )
+        connected_draws = tuple(
+            identity
+            for node in closure
+            if node.kind == "liquidity"
+            and node.ambiguity_state is not EvidenceStatus.INVALIDATED
+            and (
+                identity := _context_identity(node)
+            ) in visible_directional_draw_ids
+        )
+        nearest_external_draws = tuple(
+            values[0]
+            for side in draw_sides
+            if (values := context.external_draw_candidates.get(side, ()))
+        )
+        draw_ids = tuple(
+            dict.fromkeys(
+                (
+                    *connected_draws,
+                    *visible_directional_draws,
+                    *nearest_external_draws,
+                )
+            )
+        )
+        view = (
+            None
+            if direction is None
+            else context.obstruction_views[direction.value]
+        )
+        obstruction_ids = (
+            ()
+            if view is None
+            else tuple(
+                item.obstruction_id
+                for item in (
+                    *view.hard_barriers[:4],
+                    *view.soft_frictions[:4],
+                )
+            )
+        )
+        conflict_ids = tuple(
+            conflict.conflict_id
+            for conflict in context.material_conflicts
+            if (
+                conflict.source_node_id in closure_node_ids
+                or conflict.target_node_id in closure_node_ids
+            )
+        )
+        unknown = tuple(
+            identity
+            for identity in context.unknown_evidence
+            if identity in identities
+        )
+        ambiguous = tuple(
+            dict.fromkeys(
+                (
+                    *(
+                        _context_identity(node)
+                        for node in closure
+                        if node.ambiguity_state
+                        in {
+                            EvidenceStatus.AMBIGUOUS,
+                            EvidenceStatus.CONFLICTING,
+                        }
+                    ),
+                    *(
+                        identity
+                        for identity in context.ambiguous_evidence
+                        if identity in identities
+                    ),
+                )
+            )
+        )
+        attributes = dict(root.semantic_attributes)
+        raw_source_timeframe = attributes.get(
+            "source_timeframe",
+            root.timeframe,
+        )
+        try:
+            source_timeframe = Timeframe(raw_source_timeframe)
+        except ValueError:
+            source_timeframe = Timeframe(root.timeframe)
+        raw_identity = (
+            f"{context.market_epoch_id}|{root_id}|"
+            f"{None if direction is None else direction.value}"
+        )
+        supporting_ids = tuple(
+            dict.fromkeys(
+                (
+                    *mechanism_ids,
+                    *location_ids,
+                    *trigger_ids,
+                )
+            )
+        )
+        opposing_ids = tuple(dict.fromkeys(conflict_ids))
+        lifecycle = (
+            "weakening"
+            if opposing_ids
+            else "active"
+            if direction is not None and draw_ids
+            else "forming"
+        )
+        semantic_revision = (
+            root_id,
+            None if direction is None else direction.value,
+            source_timeframe.value,
+            root.structural_scale.value,
+            _open_thesis_mechanism(root),
+            _open_thesis_authority_relation(
+                root,
+                source_timeframe,
+                context,
+                direction=direction,
+            ),
+            lifecycle,
+            supporting_ids,
+            opposing_ids,
+            obstruction_ids,
+            unknown,
+            ambiguous,
+        )
+        revision_id = (
+            "thesis-evidence:"
+            + hashlib.sha256(repr(semantic_revision).encode()).hexdigest()[:24]
+        )
+        prior_supporting = (
+            () if prior is None else prior.supporting_event_ids
+        )
+        prior_opposing = () if prior is None else prior.opposing_event_ids
+        changed_at = (
+            prior.updated_at
+            if prior is not None
+            and prior.evidence_revision_id == revision_id
+            else observation.asof
+        )
+        evidence_state = ThesisEvidenceState(
+            lifecycle=lifecycle,
+            revision_id=revision_id,
+            changed_at=changed_at,
+            supporting_event_ids=supporting_ids,
+            opposing_event_ids=opposing_ids,
+            new_supporting_event_ids=tuple(
+                value
+                for value in supporting_ids
+                if value not in prior_supporting
+            ),
+            new_opposing_event_ids=tuple(
+                value for value in opposing_ids if value not in prior_opposing
+            ),
+        )
+        output.append(
+            OpenMarketThesis(
+                thesis_id=(
+                    "market-thesis:"
+                    f"{hashlib.sha256(raw_identity.encode()).hexdigest()[:24]}"
+                ),
+                root_id=root_id,
+                market_epoch_id=context.market_epoch_id,
+                formed_at=(
+                    root.formed_at if prior is None else prior.formed_at
+                ),
+                updated_at=changed_at,
+                direction=direction,
+                source_timeframe=source_timeframe,
+                structural_scale=root.structural_scale.value,
+                mechanism=_open_thesis_mechanism(root),
+                authority_relation=_open_thesis_authority_relation(
+                    root,
+                    source_timeframe,
+                    context,
+                    direction=direction,
+                ),
+                authority_source_ids=context.authority_source_ids,
+                mechanism_event_ids=mechanism_ids,
+                draw_candidate_ids=draw_ids,
+                entry_location_ids=location_ids,
+                trigger_event_ids=trigger_ids,
+                obstruction_ids=obstruction_ids,
+                conflict_ids=conflict_ids,
+                unknown_evidence=unknown,
+                ambiguous_evidence=ambiguous,
+                evidence_state=evidence_state,
+            )
+        )
+    live_root_ids = set(candidate_groups)
+    for prior in previous:
+        if (
+            prior.market_epoch_id != context.market_epoch_id
+            or prior.root_id in live_root_ids
+            or prior.lifecycle == "invalidated"
+        ):
+            continue
+        terminal_node = _current_entity_node(graph, prior.root_id)
+        source_invalidated = prior.root_id in context.invalidated_source_ids
+        node_invalidated = bool(
+            terminal_node is not None
+            and terminal_node.lifecycle
+            in {"invalidated", "failed", "broken", "accepted_outside"}
+        )
+        if not source_invalidated and not node_invalidated:
+            continue
+        terminal_identity = (
+            prior.root_id
+            if terminal_node is None
+            else _context_identity(terminal_node)
+        )
+        opposing_ids = tuple(
+            dict.fromkeys(
+                (*prior.opposing_event_ids, terminal_identity)
+            )
+        )
+        revision_payload = (
+            prior.evidence_revision_id,
+            "invalidated",
+            terminal_identity,
+        )
+        evidence_state = ThesisEvidenceState(
+            lifecycle="invalidated",
+            revision_id=(
+                "thesis-evidence:"
+                + hashlib.sha256(repr(revision_payload).encode()).hexdigest()[:24]
+            ),
+            changed_at=observation.asof,
+            supporting_event_ids=prior.supporting_event_ids,
+            opposing_event_ids=opposing_ids,
+            new_supporting_event_ids=(),
+            new_opposing_event_ids=(
+                ()
+                if terminal_identity in prior.opposing_event_ids
+                else (terminal_identity,)
+            ),
+        )
+        output.append(
+            replace(
+                prior,
+                updated_at=observation.asof,
+                evidence_state=evidence_state,
+            )
+        )
+    return tuple(
+        sorted(output, key=lambda value: (value.formed_at, value.thesis_id))
+    )
+
+
+def market_episode_id(
+    market_epoch_id: str,
+    entry_location_id: str,
+    entry_path_id: str,
+    direction: Direction,
+) -> str:
+    """Return the physical-only identity of one neutral MarketEpisode."""
+
+    direction = Direction(direction)
+    if not market_epoch_id or not entry_location_id or not entry_path_id:
+        raise ValueError("market episode physical identity is incomplete")
+    raw_identity = (
+        f"{market_epoch_id}|{entry_location_id}|{entry_path_id}|"
+        f"{direction.value}"
+    )
+    return (
+        "market-episode:"
+        f"{hashlib.sha256(raw_identity.encode()).hexdigest()[:24]}"
+    )
+
+
+_NEUTRAL_SUCCESSFUL_PATH_REASONS = frozenset(
+    {"micro_bos_aligned", "pool_reversal_sequence_observed"}
+)
+_NEUTRAL_LOCAL_TERMINAL_PATH_REASONS = frozenset(
+    {
+        "location_left",
+        "reacceptance_failed",
+        "micro_bos_opposed",
+        "micro_bos_ambiguous_same_clock",
+    }
+)
+
+
+def _neutral_claim_relations(
+    context: GlobalMarketContext,
+    *,
+    entry_location_id: str,
+    direction: Direction,
+) -> tuple[OpenMarketThesisClaimRelation, ...]:
+    claims = tuple(
+        OpenMarketThesisClaimRelation(
+            thesis_id=thesis.thesis_id,
+            root_id=thesis.root_id,
+            relation=(
+                "unknown"
+                if thesis.direction is None
+                else "aligned"
+                if thesis.direction is direction
+                else "opposed"
+            ),
+            thesis_direction=thesis.direction,
+            mechanism=thesis.mechanism,
+            authority_relation=thesis.authority_relation,
+            evidence_revision_id=thesis.evidence_revision_id,
+            lifecycle=thesis.lifecycle,
+        )
+        for thesis in context.open_market_theses
+        if entry_location_id in thesis.entry_location_ids
+    )
+    return tuple(
+        sorted(
+            claims,
+            key=lambda claim: (
+                claim.thesis_id,
+                claim.root_id,
+                claim.relation,
+            ),
+        )
+    )
+
+
+def _merge_neutral_claim_relations(
+    previous: MarketEpisodeState | None,
+    current: tuple[OpenMarketThesisClaimRelation, ...],
+) -> tuple[
+    tuple[OpenMarketThesisClaimRelation, ...],
+    tuple[str, ...],
+]:
+    prior_by_id = {
+        claim.thesis_id: claim
+        for claim in (() if previous is None else previous.claims)
+    }
+    merged = dict(prior_by_id)
+    for claim in current:
+        prior = prior_by_id.get(claim.thesis_id)
+        if prior is not None and (
+            prior.root_id != claim.root_id
+            or prior.relation != claim.relation
+            or prior.thesis_direction is not claim.thesis_direction
+        ):
+            raise ValueError("neutral market thesis claim identity changed")
+        merged[claim.thesis_id] = claim
+    claims = tuple(
+        sorted(
+            merged.values(),
+            key=lambda claim: (
+                claim.thesis_id,
+                claim.root_id,
+                claim.relation,
+            ),
+        )
+    )
+    active_claim_ids = tuple(
+        sorted(
+            claim.thesis_id
+            for claim in current
+            if claim.lifecycle != "invalidated"
+        )
+    )
+    return claims, active_claim_ids
+
+
+def _neutral_physical_pair_is_complete(
+    observation: MarketObservation,
+    location: Any,
+    path: Any,
+) -> bool:
+    if (
+        path.context_kind != "zone_return"
+        or path.context_id != location.location_id
+        or location.symbol != observation.symbol
+        or path.symbol != observation.symbol
+        or location.instrument_id != observation.instrument_id
+        or path.instrument_id != observation.instrument_id
+        or path.symbol != location.symbol
+        or path.instrument_id != location.instrument_id
+        or path.direction is not location.direction
+        or path.formed_at != location.formed_at
+        or not path.steps
+    ):
+        return False
+    origin = path.steps[0]
+    return bool(
+        origin.kind == "zone_visible"
+        and origin.observed_at == location.formed_at
+        and origin.direction is location.direction
+        and origin.source_entity_id == location.source_zone_id
+        and origin.source_event_id == location.source_zone_id
+    )
+
+
+def _neutral_path_milestones(
+    location: Any,
+    path: Any,
+) -> tuple[Any | None, Any | None]:
+    pullbacks = tuple(
+        step
+        for step in path.steps
+        if step.kind == "first_pullback"
+        and step.source_entity_id == location.location_id
+    )
+    if len(pullbacks) > 1:
+        raise ValueError("neutral market episode has repeated first pullback")
+    pullback = None if not pullbacks else pullbacks[0]
+    if pullback is None:
+        return None, None
+    triggers = tuple(
+        step
+        for step in path.steps
+        if step.kind == "micro_bos_confirmed"
+        and step.observed_at > pullback.observed_at
+        and step.source_event_id is not None
+    )
+    return pullback, None if not triggers else triggers[0]
+
+
+def _with_neutral_episode_update_clock(
+    previous: MarketEpisodeState | None,
+    candidate: MarketEpisodeState,
+) -> tuple[MarketEpisodeState, bool]:
+    if previous is None:
+        return candidate, True
+    if all(
+        field.name == "updated_at"
+        or getattr(candidate, field.name) == getattr(previous, field.name)
+        for field in dataclass_fields(MarketEpisodeState)
+    ):
+        return previous, False
+    return candidate, True
+
+
+def _build_unique_market_episode(
+    previous: MarketEpisodeState | None,
+    observation: MarketObservation,
+    context: GlobalMarketContext,
+    location: Any,
+    path: Any,
+) -> tuple[MarketEpisodeState, bool]:
+    identity = market_episode_id(
+        context.market_epoch_id,
+        location.location_id,
+        path.sequence_id,
+        location.direction,
+    )
+    if previous is not None and (
+        previous.episode_id != identity
+        or previous.market_epoch_id != context.market_epoch_id
+        or previous.symbol != location.symbol
+        or previous.instrument_id != location.instrument_id
+        or previous.direction is not location.direction
+        or previous.entry_location_id != location.location_id
+        or previous.entry_path_id != path.sequence_id
+        or previous.source_zone_id != location.source_zone_id
+        or previous.source_displacement_id
+        != location.source_displacement_id
+        or previous.entry_location_protocol_hash != location.protocol_hash
+        or previous.source_group3_protocol_hash
+        != location.source_group3_protocol_hash
+        or previous.source_zone_kind != location.source_zone_kind
+        or previous.source_zone_protocol_hash
+        != location.source_zone_protocol_hash
+        or previous.source_bos_id != location.source_bos_id
+        or previous.lower_bound != location.lower_bound
+        or previous.upper_bound != location.upper_bound
+        or previous.midpoint != location.midpoint
+        or previous.near_edge != location.near_edge
+        or previous.far_edge != location.far_edge
+        or previous.failure_boundary != location.failure_boundary
+        or previous.formed_at != location.formed_at
+    ):
+        raise ValueError("neutral market episode physical custody changed")
+    pullback, trigger = _neutral_path_milestones(location, path)
+    if previous is not None and (
+        (
+            previous.first_pullback_step_id,
+            previous.first_pullback_at,
+        )
+        != (
+            None if pullback is None else pullback.step_id,
+            None if pullback is None else pullback.observed_at,
+        )
+        and previous.first_pullback_at is not None
+    ):
+        raise ValueError("neutral market episode pullback custody changed")
+    if previous is not None and (
+        (
+            previous.trigger_step_id,
+            previous.trigger_event_id,
+            previous.trigger_at,
+        )
+        != (
+            None if trigger is None else trigger.step_id,
+            None if trigger is None else trigger.source_event_id,
+            None if trigger is None else trigger.observed_at,
+        )
+        and previous.trigger_at is not None
+    ):
+        raise ValueError("neutral market episode trigger custody changed")
+    successful_pulse_at = (
+        path.ended_at
+        if (
+            path.lifecycle is PathSequenceLifecycle.CLOSED
+            and path.transition_reason in _NEUTRAL_SUCCESSFUL_PATH_REASONS
+        )
+        else None
+    )
+    successful_pulse_reason = (
+        path.transition_reason if successful_pulse_at is not None else None
+    )
+    local_terminal = bool(
+        path.lifecycle is PathSequenceLifecycle.CLOSED
+        and path.transition_reason
+        in _NEUTRAL_LOCAL_TERMINAL_PATH_REASONS
+    )
+    if (
+        path.lifecycle is PathSequenceLifecycle.CLOSED
+        and successful_pulse_at is None
+        and not local_terminal
+    ):
+        raise ValueError(
+            "neutral market episode encountered an unknown closed-path reason"
+        )
+    terminal_at = (
+        path.ended_at
+        if local_terminal
+        or path.lifecycle is PathSequenceLifecycle.CENSORED
+        else None
+    )
+    terminal_reason = (
+        path.transition_reason if terminal_at is not None else None
+    )
+    if previous is not None and previous.terminal_at is not None:
+        if (
+            terminal_at != previous.terminal_at
+            or terminal_reason != previous.terminal_reason
+        ):
+            raise ValueError("neutral market episode terminal custody changed")
+        return previous, False
+    if previous is not None:
+        if previous.successful_pulse_at is not None:
+            successful_pulse_at = previous.successful_pulse_at
+            successful_pulse_reason = previous.successful_pulse_reason
+    current_claims = _neutral_claim_relations(
+        context,
+        entry_location_id=location.location_id,
+        direction=location.direction,
+    )
+    claims, active_claim_ids = _merge_neutral_claim_relations(
+        previous,
+        current_claims,
+    )
+    lifecycle = (
+        "terminal"
+        if terminal_at is not None
+        else "triggered"
+        if trigger is not None
+        else "pullback"
+        if pullback is not None
+        else "registered"
+    )
+    candidate = MarketEpisodeState(
+        episode_id=identity,
+        market_epoch_id=context.market_epoch_id,
+        symbol=location.symbol,
+        instrument_id=location.instrument_id,
+        direction=location.direction,
+        entry_location_id=location.location_id,
+        entry_path_id=path.sequence_id,
+        source_zone_id=location.source_zone_id,
+        source_displacement_id=location.source_displacement_id,
+        entry_location_protocol_hash=location.protocol_hash,
+        source_group3_protocol_hash=location.source_group3_protocol_hash,
+        source_zone_kind=location.source_zone_kind,
+        source_zone_protocol_hash=location.source_zone_protocol_hash,
+        source_bos_id=location.source_bos_id,
+        lower_bound=location.lower_bound,
+        upper_bound=location.upper_bound,
+        midpoint=location.midpoint,
+        near_edge=location.near_edge,
+        far_edge=location.far_edge,
+        failure_boundary=location.failure_boundary,
+        formed_at=location.formed_at,
+        updated_at=observation.asof,
+        binding_status="unique",
+        claims=claims,
+        active_claim_ids=active_claim_ids,
+        claim_status=(
+            "unbound"
+            if not active_claim_ids
+            else "unique"
+            if len(active_claim_ids) == 1
+            else "ambiguous"
+        ),
+        first_pullback_step_id=(
+            None if pullback is None else pullback.step_id
+        ),
+        first_pullback_at=(
+            None if pullback is None else pullback.observed_at
+        ),
+        trigger_step_id=None if trigger is None else trigger.step_id,
+        trigger_event_id=(
+            None if trigger is None else trigger.source_event_id
+        ),
+        trigger_at=None if trigger is None else trigger.observed_at,
+        successful_pulse_at=successful_pulse_at,
+        successful_pulse_reason=successful_pulse_reason,
+        lifecycle=lifecycle,
+        terminal_at=terminal_at,
+        terminal_reason=terminal_reason,
+    )
+    return _with_neutral_episode_update_clock(previous, candidate)
+
+
+def _rebind_neutral_episode(
+    previous: MarketEpisodeState,
+    observation: MarketObservation,
+    context: GlobalMarketContext,
+    *,
+    binding_status: str,
+) -> tuple[MarketEpisodeState, bool]:
+    if previous.terminal_at is not None:
+        return previous, False
+    current_claims = _neutral_claim_relations(
+        context,
+        entry_location_id=previous.entry_location_id,
+        direction=previous.direction,
+    )
+    claims, active_claim_ids = _merge_neutral_claim_relations(
+        previous,
+        current_claims,
+    )
+    candidate = replace(
+        previous,
+        updated_at=observation.asof,
+        binding_status=binding_status,
+        claims=claims,
+        active_claim_ids=active_claim_ids,
+        claim_status=(
+            "unbound"
+            if not active_claim_ids
+            else "unique"
+            if len(active_claim_ids) == 1
+            else "ambiguous"
+        ),
+    )
+    return _with_neutral_episode_update_clock(previous, candidate)
+
+
+def _neutral_boundary_terminal(
+    previous: MarketEpisodeState,
+    observation: MarketObservation,
+) -> MarketEpisodeState:
+    boundary_by_path = {
+        path.sequence_id: path
+        for path in observation.group5_boundary_path_transitions
+    }
+    boundary = boundary_by_path.get(previous.entry_path_id)
+    if boundary is not None:
+        reason = boundary.transition_reason
+    elif "contract_change_history_reset" in observation.anomalies:
+        reason = "contract_change_reset"
+    elif "data_gap_history_reset" in observation.anomalies:
+        reason = "data_gap_reset"
+    else:
+        reason = "market_epoch_reset"
+    return replace(
+        previous,
+        updated_at=observation.asof,
+        binding_status="unbound",
+        lifecycle="terminal",
+        terminal_at=observation.asof,
+        terminal_reason=reason,
+    )
+
+
+def build_neutral_market_state(
+    previous: NeutralMarketState | None,
+    observation: MarketObservation,
+    context: GlobalMarketContext,
+) -> NeutralMarketState:
+    """Purely reduce typed physical pairs into a neutral market lifecycle."""
+
+    if (
+        context.updated_at != observation.asof
+        or context.scene_revision_id != observation.scene_revision_id
+    ):
+        raise ValueError("neutral market inputs disagree on clock or revision")
+    previous_by_id = (
+        {}
+        if previous is None
+        else previous.market_episode_by_id
+    )
+    previous_by_location: dict[str, list[MarketEpisodeState]] = defaultdict(list)
+    for episode in previous_by_id.values():
+        previous_by_location[episode.entry_location_id].append(episode)
+    transitions: dict[str, MarketEpisodeState] = {}
+    if (
+        previous is not None
+        and previous.market_epoch_id != context.market_epoch_id
+    ):
+        for episode in previous.market_episodes:
+            if episode.terminal_at is not None:
+                continue
+            terminal = _neutral_boundary_terminal(episode, observation)
+            transitions[terminal.episode_id] = terminal
+        previous_by_id = {}
+        previous_by_location.clear()
+
+    paths_by_location: dict[str, list[Any]] = defaultdict(list)
+    for path in observation.path_sequences:
+        if path.context_kind == "zone_return":
+            paths_by_location[path.context_id].append(path)
+
+    episodes: dict[str, MarketEpisodeState] = {}
+    unbound: list[str] = []
+    ambiguous: list[tuple[str, tuple[str, ...]]] = []
+    rejected: list[tuple[str, str]] = []
+    retirements: dict[str, str] = {}
+    for location in sorted(
+        observation.entry_locations,
+        key=lambda item: (item.formed_at, item.location_id),
+    ):
+        paths = tuple(paths_by_location.get(location.location_id, ()))
+        priors = tuple(previous_by_location.get(location.location_id, ()))
+        if not paths:
+            unbound.append(location.location_id)
+            for prior in priors:
+                rebound, changed = _rebind_neutral_episode(
+                    prior,
+                    observation,
+                    context,
+                    binding_status="unbound",
+                )
+                episodes[rebound.episode_id] = rebound
+                if changed:
+                    transitions[rebound.episode_id] = rebound
+            continue
+        if len(paths) != 1:
+            path_ids = tuple(sorted(path.sequence_id for path in paths))
+            ambiguous.append((location.location_id, path_ids))
+            for prior in priors:
+                rebound, changed = _rebind_neutral_episode(
+                    prior,
+                    observation,
+                    context,
+                    binding_status="ambiguous",
+                )
+                episodes[rebound.episode_id] = rebound
+                if changed:
+                    transitions[rebound.episode_id] = rebound
+            continue
+        path = paths[0]
+        if not _neutral_physical_pair_is_complete(
+            observation,
+            location,
+            path,
+        ):
+            rejected.append((location.location_id, path.sequence_id))
+            for prior in priors:
+                rebound, changed = _rebind_neutral_episode(
+                    prior,
+                    observation,
+                    context,
+                    binding_status="unbound",
+                )
+                episodes[rebound.episode_id] = rebound
+                if changed:
+                    transitions[rebound.episode_id] = rebound
+            continue
+        identity = market_episode_id(
+            context.market_epoch_id,
+            location.location_id,
+            path.sequence_id,
+            location.direction,
+        )
+        episode, changed = _build_unique_market_episode(
+            previous_by_id.get(identity),
+            observation,
+            context,
+            location,
+            path,
+        )
+        episodes[identity] = episode
+        if changed:
+            transitions[identity] = episode
+
+    for episode_id, prior in previous_by_id.items():
+        if episode_id in episodes:
+            continue
+        if prior.successful_pulse_at is not None:
+            retirements[episode_id] = "upstream_compacted_after_success"
+        elif prior.terminal_at is not None:
+            retirements[episode_id] = "upstream_compacted_after_terminal"
+        else:
+            raise ValueError(
+                "unresolved neutral market episode disappeared upstream"
+            )
+
+    return NeutralMarketState(
+        schema_version=NEUTRAL_MARKET_STATE_SCHEMA_VERSION,
+        asof=observation.asof,
+        market_epoch_id=context.market_epoch_id,
+        scene_revision_id=context.scene_revision_id,
+        global_context=context,
+        market_episodes=tuple(
+            sorted(
+                episodes.values(),
+                key=lambda episode: (episode.formed_at, episode.episode_id),
+            )
+        ),
+        episode_transitions_this_update=tuple(
+            sorted(
+                transitions.values(),
+                key=lambda episode: (episode.updated_at, episode.episode_id),
+            )
+        ),
+        unbound_entry_location_ids=tuple(sorted(unbound)),
+        ambiguous_entry_location_path_ids=tuple(sorted(ambiguous)),
+        rejected_entry_location_path_ids=tuple(sorted(rejected)),
+        retired_episode_ids_this_update=tuple(sorted(retirements)),
+        retirement_reasons_this_update=tuple(sorted(retirements.items())),
+    )
 
 
 def update_global_market_context(
@@ -4049,9 +7137,59 @@ def update_global_market_context(
         previous is not None
         and current_not_ready != previous_not_ready
     )
-    candidates = _high_salience_episode_ids(
+    balance_context = (
+        previous.balance_context
+        if previous is not None
+        and not boundary
+        and not any(node.kind == "range" for node in changed_nodes)
+        else _global_balance_context(observation, graph)
+    )
+    balance_changed = bool(
+        previous is not None
+        and previous.balance_context != balance_context
+    )
+    changed_candidates = _high_salience_episode_ids(
         changed_nodes,
         market_epoch_id=graph._market_epoch_id,
+    )
+    continuation_root_pulses = _accepted_h1_continuation_root_ids(
+        changed_nodes,
+        market_epoch_id=graph._market_epoch_id,
+    )
+    live_candidates = set(
+        ()
+        if previous is None or boundary
+        else previous.candidate_structured_episode_ids
+    )
+    # Terminal roots are exposed for exactly the update that resolves them so
+    # Brain can classify a reaccepted manipulation.  They are not carried as
+    # live candidates on subsequent clocks.
+    live_candidates = {
+        identity
+        for identity in live_candidates
+        if (
+            (node := _current_entity_node(graph, identity)) is not None
+            and _persistent_explanation_candidate(node)
+        )
+    }
+    for node in changed_nodes:
+        identity = _context_identity(node)
+        if _is_terminal(node.kind, node.lifecycle):
+            live_candidates.discard(identity)
+    live_candidates.update(changed_candidates)
+    live_candidates.update(continuation_root_pulses)
+    candidates = tuple(sorted(live_candidates))
+    live_unexplained = tuple(
+        identity
+        for identity in (
+            ()
+            if previous is None or boundary
+            else previous.unexplained_structured_episode_ids
+        )
+        if (
+            (node := _current_entity_node(graph, identity)) is not None
+            and not _is_terminal(node.kind, node.lifecycle)
+        )
     )
     invalidated: list[str] = []
     if boundary and previous is not None:
@@ -4082,6 +7220,7 @@ def update_global_market_context(
         previous is None
         or boundary
         or readiness_changed
+        or balance_changed
         or relevant_node_delta
         or relevant_edge_delta
     )
@@ -4092,53 +7231,125 @@ def update_global_market_context(
         retained_mode = previous.market_mode
         if (
             retained_mode is MarketMode.TRANSITION
-            and not previous.material_conflicts
+            and not any(
+                conflict.role
+                is not GlobalConflictRole.LOCAL_COUNTERTREND_DELIVERY
+                for conflict in previous.material_conflicts
+            )
         ):
             retained_mode = (
                 MarketMode.DIRECTIONAL
                 if previous.authority_direction is not None
                 else MarketMode.UNCERTAIN
             )
+        graph._current_global_material_conflict_ids = {
+            conflict.conflict_id
+            for conflict in previous.material_conflicts
+            if conflict.role
+            is not GlobalConflictRole.LOCAL_COUNTERTREND_DELIVERY
+        }
+        retained_stack = tuple(
+            layer
+            for layer in previous.authority_stack
+            if layer.status != "invalidated"
+        )
+        aged_relations = {
+            key: replace(
+                state,
+                age_bars=_timeframe_age_bars(
+                    state.since,
+                    observation.asof,
+                    state.timeframe,
+                ),
+            )
+            for key, state in previous.scale_relation_details.items()
+        }
+        draws = _global_external_draws(graph, observation)
         return GlobalMarketContext(
             updated_at=observation.asof,
             scene_revision_id=delta.revision_id,
             market_epoch_id=previous.market_epoch_id,
-            authority_timeframe=previous.authority_timeframe,
-            authority_direction=previous.authority_direction,
-            authority_source_ids=previous.authority_source_ids,
+            authority_stack=retained_stack,
             market_mode=retained_mode,
-            scale_relations=previous.scale_relations,
-            external_draw_candidates=previous.external_draw_candidates,
-            path_blocker_ids=_global_path_blockers(graph),
+            scale_relation_details=aged_relations,
+            external_draw_candidates=draws,
+            obstruction_views=_refresh_obstruction_draws(
+                graph,
+                previous.obstruction_views,
+                draws,
+            ),
             material_conflicts=previous.material_conflicts,
             unknown_evidence=previous.unknown_evidence,
             ambiguous_evidence=previous.ambiguous_evidence,
-            dislocated=previous.dislocated,
+            dislocations_by_scale=previous.dislocations_by_scale,
+            balance_context=balance_context,
             invalidated_source_ids=tuple(dict.fromkeys(invalidated)),
             candidate_structured_episode_ids=candidates,
-            unexplained_structured_episode_ids=(
-                previous.unexplained_structured_episode_ids
-            ),
+            unexplained_structured_episode_ids=live_unexplained,
         )
-    (
-        authority_timeframe,
-        authority_direction,
-        authority_source_ids,
-        _,
-    ) = _global_authority(
+    authority_stack = _global_authority(
         graph,
         ready_timeframes=ready_timeframes,
     )
-    conflicts = _global_material_conflicts(
+    active_layer_timeframes = {layer.timeframe for layer in authority_stack}
+    if previous is not None and invalidated:
+        invalidated_set = set(invalidated)
+        authority_stack = tuple(
+            (
+                *authority_stack,
+                *(
+                    replace(layer, status="invalidated")
+                    for layer in previous.authority_stack
+                    if layer.timeframe not in active_layer_timeframes
+                    and not invalidated_set.isdisjoint(
+                        {
+                            layer.structure_id,
+                            *layer.source_ids,
+                            *((layer.protected_level_id,) if layer.protected_level_id else ()),
+                        }
+                    )
+                ),
+            )
+        )
+    dominant = _dominant_authority_layer(authority_stack)
+    authority_timeframe = None if dominant is None else dominant.timeframe
+    authority_direction = None if dominant is None else dominant.direction
+    authority_source_ids = (
+        ()
+        if dominant is None
+        else tuple(
+            dict.fromkeys(
+                (
+                    dominant.structure_id,
+                    *dominant.source_ids,
+                    *((dominant.protected_level_id,) if dominant.protected_level_id else ()),
+                )
+            )
+        )
+    )
+    live_conflicts = _global_material_conflicts(
         graph,
         ready_timeframes=ready_timeframes,
     )
-    relations, unknown, relation_ambiguities = _global_scale_relations(
+    terminal_conflicts = _global_terminal_authority_conflicts(
+        graph,
+        delta,
+        ready_timeframes=ready_timeframes,
+    )
+    conflicts = tuple(
+        sorted(
+            {
+                conflict.conflict_id: conflict
+                for conflict in (*live_conflicts, *terminal_conflicts)
+            }.values(),
+            key=lambda value: (value.observed_at, value.conflict_id),
+        )
+    )
+    relation_details, unknown, relation_ambiguities = _global_scale_relations(
         graph,
         observation=observation,
         ready_timeframes=ready_timeframes,
-        authority_timeframe=authority_timeframe,
-        authority_direction=authority_direction,
+        authority_stack=authority_stack,
         conflicts=conflicts,
     )
     ambiguous_ids = tuple(
@@ -4157,36 +7368,6 @@ def update_global_market_context(
             )
         )
     )
-    mature_balance_nodes = tuple(
-        node
-        for node in _current_context_nodes(graph, "range")
-        if node.timeframe == Timeframe.H1.value
-        and node.lifecycle == "mature"
-        and node.ambiguity_state is EvidenceStatus.CONFIRMED
-    )
-    balance_owns_authority = bool(
-        mature_balance_nodes
-        and authority_timeframe not in {Timeframe.H4, Timeframe.H1}
-    )
-    if balance_owns_authority:
-        authority_timeframe = Timeframe.H1
-        authority_direction = None
-        authority_source_ids = tuple(
-            dict.fromkeys(
-                source_id
-                for node in sorted(
-                    mature_balance_nodes,
-                    key=lambda value: (
-                        value.confirmed_at or value.formed_at,
-                        value.node_id,
-                    ),
-                )
-                for source_id in (
-                    _context_identity(node),
-                    *node.source_ids,
-                )
-            )
-        )
     authority_changed = bool(
         previous is not None
         and not boundary
@@ -4195,41 +7376,58 @@ def update_global_market_context(
             or previous.authority_direction != authority_direction
         )
     )
-    if conflicts or authority_changed or (invalidated and not boundary):
+    authority_conflicts = tuple(
+        conflict
+        for conflict in conflicts
+        if conflict.role
+        is not GlobalConflictRole.LOCAL_COUNTERTREND_DELIVERY
+    )
+    authority_scale_ambiguous = any(
+        relation_details[timeframe.value].ambiguous
+        for timeframe in (Timeframe.H4, Timeframe.H1, Timeframe.M15)
+    )
+    if authority_scale_ambiguous:
+        market_mode = MarketMode.UNCERTAIN
+    elif authority_conflicts or authority_changed or (invalidated and not boundary):
         market_mode = MarketMode.TRANSITION
-    elif balance_owns_authority:
+    elif (
+        authority_direction is None
+        and balance_context is not None
+        and balance_context.status in {"descriptive", "authoritative"}
+        and not balance_context.accepted_external_break
+    ):
         market_mode = MarketMode.BALANCED
     elif authority_direction is None:
         market_mode = MarketMode.UNCERTAIN
     else:
         market_mode = MarketMode.DIRECTIONAL
-    dislocated = any(
-        node.lifecycle == "active"
-        and node.ambiguity_state is EvidenceStatus.CONFIRMED
-        for node in _current_context_nodes(graph, "displacement")
-    )
-    unexplained = (
-        ()
-        if previous is None or boundary
-        else previous.unexplained_structured_episode_ids
-    )
+    dislocations = _global_dislocations_by_scale(graph)
+    unexplained = live_unexplained
     if authority_timeframe is None:
         unknown = tuple((*unknown, "authority:unresolved"))
+    graph._current_global_material_conflict_ids = {
+        conflict.conflict_id for conflict in authority_conflicts
+    }
+    draws = _global_external_draws(graph, observation)
     return GlobalMarketContext(
         updated_at=observation.asof,
         scene_revision_id=delta.revision_id,
         market_epoch_id=graph._market_epoch_id,
-        authority_timeframe=authority_timeframe,
-        authority_direction=authority_direction,
-        authority_source_ids=authority_source_ids,
+        authority_stack=authority_stack,
         market_mode=market_mode,
-        scale_relations=relations,
-        external_draw_candidates=_global_external_draws(graph, observation),
-        path_blocker_ids=_global_path_blockers(graph),
+        scale_relation_details=relation_details,
+        external_draw_candidates=draws,
+        obstruction_views=_global_obstruction_views(
+            graph,
+            observation,
+            draws,
+            authority_stack,
+        ),
         material_conflicts=conflicts,
         unknown_evidence=tuple(dict.fromkeys(unknown)),
         ambiguous_evidence=ambiguous_ids,
-        dislocated=dislocated,
+        dislocations_by_scale=dislocations,
+        balance_context=balance_context,
         invalidated_source_ids=tuple(dict.fromkeys(invalidated)),
         candidate_structured_episode_ids=candidates,
         unexplained_structured_episode_ids=unexplained,
@@ -4251,14 +7449,141 @@ _PHASE_FOCUS: Mapping[PlaybookPhase, tuple[str, ...]] = {
 }
 
 
+def _focus_entry_episode_source_ids(
+    hypothesis: Any,
+) -> tuple[str, ...] | None:
+    """Return one internally consistent child-Episode identity closure.
+
+    Focus is descriptive, but binding it to a sibling's path would still make
+    its question and conflict diagnostics misleading.  Treat a partially
+    populated or internally inconsistent Episode as unbound instead of
+    combining whichever setup/location/path/trigger identifiers happen to be
+    present.  Runtime ``HypothesisBelief`` already enforces this contract;
+    the defensive checks also keep restored/duck-typed diagnostic inputs
+    fail-closed.
+    """
+
+    setup_id = getattr(hypothesis, "setup_context_id", None)
+    episode_id = getattr(hypothesis, "episode_id", None)
+    location_id = getattr(hypothesis, "entry_location_id", None)
+    path_id = getattr(hypothesis, "entry_path_id", None)
+    plan = getattr(hypothesis, "plan", None)
+    trigger = getattr(hypothesis, "selected_trigger", None)
+    sequence = getattr(hypothesis, "sequence", None)
+    plan_setup_id = None if plan is None else getattr(plan, "setup_id", None)
+    plan_location_id = (
+        None if plan is None else getattr(plan, "entry_location_id", None)
+    )
+    plan_path_id = None if plan is None else getattr(plan, "entry_path_id", None)
+    trigger_setup_id = (
+        None if trigger is None else getattr(trigger, "setup_id", None)
+    )
+    trigger_location_id = (
+        None if trigger is None else getattr(trigger, "entry_location_id", None)
+    )
+    trigger_path_id = (
+        None if trigger is None else getattr(trigger, "entry_path_id", None)
+    )
+    sequence_setup_id = (
+        None if sequence is None else getattr(sequence, "setup_id", None)
+    )
+    child_declared = any(
+        value is not None
+        for value in (
+            episode_id,
+            location_id,
+            path_id,
+            plan_setup_id,
+            plan_location_id,
+            plan_path_id,
+            trigger_setup_id,
+            trigger_location_id,
+            trigger_path_id,
+        )
+    )
+    if not child_declared:
+        return ()
+    if (
+        episode_id is None
+        or setup_id != episode_id
+        or (
+            sequence_setup_id is not None
+            and sequence_setup_id != episode_id
+        )
+        or (location_id is None) != (path_id is None)
+        or (
+            path_id is not None
+            and (location_id is None or episode_id is None)
+        )
+        or (
+            plan is not None
+            and any(
+                value is not None
+                for value in (plan_setup_id, plan_location_id, plan_path_id)
+            )
+            and (
+                plan_setup_id != episode_id
+                or plan_location_id != location_id
+                or plan_path_id != path_id
+            )
+        )
+        or (
+            trigger is not None
+            and (
+                trigger_setup_id != episode_id
+                or trigger_location_id != location_id
+                or trigger_path_id != path_id
+            )
+        )
+    ):
+        return None
+    metadata = getattr(hypothesis, "context_metadata", {}) or {}
+    zone_id = (
+        metadata.get("lsr_entry_zone_id")
+        if isinstance(metadata, Mapping)
+        else None
+    )
+    if zone_id in {None, "", "none", "unknown"}:
+        zone_id = None
+    values = [setup_id, episode_id, location_id, path_id, zone_id]
+    if trigger is not None:
+        values.extend(
+            (
+                getattr(trigger, "trigger_id", None),
+                getattr(trigger, "source_entity_id", None),
+                getattr(trigger, "source_event_id", None),
+            )
+        )
+    return tuple(dict.fromkeys(value for value in values if value))
+
+
 def _focus_hypothesis_source_ids(hypothesis: Any) -> frozenset[str]:
     values: list[str | None] = [
+        getattr(hypothesis, "required_root_id", None),
+        getattr(hypothesis, "market_thesis_root_id", None),
         getattr(hypothesis, "context_id", None),
-        getattr(hypothesis, "setup_context_id", None),
-        getattr(hypothesis, "episode_id", None),
+        getattr(hypothesis, "context_thesis_id", None),
+        getattr(hypothesis, "parent_context_thesis_id", None),
         getattr(hypothesis, "initiating_event_id", None),
-        getattr(hypothesis, "entry_location_id", None),
     ]
+    metadata = getattr(hypothesis, "context_metadata", {}) or {}
+    if isinstance(metadata, Mapping):
+        values.extend(
+            metadata.get(name)
+            for name in (
+                "lsr_manipulation_id",
+                "lsr_pool_path_id",
+                "lsr_displacement_id",
+            )
+            if metadata.get(name) not in {None, "", "none", "unknown"}
+        )
+    episode_ids = _focus_entry_episode_source_ids(hypothesis)
+    if episode_ids is not None:
+        values.extend(episode_ids)
+    elif getattr(hypothesis, "episode_id", None) is not None:
+        # Do not let a malformed child borrow sequence/route identities from a
+        # sibling.  Context-level identities above remain available.
+        return frozenset(value for value in values if value)
     invalidation = getattr(hypothesis, "invalidation", None)
     values.append(
         None
@@ -4287,23 +7612,51 @@ def _focus_hypothesis_source_ids(hypothesis: Any) -> frozenset[str]:
     return frozenset(value for value in values if value)
 
 
+def _focus_identity_is_bound(
+    identity: str,
+    bound_ids: frozenset[str],
+) -> bool:
+    return any(
+        identity == bound_id
+        or identity.endswith(f":{bound_id}")
+        or bound_id.endswith(f":{identity}")
+        for bound_id in bound_ids
+    )
+
+
 def _focus_conflict_is_bound(
     conflict: GlobalConflictEvidence,
     hypothesis: Any,
 ) -> bool:
-    if getattr(hypothesis, "key", None) not in conflict.affected_hypothesis_ids:
+    playbook = getattr(hypothesis, "playbook", None)
+    direction = getattr(hypothesis, "direction", None)
+    summary_key = (
+        None
+        if playbook is None or direction is None
+        else (
+            f"{getattr(playbook, 'value', playbook)}:"
+            f"{getattr(direction, 'value', direction)}"
+        )
+    )
+    hypothesis_keys = {
+        value
+        for value in (
+            getattr(hypothesis, "key", None),
+            getattr(hypothesis, "candidate_id", None),
+            summary_key,
+        )
+        if value
+    }
+    if hypothesis_keys.isdisjoint(conflict.affected_hypothesis_ids):
         return False
     bound_ids = _focus_hypothesis_source_ids(hypothesis)
     return any(
-        conflict_id == bound_id
-        or conflict_id.endswith(f":{bound_id}")
-        or bound_id.endswith(f":{conflict_id}")
+        _focus_identity_is_bound(conflict_id, bound_ids)
         for conflict_id in (
             conflict.event_id,
             conflict.source_node_id,
             conflict.target_node_id,
         )
-        for bound_id in bound_ids
     )
 
 
@@ -4313,8 +7666,15 @@ def select_focus(
     scene_delta: SceneGraphDelta | None,
     scene_graph: TemporalMarketSceneGraph | None,
     global_context: GlobalMarketContext | None = None,
+    preferred_candidate: Any | None = None,
 ) -> FocusState:
-    """Choose what to read using bounded, inspectable rules only."""
+    """Select one bounded question around the current root candidate.
+
+    Focus is a query hint, never an entry gate.  Its semantic selection is
+    retained until the current root, candidate, phase/terminal state, or a
+    related conflict/ambiguity actually changes.  Unrelated graph revisions
+    never change Focus.
+    """
 
     if global_context is not None and (
         global_context.updated_at != observation.asof
@@ -4324,20 +7684,10 @@ def select_focus(
         )
     ):
         raise ValueError("focus received a stale global market context")
-
-    prior_focus = None if previous_belief is None else getattr(previous_belief, "focus_state", None)
-    ranked = [] if previous_belief is None else previous_belief.ranked()
-    dominant = ranked[0] if ranked else None
-    phase = PlaybookPhase.FORMING if dominant is None else dominant.phase
     active_frames = tuple(
         timeframe.value for timeframe in observation.active_timeframes
     )
     active_set = set(active_frames)
-    ready_frames = frozenset(
-        timeframe.value
-        for timeframe in observation.active_timeframes
-        if observation.frame(timeframe).ready
-    )
 
     def enabled(values: Sequence[str]) -> tuple[str, ...]:
         filtered = tuple(
@@ -4349,165 +7699,253 @@ def select_focus(
             return (Timeframe.M1.value,)
         return (active_frames[0],)
 
-    desired = enabled(_PHASE_FOCUS[phase])
-    reasons: list[str] = ["initial_context" if prior_focus is None else "next_expected_evidence"]
-    triggers: list[str] = []
-    question = "establish higher-timeframe structure, bridge context and active draw"
-    allowed_switch = prior_focus is None
-    if (
-        global_context is not None
-        and global_context.authority_timeframe is not None
-    ):
-        reasons.append("global_authority_context")
-        desired = enabled(
-            (
-                global_context.authority_timeframe.value,
-                *desired,
-            )
-        )
-    if prior_focus is not None and prior_focus.resolution_status in {
-        EvidenceStatus.CONFIRMED,
-        EvidenceStatus.INVALIDATED,
-    }:
-        reasons.append("focus_question_resolved_or_invalidated")
-        allowed_switch = True
-    if dominant is not None:
-        question = {
-            PlaybookPhase.WAITING_LOCATION: "has price reached the frozen setup zone without chasing",
-            PlaybookPhase.WAITING_TRIGGER: "has a strict rejection, reacceptance or micro BOS confirmed",
-            PlaybookPhase.EXECUTABLE: "does trigger and remaining delivery remain valid",
-            PlaybookPhase.ENTERED: "is the frozen thesis delivering, weakening or invalidated",
-        }.get(phase, "what exact causal event is required next")
-        if prior_focus is not None and prior_focus.phase_at_selection != phase.value:
-            reasons.append("playbook_stage_changed")
-            allowed_switch = True
-    if scene_delta is not None and scene_delta.changed:
-        key_nodes = [
-            scene_graph._nodes[node_id]
-            for node_id in (*scene_delta.added_node_ids, *scene_delta.revised_node_ids)
-            if scene_graph is not None and node_id in scene_graph._nodes
-            and scene_graph._nodes[node_id].kind in {"bos", "displacement", "manipulation", "entry_location", "micro_bos"}
-        ]
-        if key_nodes:
-            reasons.append("new_key_event")
-            triggers.extend(node.node_id for node in key_nodes)
-            allowed_switch = True
-            event_frames = tuple(dict.fromkeys(node.timeframe for node in key_nodes))
-            desired = enabled((*desired, *event_frames))
-    current_scene_view = bool(
-        scene_graph is not None
-        and scene_graph.last_asof == observation.asof
-    )
-    current_epoch = (
+    prior_focus = (
         None
-        if scene_graph is None
-        else (
-            scene_graph._market_epoch_id
-            if current_scene_view
-            else scene_graph._epoch_asof(observation.asof)
+        if previous_belief is None
+        else getattr(previous_belief, "focus_state", None)
+    )
+    ranked = [] if previous_belief is None else previous_belief.ranked()
+    dominant = preferred_candidate or (ranked[0] if ranked else None)
+    candidate_id = (
+        None
+        if dominant is None
+        else getattr(dominant, "candidate_id", None) or dominant.key
+    )
+    prior_resolver = (
+        None
+        if previous_belief is None
+        else getattr(previous_belief, "resolve_hypothesis", None)
+    )
+    prior_candidate = (
+        None
+        if previous_belief is None or prior_focus is None
+        else prior_resolver(prior_focus.hypothesis_id)
+        if callable(prior_resolver)
+        else ranked[0]
+        if ranked
+        else None
+    )
+    phase = PlaybookPhase.FORMING if dominant is None else dominant.phase
+    candidate_changed = bool(
+        prior_focus is not None
+        and prior_focus.hypothesis_id != candidate_id
+    )
+    phase_changed = bool(
+        prior_candidate is not None
+        and dominant is not None
+        and prior_focus is not None
+        and prior_focus.hypothesis_id == candidate_id
+        and prior_candidate.phase is not dominant.phase
+    )
+
+    def related_conflicts(
+        context: GlobalMarketContext | None,
+        hypothesis: Any | None,
+    ) -> tuple[str, ...]:
+        if context is None or hypothesis is None:
+            return ()
+        return tuple(
+            sorted(
+                conflict.conflict_id
+                for conflict in context.material_conflicts
+                if conflict.role
+                is not GlobalConflictRole.LOCAL_COUNTERTREND_DELIVERY
+                and _focus_conflict_is_bound(conflict, hypothesis)
+            )
+        )
+
+    def related_invalidated_sources(
+        context: GlobalMarketContext | None,
+        hypothesis: Any | None,
+    ) -> tuple[str, ...]:
+        if context is None or hypothesis is None:
+            return ()
+        bound_ids = _focus_hypothesis_source_ids(hypothesis)
+        return tuple(
+            sorted(
+                source_id
+                for source_id in getattr(
+                    context,
+                    "invalidated_source_ids",
+                    (),
+                )
+                if _focus_identity_is_bound(source_id, bound_ids)
+            )
+        )
+
+    conflict_ids = related_conflicts(global_context, dominant)
+    previous_conflicts = related_conflicts(
+        None
+        if previous_belief is None
+        else getattr(previous_belief, "global_context", None),
+        prior_candidate,
+    )
+    invalidated_source_ids = related_invalidated_sources(
+        global_context,
+        dominant,
+    )
+    previous_invalidated_source_ids = related_invalidated_sources(
+        None
+        if previous_belief is None
+        else getattr(previous_belief, "global_context", None),
+        prior_candidate,
+    )
+    bound_thesis = next(
+        (
+            thesis
+            for thesis in (
+                ()
+                if global_context is None
+                else global_context.open_market_theses
+            )
+            if dominant is not None
+            and thesis.root_id
+            == getattr(dominant, "required_root_id", None)
+        ),
+        None,
+    )
+    current_ambiguity = tuple(
+        sorted(
+            () if bound_thesis is None else bound_thesis.ambiguous_evidence
         )
     )
-    conflict_ids: tuple[str, ...] = ()
-    if global_context is not None:
-        conflict_ids = tuple(
-            conflict.conflict_id
-            for conflict in global_context.material_conflicts
-            if dominant is None
-            or _focus_conflict_is_bound(conflict, dominant)
-        )
-    elif scene_graph is not None:
-        conflicts: tuple[SceneEdge, ...] = ()
-        current_nodes = scene_graph._nodes
-        candidate_edges = (
-            tuple(
-                sorted(
-                    (
-                        scene_graph._edges[edge_id]
-                        for edge_id in scene_graph._current_epoch_active_opposes_edge_ids
-                        if edge_id in scene_graph._edges
-                    ),
-                    key=lambda edge: (edge.observed_at, edge.edge_id),
-                )
+    if (
+        not current_ambiguity
+        and dominant is None
+        and global_context is None
+        and scene_graph is not None
+    ):
+        if scene_graph.last_asof == observation.asof:
+            current_ambiguity = tuple(
+                sorted(scene_graph._current_epoch_ambiguous_node_ids)
             )
-            if current_scene_view
-            else scene_graph.edges_asof(observation.asof)
-        )
-        opposing = tuple(
-            edge
-            for edge in candidate_edges
-            if _is_material_cross_scale_conflict(
-                edge,
-                current_nodes,
-                ready_timeframes=ready_frames,
+        else:
+            current_ambiguity = tuple(
+                node.node_id
+                for node in scene_graph.nodes_asof(observation.asof)
+                if node.ambiguity_state
+                in {EvidenceStatus.AMBIGUOUS, EvidenceStatus.CONFLICTING}
             )
-            and scene_graph._nodes[edge.source_node_id].market_epoch_id
-            == current_epoch
+    prior_thesis = next(
+        (
+            thesis
+            for thesis in (
+                ()
+                if previous_belief is None
+                or getattr(previous_belief, "global_context", None) is None
+                else previous_belief.global_context.open_market_theses
+            )
+            if prior_candidate is not None
+            and thesis.root_id
+            == getattr(prior_candidate, "required_root_id", None)
+        ),
+        None,
+    )
+    prior_ambiguity = tuple(
+        sorted(
+            () if prior_thesis is None else prior_thesis.ambiguous_evidence
         )
-        context_ids: tuple[str, ...] = ()
-        if previous_belief is not None:
-            dominant_context_id = getattr(
-                previous_belief,
-                "dominant_hypothesis_id",
+    )
+
+    def root_revision(
+        thesis: Any | None,
+        hypothesis: Any | None,
+    ) -> tuple[str, str, str] | tuple[str, str] | None:
+        # LSR's frozen Context Thesis outlives the transient open Scene-Graph
+        # root projection.  Its evidence revision is also deliberately shared
+        # by sibling zone Episodes.  Use that stable Brain-owned revision so a
+        # sibling path appearing/disappearing cannot spuriously reselect the
+        # current child's Focus.  Candidate identity and phase changes retain
+        # their independent reselection authority above.
+        if (
+            hypothesis is not None
+            and getattr(hypothesis, "playbook", None)
+            is Playbook.LIQUIDITY_SWEEP_REVERSAL
+        ):
+            context_thesis_id = getattr(
+                hypothesis,
+                "context_thesis_id",
                 None,
             )
-            dominant_context = getattr(
-                previous_belief,
-                "context_hypotheses",
-                {},
-            ).get(dominant_context_id)
-            if dominant_context is not None:
-                context_ids = tuple(dominant_context.context_root_ids)
-            elif dominant is not None:
-                context_ids = tuple(
-                    value
-                    for value in (
-                        dominant.context_id,
-                        dominant.setup_context_id,
-                        dominant.initiating_event_id,
-                    )
-                    if value is not None
+            evidence_revision_id = getattr(
+                hypothesis,
+                "evidence_revision_id",
+                None,
+            )
+            if context_thesis_id and evidence_revision_id:
+                return (
+                    "lsr_context",
+                    context_thesis_id,
+                    evidence_revision_id,
                 )
-        closure = {
-            node_id
-            for source_id in context_ids
-            for node_id in (
-                scene_graph._node_id_for_source(
-                    source_id,
-                    asof=observation.asof,
-                ),
-            )
-            if node_id is not None
-        }
-        frontier = deque((node_id, 0) for node_id in closure)
-        while frontier:
-            node_id, depth = frontier.popleft()
-            if depth >= 4:
-                continue
-            for neighbor, _ in scene_graph._neighbors(
-                node_id,
-                asof=observation.asof,
-            ):
-                if neighbor not in closure:
-                    closure.add(neighbor)
-                    frontier.append((neighbor, depth + 1))
-        if closure:
-            conflicts = tuple(
-                edge
-                for edge in opposing
-                if edge.source_node_id in closure
-                and edge.target_node_id in closure
-            )
-        elif dominant is None and scene_delta is not None:
-            changed_edges = set(
-                (*scene_delta.added_edge_ids, *scene_delta.revised_edge_ids)
-            )
-            conflicts = tuple(
-                edge for edge in opposing if edge.edge_id in changed_edges
-            )
-        conflict_ids = tuple(edge.edge_id for edge in conflicts)
+        if thesis is None:
+            return None
+        return (thesis.root_id, thesis.evidence_revision_id)
+
+    current_root_revision = root_revision(bound_thesis, dominant)
+    prior_root_revision = root_revision(prior_thesis, prior_candidate)
+    root_revision_changed = current_root_revision != prior_root_revision
+    context_changed = bool(
+        conflict_ids != previous_conflicts
+        or current_ambiguity != prior_ambiguity
+        or invalidated_source_ids != previous_invalidated_source_ids
+    )
+    reselect = bool(
+        prior_focus is None
+        or candidate_changed
+        or phase_changed
+        or root_revision_changed
+        or context_changed
+    )
+    if prior_focus is not None and not reselect:
+        return replace(prior_focus, asof=observation.asof, switched=False)
+
+    desired = enabled(_PHASE_FOCUS[phase])
+    reasons: list[str] = [
+        "initial_context" if prior_focus is None else "focus_reselected"
+    ]
+    if candidate_changed:
+        reasons.append("root_candidate_changed")
+    if phase_changed:
+        reasons.append("candidate_phase_changed")
+    if root_revision_changed:
+        reasons.append("root_market_thesis_revised")
+    if global_context is not None and global_context.authority_timeframe:
+        desired = enabled(
+            (global_context.authority_timeframe.value, *desired)
+        )
+        reasons.append("global_authority_context")
+    if bound_thesis is not None:
+        desired = enabled((bound_thesis.source_timeframe.value, *desired))
+        reasons.append("root_market_thesis")
+
+    question = {
+        PlaybookPhase.WAITING_LOCATION: (
+            "has price reached the frozen setup zone without chasing"
+        ),
+        PlaybookPhase.WAITING_TRIGGER: (
+            "has one qualified root-bound trigger confirmed"
+        ),
+        PlaybookPhase.EXECUTABLE: (
+            "does the frozen plan retain delivery space"
+        ),
+        PlaybookPhase.ENTERED: (
+            "is the frozen thesis delivering, weakening or invalidated"
+        ),
+        PlaybookPhase.DELIVERING: (
+            "is the frozen thesis still delivering"
+        ),
+        PlaybookPhase.WEAKENING: (
+            "which current fact weakened the frozen thesis"
+        ),
+        PlaybookPhase.INVALIDATED: (
+            "which frozen source invalidated the thesis"
+        ),
+    }.get(phase, "what exact causal event is required next")
+    if dominant is None:
+        question = "which registered mechanism explains the active market root"
     if conflict_ids:
-        reasons.append("cross_scale_conflict")
-        triggers.extend(conflict_ids[-4:])
+        reasons.append("root_related_cross_scale_conflict")
         desired = enabled(
             (
                 Timeframe.H4.value,
@@ -4516,23 +7954,17 @@ def select_focus(
                 Timeframe.M5.value,
             )
         )
-        question = "which scale owns the active structural conflict"
-        allowed_switch = True
+        question = "which scale owns the root-related structural conflict"
+    if current_ambiguity:
+        reasons.append("root_related_ambiguity")
     if dominant is not None and global_context is not None:
-        bound_ids = _focus_hypothesis_source_ids(dominant)
-        invalidated_ids = tuple(
-            source_id
-            for source_id in global_context.invalidated_source_ids
-            if source_id in bound_ids
-        )
+        invalidated_ids = set(invalidated_source_ids)
         route = getattr(dominant, "liquidity_route", None)
         draw_ids = {
             value
             for value in (
                 None if route is None else route.context_draw_id,
-                None
-                if route is None
-                else route.primary_deliverable_target_id,
+                None if route is None else route.primary_deliverable_target_id,
                 None if route is None else route.terminal_draw_id,
             )
             if value is not None
@@ -4543,145 +7975,49 @@ def select_focus(
                 if draw_ids.intersection(invalidated_ids)
                 else "active_thesis_source_invalidated"
             )
-            triggers.extend(invalidated_ids)
-            desired = enabled(
-                (
-                    Timeframe.H4.value,
-                    Timeframe.H1.value,
-                    Timeframe.M15.value,
-                    Timeframe.M5.value,
-                )
-            )
             question = "which frozen source closed the active thesis"
-            allowed_switch = True
-        elif route is not None:
-            blocker_ids = tuple(
-                source_id
-                for source_id in route.path_blocker_ids
-                if source_id in global_context.path_blocker_ids
-            )
-            if blocker_ids:
-                reasons.append("delivery_path_blocked")
-                triggers.extend(blocker_ids)
-                desired = enabled(
-                    (
-                        Timeframe.H1.value,
-                        Timeframe.M15.value,
-                        Timeframe.M5.value,
-                    )
-                )
-                question = "does the frozen route retain enough delivery space"
-                allowed_switch = True
+        if route is not None and set(route.path_blocker_ids).intersection(
+            global_context.path_blocker_ids
+        ):
+            reasons.append("delivery_path_blocked")
+            question = "does the frozen route retain enough delivery space"
     if dominant is not None and dominant.plan is not None:
         plan = dominant.plan
-        if plan.entry_zone_lower is not None and plan.entry_zone_upper is not None and plan.entry_zone_lower <= observation.price <= plan.entry_zone_upper:
-            reasons.append("price_entered_frozen_zone")
+        if (
+            plan.entry_zone_lower is not None
+            and plan.entry_zone_upper is not None
+            and plan.entry_zone_lower
+            <= observation.price
+            <= plan.entry_zone_upper
+        ):
+            reasons.append("price_in_frozen_zone")
             desired = enabled((Timeframe.M5.value, Timeframe.M1.value))
-            question = "has the frozen-zone trigger actually confirmed"
-            allowed_switch = True
-    prior_frames = () if prior_focus is None else prior_focus.primary_timeframes
-    switched = bool(prior_focus is not None and tuple(desired) != tuple(prior_frames) and allowed_switch)
-    if prior_focus is not None and not switched and not allowed_switch:
-        desired = enabled(prior_focus.primary_timeframes)
-        reasons = ["focus_retained_no_switch_event"]
-        question = prior_focus.question
+            question = "has one qualified root-bound trigger confirmed"
+
     resolution = (
-        EvidenceStatus.CONFLICTING
+        EvidenceStatus.INVALIDATED
+        if phase is PlaybookPhase.INVALIDATED
+        else EvidenceStatus.CONFLICTING
         if conflict_ids
         else EvidenceStatus.AMBIGUOUS
-        if (
-            bool(global_context.ambiguous_evidence)
-            if global_context is not None
-            else scene_graph is not None
-            and (
-                bool(scene_graph._current_epoch_ambiguous_node_ids)
-                if current_scene_view
-                else any(
-                    node.market_epoch_id == current_epoch
-                    and node.ambiguity_state is EvidenceStatus.AMBIGUOUS
-                    for node in scene_graph.nodes_asof(observation.asof)
-                )
-            )
-        )
-        else EvidenceStatus.UNKNOWN
-        if (
-            global_context is not None
-            and global_context.market_mode is MarketMode.UNCERTAIN
-        )
+        if current_ambiguity
+        else EvidenceStatus.CONFIRMED
+        if phase
+        in {
+            PlaybookPhase.EXECUTABLE,
+            PlaybookPhase.ENTERED,
+            PlaybookPhase.DELIVERING,
+        }
         else EvidenceStatus.FORMING
     )
     return FocusState(
         asof=observation.asof,
         primary_timeframes=tuple(desired),
-        supplemental_timeframes=(),
         reason_codes=tuple(dict.fromkeys(reasons)),
-        trigger_event_ids=tuple(dict.fromkeys(triggers)),
         question=question,
         resolution_status=resolution,
-        switched=switched,
-        switched_at=observation.asof if switched else None,
-        prior_timeframes=tuple(prior_frames),
-        hypothesis_id=(
-            None
-            if dominant is None
-            else (
-                getattr(previous_belief, "dominant_hypothesis_id", None)
-                or dominant.key
-            )
-        ),
-        phase_at_selection=phase.value,
-    )
-
-
-def supplement_focus_once(
-    focus: FocusState,
-    prior_hypothesis: Any | None,
-    current_hypothesis: Any | None,
-    active_timeframes: Sequence[Timeframe] | None = None,
-) -> FocusState:
-    if (
-        focus.supplemental_query_used
-        or prior_hypothesis is None
-        or current_hypothesis is None
-        or prior_hypothesis.phase is current_hypothesis.phase
-    ):
-        return focus
-    allowed = (
-        set(active_timeframes)
-        if active_timeframes is not None
-        else set(CORE_TIMEFRAMES)
-        | {
-            Timeframe(value)
-            for value in (
-                *focus.primary_timeframes,
-                *focus.prior_timeframes,
-            )
-            if value in {item.value for item in Timeframe}
-        }
-    )
-    requested = tuple(
-        value
-        for value in _PHASE_FOCUS[current_hypothesis.phase]
-        if Timeframe(value) in allowed
-    )
-    supplemental = tuple(value for value in requested if value not in focus.primary_timeframes)
-    if not supplemental:
-        return focus
-    return replace(
-        focus,
-        supplemental_timeframes=supplemental,
-        reason_codes=tuple(dict.fromkeys((*focus.reason_codes, "playbook_stage_changed_after_query"))),
-        question="resolve the evidence required by the newly reached stage",
-        switched=True,
-        switched_at=focus.asof,
-        hypothesis_id=(
-            focus.hypothesis_id
-            if prior_hypothesis.key == current_hypothesis.key
-            and focus.hypothesis_id is not None
-            else current_hypothesis.key
-        ),
-        phase_at_selection=current_hypothesis.phase.value,
-        supplemental_query_used=True,
+        hypothesis_id=candidate_id,
+        switched=prior_focus is not None,
     )
 
 
@@ -4690,7 +8026,7 @@ def build_hypothesis_states(
     graph: TemporalMarketSceneGraph | None,
     focused: FocusedObservation | None,
 ) -> Mapping[str, HypothesisState]:
-    """Project dominant six-slot beliefs into at most two contexts per slot."""
+    """Project read-only graph context for root-specific Brain candidates."""
 
     def relevant_kinds(step_id: str) -> set[str]:
         token = step_id.lower()
@@ -4732,14 +8068,28 @@ def build_hypothesis_states(
         sequence = belief.sequence
         steps = () if sequence is None else sequence.steps
         satisfied = tuple(step for step in steps if step.satisfied)
+        episode_source_ids = _focus_entry_episode_source_ids(belief)
         roots = tuple(
             dict.fromkeys(
                 value
                 for value in (
+                    getattr(belief, "required_root_id", None),
                     belief.context_id,
-                    belief.setup_context_id,
                     belief.initiating_event_id,
-                    *(source for step in satisfied for source in step.source_ids),
+                    *(
+                        ()
+                        if episode_source_ids is None
+                        else episode_source_ids
+                    ),
+                    *(
+                        ()
+                        if episode_source_ids is None
+                        else tuple(
+                            source
+                            for step in satisfied
+                            for source in step.source_ids
+                        )
+                    ),
                 )
                 if value is not None
             )
@@ -4828,23 +8178,19 @@ def build_hypothesis_states(
                 )
                 if path:
                     paths.append(path)
-        contradicting_paths: list[tuple[str, ...]] = []
+        material_conflict_ids: list[str] = []
         if focused is not None:
             focused_conflict_ids = set(focused.cross_scale_conflicts)
-            contradicting_paths.extend(
-                (
-                    edge.source_node_id,
-                    edge.relation.value,
-                    edge.target_node_id,
-                )
+            material_conflict_ids.extend(
+                edge.edge_id
                 for edge in focused.edges
                 if edge.edge_id in focused_conflict_ids
-                and edge.source_node_id in closure_ids
-                and edge.target_node_id in closure_ids
+                and (
+                    edge.source_node_id in closure_ids
+                    or edge.target_node_id in closure_ids
+                )
             )
-        context_root = roots[0] if roots else slot_key
-        raw = f"{slot_key}|{context_root}"
-        hypothesis_id = f"hyp:{hashlib.sha256(raw.encode()).hexdigest()[:24]}"
+        hypothesis_id = getattr(belief, "candidate_id", None) or slot_key
         next_event = next((step.step_id for step in steps if not step.satisfied), None)
         fallback_target_id = (
             None
@@ -4871,7 +8217,7 @@ def build_hypothesis_states(
             sequence_stage=belief.phase.value,
             next_expected_event=next_event,
             supporting_graph_paths=tuple(paths),
-            contradicting_graph_paths=tuple(contradicting_paths),
+            material_conflict_ids=tuple(material_conflict_ids),
             missing_evidence=missing,
             ambiguous_evidence=ambiguous,
             context_draw_id=(
@@ -4890,50 +8236,24 @@ def build_hypothesis_states(
                 None if belief.invalidation is None else belief.invalidation.source_level_id
             ),
             evidence_revision_id=belief.evidence_revision_id,
+            source_market_thesis_ids=getattr(
+                belief,
+                "market_thesis_ids",
+                (),
+            ),
+            playbook_match_strength=getattr(
+                belief,
+                "playbook_match_strength",
+                0.0,
+            ),
+            market_thesis_action_bound=(
+                getattr(
+                    belief,
+                    "market_thesis_action_bound",
+                    False,
+                )
+            ),
         )
-        if graph is None or asof is None or not closure_ids:
-            continue
-        candidate_kinds = {
-            Playbook.DISPLACEMENT_FIRST_PULLBACK: {"displacement", "fvg", "order_block"},
-            Playbook.LIQUIDITY_SWEEP_REVERSAL: {"liquidity_pool", "manipulation"},
-            Playbook.FAILED_AUCTION_VALUE_RETURN: {"range", "manipulation"},
-        }[belief.playbook]
-        alternatives = [
-            node
-            for node in reversed(graph.nodes_asof(asof))
-            if node.kind in candidate_kinds
-            and node.ambiguity_state not in {EvidenceStatus.INVALIDATED, EvidenceStatus.UNKNOWN}
-            and (node.direction is None or node.direction is belief.direction)
-            and node.node_id not in roots
-            and node.node_id in closure_ids
-            and node.node_id not in {
-                graph._node_id_for_source(value, asof=asof)
-                for value in roots
-            }
-        ]
-        if alternatives:
-            alternate = alternatives[0]
-            alternate_raw = f"{slot_key}|{alternate.node_id}"
-            alternate_id = f"hyp:{hashlib.sha256(alternate_raw.encode()).hexdigest()[:24]}"
-            output[alternate_id] = replace(
-                output[hypothesis_id],
-                hypothesis_id=alternate_id,
-                context_root_ids=(alternate.node_id,),
-                sequence_stage=PlaybookPhase.FORMING.value,
-                next_expected_event="context_specific_sequence_evaluation",
-                supporting_graph_paths=(),
-                missing_evidence={
-                    "context_specific_sequence_evaluation": EvidenceStatus.UNKNOWN
-                },
-                ambiguous_evidence=(
-                    {"context_interpretation": EvidenceStatus.AMBIGUOUS}
-                    if alternate.ambiguity_state is EvidenceStatus.AMBIGUOUS
-                    else {}
-                ),
-                context_draw_id=None,
-                primary_target_id=None,
-                invalidation_id=None,
-            )
     return output
 
 
@@ -4952,9 +8272,11 @@ __all__ = [
     "StructuralScale",
     "TemporalMarketSceneGraph",
     "build_hypothesis_states",
+    "build_neutral_market_state",
+    "build_open_market_theses",
+    "market_episode_id",
     "parse_scale_specs",
     "scale_registry_id",
     "select_focus",
-    "supplement_focus_once",
     "update_global_market_context",
 ]

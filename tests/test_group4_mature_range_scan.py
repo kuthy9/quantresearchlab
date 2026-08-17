@@ -229,7 +229,7 @@ def test_registered_2023_profile_is_exact_and_outcome_blind() -> None:
     )
 
     _validate_config(payload)
-    assert payload["allowed_ohlcv_role"] == "calibration"
+    assert payload["allowed_ohlcv_role"] == "brain_validation"
     assert payload["threshold_search"] is False
     assert payload["outcome_fields_used"] is False
     assert payload["pnl_used"] is False

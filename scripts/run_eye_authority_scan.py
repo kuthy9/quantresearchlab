@@ -266,7 +266,7 @@ def _validate_registered_payload(payload: Mapping[str, Any]) -> None:
         or profile.get("execution_reality_status") != "not_evaluated"
         or profile.get("timezone") != "America/New_York"
         or int(profile.get("warmup_calendar_days", 0)) != 7
-        or profile.get("allowed_ohlcv_role") != "calibration"
+        or profile.get("allowed_ohlcv_role") != "brain_validation"
         or profile.get("registered_calibration_exception")
         != "outcome_blind_natural_authority_only"
         or profile.get("allow_data_gap_reset") is not True
@@ -895,9 +895,14 @@ def run_scan(
     )
     validation = load_validation_protocol(DEFAULT_CONFIG)
     role = validation.classify_ohlcv(start, end)
-    warmup_role = validation.classify_ohlcv(warmup_start, end)
-    if role.role != "calibration" or warmup_role.role != "calibration":
-        raise ValueError("registered eye window is outside its calibration role")
+    warmup_role = validation.classify_ohlcv(warmup_start, start)
+    if (
+        role.role != "brain_validation"
+        or warmup_role.role not in {"calibration", "brain_validation"}
+    ):
+        raise ValueError(
+            "registered eye window is outside its Brain-validation role"
+        )
 
     run_identity = _run_identity(
         payload,

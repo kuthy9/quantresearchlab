@@ -10,20 +10,27 @@ from smc_trader.model import (
     EngineSnapshot,
     RiskAssessment,
 )
-from smc_trader.decision import UtilityDecisionLayer
 from smc_trader.risk import StructuralRiskEngine
-from smc_trader.simulation import SequentialPortfolio
+from smc_trader.simulation import SequentialPortfolio, SequentialReplay
 from smc_trader.observation import ExecutionRealityInput
 
-from .test_v4_typed_vertical import _brain, _dfp_fixture
+from .test_v4_typed_vertical import (
+    _dfp_fixture,
+    _mapped_brain,
+    _ready_decision_layer,
+)
+from .helpers import graph_free_action_belief
 
 
 def _approved_entry_snapshot() -> EngineSnapshot:
     _, _, _, forming, triggered = _dfp_fixture()
-    brain = _brain()
+    brain = _mapped_brain()
     brain.update(forming)
     belief = brain.update(triggered)
-    decision = UtilityDecisionLayer().decide(triggered, belief)
+    decision = _ready_decision_layer(brain).decide(
+        triggered,
+        graph_free_action_belief(belief),
+    )
     snapshot = EngineSnapshot(
         observation=triggered,
         belief=belief,
@@ -195,3 +202,64 @@ def test_stop_close_exposes_invalidated_lifecycle_for_one_decision() -> None:
     assert lifecycle.status == "invalidated"
     portfolio.clear_lifecycle_position()
     assert portfolio.lifecycle_position is None
+
+
+def test_contract_boundary_exits_before_brain_receives_lifecycle_position() -> None:
+    """A Brain epoch reset follows, rather than causes, boundary exit."""
+
+    snapshot = _approved_entry_snapshot()
+
+    class BoundaryPortfolio(SequentialPortfolio):
+        def after_decision(self, _snapshot: EngineSnapshot) -> None:
+            # The assertion concerns before-bar ordering only.  Do not let the
+            # fixture snapshot create another pending entry after the exit.
+            return None
+
+    class CapturingEngine:
+        def __init__(self) -> None:
+            self.account = None
+            self.belief_position = None
+
+        def on_bar(self, _bar, *, execution, account, belief_position):
+            self.account = account
+            self.belief_position = belief_position
+            return snapshot
+
+    portfolio = BoundaryPortfolio()
+    SequentialPortfolio.after_decision(portfolio, snapshot)
+    entry_bar = Bar(
+        snapshot.observation.asof,
+        101.0,
+        101.5,
+        99.5,
+        100.5,
+        100,
+        "NQH5",
+        1,
+    )
+    assert not portfolio.before_bar(entry_bar)
+    assert portfolio.account(entry_bar.end).position is not None
+
+    engine = CapturingEngine()
+    replay = SequentialReplay(engine=engine, portfolio=portfolio)
+    next_contract = Bar(
+        entry_bar.end,
+        100.5,
+        101.0,
+        100.0,
+        100.75,
+        100,
+        "NQM5",
+        2,
+    )
+    step = replay.on_bar(
+        next_contract,
+        execution=ExecutionRealityInput(),
+    )
+
+    assert len(step.closed_trades) == 1
+    assert step.closed_trades[0].exit_reason == "contract_change_gap_exit"
+    assert engine.account.position is None
+    assert engine.belief_position is not None
+    assert engine.belief_position.status == "invalidated"
+    assert step.position is None

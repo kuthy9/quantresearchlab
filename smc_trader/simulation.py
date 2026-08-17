@@ -357,7 +357,8 @@ class SequentialPortfolio:
                     thesis=pending.thesis,
                     decision_time=pending.decision_time,
                     # The touch is only knowable after this completed bar.
-                    # Align the causal fill clock with PathTestRunner.
+                    # Align the fill clock with the completed-bar execution
+                    # contract; the intrabar touch was not knowable earlier.
                     opened_at=bar.end,
                     entry_price=float(result.entry_price),
                     current_stop=pending.thesis.original_invalidation.price,

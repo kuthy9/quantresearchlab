@@ -23,7 +23,11 @@ from smc_trader.model import (
     Timeframe,
 )
 from smc_trader.playbook_registry import load_playbook_registry
-from smc_trader.playbooks import PlaybookBrain
+from smc_trader.playbooks import (
+    PlaybookBrain,
+    _stable_context_thesis_id,
+    _typed_favr,
+)
 from smc_trader.risk import StructuralRiskEngine
 from smc_trader.scene_graph import (
     SceneEdgeKind,
@@ -31,7 +35,7 @@ from smc_trader.scene_graph import (
 )
 from smc_trader.visualization import DecisionVisualizer
 
-from .helpers import market_observation
+from .helpers import graph_free_action_belief, market_observation
 from .test_v3_group4_primitives import (
     _m1 as _group4_m1,
     _mature_range,
@@ -813,6 +817,30 @@ def test_favr_full_causal_chain_is_implemented_but_runtime_parked() -> None:
     )
 
 
+def test_favr_stable_context_identity_keeps_its_generic_contract() -> None:
+    observation, _, _ = _favr_observation()
+    brain = _unparked_favr_brain()
+    evaluation = _typed_favr(
+        observation,
+        Direction.LONG,
+        brain.registry.for_playbook(
+            Playbook.FAILED_AUCTION_VALUE_RETURN
+        ),
+        None,
+        brain.config,
+    )
+
+    assert evaluation.context_identity is not None
+    assert evaluation.sequence_signals
+    assert _stable_context_thesis_id(
+        "epoch:favr-generic-context",
+        Playbook.FAILED_AUCTION_VALUE_RETURN,
+        Direction.LONG,
+        evaluation,
+        None,
+    ) is not None
+
+
 def test_favr_scene_graph_forms_continuously_via_public_update() -> None:
     graph, observation, _, mature, manipulation = (
         _favr_public_scene_graph()
@@ -1008,14 +1036,23 @@ def test_unparked_favr_freezes_range_sweep_entry_and_opposite_draw() -> None:
         "frozen_opposite_range_boundary"
     )
 
-    decision = UtilityDecisionLayer().decide(observation, belief)
-    assert decision.selected_action.value == "enter"
+    decision = UtilityDecisionLayer().decide(
+        observation,
+        graph_free_action_belief(belief),
+    )
+    assert decision.selected_action.value == "abstain"
+    enter = next(
+        item
+        for item in decision.utilities
+        if item.action.value == "enter"
+        and item.hypothesis_key == hypothesis.key
+    )
+    assert "playbook_not_action_calibrated" in enter.reason
+    assert "calibration_not_ready" in enter.reason
     risk = StructuralRiskEngine().review(decision, observation)
     assert risk.passed
-    assert risk.final_action.value == "enter"
-    assert risk.frozen_thesis is not None
-    assert risk.frozen_thesis.range_auction == context
-    assert risk.frozen_thesis.draw_selection == plan.draw_selection
+    assert risk.final_action.value == "abstain"
+    assert risk.frozen_thesis is None
 
 
 def test_favr_terminalizes_late_mss_and_bound_location_failure() -> None:

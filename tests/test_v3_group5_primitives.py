@@ -4,6 +4,7 @@ from dataclasses import replace
 import hashlib
 import json
 import math
+import pickle
 from pathlib import Path
 
 import pandas as pd
@@ -958,6 +959,130 @@ def test_pool_reaccepted_clock_is_latched_and_old_bos_cannot_be_backfilled() -> 
     assert triggered.path_sequences[0].transition_reason == (
         "pool_reversal_sequence_observed"
     )
+
+
+def test_pool_opposite_displacement_freezes_root_not_entry_zone() -> None:
+    sweep_bar = _m1(
+        0,
+        open_=101.0,
+        high=101.25,
+        low=100.75,
+        close=101.25,
+    )
+    swept = _manipulation(sweep_bar.end)
+    reaccepted_at = _m1(2).end
+    returned = _manipulation(
+        sweep_bar.end,
+        lifecycle=ManipulationLifecycle.REACCEPTED,
+        resolved_at=reaccepted_at,
+    )
+    displacement_active_at = _m1(3).end
+    zone_confirmed_at = _m1(4).end
+    pre_visibility_bos = _bos(
+        identity="bos:before-zone-visible",
+        resolved_at=displacement_active_at,
+        direction=Direction.SHORT,
+    )
+    first_zone = _fvg(
+        zone_confirmed_at,
+        identity="fvg:pool-reverse-short:a",
+        direction=Direction.SHORT,
+        displacement_active_at=displacement_active_at,
+    )
+    second_zone = replace(
+        _fvg(
+            zone_confirmed_at,
+            identity="fvg:pool-reverse-short:b",
+            direction=Direction.SHORT,
+            displacement_active_at=displacement_active_at,
+        ),
+        source_displacement_id=first_zone.source_displacement_id,
+        source_active_transition_id=(
+            first_zone.source_active_transition_id
+        ),
+        source_displacement_started_at=(
+            first_zone.source_displacement_started_at
+        ),
+        source_displacement_prefix_commitment=(
+            first_zone.source_displacement_prefix_commitment
+        ),
+    )
+
+    frozen_steps = []
+    for zones in (
+        (first_zone,),
+        (second_zone,),
+        (first_zone, second_zone),
+    ):
+        reducer = CausalGroup5Reducer(_protocol())
+        reducer.on_completed_1m(
+            sweep_bar,
+            manipulations=(swept,),
+            m1_atr=1.0,
+        )
+        reducer.on_completed_1m(
+            _m1(1),
+            manipulations=(swept,),
+            m1_atr=1.0,
+        )
+        reducer.on_completed_1m(
+            _m1(2),
+            manipulations=(returned,),
+            m1_atr=1.0,
+        )
+        reducer.on_completed_1m(
+            _m1(3),
+            m1_bos=(pre_visibility_bos,),
+            m1_atr=1.0,
+        )
+        output = reducer.on_completed_1m(
+            _m1(4),
+            fair_value_gaps=zones,
+            m1_bos=(pre_visibility_bos,),
+            m1_atr=1.0,
+        )
+        assert {
+            location.source_zone_id for location in output.entry_locations
+        } == {zone.fvg_id for zone in zones}
+        assert all(
+            reference.bos_id != pre_visibility_bos.bos_id
+            for reference in output.micro_bos_references
+        )
+        pool_path = next(
+            path
+            for path in output.path_sequences
+            if path.context_kind == "pool_reversal"
+        )
+        assert pool_path.lifecycle is PathSequenceLifecycle.ACTIVE
+        frozen_steps.append(
+            next(
+                step
+                for step in pool_path.steps
+                if step.kind == "opposite_displacement"
+            )
+        )
+
+    first_step, second_step, combined_step = frozen_steps
+    assert first_step == second_step == combined_step
+    assert first_step.source_event_id == returned.manipulation_id
+    assert first_step.source_entity_id == first_zone.source_displacement_id
+    assert first_step.observed_at == zone_confirmed_at
+    assert first_step.source_active_at == displacement_active_at
+    assert reaccepted_at < first_step.source_active_at <= first_step.observed_at
+    assert first_step.direction is Direction.SHORT
+    assert first_step.reason == "opposite_displacement_after_reacceptance"
+    assert first_step.source_event_id not in {
+        first_zone.fvg_id,
+        second_zone.fvg_id,
+    }
+    assert pickle.loads(pickle.dumps(first_step)) == first_step
+    with pytest.raises(ValueError, match="path-sequence step is invalid"):
+        replace(first_step, source_active_at=None)
+    with pytest.raises(ValueError, match="path-sequence step is invalid"):
+        replace(
+            first_step,
+            source_active_at=zone_confirmed_at + pd.Timedelta(minutes=1),
+        )
 
 
 def test_pool_reacceptance_accepts_atr_derived_off_tick_zone_boundary() -> None:

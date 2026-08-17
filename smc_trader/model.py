@@ -84,6 +84,23 @@ class ScaleRelation(str, Enum):
     UNKNOWN = "unknown"
 
 
+class GlobalConflictRole(str, Enum):
+    """Deterministic market-level meaning of one cross-scale opposition."""
+
+    LOCAL_COUNTERTREND_DELIVERY = "local_countertrend_delivery"
+    AUTHORITY_TRANSITION_CANDIDATE = "authority_transition_candidate"
+    AUTHORITY_INVALIDATION = "authority_invalidation"
+
+
+class HypothesisConflictRelation(str, Enum):
+    """Direction-aware meaning of global evidence for one hypothesis."""
+
+    CHALLENGES_INCUMBENT = "challenges_incumbent"
+    SUPPORTS_CHALLENGER = "supports_challenger"
+    LOCAL_COUNTERTREND = "local_countertrend"
+    UNRELATED = "unrelated"
+
+
 class Action(str, Enum):
     ENTER = "enter"
     WAIT = "wait"
@@ -311,6 +328,9 @@ GROUP5_PATH_STEP_KINDS = frozenset(
         "accepted_outside",
     }
 )
+
+
+NEUTRAL_MARKET_STATE_SCHEMA_VERSION = 2
 GROUP5_SAME_CLOCK_RELATIONS = frozenset(
     {
         "origin",
@@ -3717,6 +3737,7 @@ class PathSequenceStep:
     direction: Direction
     strength: float
     reason: str
+    source_active_at: pd.Timestamp | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -3732,6 +3753,15 @@ class PathSequenceStep:
             "predecessor_step_ids",
             tuple(self.predecessor_step_ids),
         )
+        if self.source_active_at is not None:
+            object.__setattr__(
+                self,
+                "source_active_at",
+                aware_timestamp(
+                    self.source_active_at,
+                    name="path_step.source_active_at",
+                ),
+            )
         if (
             not self.step_id
             or self.kind not in GROUP5_PATH_STEP_KINDS
@@ -3746,6 +3776,21 @@ class PathSequenceStep:
             or not math.isfinite(float(self.strength))
             or not 0.0 <= self.strength <= 1.0
             or not self.reason
+            or (
+                self.kind == "opposite_displacement"
+                and (
+                    self.source_event_id is None
+                    or self.source_active_at is None
+                )
+            )
+            or (
+                self.kind != "opposite_displacement"
+                and self.source_active_at is not None
+            )
+            or (
+                self.source_active_at is not None
+                and self.source_active_at > self.observed_at
+            )
         ):
             raise ValueError("path-sequence step is invalid")
 
@@ -4048,6 +4093,9 @@ class LiquidityRoute:
     intermediate_liquidity_ids: tuple[str, ...]
     primary_deliverable_target_id: str | None
     terminal_draw_id: str | None
+    authority_barrier_id: str | None = None
+    authority_barrier_price: float | None = None
+    primary_target_price_basis: str = "inventory_price"
     path_blocker_ids: tuple[str, ...] = ()
     source_path_ids: tuple[str, ...] = ()
     range_context_id: str | None = None
@@ -4076,9 +4124,28 @@ class LiquidityRoute:
                 self.context_draw_id,
                 self.primary_deliverable_target_id,
                 self.terminal_draw_id,
+                self.authority_barrier_id,
             )
         ):
             raise ValueError("liquidity-route identity is invalid")
+        if (self.authority_barrier_id is None) != (
+            self.authority_barrier_price is None
+        ):
+            raise ValueError(
+                "liquidity-route authority barrier is only partially identified"
+            )
+        if self.authority_barrier_price is not None and (
+            not math.isfinite(float(self.authority_barrier_price))
+            or float(self.authority_barrier_price) <= 0.0
+        ):
+            raise ValueError("liquidity-route authority barrier price is invalid")
+        if self.primary_target_price_basis not in {
+            "inventory_price",
+            "conservative_contact",
+        }:
+            raise ValueError(
+                "liquidity-route primary target price basis is invalid"
+            )
         range_identity = (
             self.range_context_id,
             self.swept_range_boundary_id,
@@ -5670,6 +5737,64 @@ class MarketObservation:
                 "micro BOS reference lacks its path context"
             )
 
+    def _with_scene_delta(
+        self,
+        *,
+        scene_revision_id: str | None,
+        scene_added_node_ids: tuple[str, ...] = (),
+        scene_revised_node_ids: tuple[str, ...] = (),
+        scene_added_edge_ids: tuple[str, ...] = (),
+        scene_revised_edge_ids: tuple[str, ...] = (),
+        scene_resolution_event_ids: tuple[str, ...] = (),
+    ) -> "MarketObservation":
+        """Attach the graph delta without revalidating the immutable Eye payload.
+
+        ``MarketObservation`` has already completed its full causal and typed
+        contract validation before the Scene Graph consumes it.  Graph
+        projection changes only these six transport fields, so rebuilding the
+        dataclass through :func:`dataclasses.replace` needlessly repeats the
+        complete (and deliberately strict) validation of frames, inventories,
+        timelines, and Group 3-5 state.
+
+        This private clone path preserves every validated object reference and
+        validates exactly the newly attached revision/delta identities.  It is
+        intentionally not a general-purpose unchecked replacement API.
+        """
+        delta_names = (
+            "scene_added_node_ids",
+            "scene_revised_node_ids",
+            "scene_added_edge_ids",
+            "scene_revised_edge_ids",
+            "scene_resolution_event_ids",
+        )
+        delta_values = tuple(
+            tuple(value)
+            for value in (
+                scene_added_node_ids,
+                scene_revised_node_ids,
+                scene_added_edge_ids,
+                scene_revised_edge_ids,
+                scene_resolution_event_ids,
+            )
+        )
+        if scene_revision_id is not None and not scene_revision_id:
+            raise ValueError("scene revision identity cannot be empty")
+        if scene_revision_id is None and any(delta_values):
+            raise ValueError("scene delta identities require a scene revision")
+        if any(
+            len(values) != len(set(values))
+            or any(not isinstance(value, str) or not value for value in values)
+            for values in delta_values
+        ):
+            raise ValueError("scene delta identities are invalid")
+
+        clone = object.__new__(type(self))
+        object.__setattr__(clone, "__dict__", self.__dict__.copy())
+        object.__setattr__(clone, "scene_revision_id", scene_revision_id)
+        for name, values in zip(delta_names, delta_values, strict=True):
+            object.__setattr__(clone, name, values)
+        return clone
+
     def frame(self, timeframe: Timeframe) -> FrameObservation:
         return self.frames[timeframe]
 
@@ -5743,6 +5868,62 @@ class HypothesisSequenceState:
     @property
     def complete(self) -> bool:
         return bool(self.steps) and self.completed_steps == len(self.steps)
+
+
+@dataclass(frozen=True)
+class FrozenTriggerState:
+    """First qualified entry trigger owned by one frozen setup episode.
+
+    Later qualified trigger kinds may strengthen the same episode, but they
+    cannot replace the trigger identity or clock that first made the episode
+    ready.  A different ``setup_id`` is therefore required to select a new
+    trigger.
+    """
+
+    trigger_id: str
+    trigger_kind: str
+    observed_at: pd.Timestamp
+    setup_id: str
+    entry_path_id: str
+    entry_location_id: str
+    direction: Direction
+    source_entity_id: str
+    source_event_id: str | None = None
+    strength: float = 0.0
+    available_trigger_kinds: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "observed_at",
+            aware_timestamp(
+                self.observed_at,
+                name="frozen_trigger.observed_at",
+            ),
+        )
+        object.__setattr__(self, "direction", Direction(self.direction))
+        kinds = tuple(dict.fromkeys(self.available_trigger_kinds))
+        object.__setattr__(self, "available_trigger_kinds", kinds)
+        allowed_kinds = {
+            "wick_rejection",
+            "reacceptance_held",
+            "micro_bos_confirmed",
+        }
+        if (
+            not self.trigger_id
+            or self.trigger_kind not in allowed_kinds
+            or not self.setup_id
+            or not self.entry_path_id
+            or not self.entry_location_id
+            or not self.source_entity_id
+            or self.source_event_id == ""
+            or not math.isfinite(float(self.strength))
+            or not 0.0 <= float(self.strength) <= 1.0
+            or not kinds
+            or self.trigger_kind not in kinds
+            or any(kind not in allowed_kinds for kind in kinds)
+        ):
+            raise ValueError("frozen trigger identity or evidence is invalid")
 
 
 @dataclass(frozen=True)
@@ -5829,6 +6010,81 @@ class FrozenRangeAuctionContext:
 
 
 @dataclass(frozen=True)
+class FrozenLSRContext:
+    """Decision-time provenance for one long-lived LSR reversal Context.
+
+    The parent manipulation/reacceptance/displacement mechanism is frozen
+    independently of the child entry zone.  A Risk review can therefore
+    validate a later FVG/OB Episode without treating that zone as the Context
+    identity or depending on the bounded Group5 path still being materialized.
+    """
+
+    manipulation_id: str
+    manipulation_protocol_hash: str
+    source_pool_id: str
+    pool_path_id: str
+    pool_path_protocol_hash: str
+    displacement_id: str
+    direction: Direction
+    swept_at: pd.Timestamp
+    reaccepted_at: pd.Timestamp
+    displacement_active_at: pd.Timestamp
+    displacement_observed_at: pd.Timestamp
+    sweep_extreme: float
+
+    def __post_init__(self) -> None:
+        for name in (
+            "swept_at",
+            "reaccepted_at",
+            "displacement_active_at",
+            "displacement_observed_at",
+        ):
+            object.__setattr__(
+                self,
+                name,
+                aware_timestamp(
+                    getattr(self, name),
+                    name=f"lsr_context.{name}",
+                ),
+            )
+        object.__setattr__(self, "direction", Direction(self.direction))
+        if (
+            any(
+                not isinstance(value, str) or not value
+                for value in (
+                    self.manipulation_id,
+                    self.manipulation_protocol_hash,
+                    self.source_pool_id,
+                    self.pool_path_id,
+                    self.pool_path_protocol_hash,
+                    self.displacement_id,
+                )
+            )
+            or not math.isfinite(float(self.sweep_extreme))
+            or float(self.sweep_extreme) <= 0.0
+            or not self.swept_at
+            < self.reaccepted_at
+            < self.displacement_active_at
+            <= self.displacement_observed_at
+        ):
+            raise ValueError("frozen LSR Context provenance is invalid")
+
+    def entry_episode_id(self, zone_id: str) -> str:
+        """Return the registered child identity for one exact entry zone."""
+
+        if not isinstance(zone_id, str) or not zone_id:
+            raise ValueError("LSR entry Episode requires a zone identity")
+        raw = (
+            f"{self.manipulation_id}|{self.displacement_id}|{zone_id}|"
+            f"{self.direction.value}"
+        )
+        return (
+            "lsr-entry-episode:"
+            f"{hashlib.sha256(raw.encode()).hexdigest()[:24]}"
+        )
+
+
+@dataclass(frozen=True)
 class TradePlan:
     playbook: Playbook
     direction: Direction
@@ -5847,6 +6103,7 @@ class TradePlan:
     selected_draw_id: str | None = None
     draw_selection: DrawSelection | None = None
     range_auction: FrozenRangeAuctionContext | None = None
+    lsr_context: FrozenLSRContext | None = None
     liquidity_route: LiquidityRoute | None = None
 
     def __post_init__(self) -> None:
@@ -5975,6 +6232,76 @@ class TradePlan:
                 )
         elif self.range_auction is not None:
             raise ValueError("only FAVR may carry a range-auction context")
+        if (
+            self.playbook is Playbook.LIQUIDITY_SWEEP_REVERSAL
+            and self.setup_id is not None
+        ):
+            if (
+                self.lsr_context is None
+                or self.lsr_context.direction is not self.direction
+                or self.invalidation.source_level_id
+                != self.lsr_context.manipulation_id
+                or self.invalidation.observed_at != self.lsr_context.swept_at
+                or not math.isclose(
+                    self.invalidation.price,
+                    self.lsr_context.sweep_extreme,
+                    rel_tol=1e-9,
+                    abs_tol=1e-9,
+                )
+            ):
+                raise ValueError(
+                    "LSR plan requires its frozen parent Context provenance"
+                )
+        elif self.lsr_context is not None:
+            raise ValueError("only LSR may carry frozen Context provenance")
+
+
+@dataclass(frozen=True)
+class PlanFeasibility:
+    """Common, descriptive validation of one playbook-proposed plan.
+
+    A playbook still owns the allowed invalidation and draw sources.  This
+    object only reports whether the resulting frozen geometry is currently
+    usable; it neither invents a stop/target nor grants action authority.
+    """
+
+    valid: bool
+    planned_entry: float | None
+    invalidation: StructuralLevel | None
+    target: LiquidityLevel | None
+    remaining_path_R: float | None
+    deadline: pd.Timestamp | None
+    failure_reason: str | None
+
+    def __post_init__(self) -> None:
+        if self.deadline is not None:
+            object.__setattr__(
+                self,
+                "deadline",
+                aware_timestamp(
+                    self.deadline,
+                    name="plan_feasibility.deadline",
+                ),
+            )
+        numeric = (self.planned_entry, self.remaining_path_R)
+        if any(
+            value is not None and not math.isfinite(float(value))
+            for value in numeric
+        ):
+            raise ValueError("plan feasibility contains a non-finite value")
+        complete = bool(
+            self.planned_entry is not None
+            and self.invalidation is not None
+            and self.target is not None
+            and self.remaining_path_R is not None
+            and self.deadline is not None
+        )
+        if (
+            type(self.valid) is not bool
+            or self.failure_reason == ""
+            or self.valid != (complete and self.failure_reason is None)
+        ):
+            raise ValueError("plan feasibility contract is inconsistent")
 
 
 @dataclass(frozen=True)
@@ -6007,14 +6334,22 @@ class HypothesisBelief:
     )
     setup_context_id: str | None = None
     entry_location_id: str | None = None
+    entry_path_id: str | None = None
     context_id: str | None = None
     episode_id: str | None = None
+    # Explicit lifecycle ownership.  ``context_id``/``episode_id`` remain the
+    # evaluator-native identities; these IDs express the longer-lived market
+    # thesis and its short-lived child opportunity without conflating them.
+    context_thesis_id: str | None = None
+    parent_context_thesis_id: str | None = None
+    thesis_deadline: pd.Timestamp | None = None
     episode_deadline: pd.Timestamp | None = None
     initiating_event_id: str | None = None
     evidence_revision_id: str | None = None
     terminal_at: pd.Timestamp | None = None
     terminal_reason: str | None = None
     terminal_source_ids: tuple[str, ...] = ()
+    thesis_draw: LiquidityLevel | None = None
     draw_selection: DrawSelection | None = None
     raw_quality_dimensions: Mapping[str, float] = field(
         default_factory=dict
@@ -6022,8 +6357,52 @@ class HypothesisBelief:
     liquidity_route: LiquidityRoute | None = None
     context_metadata: Mapping[str, str] = field(default_factory=dict)
     competing_episode_ids: tuple[str, ...] = ()
+    market_thesis_ids: tuple[str, ...] = ()
+    market_thesis_id: str | None = None
+    bound_market_thesis_id: str | None = None
+    market_thesis_root_id: str | None = None
+    market_thesis_mechanism: str | None = None
+    market_thesis_authority_relation: str | None = None
+    playbook_match_strength: float = 0.0
+    market_thesis_binding_required: bool = False
+    market_thesis_action_bound: bool = False
+    market_thesis_match_status: str = "not_required"
+    selected_trigger: FrozenTriggerState | None = None
+    # Root-specific Brain candidates use a stable identity that is distinct
+    # from the six playbook-direction summary slots.  ``required_root_id`` is
+    # the canonical open-thesis root that the typed evaluator was constrained
+    # to consume; the pair is absent on summary beliefs.
+    candidate_id: str | None = None
+    required_root_id: str | None = None
+    record_kind: str = "summary"
+    summary_source_candidate_id: str | None = None
+    plan_feasibility: PlanFeasibility | None = None
 
     def __post_init__(self) -> None:
+        # Backward-compatible graph-free/summary construction may provide
+        # only the evaluator-native context identity.  Runtime root
+        # candidates must supply the stronger epoch-scoped identity
+        # explicitly; silently promoting their local context would let an
+        # incomplete candidate manufacture a long-lived parent thesis.
+        context_thesis_id = self.context_thesis_id
+        if context_thesis_id is None and self.candidate_id is None:
+            context_thesis_id = self.context_id
+        parent_context_thesis_id = self.parent_context_thesis_id
+        if self.episode_id is not None and parent_context_thesis_id is None:
+            parent_context_thesis_id = context_thesis_id
+        object.__setattr__(self, "context_thesis_id", context_thesis_id)
+        object.__setattr__(
+            self,
+            "parent_context_thesis_id",
+            parent_context_thesis_id,
+        )
+        entry_path_id = self.entry_path_id
+        if entry_path_id is None:
+            if self.plan is not None:
+                entry_path_id = self.plan.entry_path_id
+            elif self.selected_trigger is not None:
+                entry_path_id = self.selected_trigger.entry_path_id
+        object.__setattr__(self, "entry_path_id", entry_path_id)
         object.__setattr__(
             self,
             "phase_started_at",
@@ -6032,6 +6411,14 @@ class HypothesisBelief:
                 name="belief.phase_started_at",
             ),
         )
+        for name in ("thesis_deadline", "episode_deadline"):
+            value = getattr(self, name)
+            if value is not None:
+                object.__setattr__(
+                    self,
+                    name,
+                    aware_timestamp(value, name=f"belief.{name}"),
+                )
         object.__setattr__(self, "probability", clamp(self.probability))
         if self.raw_probability is not None:
             object.__setattr__(
@@ -6071,6 +6458,165 @@ class HypothesisBelief:
             "competing_episode_ids",
             competing_episode_ids,
         )
+        market_thesis_ids = tuple(dict.fromkeys(self.market_thesis_ids))
+        object.__setattr__(self, "market_thesis_ids", market_thesis_ids)
+        object.__setattr__(
+            self,
+            "playbook_match_strength",
+            clamp(self.playbook_match_strength),
+        )
+        thesis_identity_fields = (
+            self.market_thesis_id,
+            self.bound_market_thesis_id,
+            self.market_thesis_root_id,
+            self.market_thesis_mechanism,
+            self.market_thesis_authority_relation,
+        )
+        candidate_identity_fields = (
+            self.candidate_id,
+            self.required_root_id,
+            self.summary_source_candidate_id,
+        )
+        valid_match_statuses = {
+            "not_required",
+            "no_open_thesis",
+            "no_direction_match",
+            "no_mechanism_match",
+            "root_identity_unbound",
+            "exact_root_bound",
+        }
+        if (
+            type(self.market_thesis_binding_required) is not bool
+            or type(self.market_thesis_action_bound) is not bool
+            or self.market_thesis_match_status not in valid_match_statuses
+            or any(
+                value is not None
+                and (not isinstance(value, str) or not value)
+                for value in thesis_identity_fields
+            )
+            or (
+                self.market_thesis_id is None
+                and any(value is not None for value in thesis_identity_fields[1:])
+            )
+            or (
+                self.market_thesis_id is not None
+                and any(
+                    value is None
+                    for value in (
+                        self.market_thesis_root_id,
+                        self.market_thesis_mechanism,
+                        self.market_thesis_authority_relation,
+                    )
+                )
+            )
+            or (
+                self.market_thesis_id is not None
+                and (
+                    not market_thesis_ids
+                    or self.market_thesis_id != market_thesis_ids[0]
+                )
+            )
+            or bool(market_thesis_ids) != (self.market_thesis_id is not None)
+            or (
+                self.bound_market_thesis_id is not None
+                and (
+                    self.bound_market_thesis_id not in market_thesis_ids
+                    or self.bound_market_thesis_id
+                    != self.market_thesis_id
+                )
+            )
+            or self.market_thesis_action_bound
+            != (self.bound_market_thesis_id is not None)
+            or self.market_thesis_binding_required
+            != (self.market_thesis_match_status != "not_required")
+            or self.market_thesis_action_bound
+            != (self.market_thesis_match_status == "exact_root_bound")
+            or (self.market_thesis_id is not None)
+            != (
+                self.market_thesis_match_status
+                in {"root_identity_unbound", "exact_root_bound"}
+            )
+            or (
+                self.market_thesis_id is None
+                and self.playbook_match_strength != 0.0
+            )
+            or (self.candidate_id is None) != (
+                self.required_root_id is None
+            )
+            or any(
+                value is not None
+                and (not isinstance(value, str) or not value)
+                for value in candidate_identity_fields
+            )
+            or (
+                self.required_root_id is not None
+                and self.market_thesis_root_id
+                != self.required_root_id
+            )
+            or self.record_kind
+            not in {
+                "summary",
+                "root_candidate",
+                "retained_episode",
+                "position_management",
+            }
+            or (
+                self.record_kind == "summary"
+                and (
+                    self.candidate_id is not None
+                    or self.required_root_id is not None
+                )
+            )
+            or (
+                self.record_kind != "summary"
+                and (
+                    self.candidate_id is None
+                    or self.required_root_id is None
+                    or self.summary_source_candidate_id is not None
+                )
+            )
+            or (
+                self.record_kind == "summary"
+                and self.summary_source_candidate_id is not None
+                and not self.summary_source_candidate_id
+            )
+        ):
+            raise ValueError("market thesis binding diagnostics are invalid")
+        if self.plan_feasibility is not None:
+            feasibility = self.plan_feasibility
+            if self.plan is None:
+                if feasibility.valid:
+                    raise ValueError(
+                        "belief without a plan cannot be plan-feasible"
+                    )
+            elif (
+                feasibility.planned_entry != self.plan.planned_entry
+                or feasibility.invalidation != self.plan.invalidation
+                or feasibility.target != self.plan.targets[0]
+                or feasibility.remaining_path_R
+                != self.plan.remaining_path_R
+                or feasibility.deadline != self.plan.deadline
+            ):
+                raise ValueError(
+                    "belief plan and common feasibility view disagree"
+                )
+        if self.selected_trigger is not None and (
+            self.setup_context_id != self.selected_trigger.setup_id
+            or self.entry_location_id
+            != self.selected_trigger.entry_location_id
+            or self.entry_path_id != self.selected_trigger.entry_path_id
+            or self.direction is not self.selected_trigger.direction
+            or (
+                self.sequence is not None
+                and self.sequence.setup_id != self.selected_trigger.setup_id
+            )
+            or (
+                self.plan is not None
+                and self.plan.entry_path_id
+                != self.selected_trigger.entry_path_id
+            )
+        ):
+            raise ValueError("frozen trigger does not belong to the hypothesis episode")
         expected_groups = {
             "structure",
             "displacement",
@@ -6125,19 +6671,84 @@ class HypothesisBelief:
             raise ValueError(
                 "belief raw quality dimensions are invalid"
             )
+        uncertainty_names = (
+            "uncertainty_conflict",
+            "uncertainty_required_evidence_missing",
+            "uncertainty_authority_missing",
+            "uncertainty_graph_ambiguity",
+            "uncertainty_total",
+        )
+        if any(name in context_metadata for name in uncertainty_names):
+            if not all(name in context_metadata for name in uncertainty_names):
+                raise ValueError(
+                    "belief uncertainty component metadata is incomplete"
+                )
+            try:
+                uncertainty_values = tuple(
+                    float(context_metadata[name])
+                    for name in uncertainty_names
+                )
+            except (TypeError, ValueError) as error:
+                raise ValueError(
+                    "belief uncertainty component metadata is invalid"
+                ) from error
+            components = uncertainty_values[:-1]
+            total = uncertainty_values[-1]
+            recomputed = 1.0 - math.prod(
+                1.0 - value for value in components
+            )
+            if (
+                any(
+                    not math.isfinite(value) or not 0.0 <= value <= 1.0
+                    for value in uncertainty_values
+                )
+                or not math.isclose(
+                    total,
+                    recomputed,
+                    rel_tol=1e-9,
+                    abs_tol=1e-9,
+                )
+                or not math.isclose(
+                    total,
+                    float(raw_dimensions["uncertainty"]),
+                    rel_tol=1e-9,
+                    abs_tol=1e-9,
+                )
+                or not math.isclose(
+                    total,
+                    float(self.uncertainty),
+                    rel_tol=1e-9,
+                    abs_tol=1e-9,
+                )
+            ):
+                raise ValueError(
+                    "belief uncertainty total disagrees with its components"
+                )
         if (
             any(not name or not value for name, value in context_metadata.items())
             or any(
                 not isinstance(value, str) or not value
                 for value in competing_episode_ids
             )
+            or any(
+                not isinstance(value, str) or not value
+                for value in market_thesis_ids
+            )
+            or (
+                self.market_thesis_action_bound
+                and not market_thesis_ids
+            )
         ):
             raise ValueError("belief context diagnostics are invalid")
         if self.setup_context_id == "" or self.entry_location_id == "":
             raise ValueError("belief typed context identity cannot be empty")
+        if self.entry_path_id == "":
+            raise ValueError("belief entry path identity cannot be empty")
         for name in (
             "context_id",
             "episode_id",
+            "context_thesis_id",
+            "parent_context_thesis_id",
             "initiating_event_id",
             "evidence_revision_id",
         ):
@@ -6148,14 +6759,20 @@ class HypothesisBelief:
                 raise ValueError(
                     f"belief {name} must be non-empty text when present"
                 )
-        if self.episode_deadline is not None:
-            object.__setattr__(
-                self,
-                "episode_deadline",
-                aware_timestamp(
-                    self.episode_deadline,
-                    name="belief.episode_deadline",
-                ),
+        if (
+            self.parent_context_thesis_id is not None
+            and self.context_thesis_id
+            != self.parent_context_thesis_id
+        ):
+            raise ValueError(
+                "entry episode must reference its owning context thesis"
+            )
+        if (
+            self.episode_id is not None
+            and self.parent_context_thesis_id is None
+        ):
+            raise ValueError(
+                "entry episode requires a parent context thesis"
             )
         object.__setattr__(
             self,
@@ -6179,6 +6796,13 @@ class HypothesisBelief:
         ):
             raise ValueError(
                 "belief entry location requires its setup context"
+            )
+        if self.entry_path_id is not None and (
+            self.setup_context_id is None
+            or self.entry_location_id is None
+        ):
+            raise ValueError(
+                "belief entry path requires its setup and location"
             )
         if (
             self.sequence is not None
@@ -6214,6 +6838,14 @@ class HypothesisBelief:
         ):
             raise ValueError(
                 "trade plan cannot extend its frozen episode deadline"
+            )
+        if (
+            self.plan is not None
+            and self.plan.entry_path_id is not None
+            and self.entry_path_id != self.plan.entry_path_id
+        ):
+            raise ValueError(
+                "belief and trade plan entry paths disagree"
             )
         terminal = self.phase in {
             PlaybookPhase.COMPLETED,
@@ -6293,7 +6925,41 @@ class HypothesisBelief:
 
     @property
     def key(self) -> str:
-        return f"{self.playbook.value}:{self.direction.value}"
+        return self.candidate_id or (
+            f"{self.playbook.value}:{self.direction.value}"
+        )
+
+    @property
+    def selected_trigger_kind(self) -> str | None:
+        return (
+            None
+            if self.selected_trigger is None
+            else self.selected_trigger.trigger_kind
+        )
+
+    @property
+    def selected_trigger_id(self) -> str | None:
+        return (
+            None
+            if self.selected_trigger is None
+            else self.selected_trigger.trigger_id
+        )
+
+    @property
+    def selected_trigger_at(self) -> pd.Timestamp | None:
+        return (
+            None
+            if self.selected_trigger is None
+            else self.selected_trigger.observed_at
+        )
+
+    @property
+    def available_trigger_kinds(self) -> tuple[str, ...]:
+        return (
+            ()
+            if self.selected_trigger is None
+            else self.selected_trigger.available_trigger_kinds
+        )
 
     @property
     def eligible(self) -> bool:
@@ -6307,23 +6973,26 @@ class HypothesisBelief:
 
     @property
     def effective_probability(self) -> float:
-        """Action-facing score; terminal/inactive theses have no authority."""
+        """Compatibility view of calibrated executable delivery readiness.
 
-        if not self.eligible:
+        The five typed dimensions are distinct causal questions and therefore
+        must not be collapsed into a pseudo-probability.  Decision consumes
+        them directly; this compatibility scalar is exposed only when an
+        executable hypothesis has a non-identity calibration.
+        """
+
+        if (
+            self.phase is not PlaybookPhase.EXECUTABLE
+            or self.calibration_version == "identity-unvalidated"
+            or self.delivery_quality is None
+        ):
             return 0.0
-        typed = (
-            self.thesis_strength,
-            self.sequence_progress,
-            self.location_quality,
-            self.entry_readiness,
-            self.delivery_quality,
-        )
-        return min(float(value) for value in typed if value is not None)
+        return clamp(self.delivery_quality)
 
 
 @dataclass(frozen=True)
 class GlobalConflictEvidence:
-    """One material, causally clocked cross-scale conflict.
+    """One causally clocked and explicitly classified cross-scale opposition.
 
     The object records graph identities rather than a generic conflict flag so
     downstream hypothesis routing can distinguish relevant opposition from an
@@ -6340,6 +7009,7 @@ class GlobalConflictEvidence:
     source_direction: Direction | None
     target_direction: Direction | None
     structural_scale: str
+    role: GlobalConflictRole
     reason: str
     affected_hypothesis_ids: tuple[str, ...]
 
@@ -6374,6 +7044,7 @@ class GlobalConflictEvidence:
                 "target_direction",
                 Direction(self.target_direction),
             )
+        object.__setattr__(self, "role", GlobalConflictRole(self.role))
         affected = tuple(dict.fromkeys(self.affected_hypothesis_ids))
         object.__setattr__(self, "affected_hypothesis_ids", affected)
         if (
@@ -6406,6 +7077,610 @@ class GlobalConflictEvidence:
 
 
 @dataclass(frozen=True)
+class AuthorityLayer:
+    """One current structural authority layer; never a playbook verdict."""
+
+    timeframe: Timeframe
+    direction: Direction
+    structure_id: str
+    confirmed_at: pd.Timestamp
+    protected_level_id: str | None
+    structural_scope: str
+    acceptance_state: str
+    status: str
+    source_ids: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "timeframe", Timeframe(self.timeframe))
+        object.__setattr__(self, "direction", Direction(self.direction))
+        object.__setattr__(
+            self,
+            "confirmed_at",
+            aware_timestamp(
+                self.confirmed_at,
+                name="authority_layer.confirmed_at",
+            ),
+        )
+        sources = tuple(dict.fromkeys(self.source_ids))
+        object.__setattr__(self, "source_ids", sources)
+        if (
+            self.timeframe not in {Timeframe.H4, Timeframe.H1, Timeframe.M15}
+            or not self.structure_id
+            or (
+                self.protected_level_id is not None
+                and not self.protected_level_id
+            )
+            or self.structural_scope
+            not in {"internal", "intermediate", "external"}
+            or self.acceptance_state
+            not in {"pending", "rejected", "accepted", "confirmed", "unknown"}
+            or self.status not in {"intact", "challenging", "invalidated"}
+            or any(not isinstance(value, str) or not value for value in sources)
+        ):
+            raise ValueError("authority layer is invalid")
+
+
+@dataclass(frozen=True)
+class ScaleRelationState:
+    """Causally sourced relation of one scale to dominant authority."""
+
+    timeframe: Timeframe
+    relation: ScaleRelation
+    direction: Direction | None
+    authority_layer_id: str | None
+    evidence_ids: tuple[str, ...]
+    evidence_kind: str | None
+    structural_scope: str | None
+    acceptance_state: str | None
+    since: pd.Timestamp | None
+    age_bars: int
+    graph_connected: bool
+    ambiguous: bool
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "timeframe", Timeframe(self.timeframe))
+        object.__setattr__(self, "relation", ScaleRelation(self.relation))
+        if self.direction is not None:
+            object.__setattr__(self, "direction", Direction(self.direction))
+        if self.since is not None:
+            object.__setattr__(
+                self,
+                "since",
+                aware_timestamp(self.since, name="scale_relation.since"),
+            )
+        evidence = tuple(dict.fromkeys(self.evidence_ids))
+        object.__setattr__(self, "evidence_ids", evidence)
+        if (
+            (self.authority_layer_id is not None and not self.authority_layer_id)
+            or any(not isinstance(value, str) or not value for value in evidence)
+            or (self.evidence_kind is not None and not self.evidence_kind)
+            or self.structural_scope
+            not in {None, "internal", "intermediate", "external"}
+            or self.acceptance_state
+            not in {None, "pending", "rejected", "accepted", "confirmed", "unknown"}
+            or type(self.age_bars) is not int
+            or self.age_bars < 0
+            or type(self.graph_connected) is not bool
+            or type(self.ambiguous) is not bool
+            or (self.ambiguous and self.relation is not ScaleRelation.UNKNOWN)
+            or (
+                self.relation is ScaleRelation.MATERIAL_OPPOSITION
+                and (
+                    not self.graph_connected
+                    or self.direction is None
+                    or not evidence
+                )
+            )
+        ):
+            raise ValueError("scale relation state is invalid")
+
+
+@dataclass(frozen=True)
+class BalanceContext:
+    """Descriptive balance context, separate from strict FAVR authority."""
+
+    context_id: str
+    timeframe: Timeframe
+    status: str
+    source_ids: tuple[str, ...]
+    bilateral_boundaries: bool
+    internal_crossing: bool
+    accepted_external_break: bool
+    value_authoritative: bool
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "timeframe", Timeframe(self.timeframe))
+        sources = tuple(dict.fromkeys(self.source_ids))
+        object.__setattr__(self, "source_ids", sources)
+        if (
+            not self.context_id
+            or self.timeframe not in {Timeframe.H4, Timeframe.H1, Timeframe.M15}
+            or self.status not in {"candidate", "descriptive", "authoritative"}
+            or not sources
+            or any(not isinstance(value, str) or not value for value in sources)
+            or any(
+                type(value) is not bool
+                for value in (
+                    self.bilateral_boundaries,
+                    self.internal_crossing,
+                    self.accepted_external_break,
+                    self.value_authoritative,
+                )
+            )
+            or (
+                self.status == "authoritative"
+                and (
+                    not self.bilateral_boundaries
+                    or not self.internal_crossing
+                    or not self.value_authoritative
+                    or self.accepted_external_break
+                )
+            )
+            or (
+                self.status != "authoritative"
+                and self.value_authoritative
+            )
+        ):
+            raise ValueError("balance context is invalid")
+
+
+@dataclass(frozen=True)
+class DeliveryObstruction:
+    """One price-geometric obstruction candidate, independent of a plan."""
+
+    obstruction_id: str
+    timeframe: Timeframe
+    direction: Direction | None
+    side: str
+    lower_bound: float
+    upper_bound: float
+    hard: bool
+    source_kind: str
+    source_ids: tuple[str, ...]
+    structural_scope: str
+    acceptance_state: str | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "timeframe", Timeframe(self.timeframe))
+        if self.direction is not None:
+            object.__setattr__(self, "direction", Direction(self.direction))
+        sources = tuple(dict.fromkeys(self.source_ids))
+        object.__setattr__(self, "source_ids", sources)
+        if (
+            not self.obstruction_id
+            or self.side not in {"above", "below"}
+            or not math.isfinite(float(self.lower_bound))
+            or not math.isfinite(float(self.upper_bound))
+            or not 0.0 < float(self.lower_bound) <= float(self.upper_bound)
+            or type(self.hard) is not bool
+            or not self.source_kind
+            or not sources
+            or any(not isinstance(value, str) or not value for value in sources)
+            or self.structural_scope
+            not in {"internal", "intermediate", "external"}
+            or self.acceptance_state
+            not in {None, "pending", "rejected", "accepted", "confirmed", "unknown"}
+        ):
+            raise ValueError("delivery obstruction is invalid")
+
+    def contact_price(self, direction: Direction) -> float:
+        """Conservative first contact in the proposed delivery direction."""
+
+        direction = Direction(direction)
+        return (
+            float(self.lower_bound)
+            if direction is Direction.LONG
+            else float(self.upper_bound)
+        )
+
+
+@dataclass(frozen=True)
+class DirectionalObstructionView:
+    """Current draw/obstruction inventory for one direction, not a gate."""
+
+    direction: Direction
+    nearest_draw_id: str | None
+    nearest_draw_price: float | None
+    hard_barriers: tuple[DeliveryObstruction, ...]
+    soft_frictions: tuple[DeliveryObstruction, ...]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "direction", Direction(self.direction))
+        hard = tuple(self.hard_barriers)
+        soft = tuple(self.soft_frictions)
+        object.__setattr__(self, "hard_barriers", hard)
+        object.__setattr__(self, "soft_frictions", soft)
+        identities = tuple(
+            item.obstruction_id for item in (*hard, *soft)
+        )
+        if (
+            (self.nearest_draw_id is None) != (self.nearest_draw_price is None)
+            or (
+                self.nearest_draw_id is not None
+                and (
+                    not self.nearest_draw_id
+                    or not math.isfinite(float(self.nearest_draw_price))
+                    or float(self.nearest_draw_price) <= 0.0
+                )
+            )
+            or any(
+                not isinstance(item, DeliveryObstruction)
+                for item in (*hard, *soft)
+            )
+            or any(not item.hard for item in hard)
+            or any(item.hard for item in soft)
+            or len(identities) != len(set(identities))
+        ):
+            raise ValueError("directional obstruction view is invalid")
+
+
+@dataclass(frozen=True)
+class ThesisEvidenceState:
+    """Incremental factual state for one playbook-neutral market thesis."""
+
+    lifecycle: str
+    revision_id: str
+    changed_at: pd.Timestamp
+    supporting_event_ids: tuple[str, ...] = ()
+    opposing_event_ids: tuple[str, ...] = ()
+    new_supporting_event_ids: tuple[str, ...] = ()
+    new_opposing_event_ids: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "changed_at",
+            aware_timestamp(
+                self.changed_at,
+                name="thesis_evidence.changed_at",
+            ),
+        )
+        for name in (
+            "supporting_event_ids",
+            "opposing_event_ids",
+            "new_supporting_event_ids",
+            "new_opposing_event_ids",
+        ):
+            values = tuple(dict.fromkeys(getattr(self, name)))
+            object.__setattr__(self, name, values)
+            if any(not isinstance(value, str) or not value for value in values):
+                raise ValueError(f"thesis evidence {name} is invalid")
+        if (
+            self.lifecycle
+            not in {"forming", "active", "weakening", "invalidated"}
+            or not self.revision_id
+            or not set(self.new_supporting_event_ids).issubset(
+                self.supporting_event_ids
+            )
+            or not set(self.new_opposing_event_ids).issubset(
+                self.opposing_event_ids
+            )
+        ):
+            raise ValueError("thesis evidence lifecycle or revision is invalid")
+
+
+@dataclass(frozen=True)
+class OpenMarketThesis:
+    """One active, playbook-neutral interpretation of a connected graph root.
+
+    The object carries only causal identities already observed by the Eye.  It
+    neither selects a playbook nor authorizes an action; typed playbooks may
+    subsequently match and constrain it.
+    """
+
+    thesis_id: str
+    root_id: str
+    market_epoch_id: str
+    formed_at: pd.Timestamp
+    updated_at: pd.Timestamp
+    direction: Direction | None
+    source_timeframe: Timeframe
+    structural_scale: str
+    mechanism: str
+    authority_relation: str
+    authority_source_ids: tuple[str, ...] = ()
+    mechanism_event_ids: tuple[str, ...] = ()
+    draw_candidate_ids: tuple[str, ...] = ()
+    entry_location_ids: tuple[str, ...] = ()
+    trigger_event_ids: tuple[str, ...] = ()
+    obstruction_ids: tuple[str, ...] = ()
+    conflict_ids: tuple[str, ...] = ()
+    unknown_evidence: tuple[str, ...] = ()
+    ambiguous_evidence: tuple[str, ...] = ()
+    evidence_state: ThesisEvidenceState | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "formed_at",
+            aware_timestamp(self.formed_at, name="market_thesis.formed_at"),
+        )
+        object.__setattr__(
+            self,
+            "updated_at",
+            aware_timestamp(self.updated_at, name="market_thesis.updated_at"),
+        )
+        if self.direction is not None:
+            object.__setattr__(self, "direction", Direction(self.direction))
+        object.__setattr__(
+            self,
+            "source_timeframe",
+            Timeframe(self.source_timeframe),
+        )
+        identity_fields = (
+            "authority_source_ids",
+            "mechanism_event_ids",
+            "draw_candidate_ids",
+            "entry_location_ids",
+            "trigger_event_ids",
+            "obstruction_ids",
+            "conflict_ids",
+            "unknown_evidence",
+            "ambiguous_evidence",
+        )
+        for name in identity_fields:
+            values = tuple(dict.fromkeys(getattr(self, name)))
+            object.__setattr__(self, name, values)
+            if any(
+                not isinstance(value, str) or not value for value in values
+            ):
+                raise ValueError(
+                    f"market thesis {name} contains an invalid identity"
+                )
+        if (
+            not self.thesis_id
+            or not self.root_id
+            or not self.market_epoch_id
+            or self.formed_at > self.updated_at
+            or self.structural_scale
+            not in {"internal", "intermediate", "external"}
+            or not self.mechanism
+            or not self.authority_relation
+            or self.root_id not in self.mechanism_event_ids
+            or (
+                self.evidence_state is not None
+                and (
+                    self.evidence_state.changed_at > self.updated_at
+                    or self.root_id
+                    not in self.evidence_state.supporting_event_ids
+                )
+            )
+        ):
+            raise ValueError("open market thesis identity or clock is invalid")
+
+    @property
+    def lifecycle(self) -> str:
+        return (
+            "forming"
+            if self.evidence_state is None
+            else self.evidence_state.lifecycle
+        )
+
+    @property
+    def evidence_revision_id(self) -> str:
+        return (
+            f"thesis-evidence:{self.thesis_id}"
+            if self.evidence_state is None
+            else self.evidence_state.revision_id
+        )
+
+    @property
+    def supporting_event_ids(self) -> tuple[str, ...]:
+        return (
+            self.mechanism_event_ids
+            if self.evidence_state is None
+            else self.evidence_state.supporting_event_ids
+        )
+
+    @property
+    def opposing_event_ids(self) -> tuple[str, ...]:
+        return (
+            self.conflict_ids
+            if self.evidence_state is None
+            else self.evidence_state.opposing_event_ids
+        )
+
+
+@dataclass(frozen=True)
+class ContextThesisState:
+    """Long-lived causal market view shared by zero or more entry episodes.
+
+    This state is descriptive and never grants action authority.  The stable
+    identity is frozen from market epoch, authority structure, direction and
+    context draw by the Brain; children retain only that identity.
+    """
+
+    context_thesis_id: str
+    market_epoch_id: str
+    direction: Direction
+    authority_ids: tuple[str, ...]
+    context_draw: LiquidityLevel | None
+    structural_invalidation: StructuralLevel | None
+    supporting_event_ids: tuple[str, ...]
+    opposing_event_ids: tuple[str, ...]
+    lifecycle: str
+    formed_at: pd.Timestamp
+    updated_at: pd.Timestamp
+    thesis_deadline: pd.Timestamp | None
+    # Bounded current-child projection; historical counts are diagnostics.
+    child_episode_ids: tuple[str, ...] = ()
+    terminal_at: pd.Timestamp | None = None
+    terminal_reason: str | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "direction", Direction(self.direction))
+        for name in ("formed_at", "updated_at", "thesis_deadline", "terminal_at"):
+            value = getattr(self, name)
+            if value is not None:
+                object.__setattr__(
+                    self,
+                    name,
+                    aware_timestamp(value, name=f"context_thesis.{name}"),
+                )
+        for name in (
+            "authority_ids",
+            "supporting_event_ids",
+            "opposing_event_ids",
+            "child_episode_ids",
+        ):
+            values = tuple(dict.fromkeys(getattr(self, name)))
+            object.__setattr__(self, name, values)
+            if any(not isinstance(value, str) or not value for value in values):
+                raise ValueError(f"context thesis {name} is invalid")
+        terminal = self.lifecycle in {"completed", "invalidated", "censored"}
+        invalid_reasons = tuple(
+            reason
+            for reason, invalid in (
+                ("missing_context_thesis_id", not self.context_thesis_id),
+                ("missing_market_epoch_id", not self.market_epoch_id),
+                ("missing_authority_ids", not self.authority_ids),
+                ("formed_after_update", self.formed_at > self.updated_at),
+                (
+                    "unknown_lifecycle",
+                    self.lifecycle
+                    not in {
+                        "forming",
+                        "active",
+                        "weakening",
+                        "completed",
+                        "invalidated",
+                        "censored",
+                    },
+                ),
+                (
+                    "terminal_clock_mismatch",
+                    terminal != (self.terminal_at is not None),
+                ),
+                (
+                    "terminal_reason_mismatch",
+                    terminal != (self.terminal_reason is not None),
+                ),
+                (
+                    "deadline_before_formation",
+                    self.thesis_deadline is not None
+                    and self.thesis_deadline < self.formed_at,
+                ),
+                (
+                    "draw_confirmed_after_update",
+                    self.context_draw is not None
+                    and self.context_draw.confirmed_at > self.updated_at,
+                ),
+                (
+                    "invalidation_observed_after_update",
+                    self.structural_invalidation is not None
+                    and self.structural_invalidation.observed_at
+                    > self.updated_at,
+                ),
+            )
+            if invalid
+        )
+        if invalid_reasons:
+            raise ValueError(
+                "context thesis identity or lifecycle is invalid: "
+                + ",".join(invalid_reasons)
+            )
+
+
+@dataclass(frozen=True)
+class EntryEpisodeState:
+    """Short-lived entry opportunity owned by exactly one context thesis."""
+
+    episode_id: str
+    parent_context_thesis_id: str
+    candidate_id: str
+    playbook: Playbook
+    direction: Direction
+    initiating_event_id: str | None
+    entry_location_id: str | None
+    entry_path_id: str | None
+    first_pullback_at: pd.Timestamp | None
+    selected_trigger: FrozenTriggerState | None
+    plan: TradePlan | None
+    invalidation: StructuralLevel | None
+    deadline: pd.Timestamp
+    phase: PlaybookPhase
+    formed_at: pd.Timestamp
+    updated_at: pd.Timestamp
+    terminal_at: pd.Timestamp | None = None
+    terminal_reason: str | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "playbook", Playbook(self.playbook))
+        object.__setattr__(self, "direction", Direction(self.direction))
+        object.__setattr__(self, "phase", PlaybookPhase(self.phase))
+        for name in (
+            "first_pullback_at",
+            "deadline",
+            "formed_at",
+            "updated_at",
+            "terminal_at",
+        ):
+            value = getattr(self, name)
+            if value is not None:
+                object.__setattr__(
+                    self,
+                    name,
+                    aware_timestamp(value, name=f"entry_episode.{name}"),
+                )
+        terminal = self.phase in {
+            PlaybookPhase.COMPLETED,
+            PlaybookPhase.INVALIDATED,
+        }
+        identity_values = (
+            self.episode_id,
+            self.parent_context_thesis_id,
+            self.candidate_id,
+        )
+        optional_identities = (
+            self.initiating_event_id,
+            self.entry_location_id,
+            self.entry_path_id,
+        )
+        if (
+            any(not isinstance(value, str) or not value for value in identity_values)
+            or any(
+                value is not None
+                and (not isinstance(value, str) or not value)
+                for value in optional_identities
+            )
+            or self.formed_at > self.updated_at
+            or self.deadline < self.formed_at
+            or terminal != (self.terminal_at is not None)
+            or terminal != (self.terminal_reason is not None)
+            or (
+                self.selected_trigger is not None
+                and (
+                    self.selected_trigger.setup_id != self.episode_id
+                    or self.selected_trigger.entry_location_id
+                    != self.entry_location_id
+                    or self.selected_trigger.entry_path_id
+                    != self.entry_path_id
+                )
+            )
+            or (
+                self.playbook is Playbook.LIQUIDITY_SWEEP_REVERSAL
+                and self.selected_trigger is not None
+                and (
+                    self.first_pullback_at is None
+                    or self.selected_trigger.observed_at
+                    <= self.first_pullback_at
+                )
+            )
+            or (
+                self.plan is not None
+                and (
+                    self.plan.setup_id != self.episode_id
+                    or self.plan.entry_location_id != self.entry_location_id
+                    or self.plan.entry_path_id != self.entry_path_id
+                    or self.plan.invalidation != self.invalidation
+                    or self.plan.deadline > self.deadline
+                )
+            )
+        ):
+            raise ValueError("entry episode identity or lifecycle is invalid")
+
+
+@dataclass(frozen=True)
 class GlobalMarketContext:
     """Compact market-wide interpretation of the current scene graph.
 
@@ -6416,20 +7691,20 @@ class GlobalMarketContext:
     updated_at: pd.Timestamp
     scene_revision_id: str
     market_epoch_id: str
-    authority_timeframe: Timeframe | None
-    authority_direction: Direction | None
-    authority_source_ids: tuple[str, ...]
+    authority_stack: tuple[AuthorityLayer, ...]
     market_mode: MarketMode
-    scale_relations: Mapping[str, ScaleRelation]
+    scale_relation_details: Mapping[str, ScaleRelationState]
     external_draw_candidates: Mapping[str, tuple[str, ...]]
-    path_blocker_ids: tuple[str, ...]
+    obstruction_views: Mapping[str, DirectionalObstructionView]
     material_conflicts: tuple[GlobalConflictEvidence, ...]
     unknown_evidence: tuple[str, ...]
     ambiguous_evidence: tuple[str, ...]
-    dislocated: bool = False
+    dislocations_by_scale: Mapping[str, tuple[str, ...]]
+    balance_context: BalanceContext | None = None
     invalidated_source_ids: tuple[str, ...] = ()
     candidate_structured_episode_ids: tuple[str, ...] = ()
     unexplained_structured_episode_ids: tuple[str, ...] = ()
+    open_market_theses: tuple[OpenMarketThesis, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -6440,32 +7715,40 @@ class GlobalMarketContext:
                 name="global_context.updated_at",
             ),
         )
-        if self.authority_timeframe is not None:
-            object.__setattr__(
-                self,
-                "authority_timeframe",
-                Timeframe(self.authority_timeframe),
+        authority_rank = {
+            Timeframe.H4: 3,
+            Timeframe.H1: 2,
+            Timeframe.M15: 1,
+        }
+        authority_stack = tuple(
+            sorted(
+                self.authority_stack,
+                key=lambda value: -authority_rank[value.timeframe],
             )
-        if self.authority_direction is not None:
-            object.__setattr__(
-                self,
-                "authority_direction",
-                Direction(self.authority_direction),
-            )
+        )
+        object.__setattr__(self, "authority_stack", authority_stack)
         object.__setattr__(self, "market_mode", MarketMode(self.market_mode))
-        relations = {
-            str(key): ScaleRelation(value)
-            for key, value in self.scale_relations.items()
+        relation_details = {
+            str(getattr(key, "value", key)): value
+            for key, value in self.scale_relation_details.items()
         }
         draws = {
-            str(side): tuple(dict.fromkeys(values))
+            str(getattr(side, "value", side)): tuple(dict.fromkeys(values))
             for side, values in self.external_draw_candidates.items()
         }
-        object.__setattr__(self, "scale_relations", relations)
+        obstruction_views = {
+            str(getattr(direction, "value", direction)): value
+            for direction, value in self.obstruction_views.items()
+        }
+        dislocations = {
+            str(getattr(key, "value", key)): tuple(dict.fromkeys(values))
+            for key, values in self.dislocations_by_scale.items()
+        }
+        object.__setattr__(self, "scale_relation_details", relation_details)
         object.__setattr__(self, "external_draw_candidates", draws)
+        object.__setattr__(self, "obstruction_views", obstruction_views)
+        object.__setattr__(self, "dislocations_by_scale", dislocations)
         tuple_fields = (
-            "authority_source_ids",
-            "path_blocker_ids",
             "unknown_evidence",
             "ambiguous_evidence",
             "invalidated_source_ids",
@@ -6484,12 +7767,33 @@ class GlobalMarketContext:
                 )
         conflicts = tuple(self.material_conflicts)
         object.__setattr__(self, "material_conflicts", conflicts)
+        open_theses = tuple(self.open_market_theses)
+        object.__setattr__(self, "open_market_theses", open_theses)
         expected_scales = {timeframe.value for timeframe in Timeframe}
         if (
             not self.scene_revision_id
             or not self.market_epoch_id
-            or set(relations) != expected_scales
+            or set(relation_details) != expected_scales
+            or any(
+                not isinstance(value, ScaleRelationState)
+                or value.timeframe.value != key
+                for key, value in relation_details.items()
+            )
             or set(draws) != {"above", "below"}
+            or set(obstruction_views) != {
+                Direction.LONG.value,
+                Direction.SHORT.value,
+            }
+            or any(
+                not isinstance(value, DirectionalObstructionView)
+                or value.direction.value != key
+                for key, value in obstruction_views.items()
+            )
+            or set(dislocations) != expected_scales
+            or any(
+                any(not isinstance(value, str) or not value for value in values)
+                for values in dislocations.values()
+            )
             or any(
                 len(values) != len(set(values))
                 or any(
@@ -6499,18 +7803,26 @@ class GlobalMarketContext:
                 for values in draws.values()
             )
             or (
-                self.authority_timeframe is None
-                and self.authority_direction is not None
+                len({layer.timeframe for layer in authority_stack})
+                != len(authority_stack)
             )
-            or (
-                self.authority_direction is not None
-                and not self.authority_source_ids
+            or any(not isinstance(layer, AuthorityLayer) for layer in authority_stack)
+            or any(
+                layer.confirmed_at > self.updated_at
+                for layer in authority_stack
+            )
+            or any(
+                state.since is not None and state.since > self.updated_at
+                for state in relation_details.values()
             )
             or (
                 self.market_mode is MarketMode.DIRECTIONAL
                 and self.authority_direction is None
             )
-            or type(self.dislocated) is not bool
+            or (
+                self.balance_context is not None
+                and not isinstance(self.balance_context, BalanceContext)
+            )
             or any(
                 not isinstance(conflict, GlobalConflictEvidence)
                 or conflict.observed_at > self.updated_at
@@ -6518,8 +7830,526 @@ class GlobalMarketContext:
             )
             or len({conflict.conflict_id for conflict in conflicts})
             != len(conflicts)
+            or len({thesis.thesis_id for thesis in open_theses})
+            != len(open_theses)
+            or any(
+                not isinstance(thesis, OpenMarketThesis)
+                or thesis.market_epoch_id != self.market_epoch_id
+                or thesis.updated_at > self.updated_at
+                for thesis in open_theses
+            )
         ):
             raise ValueError("global market context is invalid")
+
+    @property
+    def dominant_authority_layer(self) -> AuthorityLayer | None:
+        """Highest intact H4/H1/M15 layer; the stack is the sole source."""
+
+        return next(
+            (
+                layer
+                for layer in self.authority_stack
+                if layer.status == "intact"
+            ),
+            None,
+        )
+
+    @property
+    def authority_timeframe(self) -> Timeframe | None:
+        layer = self.dominant_authority_layer
+        return None if layer is None else layer.timeframe
+
+    @property
+    def authority_direction(self) -> Direction | None:
+        layer = self.dominant_authority_layer
+        return None if layer is None else layer.direction
+
+    @property
+    def authority_source_ids(self) -> tuple[str, ...]:
+        layer = self.dominant_authority_layer
+        if layer is None:
+            return ()
+        return tuple(
+            dict.fromkeys(
+                (
+                    layer.structure_id,
+                    *((layer.protected_level_id,) if layer.protected_level_id else ()),
+                    *layer.source_ids,
+                )
+            )
+        )
+
+    @property
+    def scale_relations(self) -> Mapping[str, ScaleRelation]:
+        """Compatibility read view; detail states remain authoritative."""
+
+        return {
+            key: value.relation
+            for key, value in self.scale_relation_details.items()
+        }
+
+    @property
+    def path_blocker_ids(self) -> tuple[str, ...]:
+        return tuple(
+            dict.fromkeys(
+                obstruction.obstruction_id
+                for view in self.obstruction_views.values()
+                for obstruction in view.hard_barriers
+            )
+        )
+
+    @property
+    def dislocated(self) -> bool:
+        return any(self.dislocations_by_scale.values())
+
+    @property
+    def dominant_dislocation_scale(self) -> Timeframe | None:
+        for timeframe in (Timeframe.H4, Timeframe.H1, Timeframe.M15, Timeframe.M5, Timeframe.M1):
+            if self.dislocations_by_scale[timeframe.value]:
+                return timeframe
+        return None
+
+
+@dataclass(frozen=True)
+class OpenMarketThesisClaimRelation:
+    """One descriptive thesis-to-physical-episode relation.
+
+    Claims are diagnostics, never admission or action authority.  Their
+    canonical relation identity is the exact OpenMarketThesis identity; a
+    directionally opposed claim remains attached to the same physical market
+    episode instead of creating a second episode.
+    """
+
+    thesis_id: str
+    root_id: str
+    relation: str
+    thesis_direction: Direction | None
+    mechanism: str
+    authority_relation: str
+    evidence_revision_id: str
+    lifecycle: str
+
+    def __post_init__(self) -> None:
+        if self.thesis_direction is not None:
+            object.__setattr__(
+                self,
+                "thesis_direction",
+                Direction(self.thesis_direction),
+            )
+        if (
+            not self.thesis_id
+            or not self.root_id
+            or self.relation not in {"aligned", "opposed", "unknown"}
+            or not self.mechanism
+            or not self.authority_relation
+            or not self.evidence_revision_id
+            or self.lifecycle
+            not in {"forming", "active", "weakening", "invalidated"}
+        ):
+            raise ValueError("open market thesis claim relation is invalid")
+
+
+@dataclass(frozen=True)
+class MarketEpisodeState:
+    """Playbook-neutral lifecycle of one exact physical Group 5 pair."""
+
+    episode_id: str
+    market_epoch_id: str
+    symbol: str
+    instrument_id: int
+    direction: Direction
+    entry_location_id: str
+    entry_path_id: str
+    source_zone_id: str
+    source_displacement_id: str
+    entry_location_protocol_hash: str
+    source_group3_protocol_hash: str
+    source_zone_kind: str
+    source_zone_protocol_hash: str
+    source_bos_id: str | None
+    lower_bound: float
+    upper_bound: float
+    midpoint: float
+    near_edge: float
+    far_edge: float
+    failure_boundary: float
+    formed_at: pd.Timestamp
+    updated_at: pd.Timestamp
+    binding_status: str
+    claims: tuple[OpenMarketThesisClaimRelation, ...]
+    active_claim_ids: tuple[str, ...]
+    claim_status: str
+    first_pullback_step_id: str | None = None
+    first_pullback_at: pd.Timestamp | None = None
+    trigger_step_id: str | None = None
+    trigger_event_id: str | None = None
+    trigger_at: pd.Timestamp | None = None
+    successful_pulse_at: pd.Timestamp | None = None
+    successful_pulse_reason: str | None = None
+    lifecycle: str = "registered"
+    terminal_at: pd.Timestamp | None = None
+    terminal_reason: str | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "direction", Direction(self.direction))
+        for name in (
+            "formed_at",
+            "updated_at",
+            "first_pullback_at",
+            "trigger_at",
+            "successful_pulse_at",
+            "terminal_at",
+        ):
+            value = getattr(self, name)
+            if value is not None:
+                object.__setattr__(
+                    self,
+                    name,
+                    aware_timestamp(value, name=f"market_episode.{name}"),
+                )
+        claims = tuple(self.claims)
+        object.__setattr__(self, "claims", claims)
+        active_claim_ids = tuple(self.active_claim_ids)
+        object.__setattr__(self, "active_claim_ids", active_claim_ids)
+        claim_keys = tuple(
+            (claim.thesis_id, claim.root_id, claim.relation)
+            for claim in claims
+        )
+        identity_fields = (
+            self.episode_id,
+            self.market_epoch_id,
+            self.symbol,
+            self.entry_location_id,
+            self.entry_path_id,
+            self.source_zone_id,
+            self.source_displacement_id,
+            self.entry_location_protocol_hash,
+            self.source_group3_protocol_hash,
+            self.source_zone_kind,
+            self.source_zone_protocol_hash,
+        )
+        pullback_fields = (
+            self.first_pullback_step_id,
+            self.first_pullback_at,
+        )
+        trigger_fields = (
+            self.trigger_step_id,
+            self.trigger_event_id,
+            self.trigger_at,
+        )
+        pulse_fields = (
+            self.successful_pulse_at,
+            self.successful_pulse_reason,
+        )
+        terminal_fields = (self.terminal_at, self.terminal_reason)
+        expected_lifecycle = (
+            "terminal"
+            if self.terminal_at is not None
+            else "triggered"
+            if self.trigger_at is not None
+            else "pullback"
+            if self.first_pullback_at is not None
+            else "registered"
+        )
+        if (
+            any(not isinstance(value, str) or not value for value in identity_fields)
+            or type(self.instrument_id) is not int
+            or self.instrument_id < 0
+            or self.source_zone_kind not in {"fvg", "order_block"}
+            or (
+                self.source_zone_kind == "fvg"
+                and self.source_bos_id is not None
+            )
+            or (
+                self.source_zone_kind == "order_block"
+                and (
+                    not isinstance(self.source_bos_id, str)
+                    or not self.source_bos_id
+                )
+            )
+            or (
+                self.source_bos_id is not None
+                and (
+                    not isinstance(self.source_bos_id, str)
+                    or not self.source_bos_id
+                )
+            )
+            or not all(
+                math.isfinite(float(value))
+                for value in (
+                    self.lower_bound,
+                    self.upper_bound,
+                    self.midpoint,
+                    self.near_edge,
+                    self.far_edge,
+                    self.failure_boundary,
+                )
+            )
+            or not 0 < self.lower_bound < self.upper_bound
+            or not math.isclose(
+                self.midpoint,
+                (self.lower_bound + self.upper_bound) / 2.0,
+                rel_tol=1e-9,
+                abs_tol=1e-9,
+            )
+            or not math.isclose(
+                self.near_edge,
+                self.upper_bound
+                if self.direction is Direction.LONG
+                else self.lower_bound,
+                rel_tol=1e-9,
+                abs_tol=1e-9,
+            )
+            or not math.isclose(
+                self.far_edge,
+                self.lower_bound
+                if self.direction is Direction.LONG
+                else self.upper_bound,
+                rel_tol=1e-9,
+                abs_tol=1e-9,
+            )
+            or not math.isclose(
+                self.failure_boundary,
+                self.far_edge,
+                rel_tol=1e-9,
+                abs_tol=1e-9,
+            )
+            or self.binding_status not in {"unique", "unbound", "ambiguous"}
+            or self.formed_at > self.updated_at
+            or any(not isinstance(claim, OpenMarketThesisClaimRelation) for claim in claims)
+            or claim_keys != tuple(sorted(claim_keys))
+            or len({claim.thesis_id for claim in claims}) != len(claims)
+            or active_claim_ids != tuple(sorted(active_claim_ids))
+            or len(active_claim_ids) != len(set(active_claim_ids))
+            or not set(active_claim_ids).issubset(
+                {claim.thesis_id for claim in claims}
+            )
+            or self.claim_status
+            != (
+                "unbound"
+                if not active_claim_ids
+                else "unique"
+                if len(active_claim_ids) == 1
+                else "ambiguous"
+            )
+            or any((value is None) != (pullback_fields[0] is None) for value in pullback_fields)
+            or any((value is None) != (trigger_fields[0] is None) for value in trigger_fields)
+            or any((value is None) != (pulse_fields[0] is None) for value in pulse_fields)
+            or any((value is None) != (terminal_fields[0] is None) for value in terminal_fields)
+            or any(
+                value is not None
+                and (not isinstance(value, str) or not value)
+                for value in (
+                    self.first_pullback_step_id,
+                    self.trigger_step_id,
+                    self.trigger_event_id,
+                )
+            )
+            or (
+                self.first_pullback_at is not None
+                and not self.formed_at <= self.first_pullback_at <= self.updated_at
+            )
+            or (
+                self.trigger_at is not None
+                and (
+                    self.first_pullback_at is None
+                    or self.trigger_at <= self.first_pullback_at
+                    or self.trigger_at > self.updated_at
+                )
+            )
+            or (
+                self.successful_pulse_at is not None
+                and (
+                    self.successful_pulse_at > self.updated_at
+                    or self.trigger_at is None
+                    or self.successful_pulse_at != self.trigger_at
+                    or self.successful_pulse_reason
+                    not in {
+                        "micro_bos_aligned",
+                        "pool_reversal_sequence_observed",
+                    }
+                )
+            )
+            or (
+                self.terminal_at is not None
+                and (
+                    self.terminal_at > self.updated_at
+                    or not self.terminal_reason
+                )
+            )
+            or self.lifecycle != expected_lifecycle
+            or any(
+                claim.relation
+                != (
+                    "unknown"
+                    if claim.thesis_direction is None
+                    else "aligned"
+                    if claim.thesis_direction is self.direction
+                    else "opposed"
+                )
+                for claim in claims
+            )
+        ):
+            raise ValueError("market episode identity or lifecycle is invalid")
+
+
+@dataclass(frozen=True)
+class NeutralMarketState:
+    """Independent, bounded neutral projection for one completed clock."""
+
+    schema_version: int
+    asof: pd.Timestamp
+    market_epoch_id: str
+    scene_revision_id: str
+    global_context: GlobalMarketContext
+    market_episodes: tuple[MarketEpisodeState, ...]
+    episode_transitions_this_update: tuple[MarketEpisodeState, ...] = ()
+    unbound_entry_location_ids: tuple[str, ...] = ()
+    ambiguous_entry_location_path_ids: tuple[
+        tuple[str, tuple[str, ...]], ...
+    ] = ()
+    rejected_entry_location_path_ids: tuple[tuple[str, str], ...] = ()
+    retired_episode_ids_this_update: tuple[str, ...] = ()
+    retirement_reasons_this_update: tuple[tuple[str, str], ...] = ()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "asof",
+            aware_timestamp(self.asof, name="neutral_market_state.asof"),
+        )
+        for name in (
+            "market_episodes",
+            "episode_transitions_this_update",
+            "unbound_entry_location_ids",
+            "ambiguous_entry_location_path_ids",
+            "rejected_entry_location_path_ids",
+            "retired_episode_ids_this_update",
+            "retirement_reasons_this_update",
+        ):
+            object.__setattr__(self, name, tuple(getattr(self, name)))
+        episode_keys = tuple(
+            (episode.formed_at, episode.episode_id)
+            for episode in self.market_episodes
+        )
+        transition_keys = tuple(
+            (episode.updated_at, episode.episode_id)
+            for episode in self.episode_transitions_this_update
+        )
+        current_episodes = {
+            episode.episode_id: episode for episode in self.market_episodes
+        }
+        transition_episodes = {
+            episode.episode_id: episode
+            for episode in self.episode_transitions_this_update
+        }
+        unbound = self.unbound_entry_location_ids
+        ambiguous = self.ambiguous_entry_location_path_ids
+        rejected = self.rejected_entry_location_path_ids
+        retired = self.retired_episode_ids_this_update
+        retirement_reasons = self.retirement_reasons_this_update
+        ambiguous_locations = tuple(item[0] for item in ambiguous)
+        rejected_locations = tuple(item[0] for item in rejected)
+        if (
+            self.schema_version != NEUTRAL_MARKET_STATE_SCHEMA_VERSION
+            or not self.market_epoch_id
+            or not self.scene_revision_id
+            or not isinstance(self.global_context, GlobalMarketContext)
+            or self.global_context.updated_at != self.asof
+            or self.global_context.market_epoch_id != self.market_epoch_id
+            or self.global_context.scene_revision_id != self.scene_revision_id
+            or any(not isinstance(episode, MarketEpisodeState) for episode in self.market_episodes)
+            or any(
+                not isinstance(episode, MarketEpisodeState)
+                for episode in self.episode_transitions_this_update
+            )
+            or episode_keys != tuple(sorted(episode_keys))
+            or len({episode.episode_id for episode in self.market_episodes})
+            != len(self.market_episodes)
+            or any(
+                episode.market_epoch_id != self.market_epoch_id
+                or episode.updated_at > self.asof
+                for episode in self.market_episodes
+            )
+            or transition_keys != tuple(sorted(transition_keys))
+            or len(
+                {
+                    episode.episode_id
+                    for episode in self.episode_transitions_this_update
+                }
+            )
+            != len(self.episode_transitions_this_update)
+            or any(
+                episode.updated_at != self.asof
+                for episode in self.episode_transitions_this_update
+            )
+            or any(
+                episode.updated_at == self.asof
+                and transition_episodes.get(episode.episode_id) != episode
+                for episode in self.market_episodes
+            )
+            or any(
+                (
+                    transition.market_epoch_id == self.market_epoch_id
+                    and current_episodes.get(transition.episode_id)
+                    != transition
+                )
+                or (
+                    transition.market_epoch_id != self.market_epoch_id
+                    and (
+                        transition.episode_id in current_episodes
+                        or transition.lifecycle != "terminal"
+                        or transition.terminal_at != self.asof
+                    )
+                )
+                for transition in self.episode_transitions_this_update
+            )
+            or unbound != tuple(sorted(unbound))
+            or len(unbound) != len(set(unbound))
+            or any(not value for value in unbound)
+            or ambiguous != tuple(sorted(ambiguous))
+            or len(ambiguous_locations) != len(set(ambiguous_locations))
+            or any(
+                not location_id
+                or len(path_ids) < 2
+                or tuple(path_ids) != tuple(sorted(path_ids))
+                or len(path_ids) != len(set(path_ids))
+                or any(not path_id for path_id in path_ids)
+                for location_id, path_ids in ambiguous
+            )
+            or rejected != tuple(sorted(rejected))
+            or len(rejected) != len(set(rejected))
+            or any(not location_id or not path_id for location_id, path_id in rejected)
+            or set(unbound) & set(ambiguous_locations)
+            or set(unbound) & set(rejected_locations)
+            or set(ambiguous_locations) & set(rejected_locations)
+            or retired != tuple(sorted(retired))
+            or len(retired) != len(set(retired))
+            or any(not episode_id for episode_id in retired)
+            or retirement_reasons != tuple(sorted(retirement_reasons))
+            or tuple(episode_id for episode_id, _ in retirement_reasons)
+            != retired
+            or any(
+                reason
+                not in {
+                    "upstream_compacted_after_success",
+                    "upstream_compacted_after_terminal",
+                }
+                for _, reason in retirement_reasons
+            )
+        ):
+            raise ValueError("neutral market state is invalid")
+
+    @property
+    def market_episode_by_id(self) -> Mapping[str, MarketEpisodeState]:
+        return {
+            episode.episode_id: episode
+            for episode in self.market_episodes
+        }
+
+    @property
+    def open_market_theses(self) -> tuple[OpenMarketThesis, ...]:
+        return self.global_context.open_market_theses
 
 
 @dataclass(frozen=True)
@@ -6534,6 +8364,24 @@ class MarketBelief:
     unresolved_ambiguities: tuple[str, ...] = ()
     scene_revision_id: str | None = None
     global_context: GlobalMarketContext | None = None
+    thesis_candidates: Mapping[str, HypothesisBelief] = field(
+        default_factory=dict
+    )
+    # A disappeared analytical root is retained here until a causal terminal
+    # outcome is observed.  Dormant episodes are deliberately excluded from
+    # the action interface; a stale executable snapshot can never re-enter.
+    retained_episode_candidates: Mapping[str, HypothesisBelief] = field(
+        default_factory=dict
+    )
+    position_management_candidates: Mapping[str, HypothesisBelief] = field(
+        default_factory=dict
+    )
+    context_theses: Mapping[str, ContextThesisState] = field(
+        default_factory=dict
+    )
+    entry_episodes: Mapping[str, EntryEpisodeState] = field(
+        default_factory=dict
+    )
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "asof", aware_timestamp(self.asof, name="belief.asof"))
@@ -6571,6 +8419,10 @@ class MarketBelief:
                 for target in hypothesis.deliverable_targets
             )
             or (
+                hypothesis.thesis_draw is not None
+                and hypothesis.thesis_draw.confirmed_at > self.asof
+            )
+            or (
                 hypothesis.sequence is not None
                 and (
                     (
@@ -6587,6 +8439,10 @@ class MarketBelief:
             or (
                 hypothesis.terminal_at is not None
                 and hypothesis.terminal_at > self.asof
+            )
+            or (
+                hypothesis.selected_trigger is not None
+                and hypothesis.selected_trigger.observed_at > self.asof
             )
             or (
                 hypothesis.draw_selection is not None
@@ -6607,29 +8463,137 @@ class MarketBelief:
             for key, value in self.context_hypotheses.items()
         ):
             raise ValueError("context hypothesis mapping identity is invalid")
-        slot_counts: dict[tuple[Playbook, Direction], int] = {}
-        for value in context_values:
-            slot = (value.playbook, value.direction)
-            slot_counts[slot] = slot_counts.get(slot, 0) + 1
-        if any(count > 2 for count in slot_counts.values()):
-            raise ValueError(
-                "a playbook-direction slot may retain at most two contexts"
+        if any(
+            hypothesis.record_kind != "summary"
+            or (
+                hypothesis.summary_source_candidate_id is not None
+                and hypothesis.summary_source_candidate_id
+                not in self.thesis_candidates
+                and hypothesis.summary_source_candidate_id
+                not in self.position_management_candidates
             )
+            for hypothesis in self.hypotheses.values()
+        ):
+            raise ValueError("six-slot beliefs must be read-only summaries")
+        candidates = tuple(self.thesis_candidates.values())
+        if any(
+            key != candidate.candidate_id
+            or candidate.required_root_id is None
+            or candidate.record_kind != "root_candidate"
+            or candidate.phase_started_at > self.asof
+            or (
+                candidate.market_thesis_root_id
+                != candidate.required_root_id
+            )
+            for key, candidate in self.thesis_candidates.items()
+        ):
+            raise ValueError("root-specific thesis candidate mapping is invalid")
+        retained_candidates = tuple(
+            self.retained_episode_candidates.values()
+        )
+        if (
+            not set(self.thesis_candidates).isdisjoint(
+                self.retained_episode_candidates
+            )
+            or any(
+            key != candidate.candidate_id
+            or candidate.required_root_id is None
+            or candidate.record_kind != "retained_episode"
+            or candidate.phase_started_at > self.asof
+            or candidate.market_thesis_root_id
+            != candidate.required_root_id
+            or candidate.phase is PlaybookPhase.EXECUTABLE
+            for key, candidate in self.retained_episode_candidates.items()
+            )
+        ):
+            raise ValueError("retained entry episode mapping is invalid")
+        candidate_slots = {
+            (
+                candidate.required_root_id,
+                candidate.playbook,
+                candidate.direction,
+                candidate.episode_id,
+            )
+            for candidate in candidates
+        }
+        if len(candidate_slots) != len(candidates):
+            raise ValueError(
+                "root-specific EntryEpisode candidates contain duplicates"
+            )
+        management_candidates = tuple(
+            self.position_management_candidates.values()
+        )
+        if (
+            len(management_candidates) > 1
+            or any(
+                key != candidate.candidate_id
+                or candidate.required_root_id is None
+                or candidate.record_kind != "position_management"
+                or candidate.phase_started_at > self.asof
+                or candidate.market_thesis_root_id
+                != candidate.required_root_id
+                or not candidate.market_thesis_action_bound
+                or candidate.market_thesis_match_status
+                != "exact_root_bound"
+                or candidate.phase
+                not in {
+                    PlaybookPhase.ENTERED,
+                    PlaybookPhase.DELIVERING,
+                    PlaybookPhase.WEAKENING,
+                    PlaybookPhase.COMPLETED,
+                    PlaybookPhase.INVALIDATED,
+                }
+                for key, candidate
+                in self.position_management_candidates.items()
+            )
+            or not set(self.position_management_candidates).isdisjoint(
+                self.thesis_candidates
+            )
+            or not set(self.position_management_candidates).isdisjoint(
+                self.retained_episode_candidates
+            )
+        ):
+            raise ValueError(
+                "position-management thesis candidate mapping is invalid"
+            )
+        candidate_ids = {
+            *self.thesis_candidates,
+            *self.retained_episode_candidates,
+            *self.position_management_candidates,
+        }
+        realtime_candidate_ids = {
+            *self.thesis_candidates,
+            *self.position_management_candidates,
+        }
         context_ids = set(self.context_hypotheses)
+        if not context_ids.issubset(realtime_candidate_ids):
+            raise ValueError(
+                "candidate context views must reference realtime candidates"
+            )
         if (
             self.dominant_hypothesis_id is not None
-            and self.dominant_hypothesis_id not in context_ids
+            and self.dominant_hypothesis_id not in realtime_candidate_ids
         ):
-            raise ValueError("dominant context hypothesis is not retained")
+            raise ValueError("dominant root candidate is not realtime")
         if (
             len(self.competing_hypothesis_ids)
             != len(set(self.competing_hypothesis_ids))
-            or not set(self.competing_hypothesis_ids).issubset(context_ids)
+            or not set(self.competing_hypothesis_ids).issubset(
+                realtime_candidate_ids
+            )
             or self.dominant_hypothesis_id in self.competing_hypothesis_ids
         ):
-            raise ValueError("competing context hypothesis identities are invalid")
+            raise ValueError(
+                "competing realtime candidate identities are invalid"
+            )
         if self.focus_state is not None and self.focus_state.asof != self.asof:
             raise ValueError("belief focus and belief clocks disagree")
+        if (
+            self.focus_state is not None
+            and self.focus_state.hypothesis_id is not None
+            and self.focus_state.hypothesis_id not in realtime_candidate_ids
+        ):
+            raise ValueError("focus must reference a realtime root candidate")
         if self.scene_revision_id is not None and not self.scene_revision_id:
             raise ValueError("belief scene revision cannot be empty")
         if self.global_context is not None:
@@ -6643,23 +8607,263 @@ class MarketBelief:
                 raise ValueError(
                     "belief global context and scene revisions disagree"
                 )
+            authoritative_conflict_ids = {
+                conflict.conflict_id
+                for conflict in self.global_context.material_conflicts
+                if GlobalConflictRole(conflict.role)
+                is not GlobalConflictRole.LOCAL_COUNTERTREND_DELIVERY
+            }
+            if not set(self.cross_scale_conflicts).issubset(
+                authoritative_conflict_ids
+            ):
+                raise ValueError(
+                    "belief conflicts must be filtered GlobalMarketContext IDs"
+                )
+            # Discovery-root visibility is not an EntryEpisode lifetime
+            # signal.  A root-specific action candidate may therefore retain
+            # its frozen exact binding while the open-thesis projection is
+            # absent, provided PlaybookBrain can still resolve the identical
+            # live setup/location/path.  PlaybookBrain's exact frozen-source
+            # matching and mapping disjointness—not current root visibility—
+            # form the action-authority boundary.
+        elif candidates or retained_candidates or management_candidates:
+            raise ValueError(
+                "market thesis candidates require GlobalMarketContext"
+            )
+        context_theses = dict(self.context_theses)
+        entry_episodes = dict(self.entry_episodes)
+        if any(
+            key != thesis.context_thesis_id
+            or thesis.updated_at > self.asof
+            for key, thesis in context_theses.items()
+        ):
+            raise ValueError("context thesis mapping identity or clock is invalid")
+        if any(
+            key != episode.candidate_id
+            or episode.parent_context_thesis_id not in context_theses
+            or episode.updated_at > self.asof
+            or key not in candidate_ids
+            for key, episode in entry_episodes.items()
+        ):
+            raise ValueError("entry episode mapping identity or clock is invalid")
+        if any(
+            candidate.context_thesis_id is not None
+            and (
+                candidate.context_thesis_id not in context_theses
+                or context_theses[candidate.context_thesis_id].direction
+                is not candidate.direction
+            )
+            for candidate in (
+                *candidates,
+                *retained_candidates,
+                *management_candidates,
+            )
+        ):
+            raise ValueError("candidate references an unknown context thesis")
+        if any(
+            candidate.episode_id is not None
+            and (
+                candidate.candidate_id not in entry_episodes
+                or entry_episodes[candidate.candidate_id].episode_id
+                != candidate.episode_id
+                or entry_episodes[candidate.candidate_id]
+                .parent_context_thesis_id
+                != candidate.parent_context_thesis_id
+                or entry_episodes[candidate.candidate_id].playbook
+                is not candidate.playbook
+                or entry_episodes[candidate.candidate_id].direction
+                is not candidate.direction
+                or entry_episodes[candidate.candidate_id].phase
+                is not candidate.phase
+                or entry_episodes[candidate.candidate_id].entry_location_id
+                != candidate.entry_location_id
+                or entry_episodes[candidate.candidate_id].entry_path_id
+                != candidate.entry_path_id
+                or entry_episodes[candidate.candidate_id].selected_trigger
+                != candidate.selected_trigger
+                or entry_episodes[candidate.candidate_id].plan
+                != candidate.plan
+                or entry_episodes[candidate.candidate_id].invalidation
+                != candidate.invalidation
+                or entry_episodes[candidate.candidate_id].deadline
+                != candidate.episode_deadline
+            )
+            for candidate in (
+                *candidates,
+                *retained_candidates,
+                *management_candidates,
+            )
+        ):
+            raise ValueError("candidate and entry episode lifecycle disagree")
+        if any(
+            not {
+                episode.episode_id
+                for episode in entry_episodes.values()
+                if episode.parent_context_thesis_id == identity
+            }.issubset(thesis.child_episode_ids)
+            for identity, thesis in context_theses.items()
+        ):
+            raise ValueError("context thesis children disagree with entry episodes")
+        # Exact entry-path ownership is an action/position invariant.  A
+        # dormant analytical projection may overlap the position owner (or
+        # another unresolved dormant root) while the graph is unable to prove
+        # which root owned the historical path.  Those snapshots have no
+        # action authority and must not crash the whole completed-bar update.
+        realtime_episode_ids = {
+            *self.thesis_candidates,
+            *self.position_management_candidates,
+        }
+        active_episodes = tuple(
+            episode
+            for candidate_id, episode in entry_episodes.items()
+            if candidate_id in realtime_episode_ids
+            and episode.phase
+            not in {PlaybookPhase.COMPLETED, PlaybookPhase.INVALIDATED}
+        )
+        for field_name in ("entry_location_id", "entry_path_id"):
+            identities = tuple(
+                getattr(episode, field_name)
+                for episode in active_episodes
+                if getattr(episode, field_name) is not None
+            )
+            if len(identities) != len(set(identities)):
+                raise ValueError(
+                    f"active entry episodes cannot share {field_name}"
+                )
+        trigger_ids = tuple(
+            episode.selected_trigger.trigger_id
+            for episode in active_episodes
+            if episode.selected_trigger is not None
+        )
+        if len(trigger_ids) != len(set(trigger_ids)):
+            raise ValueError("active entry episodes cannot share a trigger")
 
     def candidates(self) -> tuple[HypothesisBelief, ...]:
-        """Action-facing dominant candidates; context projections stay diagnostic."""
+        """Compatibility view of the six playbook-direction summaries."""
 
         return tuple(self.hypotheses.values())
+
+    def owns_actionable_entry_episode(
+        self,
+        candidate_id: str,
+        hypothesis: HypothesisBelief,
+    ) -> bool:
+        """Return whether one action root owns its exact live projections."""
+
+        candidate = self.thesis_candidates.get(candidate_id)
+        context_id = hypothesis.context_thesis_id
+        episode_id = hypothesis.episode_id
+        plan = hypothesis.plan
+        if (
+            candidate is not hypothesis
+            or hypothesis.candidate_id != candidate_id
+            or not isinstance(context_id, str)
+            or not context_id
+            or not isinstance(episode_id, str)
+            or not episode_id
+            or hypothesis.parent_context_thesis_id != context_id
+            or plan is None
+            or plan.setup_id != episode_id
+            or hypothesis.setup_context_id != episode_id
+        ):
+            return False
+        context = self.context_theses.get(context_id)
+        episode = self.entry_episodes.get(candidate_id)
+        return bool(
+            context is not None
+            and episode is not None
+            and context.direction is hypothesis.direction
+            and context.lifecycle
+            not in {"completed", "invalidated", "censored"}
+            and episode_id in context.child_episode_ids
+            and episode.candidate_id == candidate_id
+            and episode.episode_id == episode_id
+            and episode.parent_context_thesis_id == context_id
+            and episode.playbook is hypothesis.playbook
+            and episode.direction is hypothesis.direction
+            and episode.phase is hypothesis.phase
+            and episode.entry_location_id == hypothesis.entry_location_id
+            and episode.entry_path_id == hypothesis.entry_path_id
+            and episode.selected_trigger == hypothesis.selected_trigger
+            and episode.plan == plan
+            and episode.invalidation == hypothesis.invalidation
+            and episode.deadline == hypothesis.episode_deadline
+        )
+
+    def action_candidate_items(
+        self,
+    ) -> tuple[tuple[str, HypothesisBelief], ...]:
+        """Stable action identities paired with their root-specific beliefs."""
+
+        # The six playbook-direction slots are read-only summaries.  A
+        # missing graph/context therefore yields no action identity instead
+        # of silently promoting a summary into an executable hypothesis.
+        # Graph-free construction needed by unit tests belongs in a test
+        # helper, not in this production contract.
+        return tuple(self.thesis_candidates.items())
+
+    def lifecycle_candidate_items(
+        self,
+    ) -> tuple[tuple[str, HypothesisBelief], ...]:
+        """All candidates whose causal lifecycle still needs observation.
+
+        Unlike :meth:`action_candidate_items`, this includes dormant roots.
+        Calibration/diagnostic recorders may observe them, but Decision must
+        never use this interface to authorize an entry.
+        """
+
+        return (
+            *tuple(self.thesis_candidates.items()),
+            *tuple(self.retained_episode_candidates.items()),
+            *tuple(self.position_management_candidates.items()),
+        )
+
+    def position_candidate_items(
+        self,
+    ) -> tuple[tuple[str, HypothesisBelief], ...]:
+        """Candidates resolvable for an already-open frozen position.
+
+        A closed analytical root may remain here only to manage the exact
+        position that it created.  It is deliberately excluded from
+        :meth:`action_candidate_items`, so it can never authorize a new
+        ``ENTER``.
+        """
+
+        return (
+            *self.action_candidate_items(),
+            *tuple(self.position_management_candidates.items()),
+        )
+
+    @property
+    def market_theses(self) -> tuple[OpenMarketThesis, ...]:
+        """Current playbook-neutral theses, never direct action candidates."""
+
+        return (
+            ()
+            if self.global_context is None
+            else self.global_context.open_market_theses
+        )
 
     def resolve_hypothesis(self, identity: str | None) -> HypothesisBelief | None:
         if identity is None:
             return None
+        direct = self.thesis_candidates.get(identity)
+        if direct is not None:
+            return direct
+        direct = self.retained_episode_candidates.get(identity)
+        if direct is not None:
+            return direct
+        direct = self.position_management_candidates.get(identity)
+        if direct is not None:
+            return direct
         direct = self.hypotheses.get(identity)
         if direct is not None:
             return direct
         context = self.context_hypotheses.get(identity)
         if context is None:
             return None
-        return self.hypotheses.get(
-            f"{context.playbook.value}:{context.direction.value}"
+        return self.thesis_candidates.get(identity) or (
+            self.position_management_candidates.get(identity)
         )
 
     def for_slot(
@@ -6673,17 +8877,38 @@ class MarketBelief:
     def ranked(self) -> list[HypothesisBelief]:
         def rank_key(
             belief: HypothesisBelief,
-        ) -> tuple[float, float, float, float]:
-            readiness = belief.effective_probability
+        ) -> tuple[float, float, float, float, float]:
+            phase_rank = {
+                PlaybookPhase.INVALIDATED: 0.0,
+                PlaybookPhase.COMPLETED: 0.0,
+                PlaybookPhase.INACTIVE: 1.0,
+                PlaybookPhase.FORMING: 2.0,
+                PlaybookPhase.ARMED: 3.0,
+                PlaybookPhase.WAITING_LOCATION: 4.0,
+                PlaybookPhase.WAITING_TRIGGER: 5.0,
+                PlaybookPhase.EXECUTABLE: 6.0,
+                PlaybookPhase.WEAKENING: 7.0,
+                PlaybookPhase.DELIVERING: 8.0,
+                PlaybookPhase.ENTERED: 9.0,
+            }[belief.phase]
             return (
                 float(belief.eligible),
-                readiness,
+                phase_rank,
+                float(belief.entry_readiness or 0.0),
                 float(belief.thesis_strength),
                 -belief.uncertainty,
             )
 
+        source = (
+            {
+                **self.thesis_candidates,
+                **self.position_management_candidates,
+            }.values()
+            if self.global_context is not None
+            else self.hypotheses.values()
+        )
         return sorted(
-            self.hypotheses.values(),
+            source,
             key=rank_key,
             reverse=True,
         )
@@ -6820,6 +9045,7 @@ class FrozenThesis:
     entry_path_id: str | None = None
     draw_selection: DrawSelection | None = None
     range_auction: FrozenRangeAuctionContext | None = None
+    lsr_context: FrozenLSRContext | None = None
     liquidity_route: LiquidityRoute | None = None
 
     def __post_init__(self) -> None:
@@ -6853,6 +9079,16 @@ class FrozenThesis:
                 )
         elif self.range_auction is not None:
             raise ValueError("non-FAVR thesis cannot own a range auction")
+        if (
+            self.playbook is Playbook.LIQUIDITY_SWEEP_REVERSAL
+            and self.setup_id is not None
+        ):
+            if self.lsr_context is None:
+                raise ValueError(
+                    "frozen LSR thesis lacks its parent Context provenance"
+                )
+        elif self.lsr_context is not None:
+            raise ValueError("non-LSR thesis cannot own LSR Context provenance")
 
 
 @dataclass(frozen=True)
@@ -6861,6 +9097,26 @@ class EngineSnapshot:
     belief: MarketBelief
     decision: Decision
     risk: RiskAssessment
+    neutral_market_state: NeutralMarketState | None = None
+
+
+@dataclass(frozen=True)
+class NeutralEngineSnapshot:
+    """Action-free Engine projection for neutral market-case input."""
+
+    observation: MarketObservation
+    neutral_market_state: NeutralMarketState
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.neutral_market_state, NeutralMarketState)
+            or self.observation.asof != self.neutral_market_state.asof
+            or self.observation.scene_revision_id
+            != self.neutral_market_state.scene_revision_id
+        ):
+            raise ValueError(
+                "neutral Engine snapshot observation and state differ"
+            )
 
 
 def to_primitive(value: Any) -> Any:

@@ -36,7 +36,6 @@ class PlaybookProtocol:
     invalidation: Mapping[str, Any]
     targets: Mapping[str, Any]
     deadline: Mapping[str, Any]
-    path_test: Mapping[str, Any]
     evidence_groups: Mapping[str, tuple[str, ...]]
     hard_gates: tuple[str, ...]
 
@@ -71,6 +70,12 @@ def _require_schema_version(value: Any, path: str) -> int:
     if isinstance(value, bool) or value != 1:
         raise PlaybookRegistryError(f"{path} must be 1")
     return 1
+
+
+def _require_playbook_schema_version(value: Any, path: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise PlaybookRegistryError(f"{path} must be a positive integer")
+    return value
 
 
 def _load_step(raw: Any, path: str) -> SequenceStepProtocol:
@@ -148,8 +153,6 @@ def _load_protocol(raw: Any, path: str) -> PlaybookProtocol:
         )
     targets = _require_mapping(item.get("targets"), f"{path}.targets")
     deadline = _require_mapping(item.get("deadline"), f"{path}.deadline")
-    path_test = _require_mapping(item.get("path_test"), f"{path}.path_test")
-    _require_text(path_test.get("primary_outcome"), f"{path}.path_test.primary_outcome")
     evidence_groups_raw = item.get("evidence_groups", {})
     evidence_groups_mapping = _require_mapping(
         evidence_groups_raw,
@@ -218,7 +221,7 @@ def _load_protocol(raw: Any, path: str) -> PlaybookProtocol:
 
     return PlaybookProtocol(
         playbook=playbook,
-        schema_version=_require_schema_version(
+        schema_version=_require_playbook_schema_version(
             item.get("schema_version"),
             f"{path}.schema_version",
         ),
@@ -234,7 +237,6 @@ def _load_protocol(raw: Any, path: str) -> PlaybookProtocol:
         invalidation=dict(invalidation),
         targets=dict(targets),
         deadline=dict(deadline),
-        path_test=dict(path_test),
         evidence_groups=evidence_groups,
         hard_gates=hard_gates,
     )

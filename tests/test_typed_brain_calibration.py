@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -11,8 +12,12 @@ from smc_trader.calibration import (
     TYPED_CALIBRATION_DIMENSIONS,
     TypedBrainCalibrator,
 )
-from smc_trader.engine import ContinuousSMCEngine
+from smc_trader.engine import (
+    ContinuousSMCEngine,
+    normalize_action_disabled_playbooks,
+)
 from smc_trader.model import Playbook
+from smc_trader.playbook_registry import load_playbook_registry
 
 
 DFP = Playbook.DISPLACEMENT_FIRST_PULLBACK
@@ -91,6 +96,7 @@ def test_typed_calibrator_maps_active_dimensions_and_passes_sequence(tmp_path: P
     )
 
     assert calibrator.version == "typed-test"
+    assert calibrator.is_ready
     assert calibrator.apply(DFP, "thesis_strength", 0.5) == pytest.approx(0.6)
     assert calibrator.apply(LSR, "uncertainty", 0.5) == pytest.approx(0.55)
     assert calibrator.apply(DFP, "sequence_progress", 0.37) == 0.37
@@ -100,6 +106,7 @@ def test_typed_calibrator_maps_active_dimensions_and_passes_sequence(tmp_path: P
 
 def test_typed_identity_returns_raw_for_every_dimension_and_playbook() -> None:
     calibrator = TypedBrainCalibrator.identity()
+    assert not calibrator.is_ready
     for playbook in Playbook:
         for dimension in (*TYPED_CALIBRATION_DIMENSIONS, "sequence_progress"):
             assert calibrator.apply(playbook, dimension, 0.43) == 0.43
@@ -154,6 +161,9 @@ def test_engine_accepts_current_typed_config_and_rejects_incomplete_current_conf
 
     assert isinstance(engine.brain.calibrator, TypedBrainCalibrator)
     assert engine.runtime_mode == "development"
+    assert not engine.brain.calibrator.is_ready
+    assert not engine.decision.calibration_ready
+    assert engine.decision.calibration_version == "identity-unvalidated"
     with pytest.raises(TypeError, match="runtime_mode"):
         ContinuousSMCEngine.from_config("configs/model.json")
     with pytest.raises(RuntimeError, match="readiness gate"):
@@ -181,6 +191,76 @@ def test_engine_accepts_current_typed_config_and_rejects_incomplete_current_conf
             incomplete,
             runtime_mode="development",
         )
+
+
+def test_engine_runtime_action_policy_is_explicit_deterministic_and_fail_closed() -> None:
+    engine = ContinuousSMCEngine.from_config(
+        "configs/model.json",
+        runtime_mode="development",
+        action_disabled_playbooks=(LSR,),
+    )
+
+    assert engine.action_disabled_playbooks == (LSR,)
+    assert engine.runtime_action_policy_identity == {
+        "schema_version": 1,
+        "scope": "new_entry_action_candidates_only",
+        "disabled_new_entry_playbooks": [LSR.value],
+        "decision_belief_projection": "action_filtered",
+        "engine_snapshot_belief_projection": "raw",
+        "position_management_projection": "raw",
+    }
+    assert normalize_action_disabled_playbooks((LSR.value, DFP)) == (
+        DFP,
+        LSR,
+    )
+    with pytest.raises(ValueError, match="duplicate action-disabled"):
+        normalize_action_disabled_playbooks((LSR, LSR.value))
+    with pytest.raises(ValueError, match="unknown action-disabled"):
+        normalize_action_disabled_playbooks(("not_a_playbook",))
+
+
+def test_engine_snapshot_retains_raw_belief_while_decision_gets_policy_view() -> None:
+    lsr = SimpleNamespace(playbook=LSR)
+    dfp = SimpleNamespace(playbook=DFP)
+    raw_belief = SimpleNamespace(
+        action_candidate_items=lambda: (
+            ("candidate:lsr", lsr),
+            ("candidate:dfp", dfp),
+        )
+    )
+    observation = SimpleNamespace(anomalies=())
+    captured: dict[str, object] = {}
+
+    def decide(_observation, belief, _account):
+        captured["belief"] = belief
+        return SimpleNamespace()
+
+    engine = ContinuousSMCEngine(
+        reader=SimpleNamespace(on_bar=lambda _bar: SimpleNamespace()),
+        observer=SimpleNamespace(
+            observe=lambda _update, _execution: observation,
+            scene_graph=SimpleNamespace(),
+            last_scene_delta=None,
+        ),
+        brain=SimpleNamespace(update=lambda _observation, **_kwargs: raw_belief),
+        decision=SimpleNamespace(decide=decide),
+        risk=SimpleNamespace(review=lambda *_args: SimpleNamespace()),
+        runtime_mode="development",
+        action_disabled_playbooks=(LSR,),
+    )
+
+    snapshot = engine.on_bar(SimpleNamespace())
+
+    assert snapshot.belief is raw_belief
+    decision_belief = captured["belief"]
+    assert decision_belief is not raw_belief
+    assert decision_belief.action_candidate_items() == (
+        ("candidate:dfp", dfp),
+    )
+    assert raw_belief.action_candidate_items() == (
+        ("candidate:lsr", lsr),
+        ("candidate:dfp", dfp),
+    )
 
 
 def test_engine_live_mode_has_one_fail_closed_release_gate(
@@ -212,12 +292,28 @@ def test_engine_live_mode_has_one_fail_closed_release_gate(
     model_path = tmp_path / "model-live.json"
     model_path.write_text(json.dumps(model), encoding="utf-8")
 
-    engine = ContinuousSMCEngine.from_config(
-        model_path,
-        runtime_mode="live",
-    )
+    with pytest.raises(RuntimeError, match="typed_brain_calibration_ready"):
+        ContinuousSMCEngine.from_config(
+            model_path,
+            runtime_mode="live",
+        )
+
+    registry = load_playbook_registry(model["playbook_registry"])
+    artifact = _artifact()
+    artifact["playbook_registry_hash"] = registry.fingerprint
+    artifact_path = _write_artifact(tmp_path, artifact)
+    model["calibration_artifact"] = str(artifact_path)
+    model_path.write_text(json.dumps(model), encoding="utf-8")
+
+    engine = ContinuousSMCEngine.from_config(model_path, runtime_mode="live")
     assert isinstance(engine, ContinuousSMCEngine)
     assert engine.runtime_mode == "live"
+    assert engine.brain.calibrator.is_ready
+    assert engine.decision.calibration_ready
+    assert (
+        engine.decision.calibration_version
+        == engine.brain.calibrator.version
+    )
 
     for field in (
         "active_model_natural_authority_validated",

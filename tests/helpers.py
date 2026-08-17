@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import fields, replace
 import json
 import math
 from pathlib import Path
@@ -52,6 +52,49 @@ CORE_TEST_SCALE_SPECS = tuple(
     in {Timeframe.H4, Timeframe.H1, Timeframe.M5, Timeframe.M1}
 )
 CORE_TEST_SCALE_REGISTRY_ID = scale_registry_id(CORE_TEST_SCALE_SPECS)
+
+
+class GraphFreeActionBelief(MarketBelief):
+    """Test-only adapter for evaluator/Decision tests without a Scene Graph."""
+
+    def action_candidate_items(self):
+        if self.global_context is not None:
+            return super().action_candidate_items()
+        return tuple(self.hypotheses.items())
+
+    def owns_actionable_entry_episode(self, candidate_id, hypothesis):
+        if self.global_context is not None:
+            return super().owns_actionable_entry_episode(
+                candidate_id,
+                hypothesis,
+            )
+        plan = hypothesis.plan
+        return bool(
+            self.hypotheses.get(candidate_id) is hypothesis
+            and hypothesis.context_thesis_id
+            and hypothesis.episode_id
+            and hypothesis.parent_context_thesis_id
+            == hypothesis.context_thesis_id
+            and plan is not None
+            and plan.setup_id == hypothesis.episode_id
+            and hypothesis.setup_context_id == hypothesis.episode_id
+        )
+
+
+def graph_free_action_belief(belief: MarketBelief) -> MarketBelief:
+    """Explicitly grant summary-slot action authority in a unit-test fixture.
+
+    Runtime ``MarketBelief`` is intentionally fail-closed without root-specific
+    candidates.  This adapter keeps graph-free component tests focused on the
+    downstream behavior they were built to exercise.
+    """
+
+    return GraphFreeActionBelief(
+        **{
+            item.name: getattr(belief, item.name)
+            for item in fields(MarketBelief)
+        }
+    )
 
 
 def session_bars(

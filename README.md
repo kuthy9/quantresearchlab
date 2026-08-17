@@ -11,7 +11,11 @@ causal 4H / 1H / 15m / 5m / 1m observation + ordered event memory
     ↓
 Temporal Market Scene Graph + GlobalMarketContext + FocusState
     ↓
-typed DFP / LSR / parked FAVR beliefs
+playbook-neutral open theses
+    ↓
+long-lived Context Theses → independent zone/path Entry Episodes
+    ↓
+root-specific DFP / LSR action candidates + parked FAVR
     ↓
 enter / wait / hold / protect / exit / abstain utility comparison
     ↓
@@ -23,6 +27,10 @@ next-bar execution and position feedback
 The eyes describe what has happened. The Brain maintains typed causal
 hypotheses and continuous stages. The Decision layer acts only when one action
 has a clear utility advantage, and Risk can veto any optimistic output.
+An open thesis is descriptive by itself. Only its independently evaluated,
+exact-root DFP/LSR projection can become an action candidate after causal gates,
+a complete frozen plan and calibrated delivery probability pass. Unmatched or
+incomplete theses remain in Focus/unexplained diagnostics; FAVR remains parked.
 
 This is research software. A connected software path is not evidence of market
 edge. Brain calibration, rolling OOF, MBO stability and the sealed holdout are
@@ -48,7 +56,7 @@ Current primitive protocol status:
 | Displacement | `3.2.0-displacement-episode.3` | finite real replay and stratified review passed |
 | FVG/order block | `3.2.0-group3.4` | FVG finite replay passed; OB failure coverage sparse |
 | Range/manipulation | `3.2.0-group4.1` | limited natural observation passed; mature-range coverage sparse |
-| Entry/path | `3.2.0-group5.3` | DFP/LSR input authority enabled; FAVR authority disabled and parked |
+| Entry/path | `3.2.0-group5.4` | LSR reversal context freezes root/displacement independently of each FVG/OB entry zone; DFP/LSR input authority enabled; FAVR authority disabled and parked |
 
 “Implementation complete” means the typed incremental contract and its
 synthetic/boundary tests exist. It is not a profitability or natural-market
@@ -154,12 +162,31 @@ python3 scripts/run_continuous_replay.py \
 ```
 
 Normal replay writes light decision rows, an aggregate summary, progress,
-checkpoints and resumable shards. `--brain-calibration` adds typed calibration
-rows only inside the registered calibration window. `--mbo-execution` supplies
+checkpoints and resumable shards. `--brain-calibration` adds only typed
+calibration rows inside the registered calibration window. `--shadow-outcomes`
+independently records frozen, outcome-blind Shadow candidates and later derives
+sharded episode/root outcomes; add `--shadow-details` only when per-candidate
+challenge and motif rows are needed. The two modes can be enabled together but
+neither enables the other, and aggregate Brain funnels require the separate
+`--brain-diagnostics` flag. Shadow output never feeds Brain, Decision or Risk.
+Shadow summary schema v4 reports raw revision rows, selected root-representative
+rows and unbound rows separately; outcome-quality statistics use only the
+root-representative population. Finalization keeps episode/root de-duplication
+in a disposable local SQLite index and removes that index before publishing.
+Detailed motif rows retain at most 40 deterministic root IDs as examples; they
+are not an exhaustive motif-membership list.
+`--mbo-execution` supplies
 observed spread/depth/fillability to Observation, Decision and Risk;
 `--simulate-execution` enables the existing next-bar position feedback path.
 Pending fills remain conservatively OHLCV-bar based until the MBO queue/depth
 fill simulator is completed.
+
+Unexplained episodes have no action authority. Normal replay keeps only their
+aggregate strata plus currently open roots in checkpoint state. Use
+`--include-unexplained-episode-details` only for diagnostics; it writes a
+deterministic stratified sample capped at 40 cases rather than the full history.
+Full thesis/playbook comparisons are likewise shadow diagnostics, not part of
+the live `MarketBelief` action contract.
 
 Visualization is opt-in and limited to preselected decision clocks. Repeat an
 aware `--visualize-at` value for at most 40 sampled cases; the replay renders

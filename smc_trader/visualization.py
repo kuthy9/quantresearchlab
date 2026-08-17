@@ -210,7 +210,7 @@ def _blank_causal_panel(
 def _selected_hypothesis(snapshot: EngineSnapshot):
     selected_key = snapshot.decision.best_hypothesis_key
     if selected_key is not None:
-        belief = snapshot.belief.hypotheses.get(selected_key)
+        belief = snapshot.belief.resolve_hypothesis(selected_key)
         if belief is None:
             raise ValueError("selected visual hypothesis identity is absent")
         return belief
@@ -2341,6 +2341,9 @@ def _liquidity_route_text(route: Any) -> str:
         "  primary deliverable "
         f"{identity(route.primary_deliverable_target_id)}",
         f"  terminal draw {identity(route.terminal_draw_id)}",
+        "  authority barrier "
+        f"{identity(getattr(route, 'authority_barrier_id', None))} @ "
+        f"{getattr(route, 'authority_barrier_price', None)}",
         f"  path blockers {identities(route.path_blocker_ids)}",
         f"  source paths {identities(route.source_path_ids)}",
     ]
@@ -2510,6 +2513,15 @@ def _temporal_market_reading_text(snapshot: EngineSnapshot) -> str:
     belief = snapshot.belief
     focus = getattr(belief, "focus_state", None)
     contexts = dict(getattr(belief, "context_hypotheses", {}))
+    global_context = getattr(belief, "global_context", None)
+    conflict_evidence = {
+        conflict.conflict_id: conflict
+        for conflict in (
+            ()
+            if global_context is None
+            else global_context.material_conflicts
+        )
+    }
     scene_revision = (
         getattr(belief, "scene_revision_id", None)
         or getattr(snapshot.observation, "scene_revision_id", None)
@@ -2537,41 +2549,21 @@ def _temporal_market_reading_text(snapshot: EngineSnapshot) -> str:
             "value",
             getattr(focus, "resolution_status", "unknown"),
         )
-        switched_at = getattr(focus, "switched_at", None)
         rows.extend(
             (
                 "\nFOCUS",
                 "primary "
                 + ", ".join(getattr(focus, "primary_timeframes", ())),
-                "supplemental "
-                + (
-                    ", ".join(
-                        getattr(focus, "supplemental_timeframes", ())
-                    )
-                    or "none"
-                ),
                 "reason "
                 + ", ".join(getattr(focus, "reason_codes", ())),
-                "trigger "
-                + (
-                    ", ".join(
-                        _short_identity(value)
-                        for value in getattr(
-                            focus,
-                            "trigger_event_ids",
-                            (),
-                        )
-                    )
-                    or "none"
+                "root "
+                + _short_identity(
+                    getattr(focus, "hypothesis_id", None) or "none"
                 ),
                 f"question {getattr(focus, 'question', 'unknown')}",
                 f"status {resolution}",
-                "switch "
-                + (
-                    "none"
-                    if switched_at is None
-                    else switched_at.strftime("%m-%d %H:%M")
-                ),
+                "reselected "
+                + str(bool(getattr(focus, "switched", False))).lower(),
             )
         )
 
@@ -2614,24 +2606,47 @@ def _temporal_market_reading_text(snapshot: EngineSnapshot) -> str:
     if len(ordered_ids) > 8:
         rows.append(f"+ {len(ordered_ids) - 8} additional context(s)")
 
-    rows.append("\nCAUSAL GRAPH PATHS")
+    rows.append("\nCAUSAL SUPPORT PATHS")
     path_rows = 0
     for identity in ordered_ids[:3]:
         context = contexts.get(identity)
         if context is None:
             continue
-        for prefix, paths in (
-            ("+", context.supporting_graph_paths),
-            ("−", context.contradicting_graph_paths),
-        ):
-            for path in paths[:2]:
-                rows.append(
-                    f"{prefix} {_short_identity(identity)} "
-                    f"{_graph_path_text(path)}"
-                )
-                path_rows += 1
+        for path in context.supporting_graph_paths[:2]:
+            rows.append(
+                f"+ {_short_identity(identity)} "
+                f"{_graph_path_text(path)}"
+            )
+            path_rows += 1
     if path_rows == 0:
         rows.append("none frozen")
+
+    rows.append("\nMATERIAL CONFLICTS")
+    conflict_rows = 0
+    for identity in ordered_ids[:3]:
+        context = contexts.get(identity)
+        if context is None:
+            continue
+        for conflict_id in context.material_conflict_ids[:3]:
+            conflict = conflict_evidence.get(conflict_id)
+            if conflict is None:
+                rows.append(
+                    f"! {_short_identity(identity)} "
+                    f"{_short_identity(conflict_id)}"
+                )
+            else:
+                rows.append(
+                    f"! {_short_identity(identity)} "
+                    f"{conflict.role.value}: "
+                    f"{conflict.source_timeframe.value}/"
+                    f"{getattr(conflict.source_direction, 'value', 'unknown')} "
+                    f"→ {conflict.target_timeframe.value}/"
+                    f"{getattr(conflict.target_direction, 'value', 'unknown')} "
+                    f"({_short_identity(conflict.event_id)})"
+                )
+            conflict_rows += 1
+    if conflict_rows == 0:
+        rows.append("none material")
 
     rows.append("\nAMBIGUOUS / MISSING EVIDENCE")
     ambiguity_rows = 0
@@ -3033,26 +3048,17 @@ class DecisionVisualizer:
         primary_focus = set(
             () if focus is None else focus.primary_timeframes
         )
-        supplemental_focus = set(
-            () if focus is None else focus.supplemental_timeframes
-        )
         for axis, timeframe in zip(axes, display_timeframes):
             values = panels[timeframe]
             focus_label = (
                 " · PRIMARY FOCUS"
                 if timeframe.value in primary_focus
-                else " · SUPPLEMENTAL FOCUS"
-                if timeframe.value in supplemental_focus
                 else ""
             )
             if timeframe.value in primary_focus:
                 for spine in axis.spines.values():
                     spine.set_color("#2563eb")
                     spine.set_linewidth(1.8)
-            elif timeframe.value in supplemental_focus:
-                for spine in axis.spines.values():
-                    spine.set_color("#d97706")
-                    spine.set_linewidth(1.3)
             if not values:
                 _blank_causal_panel(
                     axis,

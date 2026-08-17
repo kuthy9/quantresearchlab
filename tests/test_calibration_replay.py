@@ -12,7 +12,6 @@ from smc_trader.calibration_replay import (
     ReplayCheckpointStore,
     iter_after_source_checkpoint,
 )
-from smc_trader.decision import UtilityDecisionLayer
 from smc_trader.engine import ContinuousSMCEngine
 from smc_trader.io import iter_completed_bars
 from smc_trader.model import Bar, EngineSnapshot, to_primitive
@@ -20,8 +19,12 @@ from smc_trader.observation import ExecutionRealityInput
 from smc_trader.simulation import SequentialPortfolio, SequentialReplay
 from smc_trader.risk import StructuralRiskEngine
 
-from .helpers import flat_account, session_bars
-from .test_v4_typed_vertical import _brain, _dfp_fixture
+from .helpers import flat_account, graph_free_action_belief, session_bars
+from .test_v4_typed_vertical import (
+    _dfp_fixture,
+    _mapped_brain,
+    _ready_decision_layer,
+)
 
 
 def _execution(asof: pd.Timestamp) -> ExecutionRealityInput:
@@ -128,10 +131,13 @@ def test_non_simulating_replay_rejects_portfolio_state() -> None:
 
 def test_lightweight_replay_passes_open_position_to_brain() -> None:
     _, _, _, forming, triggered = _dfp_fixture()
-    brain = _brain()
+    brain = _mapped_brain()
     brain.update(forming)
     belief = brain.update(triggered)
-    decision = UtilityDecisionLayer().decide(triggered, belief)
+    decision = _ready_decision_layer(brain).decide(
+        triggered,
+        graph_free_action_belief(belief),
+    )
     risk = StructuralRiskEngine().review(decision, triggered)
     approved = EngineSnapshot(triggered, belief, decision, risk)
     assert approved.risk.passed

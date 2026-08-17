@@ -1016,10 +1016,12 @@ def _validate_config(payload: Mapping[str, Any]) -> None:
     if payload.get("allowed_ohlcv_role") not in {
         "development",
         "calibration",
+        "brain_validation",
     }:
         raise ValueError("authority profile has an invalid OHLCV role")
     if (
-        payload.get("allowed_ohlcv_role") == "calibration"
+        payload.get("allowed_ohlcv_role")
+        in {"calibration", "brain_validation"}
         and payload.get("registered_calibration_exception")
         != "outcome_blind_natural_authority_only"
     ):
@@ -1027,7 +1029,10 @@ def _validate_config(payload: Mapping[str, Any]) -> None:
             "calibration data requires the registered outcome-blind "
             "authority exception"
         )
-    if payload.get("allowed_ohlcv_role") == "calibration":
+    if payload.get("allowed_ohlcv_role") in {
+        "calibration",
+        "brain_validation",
+    }:
         if (
             payload.get("validation_protocol")
             != str(DEFAULT_CONFIG.relative_to(ROOT))
@@ -1121,9 +1126,15 @@ def _scan_window(
     )
     validation = load_validation_protocol(ROOT / str(payload["validation_protocol"]))
     role = validation.classify_ohlcv(start, end)
-    warmup_role = validation.classify_ohlcv(warmup_start, end)
+    warmup_role = validation.classify_ohlcv(warmup_start, start)
     allowed_role = str(payload["allowed_ohlcv_role"])
-    if role.role != allowed_role or warmup_role.role != allowed_role:
+    allowed_warmup_roles = {allowed_role}
+    if allowed_role == "brain_validation":
+        allowed_warmup_roles.add("calibration")
+    if (
+        role.role != allowed_role
+        or warmup_role.role not in allowed_warmup_roles
+    ):
         raise ValueError(
             "authority profile interval differs from its registered OHLCV role"
         )

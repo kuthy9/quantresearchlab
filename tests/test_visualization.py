@@ -21,6 +21,7 @@ from smc_trader.model import (
     PlaybookPhase,
     SequenceStepState,
     Timeframe,
+    GlobalConflictRole,
 )
 from smc_trader.scene_graph import (
     EvidenceStatus,
@@ -301,18 +302,16 @@ def _scene_reading_snapshot():
     )
     focus = FocusState(
         asof=asof,
-        primary_timeframes=(Timeframe.M15.value, Timeframe.M5.value),
-        supplemental_timeframes=(Timeframe.H1.value,),
+        primary_timeframes=(
+            Timeframe.H1.value,
+            Timeframe.M15.value,
+            Timeframe.M5.value,
+        ),
         reason_codes=("new_key_event", "cross_scale_conflict"),
-        trigger_event_ids=("event:m15-bos",),
         question="did the bridge BOS align with the setup displacement?",
         resolution_status=EvidenceStatus.AMBIGUOUS,
         switched=True,
-        switched_at=asof,
-        prior_timeframes=(Timeframe.H4.value, Timeframe.H1.value),
         hypothesis_id="hyp:dfp-long",
-        phase_at_selection=PlaybookPhase.ARMED.value,
-        supplemental_query_used=True,
     )
     dominant = HypothesisState(
         hypothesis_id="hyp:dfp-long",
@@ -333,7 +332,7 @@ def _scene_reading_snapshot():
                 "node:m5-fvg",
             ),
         ),
-        contradicting_graph_paths=(),
+        material_conflict_ids=(),
         missing_evidence={"micro_bos": EvidenceStatus.UNKNOWN},
         ambiguous_evidence={
             "reacceptance": EvidenceStatus.AMBIGUOUS,
@@ -354,13 +353,7 @@ def _scene_reading_snapshot():
         sequence_stage=PlaybookPhase.FORMING.value,
         next_expected_event="opposite_displacement",
         supporting_graph_paths=(),
-        contradicting_graph_paths=(
-            (
-                "node:m15-pool",
-                "OPPOSES",
-                "node:h1-structure",
-            ),
-        ),
+        material_conflict_ids=("conflict:m15-vs-h1",),
         missing_evidence={
             "opposite_displacement": EvidenceStatus.NOT_OBSERVED,
         },
@@ -370,9 +363,54 @@ def _scene_reading_snapshot():
         invalidation_id="node:sweep-extreme",
         evidence_revision_id="evidence:1",
     )
+    base_belief = next(iter(snapshot.belief.hypotheses.values()))
+
+    def root_candidate(
+        candidate_id: str,
+        root_id: str,
+        playbook: Playbook,
+        direction: Direction,
+    ):
+        thesis_id = f"market-thesis:{root_id}"
+        return replace(
+            base_belief,
+            playbook=playbook,
+            direction=direction,
+            plan=None,
+            plan_feasibility=None,
+            candidate_id=candidate_id,
+            required_root_id=root_id,
+            record_kind="root_candidate",
+            market_thesis_ids=(thesis_id,),
+            market_thesis_id=thesis_id,
+            bound_market_thesis_id=thesis_id,
+            market_thesis_root_id=root_id,
+            market_thesis_mechanism="visual-test",
+            market_thesis_authority_relation="visual-test",
+            playbook_match_strength=1.0,
+            market_thesis_binding_required=True,
+            market_thesis_action_bound=True,
+            market_thesis_match_status="exact_root_bound",
+        )
+
+    thesis_candidates = {
+        dominant.hypothesis_id: root_candidate(
+            dominant.hypothesis_id,
+            "node:h4-structure",
+            dominant.playbook,
+            dominant.direction,
+        ),
+        competitor.hypothesis_id: root_candidate(
+            competitor.hypothesis_id,
+            "node:m15-pool",
+            competitor.playbook,
+            competitor.direction,
+        ),
+    }
     belief = replace(
         snapshot.belief,
         asof=asof,
+        thesis_candidates=thesis_candidates,
         context_hypotheses={
             dominant.hypothesis_id: dominant,
             competitor.hypothesis_id: competitor,
@@ -383,6 +421,25 @@ def _scene_reading_snapshot():
         cross_scale_conflicts=("conflict:m15-vs-h1",),
         unresolved_ambiguities=("ambiguity:reacceptance",),
         scene_revision_id="scene:revision-2",
+        global_context=SimpleNamespace(
+            updated_at=asof,
+            scene_revision_id="scene:revision-2",
+            open_market_theses=(
+                SimpleNamespace(root_id="node:h4-structure"),
+                SimpleNamespace(root_id="node:m15-pool"),
+            ),
+            material_conflicts=(
+                SimpleNamespace(
+                    conflict_id="conflict:m15-vs-h1",
+                    role=GlobalConflictRole.AUTHORITY_TRANSITION_CANDIDATE,
+                    source_timeframe=Timeframe.M15,
+                    target_timeframe=Timeframe.H1,
+                    source_direction=Direction.SHORT,
+                    target_direction=Direction.LONG,
+                    event_id="event:m15-bos",
+                ),
+            ),
+        ),
     )
     return replace(snapshot, observation=observation, belief=belief)
 
@@ -644,9 +701,10 @@ def test_five_scale_visual_exposes_temporal_market_reading(
     assert snapshot.belief.competing_hypothesis_ids == ("hyp:lsr-short",)
 
     text = _temporal_market_reading_text(snapshot)
-    assert "primary 15m, 5m" in text
+    assert "primary 1H, 15m, 5m" in text
     assert "ACTIVE COMPETING HYPOTHESES" in text
     assert "ALIGNS_WITH" in text
+    assert "authority_transition_candidate" in text
     assert "micro_bos=unknown" in text
     assert "UNKNOWN is unresolved evidence, never FALSE" in text
 
@@ -1225,3 +1283,22 @@ def test_visual_hypothesis_selection_uses_decision_then_ranked_fallback() -> Non
         ),
     )
     assert _selected_hypothesis(no_selection) is not None
+
+
+def test_visual_hypothesis_selection_resolves_root_action_candidate() -> None:
+    snapshot = engine_snapshot()
+    candidate = next(iter(snapshot.belief.hypotheses.values()))
+    candidate_id = "open-root-1|displacement_first_pullback|long"
+    belief = SimpleNamespace(
+        hypotheses=snapshot.belief.hypotheses,
+        resolve_hypothesis=lambda identity: (
+            candidate if identity == candidate_id else None
+        ),
+        ranked=snapshot.belief.ranked,
+    )
+    selected = SimpleNamespace(
+        decision=SimpleNamespace(best_hypothesis_key=candidate_id),
+        belief=belief,
+    )
+
+    assert _selected_hypothesis(selected) is candidate

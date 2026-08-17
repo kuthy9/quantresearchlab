@@ -641,6 +641,7 @@ class CausalGroup5Reducer:
         strength: float,
         reason: str,
         same_clock_relation: str | None = None,
+        source_active_at: pd.Timestamp | None = None,
     ) -> PathSequenceStep:
         if len(path.steps) >= self.protocol.maximum_steps_per_path:
             raise RuntimeError("Group 5 path step capacity is exhausted")
@@ -668,6 +669,7 @@ class CausalGroup5Reducer:
                 kind,
                 observed_at,
                 source_entity_id,
+                *((source_active_at,) if source_active_at is not None else ()),
             ),
             kind=kind,
             observed_at=observed_at,
@@ -678,6 +680,7 @@ class CausalGroup5Reducer:
             direction=path.direction,
             strength=clamp(strength),
             reason=reason,
+            source_active_at=source_active_at,
         )
 
     def _append_step(
@@ -692,6 +695,7 @@ class CausalGroup5Reducer:
         reason: str,
         step_transitions: list[tuple[str, PathSequenceStep]],
         same_clock_relation: str | None = None,
+        source_active_at: pd.Timestamp | None = None,
     ) -> PathSequenceStep:
         path = self._paths[path_id]
         if path.lifecycle is not PathSequenceLifecycle.ACTIVE:
@@ -705,6 +709,7 @@ class CausalGroup5Reducer:
             strength=strength,
             reason=reason,
             same_clock_relation=same_clock_relation,
+            source_active_at=source_active_at,
         )
         self._paths[path_id] = replace(
             path,
@@ -2006,15 +2011,11 @@ class CausalGroup5Reducer:
         )
         if len(displacement_ids) != 1:
             if len(displacement_ids) > 1:
-                source = min(
-                    current,
-                    key=lambda value: (value.kind, value.source_id),
-                )
                 self._append_step(
                     path_id,
                     kind="opposite_displacement_ambiguous",
                     observed_at=candle.end,
-                    source_event_id=source.source_id,
+                    source_event_id=path.context_id,
                     source_entity_id=_identity(
                         "ambiguous-displacement",
                         *sorted(displacement_ids),
@@ -2025,23 +2026,30 @@ class CausalGroup5Reducer:
                 )
             return None
         displacement_id = displacement_ids[0]
-        source = min(
-            (
-                value
-                for value in current
-                if value.source_displacement_id == displacement_id
-            ),
-            key=lambda value: (value.kind, value.source_id),
-        )
+        displacement_clocks = {
+            value.source_displacement_active_at
+            for value in current
+            if value.source_displacement_id == displacement_id
+        }
+        if len(displacement_clocks) != 1:
+            raise RuntimeError(
+                "Group 5 displacement identity has inconsistent active clocks"
+            )
+        displacement_active_at = next(iter(displacement_clocks))
+        if displacement_active_at is None:
+            raise RuntimeError(
+                "Group 5 opposite displacement lacks its active clock"
+            )
         self._append_step(
             path_id,
             kind="opposite_displacement",
-            observed_at=source.confirmed_at,
-            source_event_id=source.source_id,
+            observed_at=candle.end,
+            source_event_id=path.context_id,
             source_entity_id=displacement_id,
             strength=0.0,
-            reason="displacement_linked_zone_after_reacceptance",
+            reason="opposite_displacement_after_reacceptance",
             step_transitions=step_transitions,
+            source_active_at=displacement_active_at,
         )
         return self._paths[path_id].steps[-1]
 

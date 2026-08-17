@@ -9,6 +9,7 @@ import pytest
 from smc_trader.causal import CausalMarketReader
 from smc_trader.model import (
     Bar,
+    Candle,
     Direction,
     EventKind,
     FrameObservation,
@@ -18,6 +19,7 @@ from smc_trader.model import (
     LiquidityPoolState,
     ManipulationSourceDisposition,
     ManipulationSourceDispositionKind,
+    MarketObservation,
     PathSequenceLifecycle,
     PathSequenceState,
     PathSequenceStep,
@@ -27,6 +29,7 @@ from smc_trader.model import (
 )
 from smc_trader.observation import (
     CausalObserver,
+    EventMemory,
     ExecutionRealityInput,
     ObserverConfig,
     _event,
@@ -160,6 +163,83 @@ def test_lightweight_observer_can_skip_only_scene_graph_projection() -> None:
     assert observation.scene_revision_id is None
     assert observer.last_scene_delta is None
     assert observer.scene_graph.last_asof is None
+
+
+def test_scene_delta_clone_matches_validated_replace_without_revalidating_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reader = CausalMarketReader(scale_specs=CORE_TEST_SCALE_SPECS)
+    update = reader.on_bar(session_bars(1)[0])
+    observation = CausalObserver(
+        ObserverConfig(
+            scale_specs=CORE_TEST_SCALE_SPECS,
+            project_scene_graph=False,
+        )
+    ).observe(update)
+    payload = {
+        "scene_revision_id": "scene:r000000000001",
+        "scene_added_node_ids": ("node:1",),
+        "scene_revised_node_ids": ("node:2",),
+        "scene_added_edge_ids": ("edge:1",),
+        "scene_revised_edge_ids": ("edge:2",),
+        "scene_resolution_event_ids": ("event:1",),
+    }
+    expected = replace(observation, **payload)
+
+    def unexpected_validation(_self: MarketObservation) -> None:
+        raise AssertionError("validated Eye payload was revalidated")
+
+    monkeypatch.setattr(MarketObservation, "__post_init__", unexpected_validation)
+    actual = observation._with_scene_delta(**payload)
+
+    assert actual == expected
+    assert actual is not observation
+    assert actual.frames is observation.frames
+    assert actual.recent_events is observation.recent_events
+    assert (
+        actual.retained_entity_timelines
+        is observation.retained_entity_timelines
+    )
+
+
+@pytest.mark.parametrize(
+    ("payload", "message"),
+    (
+        (
+            {"scene_revision_id": ""},
+            "scene revision identity cannot be empty",
+        ),
+        (
+            {
+                "scene_revision_id": None,
+                "scene_added_node_ids": ("node:1",),
+            },
+            "scene delta identities require a scene revision",
+        ),
+        (
+            {
+                "scene_revision_id": "scene:r000000000001",
+                "scene_added_node_ids": ("node:1", "node:1"),
+            },
+            "scene delta identities are invalid",
+        ),
+    ),
+)
+def test_scene_delta_clone_validates_only_new_transport_identity(
+    payload: dict[str, object],
+    message: str,
+) -> None:
+    reader = CausalMarketReader(scale_specs=CORE_TEST_SCALE_SPECS)
+    update = reader.on_bar(session_bars(1)[0])
+    observation = CausalObserver(
+        ObserverConfig(
+            scale_specs=CORE_TEST_SCALE_SPECS,
+            project_scene_graph=False,
+        )
+    ).observe(update)
+
+    with pytest.raises(ValueError, match=message):
+        observation._with_scene_delta(**payload)
 
 
 def test_authority_scan_projection_keeps_group4_state_identical() -> None:
@@ -420,6 +500,50 @@ def test_eye_authority_mode_preserves_all_typed_state_and_internal_memory() -> N
     assert light.memory.entity_timelines()
 
 
+def test_typed_delta_transport_preserves_full_observer_semantics() -> None:
+    baseline_reader = CausalMarketReader(scale_specs=MODEL_SCALE_SPECS)
+    transport_reader = CausalMarketReader(scale_specs=MODEL_SCALE_SPECS)
+    baseline = CausalObserver(_all_typed_observer_config())
+    transport = CausalObserver(
+        _all_typed_observer_config(
+            typed_transition_delta_transport=True,
+        )
+    )
+    reality = ExecutionRealityInput(
+        spread_points=0.25,
+        deadline=pd.Timestamp(
+            "2025-01-06 17:00",
+            tz="America/New_York",
+        ),
+    )
+
+    for bar in _tick_aligned_bars(40):
+        expected = baseline.observe(
+            baseline_reader.on_bar(bar),
+            reality,
+        )
+        actual = transport.observe(
+            transport_reader.on_bar(bar),
+            reality,
+        )
+        assert actual.typed_transition_delta_available
+        assert replace(
+            actual,
+            typed_transition_delta_available=False,
+            liquidity_inventory_transitions_this_update=(),
+            liquidity_pool_transitions_this_update=(),
+            group3_fvg_transitions_this_update=(),
+            group3_order_block_transitions_this_update=(),
+            group4_range_transitions_this_update=(),
+            group4_manipulation_transitions_this_update=(),
+            group5_entry_location_transitions_this_update=(),
+            group5_reacceptance_transitions_this_update=(),
+            group5_micro_bos_transitions_this_update=(),
+            group5_path_transitions_this_update=(),
+            group5_step_transitions_this_update=(),
+        ) == expected
+
+
 def test_normal_observer_skips_typed_delta_signature_generation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -641,6 +765,345 @@ def test_contract_boundary_carries_only_live_prefix_for_terminal_join() -> None:
         assert key not in observer.memory.entity_timelines()
 
     assert observers[0].memory.__dict__ == observers[1].memory.__dict__
+
+
+def test_event_memory_sync_reuses_timeline_storage_and_survives_pickle() -> None:
+    observer = CausalObserver(_all_typed_observer_config())
+    formed_at = pd.Timestamp(
+        "2023-01-03 10:00",
+        tz="America/New_York",
+    )
+    event = _event(
+        EventKind.SUPPORT_RESISTANCE_STATE,
+        formed_at,
+        Timeframe.M1,
+        "below",
+        100.0,
+        0.5,
+        entity_id="sync-storage-zone",
+        lifecycle=SupportResistanceLifecycle.ACTIVE.value,
+        formed_at=formed_at,
+        confirmed_at=formed_at,
+        transition_reason="confirmed_swing_cluster",
+    )
+    key = "zone:sync-storage-zone"
+    observer.memory.append(event)
+    observer.memory.sync_retained_entity_timelines(
+        {key},
+        asof=formed_at,
+    )
+    storage = observer.memory._entity_timelines[key]
+
+    observer.memory.sync_retained_entity_timelines(
+        {key},
+        asof=formed_at + pd.Timedelta(minutes=1),
+    )
+    assert observer.memory._entity_timelines[key] is storage
+    assert observer.memory.timeline(key) == (event,)
+
+    resumed = pickle.loads(pickle.dumps(observer.memory))
+    resumed_storage = resumed._entity_timelines[key]
+    resumed.sync_retained_entity_timelines(
+        {key},
+        asof=formed_at + pd.Timedelta(minutes=2),
+    )
+    assert resumed._entity_timelines[key] is resumed_storage
+    assert resumed.timeline(key) == observer.memory.timeline(key)
+
+    with pytest.raises(
+        ValueError,
+        match="retained entity timeline contains the future",
+    ):
+        resumed.sync_retained_entity_timelines(
+            {key},
+            asof=formed_at - pd.Timedelta(minutes=1),
+        )
+
+
+def test_event_memory_sequence_clock_pruning_is_once_per_sync_and_resume_safe() -> None:
+    """High retained history must not change same-clock event ordering.
+
+    The reference applies the former pruning rule after every append.  The
+    production memory defers the same retention result to the completed-bar
+    synchronization boundary, where all same-clock events have already been
+    assigned their sequence numbers.
+    """
+
+    reference = EventMemory(4)
+    deferred = EventMemory(4)
+    clock_origin = pd.Timestamp(
+        "2023-01-03 09:30",
+        tz="America/New_York",
+    )
+
+    def legacy_prune(memory: EventMemory) -> None:
+        if len(memory._sequence_counts) <= memory._events.maxlen * 2:
+            return
+        clocks = {
+            event.observed_at for event in memory._events
+        } | {
+            event.observed_at
+            for timeline in memory._entity_timelines.values()
+            for event in timeline
+        }
+        memory._sequence_counts = {
+            clock: count
+            for clock, count in memory._sequence_counts.items()
+            if clock in clocks
+        }
+
+    retained: set[str] = set()
+    for index in range(96):
+        clock = clock_origin + pd.Timedelta(minutes=index)
+        identity = f"retained-sequence-zone-{index}"
+        event = _event(
+            EventKind.SUPPORT_RESISTANCE_STATE,
+            clock,
+            Timeframe.M1,
+            "below",
+            100.0 + index,
+            0.5,
+            entity_id=identity,
+            lifecycle=SupportResistanceLifecycle.ACTIVE.value,
+            formed_at=clock,
+            confirmed_at=clock,
+        )
+        reference.append(event)
+        legacy_prune(reference)
+        deferred.append(event)
+        retained.add(f"zone:{identity}")
+
+    same_clock = clock_origin + pd.Timedelta(minutes=100)
+    for index in range(7):
+        event = _event(
+            EventKind.LIQUIDITY_CONSUMED,
+            same_clock,
+            Timeframe.M1,
+            "above",
+            200.0,
+            0.25,
+            source_ids=(f"same-clock-{index}",),
+        )
+        reference.append(event)
+        legacy_prune(reference)
+        deferred.append(event)
+
+    reference.sync_retained_entity_timelines(
+        retained,
+        asof=same_clock,
+    )
+    deferred.sync_retained_entity_timelines(
+        retained,
+        asof=same_clock,
+    )
+    assert deferred.recent() == reference.recent()
+    assert tuple(event.sequence_no for event in deferred.recent()) == (
+        3,
+        4,
+        5,
+        6,
+    )
+    assert deferred.entity_timelines() == reference.entity_timelines()
+    assert deferred._sequence_counts == reference._sequence_counts
+    assert deferred._sequence_counts_prune_pending is False
+
+    # A pre-change checkpoint has no pending-bit attribute.  It must resume,
+    # accept the next same-clock batch and converge to the same retained state.
+    resumed = pickle.loads(pickle.dumps(deferred))
+    resumed.__dict__.pop("_sequence_counts_prune_pending")
+    resumed = pickle.loads(pickle.dumps(resumed))
+    reference = pickle.loads(pickle.dumps(reference))
+    resume_clock = same_clock + pd.Timedelta(minutes=1)
+    for index in range(3):
+        event = _event(
+            EventKind.LIQUIDITY_CONSUMED,
+            resume_clock,
+            Timeframe.M1,
+            "below",
+            199.0,
+            0.25,
+            source_ids=(f"resume-clock-{index}",),
+        )
+        reference.append(event)
+        legacy_prune(reference)
+        resumed.append(event)
+    reference.sync_retained_entity_timelines(
+        retained,
+        asof=resume_clock,
+    )
+    resumed.sync_retained_entity_timelines(
+        retained,
+        asof=resume_clock,
+    )
+    assert resumed.__dict__ == reference.__dict__
+
+
+def test_temporal_metrics_cached_clock_matches_each_legacy_event_with_synthetic_minutes_and_pickle() -> None:
+    def legacy_temporal_metrics(
+        memory: EventMemory,
+        asof: pd.Timestamp,
+    ) -> tuple[dict[str, int], dict[str, int]]:
+        durations: dict[str, int] = {}
+        ages: dict[str, int] = {}
+        active = {
+            event.event_id
+            for event in memory._latest_by_entity.values()
+        }
+        events = {
+            event.event_id: event
+            for event in memory._events
+        }
+        for event in events.values():
+            if event.event_id in memory._closed_durations:
+                durations[event.event_id] = memory._closed_durations[
+                    event.event_id
+                ]
+            elif event.event_id in active:
+                durations[event.event_id] = max(
+                    0,
+                    memory._elapsed_minutes(
+                        event.formed_at or event.observed_at,
+                        asof,
+                    ),
+                )
+            else:
+                durations[event.event_id] = 0
+            origin = (
+                event.formed_at
+                or event.confirmed_at
+                or event.observed_at
+            )
+            ages[event.event_id] = max(
+                0,
+                memory._elapsed_minutes(origin, asof),
+            )
+        for timeline in memory._entity_timelines.values():
+            for index, event in enumerate(timeline):
+                if index + 1 < len(timeline):
+                    durations[event.event_id] = max(
+                        0,
+                        memory._elapsed_minutes(
+                            event.observed_at,
+                            timeline[index + 1].observed_at,
+                        ),
+                    )
+                elif event.ended_at is not None:
+                    durations[event.event_id] = 0
+                else:
+                    durations[event.event_id] = max(
+                        0,
+                        memory._elapsed_minutes(event.observed_at, asof),
+                    )
+                origin = (
+                    event.formed_at
+                    or event.confirmed_at
+                    or event.observed_at
+                )
+                ages[event.event_id] = max(
+                    0,
+                    memory._elapsed_minutes(origin, asof),
+                )
+        return durations, ages
+
+    start = pd.Timestamp(
+        "2024-03-08 15:59:00.250000",
+        tz="America/New_York",
+    )
+    memory = EventMemory(32)
+    lifecycle_by_minute = {
+        1: SupportResistanceLifecycle.ACTIVE,
+        4: SupportResistanceLifecycle.TESTED,
+        7: SupportResistanceLifecycle.BROKEN,
+        9: SupportResistanceLifecycle.REACCEPTED,
+    }
+    retained_key = "zone:clock-cache-zone"
+    retained_events = []
+
+    for minute in range(1, 11):
+        end = start + pd.Timedelta(minutes=minute)
+        synthetic = minute in {2, 3, 6, 8}
+        memory.observe_minute(
+            Candle(
+                timeframe=Timeframe.M1,
+                start=end - pd.Timedelta(minutes=1),
+                end=end,
+                open=100.0,
+                high=100.25,
+                low=99.75,
+                close=100.0,
+                volume=0.0 if synthetic else 10.0,
+                symbol="NQH4",
+                instrument_id=1,
+                observed_minutes=1,
+                expected_minutes=1,
+                complete=True,
+                real_minutes=0 if synthetic else 1,
+                synthetic_minutes=1 if synthetic else 0,
+            )
+        )
+        lifecycle = lifecycle_by_minute.get(minute)
+        if lifecycle is not None:
+            terminal = lifecycle is SupportResistanceLifecycle.REACCEPTED
+            event = _event(
+                EventKind.SUPPORT_RESISTANCE_STATE,
+                end,
+                Timeframe.M1,
+                "below",
+                100.0,
+                0.5,
+                entity_id="clock-cache-zone",
+                lifecycle=lifecycle.value,
+                formed_at=start + pd.Timedelta(minutes=1),
+                confirmed_at=start + pd.Timedelta(minutes=1),
+                ended_at=end if terminal else None,
+                transition_reason=f"test_{lifecycle.value}",
+            )
+            memory.append(event)
+            retained_events.append(event)
+        memory.append(
+            _event(
+                EventKind.LIQUIDITY_CONSUMED,
+                end,
+                Timeframe.M1,
+                "below",
+                99.75,
+                0.25,
+                source_ids=(f"minute-{minute}",),
+            )
+        )
+        memory.sync_retained_entity_timelines(
+            {retained_key},
+            asof=end,
+        )
+        for query_asof in (
+            end,
+            end
+            + pd.Timedelta(seconds=37)
+            + pd.Timedelta(microseconds=125),
+        ):
+            expected = legacy_temporal_metrics(memory, query_asof)
+            actual = memory.temporal_metrics(query_asof)
+            assert actual == expected
+            assert set(actual[0]) == set(actual[1])
+            assert all(
+                actual[index][event.event_id]
+                == expected[index][event.event_id]
+                for event in (*memory.recent(), *retained_events)
+                for index in (0, 1)
+            )
+        if minute == 5:
+            memory = pickle.loads(pickle.dumps(memory))
+
+    # A scheduled market closure advances wall time without inserting
+    # synthetic bars.  Preserve that existing distinction from explicit
+    # synthetic no-trade minutes as well.
+    after_weekend = pd.Timestamp(
+        "2024-03-11 09:30:17.125",
+        tz="America/New_York",
+    )
+    assert memory.temporal_metrics(after_weekend) == (
+        legacy_temporal_metrics(memory, after_weekend)
+    )
 
 
 def test_reference_zone_same_admission_prefix_is_causal_and_not_recent() -> None:

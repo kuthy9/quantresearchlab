@@ -23,6 +23,14 @@ TYPED_CALIBRATION_DIMENSIONS = (
     "uncertainty",
 )
 TYPED_SEQUENCE_DIMENSION = "sequence_progress"
+_ACTION_CALIBRATION_DIMENSIONS = frozenset(
+    {
+        "thesis_strength",
+        "location_quality",
+        "entry_readiness",
+        "delivery_quality",
+    }
+)
 TYPED_ACTIVE_PLAYBOOKS = (
     Playbook.DISPLACEMENT_FIRST_PULLBACK,
     Playbook.LIQUIDITY_SWEEP_REVERSAL,
@@ -168,6 +176,29 @@ class TypedBrainCalibrator:
             registry_hash=None,
             maps={},
             status="identity_unvalidated",
+        )
+
+    @property
+    def is_ready(self) -> bool:
+        """Whether action-facing typed maps are explicitly usable.
+
+        ``uncertainty`` remains a descriptive conflict/missing-evidence
+        formula in the Brain.  It is intentionally not required for Decision
+        readiness even though the current artifact schema still carries its
+        map.  Sequence progress is deterministic and is never calibrated.
+        """
+
+        if (
+            self.status != "ready"
+            or not self.version
+            or self.version == "identity-unvalidated"
+            or not self.registry_hash
+        ):
+            return False
+        return all(
+            (maps := self.maps.get(playbook)) is not None
+            and _ACTION_CALIBRATION_DIMENSIONS.issubset(maps)
+            for playbook in TYPED_ACTIVE_PLAYBOOKS
         )
 
     @classmethod

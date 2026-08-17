@@ -118,6 +118,7 @@ class ObserverConfig:
     materialize_event_view: bool = True
     group4_projection_only: bool = False
     eye_authority_mode: bool = False
+    typed_transition_delta_transport: bool = False
 
 
 @dataclass(frozen=True)
@@ -905,6 +906,12 @@ class EventMemory:
         self._retained_entity_keys: set[str] = set()
         self._incomplete_entity_keys: set[str] = set()
         self._boundary_cooling_entity_keys: set[str] = set()
+        # Sequence-clock retention is synchronized once after the completed
+        # observation has projected every same-clock event.  Keeping only a
+        # pending bit here avoids rescanning every retained lifecycle timeline
+        # after each individual append when the clock table is above its
+        # bounded cleanup threshold.
+        self._sequence_counts_prune_pending = False
 
     @property
     def last_minute_end(self) -> pd.Timestamp | None:
@@ -1252,19 +1259,7 @@ class EventMemory:
                 self._latest_by_entity.pop(event.entity_id, None)
                 self._closed_durations[event.event_id] = 0
         if len(self._sequence_counts) > self._events.maxlen * 2:
-            clocks = {
-                item.observed_at
-                for item in self._events
-            } | {
-                item.observed_at
-                for timeline in self._entity_timelines.values()
-                for item in timeline
-            }
-            self._sequence_counts = {
-                clock: count
-                for clock, count in self._sequence_counts.items()
-                if clock in clocks
-            }
+            self._sequence_counts_prune_pending = True
 
     def sync_retained_entity_timelines(
         self,
@@ -1288,12 +1283,38 @@ class EventMemory:
                 "retained typed entity lacks a lifecycle timeline"
             )
         for timeline in self._entity_timelines.values():
-            if any(event.observed_at > clock for event in timeline):
+            # ``append`` enforces a strictly increasing lifecycle clock, so
+            # the tail is the maximum observation time for this entity.
+            if timeline and timeline[-1].observed_at > clock:
                 raise ValueError(
                     "retained entity timeline contains the future"
                 )
+        if getattr(self, "_sequence_counts_prune_pending", False):
+            # Match the former post-append retention boundary exactly: the
+            # final event of this completed update could still see every
+            # pre-synchronization timeline.  Timeline membership is narrowed
+            # only after the clock table has been pruned against that same
+            # view, preserving checkpoint state as well as same-clock counts.
+            retained_clocks = {
+                event.observed_at
+                for event in self._events
+            } | {
+                event.observed_at
+                for timeline in self._entity_timelines.values()
+                for event in timeline
+            }
+            self._sequence_counts = {
+                event_clock: count
+                for event_clock, count in self._sequence_counts.items()
+                if event_clock in retained_clocks
+            }
+            self._sequence_counts_prune_pending = False
         next_timelines = {
-            key: list(self._entity_timelines[key])
+            # Retention changes dictionary membership, never lifecycle list
+            # ownership.  Keeping the internal list avoids copying every
+            # retained history on each completed minute; public readers still
+            # receive immutable tuples from ``entity_timelines``/``timeline``.
+            key: self._entity_timelines[key]
             for key in sorted(retained)
         }
         self._entity_timelines = next_timelines
@@ -1441,6 +1462,7 @@ class EventMemory:
             for event_clock, count in prior._sequence_counts.items()
             if event_clock in retained_clocks
         }
+        self._sequence_counts_prune_pending = False
         return keys
 
     def has_entity_lifecycle(
@@ -1462,6 +1484,55 @@ class EventMemory:
     ) -> tuple[dict[str, int], dict[str, int]]:
         """Materialize event duration and age in one causal traversal."""
 
+        # A retained lifecycle commonly contributes the same formation clock
+        # to several events, while the current ``asof`` is shared by every
+        # active duration and age.  Resolve each timestamp onto the existing
+        # real-minute clock once per materialization instead of repeatedly
+        # constructing Timedelta objects and bisecting synthetic runs.
+        #
+        # Keep the sub-minute remainder alongside the minute coordinate.  The
+        # remainder correction makes this exactly equivalent to
+        # ``floor((end - start) / one_minute)`` even for non-aligned aware
+        # timestamps; synthetic minutes retain the original (start, end]
+        # inclusion convention from ``_synthetic_count_through``.
+        minute_ns = 60_000_000_000
+        clock_coordinates: dict[int, tuple[int, int, int]] = {}
+
+        def coordinate(
+            timestamp: pd.Timestamp,
+        ) -> tuple[int, int, int]:
+            timestamp_ns = int(timestamp.value)
+            cached = clock_coordinates.get(timestamp_ns)
+            if cached is not None:
+                return cached
+            minute, remainder = divmod(timestamp_ns, minute_ns)
+            value = (
+                minute,
+                remainder,
+                self._synthetic_count_through(timestamp),
+            )
+            clock_coordinates[timestamp_ns] = value
+            return value
+
+        def elapsed_minutes(
+            start: pd.Timestamp,
+            end: pd.Timestamp,
+        ) -> int:
+            start_minute, start_remainder, start_synthetic = coordinate(
+                start
+            )
+            end_minute, end_remainder, end_synthetic = coordinate(end)
+            wall_minutes = max(
+                0,
+                end_minute
+                - start_minute
+                - int(end_remainder < start_remainder),
+            )
+            return max(
+                0,
+                wall_minutes - (end_synthetic - start_synthetic),
+            )
+
         durations: dict[str, int] = {}
         ages: dict[str, int] = {}
         active = {
@@ -1480,7 +1551,7 @@ class EventMemory:
             elif event.event_id in active:
                 durations[event.event_id] = max(
                     0,
-                    self._elapsed_minutes(
+                    elapsed_minutes(
                         event.formed_at or event.observed_at,
                         asof,
                     ),
@@ -1494,7 +1565,7 @@ class EventMemory:
             )
             ages[event.event_id] = max(
                 0,
-                self._elapsed_minutes(origin, asof),
+                elapsed_minutes(origin, asof),
             )
         for timeline in self._entity_timelines.values():
             for index, event in enumerate(timeline):
@@ -1502,14 +1573,14 @@ class EventMemory:
                     end = timeline[index + 1].observed_at
                     durations[event.event_id] = max(
                         0,
-                        self._elapsed_minutes(event.observed_at, end),
+                        elapsed_minutes(event.observed_at, end),
                     )
                 elif event.ended_at is not None:
                     durations[event.event_id] = 0
                 else:
                     durations[event.event_id] = max(
                         0,
-                        self._elapsed_minutes(event.observed_at, asof),
+                        elapsed_minutes(event.observed_at, asof),
                     )
                 origin = (
                     event.formed_at
@@ -1518,7 +1589,7 @@ class EventMemory:
                 )
                 ages[event.event_id] = max(
                     0,
-                    self._elapsed_minutes(origin, asof),
+                    elapsed_minutes(origin, asof),
                 )
         return durations, ages
 
@@ -1656,6 +1727,10 @@ class CausalObserver:
             raise ValueError("Group 4 projection-only flag must be boolean")
         if type(self.config.eye_authority_mode) is not bool:
             raise ValueError("eye-authority mode flag must be boolean")
+        if type(self.config.typed_transition_delta_transport) is not bool:
+            raise ValueError(
+                "typed transition delta transport flag must be boolean"
+            )
         if self.config.eye_authority_mode:
             if (
                 self.config.project_scene_graph
@@ -1977,8 +2052,9 @@ class CausalObserver:
         self._reference_inventory: dict[str, LiquidityInventoryItem] = {}
         self._reference_last_end: pd.Timestamp | None = None
         self._reference_coverage_start: pd.Timestamp | None = None
-        # Authority-scan-only transport cache.  Production Engine observers
-        # never populate it and therefore pay no typed-delta comparison cost.
+        # Optional transport cache for authority scans and bounded diagnostics.
+        # Production Engine observers do not populate it unless explicitly
+        # requested, so ordinary replay pays no typed-delta comparison cost.
         self._typed_delta_signatures: dict[
             str,
             dict[str, tuple[tuple[str, object], ...]],
@@ -5359,7 +5435,10 @@ class CausalObserver:
             if group5_update is None
             else group5_update.path_sequences
         )
-        typed_delta_available = self.config.eye_authority_mode
+        typed_delta_available = bool(
+            self.config.eye_authority_mode
+            or self.config.typed_transition_delta_transport
+        )
         liquidity_inventory_delta: tuple[object, ...] = ()
         liquidity_pool_delta: tuple[object, ...] = ()
         group3_fvg_delta: tuple[object, ...] = ()
@@ -5738,8 +5817,7 @@ class CausalObserver:
         if self.config.project_scene_graph:
             try:
                 self.last_scene_delta = self.scene_graph.update(observation)
-                observation = replace(
-                    observation,
+                observation = observation._with_scene_delta(
                     scene_revision_id=self.last_scene_delta.revision_id,
                     scene_added_node_ids=(
                         self.last_scene_delta.added_node_ids

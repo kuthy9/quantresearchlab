@@ -70,12 +70,63 @@ class MBOManifestIdentity:
 
 
 @dataclass(frozen=True)
+class BrainCalibrationFitAdmission:
+    """Independent causal-unit thresholds that authorize Brain fitting."""
+
+    minimum_dimension_units: int
+    minimum_plan_valid_roots: int
+    minimum_executable_episodes: int
+
+    @classmethod
+    def from_mapping(cls, payload: Any) -> BrainCalibrationFitAdmission:
+        if not isinstance(payload, Mapping):
+            raise ValidationProtocolError(
+                "brain_calibration_fit_admission must be an object"
+            )
+        expected = {
+            "minimum_dimension_units",
+            "minimum_plan_valid_roots",
+            "minimum_executable_episodes",
+        }
+        if set(payload) != expected:
+            raise ValidationProtocolError(
+                "brain_calibration_fit_admission must explicitly contain "
+                "minimum_dimension_units, minimum_plan_valid_roots and "
+                "minimum_executable_episodes"
+            )
+        values: dict[str, int] = {}
+        for field in sorted(expected):
+            value = payload[field]
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise ValidationProtocolError(
+                    "brain_calibration_fit_admission."
+                    f"{field} must be an integer"
+                )
+            minimum = 2 if field == "minimum_dimension_units" else 1
+            if value < minimum:
+                raise ValidationProtocolError(
+                    "brain_calibration_fit_admission."
+                    f"{field} must be at least {minimum}"
+                )
+            values[field] = value
+        return cls(**values)
+
+    def as_dict(self) -> dict[str, int]:
+        return {
+            "minimum_dimension_units": self.minimum_dimension_units,
+            "minimum_plan_valid_roots": self.minimum_plan_valid_roots,
+            "minimum_executable_episodes": self.minimum_executable_episodes,
+        }
+
+
+@dataclass(frozen=True)
 class ValidationProtocol:
     schema_version: int
     fingerprint: str
     causal_source: CausalSourceIdentity
     mbo_identity: MBOManifestIdentity
     belief_calibration_valid_from: pd.Timestamp
+    brain_calibration_fit_admission: BrainCalibrationFitAdmission
     ohlcv_windows: Mapping[str, ValidationWindow]
     mbo_windows: Mapping[str, ValidationWindow]
     fixed_development_windows: Mapping[str, tuple[ValidationWindow, ...]]
@@ -399,6 +450,11 @@ def load_validation_protocol(
         causal_source=causal_source,
         mbo_identity=mbo_identity,
         belief_calibration_valid_from=calibration_valid_from,
+        brain_calibration_fit_admission=(
+            BrainCalibrationFitAdmission.from_mapping(
+                payload.get("brain_calibration_fit_admission")
+            )
+        ),
         ohlcv_windows=ohlcv_windows,
         mbo_windows=_load_windows(
             payload.get("mbo_windows"),
@@ -411,6 +467,7 @@ def load_validation_protocol(
 
 
 __all__ = [
+    "BrainCalibrationFitAdmission",
     "CausalSourceIdentity",
     "MBOExecutionArtifactIdentity",
     "MBOManifestIdentity",
