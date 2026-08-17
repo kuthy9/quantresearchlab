@@ -32,24 +32,29 @@ The legacy next-event-time, displacement and draw targets, and the generic
 next-event-family target, are explicitly `-100` and receive zero supervision.
 Direct scale-relation tokens are marked for the shortcut-mask probe.
 
-The trainer's neutral branch remains deliberately fit-free. Its only required
-identities are the input-shard manifest and its bound run manifest. It derives
-their content identities directly, verifies source/config identity once per
-load, and verifies shard hashes/rows and the exact 18-column Arrow schema. It
-does not require caller-supplied duplicate manifest hashes, an outcome manifest
-or a causal-case library. A run manifest may carry the newer exact
-`repository: {commit: <40-lowercase-hex>}` identity; older immutable smoke runs
-without that field remain readable, and the repository value is never
-tokenized.
+The neutral audit/single-batch branches remain deliberately fit-free. The
+separate `--neutral-fit` branch accepts only the pre-registered three-window
+smoke population or the complete ten-window population. Each run contributes
+only its input-shard manifest and bound run manifest; the trainer derives their
+content identities, verifies source/config identity once per load, and checks
+shard hashes/rows plus the exact 18-column Arrow schema. It does not accept an
+outcome manifest or causal-case library. Fit runs must share source, config and
+protocol identities. Each run's repository commit is retained separately in
+artifact lineage rather than treated as a compatibility key or repeated in
+rows.
 
 Audit mode validates all rows, builds the neutral targets and reports coverage.
 Single-batch smoke additionally reconstructs the canonical five completed-bar
 views from the run-bound 1m source, resolves every prefix, collates one batch,
 and executes one evaluation-mode forward/loss pass. It creates no optimizer,
 performs no backward pass and writes no checkpoint or embedding/head artifact.
-Both modes reject fit/export options before loading the dataset. A future fit
-requires a new preregistered time-block profile with purge/embargo boundaries
-and a separately materialized training corpus.
+Both modes reject fit/export options before loading the dataset. Neutral fit
+also verifies the registered 14-calendar-day purge against actual prefix
+exposure and observes at least five completed Globex sessions in each embargo,
+using the run timezone. Whole episodes are keyed by run-manifest hash, market
+epoch and MarketEpisode ID, so an episode cannot cross split roles. Only train
+rows enter backward/optimizer steps; validation and holdout are fixed,
+no-gradient reports and are never used to tune a threshold.
 
 `MarketEpisodeCaseIndex` is a thin, outcome-free retrieval facade over the
 shared cosine-distance, local-density and OOD routing core. It admits only the
@@ -64,9 +69,11 @@ the canonical MarketEpisode, location, path, full same-clock transition-kind
 set, causal clocks and encoder content identity. Its companion
 `encode_market_episode_active_head_records()` exports exactly the two active
 neutral heads; the four disabled legacy heads are absent rather than emitted as
-untrained probabilities. These APIs are ready for a future eligible fit, but
-the current audit-only profile produces no embeddings or trained retrieval
-index.
+untrained probabilities. One fit writes a combined unmasked embedding JSONL
+from the reference encoder and one combined active-head JSONL from at least
+three independently seeded checkpoints. Both span all registered split roles;
+the manifests bind every input/run manifest path and hash, source/config/
+repository/protocol identity, split protocol and artifact hash.
 
 ## Input contract
 
@@ -294,6 +301,30 @@ Exercise the complete neutral read/feature/target/model boundary as one batch:
 These commands validate and report; neither fits nor exports a model.
 Supplying `--epochs`, `--checkpoint`, `--embedding-output` or `--head-output`
 with either neutral mode fails closed.
+
+Run the pre-registered three-window pipeline smoke by repeating paired
+manifests in train, validation and holdout order (order itself is not trusted;
+the registered profile role is):
+
+```bash
+.venv/bin/python scripts/train_market_representation.py \
+  --neutral-fit \
+  --market-case-input-manifest TRAIN/market_case_input_shards.manifest.json \
+  --market-case-run-manifest TRAIN/run_manifest.json \
+  --market-case-input-manifest VALIDATION/market_case_input_shards.manifest.json \
+  --market-case-run-manifest VALIDATION/run_manifest.json \
+  --market-case-input-manifest HOLDOUT/market_case_input_shards.manifest.json \
+  --market-case-run-manifest HOLDOUT/run_manifest.json \
+  --ensemble-size 3 --epochs 1 \
+  --checkpoint OUT/model.pt \
+  --embedding-output OUT/market_episode_embeddings.jsonl \
+  --head-output OUT/market_episode_active_heads.jsonl \
+  --metrics-output OUT/metrics.json
+```
+
+This smoke proves only that the registered, leak-guarded training and export
+pipeline executes. It does not validate representation quality, retrieval,
+OOD/abstention, trading edge or action value.
 
 The legacy EntryEpisode training path requires causal-case input shards plus pre-registered input,
 run and finalized-library manifest hashes, canonical completed-bar views,

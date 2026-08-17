@@ -4143,6 +4143,24 @@ def _load_market_case_input_profile(
     return profile_name, dict(profile)
 
 
+def _validate_market_input_replay_contract(
+    profile: Mapping[str, Any],
+    replay_contract: tuple[str, int],
+) -> None:
+    """Match a preregistered representation window to its sole source contract."""
+
+    expected = profile.get("expected_replay_contract")
+    if expected is None:
+        return
+    if not isinstance(expected, Mapping):
+        raise ValueError("market-case input expected_replay_contract must be an object")
+    registered = (expected.get("symbol"), expected.get("instrument_id"))
+    if replay_contract != registered:
+        raise ValueError(
+            "--market-case-input replay contract does not match the registered profile"
+        )
+
+
 def _visualization_clocks(
     values: list[str] | tuple[str, ...],
     *,
@@ -5551,6 +5569,11 @@ def _streamed_main(args: argparse.Namespace) -> None:
             str(pair["symbol"]),
             int(pair["instrument_id"]),
         )
+        if market_input_profile is not None:
+            _validate_market_input_replay_contract(
+                market_input_profile,
+                market_source_contract,
+            )
     total_source_rows = int(len(replay_frame))
     last_completed_asof = pd.Timestamp(replay_frame.index[-1]) + pd.Timedelta(
         minutes=1

@@ -234,6 +234,17 @@ NEUTRAL_SPARSE_DISABLED_TARGETS = (
     "displacement_state",
     "draw_consumed",
 )
+NEUTRAL_REPRESENTATION_LOSS_WEIGHTS: Mapping[str, float] = {
+    "candle_reconstruction": 1.0,
+    "event_reconstruction": 1.0,
+    "next_event": 0.0,
+    "next_lifecycle": 0.75,
+    "next_event_time": 0.0,
+    "displacement": 0.0,
+    "draw_consumed": 0.0,
+    "scale_alignment": 0.5,
+    "contrastive": 0.0,
+}
 NEUTRAL_SPARSE_TARGET_LABEL_SOURCE = (
     "same_market_episode_next_sparse_revision_and_same_clock_global_context_v1"
 )
@@ -4325,6 +4336,32 @@ def representation_multitask_loss(
     return LossBreakdown(total=total, components=components)
 
 
+def neutral_representation_multitask_loss(
+    output: RepresentationOutput,
+    batch: RepresentationBatch,
+    targets: TargetBatch,
+) -> LossBreakdown:
+    """Compute only the preregistered neutral V1 representation objectives."""
+
+    require_torch()
+    disabled = {
+        "next_event_type": targets.next_event_type,
+        "next_event_time_bucket": targets.next_event_time_bucket,
+        "displacement_state": targets.displacement_state,
+        "draw_consumed": targets.draw_consumed,
+    }
+    if any(bool((values != -100).any()) for values in disabled.values()):
+        raise RepresentationDataError(
+            "neutral fit enabled a coverage-dependent legacy target"
+        )
+    return representation_multitask_loss(
+        output,
+        batch,
+        targets,
+        weights=NEUTRAL_REPRESENTATION_LOSS_WEIGHTS,
+    )
+
+
 def majority_class_baselines(
     training_targets: Sequence[SelfSupervisedTarget],
     validation_targets: Sequence[SelfSupervisedTarget],
@@ -4769,6 +4806,7 @@ def encode_market_episode_active_head_records(
             "checkpoint_id": record.checkpoint_id,
             "model_version": record.model_version,
             "revision_id": case.revision_id,
+            "market_epoch_id": case.market_epoch_id,
             "market_episode_id": case.market_episode_id,
             "decision_at": case.asof.isoformat(),
             "feature_max_at": record.feature_max_at.isoformat(),

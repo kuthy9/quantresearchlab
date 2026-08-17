@@ -46,6 +46,17 @@ MARKET_EPISODE_LINEAGE = {
     "run_manifest_sha256": "c" * 64,
     "selection_contract": MARKET_EPISODE_FIRST_OCCURRENCE_SELECTION_CONTRACT,
 }
+MARKET_EPISODE_DATASET_CONTRACT = {
+    "source_sha256": "d" * 64,
+    "model_config_sha256": "e" * 64,
+    "market_case_protocol": {"protocol_version": "neutral-test-v1"},
+    "representation_feature_schema_version": "feature-test-v1",
+    "embedding_input_protocol": INFERENCE_INPUT_PROTOCOL,
+    "selection_contract": MARKET_EPISODE_FIRST_OCCURRENCE_SELECTION_CONTRACT,
+    "embedding_model_version": "representation:test-v1",
+    "embedding_checkpoint_id": EMBEDDING_CHECKPOINT_ID,
+    "calendar_timezone": "America/New_York",
+}
 
 
 def _case(
@@ -162,6 +173,7 @@ def _market_episode_case(
     epoch: str = "epoch:neutral",
     direction: str = "long",
     split: str = "train",
+    run_manifest_sha256: str = "c" * 64,
 ) -> dict[str, Any]:
     location_id = f"location:{episode}"
     path_id = f"path:{episode}"
@@ -176,6 +188,7 @@ def _market_episode_case(
         "revision_id": f"market-revision:{episode}:{revision_index}",
         "revision_index": revision_index,
         "revision_stage": "market_episode_transition",
+        "run_manifest_sha256": run_manifest_sha256,
         "market_epoch_id": epoch,
         "market_episode_id": episode_id,
         "entry_location_id": location_id,
@@ -203,6 +216,8 @@ def _market_episode_query(
     episode: str = "query",
     material_kind: str = "trigger",
     epoch: str = "epoch:neutral",
+    split: str = "train",
+    run_manifest_sha256: str = "c" * 64,
 ) -> MarketEpisodeEmbeddingQuery:
     return MarketEpisodeEmbeddingQuery.from_mapping(
         _market_episode_case(
@@ -210,6 +225,8 @@ def _market_episode_query(
             minute,
             embedding,
             transition_kinds=(material_kind,),
+            split=split,
+            run_manifest_sha256=run_manifest_sha256,
         ),
         material_kind=material_kind,
         embedding_dim=DIM,
@@ -229,6 +246,8 @@ def _market_episode_ensemble(
             ).hexdigest(),
             "model_version": query.embedding_model_version,
             "revision_id": query.revision_id,
+            "run_manifest_sha256": query.run_manifest_sha256,
+            "market_epoch_id": query.market_epoch_id,
             "market_episode_id": query.market_episode_id,
             "decision_at": query.decision_at,
             "feature_max_at": query.feature_max_at,
@@ -1335,7 +1354,7 @@ def test_market_episode_selector_keeps_first_of_all_six_material_kinds() -> None
         )
 
 
-def test_market_episode_query_is_strictly_prior_same_epoch_and_outcome_free() -> None:
+def test_market_episode_query_is_strictly_prior_and_outcome_free() -> None:
     eligible = [
         _market_episode_case(
             f"prior-{index}",
@@ -1375,9 +1394,9 @@ def test_market_episode_query_is_strictly_prior_same_epoch_and_outcome_free() ->
     )
 
     assert result.ood.policy is RetrievalPolicy.CONTINUE_EVALUATION
-    assert result.ood.eligible_neighbours == 5
+    assert result.ood.eligible_neighbours == 6
     assert {item["market_episode_id"] for item in result.neighbours} == {
-        item["market_episode_id"] for item in eligible
+        item["market_episode_id"] for item in [*eligible, records[-2]]
     }
     assert set(result.ood.head_disagreement) == set(
         MARKET_EPISODE_ACTIVE_ENSEMBLE_HEAD_WIDTHS
@@ -1390,6 +1409,86 @@ def test_market_episode_query_is_strictly_prior_same_epoch_and_outcome_free() ->
     )
     assert no_ensemble.ood.policy is RetrievalPolicy.ABSTAIN
     assert "deep_ensemble_unavailable" in no_ensemble.ood.reasons
+
+
+def test_market_episode_cross_artifact_query_uses_scoped_episode_identity() -> None:
+    reference = _market_episode_case(
+        "shared-local-identity",
+        1,
+        [1.0, 0.0, 0.0, 0.0],
+        run_manifest_sha256="1" * 64,
+    )
+    reference_lineage = {
+        **MARKET_EPISODE_LINEAGE,
+        "run_manifest_sha256": "1" * 64,
+    }
+    second_reference = _market_episode_case(
+        "shared-local-identity",
+        24 * 60 + 1,
+        [1.0, 0.01, 0.0, 0.0],
+        run_manifest_sha256="2" * 64,
+    )
+    second_reference_lineage = {
+        **MARKET_EPISODE_LINEAGE,
+        "stream_manifest_sha256": "4" * 64,
+        "run_manifest_sha256": "2" * 64,
+    }
+    query_lineage = {
+        **MARKET_EPISODE_LINEAGE,
+        "stream_manifest_sha256": "5" * 64,
+        "run_manifest_sha256": "3" * 64,
+    }
+    index = MarketEpisodeCaseIndex.from_artifacts(
+        (
+            {
+                "records": [reference],
+                "artifact_lineage": reference_lineage,
+                "dataset_contract": MARKET_EPISODE_DATASET_CONTRACT,
+            },
+            {
+                "records": [second_reference],
+                "artifact_lineage": second_reference_lineage,
+                "dataset_contract": MARKET_EPISODE_DATASET_CONTRACT,
+            },
+        ),
+        embedding_dim=DIM,
+    )
+    query = _market_episode_query(
+        2 * 24 * 60 + 1,
+        [1.0, 0.0, 0.0, 0.0],
+        episode="shared-local-identity",
+        split="validation",
+        run_manifest_sha256="3" * 64,
+    )
+    result = index.query(
+        query,
+        artifact_lineage=query_lineage,
+        dataset_contract=MARKET_EPISODE_DATASET_CONTRACT,
+        require_different_calendar_date=True,
+        thresholds=OODThresholds(minimum_neighbours=1),
+        ensemble=_market_episode_ensemble([0.49, 0.50, 0.51], query=query),
+    )
+
+    assert result.ood.eligible_neighbours == 2
+    assert {row["run_manifest_sha256"] for row in result.neighbours} == {
+        "1" * 64,
+        "2" * 64,
+    }
+    assert result.as_dict()["query_run_manifest_sha256"] == "3" * 64
+    assert (
+        result.neighbours[0]["market_episode_id"]
+        == result.query_market_episode_id
+    )
+
+    with pytest.raises(CaseRetrievalError, match="dataset contracts differ"):
+        index.query(
+            query,
+            artifact_lineage=query_lineage,
+            dataset_contract={
+                **MARKET_EPISODE_DATASET_CONTRACT,
+                "source_sha256": "4" * 64,
+            },
+        )
 
 
 def test_market_episode_lineage_and_active_heads_fail_closed() -> None:
@@ -1412,6 +1511,24 @@ def test_market_episode_lineage_and_active_heads_fail_closed() -> None:
     )
     query = _market_episode_query(20, [1.0, 0.0, 0.0, 0.0])
     ensemble = _market_episode_ensemble([0.49, 0.50, 0.51], query=query)
+    wrong_epoch = [dict(row) for row in ensemble]
+    wrong_epoch[0]["market_epoch_id"] = "epoch:other"
+    with pytest.raises(CaseRetrievalError, match="ensemble binding"):
+        index.query(
+            query,
+            artifact_lineage=MARKET_EPISODE_LINEAGE,
+            ensemble=wrong_epoch,
+        )
+
+    missing_run = [dict(row) for row in ensemble]
+    missing_run[0].pop("run_manifest_sha256")
+    with pytest.raises(CaseRetrievalError, match="ensemble run lineage"):
+        index.query(
+            query,
+            artifact_lineage=MARKET_EPISODE_LINEAGE,
+            ensemble=missing_run,
+        )
+
     ensemble[0]["head_predictions"] = {
         **ensemble[0]["head_predictions"],
         "masked_reconstruction": (0.5, 0.5),

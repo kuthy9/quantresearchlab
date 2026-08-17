@@ -34,6 +34,9 @@ from smc_trader.market_representation import (  # noqa: E402
     INFERENCE_INPUT_PROTOCOL,
     MODEL_VERSION,
     NEUTRAL_MARKET_TRANSITION_KINDS,
+    NEUTRAL_REPRESENTATION_LOSS_WEIGHTS,
+    NEUTRAL_SPARSE_ACTIVE_TARGETS,
+    NEUTRAL_SPARSE_DISABLED_TARGETS,
     OUTCOME_BLIND_HEAD_WIDTHS,
     TIMEFRAMES,
     CanonicalOHLCVStore,
@@ -48,17 +51,22 @@ from smc_trader.market_representation import (  # noqa: E402
     SelfSupervisedTarget,
     assign_leakage_safe_splits,
     build_observable_revision_targets,
+    build_neutral_market_revision_targets,
     collate_representation_cases,
     compare_reconstruction_to_baselines,
     compare_validation_to_baseline,
     deduplicate_causal_inputs,
     encode_decision_time_head_records,
     encode_decision_time_records,
+    encode_market_episode_active_head_records,
+    encode_market_episode_records,
     evaluate_outcome_blind_embedding_space,
     majority_class_baselines,
     mask_direct_label_source_tokens,
+    neutral_representation_multitask_loss,
     prepare_representation_case,
     representation_case_from_case_input_row,
+    representation_case_from_market_case_input_row,
     representation_checkpoint_id,
     representation_multitask_loss,
     representation_task_metrics,
@@ -73,6 +81,10 @@ LINEAGE_SCHEMA = "smc-canonical-mtf-lineage-v1"
 AGGREGATION_PROTOCOL = "smc-existing-causal-aggregation-v1"
 EMBEDDING_ARTIFACT_SCHEMA = "smc-decision-time-embeddings-v1"
 HEAD_ARTIFACT_SCHEMA = "smc-decision-time-self-supervised-heads-v1"
+NEUTRAL_EMBEDDING_ARTIFACT_SCHEMA = "smc-neutral-market-episode-embeddings-v1"
+NEUTRAL_HEAD_ARTIFACT_SCHEMA = "smc-neutral-market-episode-active-heads-v1"
+NEUTRAL_MATERIAL_SELECTION_CONTRACT = "first_online_market_episode_material_kind_by_revision_index_v1"
+DATA_SPLITS = ROOT / "configs/data_splits.json"
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -113,12 +125,12 @@ def _parser() -> argparse.ArgumentParser:
         help="separate Parquet/JSONL labels keyed by revision_id",
     )
     parser.add_argument(
-        "--market-case-input-manifest",
-        help="complete input-only market_case_input_shards manifest",
+        "--market-case-input-manifest", action="append", default=[],
+        help="input-only shard manifest; repeat in run-manifest order",
     )
     parser.add_argument(
-        "--market-case-run-manifest",
-        help="run manifest bound by the input shard manifest",
+        "--market-case-run-manifest", action="append", default=[],
+        help="bound run manifest; repeat in input-manifest order",
     )
     parser.add_argument("--neutral-dataset-audit-only", action="store_true")
     parser.add_argument(
@@ -132,6 +144,10 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--market-embedding-kind", choices=NEUTRAL_MARKET_TRANSITION_KINDS
+    )
+    parser.add_argument(
+        "--neutral-fit", action="store_true",
+        help="fit the preregistered three-window smoke or ten-window population",
     )
     parser.add_argument(
         "--canonical-view",
@@ -337,26 +353,42 @@ def _neutral_bound_file(root: Path, value: Any, *, name: str) -> Path:
     return resolved
 
 
-def _neutral_run_identity(run: Mapping[str, Any]) -> Mapping[str, Any]:
+def _neutral_run_identity(
+    run: Mapping[str, Any], *,
+    identity_cache: dict[tuple[str, str, str], Any] | None = None,
+) -> Mapping[str, Any]:
     """Verify each run-constant source/config identity exactly once."""
 
     from smc_trader.market_representation import _validated_market_case_run_manifest
 
     normalized = _validated_market_case_run_manifest(run)
     repository = run.get("repository")
+    cache = identity_cache if identity_cache is not None else {}
+    config_path = Path(normalized["model_config_path"])
+    config_key = ("config", str(config_path), normalized["model_config_sha256"])
     try:
-        config_path = Path(normalized["model_config_path"])
-        config_raw = config_path.read_bytes()
-        config_payload = json.loads(config_raw.decode("utf-8"))
+        cached_config = cache.get(config_key)
+        if cached_config is None:
+            config_raw = config_path.read_bytes()
+            if hashlib.sha256(config_raw).hexdigest() != normalized[
+                "model_config_sha256"
+            ]:
+                raise RepresentationDataError(
+                    "neutral run model_config hash mismatch"
+                )
+            cached_config = json.loads(config_raw.decode("utf-8"))
+            cache[config_key] = cached_config
+        config_payload = cached_config
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise RepresentationDataError("neutral run model config is unreadable") from exc
     source_path = Path(normalized["source_path"])
     if source_path.is_symlink() or not source_path.is_file():
         raise RepresentationDataError("neutral run source is missing")
-    if hashlib.sha256(config_raw).hexdigest() != normalized["model_config_sha256"]:
-        raise RepresentationDataError("neutral run model_config hash mismatch")
-    if _sha256_file(str(source_path)) != normalized["source_sha256"]:
-        raise RepresentationDataError("neutral run source hash mismatch")
+    source_key = ("source", str(source_path), normalized["source_sha256"])
+    if source_key not in cache:
+        if _sha256_file(str(source_path)) != normalized["source_sha256"]:
+            raise RepresentationDataError("neutral run source hash mismatch")
+        cache[source_key] = True
     if not isinstance(config_payload, Mapping):
         raise RepresentationDataError("neutral run model config must be an object")
     try:
@@ -389,6 +421,7 @@ def _neutral_run_identity(run: Mapping[str, Any]) -> Mapping[str, Any]:
 
 def _load_neutral_market_dataset(
     *, input_manifest_path: str | None, run_manifest_path: str | None,
+    identity_cache: dict[tuple[str, str, str], Any] | None = None,
 ) -> Mapping[str, Any]:
     """Load one finalized neutral stream; no library or outcome is consulted."""
 
@@ -408,7 +441,7 @@ def _load_neutral_market_dataset(
         run_manifest_path,
         option="--market-case-run-manifest",
     )
-    run_identity = _neutral_run_identity(run)
+    run_identity = _neutral_run_identity(run, identity_cache=identity_cache)
     keys = {
         "format_version", "artifact", "status", "stream", "rows", "shards",
         "bindings", "schema_fingerprint", "field_types",
@@ -479,6 +512,284 @@ def _load_neutral_market_dataset(
         "input_manifest": manifest, "run_path": run_path, "run_sha": run_sha,
         "run_manifest": run,
         "run_identity": run_identity,
+    }
+
+
+def _neutral_profile_sha256(profile: Mapping[str, Any]) -> str:
+    return hashlib.sha256(
+        json.dumps(dict(profile), sort_keys=True, separators=(",", ":"),
+                   ensure_ascii=False).encode("utf-8")
+    ).hexdigest()
+
+
+def _neutral_split_registry() -> tuple[Any, Mapping[str, Any], str]:
+    from smc_trader.validation import ValidationProtocolError, load_validation_protocol
+
+    try:
+        raw = DATA_SPLITS.read_bytes()
+        payload = json.loads(raw.decode("utf-8"))
+        protocol = load_validation_protocol(DATA_SPLITS)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError,
+            ValidationProtocolError) as exc:
+        raise RepresentationDataError("neutral split registry is invalid") from exc
+    profiles = payload.get("market_case_input_profiles")
+    if not isinstance(profiles, Mapping):
+        raise RepresentationDataError("neutral profiles are missing")
+    return (protocol.neutral_representation_splits, profiles,
+            hashlib.sha256(raw).hexdigest())
+
+
+def _neutral_episode_prefix_exposure(
+    dataset: Mapping[str, Any],
+) -> tuple[pd.Timestamp, pd.Timestamp]:
+    from smc_trader.io import load_ohlcv
+
+    normalized = dataset["run_identity"]["normalized"]
+    try:
+        loaded = load_ohlcv(
+            normalized["source_path"],
+            start=normalized["source_first"],
+            end=normalized["source_last"] + pd.Timedelta(minutes=1),
+        )
+    except (OSError, TypeError, ValueError) as exc:
+        raise RepresentationDataError("neutral prefix source cannot be loaded") from exc
+    frame = loaded.frame
+    if len(frame) != normalized["source_rows"] or not frame.index.is_monotonic_increasing:
+        raise RepresentationDataError("neutral prefix source identity changed")
+    contracts = frame.loc[:, ["symbol", "instrument_id"]].drop_duplicates()
+    expected_contract = (normalized["symbol"], normalized["instrument_id"])
+    if len(contracts) != 1 or (
+        str(contracts.iloc[0]["symbol"]),
+        int(contracts.iloc[0]["instrument_id"]),
+    ) != expected_contract:
+        raise RepresentationDataError("neutral replay frame must contain one contract")
+
+    run_sha = str(dataset["run_sha"])
+    episodes: dict[
+        tuple[str, str, str], tuple[pd.Timestamp, pd.Timestamp]
+    ] = {}
+    for row in dataset["rows"]:
+        try:
+            raw_prefixes = json.loads(str(row["ohlcv_prefix_refs_json"]))
+            ranges = {
+                (
+                    int(prefix["replay_view_1m_row_start"]),
+                    int(prefix["replay_view_1m_row_end_exclusive"]),
+                )
+                for prefix in raw_prefixes
+            }
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise RepresentationDataError("neutral prefix binding is invalid") from exc
+        if len(ranges) != 1:
+            raise RepresentationDataError("neutral prefix differs across timeframes")
+        start_index, end_index = next(iter(ranges))
+        if start_index < 0 or end_index <= start_index or end_index > len(frame):
+            raise RepresentationDataError("neutral prefix exceeds its replay frame")
+        start_at = pd.Timestamp(frame.index[start_index])
+        end_at = pd.Timestamp(frame.index[end_index - 1]) + pd.Timedelta(minutes=1)
+        key = (
+            run_sha,
+            str(row["market_epoch_id"]),
+            str(row["market_episode_id"]),
+        )
+        prior = episodes.get(key)
+        episodes[key] = (
+            start_at if prior is None else min(start_at, prior[0]),
+            end_at if prior is None else max(end_at, prior[1]),
+        )
+    if not episodes:
+        raise RepresentationDataError("neutral fit dataset contains no MarketEpisode")
+    return (min(value[0] for value in episodes.values()),
+            max(value[1] for value in episodes.values()))
+
+
+def _observed_completed_sessions(
+    source_path: str,
+    *,
+    start: pd.Timestamp,
+    end: pd.Timestamp,
+) -> tuple[str, ...]:
+    from smc_trader.io import load_ohlcv
+    from smc_trader.market_clock import _session_bounds, is_registered_trading_minute
+
+    if end <= start:
+        return ()
+    try:
+        frame = load_ohlcv(source_path, start=start, end=end).frame
+    except (OSError, TypeError, ValueError) as exc:
+        raise RepresentationDataError("neutral embargo source cannot be loaded") from exc
+    if frame.empty:
+        return ()
+    local = pd.DatetimeIndex(frame.index).tz_convert("America/New_York")
+    # Shift Globex 18:00-17:00 bars onto one local session label.
+    labels = (local + pd.Timedelta(hours=6)).normalize()
+    complete: list[str] = []
+    for raw_label in sorted(set(labels)):
+        label = pd.Timestamp(raw_label).date()
+        bounds = _session_bounds(label)
+        if bounds is None:
+            continue
+        opened, closed = bounds
+        if opened < start or closed > end:
+            continue
+        actual = local[labels == raw_label]
+        expected = pd.DatetimeIndex(
+            stamp
+            for stamp in pd.date_range(
+                opened,
+                closed - pd.Timedelta(minutes=1),
+                freq="1min",
+            )
+            if is_registered_trading_minute(stamp)
+        )
+        if actual.equals(expected):
+            complete.append(label.isoformat())
+    return tuple(complete)
+
+
+def _validate_neutral_actual_exposure_boundaries(
+    datasets: Sequence[Mapping[str, Any]],
+    registry: Any,
+) -> tuple[Mapping[str, Any], ...]:
+    ordered = sorted(datasets, key=lambda item: item["registered_window"].warmup_start)
+    observed: list[Mapping[str, Any]] = []
+    for left, right in zip(ordered[:-1], ordered[1:]):
+        purge_end = left["prefix_exposure_end"] + pd.DateOffset(
+            days=registry.purge_calendar_days
+        )
+        if right["prefix_exposure_start"] <= purge_end:
+            raise RepresentationDataError("neutral prefix violates 14-day purge/embargo")
+        sessions = _observed_completed_sessions(
+            left["run_identity"]["normalized"]["source_path"],
+            start=purge_end,
+            end=right["prefix_exposure_start"],
+        )
+        if len(sessions) < registry.embargo_trading_days:
+            raise RepresentationDataError(
+                "neutral prefix embargo has fewer than five completed sessions"
+            )
+        observed.append(
+            {
+                "left_profile": left["profile_name"],
+                "right_profile": right["profile_name"],
+                "purge_end": purge_end.isoformat(),
+                "next_prefix_start": right["prefix_exposure_start"].isoformat(),
+                "observed_session_count": len(sessions),
+                "first_observed_session": sessions[0],
+                "last_observed_session": sessions[-1],
+            }
+        )
+    return tuple(observed)
+
+
+def _load_neutral_fit_collection(
+    *,
+    input_manifest_paths: Sequence[str],
+    run_manifest_paths: Sequence[str],
+) -> Mapping[str, Any]:
+    if len(input_manifest_paths) != len(run_manifest_paths) or len(input_manifest_paths) < 3:
+        raise RepresentationDataError(
+            "neutral fit requires paired input/run manifests for all three roles"
+        )
+    registry, raw_profiles, registry_sha = _neutral_split_registry()
+    identity_cache: dict[tuple[str, str, str], Any] = {}
+    datasets: list[dict[str, Any]] = []
+    selected_profiles: set[str] = set()
+    revision_origins: dict[str, str] = {}
+    for input_path, run_path in zip(input_manifest_paths, run_manifest_paths, strict=True):
+        loaded = dict(
+            _load_neutral_market_dataset(
+                input_manifest_path=input_path,
+                run_manifest_path=run_path,
+                identity_cache=identity_cache,
+            )
+        )
+        run = loaded["run_manifest"]
+        profile_name = str(run["profile"]["name"])
+        profile = raw_profiles.get(profile_name)
+        window = registry.windows.get(profile_name)
+        if not isinstance(profile, Mapping) or window is None:
+            raise RepresentationDataError(
+                "neutral fit run uses an unregistered representation profile"
+            )
+        if run["profile"]["identity"] != _neutral_profile_sha256(profile) or (
+            profile.get("representation_split_role") != window.representation_split_role
+        ):
+            raise RepresentationDataError(
+                "neutral fit profile identity or role was tampered"
+            )
+        normalized = loaded["run_identity"]["normalized"]
+        if (
+            normalized["window_start"] != window.start
+            or normalized["window_end_exclusive"] != window.end_exclusive
+            or normalized["window_role"] != window.allowed_ohlcv_role
+            or run["window"]["warmup_days"] != registry.warmup_calendar_days
+            or normalized["symbol"] != window.expected_symbol
+            or normalized["instrument_id"] != window.expected_instrument_id
+        ):
+            raise RepresentationDataError("neutral fit run differs from its registry")
+        if loaded["run_identity"]["repository"] is None:
+            raise RepresentationDataError("neutral fit run must bind one commit")
+        if profile_name in selected_profiles:
+            raise RepresentationDataError("neutral fit profile is duplicated")
+        selected_profiles.add(profile_name)
+        role = window.representation_split_role
+        for row in loaded["rows"]:
+            revision_id = str(row["revision_id"])
+            if revision_id in revision_origins:
+                raise RepresentationDataError(
+                    "neutral fit revision identity is duplicated across runs"
+                )
+            revision_origins[revision_id] = loaded["run_sha"]
+        loaded.update(profile_name=profile_name,
+                      representation_split_role=role, registered_window=window)
+        datasets.append(loaded)
+
+    smoke_profiles = set(registry.smoke_profiles.values())
+    full_profiles = set(registry.windows)
+    if selected_profiles == smoke_profiles:
+        scope = "three_window_pipeline_smoke"
+    elif selected_profiles == full_profiles:
+        scope = "ten_window_registered_fit"
+    else:
+        raise RepresentationDataError("neutral fit population is not preregistered")
+    if {item["representation_split_role"] for item in datasets} != {
+        "train", "validation", "holdout"
+    }:
+        raise RepresentationDataError("neutral fit requires all three roles")
+    compatibility = {
+        "source_sha256": lambda item: item["run_identity"]["normalized"]["source_sha256"],
+        "model_config_sha256": lambda item: item["run_identity"]["normalized"]["model_config_sha256"],
+        "market_case_protocol": lambda item: json.dumps(
+            item["run_manifest"]["market_case_input_identity"], sort_keys=True,
+            separators=(",", ":"), ensure_ascii=False,
+        ),
+    }
+    identities = {name: {getter(item) for item in datasets}
+                  for name, getter in compatibility.items()}
+    if any(len(values) != 1 for values in identities.values()):
+        raise RepresentationDataError(
+            "neutral fit runs have incompatible source/config/protocol identity"
+        )
+
+    for dataset in datasets:
+        start, end = _neutral_episode_prefix_exposure(dataset)
+        window = dataset["registered_window"]
+        if start < window.warmup_start or end > window.end_exclusive:
+            raise RepresentationDataError("neutral prefix escaped its replay window")
+        dataset.update(prefix_exposure_start=start, prefix_exposure_end=end)
+    observed_embargo_sessions = _validate_neutral_actual_exposure_boundaries(
+        datasets, registry
+    )
+    return {
+        "datasets": tuple(datasets),
+        "scope": scope,
+        "registry": registry,
+        "registry_sha256": registry_sha,
+        "source_sha256": next(iter(identities["source_sha256"])),
+        "model_config_sha256": next(iter(identities["model_config_sha256"])),
+        "timezone": datasets[0]["run_identity"]["normalized"]["timezone"],
+        "observed_embargo_sessions": observed_embargo_sessions,
     }
 
 
@@ -593,12 +904,8 @@ def _neutral_canonical_store(
     from smc_trader.scene_graph import parse_scale_specs
 
     if not cases:
-        raise RepresentationDataError("neutral smoke requires at least one case")
+        raise RepresentationDataError("neutral dataset requires at least one case")
     epochs = {case.market_epoch_id for case in cases}
-    if len(epochs) != 1:
-        raise RepresentationDataError(
-            "neutral single-batch smoke requires one reset-free market epoch"
-        )
     identity = dataset["run_identity"]
     normalized, config = identity["normalized"], identity["model_config"]
     scales = config.get("scales")
@@ -656,15 +963,14 @@ def _neutral_canonical_store(
     if any(not completed[timeframe] for timeframe in TIMEFRAMES):
         raise RepresentationDataError("neutral source has an empty canonical timeframe")
 
-    epoch = next(iter(epochs))
     source_sha = normalized["source_sha256"]
     frames: dict[CanonicalSourceKey, pd.DataFrame] = {}
     ticks: dict[CanonicalSourceKey, float] = {}
     availability: dict[CanonicalSourceKey, str] = {}
+    canonical_frames: dict[str, pd.DataFrame] = {}
     for timeframe in TIMEFRAMES:
         candles = completed[timeframe]
-        key = CanonicalSourceKey(epoch, timeframe, source_sha)
-        frame = pd.DataFrame(
+        canonical_frames[timeframe] = pd.DataFrame(
             {
                 "open": [float(candle.open) for candle in candles],
                 "high": [float(candle.high) for candle in candles],
@@ -674,9 +980,12 @@ def _neutral_canonical_store(
             },
             index=pd.DatetimeIndex([candle.end for candle in candles]),
         )
-        frames[key] = frame
-        ticks[key] = float(normalized["tick_size"])
-        availability[key] = BAR_END_INDEX_BINDING
+    for epoch in epochs:
+        for timeframe, frame in canonical_frames.items():
+            key = CanonicalSourceKey(epoch, timeframe, source_sha)
+            frames[key] = frame
+            ticks[key] = float(normalized["tick_size"])
+            availability[key] = BAR_END_INDEX_BINDING
     store = CanonicalOHLCVStore(
         frames,
         tick_sizes=ticks,
@@ -685,6 +994,7 @@ def _neutral_canonical_store(
     return store, {
         "source_rows": len(loaded.frame),
         "completed_1m_bars": completed_1m,
+        "market_epochs": len(epochs),
         "canonical_rows": {
             timeframe: len(completed[timeframe]) for timeframe in TIMEFRAMES
         },
@@ -783,9 +1093,387 @@ def _neutral_single_batch_smoke_report(
     }
 
 
+def _prepare_neutral_fit_collection(
+    collection: Mapping[str, Any],
+) -> Mapping[str, Any]:
+    examples: list[PreparedRepresentationCase] = []
+    targets: list[SelfSupervisedTarget] = []
+    splits: dict[str, str] = {}
+    origins: dict[str, str] = {}
+    for dataset in collection["datasets"]:
+        rows, run = dataset["rows"], dataset["run_manifest"]
+        cases = tuple(representation_case_from_market_case_input_row(row, run)
+                      for row in rows)
+        target_records = build_neutral_market_revision_targets(rows, run)
+        if set(target_records) != {case.revision_id for case in cases}:
+            raise RepresentationDataError("neutral targets omit input revisions")
+        store, _ = _neutral_canonical_store(dataset, cases)
+        prepared = tuple(prepare_representation_case(case, store) for case in cases)
+        role = str(dataset["representation_split_role"])
+        for example in prepared:
+            revision_id = example.case.revision_id
+            if revision_id in splits:
+                raise RepresentationDataError("neutral fit duplicate revision")
+            splits[revision_id] = role
+            origins[revision_id] = str(dataset["run_sha"])
+            examples.append(example)
+            targets.append(target_records[revision_id].target)
+    if set(splits.values()) != {"train", "validation", "holdout"}:
+        raise RepresentationDataError("neutral fit prepared incomplete split roles")
+    return {"examples": tuple(examples), "targets": tuple(targets),
+            "splits": splits, "origins": origins}
+
+
+def _neutral_role_metrics(
+    model: MarketRepresentationModel,
+    examples: Sequence[PreparedRepresentationCase],
+    targets: Sequence[SelfSupervisedTarget],
+    indices: Sequence[int],
+    *, batch_size: int, seed: int, device: Any,
+) -> Mapping[str, Any]:
+    import torch
+
+    sums: Counter[str] = Counter()
+    rows = 0
+    model.eval()
+    for batch_index, selected in enumerate(_batches(indices, batch_size)):
+        batch, target_batch = collate_representation_cases(
+            tuple(mask_direct_label_source_tokens(examples[index]) for index in selected),
+            targets=tuple(targets[index] for index in selected),
+            mask_probability=0.15, seed=seed + batch_index,
+        )
+        assert target_batch is not None
+        batch = batch.to(device)
+        target_batch = target_batch.to(device)
+        with torch.no_grad():
+            breakdown = neutral_representation_multitask_loss(model(batch), batch,
+                                                               target_batch)
+        weight = len(selected)
+        rows += weight
+        sums["total"] += float(breakdown.total.detach().cpu()) * weight
+        for name, value in breakdown.components.items():
+            sums[name] += float(value.detach().cpu()) * weight
+    if rows < 1:
+        raise RepresentationDataError("neutral role evaluation is empty")
+    disabled = ("next_event", "next_event_time", "displacement", "draw_consumed")
+    if any(sums[name] != 0.0 for name in disabled):
+        raise RepresentationDataError("neutral evaluation enabled a disabled head")
+    return {
+        "rows": rows,
+        "total_loss": sums["total"] / rows,
+        "objective_losses": {name: sums[name] / rows for name in (
+            "candle_reconstruction", "event_reconstruction",
+            "next_lifecycle", "scale_alignment",
+        )},
+        "label_sources_masked": True,
+        "gradient_enabled": False,
+    }
+
+
+def _train_neutral_member(
+    examples: Sequence[PreparedRepresentationCase],
+    targets: Sequence[SelfSupervisedTarget],
+    splits: Mapping[str, str],
+    args: argparse.Namespace,
+) -> tuple[MarketRepresentationModel, Mapping[str, Any]]:
+    require_torch()
+    import torch
+
+    if args.epochs < 1 or args.batch_size < 1 or args.learning_rate <= 0:
+        raise RepresentationDataError("training hyperparameters must be positive")
+    random.seed(args.seed)
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
+    torch.use_deterministic_algorithms(True)
+    device = torch.device(args.device)
+    if device.type == "cuda" and not torch.cuda.is_available():
+        raise RepresentationDataError("requested CUDA device is unavailable")
+    if device.type == "mps" and not torch.backends.mps.is_available():
+        raise RepresentationDataError("requested MPS device is unavailable")
+    split_indices = {role: [index for index, example in enumerate(examples)
+                            if splits[example.case.revision_id] == role]
+                     for role in ("train", "validation", "holdout")}
+    if any(not indices for indices in split_indices.values()):
+        raise RepresentationDataError("neutral fit has an empty split")
+    model = MarketRepresentationModel().to(device)
+    optimizer = torch.optim.AdamW(
+        model.parameters(), lr=args.learning_rate, weight_decay=1e-4
+    )
+    epoch_losses: list[float] = []
+    for epoch in range(args.epochs):
+        model.train()
+        order = list(split_indices["train"])
+        random.Random(args.seed + epoch).shuffle(order)
+        losses: list[float] = []
+        for batch_index, selected in enumerate(_batches(order, args.batch_size)):
+            selected_examples = tuple(mask_direct_label_source_tokens(examples[index])
+                                      for index in selected)
+            batch, target_batch = collate_representation_cases(
+                selected_examples,
+                targets=tuple(targets[index] for index in selected),
+                mask_probability=0.15,
+                seed=args.seed + epoch * 10_000 + batch_index,
+            )
+            assert target_batch is not None
+            batch = batch.to(device)
+            target_batch = target_batch.to(device)
+            optimizer.zero_grad(set_to_none=True)
+            breakdown = neutral_representation_multitask_loss(model(batch), batch,
+                                                               target_batch)
+            if not bool(torch.isfinite(breakdown.total)):
+                raise RepresentationDataError("non-finite neutral training loss")
+            breakdown.total.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            optimizer.step()
+            losses.append(float(breakdown.total.detach().cpu()))
+        epoch_losses.append(float(np.mean(losses)))
+    metrics = {
+        "model_version": MODEL_VERSION,
+        "parameter_count": model.parameter_count(),
+        "embedding_dim": model.config.embedding_dim,
+        "epochs": args.epochs,
+        "epoch_training_loss": epoch_losses,
+        "split_counts": {role: len(indices) for role, indices in split_indices.items()},
+        "objectives": {
+            "loss_weights": dict(NEUTRAL_REPRESENTATION_LOSS_WEIGHTS),
+            "active_heads": list(NEUTRAL_SPARSE_ACTIVE_TARGETS),
+            "disabled_heads": list(NEUTRAL_SPARSE_DISABLED_TARGETS),
+        },
+        "validation": _neutral_role_metrics(
+            model, examples, targets, split_indices["validation"],
+            batch_size=args.batch_size, seed=args.seed + 900_000, device=device),
+        "holdout": _neutral_role_metrics(
+            model, examples, targets, split_indices["holdout"],
+            batch_size=args.batch_size, seed=args.seed + 950_000, device=device),
+        "optimized_roles": ["train"],
+        "validation_used_for_optimization": False,
+        "holdout_used_for_optimization": False,
+        "threshold_search_performed": False,
+        "outcome_fields_used": False,
+        "model_capability_validated": False,
+        "trading_edge_claimed": False,
+    }
+    return model, metrics
+
+
+def _neutral_fit_lineage(collection: Mapping[str, Any]) -> Mapping[str, Any]:
+    registry = collection["registry"]
+    datasets = sorted(collection["datasets"], key=lambda item: item["profile_name"])
+    protocol_identity = datasets[0]["run_manifest"]["market_case_input_identity"]
+    return {
+        "input_runs": [
+            {
+                "profile_name": item["profile_name"],
+                "split_role": item["representation_split_role"],
+                "input_manifest_path": str(item["input_path"]),
+                "input_manifest_sha256": item["input_sha"],
+                "run_manifest_path": str(item["run_path"]),
+                "run_manifest_sha256": item["run_sha"],
+                "repository_commit": item["run_identity"]["repository"]["commit"],
+            }
+            for item in datasets
+        ],
+        "source_identity": {"sha256": collection["source_sha256"]},
+        "model_config_identity": {"sha256": collection["model_config_sha256"], "timezone": collection["timezone"]},
+        "market_case_protocol": protocol_identity,
+        "representation_feature_schema_version": FEATURE_SCHEMA_VERSION,
+        "split_protocol": {
+            "registry_sha256": collection["registry_sha256"],
+            "protocol_version": registry.protocol_version,
+            "warmup_calendar_days": registry.warmup_calendar_days,
+            "purge_calendar_days": registry.purge_calendar_days,
+            "embargo_trading_days": registry.embargo_trading_days,
+            "market_episode_split_key": list(registry.episode_split_key),
+            "actual_prefix_exposure_verified": True,
+            "observed_completed_session_embargo": list(collection["observed_embargo_sessions"]),
+        },
+    }
+
+
+def _neutral_export_records(
+    model: MarketRepresentationModel,
+    examples: Sequence[PreparedRepresentationCase],
+    splits: Mapping[str, str],
+    origins: Mapping[str, str],
+    *,
+    member_id: str,
+    batch_size: int,
+    device: str,
+    embeddings: bool,
+) -> tuple[list[Mapping[str, Any]], list[Mapping[str, Any]]]:
+    embedding_rows: list[Mapping[str, Any]] = []
+    head_rows: list[Mapping[str, Any]] = []
+    run_groups: dict[str, list[PreparedRepresentationCase]] = {}
+    for example in examples:
+        run_groups.setdefault(origins[example.case.revision_id], []).append(example)
+    for run_sha, run_examples in sorted(run_groups.items()):
+        if embeddings:
+            for kind in NEUTRAL_MARKET_TRANSITION_KINDS:
+                selected = [example for example in run_examples
+                            if kind in example.case.transition_kinds]
+                grains = [(item.case.market_epoch_id, item.case.market_episode_id, kind)
+                          for item in selected]
+                if len(grains) != len(set(grains)):
+                    raise RepresentationDataError("duplicate material occurrence")
+                for batch_examples in _batches(selected, batch_size):
+                    batch, _ = collate_representation_cases(
+                        tuple(batch_examples), mask_probability=0.0, seed=0
+                    )
+                    records = encode_market_episode_records(
+                        model, batch.to(device), tuple(batch_examples),
+                        split_roles=splits, material_kind=kind)
+                    for record in records:
+                        embedding_rows.append({**record, "run_manifest_sha256": run_sha})
+        for batch_examples in _batches(run_examples, batch_size):
+            batch, _ = collate_representation_cases(
+                tuple(batch_examples), mask_probability=0.0, seed=0
+            )
+            records = encode_market_episode_active_head_records(
+                model, batch.to(device), tuple(batch_examples), member_id=member_id)
+            for record in records:
+                head_rows.append({
+                    **record, "run_manifest_sha256": run_sha,
+                    "data_split": splits[str(record["revision_id"])],
+                })
+    return embedding_rows, head_rows
+
+
+def _write_neutral_artifact(
+    path: str | Path,
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    schema: str,
+    checkpoint_ids: Sequence[str],
+    lineage: Mapping[str, Any],
+) -> Path:
+    if not rows:
+        raise RepresentationDataError("neutral export produced no records")
+    for row in rows:
+        if (
+            row.get("outcome_fields_used") is not False
+            or "outcome" in row
+            or "frozen_outcome" in row
+        ):
+            raise RepresentationDataError("neutral export contains outcome data")
+    destination = _atomic_jsonl(path, rows)
+    manifest = {
+        "schema": schema,
+        "status": "complete",
+        "records": len(rows),
+        "artifact_path": destination.name,
+        "artifact_sha256": _sha256_file(str(destination)),
+        "model_version": MODEL_VERSION,
+        "feature_schema_version": FEATURE_SCHEMA_VERSION,
+        "input_protocol": INFERENCE_INPUT_PROTOCOL,
+        "selection_contract": NEUTRAL_MATERIAL_SELECTION_CONTRACT,
+        "checkpoint_ids": sorted(checkpoint_ids),
+        "split_roles": sorted({str(row["data_split"]) for row in rows}),
+        "material_kinds": list(NEUTRAL_MARKET_TRANSITION_KINDS),
+        "head_schema": (
+            {name: OUTCOME_BLIND_HEAD_WIDTHS[name]
+             for name in NEUTRAL_SPARSE_ACTIVE_TARGETS}
+            if schema == NEUTRAL_HEAD_ARTIFACT_SCHEMA
+            else None
+        ),
+        "lineage": lineage,
+        "outcome_fields_used": False,
+        "model_capability_validated": False,
+    }
+    manifest_path = _artifact_manifest_path(destination)
+    _atomic_json(manifest_path, manifest)
+    return manifest_path
+
+
+def _neutral_fit_report(
+    collection: Mapping[str, Any],
+    args: argparse.Namespace,
+) -> Mapping[str, Any]:
+    prepared = _prepare_neutral_fit_collection(collection)
+    examples = prepared["examples"]
+    targets = prepared["targets"]
+    splits = prepared["splits"]
+    origins = prepared["origins"]
+    lineage = _neutral_fit_lineage(collection)
+    members: list[Mapping[str, Any]] = []
+    checkpoint_ids: set[str] = set()
+    embedding_rows: list[Mapping[str, Any]] = []
+    head_rows: list[Mapping[str, Any]] = []
+    for member_index in range(args.ensemble_size):
+        member_id = f"member-{member_index:03d}"
+        member_args = argparse.Namespace(**vars(args))
+        member_args.seed = args.seed + member_index * 100_003
+        model, metrics = _train_neutral_member(examples, targets, splits, member_args)
+        checkpoint_id = representation_checkpoint_id(model)
+        if checkpoint_id in checkpoint_ids:
+            raise RepresentationDataError("neutral member checkpoint is duplicated")
+        checkpoint_ids.add(checkpoint_id)
+        base = Path(args.checkpoint).resolve()
+        checkpoint_path = base.with_name(
+            f"{base.stem}.{member_id}{base.suffix or '.pt'}")
+        save_representation_checkpoint(
+            checkpoint_path,
+            model,
+            metadata={
+                "training_contract": "neutral-market-representation-v1",
+                "member_id": member_id,
+                "seed": member_args.seed,
+                "split_counts": metrics["split_counts"],
+                "lineage": lineage,
+                "outcome_fields_used": False,
+                "model_capability_validated": False,
+            },
+        )
+        member_embeddings, member_heads = _neutral_export_records(
+            model, examples, splits, origins, member_id=member_id,
+            batch_size=args.batch_size, device=args.device,
+            embeddings=member_index == 0)
+        embedding_rows.extend(member_embeddings)
+        head_rows.extend(member_heads)
+        members.append({
+            "member_id": member_id, "seed": member_args.seed,
+            "checkpoint_id": checkpoint_id, "checkpoint_path": str(checkpoint_path),
+            "metrics": metrics,
+        })
+    embedding_manifest = _write_neutral_artifact(
+        args.embedding_output, embedding_rows, schema=NEUTRAL_EMBEDDING_ARTIFACT_SCHEMA,
+        checkpoint_ids=(members[0]["checkpoint_id"],), lineage=lineage)
+    head_manifest = _write_neutral_artifact(
+        args.head_output, head_rows, schema=NEUTRAL_HEAD_ARTIFACT_SCHEMA,
+        checkpoint_ids=tuple(item["checkpoint_id"] for item in members),
+        lineage=lineage)
+    return {
+        "schema_version": 1,
+        "mode": "neutral_market_representation_fit",
+        "pipeline_scope": collection["scope"],
+        "rows": len(examples),
+        "split_rows": dict(Counter(splits.values())),
+        "ensemble_members": members,
+        "artifacts": {
+            "embeddings": {
+                "path": str(Path(args.embedding_output).resolve()),
+                "manifest": str(embedding_manifest), "records": len(embedding_rows)},
+            "active_heads": {
+                "path": str(Path(args.head_output).resolve()),
+                "manifest": str(head_manifest), "records": len(head_rows)},
+        },
+        "lineage": lineage,
+        "training_performed": True,
+        "validation_used_for_optimization": False,
+        "holdout_used_for_optimization": False,
+        "threshold_search_performed": False,
+        "outcome_fields_used": False,
+        "model_capability_validated": False,
+        "retrieval_quality_validated": False,
+        "ood_capability_validated": False,
+        "trading_edge_claimed": False,
+        "action_value_claimed": False,
+    }
+
+
 def _neutral_mode_requested(args: argparse.Namespace) -> bool:
     return any((
         args.neutral_dataset_audit_only, args.neutral_single_batch_smoke,
+        args.neutral_fit,
         args.market_case_input_manifest, args.market_case_run_manifest,
         args.market_embedding_kind,
     ))
@@ -794,16 +1482,25 @@ def _neutral_mode_requested(args: argparse.Namespace) -> bool:
 def _validate_neutral_cli(args: argparse.Namespace, *, argv: Sequence[str]) -> None:
     modes = int(args.neutral_dataset_audit_only) + int(
         args.neutral_single_batch_smoke
-    )
+    ) + int(args.neutral_fit)
     if modes != 1:
         raise RepresentationDataError(
-            "neutral datasets require exactly one audit or single-batch smoke mode"
+            "neutral datasets require exactly one audit, single-batch smoke or fit mode"
         )
-    required = {
-        "--market-case-input-manifest": args.market_case_input_manifest,
-        "--market-case-run-manifest": args.market_case_run_manifest,
-    }
-    missing = sorted(key for key, value in required.items() if not value)
+    if (
+        not args.market_case_input_manifest
+        or not args.market_case_run_manifest
+        or len(args.market_case_input_manifest)
+        != len(args.market_case_run_manifest)
+    ):
+        raise RepresentationDataError(
+            "neutral mode requires paired --market-case-input-manifest and "
+            "--market-case-run-manifest"
+        )
+    if not args.neutral_fit and len(args.market_case_input_manifest) != 1:
+        raise RepresentationDataError(
+            "neutral audit/smoke accepts exactly one input/run manifest pair"
+        )
     legacy = any((
         args.synthetic_smoke, args.case_input_shard, args.case_input_manifest,
         args.case_input_manifest_sha, args.case_run_manifest_sha,
@@ -811,25 +1508,55 @@ def _validate_neutral_cli(args: argparse.Namespace, *, argv: Sequence[str]) -> N
         args.self_supervised_targets,
     ))
     explicit = {token.split("=", 1)[0] for token in argv if token.startswith("--")}
-    training = {
+    fit_options = {
         "--canonical-view", "--canonical-view-sha", "--canonical-lineage-manifest",
         "--canonical-lineage-manifest-sha", "--tick-size", "--availability-time",
         "--epochs", "--ensemble-size", "--batch-size", "--learning-rate", "--seed",
         "--device", "--checkpoint", "--embedding-output", "--head-output",
         "--embedding-stage",
     }
-    if missing:
-        raise RepresentationDataError("neutral mode requires: " + ", ".join(missing))
     if legacy:
         raise RepresentationDataError("neutral and legacy inputs are mutually exclusive")
-    if args.neutral_single_batch_smoke and args.market_embedding_kind:
+    if (args.neutral_single_batch_smoke or args.neutral_fit) and args.market_embedding_kind:
         raise RepresentationDataError(
             "neutral embedding-kind selection is audit-only"
         )
-    if forbidden := sorted(explicit & training):
+    if not args.neutral_fit and (forbidden := sorted(explicit & fit_options)):
         raise RepresentationDataError(
             "neutral modes forbid training/export options: " + ", ".join(forbidden)
         )
+    if args.neutral_fit:
+        forbidden_fit = sorted(
+            explicit
+            & {
+                "--canonical-view", "--canonical-view-sha",
+                "--canonical-lineage-manifest", "--canonical-lineage-manifest-sha",
+                "--tick-size", "--availability-time", "--embedding-stage",
+            }
+        )
+        if forbidden_fit:
+            raise RepresentationDataError(
+                "neutral fit forbids legacy feature/export options: "
+                + ", ".join(forbidden_fit)
+            )
+        if "--ensemble-size" not in explicit:
+            args.ensemble_size = 3
+        if args.ensemble_size < 3:
+            raise RepresentationDataError(
+                "neutral fit requires at least three independent ensemble members"
+            )
+        required_outputs = {
+            "--checkpoint": args.checkpoint,
+            "--embedding-output": args.embedding_output,
+            "--head-output": args.head_output,
+        }
+        missing_outputs = sorted(
+            name for name, value in required_outputs.items() if not value
+        )
+        if missing_outputs:
+            raise RepresentationDataError(
+                "neutral fit requires: " + ", ".join(missing_outputs)
+            )
 
 
 def _validate_case_input_stream_manifest(
@@ -1813,12 +2540,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(raw_argv)
     if _neutral_mode_requested(args):
         _validate_neutral_cli(args, argv=raw_argv)
-        dataset = _load_neutral_market_dataset(
-            input_manifest_path=args.market_case_input_manifest,
-            run_manifest_path=args.market_case_run_manifest,
-        )
-        report = _strict_jsonable(
-            (
+        if args.neutral_fit:
+            collection = _load_neutral_fit_collection(
+                input_manifest_paths=args.market_case_input_manifest,
+                run_manifest_paths=args.market_case_run_manifest,
+            )
+            raw_report = _neutral_fit_report(collection, args)
+        else:
+            dataset = _load_neutral_market_dataset(
+                input_manifest_path=args.market_case_input_manifest[0],
+                run_manifest_path=args.market_case_run_manifest[0],
+            )
+            raw_report = (
                 _neutral_dataset_audit_report(
                     dataset,
                     embedding_kind=args.market_embedding_kind,
@@ -1826,7 +2559,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 if args.neutral_dataset_audit_only
                 else _neutral_single_batch_smoke_report(dataset)
             )
-        )
+        report = _strict_jsonable(raw_report)
         if args.metrics_output:
             _atomic_json(args.metrics_output, report)
         print(json.dumps(report, sort_keys=True, allow_nan=False))

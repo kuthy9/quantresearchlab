@@ -74,6 +74,19 @@ MARKET_EPISODE_ACTIVE_ENSEMBLE_HEAD_WIDTHS: Mapping[str, int] = {
     name: OUTCOME_BLIND_HEAD_WIDTHS[name]
     for name in ("next_lifecycle", "scale_direction_alignment")
 }
+MARKET_EPISODE_DATASET_CONTRACT_KEYS = frozenset(
+    {
+        "source_sha256",
+        "model_config_sha256",
+        "market_case_protocol",
+        "representation_feature_schema_version",
+        "embedding_input_protocol",
+        "selection_contract",
+        "embedding_model_version",
+        "embedding_checkpoint_id",
+        "calendar_timezone",
+    }
+)
 _MARKET_EPISODE_MATERIAL_KIND_ORDER = {
     name: index for index, name in enumerate(MARKET_EPISODE_MATERIAL_KINDS)
 }
@@ -190,6 +203,49 @@ def _normalise_market_episode_artifact_lineage(
         ):
             raise CaseRetrievalError(f"MarketEpisode {name} is not a SHA-256")
         output[name] = digest
+    if (
+        value.get("selection_contract")
+        != MARKET_EPISODE_FIRST_OCCURRENCE_SELECTION_CONTRACT
+    ):
+        raise CaseRetrievalError("MarketEpisode selector contract is invalid")
+    output["selection_contract"] = (
+        MARKET_EPISODE_FIRST_OCCURRENCE_SELECTION_CONTRACT
+    )
+    return output
+
+
+def normalise_market_episode_dataset_contract(
+    value: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Canonical compatibility identity shared by independent time splits."""
+
+    if value is None or set(value) != MARKET_EPISODE_DATASET_CONTRACT_KEYS:
+        raise CaseRetrievalError("MarketEpisode dataset contract keys are invalid")
+    output: dict[str, Any] = {}
+    for name in (
+        "source_sha256",
+        "model_config_sha256",
+        "embedding_checkpoint_id",
+    ):
+        digest = str(value.get(name, "")).strip().lower()
+        if len(digest) != 64 or any(
+            character not in "0123456789abcdef" for character in digest
+        ):
+            raise CaseRetrievalError(f"MarketEpisode {name} is not a SHA-256")
+        output[name] = digest
+    protocol = value.get("market_case_protocol")
+    if not isinstance(protocol, Mapping) or not protocol:
+        raise CaseRetrievalError("MarketEpisode protocol contract is invalid")
+    output["market_case_protocol"] = _jsonable(protocol)
+    for name in (
+        "representation_feature_schema_version",
+        "embedding_model_version",
+        "calendar_timezone",
+    ):
+        output[name] = _nonempty(value.get(name), name)
+    if value.get("embedding_input_protocol") != INFERENCE_INPUT_PROTOCOL:
+        raise CaseRetrievalError("MarketEpisode input protocol is invalid")
+    output["embedding_input_protocol"] = INFERENCE_INPUT_PROTOCOL
     if (
         value.get("selection_contract")
         != MARKET_EPISODE_FIRST_OCCURRENCE_SELECTION_CONTRACT
@@ -900,6 +956,7 @@ class MarketEpisodeEmbeddingRecord:
     revision_id: str
     revision_index: int
     material_kind: str
+    run_manifest_sha256: str
     market_epoch_id: str
     market_episode_id: str
     entry_location_id: str
@@ -915,6 +972,7 @@ class MarketEpisodeEmbeddingRecord:
     def __post_init__(self) -> None:
         for name in (
             "revision_id",
+            "run_manifest_sha256",
             "market_epoch_id",
             "market_episode_id",
             "entry_location_id",
@@ -923,6 +981,11 @@ class MarketEpisodeEmbeddingRecord:
             "embedding_checkpoint_id",
         ):
             object.__setattr__(self, name, _nonempty(getattr(self, name), name))
+        if len(self.run_manifest_sha256) != 64 or any(
+            character not in "0123456789abcdef"
+            for character in self.run_manifest_sha256
+        ):
+            raise CaseRetrievalError("MarketEpisode run manifest SHA is invalid")
         if isinstance(self.revision_index, bool) or not isinstance(
             self.revision_index, (int, np.integer)
         ) or int(self.revision_index) < 0:
@@ -994,6 +1057,9 @@ class MarketEpisodeEmbeddingRecord:
             revision_id=_first_present(record, "revision_id"),
             revision_index=_first_present(record, "revision_index"),
             material_kind=selected_kind,
+            run_manifest_sha256=_first_present(
+                record, "run_manifest_sha256"
+            ),
             market_epoch_id=_first_present(record, "market_epoch_id"),
             market_episode_id=_first_present(record, "market_episode_id"),
             entry_location_id=_first_present(record, "entry_location_id"),
@@ -1330,6 +1396,8 @@ class CaseRetrievalResult:
 
 @dataclass(frozen=True)
 class MarketEpisodeRetrievalResult:
+    query_run_manifest_sha256: str
+    query_market_epoch_id: str
     query_market_episode_id: str
     query_material_kind: str
     neighbours: tuple[Mapping[str, Any], ...]
@@ -1338,6 +1406,8 @@ class MarketEpisodeRetrievalResult:
 
     def as_dict(self) -> dict[str, Any]:
         return {
+            "query_run_manifest_sha256": self.query_run_manifest_sha256,
+            "query_market_epoch_id": self.query_market_epoch_id,
             "query_market_episode_id": self.query_market_episode_id,
             "query_material_kind": self.query_material_kind,
             "neighbours": [dict(item) for item in self.neighbours],
@@ -2072,13 +2142,33 @@ class MarketEpisodeCaseIndex:
         self,
         records: Sequence[MarketEpisodeEmbeddingRecord],
         *,
-        artifact_lineage: Mapping[str, Any],
+        artifact_lineages: Sequence[Mapping[str, Any]],
         embedding_dim: int,
+        dataset_contract: Mapping[str, Any] | None = None,
     ) -> None:
-        self.artifact_lineage = _normalise_market_episode_artifact_lineage(
-            artifact_lineage
+        self.artifact_lineages = tuple(
+            _normalise_market_episode_artifact_lineage(value)
+            for value in artifact_lineages
+        )
+        if not self.artifact_lineages:
+            raise CaseRetrievalError("neutral index has no artifact lineage")
+        if len({value["run_manifest_sha256"] for value in self.artifact_lineages}) != len(
+            self.artifact_lineages
+        ):
+            raise CaseRetrievalError("neutral index repeats an artifact run lineage")
+        known_runs = {
+            value["run_manifest_sha256"] for value in self.artifact_lineages
+        }
+        if any(record.run_manifest_sha256 not in known_runs for record in records):
+            raise CaseRetrievalError("neutral record has an unbound run lineage")
+        self.artifact_lineage = self.artifact_lineages[0]
+        self.dataset_contract = (
+            None
+            if dataset_contract is None
+            else normalise_market_episode_dataset_contract(dataset_contract)
         )
         self.records = tuple(sorted(records, key=lambda item: (
+            item.run_manifest_sha256,
             item.market_epoch_id,
             item.decision_at.value,
             item.market_episode_id,
@@ -2108,37 +2198,95 @@ class MarketEpisodeCaseIndex:
         *,
         artifact_lineage: Mapping[str, Any],
         embedding_dim: int = DEFAULT_MARKET_EMBEDDING_DIM,
+        dataset_contract: Mapping[str, Any] | None = None,
     ) -> "MarketEpisodeCaseIndex":
+        lineage = _normalise_market_episode_artifact_lineage(artifact_lineage)
+        return cls.from_artifacts(
+            (
+                {
+                    "records": tuple(values),
+                    "artifact_lineage": lineage,
+                    "dataset_contract": dataset_contract,
+                },
+            ),
+            embedding_dim=embedding_dim,
+        )
+
+    @classmethod
+    def from_artifacts(
+        cls,
+        artifacts: Sequence[Mapping[str, Any]],
+        *,
+        embedding_dim: int = DEFAULT_MARKET_EMBEDDING_DIM,
+    ) -> "MarketEpisodeCaseIndex":
+        if not artifacts:
+            raise CaseRetrievalError("neutral index has no reference artifacts")
         accepted: dict[
-            tuple[str, str, str, str], MarketEpisodeEmbeddingRecord
+            tuple[str, str, str, str, str], MarketEpisodeEmbeddingRecord
         ] = {}
-        for raw in values:
-            if not isinstance(raw, Mapping):
-                raise CaseRetrievalError("MarketEpisode records must be mappings")
-            for kind in _market_episode_material_kinds(raw):
-                record = MarketEpisodeEmbeddingRecord.from_mapping(
-                    raw,
-                    material_kind=kind,
-                    embedding_dim=embedding_dim,
+        lineages: list[dict[str, str]] = []
+        contracts: list[dict[str, Any] | None] = []
+        for artifact in artifacts:
+            if not isinstance(artifact, Mapping) or set(artifact) != {
+                "records", "artifact_lineage", "dataset_contract",
+            }:
+                raise CaseRetrievalError("neutral reference artifact is invalid")
+            lineage = _normalise_market_episode_artifact_lineage(
+                artifact["artifact_lineage"]
+            )
+            contract = (
+                None
+                if artifact["dataset_contract"] is None
+                else normalise_market_episode_dataset_contract(
+                    artifact["dataset_contract"]
                 )
-                key = (record.data_split, record.market_epoch_id,
-                       record.market_episode_id, record.material_kind)
-                prior = accepted.get(key)
-                if prior is None:
-                    accepted[key] = record
-                    continue
-                if record.revision_index < prior.revision_index:
-                    accepted[key] = record
-                elif (
-                    record.revision_index == prior.revision_index
-                    and record != prior
-                ):
+            )
+            lineages.append(lineage)
+            contracts.append(contract)
+            for raw in artifact["records"]:
+                if not isinstance(raw, Mapping):
+                    raise CaseRetrievalError("MarketEpisode records must be mappings")
+                bound = dict(raw)
+                declared_run = bound.setdefault(
+                    "run_manifest_sha256", lineage["run_manifest_sha256"]
+                )
+                if declared_run != lineage["run_manifest_sha256"]:
                     raise CaseRetrievalError(
-                        "conflicting first material occurrence"
+                        "MarketEpisode record run lineage differs from its artifact"
                     )
-        episode_splits: dict[tuple[str, str], str] = {}
+                for kind in _market_episode_material_kinds(bound):
+                    record = MarketEpisodeEmbeddingRecord.from_mapping(
+                        bound,
+                        material_kind=kind,
+                        embedding_dim=embedding_dim,
+                    )
+                    key = (
+                        record.data_split,
+                        record.run_manifest_sha256,
+                        record.market_epoch_id,
+                        record.market_episode_id,
+                        record.material_kind,
+                    )
+                    prior = accepted.get(key)
+                    if prior is None or record.revision_index < prior.revision_index:
+                        accepted[key] = record
+                    elif record.revision_index == prior.revision_index and record != prior:
+                        raise CaseRetrievalError(
+                            "conflicting first material occurrence"
+                        )
+        if any(contract != contracts[0] for contract in contracts[1:]):
+            raise CaseRetrievalError("neutral reference dataset contracts differ")
+        if len(contracts) > 1 and contracts[0] is None:
+            raise CaseRetrievalError(
+                "multi-artifact neutral index requires a dataset contract"
+            )
+        episode_splits: dict[tuple[str, str, str], str] = {}
         for record in accepted.values():
-            identity = (record.market_epoch_id, record.market_episode_id)
+            identity = (
+                record.run_manifest_sha256,
+                record.market_epoch_id,
+                record.market_episode_id,
+            )
             if (
                 episode_splits.setdefault(identity, record.data_split)
                 != record.data_split
@@ -2146,8 +2294,9 @@ class MarketEpisodeCaseIndex:
                 raise CaseRetrievalError("MarketEpisode is shared across splits")
         return cls(
             tuple(accepted.values()),
-            artifact_lineage=artifact_lineage,
+            artifact_lineages=lineages,
             embedding_dim=embedding_dim,
+            dataset_contract=contracts[0],
         )
 
     @staticmethod
@@ -2160,7 +2309,7 @@ class MarketEpisodeCaseIndex:
         for member in members:
             required = (
                 "member_id", "checkpoint_id", "model_version", "revision_id",
-                "market_episode_id", "decision_at", "feature_max_at",
+                "market_epoch_id", "market_episode_id", "decision_at", "feature_max_at",
                 "outcome_fields_used", "input_protocol", "head_predictions",
             )
             if not isinstance(member, Mapping) or any(
@@ -2177,6 +2326,7 @@ class MarketEpisodeCaseIndex:
             bindings = (
                 (member["model_version"], query.embedding_model_version),
                 (member["revision_id"], query.revision_id),
+                (member["market_epoch_id"], query.market_epoch_id),
                 (member["market_episode_id"], query.market_episode_id),
                 (
                     _aware_utc(member["decision_at"], "ensemble decision_at"),
@@ -2220,27 +2370,70 @@ class MarketEpisodeCaseIndex:
         k: int = 10,
         ensemble: Sequence[Mapping[str, Any]] | None = None,
         thresholds: OODThresholds | None = None,
+        dataset_contract: Mapping[str, Any] | None = None,
+        require_different_calendar_date: bool = False,
     ) -> MarketEpisodeRetrievalResult:
-        if (
-            k < 1
-            or _normalise_market_episode_artifact_lineage(artifact_lineage)
-            != self.artifact_lineage
-        ):
+        query_lineage = _normalise_market_episode_artifact_lineage(
+            artifact_lineage
+        )
+        if k < 1:
             raise CaseRetrievalError("neutral query contract is invalid")
+        if self.dataset_contract is None:
+            if dataset_contract is not None or query_lineage != self.artifact_lineage:
+                raise CaseRetrievalError("neutral query contract is invalid")
+        elif (
+            dataset_contract is None
+            or normalise_market_episode_dataset_contract(dataset_contract)
+            != self.dataset_contract
+        ):
+            raise CaseRetrievalError("neutral query dataset contracts differ")
         if self.embedding_space and self.embedding_space != (
             query.embedding_model_version,
             query.embedding_checkpoint_id,
         ):
             raise CaseRetrievalError("neutral query embedding space differs")
         thresholds = thresholds or OODThresholds()
+        query_run = query_lineage["run_manifest_sha256"]
+        if query.run_manifest_sha256 != query_run:
+            raise CaseRetrievalError("neutral query record run lineage differs")
+        if ensemble and any(
+            not isinstance(member, Mapping)
+            or member.get("run_manifest_sha256") != query_run
+            for member in ensemble
+        ):
+            raise CaseRetrievalError("neutral ensemble run lineage is invalid")
+        query_scope = (
+            query_run,
+            query.market_epoch_id,
+            query.market_episode_id,
+        )
+        timezone = (
+            "UTC"
+            if self.dataset_contract is None
+            else str(self.dataset_contract["calendar_timezone"])
+        )
+        try:
+            query_date = query.decision_at.tz_convert(timezone).date()
+        except (KeyError, TypeError, ValueError) as exc:
+            raise CaseRetrievalError(
+                "MarketEpisode calendar timezone is invalid"
+            ) from exc
         eligible = [
             index
             for index, record in enumerate(self.records)
             if record.data_split in query.reference_splits
             and record.material_kind == query.material_kind
-            and record.market_epoch_id == query.market_epoch_id
-            and record.market_episode_id != query.market_episode_id
+            and (
+                record.run_manifest_sha256,
+                record.market_epoch_id,
+                record.market_episode_id,
+            )
+            != query_scope
             and record.decision_at < query.decision_at
+            and (
+                not require_different_calendar_date
+                or record.decision_at.tz_convert(timezone).date() != query_date
+            )
         ]
         ranked, selected, density, local, nearest, mean = _cosine_density_snapshot(
             self.vectors,
@@ -2250,7 +2443,11 @@ class MarketEpisodeCaseIndex:
                 expected_dim=self.embedding_dim,
             ),
             tuple(
-                (-item.decision_at.value, item.market_episode_id)
+                (
+                    -item.decision_at.value,
+                    item.run_manifest_sha256,
+                    item.market_episode_id,
+                )
                 for item in self.records
             ),
             k=k,
@@ -2269,6 +2466,8 @@ class MarketEpisodeCaseIndex:
         )
         neighbours = tuple(
             {
+                "run_manifest_sha256": self.records[index].run_manifest_sha256,
+                "market_epoch_id": self.records[index].market_epoch_id,
                 "market_episode_id": self.records[index].market_episode_id,
                 "revision_id": self.records[index].revision_id,
                 "decision_at": self.records[index].decision_at.isoformat(),
@@ -2278,6 +2477,8 @@ class MarketEpisodeCaseIndex:
             for index, similarity in selected
         )
         return MarketEpisodeRetrievalResult(
+            query_run_manifest_sha256=query_run,
+            query_market_epoch_id=query.market_epoch_id,
             query_market_episode_id=query.market_episode_id,
             query_material_kind=query.material_kind,
             neighbours=neighbours,
@@ -2306,6 +2507,7 @@ __all__ = [
     "CASE_RETRIEVAL_SCHEMA_VERSION",
     "DEFAULT_MARKET_EMBEDDING_DIM",
     "MARKET_EPISODE_ACTIVE_ENSEMBLE_HEAD_WIDTHS",
+    "MARKET_EPISODE_DATASET_CONTRACT_KEYS",
     "MARKET_EPISODE_FIRST_OCCURRENCE_SELECTION_CONTRACT",
     "MARKET_EPISODE_MATERIAL_KINDS",
     "CaseRetrievalError",
@@ -2321,5 +2523,6 @@ __all__ = [
     "NeighbourMatch",
     "OODAssessment",
     "OODThresholds",
+    "normalise_market_episode_dataset_contract",
     "RetrievalPolicy",
 ]

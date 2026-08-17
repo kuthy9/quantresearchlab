@@ -8,8 +8,10 @@ import pandas as pd
 import pytest
 
 from scripts.run_continuous_replay import (
+    _load_market_case_input_profile,
     _load_mbo_execution,
     _load_shadow_diagnostic_profile,
+    _validate_market_input_replay_contract,
 )
 from smc_trader.model import Playbook
 from smc_trader.shadow_outcome import (
@@ -22,6 +24,56 @@ from smc_trader.validation import ValidationProtocolError, load_validation_proto
 
 ROOT = Path(__file__).resolve().parents[1]
 DATA_SPLITS = ROOT / "configs/data_splits.json"
+
+
+NEUTRAL_REPRESENTATION_PROFILES = {
+    "neutral_representation_train_2019_02": (
+        "train", "2019-02-01T00:00:00-05:00", "2019-03-01T00:00:00-05:00",
+        "development", True, "NQH9", 15657,
+    ),
+    "neutral_representation_train_2019_08": (
+        "train", "2019-08-01T00:00:00-04:00", "2019-09-01T00:00:00-04:00",
+        "development", True, "NQU9", 36742,
+    ),
+    "neutral_representation_train_2020_02": (
+        "train", "2020-02-01T00:00:00-05:00", "2020-03-01T00:00:00-05:00",
+        "development", True, "NQH0", 10204,
+    ),
+    "neutral_representation_train_2020_08": (
+        "train", "2020-08-01T00:00:00-04:00", "2020-09-01T00:00:00-04:00",
+        "development", True, "NQU0", 14028,
+    ),
+    "neutral_representation_train_2021_02": (
+        "train", "2021-02-01T00:00:00-05:00", "2021-03-01T00:00:00-05:00",
+        "development", True, "NQH1", 4378,
+    ),
+    "neutral_representation_train_2021_08": (
+        "train", "2021-08-01T00:00:00-04:00", "2021-09-01T00:00:00-04:00",
+        "development", True, "NQU1", 828,
+    ),
+    "neutral_representation_validation_2022_05": (
+        "validation", "2022-05-01T00:00:00-04:00", "2022-06-01T00:00:00-04:00",
+        "calibration", False, "NQM2", 2895,
+    ),
+    "neutral_representation_validation_2022_11": (
+        "validation", "2022-11-01T00:00:00-04:00", "2022-12-01T00:00:00-05:00",
+        "calibration", False, "NQZ2", 13613,
+    ),
+    "neutral_representation_holdout_2025_02": (
+        "holdout", "2025-02-01T00:00:00-05:00", "2025-03-01T00:00:00-05:00",
+        "rolling_oof", False, "NQH5", 42288528,
+    ),
+    "neutral_representation_holdout_2025_08": (
+        "holdout", "2025-08-01T00:00:00-04:00", "2025-09-01T00:00:00-04:00",
+        "rolling_oof", False, "NQU5", 42008487,
+    ),
+}
+
+
+def _write_protocol(tmp_path: Path, payload: dict[str, object]) -> Path:
+    candidate = tmp_path / "data_splits.json"
+    candidate.write_text(json.dumps(payload), encoding="utf-8")
+    return candidate
 
 
 def test_current_data_splits_preserve_causal_and_mbo_identities() -> None:
@@ -52,6 +104,165 @@ def test_current_data_splits_preserve_causal_and_mbo_identities() -> None:
         "minimum_plan_valid_roots": 30,
         "minimum_executable_episodes": 20,
     }
+
+
+def test_neutral_representation_windows_are_preregistered_with_exact_roles() -> None:
+    payload = json.loads(DATA_SPLITS.read_text(encoding="utf-8"))
+    protocol = load_validation_protocol(DATA_SPLITS)
+    registry = protocol.neutral_representation_splits
+
+    assert registry.protocol_version == "neutral-representation-splits-1.0.0"
+    assert registry.warmup_calendar_days == 14
+    assert registry.purge_calendar_days == 14
+    assert registry.embargo_trading_days == 5
+    assert registry.whole_market_episode_single_split is True
+    assert registry.single_symbol_instrument_replay_frame_required is True
+    assert registry.episode_split_key == (
+        "run_manifest_sha256",
+        "market_epoch_id",
+        "market_episode_id",
+    )
+    assert registry.smoke_profiles == {
+        "train": "neutral_representation_train_2021_02",
+        "validation": "neutral_representation_validation_2022_05",
+        "holdout": "neutral_representation_holdout_2025_02",
+    }
+    assert set(registry.windows) == set(NEUTRAL_REPRESENTATION_PROFILES)
+
+    profiles = payload["market_case_input_profiles"]
+    for name, expected in NEUTRAL_REPRESENTATION_PROFILES.items():
+        role, start, end, ohlcv_role, fit_allowed, symbol, instrument_id = expected
+        profile = profiles[name]
+        window = registry.windows[name]
+        assert profile["representation_split_role"] == role
+        assert profile["start"] == start
+        assert profile["end_exclusive"] == end
+        assert profile["warmup_calendar_days"] == 14
+        assert profile["allowed_ohlcv_role"] == ohlcv_role
+        assert profile["representation_fit_allowed"] is fit_allowed
+        assert profile["calibration_fit_allowed"] is False
+        assert profile["threshold_search"] is False
+        assert profile["outcome_used"] is False
+        assert profile["brain_output"] is False
+        assert profile["expected_replay_contract"] == {
+            "symbol": symbol,
+            "instrument_id": instrument_id,
+        }
+        assert window.representation_split_role == role
+        assert window.warmup_start == (
+            pd.Timestamp(start).tz_convert("America/New_York")
+            - pd.DateOffset(days=14)
+        )
+        selected_name, selected = _load_market_case_input_profile(
+            DATA_SPLITS,
+            start=pd.Timestamp(start),
+            end=pd.Timestamp(end),
+            warmup_days=14,
+        )
+        assert selected_name == name
+        assert selected == profile
+
+    assert profiles["market_episode_input_smoke_2024_01_08"][
+        "representation_split_role"
+    ] == "audit_only"
+    assert profiles["market_episode_input_2024_01"][
+        "representation_fit_allowed"
+    ] is False
+
+
+def test_neutral_representation_windows_preserve_purge_and_embargo() -> None:
+    windows = sorted(
+        load_validation_protocol(DATA_SPLITS).neutral_representation_splits.windows.values(),
+        key=lambda window: window.warmup_start,
+    )
+    for left, right in zip(windows[:-1], windows[1:]):
+        cursor = (left.end_exclusive + pd.DateOffset(days=14)).normalize()
+        remaining_weekdays = 5
+        while remaining_weekdays:
+            if cursor.dayofweek < 5:
+                remaining_weekdays -= 1
+            cursor = cursor + pd.DateOffset(days=1)
+        assert right.warmup_start >= cursor
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    (
+        (
+            lambda payload: payload["neutral_representation_split_registry"][
+                "profiles"
+            ].append("neutral_representation_train_2019_02"),
+            "unique profile names",
+        ),
+        (
+            lambda payload: payload["neutral_representation_split_registry"].update(
+                {"market_episode_split_key": ["market_epoch_id", "market_episode_id"]}
+            ),
+            "preserve whole MarketEpisodes",
+        ),
+        (
+            lambda payload: payload["market_case_input_profiles"][
+                "neutral_representation_validation_2022_05"
+            ].update({"representation_fit_allowed": True}),
+            "representation_fit_allowed disagrees",
+        ),
+        (
+            lambda payload: payload["neutral_representation_split_registry"].update(
+                {"single_symbol_instrument_replay_frame_required": False}
+            ),
+            "incompatible split contract",
+        ),
+        (
+            lambda payload: payload["market_case_input_profiles"][
+                "neutral_representation_holdout_2025_02"
+            ]["expected_replay_contract"].update({"instrument_id": "42288528"}),
+            "expected_replay_contract is invalid",
+        ),
+    ),
+)
+def test_neutral_representation_registry_rejects_contract_tampering(
+    tmp_path: Path,
+    mutation: Callable[[dict[str, object]], object],
+    message: str,
+) -> None:
+    payload = json.loads(DATA_SPLITS.read_text(encoding="utf-8"))
+    mutation(payload)
+    with pytest.raises(ValidationProtocolError, match=message):
+        load_validation_protocol(_write_protocol(tmp_path, payload))
+
+
+def test_neutral_representation_registry_rejects_insufficient_gap(
+    tmp_path: Path,
+) -> None:
+    payload = json.loads(DATA_SPLITS.read_text(encoding="utf-8"))
+    profiles = payload["market_case_input_profiles"]
+    registry = payload["neutral_representation_split_registry"]
+    old_name = "neutral_representation_train_2019_08"
+    new_name = "neutral_representation_train_2019_04"
+    profile = profiles.pop(old_name)
+    profile.update(
+        {
+            "start": "2019-04-01T00:00:00-04:00",
+            "end_exclusive": "2019-05-01T00:00:00-04:00",
+            "expected_replay_contract": {"symbol": "NQM9", "instrument_id": 1},
+        }
+    )
+    profiles[new_name] = profile
+    registry["profiles"][registry["profiles"].index(old_name)] = new_name
+
+    with pytest.raises(ValidationProtocolError, match="purge plus 5-trading-day embargo"):
+        load_validation_protocol(_write_protocol(tmp_path, payload))
+
+
+def test_registered_replay_contract_must_match_preflight_identity() -> None:
+    payload = json.loads(DATA_SPLITS.read_text(encoding="utf-8"))
+    profile = payload["market_case_input_profiles"][
+        "neutral_representation_train_2021_02"
+    ]
+
+    _validate_market_input_replay_contract(profile, ("NQH1", 4378))
+    with pytest.raises(ValueError, match="does not match the registered profile"):
+        _validate_market_input_replay_contract(profile, ("NQH1", 999))
 
 
 @pytest.mark.parametrize(

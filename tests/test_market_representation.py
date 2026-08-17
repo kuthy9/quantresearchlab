@@ -3097,6 +3097,7 @@ def test_market_episode_exporters_roundtrip_into_retrieval_contract(
     assert set(heads[0]["head_predictions"]).isdisjoint(
         NEUTRAL_SPARSE_DISABLED_TARGETS
     )
+    assert heads[0]["market_epoch_id"] == case.market_epoch_id
     count, disagreement, by_head = MarketEpisodeCaseIndex._ensemble(parsed, heads)
     assert count == 1 and disagreement == 0.0
     assert set(by_head) == set(NEUTRAL_SPARSE_ACTIVE_TARGETS)
