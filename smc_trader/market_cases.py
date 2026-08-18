@@ -720,6 +720,7 @@ def _snapshot_view(snapshot: Any) -> _SnapshotView:
     transitions: list[Any] = []
     prior_epoch: list[Any] = []
     transition_ids: set[str] = set()
+    current_transition_ids: set[str] = set()
     for episode in tuple(getattr(state, "episode_transitions_this_update", ())):
         transition_id = _identity(
             getattr(episode, "episode_id", None),
@@ -729,6 +730,7 @@ def _snapshot_view(snapshot: Any) -> _SnapshotView:
             raise ValueError("market case duplicates MarketEpisode transition")
         transition_ids.add(transition_id)
         if getattr(episode, "market_epoch_id", None) == epoch_id:
+            current_transition_ids.add(transition_id)
             _validate_episode(episode, asof=asof, epoch_id=epoch_id)
             if episodes.get(transition_id) is not episode and _episode_state_signature(
                 episodes.get(transition_id)
@@ -750,7 +752,7 @@ def _snapshot_view(snapshot: Any) -> _SnapshotView:
         for episode_id, episode in episodes.items()
         if _clock(getattr(episode, "updated_at", None), name="episode.updated_at") == asof
     }
-    if expected_transition_ids != transition_ids:
+    if expected_transition_ids != current_transition_ids:
         raise ValueError("market case current MarketEpisode transitions are incomplete")
     if tuple(str(item.episode_id) for item in transitions) != tuple(
         sorted(str(item.episode_id) for item in transitions)

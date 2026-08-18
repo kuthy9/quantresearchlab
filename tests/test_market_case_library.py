@@ -597,6 +597,73 @@ def test_reset_requires_new_epoch_and_reused_physical_ids_restart_revision_index
     assert recorder.summary["epoch_resets"] == 1
 
 
+def test_reset_accepts_prior_epoch_terminals_and_current_epoch_transitions() -> None:
+    recorder = _recorder()
+    previous = _episode(0)
+    _observe(
+        recorder,
+        _snapshot(0, episodes=(previous,), transitions=(previous,)),
+        source_ordinal=0,
+        replay_ordinal=0,
+    )
+    recorder.drain_input_rows()
+
+    prior_terminal = _episode(1, terminal_reason="data_gap_reset")
+    current = _episode(
+        1,
+        epoch="epoch:2",
+        formed_minute=1,
+        location="location:2",
+        path="path:2",
+    )
+    duplicate_snapshot = _snapshot(
+        1,
+        epoch="epoch:2",
+        episodes=(current,),
+        transitions=(prior_terminal, prior_terminal, current),
+        anomalies=("data_gap_history_reset",),
+    )
+    with pytest.raises(ValueError, match="duplicates MarketEpisode transition"):
+        _observe(
+            _recorder(),
+            duplicate_snapshot,
+            source_ordinal=0,
+            replay_ordinal=0,
+        )
+    _observe(
+        recorder,
+        _snapshot(
+            1,
+            epoch="epoch:2",
+            episodes=(current,),
+            transitions=(prior_terminal, current),
+            anomalies=("data_gap_history_reset",),
+        ),
+        source_ordinal=1,
+        replay_ordinal=1,
+    )
+
+    row = _row(recorder)
+    assert row["market_epoch_id"] == "epoch:2"
+    assert row["market_episode_id"] == current.episode_id
+    assert row["revision_index"] == 0
+    assert recorder.summary["epoch_resets"] == 1
+
+
+def test_same_epoch_current_episode_transition_completeness_stays_fail_closed() -> None:
+    current = _episode(1)
+    with pytest.raises(
+        ValueError,
+        match="current MarketEpisode transitions are incomplete",
+    ):
+        _observe(
+            _recorder(),
+            _snapshot(1, episodes=(current,), transitions=()),
+            source_ordinal=0,
+            replay_ordinal=0,
+        )
+
+
 def test_data_gap_epoch_cannot_revive_terminal_identity_and_rows_are_future_safe() -> None:
     recorder = _recorder()
     formed = _episode(0)
