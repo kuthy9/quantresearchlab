@@ -3703,6 +3703,15 @@ class LossBreakdown:
 
 
 @dataclass(frozen=True)
+class NeutralB1VICRegLoss:
+    """Label-free B1 regularizer and its graph-preserving diagnostics."""
+
+    total: Tensor
+    components: Mapping[str, Tensor]
+    diagnostics: Mapping[str, Tensor | bool | int]
+
+
+@dataclass(frozen=True)
 class DecisionTimeEmbeddingRecord:
     """Outcome-free handoff consumed by similarity/OOD infrastructure."""
 
@@ -4497,6 +4506,128 @@ def neutral_representation_multitask_loss(
         batch,
         targets,
         weights=NEUTRAL_REPRESENTATION_LOSS_WEIGHTS,
+    )
+
+
+def neutral_b1_vicreg_loss(
+    first_embedding: Tensor,
+    second_embedding: Tensor,
+) -> NeutralB1VICRegLoss:
+    """Compute the frozen B1 VICReg objective on two masked embedding views.
+
+    Both inputs must be the model's final L2-normalized 128-dimensional
+    embeddings.  The regularizer is active only for the preregistered batch
+    size of 16.  A shorter final batch retains an autograd connection while
+    contributing exactly zero to every loss component.
+    """
+
+    require_torch()
+    for name, embedding in (
+        ("first_embedding", first_embedding),
+        ("second_embedding", second_embedding),
+    ):
+        if not isinstance(embedding, torch.Tensor):
+            raise RepresentationDataError(f"{name} must be a torch Tensor")
+        if not torch.is_floating_point(embedding):
+            raise RepresentationDataError(f"{name} must have a floating dtype")
+        if embedding.ndim != 2 or embedding.shape[1] != EMBEDDING_DIM:
+            raise RepresentationDataError(
+                f"{name} must have shape (N, {EMBEDDING_DIM})"
+            )
+        if not bool(torch.isfinite(embedding).all()):
+            raise RepresentationDataError(f"{name} must contain only finite values")
+        norms = torch.linalg.vector_norm(embedding, ord=2, dim=1)
+        unit_tolerance = max(1e-5, 2.0 * torch.finfo(embedding.dtype).eps)
+        if not torch.allclose(
+            norms,
+            torch.ones_like(norms),
+            rtol=unit_tolerance,
+            atol=unit_tolerance,
+        ):
+            raise RepresentationDataError(f"{name} must be L2-normalized")
+
+    if first_embedding.shape != second_embedding.shape:
+        raise RepresentationDataError("B1 VICReg views must have identical shapes")
+    if first_embedding.dtype != second_embedding.dtype:
+        raise RepresentationDataError("B1 VICReg views must have identical dtypes")
+    if first_embedding.device != second_embedding.device:
+        raise RepresentationDataError("B1 VICReg views must be on the same device")
+
+    batch_size = int(first_embedding.shape[0])
+    if not 1 <= batch_size <= 16:
+        raise RepresentationDataError("B1 VICReg batch size must be in [1, 16]")
+
+    scale = math.sqrt(EMBEDDING_DIM)
+    first_q = first_embedding * scale
+    second_q = second_embedding * scale
+    diagnostic_correction = 1 if batch_size > 1 else 0
+    first_std = torch.sqrt(
+        first_q.var(dim=0, correction=diagnostic_correction) + 1e-4
+    )
+    second_std = torch.sqrt(
+        second_q.var(dim=0, correction=diagnostic_correction) + 1e-4
+    )
+    diagnostics: dict[str, Tensor | bool | int] = {
+        "active": batch_size == 16,
+        "batch_size": batch_size,
+        "first_view_mean_std": first_std.mean(),
+        "second_view_mean_std": second_std.mean(),
+        "first_view_below_gamma_dim_count": (
+            (first_std < 1.0).sum().to(first_std.dtype) + first_std.sum() * 0.0
+        ),
+        "second_view_below_gamma_dim_count": (
+            (second_std < 1.0).sum().to(second_std.dtype) + second_std.sum() * 0.0
+        ),
+        "mean_pair_cosine": (first_embedding * second_embedding).sum(dim=1).mean(),
+    }
+
+    if batch_size < 16:
+        connected_zero = (first_embedding.sum() + second_embedding.sum()) * 0.0
+        components = {
+            "invariance": connected_zero,
+            "variance": connected_zero,
+            "covariance": connected_zero,
+        }
+        return NeutralB1VICRegLoss(
+            total=(
+                5.0 * components["invariance"]
+                + 5.0 * components["variance"]
+                + 0.2 * components["covariance"]
+            ),
+            components=components,
+            diagnostics=diagnostics,
+        )
+
+    invariance = F.mse_loss(first_q, second_q, reduction="mean")
+    variance = (
+        torch.relu(1.0 - first_std).mean()
+        + torch.relu(1.0 - second_std).mean()
+    ) / 2.0
+
+    off_diagonal = ~torch.eye(
+        EMBEDDING_DIM,
+        dtype=torch.bool,
+        device=first_embedding.device,
+    )
+
+    def covariance_penalty(values: Tensor) -> Tensor:
+        centered = values - values.mean(dim=0, keepdim=True)
+        covariance = centered.transpose(0, 1) @ centered / (batch_size - 1)
+        return covariance[off_diagonal].square().sum() / EMBEDDING_DIM
+
+    covariance = (
+        covariance_penalty(first_q) + covariance_penalty(second_q)
+    ) / 2.0
+    components = {
+        "invariance": invariance,
+        "variance": variance,
+        "covariance": covariance,
+    }
+    total = 5.0 * invariance + 5.0 * variance + 0.2 * covariance
+    return NeutralB1VICRegLoss(
+        total=total,
+        components=components,
+        diagnostics=diagnostics,
     )
 
 

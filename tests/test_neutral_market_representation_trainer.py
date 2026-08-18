@@ -367,6 +367,18 @@ def _b0_cli_args(metrics: Path | None = None) -> list[str]:
     return args
 
 
+def _b1_cli_args(metrics: Path | None = None, parent: Path | None = None) -> list[str]:
+    args = ["--neutral-b1-validation"]
+    for role in ("train", "validation"):
+        args.extend(("--market-case-input-manifest", f"{role}-input.json",
+                     "--market-case-run-manifest", f"{role}-run.json"))
+    if parent is not None:
+        args.extend(("--parent-b0-metrics", str(parent)))
+    if metrics is not None:
+        args.extend(("--metrics-output", str(metrics)))
+    return args
+
+
 def test_neutral_b0_cli_freezes_training_contract_and_requires_metrics(
     tmp_path: Path,
 ) -> None:
@@ -388,6 +400,26 @@ def test_neutral_b0_cli_freezes_training_contract_and_requires_metrics(
     with pytest.raises(RepresentationDataError, match="CPU"):
         trainer._validate_neutral_cli(
             trainer._parser().parse_args(non_cpu), argv=non_cpu
+        )
+
+
+def test_neutral_b1_cli_freezes_parent_and_training_contract(tmp_path: Path) -> None:
+    argv = _b1_cli_args(tmp_path / "b1.json", tmp_path / "b0.json")
+    args = trainer._parser().parse_args(argv)
+    trainer._validate_neutral_cli(args, argv=argv)
+    assert (args.ensemble_size, args.seed, args.batch_size, args.epochs) == (
+        3, 17, 16, 10,
+    )
+    assert args.learning_rate == 3e-4
+    with pytest.raises(RepresentationDataError, match="parent-b0-metrics"):
+        missing = _b1_cli_args(tmp_path / "b1.json")
+        trainer._validate_neutral_cli(
+            trainer._parser().parse_args(missing), argv=missing
+        )
+    overridden = [*argv, "--epochs", "9"]
+    with pytest.raises(RepresentationDataError, match="freezes"):
+        trainer._validate_neutral_cli(
+            trainer._parser().parse_args(overridden), argv=overridden
         )
 
 
@@ -424,6 +456,20 @@ def test_neutral_b0_registry_rejects_equal_but_wrong_json_types(
     monkeypatch.setattr(trainer, "DATA_SPLITS", registry)
     with pytest.raises(RepresentationDataError, match="frozen contract"):
         trainer._neutral_b0_registry_contract()
+
+
+def test_neutral_b1_registry_rejects_equal_but_wrong_json_types(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = json.loads(trainer.DATA_SPLITS.read_text())
+    payload["neutral_representation_b1_validation"][
+        "final_embedding_regularizer"
+    ]["invariance"]["weight"] = 5
+    registry = tmp_path / "data_splits.json"
+    registry.write_text(json.dumps(payload), encoding="utf-8")
+    monkeypatch.setattr(trainer, "DATA_SPLITS", registry)
+    with pytest.raises(RepresentationDataError, match="frozen contract"):
+        trainer._neutral_b1_registry_contract()
 
 
 def test_neutral_b0_rejects_holdout_before_loading_dataset(
@@ -485,6 +531,52 @@ def test_neutral_b0_failed_criteria_writes_report_and_exits_two(
     )
     assert trainer.main(_b0_cli_args(metrics)) == 2
     assert json.loads(metrics.read_text()) == {"criteria_met": False, "proof": "b0"}
+
+
+def test_neutral_b1_parent_b0_is_exact_failed_run(tmp_path: Path,
+                                                   monkeypatch: pytest.MonkeyPatch) -> None:
+    payload = _valid_failed_neutral_b0_metrics_payload()
+    path = tmp_path / "b0.json"
+    path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+    contract = copy.deepcopy(trainer.NEUTRAL_B1_VALIDATION_CONTRACT)
+    contract["parent_b0_metrics_sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
+    contract["parent_b0_trainer_commit"] = payload["trainer_repository_commit"]
+    contract["parent_b0_inputs"] = {
+        item["split_role"]: {
+            "rows": payload["split_rows"][item["split_role"]],
+            "input_manifest_sha256": item["input_manifest_sha256"],
+            "run_manifest_sha256": item["run_manifest_sha256"],
+        }
+        for item in payload["lineage"]["input_runs"]
+    }
+    monkeypatch.setattr(trainer, "NEUTRAL_B1_VALIDATION_CONTRACT", contract)
+    assert trainer._neutral_b1_parent_b0_metrics(path)["criteria_met"] is False
+    payload = _valid_neutral_b0_metrics_payload()
+    path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+    contract["parent_b0_metrics_sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
+    with pytest.raises(RepresentationDataError, match="frozen failed B0"):
+        trainer._neutral_b1_parent_b0_metrics(path)
+
+
+def test_neutral_b1_manifest_binding_fails_before_dataset_load(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parent = _valid_failed_neutral_b0_metrics_payload()
+    expected = {
+        item["input_manifest_sha256"] for item in parent["lineage"]["input_runs"]
+    } | {item["run_manifest_sha256"] for item in parent["lineage"]["input_runs"]}
+    supplied = iter((*sorted(expected)[:-1], "f" * 64))
+    monkeypatch.setattr(trainer, "_sha256_file", lambda path: next(supplied))
+    monkeypatch.setattr(
+        trainer, "_load_neutral_market_dataset",
+        lambda **kwargs: pytest.fail("B1 opened a dataset before parent binding"),
+    )
+    with pytest.raises(RepresentationDataError, match="differ from parent B0"):
+        trainer._load_neutral_fit_collection(
+            input_manifest_paths=("train-input", "validation-input"),
+            run_manifest_paths=("train-run", "validation-run"),
+            validation_protocol="b1", parent_b0_metrics=parent,
+        )
 
 
 @pytest.mark.parametrize(
@@ -799,6 +891,109 @@ def _valid_neutral_b0_metrics_payload() -> dict[str, object]:
         "artifacts_exported": False,
         "threshold_search_performed": False,
         "criteria_met": True,
+        "model_capability_validated": False,
+        "trading_edge_claimed": False,
+        "action_value_claimed": False,
+    }
+
+
+def _valid_failed_neutral_b0_metrics_payload() -> dict[str, object]:
+    payload = _valid_neutral_b0_metrics_payload()
+    for gate in payload["epoch_gates"]:
+        for member in gate["members"]:
+            member["neighbor"].update(
+                purity=0.0, train_chance=0.5, lift=-0.5
+            )
+        gate["common_pass"] = False
+    payload["selected_epoch"] = None
+    payload["criteria_met"] = False
+    return payload
+
+
+def _valid_neutral_b1_metrics_payload() -> dict[str, object]:
+    gate = _valid_failed_neutral_b0_metrics_payload()
+    gate["rows"] = 2469
+    gate["split_rows"] = {"train": 1190, "validation": 1279}
+    gate["trainer_repository_commit"] = "e" * 40
+    parent_inputs = trainer.NEUTRAL_B1_VALIDATION_CONTRACT["parent_b0_inputs"]
+    for run in gate["lineage"]["input_runs"]:
+        expected = parent_inputs[run["split_role"]]
+        run["input_manifest_sha256"] = expected["input_manifest_sha256"]
+        run["run_manifest_sha256"] = expected["run_manifest_sha256"]
+    for member in gate["ensemble_members"]:
+        for epoch in member["epoch_metrics"]:
+            epoch["train"]["rows"] = 1190
+            epoch["validation"]["rows"] = 1279
+    regularizer_epoch = {
+        "epoch": 1,
+        "optimizer_updates": 75,
+        "task_rows": 1190,
+        "vicreg_batches": 74,
+        "vicreg_rows": 1184,
+        "task_only_batches": 1,
+        "task_only_rows": 6,
+        "loss_reduction": "sum_of_batch_means",
+        "loss_sums": {
+            "view_a_task": 10.0, "view_b_task": 12.0, "task_mean": 11.0,
+            "invariance": 1.0, "variance": 2.0, "covariance": 3.0,
+            "weighted_invariance": 5.0, "weighted_variance": 10.0,
+            "weighted_covariance": 0.6, "combined": 26.6,
+        },
+        "task_component_sums": {name: 0.0 for name in (
+            "candle_reconstruction", "event_reconstruction", "next_event",
+            "next_lifecycle", "next_event_time", "displacement",
+            "draw_consumed", "scale_alignment", "contrastive",
+        )},
+        "active_batch_diagnostic_means": {
+            "first_view_mean_std": 0.8,
+            "second_view_mean_std": 0.8,
+            "first_view_below_gamma_dim_count": 64.0,
+            "second_view_below_gamma_dim_count": 64.0,
+            "mean_pair_cosine": 0.7,
+        },
+    }
+    regularizer_members = [{
+        "member_id": f"member-{index:03d}", "seed": seed,
+        "epoch_metrics": [
+            {**copy.deepcopy(regularizer_epoch), "epoch": epoch}
+            for epoch in range(1, 11)
+        ],
+    } for index, seed in enumerate((17, 100_020, 200_023))]
+    contract = copy.deepcopy(trainer.NEUTRAL_B1_VALIDATION_CONTRACT)
+    contract_sha = hashlib.sha256(json.dumps(
+        contract, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+    ).encode()).hexdigest()
+    return {
+        "schema_version": 1,
+        "mode": "neutral_b1_vicreg_validation",
+        "pipeline_scope": "2021_02_train_2022_05_validation_only",
+        "parent_b0": {
+            "metrics_sha256": contract["parent_b0_metrics_sha256"],
+            "contract_sha256": contract["parent_b0_contract_sha256"],
+            "trainer_repository_commit": contract["parent_b0_trainer_commit"],
+        },
+        "contract": {
+            "value": contract, "sha256": contract_sha,
+            "registry_sha256": "c" * 64,
+        },
+        "trainer_repository_commit": "e" * 40,
+        "b0_gate_evaluation": gate,
+        "regularizer_members": regularizer_members,
+        "b0_gates_reused_without_change": True,
+        "new_validation_thresholds_added": False,
+        "regularizer_diagnostics_used_for_selection": False,
+        "true_per_scale_alignment_used": False,
+        "selected_epoch": None,
+        "criteria_met": False,
+        "training_performed": True,
+        "validation_used_for_selection": True,
+        "validation_used_for_optimization": False,
+        "holdout_opened": False,
+        "holdout_used_for_optimization": False,
+        "holdout_used_for_selection": False,
+        "outcome_fields_used": False,
+        "artifacts_exported": False,
+        "threshold_search_performed": False,
         "model_capability_validated": False,
         "trading_edge_claimed": False,
         "action_value_claimed": False,
@@ -1149,6 +1344,99 @@ def test_neutral_b0_event_unigram_uses_every_valid_train_token() -> None:
     assert not np.any(tokens == trainer.PAD_TOKEN_ID)
 
 
+@pytest.mark.skipif(not TORCH_AVAILABLE, reason="optional PyTorch is not installed")
+def test_neutral_b1_dropout_rng_is_isolated_and_view_specific() -> None:
+    import torch
+
+    class DropoutModel(torch.nn.Module):
+        def forward(self, batch: object) -> object:
+            del batch
+            return torch.nn.functional.dropout(
+                torch.ones((16, 128)), p=0.5, training=True
+            )
+
+    model = DropoutModel()
+    torch.manual_seed(777)
+    before = torch.random.get_rng_state().clone()
+    first = trainer._neutral_b1_seeded_forward(model, None, seed=11)
+    after = torch.random.get_rng_state().clone()
+    second = trainer._neutral_b1_seeded_forward(model, None, seed=12)
+    repeated = trainer._neutral_b1_seeded_forward(model, None, seed=11)
+    assert torch.equal(before, after)
+    assert not torch.equal(first, second)
+    assert torch.equal(first, repeated)
+
+
+@pytest.mark.skipif(not TORCH_AVAILABLE, reason="optional PyTorch is not installed")
+def test_neutral_b1_trains_two_views_once_and_keeps_short_batch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import torch
+
+    source, _ = trainer._synthetic_examples(43)
+    prepared = tuple(
+        preprocess_neutral_direct_source_events(example) for example in source[:3]
+    )
+    examples = tuple([prepared[0]] * 16 + [prepared[1], prepared[2]])
+    targets = _neutral_targets(len(examples))
+    splits = {
+        prepared[0].case.revision_id: "train",
+        prepared[1].case.revision_id: "train",
+        prepared[2].case.revision_id: "validation",
+    }
+    forwards: list[int] = []
+
+    class TinyModel(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.linspace(1.0, 2.0, 128))
+            self.config = SimpleNamespace(embedding_dim=128)
+
+        def parameter_count(self) -> int:
+            return self.weight.numel()
+
+        def forward(self, batch: object) -> object:
+            forwards.append(len(batch.case_ids))
+            unit = self.weight / torch.linalg.vector_norm(self.weight)
+            return SimpleNamespace(embedding=unit.expand(len(batch.case_ids), -1))
+
+    def fake_loss(output: object, batch: object, target: object) -> object:
+        del batch, target
+        total = output.embedding[:, 0].mean() + 1.0
+        components = {name: total * 0.0 for name in (
+            "candle_reconstruction", "event_reconstruction", "next_event",
+            "next_lifecycle", "next_event_time", "displacement",
+            "draw_consumed", "scale_alignment", "contrastive",
+        )}
+        return SimpleNamespace(total=total, components=components)
+
+    monkeypatch.setattr(trainer, "MarketRepresentationModel", TinyModel)
+    monkeypatch.setattr(trainer, "neutral_representation_multitask_loss", fake_loss)
+    monkeypatch.setattr(
+        trainer, "_neutral_role_metrics",
+        lambda model, examples, targets, indices, **kwargs: {"rows": len(indices)},
+    )
+    _, metrics = trainer._train_neutral_member(
+        examples, targets, splits,
+        SimpleNamespace(epochs=10, batch_size=16, learning_rate=3e-4,
+                        device="cpu", seed=17),
+        validation_only=True, b1_validation=True,
+    )
+    assert forwards == [16, 16, 1, 1] * 10
+    for epoch in metrics["b1_regularizer_epoch_metrics"]:
+        assert (
+            epoch["optimizer_updates"], epoch["task_rows"],
+            epoch["vicreg_batches"], epoch["vicreg_rows"],
+            epoch["task_only_batches"], epoch["task_only_rows"],
+        ) == (2, 17, 1, 16, 1, 1)
+        assert epoch["loss_sums"]["combined"] == pytest.approx(
+            epoch["loss_sums"]["task_mean"]
+            + epoch["loss_sums"]["weighted_invariance"]
+            + epoch["loss_sums"]["weighted_variance"]
+            + epoch["loss_sums"]["weighted_covariance"]
+        )
+
+
 @pytest.mark.parametrize(("pass_epoch", "selected", "capable"), (
     (4, 4, True), (None, None, False),
 ))
@@ -1204,6 +1492,87 @@ def test_neutral_b0_selects_earliest_common_pass_without_exports(
     assert report["criteria_met"] is capable
     assert report["model_capability_validated"] is False
     assert report["holdout_opened"] is report["artifacts_exported"] is False
+
+
+def test_neutral_b1_report_reuses_b0_gates_and_records_regularizer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prepared = {
+        "examples": (object(), object()), "targets": (object(), object()),
+        "splits": {"train-revision": "train", "validation-revision": "validation"},
+        "origins": {},
+    }
+    calls: list[tuple[int, bool]] = []
+
+    def fake_train(*args: object, diagnostic_epochs: list[Mapping[str, object]],
+                   b1_validation: bool, **kwargs: object) -> tuple[object, Mapping[str, object]]:
+        seed = args[3].seed
+        calls.append((seed, b1_validation))
+        diagnostic_epochs.extend({} for _ in range(10))
+        role = {
+            "rows": 1, "total_loss": 1.0, "objective_losses": {},
+            "active_head_metrics": {}, "masked_reconstruction": {},
+            "geometry": {}, "material_geometry": {},
+        }
+        regularizer = [{"epoch": epoch, "proof": seed}
+                       for epoch in range(1, 11)]
+        return object(), {
+            "parameter_count": 1, "embedding_dim": 128,
+            "epoch_metrics": [{"epoch": epoch, "train": role, "validation": role}
+                              for epoch in range(1, 11)],
+            "b1_regularizer_epoch_metrics": regularizer,
+        }
+
+    monkeypatch.setattr(trainer, "_prepare_neutral_fit_collection", lambda value: prepared)
+    monkeypatch.setattr(trainer, "_train_neutral_member", fake_train)
+    monkeypatch.setattr(
+        trainer, "_neutral_b0_gate_report",
+        lambda *args, **kwargs: {
+            "selected_epoch": None, "criteria_met": False,
+        },
+    )
+    monkeypatch.setattr(
+        trainer, "_neutral_b1_registry_contract",
+        lambda: (trainer.NEUTRAL_B1_VALIDATION_CONTRACT, "d" * 64, "e" * 64),
+    )
+    report = trainer._neutral_b1_validation_report(
+        {"scope": "2021_02_train_2022_05_validation_only",
+         "b1_contract_sha256": "d" * 64},
+        SimpleNamespace(), trainer_repository_commit="f" * 40,
+        parent_b0_metrics=_valid_failed_neutral_b0_metrics_payload(),
+    )
+    assert calls == [(17, True), (100_020, True), (200_023, True)]
+    assert report["criteria_met"] is False
+    assert report["b0_gates_reused_without_change"] is True
+    assert report["regularizer_diagnostics_used_for_selection"] is False
+    assert report["true_per_scale_alignment_used"] is False
+    assert report["regularizer_members"][2]["epoch_metrics"][-1] == {
+        "epoch": 10, "proof": 200_023,
+    }
+
+
+def test_neutral_b1_failed_criteria_is_atomically_read_back_and_exits_two(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parent = tmp_path / "b0.json"
+    metrics = tmp_path / "b1.json"
+    argv = _b1_cli_args(metrics, parent)
+    monkeypatch.setattr(trainer, "_neutral_b1_trainer_commit", lambda: "a" * 40)
+    monkeypatch.setattr(
+        trainer, "_neutral_b1_parent_b0_metrics", lambda path: {"proof": "parent"}
+    )
+    monkeypatch.setattr(trainer, "_load_neutral_fit_collection", lambda **kwargs: {})
+    monkeypatch.setattr(
+        trainer, "_neutral_b1_validation_report",
+        lambda *args, **kwargs: {"proof": "b1", "criteria_met": False},
+    )
+    monkeypatch.setattr(trainer, "_validate_neutral_b1_metrics_protocol", lambda value: None)
+    monkeypatch.setattr(
+        trainer, "load_neutral_b1_validation_metrics",
+        lambda path: json.loads(Path(path).read_text()),
+    )
+    assert trainer.main(argv) == 2
+    assert json.loads(metrics.read_text()) == {"criteria_met": False, "proof": "b1"}
 
 
 def test_neutral_b0_neighbor_purity_is_train_only_strict_prior_cross_day() -> None:
@@ -1441,6 +1810,42 @@ def test_neutral_b0_metrics_loader_rejects_run_order_tamper(tmp_path: Path) -> N
     metrics_path.write_text(json.dumps(payload), encoding="utf-8")
     with pytest.raises(RepresentationDataError, match="lineage binding"):
         trainer.load_neutral_b0_validation_metrics(metrics_path)
+
+
+def test_neutral_b1_metrics_loader_accepts_exact_credible_failure(
+    tmp_path: Path,
+) -> None:
+    payload = _valid_neutral_b1_metrics_payload()
+    path = tmp_path / "b1.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    loaded = trainer.load_neutral_b1_validation_metrics(path)
+    assert loaded["criteria_met"] is False
+    assert loaded["selected_epoch"] is None
+    assert loaded["true_per_scale_alignment_used"] is False
+
+
+@pytest.mark.parametrize(("path", "replacement"), (
+    (("parent_b0", "metrics_sha256"), "f" * 64),
+    (("regularizer_members", 0, "epoch_metrics", 0,
+      "loss_sums", "weighted_variance"), 9.0),
+    (("regularizer_members", 0, "epoch_metrics", 0, "vicreg_rows"), 1168),
+    (("true_per_scale_alignment_used",), True),
+    (("b0_gate_evaluation", "lineage", "input_runs", 0,
+      "input_manifest_sha256"), "f" * 64),
+    (("selected_epoch",), True),
+))
+def test_neutral_b1_metrics_loader_rejects_tamper(
+    tmp_path: Path, path: tuple[object, ...], replacement: object,
+) -> None:
+    payload = _valid_neutral_b1_metrics_payload()
+    parent: object = payload
+    for key in path[:-1]:
+        parent = parent[key]
+    parent[path[-1]] = replacement
+    source = tmp_path / "b1.json"
+    source.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(RepresentationDataError):
+        trainer.load_neutral_b1_validation_metrics(source)
 
 
 @pytest.mark.parametrize("extra", ("action_authority", "holdout_selected"))

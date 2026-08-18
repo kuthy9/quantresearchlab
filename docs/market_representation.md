@@ -326,6 +326,31 @@ neighbour gates. It writes only its metrics report:
 epoch; it never sets `model_capability_validated`. If no common epoch passes,
 the report records failure and the ten-window fit must not start.
 
+The only registered B0 fallback is `neutral-b1-validation`. It is permitted
+only for the exact failed B0 report bound in `data_splits.json`, and reuses the
+same two manifests, seeds, optimization contract and every B0 gate. B1 changes
+one training variable: two independently masked views retain the existing
+neutral task losses and add a fixed 5/5/0.2 VICReg penalty directly to the
+final L2-normalized embedding space (scaled by `sqrt(128)` for the registered
+variance units). The six-row final train batch remains in the task loss but is
+excluded from the batch-16 VICReg estimate. B1 also writes metrics only:
+
+```bash
+.venv/bin/python scripts/train_market_representation.py \
+  --neutral-b1-validation \
+  --parent-b0-metrics OUT/b0_metrics.json \
+  --market-case-input-manifest TRAIN_2021_02/market_case_input_shards.manifest.json \
+  --market-case-run-manifest TRAIN_2021_02/run_manifest.json \
+  --market-case-input-manifest VALIDATION_2022_05/market_case_input_shards.manifest.json \
+  --market-case-run-manifest VALIDATION_2022_05/run_manifest.json \
+  --metrics-output OUT/b1_metrics.json
+```
+
+B1 does not add a projector, threshold, checkpoint, export, holdout access or
+capability claim. It also does not establish true per-scale pooled-view
+alignment; that remains a separately preregistered B2 concern. A B1 failure
+stops the representation programme instead of trying another weight set.
+
 Run the pre-registered three-window pipeline smoke by repeating paired
 manifests in train, validation and holdout order (order itself is not trusted;
 the registered profile role is):

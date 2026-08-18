@@ -387,6 +387,76 @@
       "neighbor_chance": "mean_query_label_frequency_in_each_eligible_train_pool"
     }
   },
+  "neutral_representation_b1_validation": {
+    "protocol_version": "neutral-representation-b1-vicreg-validation-1.0.0",
+    "parent_b0_metrics_sha256": "0a2c0bb6ceb0b68ab062cdb1cdf3d23f515558523da8f9f303e7c9ba2ffc8e47",
+    "parent_b0_contract_sha256": "89d8edcde0126e260c61f41ad2ef5f02c449da26c478ceb59be2432155c56dd8",
+    "parent_b0_trainer_commit": "a8ae5633ae3ad2cf7bf7bd9b7b68ef63b55a3b41",
+    "parent_b0_inputs": {
+      "train": {
+        "rows": 1190,
+        "input_manifest_sha256": "443d2465233ffc8b036629561f72acc9ae89705f369afe8cf5f9f72b238c945a",
+        "run_manifest_sha256": "576b355e0203c633108a1647be0da973fd2b93619d2bd9666a46643d3bd5a08e"
+      },
+      "validation": {
+        "rows": 1279,
+        "input_manifest_sha256": "bb1b95e19863f3f7b5d2e0a48afd10e6bc54986ef2b5d9c694861fd993d9fce7",
+        "run_manifest_sha256": "d35e49800753c0d28bde25d92f782937f9f7269da6d959abe3fe789d0c07082c"
+      }
+    },
+    "profiles": {
+      "train": "neutral_representation_train_2021_02",
+      "validation": "neutral_representation_validation_2022_05"
+    },
+    "base_training_contract": "reuse_neutral_b0_without_change",
+    "b0_gates_reused_without_change": true,
+    "new_validation_thresholds_added": false,
+    "selection": "earliest_epoch_all_preregistered_b0_gates_pass",
+    "regularizer_diagnostics_used_for_selection": false,
+    "final_embedding_regularizer": {
+      "name": "two_view_vicreg_on_export_embedding",
+      "embedding_dimension": 128,
+      "embedding_space": "l2_normalized_final_embedding",
+      "coordinate_scale": "sqrt_embedding_dimension",
+      "projector": false,
+      "stop_gradient": false,
+      "complete_batch_rows": 16,
+      "incomplete_batch_policy": "two_view_task_loss_with_graph_connected_zero_vicreg",
+      "task_loss_reduction": "mean_of_two_neutral_multitask_losses",
+      "invariance": {
+        "reduction": "mean_all_coordinates",
+        "weight": 5.0
+      },
+      "variance": {
+        "sample_variance_correction": 1,
+        "epsilon_inside_sqrt": 0.0001,
+        "gamma": 1.0,
+        "view_reduction": "mean",
+        "dimension_reduction": "mean",
+        "weight": 5.0
+      },
+      "covariance": {
+        "denominator": "batch_rows_minus_one",
+        "diagonal_included": false,
+        "dimension_divisor": 128,
+        "view_reduction": "mean",
+        "weight": 0.2,
+        "finite_rank_floor_for_complete_batch": 7.531826742000001
+      }
+    },
+    "seed_schedule": {
+      "epoch_stride": 10000,
+      "batch_index_stride": 1,
+      "mask_view_a_offset": 0,
+      "mask_view_b_offset": 400000,
+      "dropout_view_a_offset": 2800000,
+      "dropout_view_b_offset": 3200000,
+      "mask_rng_scope": "private_cpu_generator_per_collate",
+      "dropout_rng_scope": "torch_fork_rng_cpu_per_forward"
+    },
+    "cross_scale_pooled_view_alignment_claimed": false,
+    "future_b2_required_for_cross_scale_alignment_claim": true
+  },
   "market_case_input_profiles": {
     "market_episode_input_smoke_2024_01_08": {
       "purpose": "One-day input-only smoke materialization of neutral MarketEpisode transitions; no Brain, Decision, Risk, Shadow, outcome, execution, fitting or playbook action output.",

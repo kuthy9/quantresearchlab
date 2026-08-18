@@ -58,6 +58,7 @@ from smc_trader.market_representation import (
     prepare_neutral_representation_case,
     load_representation_checkpoint,
     load_neutral_representation_checkpoint,
+    neutral_b1_vicreg_loss,
     representation_case_from_case_input_row,
     representation_case_from_market_case_input_row,
     representation_multitask_loss,
@@ -1770,6 +1771,180 @@ def test_opposite_authority_is_contrastive_negative_independent_of_thesis() -> N
     assert float(opposite_loss) == pytest.approx(0.8)
     assert unknown_batch.authority_direction.tolist() == [1, 0]
     assert float(unknown_loss) == pytest.approx(0.0)
+
+
+@pytest.mark.skipif(not TORCH_AVAILABLE, reason="optional PyTorch is not installed")
+def test_neutral_b1_vicreg_penalizes_collapsed_embeddings_more_than_dispersed() -> None:
+    import torch
+    from torch.nn import functional as F
+
+    collapsed = torch.zeros((16, EMBEDDING_DIM), dtype=torch.float64)
+    collapsed[:, 0] = 1.0
+    generator = torch.Generator().manual_seed(751)
+    dispersed = F.normalize(
+        torch.randn((16, EMBEDDING_DIM), generator=generator, dtype=torch.float64),
+        dim=1,
+    )
+
+    collapsed_loss = neutral_b1_vicreg_loss(collapsed, collapsed)
+    dispersed_loss = neutral_b1_vicreg_loss(dispersed, dispersed)
+
+    assert collapsed_loss.diagnostics["active"] is True
+    assert dispersed_loss.diagnostics["active"] is True
+    assert float(collapsed_loss.total) > float(dispersed_loss.total)
+    assert float(collapsed_loss.components["variance"]) == pytest.approx(0.99)
+
+
+@pytest.mark.skipif(not TORCH_AVAILABLE, reason="optional PyTorch is not installed")
+def test_neutral_b1_vicreg_has_finite_gradients_and_exact_weighted_total() -> None:
+    import torch
+    from torch.nn import functional as F
+
+    generator = torch.Generator().manual_seed(752)
+    first_source = torch.randn(
+        (16, EMBEDDING_DIM), generator=generator, dtype=torch.float64,
+        requires_grad=True,
+    )
+    second_source = torch.randn(
+        (16, EMBEDDING_DIM), generator=generator, dtype=torch.float64,
+        requires_grad=True,
+    )
+    result = neutral_b1_vicreg_loss(
+        F.normalize(first_source, dim=1),
+        F.normalize(second_source, dim=1),
+    )
+    expected_total = (
+        5.0 * result.components["invariance"]
+        + 5.0 * result.components["variance"]
+        + 0.2 * result.components["covariance"]
+    )
+
+    torch.testing.assert_close(result.total, expected_total, rtol=0.0, atol=0.0)
+    assert all(torch.isfinite(value) for value in result.components.values())
+    assert all(value.requires_grad for value in result.components.values())
+    for name, value in result.diagnostics.items():
+        if isinstance(value, torch.Tensor):
+            assert torch.isfinite(value)
+            assert value.requires_grad, name
+
+    result.total.backward()
+    assert first_source.grad is not None
+    assert second_source.grad is not None
+    assert bool(torch.isfinite(first_source.grad).all())
+    assert bool(torch.isfinite(second_source.grad).all())
+
+
+@pytest.mark.skipif(not TORCH_AVAILABLE, reason="optional PyTorch is not installed")
+def test_neutral_b1_vicreg_skips_short_final_batch_but_activates_at_sixteen() -> None:
+    import torch
+    from torch.nn import functional as F
+
+    generator = torch.Generator().manual_seed(753)
+    short_source = torch.randn(
+        (15, EMBEDDING_DIM), generator=generator, requires_grad=True
+    )
+    short_view = F.normalize(short_source, dim=1)
+    short_result = neutral_b1_vicreg_loss(short_view, short_view)
+
+    assert short_result.diagnostics["active"] is False
+    assert short_result.diagnostics["batch_size"] == 15
+    assert float(short_result.total.detach()) == 0.0
+    assert all(
+        float(value.detach()) == 0.0 for value in short_result.components.values()
+    )
+    assert short_result.total.requires_grad
+    short_result.total.backward()
+    assert short_source.grad is not None
+    torch.testing.assert_close(short_source.grad, torch.zeros_like(short_source.grad))
+
+    active_source = torch.randn(
+        (16, EMBEDDING_DIM), generator=generator, requires_grad=True
+    )
+    active_view = F.normalize(active_source, dim=1)
+    active_result = neutral_b1_vicreg_loss(active_view, active_view.roll(1, dims=0))
+    assert active_result.diagnostics["active"] is True
+    assert active_result.diagnostics["batch_size"] == 16
+    assert float(active_result.total) > 0.0
+
+
+@pytest.mark.skipif(not TORCH_AVAILABLE, reason="optional PyTorch is not installed")
+def test_neutral_b1_vicreg_rejects_invalid_embedding_contract() -> None:
+    import torch
+    from torch.nn import functional as F
+
+    valid = F.normalize(torch.ones((16, EMBEDDING_DIM)), dim=1)
+    invalid_cases = (
+        (torch.ones((16, EMBEDDING_DIM - 1)), valid, "shape"),
+        (valid, valid[:15], "identical shapes"),
+        (torch.full_like(valid, float("nan")), valid, "finite"),
+        (torch.zeros_like(valid), valid, "L2-normalized"),
+        (torch.ones((16, EMBEDDING_DIM), dtype=torch.long), valid, "floating"),
+        (F.normalize(torch.ones((17, EMBEDDING_DIM)), dim=1),) * 2
+        + ("batch size",),
+    )
+    for first, second, message in invalid_cases:
+        with pytest.raises(RepresentationDataError, match=message):
+            neutral_b1_vicreg_loss(first, second)
+
+    with pytest.raises(TypeError):
+        neutral_b1_vicreg_loss(valid, valid, torch.zeros(16))  # type: ignore[call-arg]
+    with pytest.raises(TypeError):
+        neutral_b1_vicreg_loss(  # type: ignore[call-arg]
+            valid, valid, targets=torch.zeros(16)
+        )
+
+
+@pytest.mark.skipif(not TORCH_AVAILABLE, reason="optional PyTorch is not installed")
+def test_neutral_b1_vicreg_uses_frozen_sample_correction_and_reductions() -> None:
+    import torch
+    from torch.nn import functional as F
+
+    generator = torch.Generator().manual_seed(754)
+    first = F.normalize(
+        torch.randn((16, EMBEDDING_DIM), generator=generator, dtype=torch.float64),
+        dim=1,
+    )
+    second = F.normalize(
+        torch.randn((16, EMBEDDING_DIM), generator=generator, dtype=torch.float64),
+        dim=1,
+    )
+    result = neutral_b1_vicreg_loss(first, second)
+    first_q = first * EMBEDDING_DIM**0.5
+    second_q = second * EMBEDDING_DIM**0.5
+    first_std = torch.sqrt(first_q.var(dim=0, correction=1) + 1e-4)
+    second_std = torch.sqrt(second_q.var(dim=0, correction=1) + 1e-4)
+    expected_invariance = (first_q - second_q).square().mean()
+    expected_variance = (
+        torch.relu(1.0 - first_std).mean()
+        + torch.relu(1.0 - second_std).mean()
+    ) / 2.0
+
+    def expected_covariance(values: torch.Tensor) -> torch.Tensor:
+        centered = values - values.mean(dim=0, keepdim=True)
+        covariance = centered.T @ centered / 15
+        off_diagonal = ~torch.eye(EMBEDDING_DIM, dtype=torch.bool)
+        return covariance[off_diagonal].square().sum() / EMBEDDING_DIM
+
+    expected_covariance_mean = (
+        expected_covariance(first_q) + expected_covariance(second_q)
+    ) / 2.0
+    population_std = torch.sqrt(first_q.var(dim=0, correction=0) + 1e-4)
+
+    torch.testing.assert_close(
+        result.components["invariance"], expected_invariance, rtol=0.0, atol=1e-12
+    )
+    torch.testing.assert_close(
+        result.components["variance"], expected_variance, rtol=0.0, atol=1e-12
+    )
+    torch.testing.assert_close(
+        result.components["covariance"],
+        expected_covariance_mean,
+        rtol=0.0,
+        atol=1e-12,
+    )
+    assert not torch.allclose(
+        result.diagnostics["first_view_mean_std"], population_std.mean()
+    )
 
 
 @pytest.mark.skipif(not TORCH_AVAILABLE, reason="optional PyTorch is not installed")
