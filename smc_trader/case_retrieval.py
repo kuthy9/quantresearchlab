@@ -29,6 +29,7 @@ from .market_representation import (
     INFERENCE_INPUT_PROTOCOL,
     NEUTRAL_INFERENCE_INPUT_PROTOCOL,
     OUTCOME_BLIND_HEAD_WIDTHS,
+    neutral_direct_source_preprocessing_identity,
 )
 from .scene_graph import market_episode_id as canonical_market_episode_id
 
@@ -1104,10 +1105,14 @@ class MarketEpisodeEmbeddingRecord:
 
 @dataclass(frozen=True)
 class MarketEpisodeEmbeddingQuery(MarketEpisodeEmbeddingRecord):
+    embedding_input_protocol: str
+    neutral_preprocessing_version: str
+    neutral_preprocessing_sha256: str
     reference_splits: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         super().__post_init__()
+        self._require_neutral_input_contract()
         refs = self.reference_splits or _DEFAULT_REFERENCE_SPLITS.get(
             self.data_split,
             (self.data_split,),
@@ -1117,6 +1122,18 @@ class MarketEpisodeEmbeddingQuery(MarketEpisodeEmbeddingRecord):
             raise CaseRetrievalError("MarketEpisode reference splits are invalid")
         object.__setattr__(self, "reference_splits", refs)
 
+    def _require_neutral_input_contract(self) -> None:
+        identity = neutral_direct_source_preprocessing_identity()
+        if (
+            self.embedding_input_protocol != NEUTRAL_INFERENCE_INPUT_PROTOCOL
+            or self.neutral_preprocessing_version
+            != identity["protocol"]["protocol_version"]
+            or self.neutral_preprocessing_sha256 != identity["sha256"]
+        ):
+            raise CaseRetrievalError(
+                "MarketEpisode query preprocessing contract is invalid"
+            )
+
     @classmethod
     def from_mapping(
         cls,
@@ -1125,6 +1142,13 @@ class MarketEpisodeEmbeddingQuery(MarketEpisodeEmbeddingRecord):
         material_kind: str | None = None,
         embedding_dim: int = DEFAULT_MARKET_EMBEDDING_DIM,
     ) -> "MarketEpisodeEmbeddingQuery":
+        if (
+            record.get("embedding_input_protocol")
+            != NEUTRAL_INFERENCE_INPUT_PROTOCOL
+        ):
+            raise CaseRetrievalError(
+                "MarketEpisode query preprocessing contract is invalid"
+            )
         kinds = _market_episode_material_kinds(record)
         if material_kind is None:
             if len(kinds) != 1:
@@ -1147,7 +1171,18 @@ class MarketEpisodeEmbeddingQuery(MarketEpisodeEmbeddingRecord):
             "reference_splits", record.get("allowed_reference_splits", ())
         )
         refs = (raw_refs,) if isinstance(raw_refs, str) else tuple(raw_refs or ())
-        return cls(**parsed.__dict__, reference_splits=refs)
+        identity = neutral_direct_source_preprocessing_identity()
+        query = cls(
+            **parsed.__dict__,
+            embedding_input_protocol=NEUTRAL_INFERENCE_INPUT_PROTOCOL,
+            neutral_preprocessing_version=(
+                identity["protocol"]["protocol_version"]
+            ),
+            neutral_preprocessing_sha256=identity["sha256"],
+            reference_splits=refs,
+        )
+        query._require_neutral_input_contract()
+        return query
 
 
 @dataclass(frozen=True)
@@ -2391,6 +2426,9 @@ class MarketEpisodeCaseIndex:
         dataset_contract: Mapping[str, Any] | None = None,
         require_different_calendar_date: bool = False,
     ) -> MarketEpisodeRetrievalResult:
+        if not isinstance(query, MarketEpisodeEmbeddingQuery):
+            raise CaseRetrievalError("neutral query contract is invalid")
+        query._require_neutral_input_contract()
         query_lineage = _normalise_market_episode_artifact_lineage(
             artifact_lineage
         )

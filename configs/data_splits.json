@@ -310,6 +310,83 @@
       "holdout": "neutral_representation_holdout_2025_02"
     }
   },
+  "neutral_representation_b0_validation": {
+    "protocol_version": "neutral-representation-b0-validation-1.0.0",
+    "model_version": "1.0.0-causal-multiscale-gru",
+    "device": "cpu",
+    "profiles": {
+      "train": "neutral_representation_train_2021_02",
+      "validation": "neutral_representation_validation_2022_05"
+    },
+    "ensemble": {
+      "members": 3,
+      "seeds": [17, 100020, 200023]
+    },
+    "optimizer": {
+      "name": "AdamW",
+      "learning_rate": 0.0003,
+      "weight_decay": 0.0001,
+      "gradient_clip_max_norm": 1.0,
+      "deterministic_algorithms": true
+    },
+    "batch_size": 16,
+    "mask_probability": 0.15,
+    "max_epochs": 10,
+    "seed_schedule": {
+      "train_order_epoch_stride": 1,
+      "train_mask_epoch_stride": 10000,
+      "evaluation_train_offset": 800000,
+      "evaluation_validation_offset": 900000,
+      "batch_index_stride": 1
+    },
+    "objectives": {
+      "loss_weights": {
+        "candle_reconstruction": 1.0,
+        "event_reconstruction": 1.0,
+        "next_event": 0.0,
+        "next_lifecycle": 0.75,
+        "next_event_time": 0.0,
+        "displacement": 0.0,
+        "draw_consumed": 0.0,
+        "scale_alignment": 0.5,
+        "contrastive": 0.0
+      },
+      "active_heads": [
+        "next_lifecycle",
+        "scale_direction_alignment"
+      ],
+      "disabled_heads": [
+        "next_event_type",
+        "next_event_time_bucket",
+        "displacement_state",
+        "draw_consumed"
+      ]
+    },
+    "selection": "earliest_epoch_all_preregistered_gates_pass",
+    "gates": {
+      "masked_candle_relative_improvement_each_timeframe_min": 0.02,
+      "candle_baseline": "zero_after_frozen_feature_normalization_on_validation_mask",
+      "masked_event_relative_improvement_over_train_laplace_unigram_min": 0.02,
+      "event_baseline": "laplace_unigram_from_all_preprocessed_train_event_tokens",
+      "active_head_ensemble_nll_relative_improvement_over_train_laplace_prior_min": 0.02,
+      "active_head_member_balanced_accuracy_lift_over_train_prior_min": 0.02,
+      "active_head_members_required": 2,
+      "validation_unit_centroid_norm_max": 0.95,
+      "validation_effective_rank_min": 16.0,
+      "validation_material_min_rows_for_rank_gate": 128,
+      "validation_material_effective_rank_min": 16.0,
+      "validation_raw_p95_pairwise_cosine_max": 0.99,
+      "neighbor_k": 10,
+      "neighbor_coverage_required": 1.0,
+      "neighbor_purity_min": 0.6,
+      "neighbor_purity_lift_over_train_chance_min": 0.1,
+      "neighbor_reference_clock": "strictly_prior_cross_day_train_rows",
+      "neighbor_material_grain": "canonical_transition_kind",
+      "neighbor_material_selector": "expand_each_present_canonical_transition_kind_per_revision",
+      "neighbor_label": "next_lifecycle_and_scale_direction_alignment_joint",
+      "neighbor_chance": "mean_query_label_frequency_in_each_eligible_train_pool"
+    }
+  },
   "market_case_input_profiles": {
     "market_episode_input_smoke_2024_01_08": {
       "purpose": "One-day input-only smoke materialization of neutral MarketEpisode transitions; no Brain, Decision, Risk, Shadow, outcome, execution, fitting or playbook action output.",

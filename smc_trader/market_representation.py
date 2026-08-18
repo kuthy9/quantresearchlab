@@ -92,6 +92,11 @@ BAR_END_INDEX_BINDING = "__index_is_completed_bar_end__"
 INFERENCE_INPUT_PROTOCOL = "inference_unmasked_v1"
 NEUTRAL_INFERENCE_INPUT_PROTOCOL = "neutral_direct_source_filtered_v1"
 NEUTRAL_TRAINING_CONTRACT = "neutral-market-representation-b0-v2"
+_NEUTRAL_CHECKPOINT_METADATA_KEYS = frozenset({
+    "training_contract", "direct_source_preprocessing", "inference_input_protocol",
+    "member_id", "seed", "split_counts", "lineage", "outcome_fields_used",
+    "model_capability_validated",
+})
 _NEUTRAL_DIRECT_SOURCE_EVENT_PREPROCESSING_PROTOCOL = {
     "protocol_version": "neutral-direct-source-event-preprocessing-1.0.0",
     "scope": "neutral_market_episode",
@@ -4690,6 +4695,159 @@ def compare_validation_to_baseline(
     return result
 
 
+def _neutral_checkpoint_exact_mapping(
+    value: Any, keys: Iterable[str], name: str,
+) -> Mapping[str, Any]:
+    if not isinstance(value, Mapping) or set(value) != set(keys):
+        raise RepresentationDataError(f"neutral checkpoint {name} schema differs")
+    return value
+
+
+def _neutral_checkpoint_text(
+    value: Any, name: str, lengths: frozenset[int] = frozenset()
+) -> str:
+    valid_digest = len(value) in lengths and all(
+        character in "0123456789abcdef" for character in value
+    ) if type(value) is str and lengths else not lengths
+    if type(value) is not str or not value.strip() or not valid_digest:
+        raise RepresentationDataError(f"neutral checkpoint {name} is invalid")
+    return value
+
+
+def _neutral_checkpoint_json(value: Any) -> str:
+    try:
+        return json.dumps(value, allow_nan=False, separators=(",", ":"), sort_keys=True)
+    except (TypeError, ValueError) as exc:
+        raise RepresentationDataError("neutral checkpoint metadata is invalid") from exc
+
+
+def _validate_neutral_checkpoint_metadata(value: Any) -> None:
+    metadata = _neutral_checkpoint_exact_mapping(
+        value, _NEUTRAL_CHECKPOINT_METADATA_KEYS, "metadata")
+    if (
+        metadata["training_contract"] != NEUTRAL_TRAINING_CONTRACT
+        or _neutral_checkpoint_json(metadata["direct_source_preprocessing"])
+        != _neutral_checkpoint_json(neutral_direct_source_preprocessing_identity())
+        or metadata["inference_input_protocol"]
+        != NEUTRAL_INFERENCE_INPUT_PROTOCOL
+    ):
+        raise RepresentationDataError("neutral checkpoint protocol differs")
+    _neutral_checkpoint_text(metadata["member_id"], "member_id")
+    if type(metadata["seed"]) is not int:
+        raise RepresentationDataError("neutral checkpoint seed is invalid")
+    if (
+        metadata["outcome_fields_used"] is not False
+        or metadata["model_capability_validated"] is not False
+    ):
+        raise RepresentationDataError("neutral checkpoint claims forbidden capability")
+    lineage = _neutral_checkpoint_exact_mapping(
+        metadata["lineage"],
+        (
+            "input_runs", "source_identity", "model_config_identity",
+            "market_case_protocol", "representation_feature_schema_version",
+            "split_protocol",
+        ),
+        name="lineage",
+    )
+    runs = lineage["input_runs"]
+    if type(runs) is not list or len(runs) not in {2, 3, 10}:
+        raise RepresentationDataError("neutral checkpoint input_runs is invalid")
+    roles: set[str] = set()
+    for raw_run in runs:
+        run = _neutral_checkpoint_exact_mapping(
+            raw_run,
+            (
+                "profile_name", "split_role", "input_manifest_path",
+                "input_manifest_sha256", "run_manifest_path",
+                "run_manifest_sha256", "repository_commit",
+            ),
+            name="input run",
+        )
+        for name in ("profile_name", "split_role", "input_manifest_path",
+                     "run_manifest_path"):
+            _neutral_checkpoint_text(run[name], name=name)
+        for name in ("input_manifest_sha256", "run_manifest_sha256"):
+            _neutral_checkpoint_text(run[name], name=name, lengths=frozenset({64}))
+        _neutral_checkpoint_text(
+            run["repository_commit"], name="repository_commit",
+            lengths=frozenset({40}),
+        )
+        roles.add(run["split_role"])
+    expected_roles = (
+        {"train", "validation"} if len(runs) == 2
+        else {"train", "validation", "holdout"}
+    )
+    if roles != expected_roles:
+        raise RepresentationDataError("neutral checkpoint split roles are invalid")
+    counts = _neutral_checkpoint_exact_mapping(
+        metadata["split_counts"], roles, "split_counts")
+    if any(type(count) is not int or count < 1 for count in counts.values()):
+        raise RepresentationDataError("neutral checkpoint split_counts is invalid")
+    source = _neutral_checkpoint_exact_mapping(
+        lineage["source_identity"], ("sha256",), "source identity")
+    config = _neutral_checkpoint_exact_mapping(
+        lineage["model_config_identity"], ("sha256", "timezone"),
+        "model config identity")
+    _neutral_checkpoint_text(source["sha256"], name="source SHA", lengths=frozenset({64}))
+    _neutral_checkpoint_text(config["sha256"], name="config SHA", lengths=frozenset({64}))
+    _neutral_checkpoint_text(config["timezone"], name="timezone")
+    from .market_cases import expected_market_case_run_identity
+    if (
+        _neutral_checkpoint_json(lineage["market_case_protocol"])
+        != _neutral_checkpoint_json(expected_market_case_run_identity())
+        or
+        type(lineage["representation_feature_schema_version"]) is not int
+        or lineage["representation_feature_schema_version"] != FEATURE_SCHEMA_VERSION
+    ):
+        raise RepresentationDataError("neutral checkpoint lineage protocol differs")
+    split = _neutral_checkpoint_exact_mapping(
+        lineage["split_protocol"],
+        (
+            "registry_sha256", "protocol_version", "warmup_calendar_days",
+            "purge_calendar_days", "embargo_trading_days",
+            "market_episode_split_key", "actual_prefix_exposure_verified",
+            "observed_completed_session_embargo",
+        ),
+        name="split protocol",
+    )
+    _neutral_checkpoint_text(split["registry_sha256"], name="registry SHA", lengths=frozenset({64}))
+    _neutral_checkpoint_text(split["protocol_version"], name="split protocol version")
+    if (
+        split["protocol_version"] != "neutral-representation-splits-1.0.0"
+        or tuple(split[name] for name in (
+            "warmup_calendar_days", "purge_calendar_days", "embargo_trading_days"
+        )) != (14, 14, 5)
+        or any(type(split[name]) is not int for name in (
+            "warmup_calendar_days", "purge_calendar_days", "embargo_trading_days"
+        ))
+        or split["market_episode_split_key"]
+        != ["run_manifest_sha256", "market_epoch_id", "market_episode_id"]
+        or split["actual_prefix_exposure_verified"] is not True
+    ):
+        raise RepresentationDataError("neutral checkpoint split protocol differs")
+    observed = split["observed_completed_session_embargo"]
+    if type(observed) is not list or len(observed) != len(runs) - 1:
+        raise RepresentationDataError("neutral checkpoint embargo evidence is invalid")
+    for raw_evidence in observed:
+        evidence = _neutral_checkpoint_exact_mapping(
+            raw_evidence,
+            (
+                "left_profile", "right_profile", "purge_end", "next_prefix_start",
+                "observed_session_count", "first_observed_session",
+                "last_observed_session",
+            ),
+            name="embargo evidence",
+        )
+        for name, item in evidence.items():
+            if name != "observed_session_count":
+                _neutral_checkpoint_text(item, name=f"embargo {name}")
+        if (
+            type(evidence["observed_session_count"]) is not int
+            or evidence["observed_session_count"] < 5
+        ):
+            raise RepresentationDataError("neutral checkpoint embargo count is invalid")
+
+
 def save_representation_checkpoint(
     path: str | Path,
     model: MarketRepresentationModel,
@@ -4795,6 +4953,7 @@ def save_neutral_representation_checkpoint(
                 f"neutral checkpoint {name} conflicts with the B0 protocol"
             )
     supplied.update(required)
+    _validate_neutral_checkpoint_metadata(supplied)
     save_representation_checkpoint(path, model, metadata=supplied)
 
 
@@ -4822,6 +4981,7 @@ def load_neutral_representation_checkpoint(
         raise RepresentationDataError(
             "neutral checkpoint preprocessing protocol is missing or differs"
         )
+    _validate_neutral_checkpoint_metadata(metadata)
     return _model_from_representation_checkpoint_payload(payload)
 
 

@@ -26,7 +26,11 @@ key. Every other nested outcome/future key remains forbidden.
 sparse input stream:
 
 - next sparse lifecycle of the same physical episode;
-- contemporaneous active cross-scale direction alignment.
+- contemporaneous same-clock active-scale direction consistency.
+
+This target compares the directions of scales active at the same causal clock;
+it is not cross-scale view alignment. The serialized active-head key remains
+`scale_direction_alignment` for compatibility.
 
 The legacy next-event-time, displacement and draw targets, and the generic
 next-event-family target, are explicitly `-100` and receive zero supervision.
@@ -171,7 +175,7 @@ to `encode()`:
 - next typed-event time bucket;
 - displacement continues versus exhausts;
 - draw consumed within the fixed observable horizon;
-- contemporaneous cross-scale direction alignment;
+- contemporaneous same-clock active-scale direction consistency;
 - contrastive pull for different episodes under the same Context;
 - contrastive separation across market epochs or opposite authority.
 
@@ -301,6 +305,26 @@ Exercise the complete neutral read/feature/target/model boundary as one batch:
 These commands validate and report; neither fits nor exports a model.
 Supplying `--epochs`, `--checkpoint`, `--embedding-output` or `--head-output`
 with either neutral mode fails closed.
+
+Before any ten-window fit, run the frozen B0 validation-only protocol with
+exactly 2021-02 as train and 2022-05 as validation. It never opens a holdout,
+uses three registered seeds for at most ten epochs, and applies the registered
+reconstruction, active-head, geometry, collapse and strictly-prior cross-day
+neighbour gates. It writes only its metrics report:
+
+```bash
+.venv/bin/python scripts/train_market_representation.py \
+  --neutral-b0-validation \
+  --market-case-input-manifest TRAIN_2021_02/market_case_input_shards.manifest.json \
+  --market-case-run-manifest TRAIN_2021_02/run_manifest.json \
+  --market-case-input-manifest VALIDATION_2022_05/market_case_input_shards.manifest.json \
+  --market-case-run-manifest VALIDATION_2022_05/run_manifest.json \
+  --metrics-output OUT/b0_metrics.json
+```
+
+`criteria_met` means only that all frozen B0 gates share an earliest passing
+epoch; it never sets `model_capability_validated`. If no common epoch passes,
+the report records failure and the ten-window fit must not start.
 
 Run the pre-registered three-window pipeline smoke by repeating paired
 manifests in train, validation and holdout order (order itself is not trusted;

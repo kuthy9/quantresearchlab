@@ -357,6 +357,136 @@ def test_neutral_cli_is_mutually_exclusive_and_audit_only(
         trainer.main(args)
 
 
+def _b0_cli_args(metrics: Path | None = None) -> list[str]:
+    args = ["--neutral-b0-validation"]
+    for role in ("train", "validation"):
+        args.extend(("--market-case-input-manifest", f"{role}-input.json",
+                     "--market-case-run-manifest", f"{role}-run.json"))
+    if metrics is not None:
+        args.extend(("--metrics-output", str(metrics)))
+    return args
+
+
+def test_neutral_b0_cli_freezes_training_contract_and_requires_metrics(
+    tmp_path: Path,
+) -> None:
+    args = trainer._parser().parse_args(_b0_cli_args(tmp_path / "metrics.json"))
+    trainer._validate_neutral_cli(args, argv=_b0_cli_args(tmp_path / "metrics.json"))
+    assert (args.ensemble_size, args.seed, args.batch_size, args.epochs) == (
+        3, 17, 16, 10,
+    )
+    assert args.learning_rate == 3e-4
+    with pytest.raises(RepresentationDataError, match="metrics-output"):
+        missing = trainer._parser().parse_args(_b0_cli_args())
+        trainer._validate_neutral_cli(missing, argv=_b0_cli_args())
+    overridden = [*_b0_cli_args(tmp_path / "metrics.json"), "--epochs", "9"]
+    with pytest.raises(RepresentationDataError, match="freezes"):
+        trainer._validate_neutral_cli(
+            trainer._parser().parse_args(overridden), argv=overridden
+        )
+    non_cpu = [*_b0_cli_args(tmp_path / "metrics.json"), "--device", "mps"]
+    with pytest.raises(RepresentationDataError, match="CPU"):
+        trainer._validate_neutral_cli(
+            trainer._parser().parse_args(non_cpu), argv=non_cpu
+        )
+
+
+def test_neutral_b0_trainer_identity_requires_clean_tracked_worktree(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clean = iter((SimpleNamespace(stdout="a" * 40 + "\n"),
+                  SimpleNamespace(stdout="")))
+    monkeypatch.setattr(trainer.subprocess, "run", lambda *args, **kwargs: next(clean))
+    assert trainer._neutral_b0_trainer_commit() == "a" * 40
+    dirty = iter((SimpleNamespace(stdout="a" * 40 + "\n"),
+                  SimpleNamespace(stdout=" M scripts/train_market_representation.py\n")))
+    monkeypatch.setattr(trainer.subprocess, "run", lambda *args, **kwargs: next(dirty))
+    with pytest.raises(RepresentationDataError, match="clean trainer"):
+        trainer._neutral_b0_trainer_commit()
+
+
+@pytest.mark.parametrize(("path", "replacement"), (
+    (("max_epochs",), 10.0),
+    (("gates", "neighbor_coverage_required"), True),
+))
+def test_neutral_b0_registry_rejects_equal_but_wrong_json_types(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    path: tuple[str, ...], replacement: object,
+) -> None:
+    payload = json.loads(trainer.DATA_SPLITS.read_text())
+    contract = payload["neutral_representation_b0_validation"]
+    parent = contract
+    for key in path[:-1]:
+        parent = parent[key]
+    parent[path[-1]] = replacement
+    registry = tmp_path / "data_splits.json"
+    registry.write_text(json.dumps(payload), encoding="utf-8")
+    monkeypatch.setattr(trainer, "DATA_SPLITS", registry)
+    with pytest.raises(RepresentationDataError, match="frozen contract"):
+        trainer._neutral_b0_registry_contract()
+
+
+def test_neutral_b0_rejects_holdout_before_loading_dataset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    names = iter((
+        "neutral_representation_train_2021_02",
+        "neutral_representation_holdout_2025_02",
+    ))
+    monkeypatch.setattr(trainer, "_neutral_run_profile_name", lambda path: next(names))
+    monkeypatch.setattr(
+        trainer, "_load_neutral_market_dataset",
+        lambda **kwargs: pytest.fail("B0 opened a dataset before profile preflight"),
+    )
+    with pytest.raises(RepresentationDataError, match="ordered 2021-02"):
+        trainer._load_neutral_fit_collection(
+            input_manifest_paths=("train-input", "holdout-input"),
+            run_manifest_paths=("train-run", "holdout-run"),
+            validation_only=True,
+        )
+
+
+def test_neutral_b0_metrics_are_atomically_read_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    metrics = tmp_path / "b0.json"
+    monkeypatch.setattr(trainer, "_load_neutral_fit_collection", lambda **kwargs: {})
+    monkeypatch.setattr(
+        trainer, "_neutral_b0_validation_report",
+        lambda *args, **kwargs: {"proof": "b0", "criteria_met": True},
+    )
+    monkeypatch.setattr(trainer, "_neutral_b0_trainer_commit", lambda: "a" * 40)
+    monkeypatch.setattr(trainer, "_validate_neutral_b0_metrics_protocol", lambda value: None)
+    reads: list[dict[str, object]] = []
+    def readback(path: str) -> Mapping[str, object]:
+        reads.append(json.loads(Path(path).read_text()))
+        return reads[-1]
+    monkeypatch.setattr(trainer, "load_neutral_b0_validation_metrics", readback)
+    assert trainer.main(_b0_cli_args(metrics)) == 0
+    assert reads == [{"criteria_met": True, "proof": "b0"}]
+    assert json.loads(capsys.readouterr().out) == reads[0]
+
+
+def test_neutral_b0_failed_criteria_writes_report_and_exits_two(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    metrics = tmp_path / "b0-failed.json"
+    monkeypatch.setattr(trainer, "_load_neutral_fit_collection", lambda **kwargs: {})
+    monkeypatch.setattr(
+        trainer, "_neutral_b0_validation_report",
+        lambda *args, **kwargs: {"proof": "b0", "criteria_met": False},
+    )
+    monkeypatch.setattr(trainer, "_neutral_b0_trainer_commit", lambda: "a" * 40)
+    monkeypatch.setattr(trainer, "_validate_neutral_b0_metrics_protocol", lambda value: None)
+    monkeypatch.setattr(
+        trainer, "load_neutral_b0_validation_metrics",
+        lambda path: json.loads(Path(path).read_text()),
+    )
+    assert trainer.main(_b0_cli_args(metrics)) == 2
+    assert json.loads(metrics.read_text()) == {"criteria_met": False, "proof": "b0"}
+
+
 @pytest.mark.parametrize(
     "change",
     (
@@ -424,6 +554,50 @@ def _neutral_targets(count: int) -> tuple[SelfSupervisedTarget, ...]:
         )
         for index in range(count)
     )
+
+
+def _valid_neutral_lineage(roles: tuple[str, ...]) -> dict[str, object]:
+    profiles = {
+        "train": "neutral_representation_train_2021_02",
+        "validation": "neutral_representation_validation_2022_05",
+        "holdout": "neutral_representation_holdout_2025_02",
+    }
+    runs = [{
+        "profile_name": profiles[role], "split_role": role,
+        "input_manifest_path": f"/inputs/{role}.json",
+        "input_manifest_sha256": f"{index + 1:064x}",
+        "run_manifest_path": f"/runs/{role}.json",
+        "run_manifest_sha256": f"{index + 11:064x}",
+        "repository_commit": f"{index + 1:040x}",
+    } for index, role in enumerate(roles)]
+    observed = [{
+        "left_profile": profiles[left], "right_profile": profiles[right],
+        "purge_end": "2021-03-15T00:00:00-04:00",
+        "next_prefix_start": "2022-04-17T00:00:00-04:00",
+        "observed_session_count": 5,
+        "first_observed_session": "2021-03-16",
+        "last_observed_session": "2021-03-22",
+    } for left, right in zip(roles[:-1], roles[1:])]
+    return {
+        "input_runs": runs,
+        "source_identity": {"sha256": "a" * 64},
+        "model_config_identity": {
+            "sha256": "b" * 64, "timezone": "America/New_York",
+        },
+        "market_case_protocol": market_cases.expected_market_case_run_identity(),
+        "representation_feature_schema_version": trainer.FEATURE_SCHEMA_VERSION,
+        "split_protocol": {
+            "registry_sha256": "c" * 64,
+            "protocol_version": "neutral-representation-splits-1.0.0",
+            "warmup_calendar_days": 14, "purge_calendar_days": 14,
+            "embargo_trading_days": 5,
+            "market_episode_split_key": [
+                "run_manifest_sha256", "market_epoch_id", "market_episode_id",
+            ],
+            "actual_prefix_exposure_verified": True,
+            "observed_completed_session_embargo": observed,
+        },
+    }
 
 
 def _valid_neutral_fit_metrics_payload() -> dict[str, object]:
@@ -510,7 +684,7 @@ def _valid_neutral_fit_metrics_payload() -> dict[str, object]:
                 "records": 9,
             },
         },
-        "lineage": {},
+        "lineage": _valid_neutral_lineage(("train", "validation", "holdout")),
         "direct_source_preprocessing": neutral_direct_source_preprocessing_identity(),
         "training_performed": True,
         "validation_used_for_optimization": False,
@@ -522,6 +696,110 @@ def _valid_neutral_fit_metrics_payload() -> dict[str, object]:
         "model_capability_validated": False,
         "retrieval_quality_validated": False,
         "ood_capability_validated": False,
+        "trading_edge_claimed": False,
+        "action_value_claimed": False,
+    }
+
+
+def _valid_neutral_b0_metrics_payload() -> dict[str, object]:
+    losses = {
+        "candle_reconstruction": 0.1,
+        "event_reconstruction": 0.1,
+        "next_lifecycle": 0.1,
+        "scale_alignment": 0.1,
+    }
+    role = {
+        "rows": 128,
+        "total_loss": 0.325,
+        "objective_losses": losses,
+        "active_head_metrics": {
+            name: {
+                "labelled_rows": 128, "nll": 0.5,
+                "accuracy": 0.8, "balanced_accuracy": 0.8,
+            }
+            for name in ("next_lifecycle", "scale_direction_alignment")
+        },
+        "masked_reconstruction": {
+            "candle_by_timeframe": {
+                timeframe: {
+                    "masked_values": 16, "smooth_l1": 0.5,
+                    "zero_after_frozen_feature_normalization_smooth_l1": 1.0,
+                    "relative_improvement": 0.5,
+                }
+                for timeframe in trainer.TIMEFRAMES
+            },
+            "event": {"masked_events": 16, "nll": 0.5},
+        },
+        "geometry": {
+            "embedding_dim": 128, "effective_rank": 20.0,
+            "mean_feature_std": 0.1, "centroid_norm": 0.1,
+            "unit_centroid_norm": 0.1, "raw_p95_pairwise_cosine": 0.5,
+        },
+        "material_geometry": {
+            kind: {"rows": 128, "effective_rank": 20.0}
+            for kind in trainer.NEUTRAL_MARKET_TRANSITION_KINDS
+        },
+    }
+    members = [{
+        "member_id": f"member-{index:03d}", "seed": seed,
+        "parameter_count": 1, "embedding_dim": 128,
+        "epoch_metrics": [{
+            "epoch": epoch,
+            "train": copy.deepcopy(role),
+            "validation": copy.deepcopy(role),
+        } for epoch in range(1, 11)],
+    } for index, seed in enumerate((17, 100_020, 200_023))]
+    neighbor = {
+        "eligible_material_queries": 1, "covered_material_queries": 1,
+        "neighbors": 10, "k": 10, "purity": 0.8,
+        "train_chance": 0.5, "lift": 0.3,
+    }
+    gates = [{
+        "epoch": epoch,
+        "members": [{
+            "member_id": f"member-{index:03d}",
+            "event_relative_improvement": 0.5,
+            "event_train_prior_nll": 1.0,
+            "neighbor": copy.deepcopy(neighbor),
+        } for index in range(3)],
+        "active_heads": {
+            name: {
+                "ensemble_nll": 0.5, "train_prior_nll": 1.0,
+                "train_prior_balanced_accuracy": 0.3,
+                "member_balanced_accuracy": [0.8, 0.8, 0.8],
+            }
+            for name in ("next_lifecycle", "scale_direction_alignment")
+        },
+        "common_pass": True,
+    } for epoch in range(1, 11)]
+    contract = copy.deepcopy(trainer.NEUTRAL_B0_VALIDATION_CONTRACT)
+    contract_sha = hashlib.sha256(json.dumps(
+        contract, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+    ).encode()).hexdigest()
+    return {
+        "schema_version": 1, "mode": "neutral_b0_validation",
+        "pipeline_scope": "2021_02_train_2022_05_validation_only",
+        "rows": 256, "split_rows": {"train": 128, "validation": 128},
+        "contract": {
+            "value": contract, "sha256": contract_sha,
+            "registry_sha256": "c" * 64,
+        },
+        "trainer_repository_commit": "d" * 40,
+        "ensemble_members": members, "epoch_gates": gates,
+        "selected_epoch": 1,
+        "lineage": _valid_neutral_lineage(("train", "validation")),
+        "direct_source_preprocessing": neutral_direct_source_preprocessing_identity(),
+        "training_performed": True,
+        "validation_used_for_selection": True,
+        "validation_used_for_optimization": False,
+        "holdout_opened": False,
+        "holdout_used_for_optimization": False,
+        "holdout_used_for_selection": False,
+        "outcome_fields_used": False,
+        "artifacts_exported": False,
+        "threshold_search_performed": False,
+        "criteria_met": True,
+        "model_capability_validated": False,
         "trading_edge_claimed": False,
         "action_value_claimed": False,
     }
@@ -852,6 +1130,147 @@ def test_neutral_optimizer_reads_only_train_and_eval_never_backwards(
         }
 
 
+@pytest.mark.skipif(not TORCH_AVAILABLE, reason="optional PyTorch is not installed")
+def test_neutral_b0_event_unigram_uses_every_valid_train_token() -> None:
+    import torch
+
+    examples, _ = trainer._synthetic_examples(41)
+    selected = tuple(
+        preprocess_neutral_direct_source_events(example) for example in examples[:6]
+    )
+    diagnostics: dict[str, object] = {}
+    trainer._neutral_role_metrics(
+        MarketRepresentationModel(), selected, _neutral_targets(len(selected)),
+        tuple(range(len(selected))), batch_size=3, seed=17,
+        device=torch.device("cpu"), diagnostic_sink=diagnostics,
+    )
+    tokens = diagnostics["all_event_targets"]
+    assert len(tokens) == sum(len(example.event_type_ids) for example in selected)
+    assert not np.any(tokens == trainer.PAD_TOKEN_ID)
+
+
+@pytest.mark.parametrize(("pass_epoch", "selected", "capable"), (
+    (4, 4, True), (None, None, False),
+))
+def test_neutral_b0_selects_earliest_common_pass_without_exports(
+    monkeypatch: pytest.MonkeyPatch,
+    pass_epoch: int | None,
+    selected: int | None,
+    capable: bool,
+) -> None:
+    prepared = {
+        "examples": (object(), object()), "targets": (object(), object()),
+        "splits": {"train-revision": "train", "validation-revision": "validation"},
+        "origins": {},
+    }
+    seeds: list[int] = []
+    def fake_train(*args: object, diagnostic_epochs: list[Mapping[str, object]],
+                   **kwargs: object) -> tuple[object, Mapping[str, object]]:
+        member_args = args[3]
+        seeds.append(member_args.seed)
+        diagnostic_epochs.extend({} for _ in range(10))
+        role = {
+            "rows": 1, "total_loss": 1.0, "objective_losses": {},
+            "active_head_metrics": {}, "masked_reconstruction": {},
+            "geometry": {}, "material_geometry": {},
+        }
+        return object(), {
+            "parameter_count": 1, "embedding_dim": 128,
+            "epoch_metrics": [{"epoch": epoch, "train": role, "validation": role}
+                              for epoch in range(1, 11)],
+        }
+    monkeypatch.setattr(trainer, "_prepare_neutral_fit_collection", lambda value: prepared)
+    monkeypatch.setattr(trainer, "_train_neutral_member", fake_train)
+    monkeypatch.setattr(
+        trainer, "_neutral_b0_epoch_gate",
+        lambda members, diagnostics, epoch: {
+            "epoch": epoch, "common_pass": pass_epoch is not None and epoch >= pass_epoch,
+        },
+    )
+    monkeypatch.setattr(
+        trainer, "_neutral_b0_registry_contract",
+        lambda: (trainer.NEUTRAL_B0_VALIDATION_CONTRACT, "d" * 64, "e" * 64),
+    )
+    monkeypatch.setattr(
+        trainer, "_neutral_fit_lineage",
+        lambda value: _valid_neutral_lineage(("train", "validation")),
+    )
+    report = trainer._neutral_b0_validation_report({
+        "scope": "2021_02_train_2022_05_validation_only",
+        "b0_contract_sha256": "d" * 64,
+    }, SimpleNamespace(), trainer_repository_commit="f" * 40)
+    assert seeds == [17, 100_020, 200_023]
+    assert report["selected_epoch"] == selected
+    assert report["criteria_met"] is capable
+    assert report["model_capability_validated"] is False
+    assert report["holdout_opened"] is report["artifacts_exported"] is False
+
+
+def test_neutral_b0_neighbor_purity_is_train_only_strict_prior_cross_day() -> None:
+    reference = np.vstack((np.tile([1.0, 0.0], (10, 1)),
+                           np.tile([-1.0, 0.0], (10, 1))))
+    query = np.array(((1.0, 0.0), (-1.0, 0.0)))
+    train_labels = np.array([0] * 10 + [1] * 10)
+    report = trainer._b0_neighbor_purity(
+        {
+            "embeddings": reference,
+            "observed_at": tuple(["2021-02-01T10:00:00-05:00"] * 20),
+            "material_kinds": tuple([("trigger",)] * 20),
+            "head_targets": {
+                "next_lifecycle": train_labels,
+                "scale_direction_alignment": train_labels,
+            },
+        },
+        {
+            "embeddings": query,
+            "observed_at": (
+                "2022-05-01T10:00:00-04:00", "2022-05-02T10:00:00-04:00",
+            ),
+            "material_kinds": (("trigger",), ("trigger",)),
+            "head_targets": {
+                "next_lifecycle": np.array([0, 1]),
+                "scale_direction_alignment": np.array([0, 1]),
+            },
+        },
+        10,
+    )
+    assert report == {
+        "eligible_material_queries": 2, "covered_material_queries": 2,
+        "neighbors": 20, "k": 10, "purity": 1.0,
+        "train_chance": 0.5, "lift": 0.5,
+    }
+
+
+def test_neutral_b0_neighbor_requires_all_queries_to_have_ten_candidates() -> None:
+    labels = np.zeros(9, dtype=np.int64)
+    report = trainer._b0_neighbor_purity(
+        {
+            "embeddings": np.tile([1.0, 0.0], (9, 1)),
+            "observed_at": tuple(["2021-02-01T10:00:00-05:00"] * 9),
+            "material_kinds": tuple([("trigger",)] * 9),
+            "head_targets": {
+                "next_lifecycle": labels,
+                "scale_direction_alignment": labels,
+            },
+        },
+        {
+            "embeddings": np.array(((1.0, 0.0),)),
+            "observed_at": ("2022-05-01T10:00:00-04:00",),
+            "material_kinds": (("trigger",),),
+            "head_targets": {
+                "next_lifecycle": np.array([0]),
+                "scale_direction_alignment": np.array([0]),
+            },
+        },
+        10,
+    )
+    assert report == {
+        "eligible_material_queries": 1, "covered_material_queries": 0,
+        "neighbors": 0, "k": 10, "purity": 0.0,
+        "train_chance": 1.0, "lift": -1.0,
+    }
+
+
 _DELETE_METRIC_KEY = object()
 
 
@@ -939,6 +1358,113 @@ def test_neutral_fit_metrics_loader_accepts_exact_v2_and_rejects_duplicate_keys(
         trainer.load_neutral_fit_metrics(metrics_path)
 
 
+def test_neutral_b0_metrics_loader_accepts_exact_report_and_credible_failure(
+    tmp_path: Path,
+) -> None:
+    payload = _valid_neutral_b0_metrics_payload()
+    metrics_path = tmp_path / "b0.json"
+    metrics_path.write_text(json.dumps(payload), encoding="utf-8")
+    assert trainer.load_neutral_b0_validation_metrics(metrics_path) == payload
+
+    for gate in payload["epoch_gates"]:
+        neighbor = gate["members"][0]["neighbor"]
+        neighbor.update({
+            "covered_material_queries": 0, "neighbors": 0,
+            "purity": 0.0, "lift": -0.5,
+        })
+        gate["common_pass"] = False
+    payload["selected_epoch"] = None
+    payload["criteria_met"] = False
+    metrics_path.write_text(json.dumps(payload), encoding="utf-8")
+    assert trainer.load_neutral_b0_validation_metrics(metrics_path) == payload
+
+
+@pytest.mark.parametrize(("path", "replacement"), (
+    (("unexpected",), False),
+    (("schema_version",), True),
+    (("selected_epoch",), True),
+    (("ensemble_members", 0, "seed"), 17.0),
+    (("ensemble_members", 0, "epoch_metrics", 0, "epoch"), True),
+    (("epoch_gates", 0, "epoch"), True),
+    (("epoch_gates", 0, "common_pass"), False),
+    (("epoch_gates", 0, "members", 0, "neighbor",
+      "covered_material_queries"), 2),
+    (("epoch_gates", 0, "members", 0, "neighbor", "k"), 10.0),
+    (("epoch_gates", 0, "active_heads", "next_lifecycle",
+      "member_balanced_accuracy"), [0.7, 0.8, 0.8]),
+    (("ensemble_members", 0, "epoch_metrics", 0, "validation",
+      "total_loss"), None),
+    (("ensemble_members", 0, "epoch_metrics", 0, "validation",
+      "geometry", "effective_rank"), float("nan")),
+    (("lineage", "split_protocol", "registry_sha256"), "d" * 64),
+))
+def test_neutral_b0_metrics_loader_rejects_tamper(
+    tmp_path: Path, path: tuple[object, ...], replacement: object,
+) -> None:
+    payload: object = _valid_neutral_b0_metrics_payload()
+    parent = payload
+    for key in path[:-1]:
+        parent = parent[key]  # type: ignore[index]
+    parent[path[-1]] = replacement  # type: ignore[index]
+    metrics_path = tmp_path / "b0-tampered.json"
+    metrics_path.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(RepresentationDataError):
+        trainer.load_neutral_b0_validation_metrics(metrics_path)
+
+
+@pytest.mark.parametrize(("path", "replacement"), (
+    (("max_epochs",), 10.0),
+    (("gates", "neighbor_coverage_required"), True),
+))
+def test_neutral_b0_metrics_loader_rejects_self_hashed_contract_type_tamper(
+    tmp_path: Path, path: tuple[object, ...], replacement: object,
+) -> None:
+    payload = _valid_neutral_b0_metrics_payload()
+    contract = payload["contract"]["value"]
+    parent = contract
+    for key in path[:-1]:
+        parent = parent[key]
+    parent[path[-1]] = replacement
+    payload["contract"]["sha256"] = hashlib.sha256(json.dumps(
+        contract, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+    ).encode()).hexdigest()
+    metrics_path = tmp_path / "b0-contract-type.json"
+    metrics_path.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(RepresentationDataError, match="contract hash"):
+        trainer.load_neutral_b0_validation_metrics(metrics_path)
+
+
+def test_neutral_b0_metrics_loader_rejects_run_order_tamper(tmp_path: Path) -> None:
+    payload = _valid_neutral_b0_metrics_payload()
+    payload["lineage"]["input_runs"].reverse()
+    metrics_path = tmp_path / "b0-run-order.json"
+    metrics_path.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(RepresentationDataError, match="lineage binding"):
+        trainer.load_neutral_b0_validation_metrics(metrics_path)
+
+
+@pytest.mark.parametrize("extra", ("action_authority", "holdout_selected"))
+def test_neutral_lineage_is_exact_and_rejects_authority_fields(extra: str) -> None:
+    lineage = _valid_neutral_lineage(("train", "validation"))
+    trainer._validate_neutral_lineage(lineage, roles={"train", "validation"})
+    lineage[extra] = False
+    with pytest.raises(RepresentationDataError, match="lineage"):
+        trainer._validate_neutral_lineage(lineage, roles={"train", "validation"})
+
+
+def test_neutral_fit_metrics_rejects_more_than_ten_epochs(tmp_path: Path) -> None:
+    payload = _valid_neutral_fit_metrics_payload()
+    for member in payload["ensemble_members"]:
+        metrics = member["metrics"]
+        metrics["epochs"] = 11
+        metrics["epoch_training_loss"] *= 11
+        metrics["epoch_metrics"] *= 11
+    path = tmp_path / "too-many-epochs.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(RepresentationDataError, match="maximum"):
+        trainer.load_neutral_fit_metrics(path)
+
+
 def test_neutral_direct_source_preprocessing_is_deterministic_and_versioned() -> None:
     examples, _ = trainer._synthetic_examples(19)
     original = examples[0]
@@ -976,7 +1502,12 @@ def test_neutral_checkpoint_preprocessing_protocol_fails_closed(
 
     path = tmp_path / "neutral.pt"
     model = MarketRepresentationModel()
-    save_neutral_representation_checkpoint(path, model, metadata={"seed": 17})
+    save_neutral_representation_checkpoint(path, model, metadata={
+        "member_id": "member-000", "seed": 17,
+        "split_counts": {"train": 1, "validation": 1},
+        "lineage": _valid_neutral_lineage(("train", "validation")),
+        "outcome_fields_used": False, "model_capability_validated": False,
+    })
     assert load_neutral_representation_checkpoint(path).config == model.config
     payload = torch.load(path, map_location="cpu", weights_only=True)
     if mutation == "missing":

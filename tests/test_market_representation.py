@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import builtins
+import copy
 from dataclasses import replace
 from datetime import timedelta
 import hashlib
@@ -56,11 +57,13 @@ from smc_trader.market_representation import (
     prepare_representation_case,
     prepare_neutral_representation_case,
     load_representation_checkpoint,
+    load_neutral_representation_checkpoint,
     representation_case_from_case_input_row,
     representation_case_from_market_case_input_row,
     representation_multitask_loss,
     representation_checkpoint_id,
     save_representation_checkpoint,
+    save_neutral_representation_checkpoint,
     select_first_causal_stage_revisions,
     supervised_causal_contrastive_loss,
     validate_split_integrity,
@@ -579,6 +582,72 @@ def _neutral_run_manifest(tmp_path: Path) -> dict[str, object]:
             "shard_rows": 256,
             "checkpoint_bars": 100,
         },
+    }
+
+
+def _neutral_checkpoint_metadata() -> dict[str, object]:
+    profiles = (
+        ("neutral_representation_train_2021_02", "train"),
+        ("neutral_representation_validation_2022_05", "validation"),
+    )
+    input_runs = [
+        {
+            "profile_name": profile,
+            "split_role": role,
+            "input_manifest_path": f"/registered/{profile}/input_manifest.json",
+            "input_manifest_sha256": input_character * 64,
+            "run_manifest_path": f"/registered/{profile}/run_manifest.json",
+            "run_manifest_sha256": run_character * 64,
+            "repository_commit": "d" * 40,
+        }
+        for (profile, role), input_character, run_character in zip(
+            profiles,
+            ("a", "b"),
+            ("d", "e"),
+            strict=True,
+        )
+    ]
+    embargo = [
+        {
+            "left_profile": profiles[0][0],
+            "right_profile": profiles[1][0],
+            "purge_end": "2021-03-15T00:00:00-04:00",
+            "next_prefix_start": "2022-04-17T00:00:00-04:00",
+            "observed_session_count": 250,
+            "first_observed_session": "2021-03-16",
+            "last_observed_session": "2022-04-15",
+        },
+    ]
+    return {
+        "member_id": "member-000",
+        "seed": 73,
+        "split_counts": {"train": 100, "validation": 40},
+        "lineage": {
+            "input_runs": input_runs,
+            "source_identity": {"sha256": "1" * 64},
+            "model_config_identity": {
+                "sha256": "2" * 64,
+                "timezone": "America/New_York",
+            },
+            "market_case_protocol": expected_market_case_run_identity(),
+            "representation_feature_schema_version": 1,
+            "split_protocol": {
+                "registry_sha256": "3" * 64,
+                "protocol_version": "neutral-representation-splits-1.0.0",
+                "warmup_calendar_days": 14,
+                "purge_calendar_days": 14,
+                "embargo_trading_days": 5,
+                "market_episode_split_key": [
+                    "run_manifest_sha256",
+                    "market_epoch_id",
+                    "market_episode_id",
+                ],
+                "actual_prefix_exposure_verified": True,
+                "observed_completed_session_embargo": embargo,
+            },
+        },
+        "outcome_fields_used": False,
+        "model_capability_validated": False,
     }
 
 
@@ -3389,6 +3458,106 @@ def test_checkpoint_is_content_bound_and_rejects_nested_outcome_metadata(
             model,
             metadata={"nested": {"frozen_outcome": {"mfe_r": 2.0}}},
         )
+
+
+@pytest.mark.skipif(not TORCH_AVAILABLE, reason="optional PyTorch is not installed")
+def test_neutral_checkpoint_v2_binds_exact_typed_metadata(tmp_path: Path) -> None:
+    import torch
+
+    model = MarketRepresentationModel()
+    path = tmp_path / "neutral-v2.pt"
+    supplied = _neutral_checkpoint_metadata()
+
+    save_neutral_representation_checkpoint(path, model, metadata=supplied)
+    restored = load_neutral_representation_checkpoint(path)
+    payload = torch.load(path, map_location="cpu", weights_only=True)
+
+    assert representation_checkpoint_id(restored) == representation_checkpoint_id(model)
+    assert set(payload["metadata"]) == {
+        "training_contract",
+        "direct_source_preprocessing",
+        "inference_input_protocol",
+        "member_id",
+        "seed",
+        "split_counts",
+        "lineage",
+        "outcome_fields_used",
+        "model_capability_validated",
+    }
+    assert all(payload["metadata"][name] == value for name, value in supplied.items())
+
+    payload["metadata"]["lineage"]["split_protocol"][
+        "holdout_used_for_selection"
+    ] = False
+    torch.save(payload, path)
+    with pytest.raises(RepresentationDataError, match="neutral checkpoint"):
+        load_neutral_representation_checkpoint(path)
+
+
+@pytest.mark.skipif(not TORCH_AVAILABLE, reason="optional PyTorch is not installed")
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        "missing_member",
+        "member_type",
+        "seed_type",
+        "commit_sha256",
+        "three_run_two_roles",
+        "ten_run_two_roles",
+        "split_count_type",
+        "split_count_extra",
+        "action_authority",
+        "outcome_claim",
+        "holdout_selected",
+        "capability_claim",
+        "outcome_true",
+        "capability_true",
+    ),
+)
+def test_neutral_checkpoint_save_rejects_open_or_untyped_metadata(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    model = MarketRepresentationModel()
+    metadata = copy.deepcopy(_neutral_checkpoint_metadata())
+    if mutation == "missing_member":
+        metadata.pop("member_id")
+    elif mutation == "member_type":
+        metadata["member_id"] = 0
+    elif mutation == "seed_type":
+        metadata["seed"] = True
+    elif mutation == "commit_sha256":
+        metadata["lineage"]["input_runs"][0]["repository_commit"] = "d" * 64
+    elif mutation in {"three_run_two_roles", "ten_run_two_roles"}:
+        total = 3 if mutation == "three_run_two_roles" else 10
+        runs = metadata["lineage"]["input_runs"]
+        embargo = metadata["lineage"]["split_protocol"][
+            "observed_completed_session_embargo"
+        ]
+        while len(runs) < total:
+            runs.append(copy.deepcopy(runs[len(runs) % 2]))
+            embargo.append(copy.deepcopy(embargo[0]))
+    elif mutation == "split_count_type":
+        metadata["split_counts"]["train"] = True
+    elif mutation == "split_count_extra":
+        metadata["split_counts"]["test"] = 1
+    elif mutation == "action_authority":
+        metadata["lineage"]["source_identity"]["action_authority"] = "trade"
+    elif mutation == "outcome_claim":
+        metadata["outcome_summary"] = {"profitable": True}
+    elif mutation == "holdout_selected":
+        metadata["lineage"]["split_protocol"]["holdout_selected"] = False
+    elif mutation == "capability_claim":
+        metadata["lineage"]["input_runs"][0]["capability_score"] = 0.9
+    elif mutation == "outcome_true":
+        metadata["outcome_fields_used"] = True
+    else:
+        metadata["model_capability_validated"] = True
+
+    path = tmp_path / f"invalid-{mutation}.pt"
+    with pytest.raises(RepresentationDataError, match="neutral checkpoint"):
+        save_neutral_representation_checkpoint(path, model, metadata=metadata)
+    assert not path.exists()
 
 
 @pytest.mark.skipif(not TORCH_AVAILABLE, reason="optional PyTorch is not installed")

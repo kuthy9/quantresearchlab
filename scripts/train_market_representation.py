@@ -16,6 +16,7 @@ import json
 import math
 from pathlib import Path
 import random
+import subprocess
 import sys
 from typing import Any, Mapping, Sequence
 
@@ -39,6 +40,7 @@ from smc_trader.market_representation import (  # noqa: E402
     NEUTRAL_SPARSE_ACTIVE_TARGETS,
     NEUTRAL_SPARSE_DISABLED_TARGETS,
     OUTCOME_BLIND_HEAD_WIDTHS,
+    PAD_TOKEN_ID,
     TIMEFRAMES,
     CanonicalOHLCVStore,
     CanonicalSourceKey,
@@ -90,6 +92,68 @@ NEUTRAL_EMBEDDING_ARTIFACT_SCHEMA = "smc-neutral-market-episode-embeddings-v2"
 NEUTRAL_HEAD_ARTIFACT_SCHEMA = "smc-neutral-market-episode-active-heads-v2"
 NEUTRAL_MATERIAL_SELECTION_CONTRACT = "first_online_market_episode_material_kind_by_revision_index_v1"
 DATA_SPLITS = ROOT / "configs/data_splits.json"
+NEUTRAL_MAX_EPOCHS = 10
+NEUTRAL_B0_VALIDATION_CONTRACT: Mapping[str, Any] = {
+    "protocol_version": "neutral-representation-b0-validation-1.0.0",
+    "model_version": MODEL_VERSION,
+    "device": "cpu",
+    "profiles": {"train": "neutral_representation_train_2021_02",
+                 "validation": "neutral_representation_validation_2022_05"},
+    "ensemble": {"members": 3, "seeds": [17, 100_020, 200_023]},
+    "optimizer": {
+        "name": "AdamW", "learning_rate": 3e-4, "weight_decay": 1e-4,
+        "gradient_clip_max_norm": 1.0, "deterministic_algorithms": True,
+    },
+    "batch_size": 16, "mask_probability": 0.15, "max_epochs": NEUTRAL_MAX_EPOCHS,
+    "seed_schedule": {
+        "train_order_epoch_stride": 1,
+        "train_mask_epoch_stride": 10_000,
+        "evaluation_train_offset": 800_000,
+        "evaluation_validation_offset": 900_000,
+        "batch_index_stride": 1,
+    },
+    "objectives": {
+        "loss_weights": dict(NEUTRAL_REPRESENTATION_LOSS_WEIGHTS),
+        "active_heads": list(NEUTRAL_SPARSE_ACTIVE_TARGETS),
+        "disabled_heads": list(NEUTRAL_SPARSE_DISABLED_TARGETS),
+    },
+    "selection": "earliest_epoch_all_preregistered_gates_pass",
+    "gates": {
+        "masked_candle_relative_improvement_each_timeframe_min": 0.02,
+        "candle_baseline": "zero_after_frozen_feature_normalization_on_validation_mask",
+        "masked_event_relative_improvement_over_train_laplace_unigram_min": 0.02,
+        "event_baseline": "laplace_unigram_from_all_preprocessed_train_event_tokens",
+        "active_head_ensemble_nll_relative_improvement_over_train_laplace_prior_min": 0.02,
+        "active_head_member_balanced_accuracy_lift_over_train_prior_min": 0.02,
+        "active_head_members_required": 2,
+        "validation_unit_centroid_norm_max": 0.95,
+        "validation_effective_rank_min": 16.0,
+        "validation_material_min_rows_for_rank_gate": 128,
+        "validation_material_effective_rank_min": 16.0,
+        "validation_raw_p95_pairwise_cosine_max": 0.99,
+        "neighbor_k": 10,
+        "neighbor_coverage_required": 1.0,
+        "neighbor_purity_min": 0.60,
+        "neighbor_purity_lift_over_train_chance_min": 0.10,
+        "neighbor_reference_clock": "strictly_prior_cross_day_train_rows",
+        "neighbor_material_grain": "canonical_transition_kind",
+        "neighbor_material_selector": "expand_each_present_canonical_transition_kind_per_revision",
+        "neighbor_label": "next_lifecycle_and_scale_direction_alignment_joint",
+        "neighbor_chance": "mean_query_label_frequency_in_each_eligible_train_pool",
+    },
+}
+_NEUTRAL_B0_CONTRACT_BYTES = json.dumps(
+    NEUTRAL_B0_VALIDATION_CONTRACT, sort_keys=True, separators=(",", ":"),
+    ensure_ascii=False, allow_nan=False,
+).encode("utf-8")
+
+
+def _neutral_b0_contract_bytes(value: Any) -> bytes:
+    try:
+        return json.dumps(value, sort_keys=True, separators=(",", ":"),
+                          ensure_ascii=False, allow_nan=False).encode("utf-8")
+    except (TypeError, ValueError) as exc:
+        raise RepresentationDataError("neutral B0 contract is invalid") from exc
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -153,6 +217,14 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--neutral-fit", action="store_true",
         help="fit the preregistered three-window smoke or ten-window population",
+    )
+    parser.add_argument(
+        "--neutral-b0-validation",
+        action="store_true",
+        help=(
+            "run the frozen three-member B0 train/validation protocol on exactly "
+            "2021-02 and 2022-05 without opening holdout"
+        ),
     )
     parser.add_argument(
         "--canonical-view",
@@ -544,6 +616,57 @@ def _neutral_split_registry() -> tuple[Any, Mapping[str, Any], str]:
             hashlib.sha256(raw).hexdigest())
 
 
+def _neutral_b0_registry_contract() -> tuple[Mapping[str, Any], str, str]:
+    """Load the frozen B0 subsection and bind both it and the full registry."""
+
+    try:
+        raw = DATA_SPLITS.read_bytes()
+        payload = json.loads(raw.decode("utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RepresentationDataError("neutral B0 registry is invalid") from exc
+    contract = payload.get("neutral_representation_b0_validation")
+    canonical = _neutral_b0_contract_bytes(contract)
+    if canonical != _NEUTRAL_B0_CONTRACT_BYTES:
+        raise RepresentationDataError("neutral B0 frozen contract differs")
+    return (
+        dict(contract),
+        hashlib.sha256(canonical).hexdigest(),
+        hashlib.sha256(raw).hexdigest(),
+    )
+
+
+def _neutral_b0_trainer_commit() -> str:
+    """Bind B0 to one committed trainer implementation before loading data."""
+
+    try:
+        commit = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=ROOT, check=True,
+            capture_output=True, text=True,
+        ).stdout.strip()
+        tracked = subprocess.run(
+            ["git", "status", "--porcelain", "--untracked-files=no"], cwd=ROOT,
+            check=True, capture_output=True, text=True,
+        ).stdout.strip()
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise RepresentationDataError("neutral B0 trainer git identity unavailable") from exc
+    if (len(commit) != 40 or any(character not in "0123456789abcdef" for character in commit)
+            or tracked):
+        raise RepresentationDataError(
+            "neutral B0 requires a lowercase committed clean trainer worktree"
+        )
+    return commit
+
+
+def _neutral_run_profile_name(path: str) -> str:
+    """Read only run metadata for B0 preflight; no source or shard is opened."""
+
+    _, _, run = _canonical_manifest(path, option="--market-case-run-manifest")
+    profile = run.get("profile")
+    if not isinstance(profile, Mapping) or not isinstance(profile.get("name"), str):
+        raise RepresentationDataError("neutral B0 run profile is missing")
+    return str(profile["name"])
+
+
 def _neutral_episode_prefix_exposure(
     dataset: Mapping[str, Any],
 ) -> tuple[pd.Timestamp, pd.Timestamp]:
@@ -691,11 +814,32 @@ def _load_neutral_fit_collection(
     *,
     input_manifest_paths: Sequence[str],
     run_manifest_paths: Sequence[str],
+    validation_only: bool = False,
 ) -> Mapping[str, Any]:
-    if len(input_manifest_paths) != len(run_manifest_paths) or len(input_manifest_paths) < 3:
+    required_pairs = 2 if validation_only else 3
+    if (
+        len(input_manifest_paths) != len(run_manifest_paths)
+        or len(input_manifest_paths) < required_pairs
+    ):
         raise RepresentationDataError(
-            "neutral fit requires paired input/run manifests for all three roles"
+            "neutral fit requires paired input/run manifests for every required role"
         )
+    b0_contract: Mapping[str, Any] | None = None
+    b0_contract_sha: str | None = None
+    if validation_only:
+        if len(run_manifest_paths) != 2:
+            raise RepresentationDataError(
+                "neutral B0 validation accepts exactly two manifest pairs"
+            )
+        b0_contract, b0_contract_sha, _ = _neutral_b0_registry_contract()
+        expected = tuple(b0_contract["profiles"][role]
+                         for role in ("train", "validation"))
+        supplied = tuple(_neutral_run_profile_name(path) for path in run_manifest_paths)
+        if supplied != expected:
+            raise RepresentationDataError(
+                "neutral B0 validation requires ordered 2021-02 train and "
+                "2022-05 validation profiles"
+            )
     registry, raw_profiles, registry_sha = _neutral_split_registry()
     identity_cache: dict[tuple[str, str, str], Any] = {}
     datasets: list[dict[str, Any]] = []
@@ -752,16 +896,25 @@ def _load_neutral_fit_collection(
 
     smoke_profiles = set(registry.smoke_profiles.values())
     full_profiles = set(registry.windows)
-    if selected_profiles == smoke_profiles:
+    if validation_only and selected_profiles == set(b0_contract["profiles"].values()):
+        scope = "2021_02_train_2022_05_validation_only"
+    elif validation_only:
+        raise RepresentationDataError(
+            "neutral B0 validation population is not preregistered"
+        )
+    elif selected_profiles == smoke_profiles:
         scope = "three_window_pipeline_smoke"
     elif selected_profiles == full_profiles:
         scope = "ten_window_registered_fit"
     else:
         raise RepresentationDataError("neutral fit population is not preregistered")
-    if {item["representation_split_role"] for item in datasets} != {
-        "train", "validation", "holdout"
-    }:
-        raise RepresentationDataError("neutral fit requires all three roles")
+    required_roles = (
+        {"train", "validation"}
+        if validation_only
+        else {"train", "validation", "holdout"}
+    )
+    if {item["representation_split_role"] for item in datasets} != required_roles:
+        raise RepresentationDataError("neutral fit split roles differ from its mode")
     compatibility = {
         "source_sha256": lambda item: item["run_identity"]["normalized"]["source_sha256"],
         "model_config_sha256": lambda item: item["run_identity"]["normalized"]["model_config_sha256"],
@@ -795,6 +948,8 @@ def _load_neutral_fit_collection(
         "model_config_sha256": next(iter(identities["model_config_sha256"])),
         "timezone": datasets[0]["run_identity"]["normalized"]["timezone"],
         "observed_embargo_sessions": observed_embargo_sessions,
+        "required_roles": tuple(sorted(required_roles)),
+        "b0_contract_sha256": b0_contract_sha,
     }
 
 
@@ -1127,10 +1282,37 @@ def _prepare_neutral_fit_collection(
             origins[revision_id] = str(dataset["run_sha"])
             examples.append(example)
             targets.append(target_records[revision_id].target)
-    if set(splits.values()) != {"train", "validation", "holdout"}:
+    required_roles = set(
+        collection.get("required_roles", ("train", "validation", "holdout"))
+    )
+    if set(splits.values()) != required_roles:
         raise RepresentationDataError("neutral fit prepared incomplete split roles")
     return {"examples": tuple(examples), "targets": tuple(targets),
             "splits": splits, "origins": origins}
+
+
+def _neutral_embedding_geometry(matrix: np.ndarray) -> Mapping[str, Any]:
+    matrix = matrix.astype(np.float64, copy=False)
+    centered = matrix - matrix.mean(axis=0, keepdims=True)
+    spectrum = np.clip(np.linalg.eigvalsh(centered.T @ centered), 0.0, None)
+    positive = spectrum[spectrum > np.finfo(np.float64).eps]
+    weights = positive / positive.sum() if positive.size else positive
+    norms = np.linalg.norm(matrix, axis=1, keepdims=True)
+    unit = matrix / np.maximum(norms, np.finfo(np.float64).eps)
+    cosine = unit @ unit.T
+    pairs = cosine[np.triu_indices(len(unit), k=1)]
+    return {
+        "embedding_dim": int(matrix.shape[1]),
+        "effective_rank": 0.0 if not weights.size else float(
+            np.exp(-np.sum(weights * np.log(weights)))
+        ),
+        "mean_feature_std": float(matrix.std(axis=0).mean()),
+        "centroid_norm": float(np.linalg.norm(matrix.mean(axis=0))),
+        "unit_centroid_norm": float(np.linalg.norm(unit.mean(axis=0))),
+        "raw_p95_pairwise_cosine": (
+            None if not len(pairs) else float(np.quantile(pairs, 0.95))
+        ),
+    }
 
 
 def _neutral_role_metrics(
@@ -1139,6 +1321,7 @@ def _neutral_role_metrics(
     targets: Sequence[SelfSupervisedTarget],
     indices: Sequence[int],
     *, batch_size: int, seed: int, device: Any,
+    diagnostic_sink: dict[str, Any] | None = None,
 ) -> Mapping[str, Any]:
     """Measure one split without gradients.
 
@@ -1149,10 +1332,21 @@ def _neutral_role_metrics(
     import torch
 
     require_neutral_preprocessed_examples(examples)
-    sums: Counter[str] = Counter()
-    head_sums: Counter[str] = Counter()
-    head_counts: Counter[str] = Counter()
+    sums, head_sums, head_counts, candle_sums, candle_zero_sums, candle_counts = (
+        Counter() for _ in range(6)
+    )
+    event_nll_sum = 0.0
+    event_targets: list[np.ndarray] = []
+    all_event_targets: list[np.ndarray] = []
     embeddings: list[np.ndarray] = []
+    head_targets: dict[str, list[np.ndarray]] = {
+        "next_lifecycle": [], "scale_direction_alignment": [],
+    }
+    head_probabilities: dict[str, list[np.ndarray]] = {
+        "next_lifecycle": [], "scale_direction_alignment": [],
+    }
+    observed_at: list[str] = []
+    material_kinds: list[tuple[str, ...]] = []
     rows = 0
     model.eval()
     for batch_index, selected in enumerate(_batches(indices, batch_size)):
@@ -1161,7 +1355,9 @@ def _neutral_role_metrics(
         objective_batch, objective_targets = collate_representation_cases(
             selected_examples,
             targets=selected_targets,
-            mask_probability=0.15, seed=seed + batch_index,
+            mask_probability=(NEUTRAL_B0_VALIDATION_CONTRACT["mask_probability"]
+                              if diagnostic_sink is not None else 0.15),
+            seed=seed + batch_index,
         )
         inference_batch, inference_targets = collate_representation_cases(
             selected_examples,
@@ -1183,11 +1379,39 @@ def _neutral_role_metrics(
                 inference_output, inference_targets
             )
         embeddings.append(inference_output.embedding.detach().cpu().numpy())
+        observed_at.extend(examples[index].case.asof.isoformat() for index in selected)
+        material_kinds.extend(examples[index].case.transition_kinds for index in selected)
         weight = len(selected)
         rows += weight
         sums["total"] += float(breakdown.total.detach().cpu()) * weight
         for name, value in breakdown.components.items():
             sums[name] += float(value.detach().cpu()) * weight
+        for timeframe in TIMEFRAMES:
+            mask = objective_batch.candle_reconstruction_masks[timeframe]
+            count = int(mask.sum().detach().cpu()) * int(
+                objective_output.candle_reconstruction[timeframe].shape[-1]
+            )
+            if count:
+                predicted = objective_output.candle_reconstruction[timeframe][mask]
+                expected = objective_batch.candle_reconstruction_targets[timeframe][mask]
+                candle_counts[timeframe] += count
+                candle_sums[timeframe] += float(torch.nn.functional.smooth_l1_loss(
+                    predicted, expected, reduction="sum").detach().cpu())
+                candle_zero_sums[timeframe] += float(torch.nn.functional.smooth_l1_loss(
+                    torch.zeros_like(expected), expected, reduction="sum").detach().cpu())
+        event_mask = objective_batch.event_reconstruction_mask
+        full_event_target = objective_batch.event_reconstruction_target[
+            objective_batch.event_padding_mask].detach().cpu().numpy()
+        if np.any(full_event_target == PAD_TOKEN_ID):
+            raise RepresentationDataError("neutral full event unigram contains padding")
+        all_event_targets.append(full_event_target)
+        if bool(event_mask.any()):
+            event_nll_sum += float(torch.nn.functional.cross_entropy(
+                objective_output.event_reconstruction_logits[event_mask],
+                objective_batch.event_reconstruction_target[event_mask],
+                reduction="sum").detach().cpu())
+            event_targets.append(objective_batch.event_reconstruction_target[event_mask]
+                                 .detach().cpu().numpy())
         for target_name, target_values in (
             ("next_lifecycle", inference_targets.next_lifecycle),
             (
@@ -1195,6 +1419,15 @@ def _neutral_role_metrics(
                 inference_targets.scale_direction_alignment,
             ),
         ):
+            logits = (
+                inference_output.next_lifecycle_logits
+                if target_name == "next_lifecycle"
+                else inference_output.scale_alignment_logits
+            )
+            head_probabilities[target_name].append(
+                torch.softmax(logits, dim=-1).detach().cpu().numpy()
+            )
+            head_targets[target_name].append(target_values.detach().cpu().numpy())
             labelled = int((target_values != -100).sum().detach().cpu())
             if labelled:
                 head_counts[target_name] += labelled
@@ -1207,27 +1440,63 @@ def _neutral_role_metrics(
     if any(sums[name] != 0.0 for name in disabled):
         raise RepresentationDataError("neutral evaluation enabled a disabled head")
     matrix = np.concatenate(embeddings, axis=0).astype(np.float64, copy=False)
-    centered = matrix - matrix.mean(axis=0, keepdims=True)
-    spectrum = np.linalg.eigvalsh(centered.T @ centered)
-    spectrum = np.clip(spectrum, 0.0, None)
-    positive = spectrum[spectrum > np.finfo(np.float64).eps]
-    weights = positive / positive.sum() if positive.size else positive
-    effective_rank = (
-        0.0
-        if not weights.size
-        else float(np.exp(-np.sum(weights * np.log(weights))))
-    )
     active_heads = {}
     for name in ("next_lifecycle", "scale_direction_alignment"):
         count = int(head_counts[name])
+        target = np.concatenate(head_targets[name])
+        probabilities = np.concatenate(head_probabilities[name])
+        labelled = target >= 0
+        classes = np.unique(target[labelled])
+        predicted = probabilities.argmax(axis=1)
+        balanced = None if not count else float(np.mean([
+            np.mean(predicted[target == label] == label) for label in classes]))
         active_heads[name] = {
             "labelled_rows": count,
             "nll": None if not count else head_sums[f"{name}_nll"] / count,
-            "accuracy": (
-                None if not count else head_sums[f"{name}_accuracy"] / count
-            ),
+            "accuracy": None if not count else head_sums[f"{name}_accuracy"] / count,
+            "balanced_accuracy": balanced,
         }
-    return {
+    candle_metrics = {}
+    for timeframe in TIMEFRAMES:
+        count = int(candle_counts[timeframe])
+        loss = None if not count else candle_sums[timeframe] / count
+        baseline = None if not count else candle_zero_sums[timeframe] / count
+        candle_metrics[timeframe] = {
+            "masked_values": count,
+            "smooth_l1": loss,
+            "zero_after_frozen_feature_normalization_smooth_l1": baseline,
+            "relative_improvement": None if not baseline or loss is None else 1.0 - loss / baseline,
+        }
+    event_target = (np.concatenate(event_targets).astype(np.int64, copy=False)
+                    if event_targets else np.empty(0, dtype=np.int64))
+    material_geometry = {}
+    for kind in NEUTRAL_MARKET_TRANSITION_KINDS:
+        selected = [index for index, kinds in enumerate(material_kinds) if kind in kinds]
+        material_geometry[kind] = {
+            "rows": len(selected),
+            "effective_rank": 0.0 if not selected else
+                _neutral_embedding_geometry(matrix[selected])["effective_rank"],
+        }
+    geometry = dict(_neutral_embedding_geometry(matrix))
+    if diagnostic_sink is not None:
+        diagnostic_sink.update(
+            embeddings=matrix,
+            observed_at=tuple(observed_at),
+            material_kinds=tuple(material_kinds), event_targets=event_target,
+            all_event_targets=np.concatenate(all_event_targets).astype(np.int64, copy=False),
+            event_vocab_size=int(objective_output.event_reconstruction_logits.shape[-1]),
+            head_targets={name: np.concatenate(value)
+                          for name, value in head_targets.items()},
+            head_probabilities={name: np.concatenate(value)
+                                for name, value in head_probabilities.items()},
+        )
+    else:
+        for head in active_heads.values():
+            head.pop("balanced_accuracy")
+        geometry = {key: geometry[key] for key in (
+            "embedding_dim", "effective_rank", "mean_feature_std", "centroid_norm"
+        )}
+    result = {
         "rows": rows,
         "total_loss": sums["total"] / rows,
         "objective_losses": {name: sums[name] / rows for name in (
@@ -1235,18 +1504,24 @@ def _neutral_role_metrics(
             "next_lifecycle", "scale_alignment",
         )},
         "active_head_metrics": active_heads,
-        "geometry": {
-            "embedding_dim": int(matrix.shape[1]),
-            "effective_rank": effective_rank,
-            "mean_feature_std": float(matrix.std(axis=0).mean()),
-            "centroid_norm": float(np.linalg.norm(matrix.mean(axis=0))),
-        },
+        "geometry": geometry,
         "label_sources_masked": True,
         "direct_source_preprocessing": (
             neutral_direct_source_preprocessing_identity()
         ),
         "gradient_enabled": False,
     }
+    if diagnostic_sink is not None:
+        result.update(
+            masked_reconstruction={
+                "candle_by_timeframe": candle_metrics,
+                "event": {"masked_events": int(len(event_target)), "nll": (
+                    None if not len(event_target) else event_nll_sum / len(event_target)
+                )},
+            },
+            material_geometry=material_geometry,
+        )
+    return result
 
 
 def _neutral_exact_mapping(
@@ -1323,7 +1598,6 @@ def _validate_neutral_role_metrics(
             _neutral_metric_number(
                 head["accuracy"], f"{name} accuracy", maximum=1.0
             )
-
     geometry = _neutral_exact_mapping(measured["geometry"], (
         "embedding_dim", "effective_rank", "mean_feature_std", "centroid_norm",
     ), "geometry")
@@ -1365,6 +1639,8 @@ def _validate_neutral_member_metrics_protocol(value: Mapping[str, Any]) -> None:
     _neutral_positive_int(metrics["parameter_count"], "parameter count")
     embedding_dim = _neutral_positive_int(metrics["embedding_dim"], "embedding dim")
     epochs = _neutral_positive_int(metrics["epochs"], "epoch count")
+    if epochs > NEUTRAL_MAX_EPOCHS:
+        raise RepresentationDataError("neutral epoch count exceeds frozen maximum")
     epoch_losses = metrics["epoch_training_loss"]
     epoch_metrics = metrics["epoch_metrics"]
     if (
@@ -1427,12 +1703,24 @@ def _train_neutral_member(
     targets: Sequence[SelfSupervisedTarget],
     splits: Mapping[str, str],
     args: argparse.Namespace,
+    *, validation_only: bool = False,
+    diagnostic_epochs: list[Mapping[str, Any]] | None = None,
 ) -> tuple[MarketRepresentationModel, Mapping[str, Any]]:
     require_torch()
     import torch
 
-    if args.epochs < 1 or args.batch_size < 1 or args.learning_rate <= 0:
+    if (
+        args.epochs < 1 or args.epochs > NEUTRAL_MAX_EPOCHS
+        or args.batch_size < 1 or args.learning_rate <= 0
+    ):
         raise RepresentationDataError("training hyperparameters must be positive")
+    frozen = NEUTRAL_B0_VALIDATION_CONTRACT
+    if validation_only and (
+        (args.epochs, args.batch_size, args.learning_rate, args.device) !=
+        (frozen["max_epochs"], frozen["batch_size"],
+         frozen["optimizer"]["learning_rate"], frozen["device"])
+    ):
+        raise RepresentationDataError("neutral B0 training contract differs")
     require_neutral_preprocessed_examples(examples)
     random.seed(args.seed)
     np.random.seed(args.seed)
@@ -1443,29 +1731,34 @@ def _train_neutral_member(
         raise RepresentationDataError("requested CUDA device is unavailable")
     if device.type == "mps" and not torch.backends.mps.is_available():
         raise RepresentationDataError("requested MPS device is unavailable")
+    roles = ("train", "validation") if validation_only else (
+        "train", "validation", "holdout"
+    )
     split_indices = {role: [index for index, example in enumerate(examples)
                             if splits[example.case.revision_id] == role]
-                     for role in ("train", "validation", "holdout")}
+                     for role in roles}
     if any(not indices for indices in split_indices.values()):
         raise RepresentationDataError("neutral fit has an empty split")
     model = MarketRepresentationModel().to(device)
-    optimizer = torch.optim.AdamW(
-        model.parameters(), lr=args.learning_rate, weight_decay=1e-4
-    )
+    optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate,
+        weight_decay=(frozen["optimizer"]["weight_decay"]
+                      if validation_only else 1e-4))
+    schedule = frozen["seed_schedule"]
     epoch_losses: list[float] = []
     epoch_metrics: list[Mapping[str, Any]] = []
     for epoch in range(args.epochs):
         model.train()
         order = list(split_indices["train"])
-        random.Random(args.seed + epoch).shuffle(order)
+        random.Random(args.seed + epoch * schedule["train_order_epoch_stride"]).shuffle(order)
         losses: list[float] = []
         for batch_index, selected in enumerate(_batches(order, args.batch_size)):
             selected_examples = tuple(examples[index] for index in selected)
             batch, target_batch = collate_representation_cases(
                 selected_examples,
                 targets=tuple(targets[index] for index in selected),
-                mask_probability=0.15,
-                seed=args.seed + epoch * 10_000 + batch_index,
+                mask_probability=(frozen["mask_probability"] if validation_only else 0.15),
+                seed=args.seed + epoch * schedule["train_mask_epoch_stride"]
+                + batch_index * schedule["batch_index_stride"],
             )
             assert target_batch is not None
             batch = batch.to(device)
@@ -1476,29 +1769,35 @@ def _train_neutral_member(
             if not bool(torch.isfinite(breakdown.total)):
                 raise RepresentationDataError("non-finite neutral training loss")
             breakdown.total.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=(
+                frozen["optimizer"]["gradient_clip_max_norm"]
+                if validation_only else 1.0))
             optimizer.step()
             losses.append(float(breakdown.total.detach().cpu()))
         epoch_losses.append(float(np.mean(losses)))
+        train_diagnostics: dict[str, Any] = {}
+        validation_diagnostics: dict[str, Any] = {}
         epoch_metrics.append({
             "epoch": epoch + 1,
             "train": _neutral_role_metrics(
                 model, examples, targets, split_indices["train"],
                 batch_size=args.batch_size,
-                seed=args.seed + 800_000,
+                seed=args.seed + schedule["evaluation_train_offset"],
                 device=device,
+                diagnostic_sink=train_diagnostics if validation_only else None,
             ),
             "validation": _neutral_role_metrics(
                 model, examples, targets, split_indices["validation"],
                 batch_size=args.batch_size,
-                seed=args.seed + 900_000,
+                seed=args.seed + schedule["evaluation_validation_offset"],
                 device=device,
+                diagnostic_sink=validation_diagnostics if validation_only else None,
             ),
         })
-    holdout_metrics = _neutral_role_metrics(
-        model, examples, targets, split_indices["holdout"],
-        batch_size=args.batch_size, seed=args.seed + 950_000, device=device,
-    )
+        if diagnostic_epochs is not None:
+            diagnostic_epochs.append({
+                "train": train_diagnostics, "validation": validation_diagnostics
+            })
     metrics = {
         "model_version": MODEL_VERSION,
         "parameter_count": model.parameter_count(),
@@ -1514,7 +1813,6 @@ def _train_neutral_member(
         },
         "train": epoch_metrics[-1]["train"],
         "validation": epoch_metrics[-1]["validation"],
-        "holdout": holdout_metrics,
         "direct_source_preprocessing": (
             neutral_direct_source_preprocessing_identity()
         ),
@@ -1528,8 +1826,142 @@ def _train_neutral_member(
         "model_capability_validated": False,
         "trading_edge_claimed": False,
     }
+    if validation_only:
+        return model, metrics
+    metrics["holdout"] = _neutral_role_metrics(
+        model, examples, targets, split_indices["holdout"],
+        batch_size=args.batch_size, seed=args.seed + 950_000, device=device,
+    )
     _validate_neutral_member_metrics_protocol(metrics)
     return model, metrics
+
+
+def _b0_laplace_nll(train: np.ndarray, validation: np.ndarray, width: int) -> float:
+    counts = np.bincount(train[train >= 0], minlength=width).astype(np.float64) + 1.0
+    probability = counts / counts.sum()
+    return float(-np.log(probability[validation[validation >= 0]]).mean())
+
+
+def _b0_balanced_accuracy(probability: np.ndarray, target: np.ndarray) -> float:
+    predicted = probability.argmax(axis=1)
+    return float(np.mean([np.mean(predicted[target == label] == label)
+                          for label in np.unique(target[target >= 0])]))
+
+
+def _b0_neighbor_purity(train: Mapping[str, Any], validation: Mapping[str, Any], k: int) -> Mapping[str, Any]:
+    heads = ("next_lifecycle", "scale_direction_alignment")
+    train_labels = np.column_stack([train["head_targets"][name] for name in heads])
+    validation_labels = np.column_stack([validation["head_targets"][name] for name in heads])
+    reference_ok = np.all(train_labels >= 0, axis=1)
+    query_ok = np.all(validation_labels >= 0, axis=1)
+    center = train["embeddings"][reference_ok].mean(axis=0, keepdims=True)
+    reference, query = train["embeddings"] - center, validation["embeddings"] - center
+    reference /= np.maximum(np.linalg.norm(reference, axis=1, keepdims=True), 1e-12)
+    query /= np.maximum(np.linalg.norm(query, axis=1, keepdims=True), 1e-12)
+    hits = neighbors = eligible_queries = covered_queries = 0
+    chance_sum = 0.0
+    for index in np.flatnonzero(query_ok):
+        clock = pd.Timestamp(validation["observed_at"][index])
+        for kind in validation["material_kinds"][index]:
+            eligible_queries += 1
+            eligible = np.array([reference_ok[item] and kind in train["material_kinds"][item]
+                and pd.Timestamp(at) < clock and pd.Timestamp(at).date() != clock.date()
+                for item, at in enumerate(train["observed_at"])])
+            candidates = np.flatnonzero(eligible)
+            if len(candidates):
+                chance_sum += float(np.all(
+                    train_labels[candidates] == validation_labels[index], axis=1).mean())
+            if len(candidates) < k:
+                continue
+            selected = candidates[np.argsort(query[index] @ reference[candidates].T)[-k:]]
+            hits += int(np.all(train_labels[selected] == validation_labels[index], axis=1).sum())
+            neighbors += len(selected)
+            covered_queries += 1
+    chance = 0.0 if not eligible_queries else chance_sum / eligible_queries
+    purity = 0.0 if not neighbors else hits / neighbors
+    return {"eligible_material_queries": eligible_queries,
+            "covered_material_queries": covered_queries, "neighbors": neighbors, "k": k, "purity": purity,
+            "train_chance": chance, "lift": purity - chance}
+
+
+def _b0_member_gate_decision(
+    measured: Mapping[str, Any], event_improvement: float, neighbor: Mapping[str, Any],
+) -> tuple[bool, bool, bool]:
+    gates = NEUTRAL_B0_VALIDATION_CONTRACT["gates"]
+    candle = all(value["relative_improvement"] >= gates[
+        "masked_candle_relative_improvement_each_timeframe_min"] for value in
+        measured["masked_reconstruction"]["candle_by_timeframe"].values())
+    material = all(value["rows"] < gates["validation_material_min_rows_for_rank_gate"]
+        or value["effective_rank"] >= gates["validation_material_effective_rank_min"]
+        for value in measured["material_geometry"].values())
+    geometry = measured["geometry"]
+    passed = all((candle, event_improvement >= gates[
+        "masked_event_relative_improvement_over_train_laplace_unigram_min"],
+        geometry["unit_centroid_norm"] <= gates["validation_unit_centroid_norm_max"],
+        geometry["effective_rank"] >= gates["validation_effective_rank_min"],
+        geometry["raw_p95_pairwise_cosine"] <= gates["validation_raw_p95_pairwise_cosine_max"],
+        material, neighbor["eligible_material_queries"] > 0,
+        neighbor["covered_material_queries"] / max(1, neighbor["eligible_material_queries"])
+        >= gates["neighbor_coverage_required"],
+        neighbor["purity"] >= gates["neighbor_purity_min"],
+        neighbor["lift"] >= gates["neighbor_purity_lift_over_train_chance_min"]))
+    return candle, material, passed
+
+
+def _neutral_b0_epoch_gate(
+    members: Sequence[Mapping[str, Any]], diagnostics: Sequence[Mapping[str, Any]], epoch: int,
+) -> Mapping[str, Any]:
+    gates = NEUTRAL_B0_VALIDATION_CONTRACT["gates"]
+    member_gates = []
+    member_passes = []
+    for member, epochs in zip(members, diagnostics, strict=True):
+        measured = member["epoch_metrics"][epoch - 1]["validation"]
+        raw = epochs[epoch - 1]
+        event = measured["masked_reconstruction"]["event"]
+        baseline = _b0_laplace_nll(raw["train"]["all_event_targets"],
+            raw["validation"]["event_targets"], raw["train"]["event_vocab_size"])
+        event_improvement = None if event["nll"] is None else 1.0 - event["nll"] / baseline
+        neighbor = _b0_neighbor_purity(raw["train"], raw["validation"], gates["neighbor_k"])
+        if event_improvement is None:
+            raise RepresentationDataError("neutral B0 gate diagnostics are incomplete")
+        member_passes.append(_b0_member_gate_decision(
+            measured, event_improvement, neighbor)[2])
+        member_gates.append({"member_id": member["member_id"],
+            "event_relative_improvement": event_improvement,
+            "event_train_prior_nll": baseline, "neighbor": neighbor})
+    head_gates = {}
+    head_passes = []
+    for name in ("next_lifecycle", "scale_direction_alignment"):
+        raw = diagnostics[0][epoch - 1]
+        train_target = raw["train"]["head_targets"][name]
+        validation_target = raw["validation"]["head_targets"][name]
+        width = raw["validation"]["head_probabilities"][name].shape[1]
+        prior_nll = _b0_laplace_nll(train_target, validation_target, width)
+        probabilities = [item[epoch - 1]["validation"]["head_probabilities"][name]
+                         for item in diagnostics]
+        labelled = validation_target >= 0
+        ensemble = np.mean(probabilities, axis=0)
+        ensemble_nll = float(-np.log(np.maximum(ensemble[np.flatnonzero(labelled),
+            validation_target[labelled]], 1e-12)).mean())
+        prior = np.bincount(train_target[train_target >= 0], minlength=width).argmax()
+        prior_probability = np.zeros_like(ensemble); prior_probability[:, prior] = 1.0
+        prior_balanced = _b0_balanced_accuracy(prior_probability, validation_target)
+        member_balanced = [_b0_balanced_accuracy(value, validation_target)
+                           for value in probabilities]
+        passing = sum(value >= prior_balanced + gates[
+            "active_head_member_balanced_accuracy_lift_over_train_prior_min"]
+            for value in member_balanced)
+        improvement = 1.0 - ensemble_nll / prior_nll
+        head_passes.append(improvement >= gates[
+            "active_head_ensemble_nll_relative_improvement_over_train_laplace_prior_min"]
+            and passing >= gates["active_head_members_required"])
+        head_gates[name] = {
+            "ensemble_nll": ensemble_nll, "train_prior_nll": prior_nll,
+            "train_prior_balanced_accuracy": prior_balanced,
+            "member_balanced_accuracy": member_balanced,
+        }
+    return {"epoch": epoch, "members": member_gates, "active_heads": head_gates,
+            "common_pass": all(member_passes) and all(head_passes)}
 
 
 def _neutral_fit_lineage(collection: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -1754,10 +2186,63 @@ def _neutral_fit_report(
     }
 
 
+def _neutral_b0_validation_report(
+    collection: Mapping[str, Any], args: argparse.Namespace,
+    *, trainer_repository_commit: str,
+) -> Mapping[str, Any]:
+    prepared = _prepare_neutral_fit_collection(collection)
+    members: list[Mapping[str, Any]] = []
+    diagnostics: list[list[Mapping[str, Any]]] = []
+    seeds = NEUTRAL_B0_VALIDATION_CONTRACT["ensemble"]["seeds"]
+    for index, seed in enumerate(seeds):
+        member_args = argparse.Namespace(**vars(args)); member_args.seed = seed
+        member_diagnostics: list[Mapping[str, Any]] = []
+        _, metrics = _train_neutral_member(
+            prepared["examples"], prepared["targets"], prepared["splits"],
+            member_args, validation_only=True, diagnostic_epochs=member_diagnostics,
+        )
+        epoch_metrics = [{"epoch": item["epoch"], **{
+            role: {key: item[role][key] for key in ("rows", "total_loss",
+                "objective_losses", "active_head_metrics", "masked_reconstruction",
+                "geometry", "material_geometry")}
+            for role in ("train", "validation")}} for item in metrics["epoch_metrics"]]
+        members.append({"member_id": f"member-{index:03d}", "seed": seed,
+            "parameter_count": metrics["parameter_count"],
+            "embedding_dim": metrics["embedding_dim"],
+            "epoch_metrics": epoch_metrics})
+        diagnostics.append(member_diagnostics)
+    epoch_gates = [
+        _neutral_b0_epoch_gate(members, diagnostics, epoch)
+        for epoch in range(1, NEUTRAL_MAX_EPOCHS + 1)
+    ]
+    selected = next((item["epoch"] for item in epoch_gates if item["common_pass"]), None)
+    contract, contract_sha, registry_sha = _neutral_b0_registry_contract()
+    if collection["b0_contract_sha256"] != contract_sha:
+        raise RepresentationDataError("neutral B0 collection contract changed")
+    return {
+        "schema_version": 1, "mode": "neutral_b0_validation",
+        "pipeline_scope": collection["scope"], "rows": len(prepared["examples"]),
+        "split_rows": dict(Counter(prepared["splits"].values())),
+        "contract": {"value": contract, "sha256": contract_sha,
+                     "registry_sha256": registry_sha},
+        "trainer_repository_commit": trainer_repository_commit,
+        "ensemble_members": members, "epoch_gates": epoch_gates,
+        "selected_epoch": selected, "lineage": _neutral_fit_lineage(collection),
+        "direct_source_preprocessing": neutral_direct_source_preprocessing_identity(),
+        "training_performed": True, "validation_used_for_selection": True,
+        "validation_used_for_optimization": False,
+        "holdout_opened": False, "holdout_used_for_optimization": False,
+        "holdout_used_for_selection": False, "outcome_fields_used": False,
+        "artifacts_exported": False, "threshold_search_performed": False,
+        "criteria_met": selected is not None, "model_capability_validated": False,
+        "trading_edge_claimed": False, "action_value_claimed": False,
+    }
+
+
 def _neutral_mode_requested(args: argparse.Namespace) -> bool:
     return any((
         args.neutral_dataset_audit_only, args.neutral_single_batch_smoke,
-        args.neutral_fit,
+        args.neutral_fit, args.neutral_b0_validation,
         args.market_case_input_manifest, args.market_case_run_manifest,
         args.market_embedding_kind,
     ))
@@ -1766,7 +2251,7 @@ def _neutral_mode_requested(args: argparse.Namespace) -> bool:
 def _validate_neutral_cli(args: argparse.Namespace, *, argv: Sequence[str]) -> None:
     modes = int(args.neutral_dataset_audit_only) + int(
         args.neutral_single_batch_smoke
-    ) + int(args.neutral_fit)
+    ) + int(args.neutral_fit) + int(args.neutral_b0_validation)
     if modes != 1:
         raise RepresentationDataError(
             "neutral datasets require exactly one audit, single-batch smoke or fit mode"
@@ -1781,7 +2266,8 @@ def _validate_neutral_cli(args: argparse.Namespace, *, argv: Sequence[str]) -> N
             "neutral mode requires paired --market-case-input-manifest and "
             "--market-case-run-manifest"
         )
-    if not args.neutral_fit and len(args.market_case_input_manifest) != 1:
+    training_mode = args.neutral_fit or args.neutral_b0_validation
+    if not training_mode and len(args.market_case_input_manifest) != 1:
         raise RepresentationDataError(
             "neutral audit/smoke accepts exactly one input/run manifest pair"
         )
@@ -1801,11 +2287,11 @@ def _validate_neutral_cli(args: argparse.Namespace, *, argv: Sequence[str]) -> N
     }
     if legacy:
         raise RepresentationDataError("neutral and legacy inputs are mutually exclusive")
-    if (args.neutral_single_batch_smoke or args.neutral_fit) and args.market_embedding_kind:
+    if (args.neutral_single_batch_smoke or training_mode) and args.market_embedding_kind:
         raise RepresentationDataError(
             "neutral embedding-kind selection is audit-only"
         )
-    if not args.neutral_fit and (forbidden := sorted(explicit & fit_options)):
+    if not training_mode and (forbidden := sorted(explicit & fit_options)):
         raise RepresentationDataError(
             "neutral modes forbid training/export options: " + ", ".join(forbidden)
         )
@@ -1829,10 +2315,13 @@ def _validate_neutral_cli(args: argparse.Namespace, *, argv: Sequence[str]) -> N
             raise RepresentationDataError(
                 "neutral fit requires at least three independent ensemble members"
             )
+        if args.epochs > NEUTRAL_MAX_EPOCHS:
+            raise RepresentationDataError("neutral fit exceeds the ten-epoch maximum")
         required_outputs = {
             "--checkpoint": args.checkpoint,
             "--embedding-output": args.embedding_output,
             "--head-output": args.head_output,
+            "--metrics-output": args.metrics_output,
         }
         missing_outputs = sorted(
             name for name, value in required_outputs.items() if not value
@@ -1841,6 +2330,24 @@ def _validate_neutral_cli(args: argparse.Namespace, *, argv: Sequence[str]) -> N
             raise RepresentationDataError(
                 "neutral fit requires: " + ", ".join(missing_outputs)
             )
+    if args.neutral_b0_validation:
+        forbidden = sorted(explicit & (fit_options - {"--device"}))
+        if forbidden:
+            raise RepresentationDataError(
+                "neutral B0 validation freezes training/export options: "
+                + ", ".join(forbidden)
+            )
+        if len(args.market_case_input_manifest) != 2 or not args.metrics_output:
+            raise RepresentationDataError(
+                "neutral B0 validation requires exactly two pairs and --metrics-output"
+            )
+        if args.device != NEUTRAL_B0_VALIDATION_CONTRACT["device"]:
+            raise RepresentationDataError("neutral B0 validation is frozen to CPU")
+        args.epochs = NEUTRAL_MAX_EPOCHS
+        args.ensemble_size = 3
+        args.batch_size = 16
+        args.learning_rate = 3e-4
+        args.seed = 17
 
 
 def _validate_case_input_stream_manifest(
@@ -2819,6 +3326,20 @@ def _strict_jsonable(value: Any) -> Any:
     )
 
 
+def _validate_neutral_lineage(value: Any, *, roles: set[str]) -> None:
+    from smc_trader.market_representation import (
+        NEUTRAL_TRAINING_CONTRACT, _validate_neutral_checkpoint_metadata,
+    )
+    _validate_neutral_checkpoint_metadata({
+        "training_contract": NEUTRAL_TRAINING_CONTRACT,
+        "direct_source_preprocessing": neutral_direct_source_preprocessing_identity(),
+        "inference_input_protocol": NEUTRAL_INFERENCE_INPUT_PROTOCOL,
+        "member_id": "metrics-validation", "seed": 0,
+        "split_counts": {role: 1 for role in roles}, "lineage": value,
+        "outcome_fields_used": False, "model_capability_validated": False,
+    })
+
+
 def _validate_neutral_fit_metrics_protocol(value: Mapping[str, Any]) -> None:
     report = _neutral_exact_mapping(value, (
         "schema_version", "mode", "pipeline_scope", "rows", "split_rows",
@@ -2832,7 +3353,8 @@ def _validate_neutral_fit_metrics_protocol(value: Mapping[str, Any]) -> None:
     ), "fit report")
     members = report["ensemble_members"]
     if (
-        report["schema_version"] != 2
+        type(report["schema_version"]) is not int
+        or report["schema_version"] != 2
         or report["mode"] != "neutral_market_representation_fit"
         or report["pipeline_scope"] not in {
             "three_window_pipeline_smoke", "ten_window_registered_fit",
@@ -2855,6 +3377,9 @@ def _validate_neutral_fit_metrics_protocol(value: Mapping[str, Any]) -> None:
         raise RepresentationDataError(
             "neutral fit metrics B0 protocol is missing or differs"
         )
+    _validate_neutral_lineage(
+        report["lineage"], roles={"train", "validation", "holdout"}
+    )
     rows = _neutral_positive_int(report["rows"], "fit rows")
     split_rows = _neutral_exact_mapping(
         report["split_rows"], ("train", "validation", "holdout"),
@@ -2930,12 +3455,12 @@ def _reject_nonstandard_json_number(token: str) -> None:
     )
 
 
-def load_neutral_fit_metrics(path: str | Path) -> Mapping[str, Any]:
-    """Load a B0 metrics artifact, rejecting missing/tampered protocol data."""
-
+def _load_neutral_metrics(
+    path: str | Path, validator: Any, *, label: str,
+) -> Mapping[str, Any]:
     source = Path(path)
     if source.is_symlink() or not source.is_file():
-        raise RepresentationDataError("neutral fit metrics are not a regular file")
+        raise RepresentationDataError(f"neutral {label} metrics are not a regular file")
     try:
         payload = json.loads(
             source.read_text(encoding="utf-8"),
@@ -2943,11 +3468,244 @@ def load_neutral_fit_metrics(path: str | Path) -> Mapping[str, Any]:
             parse_constant=_reject_nonstandard_json_number,
         )
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise RepresentationDataError("neutral fit metrics are invalid JSON") from exc
+        raise RepresentationDataError(f"neutral {label} metrics are invalid JSON") from exc
     if not isinstance(payload, Mapping):
-        raise RepresentationDataError("neutral fit metrics must be an object")
-    _validate_neutral_fit_metrics_protocol(payload)
+        raise RepresentationDataError(f"neutral {label} metrics must be an object")
+    validator(payload)
     return dict(payload)
+
+
+def load_neutral_fit_metrics(path: str | Path) -> Mapping[str, Any]:
+    """Load exact neutral-fit metrics, rejecting missing/tampered protocol data."""
+
+    return _load_neutral_metrics(
+        path, _validate_neutral_fit_metrics_protocol, label="fit"
+    )
+
+
+def _validate_neutral_b0_role(value: Any, *, rows: int, dimension: int) -> None:
+    role = _neutral_exact_mapping(value, ("rows", "total_loss", "objective_losses",
+        "active_head_metrics", "masked_reconstruction", "geometry",
+        "material_geometry"), "B0 role")
+    if type(role["rows"]) is not int or role["rows"] != rows:
+        raise RepresentationDataError("neutral B0 role rows differ")
+    total = _neutral_metric_number(role["total_loss"], "B0 total loss")
+    losses = _neutral_exact_mapping(role["objective_losses"],
+        ("candle_reconstruction", "event_reconstruction", "next_lifecycle",
+         "scale_alignment"), "B0 objective losses")
+    weighted = sum(_neutral_metric_number(losses[name], f"B0 {name} loss") *
+        NEUTRAL_REPRESENTATION_LOSS_WEIGHTS[name] for name in losses)
+    if not math.isclose(total, weighted, rel_tol=1e-6, abs_tol=1e-8):
+        raise RepresentationDataError("neutral B0 objective total differs")
+    heads = _neutral_exact_mapping(role["active_head_metrics"],
+        ("next_lifecycle", "scale_direction_alignment"), "B0 heads")
+    for name, head in heads.items():
+        _neutral_exact_mapping(head,
+            ("labelled_rows", "nll", "accuracy", "balanced_accuracy"), f"B0 {name}")
+        if type(head["labelled_rows"]) is not int or not 1 <= head["labelled_rows"] <= rows:
+            raise RepresentationDataError("neutral B0 head is unlabelled")
+        _neutral_metric_number(head["nll"], f"B0 {name} NLL")
+        _neutral_metric_number(head["accuracy"], f"B0 {name} accuracy", maximum=1.0)
+        _neutral_metric_number(head["balanced_accuracy"], f"B0 {name} balanced", maximum=1.0)
+    reconstruction = _neutral_exact_mapping(role["masked_reconstruction"],
+        ("candle_by_timeframe", "event"), "B0 reconstruction")
+    candles = _neutral_exact_mapping(reconstruction["candle_by_timeframe"],
+                                     TIMEFRAMES, "B0 candle timeframes")
+    for timeframe, raw in candles.items():
+        candle = _neutral_exact_mapping(raw, ("masked_values", "smooth_l1",
+            "zero_after_frozen_feature_normalization_smooth_l1", "relative_improvement"),
+            f"B0 {timeframe}")
+        if type(candle["masked_values"]) is not int or candle["masked_values"] < 1:
+            raise RepresentationDataError("neutral B0 candle count is invalid")
+        loss = _neutral_metric_number(candle["smooth_l1"], "B0 candle loss")
+        baseline = _neutral_metric_number(
+            candle["zero_after_frozen_feature_normalization_smooth_l1"],
+                                          "B0 candle baseline")
+        improvement = _neutral_metric_number(candle["relative_improvement"],
+                                              "B0 candle improvement", minimum=-1e9)
+        if baseline <= 0 or not math.isclose(improvement, 1.0 - loss / baseline, rel_tol=1e-6):
+            raise RepresentationDataError("neutral B0 candle improvement differs")
+    event = _neutral_exact_mapping(reconstruction["event"],
+                                   ("masked_events", "nll"), "B0 event")
+    if type(event["masked_events"]) is not int or event["masked_events"] < 1:
+        raise RepresentationDataError("neutral B0 event count is invalid")
+    _neutral_metric_number(event["nll"], "B0 event NLL")
+    geometry = _neutral_exact_mapping(role["geometry"], ("embedding_dim", "effective_rank",
+        "mean_feature_std", "centroid_norm", "unit_centroid_norm",
+        "raw_p95_pairwise_cosine"), "B0 geometry")
+    if (type(geometry["embedding_dim"]) is not int or
+            geometry["embedding_dim"] != dimension):
+        raise RepresentationDataError("neutral B0 geometry dimension differs")
+    _neutral_metric_number(geometry["effective_rank"], "B0 effective rank",
+                           maximum=float(dimension))
+    for key in ("mean_feature_std", "centroid_norm"):
+        _neutral_metric_number(geometry[key], f"B0 geometry {key}")
+    _neutral_metric_number(geometry["unit_centroid_norm"], "B0 unit centroid", maximum=1.0)
+    _neutral_metric_number(geometry["raw_p95_pairwise_cosine"], "B0 cosine",
+                           minimum=-1.0, maximum=1.0)
+    materials = _neutral_exact_mapping(role["material_geometry"],
+        NEUTRAL_MARKET_TRANSITION_KINDS, "B0 materials")
+    for material in materials.values():
+        _neutral_exact_mapping(material, ("rows", "effective_rank"), "B0 material")
+        if type(material["rows"]) is not int or material["rows"] < 0:
+            raise RepresentationDataError("neutral B0 material rows are invalid")
+        _neutral_metric_number(material["effective_rank"], "B0 material rank",
+                               maximum=float(dimension))
+
+
+def _validate_neutral_b0_metrics_protocol(value: Mapping[str, Any]) -> None:
+    report = _neutral_exact_mapping(value, ("schema_version mode pipeline_scope rows split_rows "
+        "contract trainer_repository_commit ensemble_members epoch_gates selected_epoch lineage training_performed "
+        "direct_source_preprocessing "
+        "validation_used_for_selection validation_used_for_optimization holdout_opened holdout_used_for_optimization "
+        "holdout_used_for_selection outcome_fields_used artifacts_exported "
+        "threshold_search_performed criteria_met model_capability_validated trading_edge_claimed "
+        "action_value_claimed").split(), "B0 report")
+    false_keys = ("validation_used_for_optimization holdout_opened holdout_used_for_optimization holdout_used_for_selection "
+        "outcome_fields_used artifacts_exported threshold_search_performed model_capability_validated "
+        "trading_edge_claimed action_value_claimed").split()
+    if (type(report["schema_version"]) is not int or report["schema_version"] != 1
+            or report["mode"] != "neutral_b0_validation"
+            or report["pipeline_scope"] != "2021_02_train_2022_05_validation_only"
+            or report["training_performed"] is not True
+            or report["validation_used_for_selection"] is not True
+            or report["direct_source_preprocessing"] != neutral_direct_source_preprocessing_identity()
+            or any(report[key] is not False for key in false_keys)):
+        raise RepresentationDataError("neutral B0 report contract differs")
+    commit = report["trainer_repository_commit"]
+    if (type(commit) is not str or len(commit) != 40 or
+            any(character not in "0123456789abcdef" for character in commit)):
+        raise RepresentationDataError("neutral B0 trainer commit is invalid")
+    contract = _neutral_exact_mapping(report["contract"],
+                                      "value sha256 registry_sha256".split(), "B0 contract")
+    encoded = _neutral_b0_contract_bytes(contract["value"])
+    if (encoded != _NEUTRAL_B0_CONTRACT_BYTES
+            or hashlib.sha256(encoded).hexdigest() != contract["sha256"]):
+        raise RepresentationDataError("neutral B0 contract hash differs")
+    _normalized_sha256(contract["registry_sha256"], name="B0 registry sha256")
+    counts = _neutral_exact_mapping(report["split_rows"],
+                                    "train validation".split(), "B0 split rows")
+    rows = _neutral_positive_int(report["rows"], "B0 rows")
+    if (any(type(item) is not int or item < 1 for item in counts.values()) or
+            sum(counts.values()) != rows):
+        raise RepresentationDataError("neutral B0 row counts differ")
+    members = report["ensemble_members"]
+    if (not isinstance(members, list) or any(not isinstance(item, Mapping) for item in members)
+            or any(type(item.get("seed")) is not int for item in members)
+            or [item.get("seed") for item in members] != [17, 100_020, 200_023]):
+        raise RepresentationDataError("neutral B0 ensemble differs")
+    for index, member in enumerate(members):
+        if (set(member) != {"member_id", "seed", "parameter_count", "embedding_dim",
+                            "epoch_metrics"} or member["member_id"] != f"member-{index:03d}"):
+            raise RepresentationDataError("neutral B0 member identity differs")
+        epochs = member["epoch_metrics"]
+        if not isinstance(epochs, list) or len(epochs) != NEUTRAL_MAX_EPOCHS:
+            raise RepresentationDataError("neutral B0 epoch metrics differ")
+        _neutral_positive_int(member["parameter_count"], "B0 parameters")
+        dimension = _neutral_positive_int(member["embedding_dim"], "B0 dimension")
+        for epoch, measured in enumerate(epochs, 1):
+            measured = _neutral_exact_mapping(
+                measured, ("epoch", "train", "validation"), "B0 epoch metrics"
+            )
+            if type(measured["epoch"]) is not int or measured["epoch"] != epoch:
+                raise RepresentationDataError("neutral B0 epoch ordinal differs")
+            for role in ("train", "validation"):
+                _validate_neutral_b0_role(measured[role], rows=counts[role],
+                                          dimension=dimension)
+    gates = report["epoch_gates"]
+    if (not isinstance(gates, list) or any(not isinstance(item, Mapping) for item in gates)
+            or any(type(item.get("epoch")) is not int for item in gates)
+            or [item.get("epoch") for item in gates] != list(range(1, NEUTRAL_MAX_EPOCHS + 1))):
+        raise RepresentationDataError("neutral B0 gate sequence differs")
+    thresholds = NEUTRAL_B0_VALIDATION_CONTRACT["gates"]
+    for epoch_index, gate in enumerate(gates):
+        gate = _neutral_exact_mapping(gate,
+            ("epoch", "members", "active_heads", "common_pass"), "B0 epoch gate")
+        if not isinstance(gate["members"], list) or len(gate["members"]) != 3:
+            raise RepresentationDataError("neutral B0 member gates differ")
+        member_passes = []
+        for member_index, raw in enumerate(gate["members"]):
+            item = _neutral_exact_mapping(raw, ("member_id", "event_relative_improvement",
+                "event_train_prior_nll", "neighbor"), "B0 member gate")
+            measured = members[member_index]["epoch_metrics"][epoch_index]["validation"]
+            neighbor = _neutral_exact_mapping(item["neighbor"], ("eligible_material_queries",
+                "covered_material_queries", "neighbors", "k", "purity", "train_chance", "lift"),
+                "B0 neighbor")
+            if (type(neighbor["eligible_material_queries"]) is not int or
+                    neighbor["eligible_material_queries"] < 1 or
+                    any(type(neighbor[key]) is not int or neighbor[key] < 0 for key in
+                        ("covered_material_queries", "neighbors")) or
+                    neighbor["covered_material_queries"] > neighbor["eligible_material_queries"] or
+                    type(neighbor["k"]) is not int or
+                    neighbor["k"] != thresholds["neighbor_k"] or
+                    neighbor["neighbors"] != neighbor["covered_material_queries"] * neighbor["k"]):
+                raise RepresentationDataError("neutral B0 neighbor counts differ")
+            purity = _neutral_metric_number(neighbor["purity"], "B0 purity", maximum=1.0)
+            chance = _neutral_metric_number(neighbor["train_chance"], "B0 chance", maximum=1.0)
+            lift = _neutral_metric_number(neighbor["lift"], "B0 purity lift", minimum=-1.0, maximum=1.0)
+            event = _neutral_metric_number(item["event_relative_improvement"],
+                                           "B0 event improvement", minimum=-1e9)
+            event_prior = _neutral_metric_number(item["event_train_prior_nll"],
+                                                 "B0 event prior NLL")
+            if (item["member_id"] != f"member-{member_index:03d}" or event_prior <= 0 or
+                    not math.isclose(lift, purity - chance, rel_tol=1e-6) or
+                    not math.isclose(event, 1.0 - measured["masked_reconstruction"]["event"]["nll"] /
+                                     event_prior, rel_tol=1e-6)):
+                raise RepresentationDataError("neutral B0 member gate is inconsistent")
+            member_passes.append(_b0_member_gate_decision(measured, event, neighbor)[2])
+        heads = _neutral_exact_mapping(gate["active_heads"],
+            ("next_lifecycle", "scale_direction_alignment"), "B0 head gates")
+        head_passes = []
+        for name, raw in heads.items():
+            head = _neutral_exact_mapping(raw, ("ensemble_nll", "train_prior_nll",
+                "train_prior_balanced_accuracy", "member_balanced_accuracy"), "B0 head gate")
+            ensemble_nll = _neutral_metric_number(head["ensemble_nll"], "B0 ensemble NLL")
+            prior_nll = _neutral_metric_number(head["train_prior_nll"], "B0 prior NLL")
+            prior_balanced = _neutral_metric_number(head["train_prior_balanced_accuracy"],
+                                                    "B0 prior balanced", maximum=1.0)
+            balanced = head["member_balanced_accuracy"]
+            if not isinstance(balanced, list) or len(balanced) != 3:
+                raise RepresentationDataError("neutral B0 balanced accuracies differ")
+            balanced = [_neutral_metric_number(value, "B0 member balanced", maximum=1.0)
+                        for value in balanced]
+            expected_balanced = [member["epoch_metrics"][epoch_index]["validation"]
+                ["active_head_metrics"][name]["balanced_accuracy"] for member in members]
+            passing = sum(value >= prior_balanced + thresholds[
+                "active_head_member_balanced_accuracy_lift_over_train_prior_min"] for value in balanced)
+            if prior_nll <= 0 or balanced != expected_balanced:
+                raise RepresentationDataError("neutral B0 head prior/metrics differ")
+            improvement = 1.0 - ensemble_nll / prior_nll
+            expected = improvement >= thresholds[
+                "active_head_ensemble_nll_relative_improvement_over_train_laplace_prior_min"] and passing >= thresholds[
+                "active_head_members_required"]
+            head_passes.append(expected)
+        common = all(member_passes) and all(head_passes)
+        if type(gate["common_pass"]) is not bool or gate["common_pass"] is not common:
+            raise RepresentationDataError("neutral B0 common gate is inconsistent")
+    selected = next((item["epoch"] for item in gates if item.get("common_pass") is True), None)
+    claimed = report["selected_epoch"]
+    if ((claimed is not None and (type(claimed) is not int or not 1 <= claimed <= 10)) or
+            claimed != selected or report["criteria_met"] is not
+            (selected is not None)):
+        raise RepresentationDataError("neutral B0 selection differs")
+    _validate_neutral_lineage(report["lineage"], roles={"train", "validation"})
+    runs = report["lineage"]["input_runs"]
+    profiles = {item["split_role"]: item["profile_name"] for item in runs}
+    evidence = report["lineage"]["split_protocol"]["observed_completed_session_embargo"]
+    if (len(runs) != 2 or [item["split_role"] for item in runs] != ["train", "validation"] or
+            len({item["run_manifest_sha256"] for item in runs}) != 2 or
+            profiles != NEUTRAL_B0_VALIDATION_CONTRACT["profiles"] or
+            evidence[0]["left_profile"] != profiles["train"] or
+            evidence[0]["right_profile"] != profiles["validation"] or
+            report["lineage"]["split_protocol"]["registry_sha256"] !=
+            contract["registry_sha256"]):
+        raise RepresentationDataError("neutral B0 lineage binding differs")
+
+
+def load_neutral_b0_validation_metrics(path: str | Path) -> Mapping[str, Any]:
+    return _load_neutral_metrics(
+        path, _validate_neutral_b0_metrics_protocol, label="B0"
+    )
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -2955,12 +3713,21 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(raw_argv)
     if _neutral_mode_requested(args):
         _validate_neutral_cli(args, argv=raw_argv)
-        if args.neutral_fit:
+        trainer_commit = (
+            _neutral_b0_trainer_commit() if args.neutral_b0_validation else None
+        )
+        if args.neutral_fit or args.neutral_b0_validation:
             collection = _load_neutral_fit_collection(
                 input_manifest_paths=args.market_case_input_manifest,
                 run_manifest_paths=args.market_case_run_manifest,
+                validation_only=args.neutral_b0_validation,
             )
-            raw_report = _neutral_fit_report(collection, args)
+            raw_report = (
+                _neutral_b0_validation_report(
+                    collection, args, trainer_repository_commit=trainer_commit
+                )
+                if args.neutral_b0_validation else _neutral_fit_report(collection, args)
+            )
         else:
             dataset = _load_neutral_market_dataset(
                 input_manifest_path=args.market_case_input_manifest[0],
@@ -2977,10 +3744,20 @@ def main(argv: Sequence[str] | None = None) -> int:
         report = _strict_jsonable(raw_report)
         if args.neutral_fit:
             _validate_neutral_fit_metrics_protocol(report)
+        elif args.neutral_b0_validation:
+            _validate_neutral_b0_metrics_protocol(report)
         if args.metrics_output:
             _atomic_json(args.metrics_output, report)
+            loaded = (
+                load_neutral_b0_validation_metrics(args.metrics_output)
+                if args.neutral_b0_validation else
+                load_neutral_fit_metrics(args.metrics_output)
+                if args.neutral_fit else report
+            )
+            if loaded != report:
+                raise RepresentationDataError("neutral metrics atomic readback differs")
         print(json.dumps(report, sort_keys=True, allow_nan=False))
-        return 0
+        return 2 if args.neutral_b0_validation and not report["criteria_met"] else 0
     require_torch()
     export_requested = bool(args.embedding_output or args.head_output)
     if export_requested and not args.embedding_stage:

@@ -35,6 +35,7 @@ from smc_trader.market_representation import (
     OUTCOME_BLIND_HEAD_WIDTHS,
     DecisionTimeEmbeddingRecord,
     checkpoint_embedding_contract,
+    neutral_direct_source_preprocessing_identity,
 )
 from smc_trader.scene_graph import market_episode_id
 
@@ -1456,6 +1457,66 @@ def test_market_episode_query_is_strictly_prior_and_outcome_free() -> None:
     )
     assert no_ensemble.ood.policy is RetrievalPolicy.ABSTAIN
     assert "deep_ensemble_unavailable" in no_ensemble.ood.reasons
+
+
+def test_market_episode_query_preserves_exact_neutral_preprocessing_contract() -> None:
+    raw = _market_episode_case(
+        "real-mapping",
+        20,
+        [1.0, 0.0, 0.0, 0.0],
+    )
+    query = MarketEpisodeEmbeddingQuery.from_mapping(
+        raw,
+        material_kind="trigger",
+        embedding_dim=DIM,
+    )
+    identity = neutral_direct_source_preprocessing_identity()
+
+    assert query.embedding_input_protocol == NEUTRAL_INFERENCE_INPUT_PROTOCOL
+    assert (
+        query.neutral_preprocessing_version
+        == identity["protocol"]["protocol_version"]
+    )
+    assert query.neutral_preprocessing_sha256 == identity["sha256"]
+
+    wrong_protocol = dict(raw)
+    wrong_protocol["embedding_input_protocol"] = INFERENCE_INPUT_PROTOCOL
+    with pytest.raises(CaseRetrievalError, match="preprocessing contract"):
+        MarketEpisodeEmbeddingQuery.from_mapping(
+            wrong_protocol,
+            material_kind="trigger",
+            embedding_dim=DIM,
+        )
+
+
+def test_market_episode_query_direct_construction_fails_closed() -> None:
+    query = _market_episode_query(20, [1.0, 0.0, 0.0, 0.0])
+    direct = dict(query.__dict__)
+
+    missing = dict(direct)
+    missing.pop("neutral_preprocessing_sha256")
+    with pytest.raises(TypeError, match="neutral_preprocessing_sha256"):
+        MarketEpisodeEmbeddingQuery(**missing)
+
+    tampered = {
+        **direct,
+        "neutral_preprocessing_sha256": "0" * 64,
+    }
+    with pytest.raises(CaseRetrievalError, match="preprocessing contract"):
+        MarketEpisodeEmbeddingQuery(**tampered)
+
+
+def test_market_episode_index_rechecks_query_preprocessing_contract() -> None:
+    index = MarketEpisodeCaseIndex.from_mappings(
+        [_market_episode_case("prior", 1, [1.0, 0.0, 0.0, 0.0])],
+        artifact_lineage=MARKET_EPISODE_LINEAGE,
+        embedding_dim=DIM,
+    )
+    query = _market_episode_query(20, [1.0, 0.0, 0.0, 0.0])
+    object.__setattr__(query, "neutral_preprocessing_sha256", "0" * 64)
+
+    with pytest.raises(CaseRetrievalError, match="preprocessing contract"):
+        index.query(query, artifact_lineage=MARKET_EPISODE_LINEAGE)
 
 
 def test_market_episode_cross_artifact_query_uses_scoped_episode_identity() -> None:
