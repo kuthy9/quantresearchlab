@@ -3077,7 +3077,9 @@ def test_market_episode_exporters_roundtrip_into_retrieval_contract(
             ),
         },
     )
-    assert tuple(record.material_kind for record in index.records) == case.transition_kinds
+    assert tuple(record.material_kind for record in index.records) == (
+        "zone_registered",
+    )
     parsed = next(record for record in index.records if record.material_kind == "zone_registered")
     assert parsed.market_episode_id == case.market_episode_id
     assert parsed.entry_location_id == case.entry_location_id

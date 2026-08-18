@@ -549,6 +549,23 @@ def _market_episode_material_kinds(
     return kinds
 
 
+def _market_episode_selected_material_kinds(
+    record: Mapping[str, Any],
+) -> tuple[str, ...]:
+    """Use an export's explicit material grain without re-expanding its revision."""
+
+    kinds = _market_episode_material_kinds(record)
+    if "material_kind" not in record:
+        return kinds
+    raw = record["material_kind"]
+    selected = raw.strip().lower() if isinstance(raw, str) else None
+    if selected is None or raw != selected or selected not in kinds:
+        raise CaseRetrievalError(
+            "MarketEpisode explicit material kind is invalid"
+        )
+    return (selected,)
+
+
 @dataclass(frozen=True)
 class EpisodeEmbeddingRecord:
     """One causally admissible decision embedding at episode grain."""
@@ -2254,7 +2271,7 @@ class MarketEpisodeCaseIndex:
                     raise CaseRetrievalError(
                         "MarketEpisode record run lineage differs from its artifact"
                     )
-                for kind in _market_episode_material_kinds(bound):
+                for kind in _market_episode_selected_material_kinds(bound):
                     record = MarketEpisodeEmbeddingRecord.from_mapping(
                         bound,
                         material_kind=kind,

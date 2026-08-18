@@ -1330,6 +1330,7 @@ def test_market_episode_selector_keeps_first_of_all_six_material_kinds() -> None
             revision_index=9,
         ),
     ]
+    assert all("material_kind" not in revision for revision in revisions)
     index = MarketEpisodeCaseIndex.from_mappings(
         revisions,
         artifact_lineage=MARKET_EPISODE_LINEAGE,
@@ -1349,6 +1350,51 @@ def test_market_episode_selector_keeps_first_of_all_six_material_kinds() -> None
     with pytest.raises(CaseRetrievalError, match="not canonical"):
         MarketEpisodeCaseIndex.from_mappings(
             revisions,
+            artifact_lineage=MARKET_EPISODE_LINEAGE,
+            embedding_dim=DIM,
+        )
+
+
+def test_market_episode_selector_consumes_explicit_material_grains_once() -> None:
+    first_pullback = _market_episode_case(
+        "simultaneous",
+        1,
+        [1.0, 0.0, 0.0, 0.0],
+        transition_kinds=("first_pullback", "terminal"),
+        revision_index=1,
+    )
+    first_pullback["material_kind"] = "first_pullback"
+    terminal = {
+        **first_pullback,
+        "material_kind": "terminal",
+        "decision_embedding": [1.0, 1e-8, 0.0, 0.0],
+    }
+
+    index = MarketEpisodeCaseIndex.from_mappings(
+        [first_pullback, terminal],
+        artifact_lineage=MARKET_EPISODE_LINEAGE,
+        embedding_dim=DIM,
+    )
+
+    assert tuple(record.material_kind for record in index.records) == (
+        "first_pullback",
+        "terminal",
+    )
+    assert index.records[0].decision_embedding != index.records[1].decision_embedding
+
+
+def test_market_episode_selector_rejects_unbound_explicit_material_kind() -> None:
+    revision = _market_episode_case(
+        "explicit-mismatch",
+        1,
+        [1.0, 0.0, 0.0, 0.0],
+        transition_kinds=("first_pullback", "terminal"),
+    )
+    revision["material_kind"] = "trigger"
+
+    with pytest.raises(CaseRetrievalError, match="explicit material kind"):
+        MarketEpisodeCaseIndex.from_mappings(
+            [revision],
             artifact_lineage=MARKET_EPISODE_LINEAGE,
             embedding_dim=DIM,
         )
