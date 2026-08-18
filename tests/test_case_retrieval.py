@@ -31,6 +31,7 @@ from smc_trader.case_retrieval import (
 from smc_trader.market_representation import (
     EMBEDDING_DIM,
     INFERENCE_INPUT_PROTOCOL,
+    NEUTRAL_INFERENCE_INPUT_PROTOCOL,
     OUTCOME_BLIND_HEAD_WIDTHS,
     DecisionTimeEmbeddingRecord,
     checkpoint_embedding_contract,
@@ -51,7 +52,7 @@ MARKET_EPISODE_DATASET_CONTRACT = {
     "model_config_sha256": "e" * 64,
     "market_case_protocol": {"protocol_version": "neutral-test-v1"},
     "representation_feature_schema_version": "feature-test-v1",
-    "embedding_input_protocol": INFERENCE_INPUT_PROTOCOL,
+    "embedding_input_protocol": NEUTRAL_INFERENCE_INPUT_PROTOCOL,
     "selection_contract": MARKET_EPISODE_FIRST_OCCURRENCE_SELECTION_CONTRACT,
     "embedding_model_version": "representation:test-v1",
     "embedding_checkpoint_id": EMBEDDING_CHECKPOINT_ID,
@@ -202,7 +203,7 @@ def _market_episode_case(
         "feature_max_at": decision_at,
         "embedding_model_version": "representation:test-v1",
         "embedding_checkpoint_id": EMBEDDING_CHECKPOINT_ID,
-        "embedding_input_protocol": INFERENCE_INPUT_PROTOCOL,
+        "embedding_input_protocol": NEUTRAL_INFERENCE_INPUT_PROTOCOL,
         "decision_embedding": list(embedding),
         "outcome_fields_used": False,
         "embedding_feature_names": ("return_1m", "atr_normalized_distance"),
@@ -259,7 +260,7 @@ def _market_episode_ensemble(
                 )
                 for name, width in MARKET_EPISODE_ACTIVE_ENSEMBLE_HEAD_WIDTHS.items()
             },
-            "input_protocol": INFERENCE_INPUT_PROTOCOL,
+            "input_protocol": NEUTRAL_INFERENCE_INPUT_PROTOCOL,
         }
         for index, value in enumerate(values)
     ]

@@ -34,6 +34,7 @@ from smc_trader.market_representation import (  # noqa: E402
     INFERENCE_INPUT_PROTOCOL,
     MODEL_VERSION,
     NEUTRAL_MARKET_TRANSITION_KINDS,
+    NEUTRAL_INFERENCE_INPUT_PROTOCOL,
     NEUTRAL_REPRESENTATION_LOSS_WEIGHTS,
     NEUTRAL_SPARSE_ACTIVE_TARGETS,
     NEUTRAL_SPARSE_DISABLED_TARGETS,
@@ -64,13 +65,17 @@ from smc_trader.market_representation import (  # noqa: E402
     majority_class_baselines,
     mask_direct_label_source_tokens,
     neutral_representation_multitask_loss,
+    neutral_direct_source_preprocessing_identity,
     prepare_representation_case,
+    prepare_neutral_representation_case,
     representation_case_from_case_input_row,
     representation_case_from_market_case_input_row,
     representation_checkpoint_id,
     representation_multitask_loss,
     representation_task_metrics,
     require_torch,
+    require_neutral_preprocessed_examples,
+    save_neutral_representation_checkpoint,
     save_representation_checkpoint,
     select_first_causal_stage_revisions,
     zero_reconstruction_baselines,
@@ -81,8 +86,8 @@ LINEAGE_SCHEMA = "smc-canonical-mtf-lineage-v1"
 AGGREGATION_PROTOCOL = "smc-existing-causal-aggregation-v1"
 EMBEDDING_ARTIFACT_SCHEMA = "smc-decision-time-embeddings-v1"
 HEAD_ARTIFACT_SCHEMA = "smc-decision-time-self-supervised-heads-v1"
-NEUTRAL_EMBEDDING_ARTIFACT_SCHEMA = "smc-neutral-market-episode-embeddings-v1"
-NEUTRAL_HEAD_ARTIFACT_SCHEMA = "smc-neutral-market-episode-active-heads-v1"
+NEUTRAL_EMBEDDING_ARTIFACT_SCHEMA = "smc-neutral-market-episode-embeddings-v2"
+NEUTRAL_HEAD_ARTIFACT_SCHEMA = "smc-neutral-market-episode-active-heads-v2"
 NEUTRAL_MATERIAL_SELECTION_CONTRACT = "first_online_market_episode_material_kind_by_revision_index_v1"
 DATA_SPLITS = ROOT / "configs/data_splits.json"
 
@@ -1024,7 +1029,9 @@ def _neutral_single_batch_smoke_report(
     if set(target_records) != {case.revision_id for case in cases}:
         raise RepresentationDataError("neutral smoke target coverage changed")
     store, source_summary = _neutral_canonical_store(dataset, cases)
-    examples = tuple(prepare_representation_case(case, store) for case in cases)
+    examples = tuple(
+        prepare_neutral_representation_case(case, store) for case in cases
+    )
     targets = tuple(target_records[case.revision_id].target for case in cases)
 
     seed = 17
@@ -1108,7 +1115,9 @@ def _prepare_neutral_fit_collection(
         if set(target_records) != {case.revision_id for case in cases}:
             raise RepresentationDataError("neutral targets omit input revisions")
         store, _ = _neutral_canonical_store(dataset, cases)
-        prepared = tuple(prepare_representation_case(case, store) for case in cases)
+        prepared = tuple(
+            prepare_neutral_representation_case(case, store) for case in cases
+        )
         role = str(dataset["representation_split_role"])
         for example in prepared:
             revision_id = example.case.revision_id
@@ -1131,33 +1140,93 @@ def _neutral_role_metrics(
     indices: Sequence[int],
     *, batch_size: int, seed: int, device: Any,
 ) -> Mapping[str, Any]:
+    """Measure one split without gradients.
+
+    ``objective_losses`` are row-weighted means of the per-batch objective
+    values.  They are diagnostic objective means, not token-level NLLs.
+    """
+
     import torch
 
+    require_neutral_preprocessed_examples(examples)
     sums: Counter[str] = Counter()
+    head_sums: Counter[str] = Counter()
+    head_counts: Counter[str] = Counter()
+    embeddings: list[np.ndarray] = []
     rows = 0
     model.eval()
     for batch_index, selected in enumerate(_batches(indices, batch_size)):
-        batch, target_batch = collate_representation_cases(
-            tuple(mask_direct_label_source_tokens(examples[index]) for index in selected),
-            targets=tuple(targets[index] for index in selected),
+        selected_examples = tuple(examples[index] for index in selected)
+        selected_targets = tuple(targets[index] for index in selected)
+        objective_batch, objective_targets = collate_representation_cases(
+            selected_examples,
+            targets=selected_targets,
             mask_probability=0.15, seed=seed + batch_index,
         )
-        assert target_batch is not None
-        batch = batch.to(device)
-        target_batch = target_batch.to(device)
+        inference_batch, inference_targets = collate_representation_cases(
+            selected_examples,
+            targets=selected_targets,
+            mask_probability=0.0, seed=0,
+        )
+        assert objective_targets is not None and inference_targets is not None
+        objective_batch = objective_batch.to(device)
+        objective_targets = objective_targets.to(device)
+        inference_batch = inference_batch.to(device)
+        inference_targets = inference_targets.to(device)
         with torch.no_grad():
-            breakdown = neutral_representation_multitask_loss(model(batch), batch,
-                                                               target_batch)
+            objective_output = model(objective_batch)
+            breakdown = neutral_representation_multitask_loss(
+                objective_output, objective_batch, objective_targets
+            )
+            inference_output = model(inference_batch)
+            task_metrics = representation_task_metrics(
+                inference_output, inference_targets
+            )
+        embeddings.append(inference_output.embedding.detach().cpu().numpy())
         weight = len(selected)
         rows += weight
         sums["total"] += float(breakdown.total.detach().cpu()) * weight
         for name, value in breakdown.components.items():
             sums[name] += float(value.detach().cpu()) * weight
+        for target_name, target_values in (
+            ("next_lifecycle", inference_targets.next_lifecycle),
+            (
+                "scale_direction_alignment",
+                inference_targets.scale_direction_alignment,
+            ),
+        ):
+            labelled = int((target_values != -100).sum().detach().cpu())
+            if labelled:
+                head_counts[target_name] += labelled
+                for suffix in ("nll", "accuracy"):
+                    key = f"{target_name}_{suffix}"
+                    head_sums[key] += task_metrics[key] * labelled
     if rows < 1:
         raise RepresentationDataError("neutral role evaluation is empty")
     disabled = ("next_event", "next_event_time", "displacement", "draw_consumed")
     if any(sums[name] != 0.0 for name in disabled):
         raise RepresentationDataError("neutral evaluation enabled a disabled head")
+    matrix = np.concatenate(embeddings, axis=0).astype(np.float64, copy=False)
+    centered = matrix - matrix.mean(axis=0, keepdims=True)
+    spectrum = np.linalg.eigvalsh(centered.T @ centered)
+    spectrum = np.clip(spectrum, 0.0, None)
+    positive = spectrum[spectrum > np.finfo(np.float64).eps]
+    weights = positive / positive.sum() if positive.size else positive
+    effective_rank = (
+        0.0
+        if not weights.size
+        else float(np.exp(-np.sum(weights * np.log(weights))))
+    )
+    active_heads = {}
+    for name in ("next_lifecycle", "scale_direction_alignment"):
+        count = int(head_counts[name])
+        active_heads[name] = {
+            "labelled_rows": count,
+            "nll": None if not count else head_sums[f"{name}_nll"] / count,
+            "accuracy": (
+                None if not count else head_sums[f"{name}_accuracy"] / count
+            ),
+        }
     return {
         "rows": rows,
         "total_loss": sums["total"] / rows,
@@ -1165,9 +1234,192 @@ def _neutral_role_metrics(
             "candle_reconstruction", "event_reconstruction",
             "next_lifecycle", "scale_alignment",
         )},
+        "active_head_metrics": active_heads,
+        "geometry": {
+            "embedding_dim": int(matrix.shape[1]),
+            "effective_rank": effective_rank,
+            "mean_feature_std": float(matrix.std(axis=0).mean()),
+            "centroid_norm": float(np.linalg.norm(matrix.mean(axis=0))),
+        },
         "label_sources_masked": True,
+        "direct_source_preprocessing": (
+            neutral_direct_source_preprocessing_identity()
+        ),
         "gradient_enabled": False,
     }
+
+
+def _neutral_exact_mapping(
+    value: Any, keys: Sequence[str], label: str,
+) -> Mapping[str, Any]:
+    if not isinstance(value, Mapping) or set(value) != set(keys):
+        raise RepresentationDataError(f"neutral {label} key contract differs")
+    return value
+
+
+def _neutral_metric_number(
+    value: Any, label: str, *, minimum: float = 0.0,
+    maximum: float | None = None,
+) -> float:
+    if type(value) not in {int, float} or not math.isfinite(float(value)):
+        raise RepresentationDataError(f"neutral {label} must be finite numeric")
+    number = float(value)
+    if number < minimum or (maximum is not None and number > maximum):
+        raise RepresentationDataError(f"neutral {label} is outside its range")
+    return number
+
+
+def _neutral_positive_int(value: Any, label: str) -> int:
+    if type(value) is not int or value < 1:
+        raise RepresentationDataError(f"neutral {label} must be a positive integer")
+    return value
+
+
+def _validate_neutral_role_metrics(
+    value: Any, *, expected_rows: int, expected_dim: int,
+) -> None:
+    measured = _neutral_exact_mapping(value, (
+        "rows", "total_loss", "objective_losses", "active_head_metrics",
+        "geometry", "label_sources_masked", "direct_source_preprocessing",
+        "gradient_enabled",
+    ), "role metrics")
+    if (
+        _neutral_positive_int(measured["rows"], "role rows") != expected_rows
+        or measured["label_sources_masked"] is not True
+        or measured["gradient_enabled"] is not False
+        or measured["direct_source_preprocessing"]
+        != neutral_direct_source_preprocessing_identity()
+    ):
+        raise RepresentationDataError("neutral role execution contract differs")
+    total = _neutral_metric_number(measured["total_loss"], "total loss")
+    losses = _neutral_exact_mapping(measured["objective_losses"], (
+        "candle_reconstruction", "event_reconstruction", "next_lifecycle",
+        "scale_alignment",
+    ), "objective losses")
+    numeric_losses = {
+        name: _neutral_metric_number(losses[name], f"{name} objective loss")
+        for name in losses
+    }
+    weighted = sum(
+        numeric_losses[name] * NEUTRAL_REPRESENTATION_LOSS_WEIGHTS[name]
+        for name in numeric_losses
+    )
+    if not math.isclose(total, weighted, rel_tol=1e-6, abs_tol=1e-8):
+        raise RepresentationDataError("neutral total/objective loss contract differs")
+
+    heads = _neutral_exact_mapping(measured["active_head_metrics"],
+        ("next_lifecycle", "scale_direction_alignment"), "active heads")
+    for name, raw_head in heads.items():
+        head = _neutral_exact_mapping(
+            raw_head, ("labelled_rows", "nll", "accuracy"), f"{name} head")
+        labelled = head["labelled_rows"]
+        if type(labelled) is not int or not 0 <= labelled <= expected_rows:
+            raise RepresentationDataError("neutral labelled-row count is invalid")
+        if labelled == 0:
+            if head["nll"] is not None or head["accuracy"] is not None:
+                raise RepresentationDataError("neutral empty head metrics must be null")
+        else:
+            _neutral_metric_number(head["nll"], f"{name} NLL")
+            _neutral_metric_number(
+                head["accuracy"], f"{name} accuracy", maximum=1.0
+            )
+
+    geometry = _neutral_exact_mapping(measured["geometry"], (
+        "embedding_dim", "effective_rank", "mean_feature_std", "centroid_norm",
+    ), "geometry")
+    if geometry["embedding_dim"] != expected_dim:
+        raise RepresentationDataError("neutral geometry dimension differs")
+    _neutral_metric_number(
+        geometry["effective_rank"], "effective rank", maximum=float(expected_dim)
+    )
+    _neutral_metric_number(geometry["mean_feature_std"], "feature std")
+    _neutral_metric_number(geometry["centroid_norm"], "centroid norm")
+
+
+def _validate_neutral_member_metrics_protocol(value: Mapping[str, Any]) -> None:
+    """Require the exact outcome-blind B0 member-metrics contract."""
+
+    metrics = _neutral_exact_mapping(value, (
+        "model_version", "parameter_count", "embedding_dim", "epochs",
+        "epoch_training_loss", "epoch_metrics", "split_counts", "objectives",
+        "train", "validation", "holdout", "direct_source_preprocessing",
+        "optimized_roles", "validation_used_for_optimization",
+        "holdout_used_for_optimization", "holdout_used_for_selection",
+        "model_selection_performed", "threshold_search_performed",
+        "outcome_fields_used", "model_capability_validated",
+        "trading_edge_claimed",
+    ), "member metrics")
+    if (
+        metrics["model_version"] != MODEL_VERSION
+        or metrics["direct_source_preprocessing"]
+        != neutral_direct_source_preprocessing_identity()
+        or metrics["optimized_roles"] != ["train"]
+        or any(metrics[name] is not False for name in (
+            "validation_used_for_optimization", "holdout_used_for_optimization",
+            "holdout_used_for_selection", "model_selection_performed",
+            "threshold_search_performed", "outcome_fields_used",
+            "model_capability_validated", "trading_edge_claimed",
+        ))
+    ):
+        raise RepresentationDataError("neutral member execution contract differs")
+    _neutral_positive_int(metrics["parameter_count"], "parameter count")
+    embedding_dim = _neutral_positive_int(metrics["embedding_dim"], "embedding dim")
+    epochs = _neutral_positive_int(metrics["epochs"], "epoch count")
+    epoch_losses = metrics["epoch_training_loss"]
+    epoch_metrics = metrics["epoch_metrics"]
+    if (
+        not isinstance(epoch_losses, list) or len(epoch_losses) != epochs
+        or not isinstance(epoch_metrics, list) or len(epoch_metrics) != epochs
+    ):
+        raise RepresentationDataError("neutral epoch sequence contract differs")
+    for loss in epoch_losses:
+        _neutral_metric_number(loss, "epoch training loss")
+
+    split_counts = _neutral_exact_mapping(
+        metrics["split_counts"], ("train", "validation", "holdout"),
+        "split counts",
+    )
+    for role in split_counts:
+        _neutral_positive_int(split_counts[role], f"{role} split rows")
+    objectives = _neutral_exact_mapping(
+        metrics["objectives"], ("loss_weights", "active_heads", "disabled_heads"),
+        "objectives",
+    )
+    weights = _neutral_exact_mapping(
+        objectives["loss_weights"], tuple(NEUTRAL_REPRESENTATION_LOSS_WEIGHTS),
+        "loss weights",
+    )
+    if (
+        objectives["active_heads"] != list(NEUTRAL_SPARSE_ACTIVE_TARGETS)
+        or objectives["disabled_heads"] != list(NEUTRAL_SPARSE_DISABLED_TARGETS)
+        or any(
+            _neutral_metric_number(weights[name], f"{name} loss weight")
+            != expected
+            for name, expected in NEUTRAL_REPRESENTATION_LOSS_WEIGHTS.items()
+        )
+    ):
+        raise RepresentationDataError("neutral objective configuration differs")
+
+    for expected_epoch, raw_epoch in enumerate(epoch_metrics, start=1):
+        epoch = _neutral_exact_mapping(
+            raw_epoch, ("epoch", "train", "validation"), "epoch metrics"
+        )
+        if type(epoch["epoch"]) is not int or epoch["epoch"] != expected_epoch:
+            raise RepresentationDataError("neutral epoch ordinal differs")
+        for role in ("train", "validation"):
+            _validate_neutral_role_metrics(
+                epoch[role], expected_rows=split_counts[role],
+                expected_dim=embedding_dim,
+            )
+    if (
+        metrics["train"] != epoch_metrics[-1]["train"]
+        or metrics["validation"] != epoch_metrics[-1]["validation"]
+    ):
+        raise RepresentationDataError("neutral final role metrics differ")
+    _validate_neutral_role_metrics(
+        metrics["holdout"], expected_rows=split_counts["holdout"],
+        expected_dim=embedding_dim,
+    )
 
 
 def _train_neutral_member(
@@ -1181,6 +1433,7 @@ def _train_neutral_member(
 
     if args.epochs < 1 or args.batch_size < 1 or args.learning_rate <= 0:
         raise RepresentationDataError("training hyperparameters must be positive")
+    require_neutral_preprocessed_examples(examples)
     random.seed(args.seed)
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
@@ -1200,14 +1453,14 @@ def _train_neutral_member(
         model.parameters(), lr=args.learning_rate, weight_decay=1e-4
     )
     epoch_losses: list[float] = []
+    epoch_metrics: list[Mapping[str, Any]] = []
     for epoch in range(args.epochs):
         model.train()
         order = list(split_indices["train"])
         random.Random(args.seed + epoch).shuffle(order)
         losses: list[float] = []
         for batch_index, selected in enumerate(_batches(order, args.batch_size)):
-            selected_examples = tuple(mask_direct_label_source_tokens(examples[index])
-                                      for index in selected)
+            selected_examples = tuple(examples[index] for index in selected)
             batch, target_batch = collate_representation_cases(
                 selected_examples,
                 targets=tuple(targets[index] for index in selected),
@@ -1227,32 +1480,55 @@ def _train_neutral_member(
             optimizer.step()
             losses.append(float(breakdown.total.detach().cpu()))
         epoch_losses.append(float(np.mean(losses)))
+        epoch_metrics.append({
+            "epoch": epoch + 1,
+            "train": _neutral_role_metrics(
+                model, examples, targets, split_indices["train"],
+                batch_size=args.batch_size,
+                seed=args.seed + 800_000,
+                device=device,
+            ),
+            "validation": _neutral_role_metrics(
+                model, examples, targets, split_indices["validation"],
+                batch_size=args.batch_size,
+                seed=args.seed + 900_000,
+                device=device,
+            ),
+        })
+    holdout_metrics = _neutral_role_metrics(
+        model, examples, targets, split_indices["holdout"],
+        batch_size=args.batch_size, seed=args.seed + 950_000, device=device,
+    )
     metrics = {
         "model_version": MODEL_VERSION,
         "parameter_count": model.parameter_count(),
         "embedding_dim": model.config.embedding_dim,
         "epochs": args.epochs,
         "epoch_training_loss": epoch_losses,
+        "epoch_metrics": epoch_metrics,
         "split_counts": {role: len(indices) for role, indices in split_indices.items()},
         "objectives": {
             "loss_weights": dict(NEUTRAL_REPRESENTATION_LOSS_WEIGHTS),
             "active_heads": list(NEUTRAL_SPARSE_ACTIVE_TARGETS),
             "disabled_heads": list(NEUTRAL_SPARSE_DISABLED_TARGETS),
         },
-        "validation": _neutral_role_metrics(
-            model, examples, targets, split_indices["validation"],
-            batch_size=args.batch_size, seed=args.seed + 900_000, device=device),
-        "holdout": _neutral_role_metrics(
-            model, examples, targets, split_indices["holdout"],
-            batch_size=args.batch_size, seed=args.seed + 950_000, device=device),
+        "train": epoch_metrics[-1]["train"],
+        "validation": epoch_metrics[-1]["validation"],
+        "holdout": holdout_metrics,
+        "direct_source_preprocessing": (
+            neutral_direct_source_preprocessing_identity()
+        ),
         "optimized_roles": ["train"],
         "validation_used_for_optimization": False,
         "holdout_used_for_optimization": False,
+        "holdout_used_for_selection": False,
+        "model_selection_performed": False,
         "threshold_search_performed": False,
         "outcome_fields_used": False,
         "model_capability_validated": False,
         "trading_edge_claimed": False,
     }
+    _validate_neutral_member_metrics_protocol(metrics)
     return model, metrics
 
 
@@ -1301,6 +1577,7 @@ def _neutral_export_records(
     device: str,
     embeddings: bool,
 ) -> tuple[list[Mapping[str, Any]], list[Mapping[str, Any]]]:
+    require_neutral_preprocessed_examples(examples)
     embedding_rows: list[Mapping[str, Any]] = []
     head_rows: list[Mapping[str, Any]] = []
     run_groups: dict[str, list[PreparedRepresentationCase]] = {}
@@ -1364,7 +1641,10 @@ def _write_neutral_artifact(
         "artifact_sha256": _sha256_file(str(destination)),
         "model_version": MODEL_VERSION,
         "feature_schema_version": FEATURE_SCHEMA_VERSION,
-        "input_protocol": INFERENCE_INPUT_PROTOCOL,
+        "input_protocol": NEUTRAL_INFERENCE_INPUT_PROTOCOL,
+        "direct_source_preprocessing": (
+            neutral_direct_source_preprocessing_identity()
+        ),
         "selection_contract": NEUTRAL_MATERIAL_SELECTION_CONTRACT,
         "checkpoint_ids": sorted(checkpoint_ids),
         "split_roles": sorted({str(row["data_split"]) for row in rows}),
@@ -1410,11 +1690,10 @@ def _neutral_fit_report(
         base = Path(args.checkpoint).resolve()
         checkpoint_path = base.with_name(
             f"{base.stem}.{member_id}{base.suffix or '.pt'}")
-        save_representation_checkpoint(
+        save_neutral_representation_checkpoint(
             checkpoint_path,
             model,
             metadata={
-                "training_contract": "neutral-market-representation-v1",
                 "member_id": member_id,
                 "seed": member_args.seed,
                 "split_counts": metrics["split_counts"],
@@ -1442,7 +1721,7 @@ def _neutral_fit_report(
         checkpoint_ids=tuple(item["checkpoint_id"] for item in members),
         lineage=lineage)
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "mode": "neutral_market_representation_fit",
         "pipeline_scope": collection["scope"],
         "rows": len(examples),
@@ -1457,9 +1736,14 @@ def _neutral_fit_report(
                 "manifest": str(head_manifest), "records": len(head_rows)},
         },
         "lineage": lineage,
+        "direct_source_preprocessing": (
+            neutral_direct_source_preprocessing_identity()
+        ),
         "training_performed": True,
         "validation_used_for_optimization": False,
         "holdout_used_for_optimization": False,
+        "holdout_used_for_selection": False,
+        "model_selection_performed": False,
         "threshold_search_performed": False,
         "outcome_fields_used": False,
         "model_capability_validated": False,
@@ -2535,6 +2819,137 @@ def _strict_jsonable(value: Any) -> Any:
     )
 
 
+def _validate_neutral_fit_metrics_protocol(value: Mapping[str, Any]) -> None:
+    report = _neutral_exact_mapping(value, (
+        "schema_version", "mode", "pipeline_scope", "rows", "split_rows",
+        "ensemble_members", "artifacts", "lineage", "direct_source_preprocessing",
+        "training_performed", "validation_used_for_optimization",
+        "holdout_used_for_optimization", "holdout_used_for_selection",
+        "model_selection_performed", "threshold_search_performed",
+        "outcome_fields_used", "model_capability_validated",
+        "retrieval_quality_validated", "ood_capability_validated",
+        "trading_edge_claimed", "action_value_claimed",
+    ), "fit report")
+    members = report["ensemble_members"]
+    if (
+        report["schema_version"] != 2
+        or report["mode"] != "neutral_market_representation_fit"
+        or report["pipeline_scope"] not in {
+            "three_window_pipeline_smoke", "ten_window_registered_fit",
+        }
+        or report["direct_source_preprocessing"]
+        != neutral_direct_source_preprocessing_identity()
+        or report["training_performed"] is not True
+        or any(report[name] is not False for name in (
+            "validation_used_for_optimization", "holdout_used_for_optimization",
+            "holdout_used_for_selection", "model_selection_performed",
+            "threshold_search_performed", "outcome_fields_used",
+            "model_capability_validated", "retrieval_quality_validated",
+            "ood_capability_validated", "trading_edge_claimed",
+            "action_value_claimed",
+        ))
+        or not isinstance(members, list)
+        or len(members) < 3
+        or not isinstance(report["lineage"], Mapping)
+    ):
+        raise RepresentationDataError(
+            "neutral fit metrics B0 protocol is missing or differs"
+        )
+    rows = _neutral_positive_int(report["rows"], "fit rows")
+    split_rows = _neutral_exact_mapping(
+        report["split_rows"], ("train", "validation", "holdout"),
+        "fit split rows",
+    )
+    for role in split_rows:
+        _neutral_positive_int(split_rows[role], f"fit {role} rows")
+    if sum(split_rows.values()) != rows:
+        raise RepresentationDataError("neutral fit row totals differ")
+    artifacts = _neutral_exact_mapping(
+        report["artifacts"], ("embeddings", "active_heads"), "fit artifacts"
+    )
+    artifact_records: dict[str, int] = {}
+    for name, raw_artifact in artifacts.items():
+        artifact = _neutral_exact_mapping(
+            raw_artifact, ("path", "manifest", "records"), f"{name} artifact"
+        )
+        if not all(isinstance(artifact[key], str) and artifact[key]
+                   for key in ("path", "manifest")):
+            raise RepresentationDataError("neutral artifact path contract differs")
+        artifact_records[name] = _neutral_positive_int(
+            artifact["records"], f"{name} artifact rows"
+        )
+
+    seeds: set[int] = set()
+    checkpoint_ids: set[str] = set()
+    checkpoint_paths: set[str] = set()
+    for index, raw_member in enumerate(members):
+        member = _neutral_exact_mapping(raw_member, (
+            "member_id", "seed", "checkpoint_id", "checkpoint_path", "metrics",
+        ), "ensemble member")
+        checkpoint_id = member["checkpoint_id"]
+        if (
+            member["member_id"] != f"member-{index:03d}"
+            or type(member["seed"]) is not int
+            or not isinstance(checkpoint_id, str)
+            or len(checkpoint_id) != 64
+            or any(character not in "0123456789abcdef" for character in checkpoint_id)
+            or not isinstance(member["checkpoint_path"], str)
+            or not member["checkpoint_path"]
+            or not isinstance(member["metrics"], Mapping)
+        ):
+            raise RepresentationDataError("neutral ensemble member contract differs")
+        _validate_neutral_member_metrics_protocol(member["metrics"])
+        if member["metrics"]["split_counts"] != split_rows:
+            raise RepresentationDataError("neutral member split counts differ")
+        seeds.add(member["seed"])
+        checkpoint_ids.add(checkpoint_id)
+        checkpoint_paths.add(member["checkpoint_path"])
+    if not all(len(values) == len(members) for values in (
+        seeds, checkpoint_ids, checkpoint_paths,
+    )):
+        raise RepresentationDataError("neutral ensemble members are not independent")
+    if (
+        artifact_records["embeddings"] < rows
+        or artifact_records["active_heads"] != rows * len(members)
+    ):
+        raise RepresentationDataError("neutral fit artifact row counts differ")
+
+
+def _neutral_json_object(pairs: Sequence[tuple[str, Any]]) -> dict[str, Any]:
+    value: dict[str, Any] = {}
+    for key, item in pairs:
+        if key in value:
+            raise RepresentationDataError("neutral fit metrics contain duplicate keys")
+        value[key] = item
+    return value
+
+
+def _reject_nonstandard_json_number(token: str) -> None:
+    raise RepresentationDataError(
+        f"neutral fit metrics contain non-standard number {token}"
+    )
+
+
+def load_neutral_fit_metrics(path: str | Path) -> Mapping[str, Any]:
+    """Load a B0 metrics artifact, rejecting missing/tampered protocol data."""
+
+    source = Path(path)
+    if source.is_symlink() or not source.is_file():
+        raise RepresentationDataError("neutral fit metrics are not a regular file")
+    try:
+        payload = json.loads(
+            source.read_text(encoding="utf-8"),
+            object_pairs_hook=_neutral_json_object,
+            parse_constant=_reject_nonstandard_json_number,
+        )
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RepresentationDataError("neutral fit metrics are invalid JSON") from exc
+    if not isinstance(payload, Mapping):
+        raise RepresentationDataError("neutral fit metrics must be an object")
+    _validate_neutral_fit_metrics_protocol(payload)
+    return dict(payload)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     raw_argv = tuple(sys.argv[1:] if argv is None else argv)
     args = _parser().parse_args(raw_argv)
@@ -2560,6 +2975,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 else _neutral_single_batch_smoke_report(dataset)
             )
         report = _strict_jsonable(raw_report)
+        if args.neutral_fit:
+            _validate_neutral_fit_metrics_protocol(report)
         if args.metrics_output:
             _atomic_json(args.metrics_output, report)
         print(json.dumps(report, sort_keys=True, allow_nan=False))

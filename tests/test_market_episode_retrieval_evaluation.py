@@ -14,8 +14,10 @@ from smc_trader.case_retrieval import CaseRetrievalError
 from smc_trader.market_cases import expected_market_case_run_identity
 from smc_trader.market_representation import (
     MarketRepresentationModel,
+    NEUTRAL_INFERENCE_INPUT_PROTOCOL,
     TORCH_AVAILABLE,
-    prepare_representation_case,
+    neutral_direct_source_preprocessing_identity,
+    prepare_neutral_representation_case,
     representation_case_from_market_case_input_row,
     representation_checkpoint_id,
 )
@@ -102,7 +104,9 @@ def _fit_artifacts(tmp_path: Path) -> tuple[Path, Path]:
             ),
             adapter_manifest,
         )
-        prepared = prepare_representation_case(case, _neutral_store(case))
+        prepared = prepare_neutral_representation_case(
+            case, _neutral_store(case)
+        )
         examples.append(prepared)
         splits[case.revision_id], origins[case.revision_id] = role, runs[role]
     embedding_rows, head_rows, checkpoints = [], [], []
@@ -149,6 +153,10 @@ def test_real_fit_export_handoff_reports_only_geometry_and_ood(tmp_path: Path) -
     assert report["outcomes_used"] is False
     assert report["prediction_quality_claimed"] is False
     assert report["action_authority"] == "none"
+    assert report["b0_compatible"] is True
+    assert report["direct_source_preprocessing"] == (
+        neutral_direct_source_preprocessing_identity()
+    )
     metrics = report["metrics"]
     retrieval = metrics["cross_day_independent_episode_retrieval"]
     assert retrieval["coverage_with_eligible_neighbour"] == 1.0
@@ -199,3 +207,39 @@ def test_real_writer_manifests_reject_synchronized_split_protocol_tamper(
     for manifest in manifests:
         with pytest.raises(CaseRetrievalError, match="split protocol lineage"):
             evaluator.load_artifact_manifest(manifest)
+
+
+@pytest.mark.skipif(not TORCH_AVAILABLE, reason="optional PyTorch is not installed")
+@pytest.mark.parametrize("mutation", ("missing", "tampered"))
+def test_b0_manifest_preprocessing_protocol_fails_closed(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    embedding_manifest, _ = _fit_artifacts(tmp_path)
+    payload = json.loads(embedding_manifest.read_text())
+    if mutation == "missing":
+        payload.pop("direct_source_preprocessing")
+    else:
+        payload["direct_source_preprocessing"]["protocol"][
+            "direct_source_action"
+        ] = "retain"
+    atomic_bytes(embedding_manifest, canonical_json(payload))
+    with pytest.raises(CaseRetrievalError, match="manifest contract"):
+        evaluator.load_artifact_manifest(embedding_manifest)
+
+
+@pytest.mark.skipif(not TORCH_AVAILABLE, reason="optional PyTorch is not installed")
+def test_b0_manifest_uses_processed_input_protocol(tmp_path: Path) -> None:
+    embedding_manifest, head_manifest = _fit_artifacts(tmp_path)
+    for path in (embedding_manifest, head_manifest):
+        payload = json.loads(path.read_text())
+        assert payload["schema"].endswith("-v2")
+        assert payload["input_protocol"] == NEUTRAL_INFERENCE_INPUT_PROTOCOL
+        assert payload["direct_source_preprocessing"] == (
+            neutral_direct_source_preprocessing_identity()
+        )
+    legacy = json.loads(embedding_manifest.read_text())
+    legacy["schema"] = "smc-neutral-market-episode-embeddings-v1"
+    atomic_bytes(embedding_manifest, canonical_json(legacy))
+    with pytest.raises(CaseRetrievalError, match="manifest contract"):
+        evaluator.load_artifact_manifest(embedding_manifest)

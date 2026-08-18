@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import copy
+from dataclasses import replace
 import hashlib
 import json
 from pathlib import Path
@@ -7,6 +9,7 @@ from types import SimpleNamespace
 from typing import Mapping
 
 import pandas as pd
+import numpy as np
 import pytest
 
 from scripts import train_market_representation as trainer
@@ -25,8 +28,13 @@ from smc_trader.market_representation import (
     MarketRepresentationModel,
     NEUTRAL_REPRESENTATION_LOSS_WEIGHTS,
     SelfSupervisedTarget,
+    TORCH_AVAILABLE,
     collate_representation_cases,
     neutral_representation_multitask_loss,
+    load_neutral_representation_checkpoint,
+    neutral_direct_source_preprocessing_identity,
+    preprocess_neutral_direct_source_events,
+    save_neutral_representation_checkpoint,
 )
 from smc_trader.model import Direction
 from smc_trader.scene_graph import market_episode_id
@@ -418,6 +426,107 @@ def _neutral_targets(count: int) -> tuple[SelfSupervisedTarget, ...]:
     )
 
 
+def _valid_neutral_fit_metrics_payload() -> dict[str, object]:
+    losses = {
+        "candle_reconstruction": 0.1,
+        "event_reconstruction": 0.2,
+        "next_lifecycle": 0.3,
+        "scale_alignment": 0.4,
+    }
+    role = {
+        "rows": 1,
+        "total_loss": 0.725,
+        "objective_losses": losses,
+        "active_head_metrics": {
+            "next_lifecycle": {"labelled_rows": 1, "nll": 0.5, "accuracy": 1.0},
+            "scale_direction_alignment": {
+                "labelled_rows": 1, "nll": 0.6, "accuracy": 0.0,
+            },
+        },
+        "geometry": {
+            "embedding_dim": 128,
+            "effective_rank": 1.0,
+            "mean_feature_std": 0.1,
+            "centroid_norm": 0.8,
+        },
+        "label_sources_masked": True,
+        "direct_source_preprocessing": neutral_direct_source_preprocessing_identity(),
+        "gradient_enabled": False,
+    }
+    metrics = {
+        "model_version": trainer.MODEL_VERSION,
+        "parameter_count": 1,
+        "embedding_dim": 128,
+        "epochs": 1,
+        "epoch_training_loss": [0.725],
+        "epoch_metrics": [{
+            "epoch": 1,
+            "train": copy.deepcopy(role),
+            "validation": copy.deepcopy(role),
+        }],
+        "split_counts": {"train": 1, "validation": 1, "holdout": 1},
+        "objectives": {
+            "loss_weights": dict(NEUTRAL_REPRESENTATION_LOSS_WEIGHTS),
+            "active_heads": list(trainer.NEUTRAL_SPARSE_ACTIVE_TARGETS),
+            "disabled_heads": list(trainer.NEUTRAL_SPARSE_DISABLED_TARGETS),
+        },
+        "train": copy.deepcopy(role),
+        "validation": copy.deepcopy(role),
+        "holdout": copy.deepcopy(role),
+        "direct_source_preprocessing": neutral_direct_source_preprocessing_identity(),
+        "optimized_roles": ["train"],
+        "validation_used_for_optimization": False,
+        "holdout_used_for_optimization": False,
+        "holdout_used_for_selection": False,
+        "model_selection_performed": False,
+        "threshold_search_performed": False,
+        "outcome_fields_used": False,
+        "model_capability_validated": False,
+        "trading_edge_claimed": False,
+    }
+    members = [{
+        "member_id": f"member-{index:03d}",
+        "seed": 17 + index * 100_003,
+        "checkpoint_id": f"{index + 1:064x}",
+        "checkpoint_path": f"/models/member-{index:03d}.pt",
+        "metrics": copy.deepcopy(metrics),
+    } for index in range(3)]
+    return {
+        "schema_version": 2,
+        "mode": "neutral_market_representation_fit",
+        "pipeline_scope": "three_window_pipeline_smoke",
+        "rows": 3,
+        "split_rows": {"train": 1, "validation": 1, "holdout": 1},
+        "ensemble_members": members,
+        "artifacts": {
+            "embeddings": {
+                "path": "/artifacts/embeddings.jsonl",
+                "manifest": "/artifacts/embeddings.jsonl.manifest.json",
+                "records": 3,
+            },
+            "active_heads": {
+                "path": "/artifacts/heads.jsonl",
+                "manifest": "/artifacts/heads.jsonl.manifest.json",
+                "records": 9,
+            },
+        },
+        "lineage": {},
+        "direct_source_preprocessing": neutral_direct_source_preprocessing_identity(),
+        "training_performed": True,
+        "validation_used_for_optimization": False,
+        "holdout_used_for_optimization": False,
+        "holdout_used_for_selection": False,
+        "model_selection_performed": False,
+        "threshold_search_performed": False,
+        "outcome_fields_used": False,
+        "model_capability_validated": False,
+        "retrieval_quality_validated": False,
+        "ood_capability_validated": False,
+        "trading_edge_claimed": False,
+        "action_value_claimed": False,
+    }
+
+
 def test_neutral_loss_has_zero_weight_and_fail_closed_disabled_heads() -> None:
     trainer.require_torch()
     examples, _ = trainer._synthetic_examples(19)
@@ -684,7 +793,10 @@ def test_neutral_optimizer_reads_only_train_and_eval_never_backwards(
     import torch
 
     examples, _ = trainer._synthetic_examples(23)
-    selected = examples[:9]
+    selected = tuple(
+        preprocess_neutral_direct_source_events(example)
+        for example in examples[:9]
+    )
     targets = _neutral_targets(len(selected))
     roles = ("train",) * 3 + ("validation",) * 3 + ("holdout",) * 3
     splits = {
@@ -722,6 +834,160 @@ def test_neutral_optimizer_reads_only_train_and_eval_never_backwards(
     assert evaluation_calls and not any(evaluation_calls)
     assert metrics["optimized_roles"] == ["train"]
     assert metrics["holdout_used_for_optimization"] is False
+    assert metrics["holdout_used_for_selection"] is False
+    assert metrics["model_selection_performed"] is False
+    assert len(metrics["epoch_metrics"]) == 1
+    assert set(metrics["epoch_metrics"][0]) == {"epoch", "train", "validation"}
+    for role in ("train", "validation"):
+        measured = metrics["epoch_metrics"][0][role]
+        assert set(measured["objective_losses"]) == {
+            "candle_reconstruction", "event_reconstruction",
+            "next_lifecycle", "scale_alignment",
+        }
+        assert set(measured["active_head_metrics"]) == {
+            "next_lifecycle", "scale_direction_alignment",
+        }
+        assert set(measured["geometry"]) == {
+            "embedding_dim", "effective_rank", "mean_feature_std", "centroid_norm",
+        }
+
+
+_DELETE_METRIC_KEY = object()
+
+
+@pytest.mark.parametrize(("path", "replacement"), (
+    (("unexpected",), False),
+    (("outcome",), {}),
+    (("holdout_used_for_optimization",), True),
+    (("holdout_used_for_selection",), True),
+    (("threshold_search_performed",), True),
+    (("outcome_fields_used",), True),
+    (("action_value_claimed",), True),
+    (("ensemble_members", 0, "unexpected"), False),
+    (("ensemble_members", 0, "metrics", "unexpected"), False),
+    (("ensemble_members", 0, "metrics", "optimized_roles"), ["train", "holdout"]),
+    (("ensemble_members", 0, "metrics", "validation_used_for_optimization"), True),
+    (("ensemble_members", 0, "metrics", "holdout_used_for_optimization"), True),
+    (("ensemble_members", 0, "metrics", "holdout_used_for_selection"), True),
+    (("ensemble_members", 0, "metrics", "threshold_search_performed"), True),
+    (("ensemble_members", 0, "metrics", "outcome_fields_used"), True),
+    (("ensemble_members", 0, "metrics", "action_value_claimed"), True),
+    (("ensemble_members", 0, "metrics", "epoch_metrics", 0, "holdout"), {}),
+    (("ensemble_members", 0, "metrics", "epoch_metrics", 0, "optimized"), True),
+    (("ensemble_members", 0, "metrics", "epoch_metrics", 0, "train", "holdout"), {}),
+    (("ensemble_members", 0, "metrics", "epoch_metrics", 0, "train", "optimized"), True),
+    (("ensemble_members", 0, "metrics", "epoch_metrics", 0, "train", "gradient_enabled"), True),
+    (("ensemble_members", 0, "metrics", "holdout", "gradient_enabled"), True),
+    (("ensemble_members", 0, "metrics", "epoch_metrics", 0, "train", "geometry", "unexpected"), 0.0),
+    (("ensemble_members", 0, "metrics", "epoch_metrics", 0, "train", "geometry", "effective_rank"), None),
+    (("ensemble_members", 0, "metrics", "epoch_metrics", 0, "train", "geometry", "effective_rank"), float("inf")),
+    (("ensemble_members", 0, "metrics", "epoch_metrics", 0, "train", "geometry", "effective_rank"), 129.0),
+    (("ensemble_members", 0, "metrics", "epoch_metrics", 0, "train", "objective_losses", "unexpected"), 0.0),
+    (("ensemble_members", 0, "metrics", "epoch_metrics", 0, "train", "objective_losses", "next_lifecycle"), "0.3"),
+    (("ensemble_members", 0, "metrics", "epoch_metrics", 0, "train", "objective_losses", "next_lifecycle"), float("nan")),
+    (("ensemble_members", 0, "metrics", "epoch_metrics", 0, "train", "objective_losses", "next_lifecycle"), _DELETE_METRIC_KEY),
+    (("ensemble_members", 0, "metrics", "epoch_metrics", 0, "train", "active_head_metrics", "unexpected"), {}),
+    (("ensemble_members", 0, "metrics", "epoch_metrics", 0, "train", "active_head_metrics", "next_lifecycle", "unexpected"), 0),
+    (("ensemble_members", 0, "metrics", "epoch_metrics", 0, "train", "active_head_metrics", "next_lifecycle", "nll"), "0.5"),
+    (("ensemble_members", 0, "metrics", "epoch_metrics", 0, "train", "active_head_metrics", "next_lifecycle", "accuracy"), 1.1),
+    (("direct_source_preprocessing",), _DELETE_METRIC_KEY),
+), ids=(
+    "top-extra", "top-outcome", "top-holdout-optimization",
+    "top-holdout-selection", "top-threshold", "top-outcome-flag",
+    "top-action", "member-extra", "member-metrics-extra",
+    "member-optimized-roles", "member-validation-optimization",
+    "member-holdout-optimization", "member-holdout-selection",
+    "member-threshold", "member-outcome", "member-action-extra",
+    "epoch-holdout", "epoch-optimized", "epoch-train-holdout",
+    "epoch-train-optimized", "epoch-train-gradient", "holdout-gradient",
+    "geometry-extra", "geometry-rank-null", "geometry-rank-infinite",
+    "geometry-rank-range", "objective-extra", "objective-nonnumeric",
+    "objective-nonfinite", "objective-missing", "heads-extra", "head-extra",
+    "head-nonnumeric", "head-range", "top-protocol-missing",
+))
+def test_neutral_fit_metrics_loader_rejects_nested_tamper(
+    tmp_path: Path,
+    path: tuple[object, ...],
+    replacement: object,
+) -> None:
+    payload: object = _valid_neutral_fit_metrics_payload()
+    parent = payload
+    for key in path[:-1]:
+        parent = parent[key]  # type: ignore[index]
+    if replacement is _DELETE_METRIC_KEY:
+        parent.pop(path[-1])  # type: ignore[union-attr]
+    else:
+        parent[path[-1]] = replacement  # type: ignore[index]
+    metrics_path = tmp_path / "metrics.json"
+    metrics_path.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(RepresentationDataError):
+        trainer.load_neutral_fit_metrics(metrics_path)
+
+
+def test_neutral_fit_metrics_loader_accepts_exact_v2_and_rejects_duplicate_keys(
+    tmp_path: Path,
+) -> None:
+    payload = _valid_neutral_fit_metrics_payload()
+    encoded = json.dumps(payload, sort_keys=True)
+    metrics_path = tmp_path / "metrics.json"
+    metrics_path.write_text(encoded, encoding="utf-8")
+    assert trainer.load_neutral_fit_metrics(metrics_path) == payload
+    metrics_path.write_text(
+        '{"schema_version":2,' + encoded[1:], encoding="utf-8"
+    )
+    with pytest.raises(RepresentationDataError, match="duplicate"):
+        trainer.load_neutral_fit_metrics(metrics_path)
+
+
+def test_neutral_direct_source_preprocessing_is_deterministic_and_versioned() -> None:
+    examples, _ = trainer._synthetic_examples(19)
+    original = examples[0]
+    marked = replace(
+        original,
+        direct_label_source_event_mask=np.ones(
+            len(original.event_type_ids), dtype=bool
+        ),
+    )
+    first = preprocess_neutral_direct_source_events(marked)
+    second = preprocess_neutral_direct_source_events(first)
+    identity = neutral_direct_source_preprocessing_identity()
+    assert first.label_sources_masked is True
+    assert first.neutral_preprocessing_version == (
+        identity["protocol"]["protocol_version"]
+    )
+    assert first.neutral_preprocessing_sha256 == identity["sha256"]
+    assert len(first.event_type_ids) == 1
+    for name in (
+        "event_type_ids", "lifecycle_ids", "relation_ids", "scale_ids",
+        "event_numeric", "direct_label_source_event_mask",
+    ):
+        np.testing.assert_array_equal(getattr(first, name), getattr(second, name))
+
+
+@pytest.mark.skipif(
+    not TORCH_AVAILABLE, reason="optional PyTorch is not installed"
+)
+@pytest.mark.parametrize("mutation", ("missing", "tampered"))
+def test_neutral_checkpoint_preprocessing_protocol_fails_closed(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    import torch
+
+    path = tmp_path / "neutral.pt"
+    model = MarketRepresentationModel()
+    save_neutral_representation_checkpoint(path, model, metadata={"seed": 17})
+    assert load_neutral_representation_checkpoint(path).config == model.config
+    payload = torch.load(path, map_location="cpu", weights_only=True)
+    if mutation == "missing":
+        payload["metadata"].pop("direct_source_preprocessing")
+    else:
+        payload["metadata"]["direct_source_preprocessing"]["protocol"][
+            "direct_source_action"
+        ] = "retain"
+    torch.save(payload, path)
+    with pytest.raises(RepresentationDataError, match="missing or differs"):
+        load_neutral_representation_checkpoint(path)
 
 
 def test_neutral_fit_exports_three_independent_members_without_outcome(
@@ -732,7 +998,10 @@ def test_neutral_fit_exports_three_independent_members_without_outcome(
     import torch
 
     examples, _ = trainer._synthetic_examples(31)
-    selected = examples[:3]
+    selected = tuple(
+        preprocess_neutral_direct_source_events(example)
+        for example in examples[:3]
+    )
     targets = _neutral_targets(3)
     splits = {
         selected[0].case.revision_id: "train",
@@ -794,7 +1063,9 @@ def test_neutral_fit_exports_three_independent_members_without_outcome(
     monkeypatch.setattr(trainer, "_neutral_fit_lineage", lambda collection: {})
     monkeypatch.setattr(trainer, "_train_neutral_member", fake_train)
     monkeypatch.setattr(trainer, "_neutral_export_records", fake_export)
-    monkeypatch.setattr(trainer, "save_representation_checkpoint", lambda *a, **k: None)
+    monkeypatch.setattr(
+        trainer, "save_neutral_representation_checkpoint", lambda *a, **k: None
+    )
     args = argparse.Namespace(
         ensemble_size=3,
         seed=37,

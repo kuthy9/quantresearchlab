@@ -27,6 +27,7 @@ import pandas as pd
 
 from .market_representation import (
     INFERENCE_INPUT_PROTOCOL,
+    NEUTRAL_INFERENCE_INPUT_PROTOCOL,
     OUTCOME_BLIND_HEAD_WIDTHS,
 )
 from .scene_graph import market_episode_id as canonical_market_episode_id
@@ -243,9 +244,9 @@ def normalise_market_episode_dataset_contract(
         "calendar_timezone",
     ):
         output[name] = _nonempty(value.get(name), name)
-    if value.get("embedding_input_protocol") != INFERENCE_INPUT_PROTOCOL:
+    if value.get("embedding_input_protocol") != NEUTRAL_INFERENCE_INPUT_PROTOCOL:
         raise CaseRetrievalError("MarketEpisode input protocol is invalid")
-    output["embedding_input_protocol"] = INFERENCE_INPUT_PROTOCOL
+    output["embedding_input_protocol"] = NEUTRAL_INFERENCE_INPUT_PROTOCOL
     if (
         value.get("selection_contract")
         != MARKET_EPISODE_FIRST_OCCURRENCE_SELECTION_CONTRACT
@@ -1055,7 +1056,7 @@ class MarketEpisodeEmbeddingRecord:
             or record.get("embedding_clock", "decision_time")
             not in {"decision", "decision_time"}
             or str(record.get("embedding_input_protocol", ""))
-            != INFERENCE_INPUT_PROTOCOL
+            != NEUTRAL_INFERENCE_INPUT_PROTOCOL
             or _aware_utc(record.get("embedding_asof", decision_at), "embedding_asof")
             != decision_at
         ):
@@ -2359,7 +2360,7 @@ class MarketEpisodeCaseIndex:
             )
             if (
                 member["outcome_fields_used"] is not False
-                or member["input_protocol"] != INFERENCE_INPUT_PROTOCOL
+                or member["input_protocol"] != NEUTRAL_INFERENCE_INPUT_PROTOCOL
                 or any(actual != expected for actual, expected in bindings)
             ):
                 raise CaseRetrievalError("neutral ensemble binding is invalid")

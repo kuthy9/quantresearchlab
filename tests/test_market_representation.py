@@ -54,6 +54,7 @@ from smc_trader.market_representation import (
     mask_direct_label_source_tokens,
     market_case_input_to_representation_mapping,
     prepare_representation_case,
+    prepare_neutral_representation_case,
     load_representation_checkpoint,
     representation_case_from_case_input_row,
     representation_case_from_market_case_input_row,
@@ -3049,7 +3050,19 @@ def test_market_episode_exporters_roundtrip_into_retrieval_contract(
         _neutral_market_case_row(),
         _neutral_run_manifest(tmp_path),
     )
-    prepared = prepare_representation_case(case, _neutral_store(case))
+    unprocessed = prepare_representation_case(case, _neutral_store(case))
+    unprocessed_batch, _ = collate_representation_cases(
+        (unprocessed,), mask_probability=0.0
+    )
+    with pytest.raises(RepresentationDataError, match="B0 protocol"):
+        encode_market_episode_records(
+            MarketRepresentationModel(),
+            unprocessed_batch,
+            (unprocessed,),
+            split_roles={case.revision_id: "train"},
+            material_kind="zone_registered",
+        )
+    prepared = prepare_neutral_representation_case(case, _neutral_store(case))
     batch, _ = collate_representation_cases((prepared,), mask_probability=0.0)
     model = MarketRepresentationModel()
     model.train()
@@ -3130,7 +3143,7 @@ def test_market_episode_exporters_reject_mixed_duplicate_and_missing_physical(
 
     def inference_batch(*cases: RepresentationCase):
         examples = tuple(
-            prepare_representation_case(case, _neutral_store(case))
+            prepare_neutral_representation_case(case, _neutral_store(case))
             for case in cases
         )
         batch, _ = collate_representation_cases(examples, mask_probability=0.0)

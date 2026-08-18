@@ -29,9 +29,12 @@ from smc_trader.case_retrieval import (  # noqa: E402
     OODThresholds,
     normalise_market_episode_dataset_contract,
 )
-from smc_trader.market_representation import INFERENCE_INPUT_PROTOCOL  # noqa: E402
-EMBEDDING_SCHEMA = "smc-neutral-market-episode-embeddings-v1"
-HEAD_SCHEMA = "smc-neutral-market-episode-active-heads-v1"
+from smc_trader.market_representation import (  # noqa: E402
+    NEUTRAL_INFERENCE_INPUT_PROTOCOL,
+    neutral_direct_source_preprocessing_identity,
+)
+EMBEDDING_SCHEMA = "smc-neutral-market-episode-embeddings-v2"
+HEAD_SCHEMA = "smc-neutral-market-episode-active-heads-v2"
 SPLITS = ("train", "validation", "holdout")
 SELECTION = MARKET_EPISODE_FIRST_OCCURRENCE_SELECTION_CONTRACT
 HEAD_IDENTITY_FIELDS = (
@@ -40,6 +43,7 @@ HEAD_IDENTITY_FIELDS = (
 MANIFEST_FIELDS = {
     "schema", "status", "records", "artifact_path", "artifact_sha256",
     "model_version", "feature_schema_version", "input_protocol",
+    "direct_source_preprocessing",
     "selection_contract", "checkpoint_ids", "split_roles", "material_kinds",
     "head_schema", "lineage", "outcome_fields_used", "model_capability_validated",
 }
@@ -227,7 +231,9 @@ def load_artifact_manifest(path: str | Path) -> dict[str, Any]:
         or manifest.get("schema") not in {EMBEDDING_SCHEMA, HEAD_SCHEMA}
         or manifest.get("outcome_fields_used") is not False
         or manifest.get("model_capability_validated") is not False
-        or manifest.get("input_protocol") != INFERENCE_INPUT_PROTOCOL
+        or manifest.get("input_protocol") != NEUTRAL_INFERENCE_INPUT_PROTOCOL
+        or manifest.get("direct_source_preprocessing")
+        != neutral_direct_source_preprocessing_identity()
         or manifest.get("selection_contract") != MARKET_EPISODE_FIRST_OCCURRENCE_SELECTION_CONTRACT
         or manifest.get("split_roles") != sorted(SPLITS)
         or manifest.get("material_kinds") != list(MARKET_EPISODE_MATERIAL_KINDS)
@@ -421,8 +427,12 @@ def evaluate(
     disagreements = [item.ensemble_disagreement for item in unique.values() if item.ensemble_disagreement is not None]
     missing = [item for item in unique.values() if item.ensemble_members < expected_members]
     return {
-        "schema_version": 1, "evaluation": "neutral_market_episode_geometry_retrieval_ood",
+        "schema_version": 2, "evaluation": "neutral_market_episode_geometry_retrieval_ood",
         "input_artifact_sha256": {"embeddings": embeddings["artifact_sha256"], "active_heads": heads["artifact_sha256"]},
+        "direct_source_preprocessing": (
+            neutral_direct_source_preprocessing_identity()
+        ),
+        "b0_compatible": True,
         "metrics": {
             "collapse": {"by_split_material_kind": geometry},
             "self_supervised_consistency": {

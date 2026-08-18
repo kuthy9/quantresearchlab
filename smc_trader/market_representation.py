@@ -90,6 +90,38 @@ PAD_TOKEN_ID = 0
 MASK_TOKEN_ID = 1
 BAR_END_INDEX_BINDING = "__index_is_completed_bar_end__"
 INFERENCE_INPUT_PROTOCOL = "inference_unmasked_v1"
+NEUTRAL_INFERENCE_INPUT_PROTOCOL = "neutral_direct_source_filtered_v1"
+NEUTRAL_TRAINING_CONTRACT = "neutral-market-representation-b0-v2"
+_NEUTRAL_DIRECT_SOURCE_EVENT_PREPROCESSING_PROTOCOL = {
+    "protocol_version": "neutral-direct-source-event-preprocessing-1.0.0",
+    "scope": "neutral_market_episode",
+    "direct_source_detector": "prepared_direct_label_source_event_mask_v1",
+    "direct_source_action": "drop",
+    "retained_event_order": "source_order",
+    "empty_event_fallback": {
+        "event_count": 1,
+        "token_id": MASK_TOKEN_ID,
+        "numeric": [0.0, 0.0, 0.0, 0.0],
+    },
+    "candle_features": "unchanged",
+    "objective_random_masks": "applied_after_this_protocol_not_persisted",
+    "deterministic": True,
+}
+
+
+def neutral_direct_source_preprocessing_identity() -> dict[str, Any]:
+    """Return the immutable-by-copy identity for neutral event preprocessing."""
+
+    protocol = copy.deepcopy(_NEUTRAL_DIRECT_SOURCE_EVENT_PREPROCESSING_PROTOCOL)
+    encoded = json.dumps(
+        protocol, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    return {
+        "protocol": protocol,
+        "sha256": hashlib.sha256(encoded).hexdigest(),
+    }
+
+
 CASE_REVISION_STAGES = frozenset(
     {
         "context_formed",
@@ -1528,6 +1560,8 @@ class PreparedRepresentationCase:
     event_numeric: np.ndarray
     direct_label_source_event_mask: np.ndarray | None = None
     label_sources_masked: bool = False
+    neutral_preprocessing_version: str | None = None
+    neutral_preprocessing_sha256: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -1572,6 +1606,23 @@ class PreparedRepresentationCase:
             )
         object.__setattr__(self, "direct_label_source_event_mask", source_mask)
         object.__setattr__(self, "label_sources_masked", bool(self.label_sources_masked))
+        version = self.neutral_preprocessing_version
+        digest = self.neutral_preprocessing_sha256
+        if (version is None) != (digest is None):
+            raise RepresentationDataError(
+                "prepared neutral preprocessing identity is incomplete"
+            )
+        if version is not None:
+            expected = neutral_direct_source_preprocessing_identity()
+            if (
+                version != expected["protocol"]["protocol_version"]
+                or digest != expected["sha256"]
+                or not self.label_sources_masked
+                or bool(source_mask.any())
+            ):
+                raise RepresentationDataError(
+                    "prepared neutral preprocessing identity is invalid"
+                )
 
 
 def prepare_representation_case(
@@ -1662,6 +1713,68 @@ def mask_direct_label_source_tokens(
         direct_label_source_event_mask=np.zeros(1, dtype=bool),
         label_sources_masked=True,
     )
+
+
+def preprocess_neutral_direct_source_events(
+    example: PreparedRepresentationCase,
+) -> PreparedRepresentationCase:
+    """Apply the single deterministic B0 event-input protocol.
+
+    Training, validation, export, and future online queries must all start from
+    this processed ``PreparedRepresentationCase``.  Objective masking remains
+    a later, stochastic training-only operation and is not part of this step.
+    """
+
+    identity = neutral_direct_source_preprocessing_identity()
+    if (
+        example.neutral_preprocessing_version is not None
+        and (
+            example.neutral_preprocessing_version
+            != identity["protocol"]["protocol_version"]
+            or example.neutral_preprocessing_sha256 != identity["sha256"]
+        )
+    ):
+        raise RepresentationDataError(
+            "prepared case uses a different neutral preprocessing protocol"
+        )
+    processed = mask_direct_label_source_tokens(example)
+    return replace(
+        processed,
+        neutral_preprocessing_version=identity["protocol"]["protocol_version"],
+        neutral_preprocessing_sha256=identity["sha256"],
+    )
+
+
+def prepare_neutral_representation_case(
+    case: RepresentationCase,
+    store: CanonicalOHLCVStore,
+) -> PreparedRepresentationCase:
+    """Resolve causal prefixes and apply the registered neutral B0 protocol."""
+
+    return preprocess_neutral_direct_source_events(
+        prepare_representation_case(case, store)
+    )
+
+
+def require_neutral_preprocessed_examples(
+    examples: Sequence[PreparedRepresentationCase],
+) -> None:
+    """Fail closed unless every example carries the current processed input."""
+
+    if not examples:
+        raise RepresentationDataError("neutral preprocessing received no examples")
+    identity = neutral_direct_source_preprocessing_identity()
+    for example in examples:
+        if (
+            example.neutral_preprocessing_version
+            != identity["protocol"]["protocol_version"]
+            or example.neutral_preprocessing_sha256 != identity["sha256"]
+            or not example.label_sources_masked
+            or bool(np.asarray(example.direct_label_source_event_mask).any())
+        ):
+            raise RepresentationDataError(
+                "neutral representation input was not processed by the B0 protocol"
+            )
 
 
 def causal_input_fingerprint(case: RepresentationCase) -> str:
@@ -4612,13 +4725,11 @@ def representation_checkpoint_id(model: MarketRepresentationModel) -> str:
     return digest.hexdigest()
 
 
-def load_representation_checkpoint(
-    path: str | Path,
-    *,
-    map_location: Any = "cpu",
+def _model_from_representation_checkpoint_payload(
+    payload: Mapping[str, Any],
 ) -> MarketRepresentationModel:
-    require_torch()
-    payload = torch.load(Path(path), map_location=map_location, weights_only=True)
+    if not isinstance(payload, Mapping):
+        raise RepresentationDataError("representation checkpoint must be an object")
     if payload.get("model_version") != MODEL_VERSION:
         raise RepresentationDataError("representation checkpoint model version mismatch")
     if tuple(payload.get("feature_names", ())) != CAUSAL_CANDLE_FEATURES:
@@ -4630,6 +4741,68 @@ def load_representation_checkpoint(
     if payload.get("checkpoint_id") != representation_checkpoint_id(model):
         raise RepresentationDataError("representation checkpoint content identity mismatch")
     return model
+
+
+def load_representation_checkpoint(
+    path: str | Path,
+    *,
+    map_location: Any = "cpu",
+) -> MarketRepresentationModel:
+    require_torch()
+    payload = torch.load(Path(path), map_location=map_location, weights_only=True)
+    return _model_from_representation_checkpoint_payload(payload)
+
+
+def save_neutral_representation_checkpoint(
+    path: str | Path,
+    model: MarketRepresentationModel,
+    *,
+    metadata: Mapping[str, Any] | None = None,
+) -> None:
+    """Persist a checkpoint that is explicitly bound to the neutral B0 input."""
+
+    supplied = dict(metadata or {})
+    required = {
+        "training_contract": NEUTRAL_TRAINING_CONTRACT,
+        "direct_source_preprocessing": (
+            neutral_direct_source_preprocessing_identity()
+        ),
+        "inference_input_protocol": NEUTRAL_INFERENCE_INPUT_PROTOCOL,
+    }
+    for name, value in required.items():
+        if name in supplied and supplied[name] != value:
+            raise RepresentationDataError(
+                f"neutral checkpoint {name} conflicts with the B0 protocol"
+            )
+    supplied.update(required)
+    save_representation_checkpoint(path, model, metadata=supplied)
+
+
+def load_neutral_representation_checkpoint(
+    path: str | Path,
+    *,
+    map_location: Any = "cpu",
+) -> MarketRepresentationModel:
+    """Load only a checkpoint carrying the exact current neutral B0 protocol."""
+
+    require_torch()
+    payload = torch.load(Path(path), map_location=map_location, weights_only=True)
+    metadata = payload.get("metadata")
+    expected = {
+        "training_contract": NEUTRAL_TRAINING_CONTRACT,
+        "direct_source_preprocessing": (
+            neutral_direct_source_preprocessing_identity()
+        ),
+        "inference_input_protocol": NEUTRAL_INFERENCE_INPUT_PROTOCOL,
+    }
+    if (
+        not isinstance(metadata, Mapping)
+        or any(metadata.get(name) != value for name, value in expected.items())
+    ):
+        raise RepresentationDataError(
+            "neutral checkpoint preprocessing protocol is missing or differs"
+        )
+    return _model_from_representation_checkpoint_payload(payload)
 
 
 def select_first_causal_stage_revisions(
@@ -4702,6 +4875,7 @@ def _market_episode_export_cases(
 
     require_torch()
     _require_unmasked_inference_batch(batch)
+    require_neutral_preprocessed_examples(examples)
     if len(examples) != len(batch.case_ids):
         raise RepresentationDataError("MarketEpisode examples do not match batch")
     cases: list[RepresentationCase] = []
@@ -4779,7 +4953,7 @@ def encode_market_episode_records(
             "embedding_clock": "decision_time",
             "embedding_asof": case.asof.isoformat(),
             "feature_max_at": record.feature_max_at.isoformat(),
-            "embedding_input_protocol": INFERENCE_INPUT_PROTOCOL,
+            "embedding_input_protocol": NEUTRAL_INFERENCE_INPUT_PROTOCOL,
             "outcome_fields_used": False,
             "decision_embedding": list(record.decision_embedding),
         }
@@ -4811,7 +4985,7 @@ def encode_market_episode_active_head_records(
             "decision_at": case.asof.isoformat(),
             "feature_max_at": record.feature_max_at.isoformat(),
             "outcome_fields_used": False,
-            "input_protocol": INFERENCE_INPUT_PROTOCOL,
+            "input_protocol": NEUTRAL_INFERENCE_INPUT_PROTOCOL,
             "head_predictions": {
                 name: list(record.head_predictions[name])
                 for name in NEUTRAL_SPARSE_ACTIVE_TARGETS
