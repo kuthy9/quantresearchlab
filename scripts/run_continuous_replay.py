@@ -49,6 +49,7 @@ from smc_trader.causal_cases import (  # noqa: E402
     write_causal_case_library_manifest,
 )
 from smc_trader.market_cases import (  # noqa: E402
+    MARKET_CASE_INPUT_DATA_CONTINUITY_POLICY,
     MARKET_CASE_INPUT_FIELD_TYPES,
     MARKET_CASE_PROTOCOL,
     MARKET_CASE_RECORDER_SCHEMA_VERSION,
@@ -140,7 +141,7 @@ TRADE_COLUMNS = [
 BRAIN_RUNTIME_STATE_SCHEMA_VERSION = 14
 # The input-only MarketEpisode mode has a disjoint, deliberately small state
 # shape and therefore owns an independent resume schema.
-MARKET_CASE_INPUT_RUNTIME_STATE_SCHEMA_VERSION = 6
+MARKET_CASE_INPUT_RUNTIME_STATE_SCHEMA_VERSION = 7
 
 # Versioned diagnostic-state contract.  Natural episode lifecycles are
 # intentionally broader than action candidates: a dormant episode cannot
@@ -5821,6 +5822,9 @@ def _streamed_main(args: argparse.Namespace) -> None:
             "runtime_state_schema_version": (
                 MARKET_CASE_INPUT_RUNTIME_STATE_SCHEMA_VERSION
             ),
+            "data_continuity": dict(
+                MARKET_CASE_INPUT_DATA_CONTINUITY_POLICY
+            ),
             "repository": _repository_commit_identity(),
             "profile": {
                 "name": market_input_profile_name,
@@ -6680,7 +6684,23 @@ def _streamed_main(args: argparse.Namespace) -> None:
     iterator = iter_after_source_checkpoint(
         replay_frame,
         state["last_source_start"],
-        allow_data_gap_reset=False,
+        maximum_no_trade_gap_minutes=(
+            int(
+                MARKET_CASE_INPUT_DATA_CONTINUITY_POLICY[
+                    "maximum_no_trade_gap_minutes"
+                ]
+            )
+            if market_case_input_enabled
+            else 5
+        ),
+        allow_data_gap_reset=(
+            market_case_input_enabled
+            and bool(
+                MARKET_CASE_INPUT_DATA_CONTINUITY_POLICY[
+                    "allow_same_contract_data_gap_reset"
+                ]
+            )
+        ),
     )
     safe_source_checkpoint = False
     try:

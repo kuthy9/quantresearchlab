@@ -33,6 +33,18 @@ from .scene_graph import market_episode_id as neutral_market_episode_id
 MARKET_CASE_RECORDER_SCHEMA_VERSION = 1
 MARKET_CASE_PROTOCOL_VERSION = "market-episode-input-only-1.2.0"
 
+# Run-level replay policy, intentionally separate from the recorder protocol:
+# the row grain and validation contract are unchanged, while runner schema 7
+# now binds how a large same-contract source discontinuity reaches the already
+# supported data-gap epoch boundary.
+MARKET_CASE_INPUT_DATA_CONTINUITY_POLICY: Mapping[str, Any] = {
+    "maximum_no_trade_gap_minutes": 5,
+    "allow_same_contract_data_gap_reset": True,
+    "data_gap_reset_anomaly": "data_gap_history_reset",
+    "allow_cross_contract_data_gap_reset": False,
+    "synthesize_over_cap_missing_minutes": False,
+}
+
 _TRANSITION_KIND_ORDER = {
     "episode_created": 0,
     "zone_registered": 1,

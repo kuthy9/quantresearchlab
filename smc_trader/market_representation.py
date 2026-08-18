@@ -2330,6 +2330,7 @@ def _validated_market_case_run_manifest(
     if not isinstance(run_manifest, Mapping) or keys not in (
         set(_MARKET_CASE_RUN_KEYS),
         set(_MARKET_CASE_RUN_KEYS) | {"repository"},
+        set(_MARKET_CASE_RUN_KEYS) | {"repository", "data_continuity"},
     ):
         raise RepresentationDataError("market case run manifest schema changed")
     if "repository" in run_manifest:
@@ -2361,13 +2362,32 @@ def _validated_market_case_run_manifest(
         name="runtime_state_schema_version",
     )
     has_repository = "repository" in run_manifest
+    has_data_continuity = "data_continuity" in run_manifest
     if not (
-        (runtime_schema == 5 and not has_repository)
-        or (runtime_schema == 6 and has_repository)
+        (runtime_schema == 5 and not has_repository and not has_data_continuity)
+        or (runtime_schema == 6 and has_repository and not has_data_continuity)
+        or (runtime_schema == 7 and has_repository and has_data_continuity)
     ):
         raise RepresentationDataError(
-            "market case run runtime/repository version binding changed"
+            "market case run runtime/continuity version binding changed"
         )
+    if has_data_continuity:
+        from .market_cases import MARKET_CASE_INPUT_DATA_CONTINUITY_POLICY
+
+        continuity = run_manifest["data_continuity"]
+        expected_continuity = dict(MARKET_CASE_INPUT_DATA_CONTINUITY_POLICY)
+        if (
+            not isinstance(continuity, Mapping)
+            or set(continuity) != set(expected_continuity)
+            or any(
+                type(continuity[key]) is not type(expected)
+                or continuity[key] != expected
+                for key, expected in expected_continuity.items()
+            )
+        ):
+            raise RepresentationDataError(
+                "market case run data continuity policy changed"
+            )
 
     profile = _strict_manifest_section(
         run_manifest["profile"],

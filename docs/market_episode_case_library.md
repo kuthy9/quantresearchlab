@@ -6,11 +6,13 @@ advances a second replay loop.
 
 The current fail-closed contract is protocol
 `market-episode-input-only-1.2.0`, NeutralMarketState schema 2, neutral Engine
-checkpoint schema 2, and market-input runner state schema 6. Schema-1 neutral
-state/checkpoints, protocol 1.1.0, and runner-state schemas 4/5 cannot resume or
-materialize under this contract. Runner schema 6 adds one run-level repository
-commit identity; it is not repeated in input rows. The recorder schema remains
-1 and the Arrow row schema remains the same 18 fields.
+checkpoint schema 2, and market-input runner state schema 7. Schema-1 neutral
+state/checkpoints, protocol 1.1.0, and runner-state schemas 4/5/6 cannot resume
+or materialize under this contract. Runner schema 6 added one run-level
+repository commit identity; schema 7 additionally binds the exact replay data
+continuity policy once in the run manifest. Neither is repeated in input rows.
+The recorder schema remains 1 and the Arrow row schema remains the same 18
+fields.
 
 ## Grain and admission
 
@@ -62,6 +64,11 @@ same-clock transition transport, aware clocks, physical episode identity,
 immutable physical custody, append-only milestones, monotonic lifecycle, and
 terminal/retirement non-revival. A contract or data-reset anomaly must advance
 the runtime market epoch; IDs may be reused only after that epoch boundary.
+The input-only runner synthesizes at most five registered open minutes for a
+same-contract no-trade gap. A larger same-contract gap emits no synthetic run:
+the next real bar carries `data_gap_history_reset` and advances the market
+epoch. Cross-contract gaps remain fail-closed. This is a runner continuity fix
+under the existing protocol 1.2.0 reset semantics, not a row/protocol change.
 
 Every structured input JSON tree rejects non-finite values, future/outcome key
 markers, and future-dated evidence clocks. The sole `outcome` key allowed in an

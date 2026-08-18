@@ -7,6 +7,7 @@ import pytest
 from smc_trader.engine import ContinuousSMCEngine
 from smc_trader.execution import TopOfBook, TopOfBookExecutionProvider
 from smc_trader.io import (
+    DataContinuityError,
     build_previous_session_front,
     inspect_source,
     iter_completed_bars,
@@ -136,6 +137,87 @@ def test_large_same_contract_gap_can_be_marked_for_causal_reset() -> None:
     assert len(bars) == 2
     assert bars[1].data_gap_before_minutes == 6
     assert not bars[1].synthetic_no_trade
+
+
+def test_february_2019_same_contract_gap_is_one_184_minute_reset() -> None:
+    index = pd.DatetimeIndex(
+        [
+            pd.Timestamp("2019-02-26 19:40", tz="America/New_York"),
+            pd.Timestamp("2019-02-26 22:45", tz="America/New_York"),
+        ],
+        name="ts",
+    )
+    frame = pd.DataFrame(
+        {
+            "open": [7_100.0, 7_101.0],
+            "high": [7_100.25, 7_101.25],
+            "low": [7_099.75, 7_100.75],
+            "close": [7_100.0, 7_101.0],
+            "volume": [10.0, 10.0],
+            "symbol": ["NQH9", "NQH9"],
+            "instrument_id": [15657, 15657],
+        },
+        index=index,
+    )
+
+    bars = list(iter_completed_bars(frame, allow_data_gap_reset=True))
+
+    assert len(bars) == 2
+    assert bars[1].start == pd.Timestamp(
+        "2019-02-26 22:45", tz="America/New_York"
+    )
+    assert bars[1].data_gap_before_minutes == 184
+    assert not bars[1].synthetic_no_trade
+
+
+def test_large_same_contract_gap_remains_fail_closed_by_default() -> None:
+    index = pd.DatetimeIndex(
+        [
+            pd.Timestamp("2025-01-06 10:00", tz="America/New_York"),
+            pd.Timestamp("2025-01-06 10:07", tz="America/New_York"),
+        ],
+        name="ts",
+    )
+    frame = pd.DataFrame(
+        {
+            "open": [100.0, 101.0],
+            "high": [100.25, 101.25],
+            "low": [99.75, 100.75],
+            "close": [100.0, 101.0],
+            "volume": [10.0, 10.0],
+            "symbol": ["NQH5", "NQH5"],
+            "instrument_id": [1, 1],
+        },
+        index=index,
+    )
+
+    with pytest.raises(DataContinuityError, match="cap=5, same_contract=True"):
+        list(iter_completed_bars(frame))
+
+
+def test_data_gap_reset_exception_never_crosses_contracts() -> None:
+    index = pd.DatetimeIndex(
+        [
+            pd.Timestamp("2025-01-06 10:00", tz="America/New_York"),
+            pd.Timestamp("2025-01-06 10:07", tz="America/New_York"),
+        ],
+        name="ts",
+    )
+    frame = pd.DataFrame(
+        {
+            "open": [100.0, 101.0],
+            "high": [100.25, 101.25],
+            "low": [99.75, 100.75],
+            "close": [100.0, 101.0],
+            "volume": [10.0, 10.0],
+            "symbol": ["NQH5", "NQM5"],
+            "instrument_id": [1, 2],
+        },
+        index=index,
+    )
+
+    with pytest.raises(DataContinuityError, match="same_contract=False"):
+        list(iter_completed_bars(frame, allow_data_gap_reset=True))
 
 
 def test_engine_runs_all_layers_once_per_completed_minute() -> None:

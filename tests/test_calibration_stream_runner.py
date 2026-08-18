@@ -18,6 +18,7 @@ from scripts.run_continuous_replay import (
     BRAIN_CALIBRATION_FIELD_TYPES,
     DECISION_FIELD_TYPES,
     MARKET_CASE_INPUT_RUNTIME_STATE_SCHEMA_VERSION,
+    MARKET_CASE_INPUT_DATA_CONTINUITY_POLICY,
     NATURAL_FUNNEL_DIAGNOSTIC_SCHEMA_VERSION,
     NATURAL_FUNNEL_SCHEMA_FINGERPRINT,
     OPEN_THESIS_BINDING_STAGES,
@@ -1400,7 +1401,11 @@ def _run(command: list[str]) -> subprocess.CompletedProcess[str]:
     )
 
 
-def _write_short_market_input_protocol(tmp_path: Path) -> Path:
+def _write_short_market_input_protocol(
+    tmp_path: Path,
+    *,
+    end_exclusive: str = "2022-06-06T18:32:00-04:00",
+) -> Path:
     payload = json.loads(
         (ROOT / "configs/data_splits.json").read_text(encoding="utf-8")
     )
@@ -1411,13 +1416,21 @@ def _write_short_market_input_protocol(tmp_path: Path) -> Path:
         {
             "allowed_ohlcv_role": "calibration",
             "start": "2022-06-06T18:00:00-04:00",
-            "end_exclusive": "2022-06-06T18:32:00-04:00",
+            "end_exclusive": end_exclusive,
             "warmup_calendar_days": 0,
         }
     )
     protocol = tmp_path / "short-market-input-data-splits.json"
     protocol.write_text(json.dumps(payload), encoding="utf-8")
     return protocol
+
+
+def _write_same_contract_gap_source(tmp_path: Path) -> Path:
+    source = _write_source(tmp_path, periods=40)
+    frame = pd.read_parquet(source)
+    frame = frame.drop(frame.index[12:20])
+    frame.to_parquet(source)
+    return source
 
 
 def _decision_rows(output: Path) -> pd.DataFrame:
@@ -3889,6 +3902,121 @@ def test_market_case_input_rejects_multi_contract_before_output(
     assert not output.exists()
 
 
+def test_market_case_input_same_contract_gap_resets_and_resumes_exactly(
+    tmp_path: Path,
+) -> None:
+    source = _write_same_contract_gap_source(tmp_path)
+    end = "2022-06-06T18:40:00-04:00"
+    protocol = _write_short_market_input_protocol(
+        tmp_path,
+        end_exclusive=end,
+    )
+    default_result = _run(
+        _command(
+            source,
+            tmp_path / "default-gap-rejected",
+            validation_protocol=protocol,
+            end=end,
+        )
+    )
+    assert default_result.returncode != 0
+    assert "unresolved open-market gap" in default_result.stderr
+    assert "same_contract=True" in default_result.stderr
+    common = {
+        "market_case_input": True,
+        "validation_protocol": protocol,
+        "end": end,
+    }
+    resumed_output = tmp_path / "market-input-gap-resumed"
+    interrupted = _run(
+        _command(source, resumed_output, stop_after=11, **common)
+    )
+    assert interrupted.returncode != 0
+    assert "intentional diagnostic interruption" in interrupted.stderr
+
+    checkpoint_manifest = json.loads(
+        (resumed_output / "_checkpoint/manifest.json").read_text()
+    )
+    checkpoint_state = pickle.loads(
+        (
+            resumed_output
+            / "_checkpoint"
+            / checkpoint_manifest["state_file"]
+        ).read_bytes()
+    )
+    assert checkpoint_state["source_rows_consumed"] == 11
+    assert checkpoint_state["last_source_start"] == pd.Timestamp(
+        "2022-06-06T18:10:00-04:00"
+    )
+
+    run_manifest_path = resumed_output / "run_manifest.json"
+    original_manifest = run_manifest_path.read_bytes()
+    manifest = json.loads(original_manifest)
+    assert manifest["runtime_state_schema_version"] == 7
+    assert manifest["data_continuity"] == dict(
+        MARKET_CASE_INPUT_DATA_CONTINUITY_POLICY
+    )
+    assert manifest["data_continuity"] == {
+        "maximum_no_trade_gap_minutes": 5,
+        "allow_same_contract_data_gap_reset": True,
+        "data_gap_reset_anomaly": "data_gap_history_reset",
+        "allow_cross_contract_data_gap_reset": False,
+        "synthesize_over_cap_missing_minutes": False,
+    }
+
+    schema_six = json.loads(original_manifest)
+    schema_six["runtime_state_schema_version"] = 6
+    run_manifest_path.write_text(json.dumps(schema_six), encoding="utf-8")
+    stale_resume = _run(
+        _command(source, resumed_output, resume=True, **common)
+    )
+    assert stale_resume.returncode != 0
+    assert "run manifest differs" in stale_resume.stderr
+    run_manifest_path.write_bytes(original_manifest)
+
+    tampered = json.loads(original_manifest)
+    tampered["data_continuity"][
+        "allow_same_contract_data_gap_reset"
+    ] = False
+    run_manifest_path.write_text(json.dumps(tampered), encoding="utf-8")
+    tampered_resume = _run(
+        _command(source, resumed_output, resume=True, **common)
+    )
+    assert tampered_resume.returncode != 0
+    assert "run manifest differs" in tampered_resume.stderr
+    run_manifest_path.write_bytes(original_manifest)
+
+    resumed = _run(
+        _command(source, resumed_output, resume=True, **common)
+    )
+    assert resumed.returncode == 0, resumed.stderr
+    control_output = tmp_path / "market-input-gap-control"
+    control = _run(_command(source, control_output, **common))
+    assert control.returncode == 0, control.stderr
+
+    assert (resumed_output / "run_manifest.json").read_bytes() == (
+        control_output / "run_manifest.json"
+    ).read_bytes()
+    assert (
+        resumed_output / "market_case_input_shards.manifest.json"
+    ).read_bytes() == (
+        control_output / "market_case_input_shards.manifest.json"
+    ).read_bytes()
+    resumed_summary = json.loads(
+        (resumed_output / "summary.json").read_text()
+    )
+    control_summary = json.loads(
+        (control_output / "summary.json").read_text()
+    )
+    assert resumed_summary["market_case_input"]["epoch_resets"] == 1
+    assert control_summary["market_case_input"]["epoch_resets"] == 1
+    assert resumed_summary["processed_bars"] == 31
+    assert resumed_summary["processed_bars"] == (
+        resumed_summary["source_rows_processed"]
+    )
+    assert resumed_summary["stream_rows"] == control_summary["stream_rows"]
+
+
 def test_market_case_input_runner_never_invokes_action_layers(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -4040,14 +4168,14 @@ def test_market_case_input_is_minimal_resumable_and_row_exact(
 
     run_manifest_path = resumed_output / "run_manifest.json"
     original_run_manifest = run_manifest_path.read_bytes()
-    version_five_run_manifest = json.loads(original_run_manifest)
-    version_five_run_manifest["runtime_state_schema_version"] = 5
-    run_manifest_path.write_text(json.dumps(version_five_run_manifest))
-    version_five_run_resume = _run(
+    version_six_run_manifest = json.loads(original_run_manifest)
+    version_six_run_manifest["runtime_state_schema_version"] = 6
+    run_manifest_path.write_text(json.dumps(version_six_run_manifest))
+    version_six_run_resume = _run(
         _command(source, resumed_output, resume=True, **common)
     )
-    assert version_five_run_resume.returncode != 0
-    assert "run manifest differs" in version_five_run_resume.stderr
+    assert version_six_run_resume.returncode != 0
+    assert "run manifest differs" in version_six_run_resume.stderr
     run_manifest_path.write_bytes(original_run_manifest)
 
     protocol_one_one_run_manifest = json.loads(original_run_manifest)
@@ -4202,6 +4330,7 @@ def test_market_case_input_is_minimal_resumable_and_row_exact(
         "runner",
         "mode",
         "runtime_state_schema_version",
+        "data_continuity",
         "repository",
         "profile",
         "source",
@@ -4214,7 +4343,10 @@ def test_market_case_input_is_minimal_resumable_and_row_exact(
     assert run_manifest["runtime_state_schema_version"] == (
         MARKET_CASE_INPUT_RUNTIME_STATE_SCHEMA_VERSION
     )
-    assert run_manifest["runtime_state_schema_version"] == 6
+    assert run_manifest["runtime_state_schema_version"] == 7
+    assert run_manifest["data_continuity"] == dict(
+        MARKET_CASE_INPUT_DATA_CONTINUITY_POLICY
+    )
     repository_commit = run_manifest["repository"]["commit"]
     assert set(run_manifest["repository"]) == {"commit"}
     assert len(repository_commit) == 40

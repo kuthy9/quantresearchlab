@@ -92,6 +92,7 @@ def iter_after_source_checkpoint(
     frame: pd.DataFrame,
     last_source_start: pd.Timestamp | None,
     *,
+    maximum_no_trade_gap_minutes: int = 5,
     allow_data_gap_reset: bool = False,
 ) -> Iterator[Bar]:
     """Resume the registered bar iterator after a committed real source row.
@@ -104,6 +105,7 @@ def iter_after_source_checkpoint(
     if last_source_start is None:
         yield from iter_completed_bars(
             frame,
+            maximum_no_trade_gap_minutes=maximum_no_trade_gap_minutes,
             allow_data_gap_reset=allow_data_gap_reset,
         )
         return
@@ -116,6 +118,7 @@ def iter_after_source_checkpoint(
         raise ValueError("checkpoint source row is absent from the bound OHLCV source")
     iterator = iter_completed_bars(
         frame.iloc[position:],
+        maximum_no_trade_gap_minutes=maximum_no_trade_gap_minutes,
         allow_data_gap_reset=allow_data_gap_reset,
     )
     try:

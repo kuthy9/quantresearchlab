@@ -943,6 +943,25 @@ def test_neutral_adapter_accepts_optional_repository_identity_without_tokenizing
     assert "repository" not in new_mapping
 
 
+def test_neutral_adapter_accepts_schema_seven_data_continuity_without_tokenizing_it(
+    tmp_path: Path,
+) -> None:
+    row = _neutral_market_case_row()
+    old_manifest = _neutral_run_manifest(tmp_path)
+    new_manifest = {
+        **old_manifest,
+        "runtime_state_schema_version": 7,
+        "repository": {"commit": "a" * 40},
+        "data_continuity": dict(
+            market_cases_module.MARKET_CASE_INPUT_DATA_CONTINUITY_POLICY
+        ),
+    }
+
+    assert market_case_input_to_representation_mapping(
+        row, new_manifest
+    ) == market_case_input_to_representation_mapping(row, old_manifest)
+
+
 @pytest.mark.parametrize(
     "repository",
     (
@@ -967,25 +986,68 @@ def test_neutral_adapter_rejects_invalid_optional_repository_identity(
 
 
 @pytest.mark.parametrize(
-    ("runtime_schema", "repository"),
+    ("runtime_schema", "repository", "data_continuity"),
     (
-        (1, None),
-        (4, None),
-        (5, {"commit": "a" * 40}),
-        (6, None),
-        (7, {"commit": "a" * 40}),
+        (1, None, None),
+        (4, None, None),
+        (5, {"commit": "a" * 40}, None),
+        (5, None, {}),
+        (6, None, None),
+        (6, {"commit": "a" * 40}, {}),
+        (7, {"commit": "a" * 40}, None),
     ),
 )
-def test_neutral_adapter_rejects_unbound_runtime_repository_versions(
+def test_neutral_adapter_rejects_unbound_runtime_continuity_versions(
     tmp_path: Path,
     runtime_schema: int,
     repository: object | None,
+    data_continuity: object | None,
 ) -> None:
     manifest = _neutral_run_manifest(tmp_path)
     manifest["runtime_state_schema_version"] = runtime_schema
     if repository is not None:
         manifest["repository"] = repository
-    with pytest.raises(RepresentationDataError, match="runtime/repository"):
+    if data_continuity is not None:
+        manifest["data_continuity"] = data_continuity
+    with pytest.raises(
+        RepresentationDataError,
+        match="runtime/continuity|manifest schema",
+    ):
+        representation_case_from_market_case_input_row(
+            _neutral_market_case_row(), manifest
+        )
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    (
+        ("maximum_no_trade_gap_minutes", 6),
+        ("maximum_no_trade_gap_minutes", 5.0),
+        ("allow_same_contract_data_gap_reset", False),
+        ("allow_same_contract_data_gap_reset", 1),
+        ("data_gap_reset_anomaly", "other"),
+        ("allow_cross_contract_data_gap_reset", True),
+        ("synthesize_over_cap_missing_minutes", True),
+        ("unexpected", False),
+    ),
+)
+def test_neutral_adapter_rejects_schema_seven_data_continuity_tamper(
+    tmp_path: Path,
+    key: str,
+    value: object,
+) -> None:
+    manifest = _neutral_run_manifest(tmp_path)
+    manifest.update(
+        {
+            "runtime_state_schema_version": 7,
+            "repository": {"commit": "a" * 40},
+            "data_continuity": {
+                **market_cases_module.MARKET_CASE_INPUT_DATA_CONTINUITY_POLICY,
+                key: value,
+            },
+        }
+    )
+    with pytest.raises(RepresentationDataError, match="continuity policy"):
         representation_case_from_market_case_input_row(
             _neutral_market_case_row(), manifest
         )

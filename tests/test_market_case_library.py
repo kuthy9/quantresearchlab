@@ -277,6 +277,14 @@ def test_input_only_schema_has_one_stable_revision_and_no_legacy_dependencies() 
     assert MARKET_CASE_PROTOCOL["runtime_source"] == (
         "NeutralEngineSnapshot.neutral_market_state"
     )
+    assert market_cases_module.MARKET_CASE_INPUT_DATA_CONTINUITY_POLICY == {
+        "maximum_no_trade_gap_minutes": 5,
+        "allow_same_contract_data_gap_reset": True,
+        "data_gap_reset_anomaly": "data_gap_history_reset",
+        "allow_cross_contract_data_gap_reset": False,
+        "synthesize_over_cap_missing_minutes": False,
+    }
+    assert "data_continuity" not in MARKET_CASE_PROTOCOL
     assert expected_market_case_run_identity() == {
         "recorder_schema_version": 1,
         "protocol": dict(MARKET_CASE_PROTOCOL),
@@ -587,6 +595,73 @@ def test_reset_requires_new_epoch_and_reused_physical_ids_restart_revision_index
     prefixes = json.loads(row["ohlcv_prefix_refs_json"])
     assert all(item["replay_view_1m_row_start"] == 1 for item in prefixes)
     assert recorder.summary["epoch_resets"] == 1
+
+
+def test_data_gap_epoch_cannot_revive_terminal_identity_and_rows_are_future_safe() -> None:
+    recorder = _recorder()
+    formed = _episode(0)
+    _observe(
+        recorder,
+        _snapshot(0, episodes=(formed,), transitions=(formed,)),
+        source_ordinal=0,
+        replay_ordinal=0,
+    )
+    rows = [item.to_dict() for item in recorder.drain_input_rows()]
+
+    terminal = _episode(1, terminal_reason="invalidation")
+    _observe(
+        recorder,
+        _snapshot(1, episodes=(terminal,), transitions=(terminal,)),
+        source_ordinal=1,
+        replay_ordinal=1,
+    )
+    rows.extend(item.to_dict() for item in recorder.drain_input_rows())
+
+    restarted = _episode(2, epoch="epoch:2", formed_minute=2)
+    _observe(
+        recorder,
+        _snapshot(
+            2,
+            epoch="epoch:2",
+            episodes=(restarted,),
+            transitions=(restarted,),
+            anomalies=("data_gap_history_reset",),
+        ),
+        source_ordinal=2,
+        replay_ordinal=2,
+    )
+    rows.extend(item.to_dict() for item in recorder.drain_input_rows())
+
+    assert terminal.episode_id != restarted.episode_id
+    assert [row["market_episode_id"] for row in rows].count(
+        terminal.episode_id
+    ) == 2
+    assert all(
+        row["market_episode_id"] != terminal.episode_id
+        for row in rows
+        if row["market_epoch_id"] == "epoch:2"
+    )
+    assert recorder.summary["epoch_resets"] == 1
+    for row in rows:
+        validate_market_case_input_row(row)
+        asof = pd.Timestamp(row["asof"])
+        assert all(
+            pd.Timestamp(prefix["cutoff"]) <= asof
+            for prefix in json.loads(row["ohlcv_prefix_refs_json"])
+        )
+
+    with pytest.raises(ValueError, match="MarketEpisode crossed market epoch"):
+        _observe(
+            recorder,
+            _snapshot(
+                3,
+                epoch="epoch:2",
+                episodes=(restarted, terminal),
+                transitions=(),
+            ),
+            source_ordinal=3,
+            replay_ordinal=3,
+        )
 
 
 def test_future_episode_clock_and_recursive_future_key_are_rejected() -> None:
