@@ -2787,6 +2787,94 @@ def test_runtime_compaction_bounds_cold_history_and_fails_closed() -> None:
         graph.write_parquet("unused-after-compaction")
 
 
+def test_compacted_stale_revision_discloses_new_source_at_current_clock() -> None:
+    graph = TemporalMarketSceneGraph()
+    disclosure_clock = _clock("2025-01-06 12:00")
+    physical_clock = disclosure_clock - pd.Timedelta(hours=3)
+    observation = market_observation(asof=disclosure_clock)
+    graph.update(observation)
+
+    # Isolate the explicit nodes below from the helper observation's delta.
+    graph._current_added_nodes = []
+    graph._current_revised_nodes = []
+    graph._current_added_edges = []
+    graph._current_revised_edges = []
+    first_source = graph.add_node(
+        _node(
+            "epoch:0:swing:1H:first-source",
+            "swing",
+            Timeframe.H1,
+            physical_clock,
+            source_ids=("first-source",),
+            entity_id="first-source",
+        )
+    )
+    second_source = graph.add_node(
+        _node(
+            "epoch:0:swing:1H:second-source",
+            "swing",
+            Timeframe.H1,
+            physical_clock,
+            source_ids=("second-source",),
+            entity_id="second-source",
+        )
+    )
+    target = graph.add_node(
+        _node(
+            "epoch:0:structure:1H:stale-target",
+            "structure",
+            Timeframe.H1,
+            physical_clock,
+            lifecycle="forming",
+            status=EvidenceStatus.FORMING,
+            source_ids=("stale-target", "first-source"),
+            entity_id="stale-target",
+        )
+    )
+    graph._derive_source_relations(observation)
+
+    first_edge = next(
+        edge
+        for edge in graph.edges
+        if edge.source_node_id == target.node_id
+        and edge.target_node_id == first_source.node_id
+        and edge.relation is SceneEdgeKind.SOURCED_FROM
+    )
+    assert first_edge.observed_at == physical_clock
+
+    result = graph.compact_runtime_history(observation)
+    assert physical_clock < result["history_retention_floor"]
+    graph._current_added_nodes = []
+    graph._current_revised_nodes = []
+    graph._current_added_edges = []
+    graph._current_revised_edges = []
+    graph.add_node(
+        replace(
+            target,
+            source_ids=(
+                *target.source_ids,
+                "second-source",
+            ),
+            revision_id="",
+        )
+    )
+    next_observation = replace(
+        observation,
+        asof=disclosure_clock + pd.Timedelta(minutes=1),
+    )
+    graph._derive_source_relations(next_observation)
+
+    second_edge = next(
+        edge
+        for edge in graph.edges
+        if edge.source_node_id == target.node_id
+        and edge.target_node_id == second_source.node_id
+        and edge.relation is SceneEdgeKind.SOURCED_FROM
+    )
+    assert second_edge.observed_at == next_observation.asof
+    assert first_edge == graph._edges[first_edge.edge_id]
+
+
 def test_runtime_compaction_retains_current_and_materialized_terminal_state(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

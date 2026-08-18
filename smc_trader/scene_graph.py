@@ -2927,7 +2927,12 @@ class TemporalMarketSceneGraph:
             "range_boundary",
         }
 
-    def _locate_liquidity_at_zones(self, node: SceneNode) -> None:
+    def _locate_liquidity_at_zones(
+        self,
+        node: SceneNode,
+        *,
+        relation_clock: pd.Timestamp,
+    ) -> None:
         if node.kind == "support_resistance":
             liquidity_nodes = self._current_nodes_sharing_sources(
                 node,
@@ -2947,7 +2952,11 @@ class TemporalMarketSceneGraph:
         else:
             return
         for liquidity, zone in pairs:
-            observed_at = max(liquidity.observed_at, zone.observed_at)
+            observed_at = max(
+                liquidity.observed_at,
+                zone.observed_at,
+                relation_clock,
+            )
             self._add_relation(
                 liquidity.node_id,
                 SceneEdgeKind.LOCATED_AT,
@@ -2960,12 +2969,28 @@ class TemporalMarketSceneGraph:
             )
 
     def _derive_source_relations(self, observation: MarketObservation) -> None:
-        for node_id in (*self._current_added_nodes, *self._current_revised_nodes):
+        revised_node_ids = set(self._current_revised_nodes)
+
+        def relation_clock(node: SceneNode) -> pd.Timestamp:
+            # A new node carries its physical evidence clock.  A revision can
+            # disclose a new source only on this completed observation; using
+            # the frozen formation clock would backfill a relation into
+            # compacted history that was not observable then.
+            return (
+                observation.asof
+                if node.node_id in revised_node_ids
+                else node.observed_at
+            )
+
+        for node_id in dict.fromkeys(
+            (*self._current_added_nodes, *self._current_revised_nodes)
+        ):
             node = self._nodes[node_id]
+            clock = relation_clock(node)
             for source_id in node.source_ids:
                 source_node = self._node_id_for_source(
                     source_id,
-                    asof=node.observed_at,
+                    asof=clock,
                 )
                 if source_node is None or source_node == node.node_id:
                     continue
@@ -2979,7 +3004,7 @@ class TemporalMarketSceneGraph:
                         node.node_id,
                         SceneEdgeKind.RESOLVES,
                         source_node,
-                        node.observed_at,
+                        clock,
                         (node.node_id, source_id),
                     )
                     source_state = self._nodes[source_node]
@@ -2989,7 +3014,7 @@ class TemporalMarketSceneGraph:
                         self.add_node(
                             replace(
                                 source_state,
-                                observed_at=node.observed_at,
+                                observed_at=clock,
                                 lifecycle="retired",
                                 ambiguity_state=(
                                     EvidenceStatus.INVALIDATED
@@ -3007,7 +3032,7 @@ class TemporalMarketSceneGraph:
                             source_node,
                             SceneEdgeKind.ANCHORS,
                             node.node_id,
-                            node.observed_at,
+                            clock,
                             (source_id, node.node_id),
                         )
                     elif (
@@ -3019,7 +3044,7 @@ class TemporalMarketSceneGraph:
                             node.node_id,
                             SceneEdgeKind.SOURCED_FROM,
                             source_node,
-                            node.observed_at,
+                            clock,
                             (node.node_id, source_id),
                         )
                     continue
@@ -3032,7 +3057,7 @@ class TemporalMarketSceneGraph:
                         self._nodes[source_node].node_id,
                         relation,
                         node_id_for_edge,
-                        node.observed_at,
+                        clock,
                         (source_id, node.node_id),
                     )
                     continue
@@ -3041,7 +3066,7 @@ class TemporalMarketSceneGraph:
                         source_node,
                         SceneEdgeKind.CREATES,
                         node.node_id,
-                        node.observed_at,
+                        clock,
                         (source_id, node.node_id),
                     )
                     continue
@@ -3051,7 +3076,13 @@ class TemporalMarketSceneGraph:
                     relation = SceneEdgeKind.RETURNS_TO
                 elif node.kind == "micro_bos" and source_kind in {"bos", "swing", "path_sequence"}:
                     relation = SceneEdgeKind.CONFIRMS
-                self._add_relation(node.node_id, relation, source_id, node.observed_at, (node.node_id, source_id))
+                self._add_relation(
+                    node.node_id,
+                    relation,
+                    source_id,
+                    clock,
+                    (node.node_id, source_id),
+                )
 
             if node.kind == "bos" and node.lifecycle == "confirmed":
                 displacement_nodes = tuple(
@@ -3061,7 +3092,7 @@ class TemporalMarketSceneGraph:
                         self._node_id_for_source(
                             source_id,
                             kind="displacement",
-                            asof=node.observed_at,
+                            asof=clock,
                         ),
                     )
                     if candidate is not None
@@ -3073,7 +3104,7 @@ class TemporalMarketSceneGraph:
                         self._node_id_for_source(
                             source_id,
                             kind="swing",
-                            asof=node.observed_at,
+                            asof=clock,
                         ),
                     )
                     if candidate is not None
@@ -3084,11 +3115,14 @@ class TemporalMarketSceneGraph:
                             displacement_node,
                             SceneEdgeKind.BREAKS,
                             swing_node,
-                            node.observed_at,
+                            clock,
                             (node.entity_id or node.node_id,),
                         )
 
-            self._locate_liquidity_at_zones(node)
+            self._locate_liquidity_at_zones(
+                node,
+                relation_clock=clock,
+            )
 
         lower_nodes = [
             self._nodes[node_id]
@@ -3110,11 +3144,12 @@ class TemporalMarketSceneGraph:
             Timeframe.H4.value: 4,
         }
         for node in lower_nodes:
+            clock = relation_clock(node)
             structures = [
                 value
                 for value in self._current_kind_nodes_asof(
                     "structure",
-                    node.observed_at,
+                    clock,
                 )
                 if value.market_epoch_id == node.market_epoch_id
                 and value.lifecycle == StructureLifecycle.CONFIRMED.value
@@ -3144,19 +3179,26 @@ class TemporalMarketSceneGraph:
                 if node.direction is parent.direction
                 else SceneEdgeKind.OPPOSES
             )
-            self._add_relation(node.node_id, relation, parent.node_id, node.observed_at, (node.node_id, parent.node_id))
+            self._add_relation(
+                node.node_id,
+                relation,
+                parent.node_id,
+                clock,
+                (node.node_id, parent.node_id),
+            )
 
         for displacement in (
             node for node in lower_nodes if node.kind == "displacement"
         ):
+            clock = relation_clock(displacement)
             manipulation_candidates = (
                 *self._current_kind_nodes_asof(
                     "manipulation",
-                    displacement.observed_at,
+                    clock,
                 ),
                 *self._recent_terminal_context_nodes(
                     "manipulation",
-                    asof=displacement.observed_at,
+                    asof=clock,
                     maximum_age=pd.Timedelta(minutes=60),
                 ),
             )
@@ -3184,7 +3226,7 @@ class TemporalMarketSceneGraph:
                     source.node_id,
                     SceneEdgeKind.PRECEDES,
                     displacement.node_id,
-                    displacement.observed_at,
+                    clock,
                     (source.node_id, displacement.node_id),
                 )
 
