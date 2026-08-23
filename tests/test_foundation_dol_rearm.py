@@ -290,6 +290,84 @@ def test_dol_inventory_bypasses_cache_for_non_weakrefable_compatibility_view() -
     )
 
 
+def test_active_generation_ancestry_survives_legacy_source_disappearance() -> None:
+    adapter = CanonicalFoundationAdapter(tick_size=TICK)
+    _, level_event = _seed_level(adapter, label="above-level", price=100.0)
+    level = adapter.lifecycle.levels[-1]
+    generation_id = level.active_generation_id
+    assert generation_id is not None
+
+    base = market_observation(asof=_clock(0), price=99.0)
+    source = replace(
+        _source_item(base),
+        kind="previous_day_high",
+        source_ids=("source:above-level", "legacy-overlay-only"),
+    )
+    visible = _observation(
+        base,
+        minute=0,
+        price=99.0,
+        projection=adapter.projection,
+        source_identity="above-level",
+        source_item=source,
+    )
+    # The publisher retains its frozen compatibility template after the
+    # legacy inventory item leaves the hot view.  Keep that public snapshot
+    # while removing only the transient legacy item, matching the real
+    # Phase-9 lifecycle that previously shortened SceneNode.source_ids.
+    published_without_legacy = replace(
+        _observation(
+            base,
+            minute=1,
+            price=99.0,
+            projection=adapter.projection,
+            source_identity="above-level",
+            source_item=source,
+        ),
+        liquidity_inventory=tuple(
+            item
+            for item in base.liquidity_inventory
+            if item.item_id != "above-level"
+        ),
+    )
+
+    graph = TemporalMarketSceneGraph()
+    graph.update(visible)
+    graph.update(published_without_legacy)
+
+    node = _canonical_nodes(graph, level_id=level.level_id)[-1]
+    history = graph.node_history(node.node_id)
+    assert len(history) == 2
+    assert history[0].source_ids == history[1].source_ids
+    assert "legacy-overlay-only" not in node.source_ids
+    assert level_event.event_id in node.source_ids
+    assert generation_id in node.source_ids
+    assert dict(history[0].descriptive_metrics)["visibility_strength"] > 0.0
+    assert dict(history[1].descriptive_metrics)["visibility_strength"] == 0.0
+
+    replayed_projection = FoundationProjectionReducer.replay(
+        adapter.projection.records
+    )
+    replayed_snapshot = replace(
+        published_without_legacy.market_snapshot,
+        foundation=replayed_projection,
+    )
+    replayed_observation = replace(
+        published_without_legacy,
+        market_snapshot=replayed_snapshot,
+    )
+    replayed_graph = TemporalMarketSceneGraph()
+    replayed_graph.update(replayed_observation)
+    replayed_node = _canonical_nodes(
+        replayed_graph,
+        level_id=level.level_id,
+    )[-1]
+    assert replace(node, revision_id="") == replace(
+        replayed_node,
+        revision_id="",
+    )
+
+
 def test_sweep_departure_generation_two_reenters_graph_context_and_brain() -> None:
     adapter = CanonicalFoundationAdapter(tick_size=TICK)
     _, level_event = _seed_level(

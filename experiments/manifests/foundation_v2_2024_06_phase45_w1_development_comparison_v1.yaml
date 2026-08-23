@@ -179,7 +179,7 @@
     },
     "runtime_scene_graph": {
       "path": "smc_trader/scene_graph.py",
-      "sha256": "4ca9b1b87511069bb5bae9bbe9172f79e746f5eb8ace84491f2eae62d646ceae"
+      "sha256": "bac6b89909e12a5aa689f324caabe984195674f2c823f106b2f54940437c2d62"
     },
     "runtime_semantic_foundation": {
       "path": "smc_trader/semantic_foundation.py",

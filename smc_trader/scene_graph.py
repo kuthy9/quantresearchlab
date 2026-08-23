@@ -349,7 +349,14 @@ def foundation_dol_inventory(
                 source_ids=tuple(
                     dict.fromkeys(
                         (
-                            *(() if legacy is None else legacy.source_ids),
+                            # The compatibility item can leave the current
+                            # inventory while this canonical interaction
+                            # generation remains active.  Its source tuple is
+                            # therefore a transient descriptive overlay, not
+                            # frozen ancestry of the generation-specific
+                            # SceneNode.  The canonical creation and
+                            # interaction records already carry the exact
+                            # authoritative event ancestry.
                             *creation_record.source_event_ids,
                             generation_id,
                             *generation_record.source_event_ids,
