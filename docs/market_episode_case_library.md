@@ -6,9 +6,11 @@ advances a second replay loop.
 
 The current fail-closed contract is protocol
 `market-episode-input-only-1.2.0`, NeutralMarketState schema 2, neutral Engine
-checkpoint schema 2, and market-input runner state schema 7. Schema-1 neutral
-state/checkpoints, protocol 1.1.0, and runner-state schemas 4/5/6 cannot resume
-or materialize under this contract. Runner schema 6 added one run-level
+checkpoint schema 3, and market-input runner state schema 7. Schema-1 neutral
+state, pre-v3 Engine checkpoints, protocol 1.1.0, and runner-state schemas 4/5/6
+cannot resume or materialize under this contract. Engine checkpoint schema 3
+adds the production canonical-foundation projection; it does not change the
+18-field MarketEpisode row schema. Runner schema 6 added one run-level
 repository commit identity; schema 7 additionally binds the exact replay data
 continuity policy once in the run manifest. Neither is repeated in input rows.
 The recorder schema remains 1 and the Arrow row schema remains the same 18

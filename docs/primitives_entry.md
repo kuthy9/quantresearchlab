@@ -7,6 +7,14 @@ Current protocol: `3.2.0-group5.4`. Typed state and DFP/LSR input authority are
 available to the Brain. Group5 still has no independent action authority, and
 FAVR natural authority remains disabled and parked.
 
+This file documents the retained v1.2 playbook-facing Group-5 lifecycle. Its
+`first_pullback` is not the additive foundation's canonical geometric First
+Retest research object. Foundation v2 requires an exact object generation,
+strictly later observed departure, one native completed-bar return, and an
+outcome-blind frozen information set; evidence from either definition cannot be
+silently transferred to the other. See the
+[`foundation specification`](refactor/canonical_semantic_foundation_v2.md).
+
 Group 5 closes four legacy semantic gaps with one incremental reducer:
 
 1. entry location is the completed 1m relationship to one exact frozen 5m

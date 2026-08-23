@@ -2,6 +2,7 @@
 
 Status date: 2026-08-23
 Runtime semantic identity reviewed: `smc_semantics_v1.2`
+Additive foundation identity: `smc_semantic_foundation_v2.0`
 Audience: technical reviewers of Trading Eye / Trading Brain semantics
 
 ## Technical summary
@@ -15,17 +16,16 @@ signals. It separates two questions that must remain independent:
   matched control, corresponds to a distinct MBO state, survives regime/time
   splits, and ultimately passes unopened OOS evaluation.
 
-The current system has a strong event-sourced base, but the target state is not
-complete. This review identified and fixes only definition defects that need no
-new market assumption: exact tick-grid normalization, immutable crossing
-terminal generations, stronger canonical-event source contracts, and protected
-external-regime transition precedence. It deliberately does **not** invent the
-missing rules for geometric Swing nesting, Structural Leg path metrics,
-internal-structure generations, Order Block decomposition, Structural Dealing
-Range, persistent Delivery Phase, FVG expiry, or range extension.
+Round 2 first fixed only definition defects that needed no new market
+assumption: exact tick-grid normalization, immutable crossing terminals,
+stronger source contracts, and protected-regime precedence. The later
+[Canonical Semantic Foundation v2](canonical_semantic_foundation_v2.md) now
+closes the requested geometry, generation, lifecycle, reinteraction, ancestry,
+and factual-outcome definitions as an additive projection over those unchanged
+v1.2 facts. It does not invent an FVG time TTL or range-extension rule.
 
-The frozen v1.2 research artifacts remain historical evidence. Current working-
-tree hardening does not rewrite their bytes or retroactively promote them. The
+The frozen v1.2 research artifacts remain historical evidence. Later versioned
+source hardening does not rewrite their bytes or retroactively promote them. The
 January Signal Research diagnostic remains sparse after E2; the June MBO study
 supports only Acceptance continuation and Displacement impact for Phase 7
 evidence admission. Neither result is predictive, OOS, causal, or trading
@@ -40,23 +40,23 @@ must be deleted.
 
 | # | Semantic | Definition status after this round | Empirical / predictive status | Required next gate |
 |---:|---|---|---|---|
-| 1 | Confirmed Swing | **Valid after tick/store hardening.** Strict pivot confirmation is causal and the full source-bar window is auditable. The current role hierarchy is a causal role-depth projection, not geometric nesting. | Descriptive coverage reviewed; incremental/predictive value unknown; OOS not tested. | If geometric hierarchy is still required, freeze duration, prominence, time/price containment, tie-break, and late-confirmation reparenting in a new version. |
-| 2 | Structural Leg | **Partial.** Direction, amplitude, duration, retracement, and one efficiency measure exist. The requested `close_efficiency`, `extreme_path_efficiency`, `close_MAE`, `wick_MAE`, full path ancestry, and explicit `ATR_at_leg_start` reference do not. | Unknown. | Preregister formulas, units, ATR source event/value, and path-bar ancestry before changing the canonical event. |
-| 3 | Candidate Liquidity | **Strong core; lifecycle partial.** Registered source taxonomy and immutable crossing identity are enforced. A fully specified same-level rearm rule is still absent. | Unknown. | Freeze rearm/generation-close rules; do not use a heuristic runtime flag. |
+| 1 | Confirmed Swing | **Valid after tick/store hardening.** Strict pivot confirmation is causal and the full source-bar window is auditable. Foundation v2 adds a separate purely geometric containment tree; role depth remains independent. | Descriptive coverage reviewed; incremental/predictive value unknown; OOS not tested. | Test whether geometry adds information; do not infer semantic importance from depth. |
+| 2 | Structural Leg | **Definition complete in foundation v2.** It freezes full native-bar ancestry, tick/ATR amplitude, two efficiencies, close/wick MAE, duration, and 14 strictly-prior BAR sources for `ATR_at_leg_start`. | Unknown. | Run a fresh version-bound construct study; historical v1.2 legs do not contain these features. |
+| 3 | Candidate Liquidity | **Definition/lifecycle complete in foundation v2.** Source identity is retained across immutable interaction generations; Sweep can enter a registered departure-based rearm path while Acceptance/retirement remains terminal. | Unknown. | Validate source-family rearm and retirement effects; do not tune rules on outcomes. |
 | 4 | Sweep | **Strong after generation uniqueness hardening.** `event_time` remains the crossing occurrence and `known_at` the terminal resolution clock; one generation has one terminal. | Phase 6 MBO: n=24, underpowered, Holm-adjusted p=1. Predictive value unknown. | Independent validation; no threshold relaxation or post-hoc extension. |
 | 5 | Acceptance | **Strong.** Penetration, resolution, clocks, direction, candidate generation, and protected-swing invalidation context are exact-source bound. | Phase 6 MBO construct association supported: n=39, mean effect about 0.14522. Predictive value unknown; OOS not tested. | Fit/validate only under an independently frozen design. |
 | 6 | Displacement ACTIVE v1.0 | **Strong/frozen.** Continuous episode state, strict-prior baseline, frozen `atr0`, lifecycle, and FVG separation remain intact; store provenance is hardened. | Phase 6 n=75 construct association supported. Score monotonicity is weak (rho about 0.024), so score is not a calibrated probability. Predictive value unknown; OOS not tested. | Preserve v1.0; preregister any new body/TR/volume-z metrics and their ATR/baseline rules in a new version. |
-| 7 | Raw Break | **Valid after exact tick normalization.** Wick, close break, and Acceptance remain distinct. | Unknown. | No new detector; study only after upstream structure generations are frozen. |
-| 8 | Structure Direction | **Partial, with reducer precedence hardened.** A live exact protected assignment cannot be overwritten by an opposite direction/Q-BOS without its registered Acceptance; MSS may change only internal direction. The detector-side generation lifecycle still needs a versioned redesign. | Unknown. | Freeze persistent external generation and transition feedback to the tracker; do not infer regime from the latest HH/HL snapshot. |
-| 9 | Qualified BOS | **Strong after source cross-link hardening.** Qualification uses a prior persistent same-timeframe direction and exact Raw Break ancestry; it cannot simultaneously create the direction it consumes. | Unknown. | Revalidate after the persistent tracker generation is versioned. |
+| 7 | Raw Break | **Valid after exact tick normalization.** Wick, close break, and Acceptance remain distinct; foundation v2 separately retains a wick-only Boundary Attack. | Unknown. | Study under the frozen generation identity; do not turn Boundary Attack into BOS/MSS. |
+| 8 | Structure Direction | **Persistent lifecycle complete in foundation v2.** External generations persist to an exact termination cause; internal challengers remain forming until a separate confirmation fact. Snapshot direction remains a projection, not generation identity. | Unknown. | Study generation age and child evidence without treating snapshots as independent samples. |
+| 9 | Qualified BOS | **Strong after source cross-link hardening.** Qualification uses a prior persistent same-timeframe direction and exact Raw Break ancestry; it cannot simultaneously create the direction it consumes. | Unknown. | Revalidate in a study explicitly bound to the frozen foundation-v2 Structure Generation. |
 | 10 | Protected Swing | **Strong after provenance/lifecycle hardening.** Assignment binds Swing → Leg → BOS; invalidation binds the exact live assignment and opposite Acceptance; monotonicity remains. | Survival study not run. | Freeze assignment-time covariates, competing risks, horizon, pre-treatment matching, and repeated-assignment policy. |
-| 11 | MSS Core | **Partial.** Sweep, Displacement, and FVG remain context, not definition. The current event does not yet prove an explicit `internal_structure_generation_id` or first terminal within that generation. | OHLCV comparison 48.08% with Sweep vs 48.28% without; Phase 6 MBO n=2. Underpowered/predictive unknown. | New semantic version with explicit generation start/terminal/transition identity; do not infer the missing remainder of the supplied brief. |
-| 12 | FVG | **Geometry/lifecycle core strong after tick normalization; expiry deliberately undefined.** | Phase 6's historical first-concrete-lifecycle proxy (originally labelled `fvg_retest_response`) had n=31 and was unsupported; it was not a geometric first-retest estimand. This does not invalidate the descriptive primitive itself. | Run a newly preregistered true first-retest study; define `FVG_EXPIRED` only with an explicit clock, threshold, reset, and transition precedence. |
-| 13 | Order Block / Origin Zone | **Partial and over-composite.** Current production output is a qualified origin-zone composite: active displacement + exact BOS/MSS relation + break membership + origin cluster. Terminal provenance is fail-closed. | Lifecycle counts only; matched causal first-retest study not run. | Version and publish base origin geometry separately from impulse/BOS qualification and retest lifecycle; freeze method before implementation. |
-| 14 | Active Dealing Range | **Definition conflated.** The existing H1 detector implements a sparse two-sided **Mature Balance Range**, while event/state names and downstream consumers treat it as a generic Structural Dealing Range. | 448 forming candidates produced only 2 mature ranges in the bounded natural scan. This evidence belongs to Balance Range only. | New version must split Structural Dealing Range and Balance Range identities/events/consumers before IRL/ERL or Brain balance evidence can be promoted. |
-| 15 | Premium / Discount / IRL / ERL | **Mathematically valid; production binding blocked.** Normalized location and boundary membership are deterministic, but their market meaning depends on the conflated range authority. | Unknown. | Rebind only after the range split; do not reinterpret historical Balance Range artifacts. |
-| 16 | Delivery Phase | **Partial.** It is currently a deterministic snapshot projection recomputed from structure/leg/range, not a persistent independent generation with entered-at and transition source DAG. | Unknown. | Freeze phase states, transition events, source authority, and precedence after the range split. |
-| 17 | DOL Candidate | **Candidate fact boundary strong; ranking integration partial.** Eye remains non-decisional and no-target mass is preserved. The compatibility ranking still consumes the legacy two-level rank rather than the event-sourced four-role projection. | Probability model not fitted, calibrated, validated, or admitted; shadow-only and action authority false. | Complete the `MarketSnapshot + events` sole-input migration, range/rank feature mapping, and independent calibration before promotion. |
+| 11 | MSS Core | **Transition-evidence boundary complete in foundation v2.** MSS starts or updates one forming internal challenger and one external transition; it never confirms an opposite regime by itself. Confirmation/failure/censoring are immutable later facts. | OHLCV comparison 48.08% with Sweep vs 48.28% without; Phase 6 MBO n=2. Underpowered/predictive unknown. | Study `P(transition confirmation | MSS)` on fresh generation-bound episodes. |
+| 12 | FVG | **Geometry, structural lifecycle, and true first-retest definition complete.** Age remains continuous; invalidation and structural/reset expiry are distinct; no arbitrary TTL exists. | Phase 6's historical first-concrete-lifecycle proxy (originally labelled `fvg_retest_response`) had n=31 and was unsupported; it was not the new geometric first-retest estimand. | Run a newly preregistered true first-retest study; only empirical evidence could justify a later TTL. |
+| 13 | Order Block / Origin Zone | **Decomposed in foundation v2.** Base Origin Core freezes outcome-blind geometry; Qualified OB separately binds active Displacement and compatible BOS/MSS. First reinteraction waits for a strictly future departure and return. | Lifecycle counts only; matched causal first-retest study not run. | Run the fresh version-bound study; do not relabel historical composite counts. |
+| 14 | Active Dealing Range | **Identities split in foundation v2.** The legacy detector remains historical Mature Balance Range; Structural Range is a separate structure-owned geometry and both may coexist. | 448 forming candidates produced only 2 mature Balance Ranges in the bounded natural scan. This evidence does not validate Structural Range. | Study each range independently and preserve the legacy evidence label. |
+| 15 | Premium / Discount / IRL / ERL | **Dual location definition complete.** Foundation publishes independent `x_structural_range` and `x_balance_range`; premium/discount belongs primarily to Structural Range. | Unknown. | Validate location features without pooling the two range types. |
+| 16 | Delivery Phase | **Persistent generation complete in foundation v2.** It reuses the deterministic classifier while retaining parent Structure Generation, entry/update/terminal clocks, age, extrema, and next phase. | Unknown. | Study phase age and transitions; no fitted inference exists. |
+| 17 | DOL Candidate | **Candidate fact boundary strong; ranking integration partial.** Eye remains non-decisional and no-target mass is preserved. The public target map now honors foundation lifecycle eligibility, including Generation-2 rearm and Acceptance/retirement exclusion; the compatibility Brain still has legacy observation/rank inputs. | Probability model not fitted, calibrated, validated, or admitted; shadow-only and action authority false. | Complete the `MarketSnapshot + events` sole-input migration, freeze remaining range/rank features, and independently calibrate before promotion. |
 
 ## Scope, evidence, and claim classes
 
@@ -112,7 +112,7 @@ framework, or execution path was introduced.
 
 ## Definition defects closed without new market assumptions
 
-The current working tree closes four authority seams:
+The versioned v1.2 hardening closes four authority seams:
 
 - raw OHLC prices are admitted only on the exact integer tick grid before
   detector state mutates; shared integer-ratio conversion replaces banker-
@@ -148,37 +148,32 @@ and prevents a stale context from terminalizing a later regime. Consequently,
 the r2 bundle must not be reused as Protected-Swing survival evidence; that
 study already requires a new frozen design and fresh version-bound output.
 
-## The main remaining work is definition-gated, not coding backlog
+## The main remaining work is empirical, not more vocabulary
 
-The following work must not be implemented until its semantic contract is
-frozen:
+Foundation v2 closes the semantic-definition items previously listed here.
+The following work remains deliberately outside this implementation:
 
-1. **Semantic vNext foundation:** geometric Swing containment; explicit
-   Structural Leg path/ATR references; persistent external and internal
-   structure generations; and complete path ancestry for multi-bar resolution.
-2. **Range split:** preserve existing Mature Balance Range evidence under its
-   real identity, then separately define Structural Dealing Range, IRL/ERL
-   authority, and persistent Delivery Phase transitions.
-3. **Zone decomposition:** separate base origin geometry from displacement,
-   BOS/MSS qualification, and first-retest lifecycle; separately define FVG
-   expiry if it is still desired.
-4. **Independent empirical programs:** Protected-Swing survival, matched
+1. **Independent empirical programs:** Protected-Swing survival, matched
    Origin-Zone first retest, a true FVG first-retest study, and any new path
    metrics.
-5. **Brain promotion:** make `MarketSnapshot + events` the sole input, freeze
+2. **Brain promotion:** make `MarketSnapshot + events` the sole input, freeze
    scope-retirement semantics, fit and independently validate path/DOL/outcome
    artifacts, and keep default production at zero intents until all are admitted.
-6. **Execution and operations:** finish method-price plus wait/cancel/stop/target
+3. **Execution and operations:** finish method-price plus wait/cancel/stop/target
    provenance, run the formal paired execution study, and then run the real-time
    multi-day no-order pilot before OOF/OOS.
+4. **Future definition changes:** any empirical FVG TTL, Structural Range
+   extension, or new tutorial SMC object requires a new registry version. It
+   cannot be silently patched into this foundation.
 
 ## Limitations and robustness boundary
 
-- The supplied brief ends mid-MSS status. This report covers all 17 concepts
-  named in the visible summary, but it does not claim compliance with unseen
-  detailed instructions.
-- The current role-depth hierarchy is causal and replay-stable, but it is not
-  the continuous prominence/duration/nesting hierarchy described as a target.
+- The historical round-two brief audited by this report ended mid-MSS status.
+  The later, complete foundation-v2 request is governed by the separate
+  foundation specification and current implementation status; this review does
+  not retroactively invent content for the earlier brief.
+- Role depth and geometric depth are now distinct replay-stable fields. No
+  relationship between them has been empirically established.
 - Existing range files and events are frozen historical contracts. Renaming
   their bytes in place would destroy reproducibility; the correct fix is a new
   semantic version and explicit migration.
@@ -191,20 +186,18 @@ frozen:
   cannot be repaired by post-hoc thresholds.
 - Phase 6 is development association evidence. Only its exact allowlist can
   enter Phase 7 evidence admission, and those effects are not likelihoods.
-- The repository working tree contains uncommitted/untracked implementation and
-  large hash-bound evidence. A reproducible source snapshot plus Git LFS or an
-  immutable artifact receipt is still required before ordinary publication.
+- Large historical ledgers remain hash-bound evidence and are not copied into
+  ordinary Git merely as cleanup. Their existing receipts remain the durable
+  authority boundary.
 
 ## Recommended next decision
 
-Do not start another broad refactor or open the sealed holdout. First review and
-freeze one coherent semantic vNext proposal covering the persistent structure
-generation and range split, with exact event schemas and migration rules. In
-parallel, retain the current v1.2 artifacts as immutable development evidence
-and complete only the already-defined engineering/empirical gates listed above.
+Do not start another broad refactor or open the sealed holdout. Freeze the
+foundation-v2 source snapshot, retain v1.2 artifacts as immutable development
+evidence, and move to the already-defined empirical gates without adding more
+canonical SMC vocabulary.
 
-Further questions that must be answered in preregistration—not in runtime code—
-are: the precise Swing containment unit and reparent policy; Structural Leg ATR
-reference; same-level liquidity rearm rule; structural-range anchors and
-extension semantics; Delivery Phase transition precedence; and the estimands,
-controls, horizons, and competing-risk rules for each remaining study.
+Further questions that must be answered in preregistration—not runtime
+heuristics—are the empirical estimands, controls, horizons, competing risks,
+and any future expiry/extension threshold. The implemented containment, ATR,
+rearm, range, and Delivery contracts are frozen in the v2 registry.

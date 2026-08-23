@@ -14,6 +14,7 @@ import pandas as pd
 
 from .dol_probability import DOLProbabilityResult
 from .dol_ranking import DOLRankingResult
+from .foundation_registry import FOUNDATION_VERSION
 from .path_belief import PathBeliefUpdateRecord, PathCompetitionSetState
 
 if TYPE_CHECKING:
@@ -220,6 +221,9 @@ class EventKind(str, Enum):
     TIMEFRAME_STATE_CHANGED = "timeframe_state_changed"
     RELATION_STATE_CHANGED = "relation_state_changed"
     SESSION_STATE_CHANGED = "session_state_changed"
+    # Technical, rebuildable transport for the versioned foundation
+    # projection.  This is not a new canonical SMC market-language term.
+    FOUNDATION_STATE_CHANGED = "foundation_state_changed"
     SWING_FORMED = "swing_formed"
     SWING_STATE = "swing_state"
     STRUCTURE_STATE = "structure_state"
@@ -691,7 +695,7 @@ class Bar:
 
     @property
     def end(self) -> pd.Timestamp:
-        return self.start + pd.Timedelta(minutes=1)
+        return self.start + pd.Timedelta(1, unit="min")
 
     @property
     def open_ticks(self) -> int | None:
@@ -1063,6 +1067,22 @@ class StructuralLegState:
     max_retracement_atr: float
     rank: SwingRank = SwingRank.INTERNAL
     source_swing_ids: tuple[str, str] = ("", "")
+    # Foundation-v2 path metrics are additive so frozen v1.2 event payloads
+    # remain readable.  A leg produced by the foundation builder populates
+    # every optional field; ``None``/empty values identify historical v1.2
+    # compatibility objects rather than silently reconstructed evidence.
+    amplitude_ticks: int | None = None
+    atr_at_leg_start: float | None = None
+    duration_seconds: int | None = None
+    close_efficiency: float | None = None
+    extreme_path_efficiency: float | None = None
+    close_mae_points: float | None = None
+    close_mae_atr: float | None = None
+    wick_mae_points: float | None = None
+    wick_mae_atr: float | None = None
+    path_candle_ids: tuple[str, ...] = ()
+    atr_source_candle_ids: tuple[str, ...] = ()
+    foundation_version: str | None = None
 
     def __post_init__(self) -> None:
         for name in ("start_event_time", "end_event_time", "known_at"):
@@ -1074,6 +1094,24 @@ class StructuralLegState:
         object.__setattr__(self, "rank", SwingRank(self.rank))
         source_ids = tuple(self.source_swing_ids)
         object.__setattr__(self, "source_swing_ids", source_ids)
+        path_candle_ids = tuple(self.path_candle_ids)
+        object.__setattr__(self, "path_candle_ids", path_candle_ids)
+        atr_source_candle_ids = tuple(self.atr_source_candle_ids)
+        object.__setattr__(
+            self,
+            "atr_source_candle_ids",
+            atr_source_candle_ids,
+        )
+        duration_seconds = self.duration_seconds
+        if duration_seconds is None:
+            duration_seconds = int(
+                (self.end_event_time - self.start_event_time).total_seconds()
+            )
+            object.__setattr__(self, "duration_seconds", duration_seconds)
+        close_efficiency = self.close_efficiency
+        if close_efficiency is None:
+            close_efficiency = float(self.efficiency)
+            object.__setattr__(self, "close_efficiency", close_efficiency)
         continuous = (
             self.start_price,
             self.end_price,
@@ -1084,6 +1122,7 @@ class StructuralLegState:
             self.efficiency,
             self.max_retracement_points,
             self.max_retracement_atr,
+            close_efficiency,
         )
         expected_direction = (
             Direction.LONG
@@ -1116,8 +1155,119 @@ class StructuralLegState:
             or self.duration_bars < 2
             or type(self.duration_minutes) is not int
             or self.duration_minutes <= 0
+            or type(duration_seconds) is not int
+            or duration_seconds <= 0
+            or duration_seconds
+            != int(
+                (self.end_event_time - self.start_event_time).total_seconds()
+            )
+            or not 0.0 <= float(close_efficiency) <= 1.0
+            or not math.isclose(
+                float(close_efficiency),
+                float(self.efficiency),
+                rel_tol=1e-12,
+                abs_tol=1e-12,
+            )
         ):
             raise ValueError("structural leg geometry or provenance is invalid")
+        optional_non_negative = (
+            self.extreme_path_efficiency,
+            self.close_mae_points,
+            self.close_mae_atr,
+            self.wick_mae_points,
+            self.wick_mae_atr,
+        )
+        if (
+            self.amplitude_ticks is not None
+            and (
+                type(self.amplitude_ticks) is not int
+                or self.amplitude_ticks <= 0
+            )
+        ) or (
+            self.atr_at_leg_start is not None
+            and (
+                not math.isfinite(float(self.atr_at_leg_start))
+                or float(self.atr_at_leg_start) <= 0.0
+            )
+        ) or any(
+            value is not None
+            and (
+                not math.isfinite(float(value))
+                or float(value) < 0.0
+            )
+            for value in optional_non_negative
+        ) or (
+            self.extreme_path_efficiency is not None
+            and float(self.extreme_path_efficiency) > 1.0
+        ):
+            raise ValueError("structural leg foundation metrics are invalid")
+        if (
+            path_candle_ids
+            and (
+                len(path_candle_ids) != self.duration_bars
+                or len(path_candle_ids) != len(set(path_candle_ids))
+                or any(
+                    not isinstance(value, str) or not value
+                    for value in path_candle_ids
+                )
+            )
+        ):
+            raise ValueError("structural leg path ancestry is invalid")
+        if atr_source_candle_ids and (
+            len(atr_source_candle_ids) != 14
+            or len(atr_source_candle_ids)
+            != len(set(atr_source_candle_ids))
+            or any(
+                not isinstance(value, str) or not value
+                for value in atr_source_candle_ids
+            )
+        ):
+            raise ValueError("structural leg ATR ancestry is invalid")
+        foundation_fields = (
+            self.amplitude_ticks,
+            self.atr_at_leg_start,
+            self.extreme_path_efficiency,
+            self.close_mae_points,
+            self.close_mae_atr,
+            self.wick_mae_points,
+            self.wick_mae_atr,
+        )
+        has_foundation_metrics = any(
+            value is not None for value in foundation_fields
+        ) or bool(path_candle_ids) or bool(
+            atr_source_candle_ids
+        ) or self.foundation_version is not None
+        if has_foundation_metrics and (
+            any(value is None for value in foundation_fields)
+            or not path_candle_ids
+            or len(atr_source_candle_ids) != 14
+            or self.foundation_version != FOUNDATION_VERSION
+        ):
+            raise ValueError(
+                "structural leg foundation metrics must be complete and versioned"
+            )
+        if self.atr_at_leg_start is not None:
+            atr0 = float(self.atr_at_leg_start)
+            normalized_pairs = (
+                (self.amplitude_points, self.amplitude_atr),
+                (self.max_retracement_points, self.max_retracement_atr),
+                (self.close_mae_points, self.close_mae_atr),
+                (self.wick_mae_points, self.wick_mae_atr),
+            )
+            if any(
+                points is None
+                or normalized is None
+                or not math.isclose(
+                    float(normalized),
+                    float(points) / atr0,
+                    rel_tol=1e-9,
+                    abs_tol=1e-9,
+                )
+                for points, normalized in normalized_pairs
+            ):
+                raise ValueError(
+                    "structural leg ATR metrics do not use ATR at leg start"
+                )
 
 
 @dataclass(frozen=True)

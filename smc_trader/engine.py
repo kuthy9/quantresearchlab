@@ -16,6 +16,11 @@ from .dol_probability import (
     load_dol_probability_model_artifact,
     load_dol_probability_protocol,
 )
+from .foundation_registry import (
+    FOUNDATION_CANONICAL_IDENTITY,
+    FOUNDATION_VERSION,
+    load_foundation_registry,
+)
 from .model import (
     AccountState,
     Bar,
@@ -62,7 +67,7 @@ _REQUIRED_PRIMITIVE_PROTOCOLS = (
 )
 _LIVE_READINESS_TOKEN = object()
 RUNTIME_ACTION_POLICY_SCHEMA_VERSION = 1
-NEUTRAL_ENGINE_CHECKPOINT_SCHEMA_VERSION = 2
+NEUTRAL_ENGINE_CHECKPOINT_SCHEMA_VERSION = 3
 
 
 def normalize_action_disabled_playbooks(
@@ -188,6 +193,8 @@ class ContinuousSMCEngine:
         # binds this identity so two engines with coincidentally equal early
         # outputs cannot be mistaken for the same registered runtime.
         self._model_config_sha256: str | None = None
+        self._foundation_version: str | None = None
+        self._foundation_registry_identity: str | None = None
         self._neutral_checkpoint_schema_version = (
             NEUTRAL_ENGINE_CHECKPOINT_SCHEMA_VERSION
         )
@@ -206,11 +213,21 @@ class ContinuousSMCEngine:
             )
         last_snapshot = state.get("_last_snapshot")
         neutral_market_state = state.get("_neutral_market_state")
+        foundation_version = state.get("_foundation_version")
+        foundation_identity = state.get("_foundation_registry_identity")
         if (
             state.get("_neutral_checkpoint_schema_version")
             != NEUTRAL_ENGINE_CHECKPOINT_SCHEMA_VERSION
             or "_neutral_market_state" not in state
             or "_last_snapshot" not in state
+            or "_foundation_version" not in state
+            or "_foundation_registry_identity" not in state
+            or (foundation_version is None) != (foundation_identity is None)
+            or foundation_version not in {None, FOUNDATION_VERSION}
+            or foundation_identity not in {
+                None,
+                FOUNDATION_CANONICAL_IDENTITY,
+            }
             or (
                 neutral_market_state is not None
                 and not isinstance(neutral_market_state, NeutralMarketState)
@@ -278,6 +295,37 @@ class ContinuousSMCEngine:
                 "model.observer must bind typed primitive protocols: "
                 + ", ".join(missing_protocols)
             )
+        if observer_raw.get("canonical_foundation_enabled") is not True:
+            raise ValueError(
+                "model.observer.canonical_foundation_enabled must be true"
+            )
+        foundation_source = observer_raw.get("canonical_foundation_registry")
+        foundation_identity = observer_raw.get("canonical_foundation_identity")
+        if (
+            not isinstance(foundation_source, (str, Path))
+            or not str(foundation_source).strip()
+        ):
+            raise ValueError(
+                "model.observer.canonical_foundation_registry must be bound"
+            )
+        if (
+            not isinstance(foundation_identity, str)
+            or len(foundation_identity) != 64
+            or any(
+                character not in "0123456789abcdef"
+                for character in foundation_identity
+            )
+        ):
+            raise ValueError(
+                "model.observer.canonical_foundation_identity must be SHA-256"
+            )
+        foundation_path = Path(foundation_source)
+        if not foundation_path.is_absolute() and not foundation_path.exists():
+            foundation_path = Path(__file__).resolve().parents[1] / foundation_path
+        foundation_registry = load_foundation_registry(
+            foundation_path,
+            expected_identity=foundation_identity,
+        )
         minimum = observer_raw.get("minimum_bars", {})
         observer = CausalObserver(
             ObserverConfig(
@@ -317,6 +365,7 @@ class ContinuousSMCEngine:
                     )
                 ),
                 scale_specs=scale_specs,
+                canonical_foundation_enabled=True,
             )
         )
         registry = load_playbook_registry(
@@ -633,11 +682,21 @@ class ContinuousSMCEngine:
             _readiness_token=_LIVE_READINESS_TOKEN,
         )
         engine._model_config_sha256 = hashlib.sha256(raw_config).hexdigest()
+        engine._foundation_version = foundation_registry.foundation_version
+        engine._foundation_registry_identity = foundation_registry.identity
         return engine
 
     @property
     def model_config_sha256(self) -> str | None:
         return getattr(self, "_model_config_sha256", None)
+
+    @property
+    def foundation_version(self) -> str | None:
+        return getattr(self, "_foundation_version", None)
+
+    @property
+    def foundation_registry_identity(self) -> str | None:
+        return getattr(self, "_foundation_registry_identity", None)
 
     @property
     def last_snapshot(self) -> EngineSnapshot | NeutralEngineSnapshot | None:

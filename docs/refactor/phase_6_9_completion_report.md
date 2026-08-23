@@ -2,6 +2,7 @@
 
 Status date: 2026-08-23
 Runtime semantic identity: `smc_semantics_v1.2`
+Current additive foundation identity: `smc_semantic_foundation_v2.0`
 
 This report records the current Phase 6–9 boundary. It does not modify or
 reinterpret frozen experiment artifacts, open an OOS/holdout window, authorize
@@ -9,6 +10,13 @@ broker submission, or claim market edge.
 The later [round-two semantic review](semantic_review_round_2.md) is the
 definition-versus-empirical status authority for the 17 concepts. It does not
 reinterpret these frozen Phase 5/6 results.
+The still-later
+[Canonical Semantic Foundation v2](canonical_semantic_foundation_v2.md)
+completes the current object/lifecycle definitions without changing this
+report's frozen study units. Its bounded June-2024 Observer construction/replay
+and current Engine file-parity checks are engineering verification only. They
+are not a Phase 6 rerun, a 6,900-clock or real-time multi-day Phase 9 pilot, or
+empirical validation.
 Against the attached target-state prompt, the aggregate completion verdict is
 **partial**, not complete: the fail-closed architecture is ahead of its fitted,
 empirical, operational, rolling-OOF, and sealed-OOS evidence gates.
@@ -20,7 +28,15 @@ empirical, operational, rolling-OOF, and sealed-OOS evidence gates.
 | 6. MBO mechanism | Complete | Registered two-week development study complete with final reproducibility review | Only Acceptance continuation and Displacement impact enter the Phase 7 evidence allowlist |
 | 7. Brain probability and intent | Reducer, current-scope runtime path lifecycle, artifact loaders, and read-only fit-readiness checker integrated in the existing Brain | Checker inspects 7,381 Phase 6 rows and reports 13 blockers; scope-retirement rule and fitted/admitted path, DOL, and outcome artifacts absent | Shadow-only; neutral updates; zero production Trade Intents; no Decision/Risk authority |
 | 8. Execution | Seven-entry-method evaluator v1.1 core, read-only blocked-template checker, and standalone immutable order FSM v1.5 implemented; evaluator/readiness 40/40 green and FSM-focused review P0/P1=0 | Checker reports 12 blockers; method provenance/variants, formal runner, end-to-end handoff, and empirical result absent | No broker/network submission and no fill-quality claim |
-| 9. Shadow Live | Deterministic parity runner v1.2 and read-only capacity preflight implemented | Pre-supplement 6,900-clock input and exact 200-clock checkpoint/resume/cold prefix retained; completion/checkpoint SHA binding verifies, but current dependency bindings differ; operational metrics, full historical run, and real-time pilot absent | `NullExecutionGateway`; capacity estimate and engineering parity only |
+| 9. Shadow Live | Deterministic parity runner v1.2 and read-only capacity preflight implemented | Pre-supplement 6,900-clock input and historical 200-clock checkpoint/resume/cold receipt retained; a separate current Foundation-enabled 200-row file-parity run binds the current model/registry. Operational metrics, complete 6,900-clock run, and real-time pilot remain absent | `NullExecutionGateway`; capacity estimate and bounded engineering parity only |
+
+The current 200-row run does not overwrite the historical receipt below. Its
+current model, Foundation, Shadow, input, and live/cold fingerprints are frozen
+in the single
+[Foundation release-verification table](canonical_semantic_foundation_v2.md#replay-test-and-empirical-boundary)
+and the separate
+[current machine receipt](../evidence/phase9_foundation_v2_prefix_200_receipt.json).
+The temporary result bundle is not a committed or portable evidence artifact.
 
 ## Phase 6: completed MBO study
 
@@ -355,12 +371,13 @@ semantics.
 
 ## Next gates
 
-1. Freeze a semantic vNext for geometric Swing containment, Structural Leg path
-   metrics/ATR reference, persistent structure generations, the base-versus-
-   qualified Origin-Zone split, and the Structural-versus-Balance Range split.
-   Separately freeze Protected-Swing survival and matched Origin-Zone first-
-   retest studies. Do not infer FVG expiry, range extension, or Delivery Phase
-   transitions from the existing role-depth/snapshot code.
+1. The additive `smc_semantic_foundation_v2.0` now freezes geometric Swing
+   containment, full Structural Leg paths/ATR ancestry, persistent structure/
+   relation/delivery generations, Origin Core versus Qualified OB, dual ranges,
+   structural FVG expiry, and true first reinteraction without rewriting these
+   historical Phase 6 results. Separately preregister fresh Protected-Swing and
+   first-retest studies. Do not relabel the historical first-concrete-lifecycle
+   proxy or infer a time TTL/range extension from it.
 2. Keep the frozen June Week-4 temporal/branching design unchanged; bind a
    separate executable revision to the exact mechanism artifact, runtime
    identities, and 6,900-clock census, then run that bounded diagnostic once.

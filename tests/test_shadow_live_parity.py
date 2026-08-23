@@ -22,6 +22,10 @@ from smc_trader.execution_fsm import (
     risk_approve_trade_intent,
 )
 from smc_trader.model import AccountState, Bar
+from smc_trader.foundation_registry import (
+    FOUNDATION_CANONICAL_IDENTITY,
+    FOUNDATION_VERSION,
+)
 from smc_trader.observation import ExecutionRealityInput
 from smc_trader.trade_intent import EntryMethod
 from smc_trader.shadow_live import (
@@ -55,6 +59,24 @@ def _engine() -> ContinuousSMCEngine:
         ROOT / "configs/model.json",
         runtime_mode="development",
     )
+
+
+def test_shadow_runtime_bindings_freeze_foundation_registry() -> None:
+    bindings = dict(_bindings())
+    assert bindings["foundation_version"] == FOUNDATION_VERSION
+    assert (
+        bindings["foundation_registry_identity"]
+        == FOUNDATION_CANONICAL_IDENTITY
+    )
+
+    engine = _engine()
+    engine._foundation_registry_identity = "0" * 64
+    with pytest.raises(ShadowLiveError, match="runtime bindings differ"):
+        ShadowLiveRunner(
+            engine=engine,
+            protocol=load_shadow_live_protocol(PROTOCOL_PATH),
+            runtime_bindings=bindings,
+        )
 
 
 def _shadow_approved():

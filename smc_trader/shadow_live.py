@@ -29,6 +29,7 @@ from .execution_fsm import (
     RiskApprovedTradeIntent,
     account_state_fingerprint,
 )
+from .foundation_registry import load_foundation_registry
 from .model import (
     AccountState,
     Bar,
@@ -74,6 +75,8 @@ SHADOW_RUNTIME_BINDING_KEYS = (
     "dol_probability_protocol_fingerprint",
     "dol_ranking_protocol_fingerprint",
     "execution_protocol_fingerprint",
+    "foundation_registry_identity",
+    "foundation_version",
     "model_config_sha256",
     "path_protocol_fingerprint",
     "semantic_version",
@@ -316,7 +319,7 @@ def load_shadow_live_protocol(
 def shadow_runtime_bindings_from_model_config(
     path: str | Path = "configs/model.json",
 ) -> tuple[tuple[str, str], ...]:
-    """Bind exact model bytes and every Phase 7/8 protocol used by parity."""
+    """Bind model bytes, the canonical foundation, and Phase 7/8 protocols."""
 
     source = Path(path)
     if not source.is_absolute() and not source.exists():
@@ -324,6 +327,20 @@ def shadow_runtime_bindings_from_model_config(
     raw = source.read_bytes()
     try:
         payload = json.loads(raw)
+        observer_values = payload["observer"]
+        foundation_source = Path(
+            observer_values["canonical_foundation_registry"]
+        )
+        if not foundation_source.is_absolute() and not foundation_source.exists():
+            foundation_source = (
+                Path(__file__).resolve().parents[1] / foundation_source
+            )
+        foundation_registry = load_foundation_registry(
+            foundation_source,
+            expected_identity=observer_values[
+                "canonical_foundation_identity"
+            ],
+        )
         path_values = payload["path_hypotheses"]
         dol_values = payload["dol_probability"]
         signal_values = payload["signal_policy"]
@@ -343,15 +360,17 @@ def shadow_runtime_bindings_from_model_config(
                 "protocol_fingerprint"
             ],
             "execution_protocol_fingerprint": EXECUTION_PROTOCOL_FINGERPRINT,
+            "foundation_registry_identity": foundation_registry.identity,
+            "foundation_version": foundation_registry.foundation_version,
         }
-    except (KeyError, TypeError, json.JSONDecodeError) as exc:
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
         raise ShadowLiveError("model config lacks exact shadow runtime bindings") from exc
     if set(bindings) != set(SHADOW_RUNTIME_BINDING_KEYS):
         raise ShadowLiveError("shadow runtime binding keys changed")
     for key, value in bindings.items():
         if not isinstance(value, str) or not value:
             raise ShadowLiveError(f"shadow runtime binding {key} is invalid")
-        if key != "semantic_version" and (
+        if key not in {"semantic_version", "foundation_version"} and (
             len(value) != 64
             or any(character not in "0123456789abcdef" for character in value)
         ):
@@ -942,6 +961,9 @@ class ShadowLiveRunner:
         if (
             engine.model_config_sha256 != binding_map["model_config_sha256"]
             or SMC_SEMANTIC_VERSION != binding_map["semantic_version"]
+            or engine.foundation_version != binding_map["foundation_version"]
+            or engine.foundation_registry_identity
+            != binding_map["foundation_registry_identity"]
             or engine.brain.path_protocol.fingerprint
             != binding_map["path_protocol_fingerprint"]
             or engine.brain.dol_protocol.fingerprint
@@ -1011,6 +1033,10 @@ class ShadowLiveRunner:
             or not model_contract_matches
             or self.engine.model_config_sha256 != binding_map["model_config_sha256"]
             or SMC_SEMANTIC_VERSION != binding_map["semantic_version"]
+            or self.engine.foundation_version
+            != binding_map["foundation_version"]
+            or self.engine.foundation_registry_identity
+            != binding_map["foundation_registry_identity"]
             or self.engine.brain.path_protocol.fingerprint
             != binding_map["path_protocol_fingerprint"]
             or self.engine.brain.dol_protocol.fingerprint

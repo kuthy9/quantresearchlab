@@ -16,6 +16,7 @@ from smc_trader.event_store import (
     validate_canonical_event,
     write_event_journal,
 )
+from smc_trader.foundation_registry import FOUNDATION_VERSION
 from smc_trader.market_state import TimeframeEventReducer, reduce_timeframe_state
 from smc_trader.model import (
     Direction,
@@ -389,6 +390,408 @@ def _with_evidence(
 ) -> MarketEvent:
     evidence = {**dict(event.evidence), **changes}
     return replace(event, details=evidence, evidence=evidence)
+
+
+def _foundation_structural_leg_contract() -> tuple[
+    MarketEvent,
+    dict[str, MarketEvent],
+]:
+    prior_bars = tuple(
+        _normalized_bar(
+            f"foundation-prior-{minute}",
+            minute,
+            timeframe=Timeframe.M1,
+            open_=100.0,
+            high=101.0,
+            low=99.0,
+            close=100.0,
+        )
+        for minute in range(1, 15)
+    )
+    path_bars = (
+        _normalized_bar(
+            "foundation-path-15",
+            15,
+            timeframe=Timeframe.M1,
+            open_=100.0,
+            high=101.0,
+            low=98.0,
+            close=100.0,
+        ),
+        _normalized_bar(
+            "foundation-path-16",
+            16,
+            timeframe=Timeframe.M1,
+            open_=100.0,
+            high=102.0,
+            low=98.5,
+            close=99.5,
+        ),
+        _normalized_bar(
+            "foundation-path-17",
+            17,
+            timeframe=Timeframe.M1,
+            open_=99.5,
+            high=103.0,
+            low=97.5,
+            close=102.0,
+        ),
+        _normalized_bar(
+            "foundation-path-18",
+            18,
+            timeframe=Timeframe.M1,
+            open_=102.0,
+            high=105.0,
+            low=101.0,
+            close=104.0,
+        ),
+    )
+    confirmation_bar = _normalized_bar(
+        "foundation-confirmation-19",
+        19,
+        timeframe=Timeframe.M1,
+        open_=104.0,
+        high=104.5,
+        low=102.0,
+        close=103.0,
+    )
+    start_swing = _event(
+        "foundation-start-swing",
+        16,
+        canonical=True,
+        kind=EventKind.SWING_CONFIRMED,
+        timeframe=Timeframe.M1,
+        side="below",
+        price=98.0,
+        event_time_minutes=14,
+        source_event_ids=(
+            prior_bars[-1].event_id,
+            path_bars[0].event_id,
+            path_bars[1].event_id,
+        ),
+        source_entity_ids=("foundation-start",),
+        details={
+            "source_entity_id": "foundation-start",
+            "side": "low",
+            "relation": "none",
+            "pivot_start": _clock(14).isoformat(),
+            "pivot_end": _clock(15).isoformat(),
+            "prominence_atr": 1.0,
+            "legacy_same_side_magnitude_atr": 0.0,
+            "confirmation_delay_bars": 1,
+            "confirmation_delay_minutes": 2,
+            "nesting_depth": 0,
+            "semantic_rank": "micro",
+            "delta_ticks": 0,
+        },
+    )
+    end_swing = _event(
+        "foundation-end-swing",
+        19,
+        canonical=True,
+        kind=EventKind.SWING_CONFIRMED,
+        timeframe=Timeframe.M1,
+        side="above",
+        price=105.0,
+        event_time_minutes=17,
+        source_event_ids=(
+            path_bars[2].event_id,
+            path_bars[3].event_id,
+            confirmation_bar.event_id,
+        ),
+        source_entity_ids=("foundation-end",),
+        details={
+            "source_entity_id": "foundation-end",
+            "side": "high",
+            "relation": "none",
+            "pivot_start": _clock(17).isoformat(),
+            "pivot_end": _clock(18).isoformat(),
+            "prominence_atr": 1.0,
+            "legacy_same_side_magnitude_atr": 0.0,
+            "confirmation_delay_bars": 1,
+            "confirmation_delay_minutes": 2,
+            "nesting_depth": 0,
+            "semantic_rank": "micro",
+            "delta_ticks": 0,
+        },
+    )
+    atr_candle_ids = tuple(
+        str(bar.evidence["detector_candle_id"]) for bar in prior_bars
+    )
+    path_candle_ids = tuple(
+        str(bar.evidence["detector_candle_id"]) for bar in path_bars
+    )
+    leg = _event(
+        "foundation-structural-leg",
+        19,
+        canonical=True,
+        kind=EventKind.STRUCTURAL_LEG_CREATED,
+        timeframe=Timeframe.M1,
+        direction=Direction.LONG,
+        side="above",
+        price=105.0,
+        event_time_minutes=17,
+        source_event_ids=(start_swing.event_id, end_swing.event_id),
+        source_data_ids=(*atr_candle_ids, *path_candle_ids),
+        source_entity_ids=(
+            "foundation-leg",
+            "foundation-start",
+            "foundation-end",
+        ),
+        context_event_ids=tuple(
+            bar.event_id for bar in (*prior_bars, *path_bars)
+        ),
+        details={
+            "leg_id": "foundation-leg",
+            "start_swing_id": "foundation-start",
+            "end_swing_id": "foundation-end",
+            "start_event_time": _clock(14).isoformat(),
+            "end_event_time": _clock(17).isoformat(),
+            "start_price": 98.0,
+            "end_price": 105.0,
+            "start_close": 100.0,
+            "end_close": 104.0,
+            "amplitude_points": 7.0,
+            "amplitude_ticks": 28,
+            "amplitude_atr": 3.5,
+            "atr_at_leg_start": 2.0,
+            "duration_bars": 4,
+            "duration_minutes": 3,
+            "duration_seconds": 180,
+            "efficiency": 0.8,
+            "close_efficiency": 0.8,
+            "extreme_path_efficiency": 1.0,
+            "max_retracement_points": 0.5,
+            "max_retracement_atr": 0.25,
+            "close_mae_points": 0.5,
+            "close_mae_atr": 0.25,
+            "wick_mae_points": 0.5,
+            "wick_mae_atr": 0.25,
+            "path_candle_ids": path_candle_ids,
+            "atr_source_candle_ids": atr_candle_ids,
+            "foundation_version": FOUNDATION_VERSION,
+            "tick_size": 0.25,
+            "symbol": "NQH5",
+            "instrument_id": 750,
+            "rank": "internal",
+        },
+    )
+    leg = replace(leg, strength=0.8)
+    available = {
+        event.event_id: event
+        for event in (
+            *prior_bars,
+            *path_bars,
+            confirmation_bar,
+            start_swing,
+            end_swing,
+        )
+    }
+    return leg, available
+
+
+def test_foundation_structural_leg_binds_production_bar_ancestry() -> None:
+    leg, available = _foundation_structural_leg_contract()
+
+    validate_canonical_event(leg, available_events=available)
+    ordered = tuple(
+        sorted(
+            (*available.values(), leg),
+            key=lambda event: (
+                event.known_at,
+                event.sequence_no,
+                event.event_id,
+            ),
+        )
+    )
+    restored = ImmutableEventStore.from_events(ordered)
+    assert restored.get(leg.event_id) == leg
+
+
+def test_structural_leg_foundation_extension_preserves_v1_2_shape() -> None:
+    leg, available = _foundation_structural_leg_contract()
+    foundation_names = {
+        "amplitude_ticks",
+        "atr_at_leg_start",
+        "atr_source_candle_ids",
+        "close_efficiency",
+        "close_mae_atr",
+        "close_mae_points",
+        "duration_seconds",
+        "extreme_path_efficiency",
+        "foundation_version",
+        "instrument_id",
+        "path_candle_ids",
+        "symbol",
+        "tick_size",
+        "wick_mae_atr",
+        "wick_mae_points",
+    }
+    legacy_evidence = {
+        key: value
+        for key, value in leg.evidence.items()
+        if key not in foundation_names
+    }
+    legacy = replace(
+        leg,
+        details=legacy_evidence,
+        evidence=legacy_evidence,
+        source_data_ids=(),
+        context_event_ids=(),
+    )
+
+    validate_canonical_event(legacy, available_events=available)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("amplitude_ticks", 27),
+        ("amplitude_points", 7.25),
+        ("amplitude_atr", 3.25),
+        ("atr_at_leg_start", 2.25),
+        ("duration_seconds", 181),
+        ("duration_minutes", 4),
+        ("efficiency", 0.7),
+        ("close_efficiency", 0.7),
+        ("extreme_path_efficiency", 0.9),
+        ("max_retracement_points", 0.75),
+        ("max_retracement_atr", 0.5),
+        ("close_mae_points", 0.75),
+        ("close_mae_atr", 0.5),
+        ("wick_mae_points", 0.75),
+        ("wick_mae_atr", 0.5),
+        ("tick_size", 0.5),
+        ("symbol", "ESM4"),
+        ("instrument_id", 751),
+    ),
+)
+def test_foundation_structural_leg_rejects_tampered_metrics(
+    field: str,
+    value: object,
+) -> None:
+    leg, available = _foundation_structural_leg_contract()
+
+    with pytest.raises(ValueError, match="foundation structural leg"):
+        validate_canonical_event(
+            _with_evidence(leg, **{field: value}),
+            available_events=available,
+        )
+
+
+@pytest.mark.parametrize("mutation", ("missing", "reordered"))
+def test_foundation_structural_leg_rejects_incomplete_or_unordered_bars(
+    mutation: str,
+) -> None:
+    leg, available = _foundation_structural_leg_contract()
+    context = list(leg.context_event_ids)
+    if mutation == "missing":
+        context.pop(0)
+    else:
+        context[0], context[1] = context[1], context[0]
+    forged = replace(leg, context_event_ids=tuple(context))
+
+    with pytest.raises(ValueError, match="foundation structural leg"):
+        validate_canonical_event(forged, available_events=available)
+
+
+@pytest.mark.parametrize("mutation", ("duplicate", "forged"))
+def test_foundation_structural_leg_rejects_self_reported_atr_candle_ids(
+    mutation: str,
+) -> None:
+    leg, available = _foundation_structural_leg_contract()
+    identities = list(leg.evidence["atr_source_candle_ids"])
+    identities[1] = identities[0] if mutation == "duplicate" else "forged-id"
+    forged = _with_evidence(
+        leg,
+        atr_source_candle_ids=tuple(identities),
+    )
+
+    with pytest.raises(ValueError, match="foundation structural leg"):
+        validate_canonical_event(forged, available_events=available)
+
+
+def test_foundation_structural_leg_rejects_nonlatest_prior_atr_bar() -> None:
+    leg, available = _foundation_structural_leg_contract()
+    older = _normalized_bar(
+        "foundation-older-prior",
+        0,
+        timeframe=Timeframe.M1,
+    )
+    available[older.event_id] = older
+    contexts = list(leg.context_event_ids)
+    contexts[0] = older.event_id
+    atr_candle_ids = list(leg.evidence["atr_source_candle_ids"])
+    atr_candle_ids[0] = str(older.evidence["detector_candle_id"])
+    source_data_ids = list(leg.source_data_ids)
+    source_data_ids[0] = atr_candle_ids[0]
+    forged = _with_evidence(
+        replace(
+            leg,
+            context_event_ids=tuple(contexts),
+            source_data_ids=tuple(source_data_ids),
+        ),
+        atr_source_candle_ids=tuple(atr_candle_ids),
+    )
+
+    with pytest.raises(ValueError, match="exact strict-prior"):
+        validate_canonical_event(forged, available_events=available)
+
+
+@pytest.mark.parametrize(
+    ("timeframe", "minutes", "match"),
+    (
+        (Timeframe.M5, 18, "real normalized BAR root"),
+        (Timeframe.M1, 20, "causally ordered"),
+    ),
+)
+def test_foundation_structural_leg_rejects_wrong_timeframe_or_future_bar(
+    timeframe: Timeframe,
+    minutes: int,
+    match: str,
+) -> None:
+    leg, available = _foundation_structural_leg_contract()
+    alien = _normalized_bar(
+        f"foundation-alien-{timeframe.value}-{minutes}",
+        minutes,
+        timeframe=timeframe,
+    )
+    available[alien.event_id] = alien
+    contexts = list(leg.context_event_ids)
+    contexts[-1] = alien.event_id
+    path_candle_ids = list(leg.evidence["path_candle_ids"])
+    path_candle_ids[-1] = str(alien.evidence["detector_candle_id"])
+    source_data_ids = list(leg.source_data_ids)
+    source_data_ids[-1] = path_candle_ids[-1]
+    forged = _with_evidence(
+        replace(
+            leg,
+            context_event_ids=tuple(contexts),
+            source_data_ids=tuple(source_data_ids),
+        ),
+        path_candle_ids=tuple(path_candle_ids),
+    )
+
+    with pytest.raises(ValueError, match=match):
+        validate_canonical_event(forged, available_events=available)
+
+
+def test_foundation_structural_leg_rejects_endpoint_swing_pivot_drift() -> None:
+    leg, available = _foundation_structural_leg_contract()
+    start = available[leg.source_event_ids[0]]
+    drifted_sources = (
+        start.source_event_ids[0],
+        leg.context_event_ids[12],
+        start.source_event_ids[2],
+    )
+    available[start.event_id] = replace(
+        start,
+        source_ids=drifted_sources,
+        source_event_ids=drifted_sources,
+    )
+
+    with pytest.raises(ValueError, match="path endpoints"):
+        validate_canonical_event(leg, available_events=available)
 
 
 def _authoritative_phase23_chain() -> tuple[MarketEvent, ...]:

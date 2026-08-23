@@ -28,21 +28,70 @@ governance artifacts during ordinary development.
 - [ ] Runtime semantic identity, registry, parameters, event store, reducer,
   experiment manifest, and result all agree; v1.1 artifacts are never replayed
   or reported as v1.2 evidence.
-- [ ] Swing hierarchy changes only through append-only exact-source role
-  assignments (`micro → internal → structural → external`); a later role does
-  not rewrite an earlier Swing or Leg. Role depth is not described as a
-  geometric parent/child Swing tree without a separately frozen containment
-  and reparenting protocol.
+- [ ] Foundation-v2 records bind the exact canonical registry identity; every
+  cross-object reference resolves to an earlier compatible object and every
+  critical serialized source ID resolves to its registered event kind,
+  timeframe, entity, and causal clock.
+- [ ] The production model contains the exact boolean
+  `observer.canonical_foundation_enabled=true`, the exact registry path, and the
+  exact canonical registry identity. Engine construction strict-loads the
+  registry; Engine/Shadow/checkpoint state freezes and compares its admitted
+  version/identity. A missing/false/non-boolean gate, absent/mismatched binding,
+  and every pre-v3 Engine checkpoint fail closed rather than publishing a
+  partial foundation.
+- [ ] Swing role assignments (`micro → internal → structural → external`)
+  and foundation-v2 geometric parent assignments are separate append-only
+  histories. Geometry uses only exact time/price containment; BOS, protected
+  role, and future importance cannot change `geometric_depth`.
 - [ ] Candidate IRL/ERL uses only the same-timeframe active/mature frozen range;
   missing/inactive range yields unresolved and no invented location.
-- [ ] The legacy Group 4 range is described as Mature Balance Range evidence,
-  not as a validated Structural Dealing Range. IRL/ERL, Delivery Phase, DOL, or
-  Brain promotion waits for the versioned Structural/Balance split.
+- [ ] The legacy Group 4 range remains Mature Balance Range evidence. The
+  independent foundation Structural/Balance records and
+  `x_structural_range`/`x_balance_range` never transfer that evidence or share
+  boundaries by default.
+- [ ] Liquidity clustering preserves every source-level identity, uses the
+  frozen one-tick complete-link tolerance, and appends terminal/superseding
+  cluster generations when membership changes; confluence never implies
+  strength in the Eye.
 - [ ] `FVG_TOUCHED`, `FVG_EXPIRED`, `ORIGIN_ZONE_TOUCHED`,
   `DEALING_RANGE_EXTENDED`, and `DELIVERY_PHASE_CHANGED` remain intentionally
   non-emitted unless a later semantic registry explicitly promotes them. The
-  touch/phase values are compatibility or derived aliases; FVG expiry and
-  range extension require new executable definitions.
+  touch/phase values are compatibility or derived aliases. Foundation FVG
+  expiry accepts exact structural/reset causes only, never an arbitrary TTL;
+  range extension remains undefined.
+- [ ] Liquidity levels have immutable source identity, explicit lifecycle and
+  owner/supersession facts; terminal interaction generations cannot reopen.
+  Sweep rearm creates a new generation only after the registered real-bar
+  departure, while Acceptance and retirement remain excluded from DOL/target
+  views.
+- [ ] Sweep and Acceptance are competing terminals of one Liquidity
+  Interaction Generation and retain the complete ordered formation BAR ledger.
+  Formation ancestry is not confused with a later temporal response window.
+- [ ] Validation does not overstate retained v1.2 Touch ancestry: legacy
+  Swing/pool Touch facts bind a confirmation BAR, not an independently supplied
+  pivot BAR. Transport validates the available exact lineage and fails closed;
+  it never reconstructs missing contact geometry heuristically.
+- [ ] External/internal Structure Generations persist until an exact terminal;
+  MSS only starts or updates a forming challenger/transition and cannot itself
+  confirm the opposite regime. Confirmed, failed, and censored transitions are
+  retained.
+- [ ] Relation and Delivery observations update one owner-bound generation;
+  repeated snapshots do not create independent starts. Reset/rollover and
+  reclassification append explicit terminal reasons.
+- [ ] Reset, rollover, supersession, and retirement append explicit immutable
+  terminals before current pointers change; no cache eviction or snapshot
+  fluctuation silently deletes a live object or generation.
+- [ ] Base Origin Core is outcome-blind and separate from Qualified OB. FVG/OB
+  first reinteraction freezes only information available at the first strict
+  future geometric return after departure; later fill, invalidation, and
+  continuation cannot rewrite it.
+- [ ] All semantic studies use the shared factual `StructuralOutcomeEngine` for
+  horizon, native-bar gaps, MFE/MAE, and same-bar ambiguity. A conservative
+  execution projection remains a separate policy.
+- [ ] The canonical registry remains the frozen 24-object vocabulary and every
+  empirical/Brain/intent/execution authority flag remains false. Tutorial-only
+  concepts stay experimental unless a later version passes the promotion
+  process; no second Eye or unnecessary infrastructure was introduced.
 - [ ] Origin Zone terminal events resolve exact created-zone and real completed
   M5 BAR parents, preserve identity/scope/frozen geometry, and agree with
   intersection or close-through failure priority; an unknown terminal identity
@@ -203,6 +252,10 @@ governance artifacts during ordinary development.
   after-decision ordering remain intact.
 - [ ] Daily replay writes light decisions/summary only; it does not emit full
   traces, audit packets, images or future-path artifacts.
+- [ ] Any bounded 2024-06 foundation replay records its exact input identity,
+  row selection, record count, payload parity, and elapsed time, and remains
+  labelled engineering construct/replay evidence—not Phase 9, empirical
+  validation, calibration, OOF, or OOS.
 
 ## Shadow-live parity
 
@@ -222,8 +275,8 @@ governance artifacts during ordinary development.
 - [ ] The runner accepts only the exact `ContinuousSMCEngine` and exact
   `NullExecutionGateway` classes; any external submission attempt fails.
   Engineering parity on 36 deterministic synthetic clocks and the exact
-  200-clock June cold-start prefix are not called a completed 6,900-clock or
-  real-time multi-day shadow pilot.
+  current Foundation-enabled 200-clock June cold-start prefix are not called a
+  completed 6,900-clock or real-time multi-day shadow pilot.
 - [ ] Scene-Graph delta identity sets used in parity, including simultaneously
   revised edge IDs, have canonical ordering across different
   `PYTHONHASHSEED` values and process restarts.
@@ -240,8 +293,10 @@ governance artifacts during ordinary development.
   fingerprint change bumps and refreezes the Shadow protocol.
 - [ ] The 6,900-clock capacity preflight verifies the completed-prefix marker's
   checkpoint-manifest SHA binding, creates no Engine, replays zero clocks, and
-  remains a lower-bound estimate with historical/current identity mismatch and
-  `full_6900_replay_authorized=false`.
+  remains a lower-bound estimate bound to the historical receipt, with that
+  receipt's historical/current identity mismatch and
+  `full_6900_replay_authorized=false`. A separate current 200-clock parity run
+  does not upgrade the preflight into full-run authority.
 
 ## Test scope
 

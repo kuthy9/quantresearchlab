@@ -15,6 +15,13 @@ OOS 或交易权限。
   [DOL protocol](../../configs/dol_probability.json) 保留
   `no_target_before_common_horizon`，并把 calibration 状态明确标为
   `not_fitted_not_admitted`、authority 标为 `shadow_only`。
+- Foundation DOL adapter 只消费 `MarketSnapshot` 中仍 active/rearmed 且绑定
+  exact interaction generation 的 level；Acceptance、retired level 和没有
+  exact live source 的 formed pool 不会回流。只有 ACTIVE StructureGeneration
+  的 exact protected-Swing assignment 才能把冻结 rank 单向提升为 external；
+  legacy tracker-only protected 标签不回填 canonical candidate。非 tick-grid
+  formed-pool midpoint 保留为 source fact，公开 target price 使用 lifecycle
+  冻结的 near-side tradable anchor。
 - [Path protocol](../../configs/path_hypotheses.json) 已表达 continuation、
   deeper retracement、reversal、balance、failed breakout 和 residual unknown
   六个竞争路径，使用有限 log weights 和共同 horizon。没有获准的 likelihood
@@ -128,8 +135,8 @@ path-conditional likelihood artifact 时仍不得产生非零概率更新。
    不能同时承担反复定义、拟合、calibration 和独立验证。
 7. 冻结 Phase 6 的 FVG unit 是 earliest concrete lifecycle，不是真正由 creation
    zone 与首个 post-creation completed M5 overlap BAR 定义的
-   `first_retest_event`。旧结果必须保留原义；新的 first-retest estimator 尚未
-   预注册/运行。
+   `first_retest_event`。旧结果必须保留原义；foundation v2 已预注册并实现新的
+   几何事件定义，但对应 empirical estimator/study 尚未预注册或运行。
 
 ## Why it matters
 
@@ -212,8 +219,9 @@ event 的 `known_at`。
   显式 relation spec 时 fail closed；
 - diagnostic `PRECEDES` 可见但不能满足 causal/open-thesis/action/FAVR gate；
 - historical FVG earliest concrete lifecycle 的同钟冲突/不同 payload fail
-  closed，且以后 lifecycle 不改写冻结分类；这项回归不冒充尚未实现的几何
-  `first_retest_event`。
+  closed，且以后 lifecycle 不改写冻结分类；它仍只是历史 proxy，不冒充
+  foundation v2 已实现的几何 `first_retest_event`。后者的经验研究尚未运行或
+  获得 admission。
 
 正式研究前仍必须冻结并验证：
 
@@ -231,9 +239,10 @@ event 的 `known_at`。
 - 当前未完成的是 empirical model：conditional likelihood、effective decay/hazard、
   calibrated path probability、calibrated DOL probability、stable branching
   relationship、future structural edge 和 action authority均不存在。
-- 真正的 FVG first-retest treatment 也未完成：必须从 creation-time zone 与首个
-  post-creation real completed M5 overlap BAR 构造，并把 boundary/no-touch
-  invalidation censor，而不是复用历史 lifecycle proxy。
+- 真正的 FVG first-retest empirical treatment/study 仍未完成。其未来数据集必须
+  使用 foundation-v2 creation-time zone 与首个 post-creation real completed M5
+  overlap BAR，按已冻结边界处理 no-touch/invalidation/censoring，而不是复用历史
+  lifecycle proxy；这不否定当前几何事件实现已经完成。
 - W4 数据输入通过预检且 design 已冻结，但 executable bindings、W4 mechanism
   feature、semantic temporal diagnostic、path/DOL fitting 均未运行。
 - sealed MBO OOS 未打开，final OOS 仍关闭。2024-06 的任何新结果最多是

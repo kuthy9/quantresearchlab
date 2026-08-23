@@ -16,6 +16,10 @@ from smc_trader.engine import (
     ContinuousSMCEngine,
     normalize_action_disabled_playbooks,
 )
+from smc_trader.foundation_registry import (
+    FOUNDATION_CANONICAL_IDENTITY,
+    FOUNDATION_VERSION,
+)
 from smc_trader.model import Playbook
 from smc_trader.playbook_registry import load_playbook_registry
 
@@ -164,6 +168,10 @@ def test_engine_accepts_current_typed_config_and_rejects_incomplete_current_conf
     assert not engine.brain.calibrator.is_ready
     assert not engine.decision.calibration_ready
     assert engine.decision.calibration_version == "identity-unvalidated"
+    assert engine.observer.config.eye_authority_mode is False
+    assert engine.observer.config.canonical_foundation_enabled is True
+    assert engine.foundation_version == FOUNDATION_VERSION
+    assert engine.foundation_registry_identity == FOUNDATION_CANONICAL_IDENTITY
     with pytest.raises(TypeError, match="runtime_mode"):
         ContinuousSMCEngine.from_config("configs/model.json")
     with pytest.raises(RuntimeError, match="readiness gate"):
@@ -191,6 +199,62 @@ def test_engine_accepts_current_typed_config_and_rejects_incomplete_current_conf
             incomplete,
             runtime_mode="development",
         )
+
+    for invalid_authority in (None, False, 1, "true"):
+        payload = json.loads(
+            Path("configs/model.json").read_text(encoding="utf-8")
+        )
+        if invalid_authority is None:
+            payload["observer"].pop("canonical_foundation_enabled")
+        else:
+            payload["observer"]["canonical_foundation_enabled"] = (
+                invalid_authority
+            )
+        incomplete.write_text(json.dumps(payload), encoding="utf-8")
+        with pytest.raises(
+            ValueError,
+            match="canonical_foundation_enabled must be true",
+        ):
+            ContinuousSMCEngine.from_config(
+                incomplete,
+                runtime_mode="development",
+            )
+
+    for field, value, message in (
+        (
+            "canonical_foundation_registry",
+            None,
+            "canonical_foundation_registry must be bound",
+        ),
+        (
+            "canonical_foundation_identity",
+            None,
+            "canonical_foundation_identity must be SHA-256",
+        ),
+        (
+            "canonical_foundation_identity",
+            "0" * 64,
+            "canonical identity mismatch",
+        ),
+        (
+            "canonical_foundation_registry",
+            "semantics/missing_foundation.json",
+            "cannot load foundation registry",
+        ),
+    ):
+        payload = json.loads(
+            Path("configs/model.json").read_text(encoding="utf-8")
+        )
+        if value is None:
+            payload["observer"].pop(field)
+        else:
+            payload["observer"][field] = value
+        incomplete.write_text(json.dumps(payload), encoding="utf-8")
+        with pytest.raises(ValueError, match=message):
+            ContinuousSMCEngine.from_config(
+                incomplete,
+                runtime_mode="development",
+            )
 
 
 def test_engine_runtime_action_policy_is_explicit_deterministic_and_fail_closed() -> None:

@@ -84,6 +84,9 @@
   ],
   "observer": {
     "semantic_registry": "semantics/registry_v1_2.yaml",
+    "canonical_foundation_enabled": true,
+    "canonical_foundation_registry": "semantics/foundation_v2_0.yaml",
+    "canonical_foundation_identity": "ac04636919931d774309a0c306764fdf8eb53aee41df0f31d4d94e5b9125732b",
     "atr_period": 14,
     "memory_events": 512,
     "structure_protocol": "configs/primitives_structure_liquidity.json",

@@ -9,6 +9,13 @@ This contract freezes the causal meaning of the 5m fair value gap and order
 block. Both are descriptive location entities. Neither is an entry signal,
 playbook, stop, target, probability adjustment, or profitability claim.
 
+This is the retained v1.2 Group-3 detector contract. The additive
+[`smc_semantic_foundation_v2.0`](refactor/canonical_semantic_foundation_v2.md)
+projection separates Base Origin Core from Qualified OB, gives FVG a structural
+expiry distinct from invalidation, and publishes a strictly future geometric
+First Retest after departure. It does not relabel this file's historical
+composite Order Block or enable an arbitrary FVG TTL.
+
 The executable companion is
 `configs/primitives_zones.json`. If this document and that file ever
 disagree, development stops until both are versioned together. Implementations

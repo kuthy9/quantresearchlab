@@ -125,7 +125,10 @@ from .playbook_registry import (
     load_playbook_registry,
 )
 from .scene_graph import (
+    current_dol_inventory,
+    dol_level_terminal_sources,
     EvidenceStatus,
+    FoundationDOLInventoryView,
     SceneEdgeKind,
     SceneGraphDelta,
     TemporalMarketSceneGraph,
@@ -834,11 +837,7 @@ def _inventory_item_map(
 ) -> dict[str, object]:
     return {
         item.item_id: item
-        for item in observation.liquidity_inventory
-        if (
-            item.lifecycle is LiquidityInventoryLifecycle.VISIBLE
-            and item.confirmed_at <= observation.asof
-        )
+        for item in current_dol_inventory(observation)
     }
 
 
@@ -858,7 +857,10 @@ def _draw_rank(
             level.confirmed_at,
             level.level_id,
         )
-    higher_timeframe = item.timeframe in {Timeframe.H4, Timeframe.H1}
+    higher_timeframe = bool(
+        not isinstance(item, FoundationDOLInventoryView)
+        and item.timeframe in {Timeframe.H4, Timeframe.H1}
+    )
     pooled = item.kind in {"equal_highs", "equal_lows"}
     external = bool(
         item.structural_rank == "external"
@@ -989,7 +991,10 @@ def _select_target(
                 and (
                     item.structural_rank == "external"
                     or item.is_protected_swing
-                    or item.timeframe in {Timeframe.H4, Timeframe.H1}
+                    or (
+                        not isinstance(item, FoundationDOLInventoryView)
+                        and item.timeframe in {Timeframe.H4, Timeframe.H1}
+                    )
                 )
             )
             and _target_is_deliverable(
@@ -2796,10 +2801,9 @@ def _typed_dfp(
     )
     context_draw_consumed = bool(
         preferred_context_draw_id is not None
-        and any(
-            item.item_id == preferred_context_draw_id
-            and item.lifecycle is LiquidityInventoryLifecycle.CONSUMED
-            for item in observation.liquidity_inventory
+        and dol_level_terminal_sources(
+            observation,
+            preferred_context_draw_id,
         )
     )
     trigger_contradiction = contradiction_step is not None
@@ -3772,7 +3776,17 @@ def _lsr_optional_range_context(
     )
     if not ranges:
         return None
-    inventory = tuple(observation.liquidity_inventory)
+    raw_ids = frozenset(
+        item.item_id for item in observation.liquidity_inventory
+    )
+    inventory = (
+        *observation.liquidity_inventory,
+        *(
+            item
+            for item in current_dol_inventory(observation)
+            if item.item_id not in raw_ids
+        ),
+    )
     candidates: list[_LSRRangeContext] = []
     for state in ranges:
         swept_boundary = next(
@@ -5067,11 +5081,10 @@ def _favr_opposite_boundary_target(
     )
     matches = tuple(
         item
-        for item in observation.liquidity_inventory
+        for item in current_dol_inventory(observation)
         if (
             item.kind == "range_boundary"
             and item.side == side
-            and item.lifecycle is LiquidityInventoryLifecycle.VISIBLE
             and dealing_range.range_id in item.source_ids
             and math.isclose(
                 item.price,
@@ -6393,18 +6406,16 @@ def _retain_unresolved_episode_evaluation(
 
     context_draw_consumed = bool(
         prior.thesis_draw is not None
-        and any(
-            item.item_id == prior.thesis_draw.level_id
-            and item.lifecycle is LiquidityInventoryLifecycle.CONSUMED
-            for item in observation.liquidity_inventory
+        and dol_level_terminal_sources(
+            observation,
+            prior.thesis_draw.level_id,
         )
     )
     selected_draw_consumed = bool(
         selected_draw is not None
-        and any(
-            item.item_id == selected_draw.level_id
-            and item.lifecycle is LiquidityInventoryLifecycle.CONSUMED
-            for item in observation.liquidity_inventory
+        and dol_level_terminal_sources(
+            observation,
+            selected_draw.level_id,
         )
     )
     if context_draw_consumed:
@@ -7993,11 +8004,7 @@ def _visible_levels(observation: MarketObservation) -> list[LiquidityLevel]:
             touches=max(0, len(item.source_ids) - 1),
             swept=False,
         )
-        for item in observation.liquidity_inventory
-        if (
-            item.lifecycle is LiquidityInventoryLifecycle.VISIBLE
-            and item.confirmed_at <= observation.asof
-        )
+        for item in current_dol_inventory(observation)
     ]
 
 
@@ -8205,10 +8212,9 @@ def _position_context_terminal_phase(
     context_draw_id = (
         None if prior.thesis_draw is None else prior.thesis_draw.level_id
     )
-    if context_draw_id is not None and any(
-        item.item_id == context_draw_id
-        and item.lifecycle is LiquidityInventoryLifecycle.CONSUMED
-        for item in observation.liquidity_inventory
+    if context_draw_id is not None and dol_level_terminal_sources(
+        observation,
+        context_draw_id,
     ):
         return PlaybookPhase.COMPLETED
     if (
@@ -8290,11 +8296,7 @@ def _frozen_primary_target_consumed(
     )
     return bool(
         target_id is not None
-        and any(
-            item.item_id == target_id
-            and item.lifecycle is LiquidityInventoryLifecycle.CONSUMED
-            for item in observation.liquidity_inventory
-        )
+        and dol_level_terminal_sources(observation, target_id)
     )
 
 
@@ -9475,10 +9477,9 @@ def _cascade_context_terminals(
             is not Playbook.LIQUIDITY_SWEEP_REVERSAL
             and
             candidate.thesis_draw is not None
-            and any(
-                item.item_id == candidate.thesis_draw.level_id
-                and item.lifecycle is LiquidityInventoryLifecycle.CONSUMED
-                for item in observation.liquidity_inventory
+            and dol_level_terminal_sources(
+                observation,
+                candidate.thesis_draw.level_id,
             )
         )
         if context_draw_consumed:
@@ -10173,23 +10174,18 @@ def _retained_context_terminal(
 
     draw = context.context_draw
     if draw is not None:
-        consumed = next(
-            (
-                item
-                for item in observation.liquidity_inventory
-                if item.item_id == draw.level_id
-                and item.lifecycle is LiquidityInventoryLifecycle.CONSUMED
-            ),
-            None,
+        consumed_sources = dol_level_terminal_sources(
+            observation,
+            draw.level_id,
         )
-        if consumed is not None:
+        if consumed_sources:
             return (
                 "completed",
                 "context_draw_consumed",
                 _identity_tuple(
                     context.context_thesis_id,
                     draw.level_id,
-                    *consumed.source_ids,
+                    *consumed_sources,
                 ),
             )
     if (

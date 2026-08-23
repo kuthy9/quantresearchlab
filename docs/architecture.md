@@ -11,6 +11,13 @@ and reserved surface is recorded in the
 [semantic specification](smc_semantic_specification_v1.md). The Phase 2–4
 producer/state surface is executable within that frozen boundary; round-two
 review distinguishes this from completion of every target definition.
+The additive `smc_semantic_foundation_v2.0` projection now completes the
+registered geometry, generation, lifecycle, relation, transition, first-
+reinteraction, ancestry, and factual-outcome layer over those immutable facts.
+See the
+[foundation specification](refactor/canonical_semantic_foundation_v2.md).
+It reuses the existing detectors and immutable store; it is not a parallel Eye
+or a new action path.
 The current implementation-versus-plan matrix, the frozen January 2024
 diagnostic boundary, and the Phase 6–9 boundary are recorded separately in the
 [current implementation status](refactor/current_implementation_status.md) and
@@ -58,7 +65,13 @@ deterministic TimeframeState reducers + SessionState
         ↓
 independent parent/child RelationState
         ↓
-MarketSnapshot (authority = atomic_event_reducer)
+CanonicalFoundationAdapter
+        ↓
+FoundationRecord history (generation/lifecycle/geometry/retest)
+        ↓
+MarketSnapshot (atomic authority + replayable foundation projection)
+        ├── versioned factual StructuralOutcomeEngine (research output,
+        │   not MarketSnapshot/FoundationRecord state)
         ───── optional existing development-trader downstream ─────
 Temporal Market Scene Graph + GlobalMarketContext
         ↓
@@ -87,6 +100,16 @@ Trade Intent → Phase 8 execution evaluator / immutable order FSM v1.5
 exact bar + execution + account evidence → Phase 9 parity journal
 ```
 
+Production construction is explicit and fail closed: the checked-in model
+configuration must contain the boolean
+`observer.canonical_foundation_enabled=true`. This admission is independent of
+scan-only `eye_authority_mode`. The model must also bind the exact foundation
+registry path and canonical identity. Engine construction strict-loads them;
+Engine, Shadow, and checkpoint state freeze and compare the admitted foundation
+version/identity. Engine checkpoint schema v3 is the first schema that carries
+the production foundation projection; earlier schemas are rejected rather than
+restored into an incomplete state.
+
 `ContinuousSMCEngine` has one incremental trader path, and its trader replay
 calls that same engine. The frozen Phase 5 diagnostic is deliberately a
 separate Reader + Eye-only runner; it does not construct Brain, Decision, Risk,
@@ -108,10 +131,11 @@ child; `SessionState` is a separate completed-1m context object; and
 available at that clock. v1.2 additionally maintains append-only Swing role
 assignments and same-timeframe IRL/ERL target membership as deterministic state
 projections.
-Round-two hardening makes raw-price tick admission and immutable-event source/
-lifecycle authority fail closed. It does not convert the current role-depth
-Swing projection into a geometric nesting model or the legacy H1 balance-range
-detector into a Structural Dealing Range.
+Round-two v1.2 hardening makes raw-price tick admission and immutable-event
+source/lifecycle authority fail closed. The legacy role-depth Swing projection
+and H1 balance-range detector remain unchanged. Additive foundation v2 now
+projects a separate geometric nesting model and Structural Range over those
+facts; it does not silently change the v1.2 detector meanings.
 
 ## Eyes and Scene Graph
 
@@ -122,7 +146,7 @@ completed:
 | Frame | Descriptive state |
 |---|---|
 | 4H | confirmed structure/BOS and external liquidity; directional displacement, efficiency and range position remain explicitly descriptive proxies |
-| 1H | confirmed swings/BOS, support/resistance and the legacy Mature Balance Range; a Structural Dealing Range is not separately defined |
+| 1H | confirmed swings/BOS, support/resistance and the legacy v1.2 Mature Balance Range atomic slot; foundation v2 publishes Structural Range separately |
 | 15m | bridge-scale candle, structure and liquidity context |
 | 5m | displacement episode, raw/displacement-linked FVG, qualified order block; rolling compression remains an explicitly descriptive proxy |
 | 1m | candle description, manipulation resolution, exact first return, qualified entry-zone reacceptance, micro BOS and ordered path steps |
@@ -162,15 +186,16 @@ draw or action. Focus identifies what the Brain should inspect next while
 preserving ambiguity and unknown authority. The eyes and graph cannot choose an
 action.
 
-Swing hierarchy is a reducer-owned append-only role history, not a future rank
-written back onto a pivot. Confirmation creates the `micro` assignment; exact
+Swing role hierarchy is a reducer-owned append-only role history, not a future
+rank written back onto a pivot. Confirmation creates the `micro` assignment; exact
 Structural Leg endpoints can add `internal`; Structure Direction source swings
 can add `structural`; and Protected Swing assignment can add `external`. The
 effective nesting depth follows that highest causally known role, while every
 assignment retains its own `known_at` and source IDs.
-This depth is a structural-role depth, not a separately inferred geometric
-parent/child Swing tree; prominence and duration remain continuous features
-without unfitted v1.2 promotion thresholds.
+That legacy depth is structural-role depth. Foundation v2 independently
+publishes an append-only geometric parent/child tree using only exact time and
+price containment. Its `geometric_depth` never consumes BOS, protected role,
+or future importance; neither depth is promoted into the other.
 
 Candidate liquidity also carries executable range membership. When the same
 timeframe has an active/mature frozen dealing range, strict interior candidates
@@ -180,12 +205,13 @@ does not duplicate path-obstacle ranking: the Brain reuses
 `GlobalMarketContext.external_draw_candidates` and directional obstruction
 views for its shadow ranking.
 
-The range input above is the existing sparse two-sided Mature Balance Range
-despite the frozen `DEALING_RANGE_*` compatibility name. Its normalized-location
-math is deterministic, but its evidence cannot be transferred to a generic
-Structural Dealing Range. Structural/Balance identity, consumers, IRL/ERL
-authority, and persistent Delivery Phase must be split in a new semantic
-version rather than renamed in place.
+The legacy range input above remains the sparse two-sided Mature Balance Range
+despite the frozen `DEALING_RANGE_*` compatibility name. Foundation v2 does
+not rename it: it publishes independent Structural Range and Balance Range
+records plus `x_structural_range`/`x_balance_range`. Delivery Phase Generation
+binds the existing classifier to an exact parent Structure Generation. Old
+Balance evidence cannot be transferred to Structural Range or persistent
+Delivery evidence.
 
 Five enum values are intentionally not canonical v1.2 emissions:
 `FVG_TOUCHED`, `FVG_EXPIRED`, `ORIGIN_ZONE_TOUCHED`,
@@ -421,10 +447,13 @@ invalidated, or expired. The retained Brain input is still
 `MarketObservation + SceneGraph/SceneDelta`, not solely
 `MarketSnapshot + events`; both gaps belong in the eventual vertical migration
 rather than a second Brain.
-The range-driven balance mapping remains shadow-only and cannot be promoted
-until the Structural/Balance Range split is frozen. Likewise, the current DOL
-compatibility ranking still consumes a legacy two-level inventory rank rather
-than the event-sourced four-role Swing projection.
+The range-driven balance mapping remains shadow-only. Foundation v2 now keeps
+Structural and Balance Range identities/locations separate, but no empirical
+artifact admits either as path evidence. DOL target-map compatibility consumes
+the foundation-active liquidity lifecycle where present, including a distinct
+rearmed interaction generation, while preserving the legacy view only for
+sources not yet managed by the foundation. This is still a candidate/ranking
+adapter, not a fitted DOL probability model.
 
 The Bayesian Belief Updater is executable accounting, not a calibrated
 Bayesian posterior. The configuration declares
@@ -536,8 +565,13 @@ journal. A real-time multi-day no-order pilot has not run, so Phase 9's
 operational gate is not passed.
 The receipt binds the earlier path/model identities `5213b3d6…` and
 `4214da19…`. The global dependency-cluster update intentionally changed those
-bindings, so the input is historical evidence for that source snapshot and
-must be rematerialized before a future pilot.
+bindings, so that output remains historical evidence for its source snapshot.
+The current Foundation-enabled Engine separately passed the same exact 200-row
+prefix while binding the current model, registry, and Foundation identity; see
+the single current
+[release-verification table](refactor/canonical_semantic_foundation_v2.md#replay-test-and-empirical-boundary).
+That result closes only current-prefix file parity. A complete 6,900-clock
+rehearsal must still be rematerialized, and it is not a real-time pilot.
 The current protocol tests deterministic equality and fail-stop behavior; it
 does not yet define acceptance metrics for semantic duplication, relation
 churn, evidence-belief consistency, signal expiry, or DOL stability. The

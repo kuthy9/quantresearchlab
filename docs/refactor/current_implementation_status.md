@@ -2,6 +2,8 @@
 
 Status date: 2026-08-23
 Runtime semantic identity: `smc_semantics_v1.2`
+Canonical foundation identity: `smc_semantic_foundation_v2.0`
+Canonical foundation registry identity: `ac04636919931d774309a0c306764fdf8eb53aee41df0f31d4d94e5b9125732b`
 
 This is the current implementation-versus-plan authority. The
 [Phase 2–5 completion report](phase_2_5_completion_report.md) remains the
@@ -10,10 +12,13 @@ counts, 24.04% matched-control coverage, and zero E3–E6 chain are baseline
 results, not descriptions of the v1.2 implementation.
 The [Phase 6–9 report](phase_6_9_completion_report.md) records the newer
 engineering and validation boundary without changing any frozen artifact.
-The [second-round semantic review](semantic_review_round_2.md) is the current
-17-concept Definition-versus-Empirical validity authority. It records both the
-working-tree hardening completed after the frozen runs and the vNext definitions
-that remain deliberately unimplemented.
+The [second-round semantic review](semantic_review_round_2.md) remains the
+17-concept Definition-versus-Empirical validity authority for the historical
+v1.2 review. The additive
+[Canonical Semantic Foundation v2](canonical_semantic_foundation_v2.md) is the
+current definition authority for geometry, generations, lifecycle,
+reinteraction, ancestry, and factual outcomes. It does not rewrite the frozen
+v1.2 runs or promote their empirical conclusions.
 The [DOL/Belief/Temporal supplement](dol_belief_temporal_supplement.md) records
 the current dependency-cluster rule, temporal/ancestry separation, FVG
 first-lifecycle freeze, and the 2024-06 joint OHLCV/MBO data-role audit.
@@ -25,11 +30,23 @@ operational Shadow Live, rolling OOF, and sealed OOS remain incomplete.
 ## Current boundary
 
 The Trading Eye is now an event-sourced, replayable, auditable, deterministic
-multi-timeframe market-state engine within the registered v1.2 semantic
-surface. It normalizes data, emits immutable atomic facts, reduces independent
-timeframe states, resolves independent parent/child relations, maintains a
-cross-timeframe Session object, and publishes current facts plus an event
-delta. It does not select a unique DOL or make a trade decision.
+multi-timeframe market-state engine. The registered v1.2 surface remains the
+atomic detector authority. Foundation v2 consumes only those admitted facts
+and adds immutable geometry, generation/lifecycle, and first-reinteraction
+records plus a technical replay projection. A separate versioned
+`StructuralOutcomeEngine` supplies factual research outcomes; those results
+are not `FoundationRecord` or `MarketSnapshot` state. The implementation
+reuses the existing detectors and event store; it is not a parallel Eye. The
+Eye does not select a unique DOL or make a trade decision.
+
+The checked-in production model explicitly enables the additive projection
+with `observer.canonical_foundation_enabled=true`; `ContinuousSMCEngine`
+rejects a missing, false, or non-boolean value. It also requires the exact
+foundation registry path and canonical identity, strict-loads them, and freezes
+the admitted version/identity into Engine, Shadow, and checkpoint state. Engine
+checkpoint schema v3 is the first schema that includes the production
+foundation state, and older schemas fail closed on restore. These bindings do
+not grant empirical, Brain, Trade Intent, execution, or live authority.
 
 The existing `PlaybookBrain` now maintains one shadow-only Hypothesis Manager
 competition set containing six mutually exclusive path hypotheses:
@@ -77,17 +94,21 @@ it. Temporal proximity alone cannot satisfy DFP/LSR/FAVR action gates. Its
 current 60-minute construction window is not a preregistered model relation and
 must remain diagnostic until a separate temporal study freezes the definition.
 
-The Brain produces shadow-only DOL rankings. It reuses the existing
-external-draw inventory and obstruction views, filters hard and soft obstacles
-to the strict open interval between current price and target, excludes the
-target itself by identity/source/co-location, and normalizes candidate scores
-across the eligible candidates for each direction. The result references the
-exact associated path-hypothesis weight; diagnostic joint quality is path
-weight multiplied by candidate weight. Neither value is a posterior. Decision,
-Risk, and execution do not consume either the new path competition or DOL
-ranking. The separate DOL probability protocol marginalizes across paths and
-retains explicit no-target mass, but the Brain publishes no probability result
-while its exact fitted/admitted model artifact is absent.
+The Brain produces shadow-only DOL rankings. Its public target inventory honors
+foundation lifecycle state where available: a registered Sweep departure can
+publish the distinct rearmed Generation 2, while Acceptance, retirement, and a
+formed pool without its exact live source are excluded. Sources not yet managed
+by the foundation retain the compatibility inventory path. The adapter reuses
+the existing obstruction views, filters hard and soft obstacles to the strict
+open interval between current price and target, excludes the target itself by
+identity/source/co-location, and normalizes candidate scores across the eligible
+candidates for each direction. The result references the exact associated
+path-hypothesis weight; diagnostic joint quality is path weight multiplied by
+candidate weight. Neither value is a posterior. Decision, Risk, and execution
+do not consume either the new path competition or DOL ranking. The separate DOL
+probability protocol marginalizes across paths and retains explicit no-target
+mass, but the Brain publishes no probability result while its exact fitted/
+admitted model artifact is absent.
 
 Signal Policy and Trade Intent are integrated as shadow projections with
 separate exact artifact admission. No fitted/admitted path-likelihood,
@@ -134,8 +155,13 @@ hash-order dependence from revised Scene-Graph edge IDs. The full 6,900-clock
 run and a real-time multi-day pilot have not run.
 That receipt binds the earlier path/model identities `5213b3d6…` and
 `4214da19…`; the present global dependency-cluster protocol intentionally
-changes those identities. It is historical engineering evidence, not a current
-pilot input, and must be rematerialized before any later rehearsal.
+changes those identities, so it remains historical engineering evidence. A
+separate current Foundation-enabled Engine run passed the same exact 200-row
+prefix under the current model/registry bindings; the single detailed
+[release-verification table](canonical_semantic_foundation_v2.md#replay-test-and-empirical-boundary)
+and its [machine receipt](../evidence/phase9_foundation_v2_prefix_200_receipt.json)
+record that bounded file-parity result. It does not complete or rematerialize
+the 6,900-clock input and is not a real-time pilot.
 A read-only 6,900-clock capacity preflight verifies the historical
 `COMPLETED.json` binding to the checkpoint-manifest SHA-256, creates no Engine,
 and replays zero clocks. Its current lower-bound estimates are 342,420,401 bytes
@@ -148,23 +174,34 @@ These input/checkpoint files are local and Git-ignored; the
 records their exact paths, hashes, commands, publication semantics, and the
 limits of the small portable receipt for otherwise Git-ignored local evidence.
 
+## Foundation-v2 release verification
+
+The foundation specification contains the single detailed
+[release-verification table](canonical_semantic_foundation_v2.md#replay-test-and-empirical-boundary),
+including the exact June-2024 OHLCV input identity, focused regressions,
+the repository-regression handoff boundary, construction/replay performance
+A/B, bounded final record census, five-view atomic replay parity, and the separate current
+Foundation-enabled 200-clock Engine file parity. Those checks are engineering
+evidence only: they are not a 6,900-clock or real-time multi-day pilot, MBO
+validation, model calibration, rolling OOF, or sealed OOS.
+
 ## Plan items 1–20
 
 | Item | Current status | Evidence boundary |
 |---|---|---|
 | 1. Eye / Brain / Executor definitions | **Complete as ownership definitions** | Eye publishes facts; Brain owns hypotheses/ranking/intent; Executor owns orders and positions. Shadow/research ownership is implemented while action admission remains closed. |
-| 2. Event-sourced hierarchical state | **Implemented for the v1.2 role-depth contract; geometric hierarchy open** | Immutable normalized and semantic events reduce into dimensioned `TimeframeState`; there is no combinatorial master enum. Continuous geometric Swing containment/nesting is not the current hierarchy. |
+| 2. Event-sourced hierarchical state | **Implemented with separate role and geometric hierarchy** | Immutable normalized and semantic events reduce into dimensioned `TimeframeState`; Foundation v2 adds an append-only Swing containment tree without changing v1.2 role depth. There is no combinatorial master enum. |
 | 3. Semantic provenance | **Producer implemented; immutable-store authority hardened in round 2** | `event_time`, `known_at`, version, immutable evidence, separated source namespaces, causal ancestry, deterministic ordering, crossing terminal uniqueness, and canonical cross-links are enforced. Frozen artifacts are not rewritten. |
-| 4. Preregistered semantics | **Current v1.2 contract implemented** | Runtime binds `registry_v1_2.yaml` and `parameters_v1_2.yaml`. Five reserved/alias kinds intentionally remain non-emitted. |
+| 4. Preregistered semantics | **v1.2 atomic and foundation-v2 contracts implemented** | Runtime binds `registry_v1_2.yaml`/`parameters_v1_2.yaml` and the hash-bound additive `foundation_v2_0.yaml`. Reserved v1.2 aliases remain non-emitted; canonical foundation records are carried through a technical `FOUNDATION_STATE_CHANGED` projection that is itself not a new atomic market fact. |
 | 5. Eye organization | **Complete within the reused codebase** | Existing normalizer/detectors feed the event store, reducers, relation/session state, and snapshot publisher; no parallel Eye stack was created. |
-| 6. Parent/child rules | **Complete for isolation; geometric nesting open** | Only parent events change parent facts; child opposition becomes retracement/warning evidence until the parent's own invalidation. A continuous geometric parent/child Swing tree is not implemented. |
-| 7. Independent relation object | **Complete** | `RelationState` owns parent/child relationships and source cutoffs instead of copying a parent into every child state. |
+| 6. Parent/child rules | **Complete for authority isolation and geometric nesting** | Only parent events change parent facts; child opposition remains evidence until the parent's own invalidation. The separate geometric tree uses only time/price containment and never BOS, protected role, or future importance. |
+| 7. Independent relation object | **Complete with generation lifecycle** | `RelationState` remains the deterministic classifier; Foundation v2 binds it to persistent parent/child Structure Generations so unchanged snapshots update one generation rather than create independent samples. |
 | 8. Cross-timeframe Session | **Complete** | `SessionState` is reduced from the completed M1 clock and is not embedded in a timeframe. |
 | 9. Competing Brain hypotheses | **Current-scope lifecycle implemented; rollover and fitted model incomplete; shadow-only** | The six-path reducer, exact terminal/winner adapter, global dependency-cluster guard, ledger, common-horizon expiry, precedence rules, and residual mass are tested. Authority/scope rollover retirement is not preregistered, and runtime still uses equal priors and zero increments/decay with no fitted/admitted likelihood artifact. |
 | 10. Signal / Execution Research separation | **Complete as an engineering boundary; execution-study coverage partial** | Signal Policy/Trade Intent, the seven-entry-method evaluator core, the order FSM, and retained simulator are distinct; none turns Eye diagnostics into action authority. A read-only readiness checker preserves the blocked template; exact method-price provenance, wait/cancel/stop/target variants, and the formal runner/study remain open. |
 | 11. Nested and non-nested comparisons | **Full v1.2 protocol-v3 diagnostic complete** | The frozen r2 run separates source-only ancestry from normalized-M5-bar composition. Episode counts are E1–E6 = 1,124 / 317 / 17 / 1 / 1 / 0; E3–E6 remain underpowered and no semantic/model admission follows. |
 | 12. Matched controls | **Measured; diagnostic coverage remains limited** | Quiet and non-sweep controls matched 372/1,124 (33.1%) and 62/1,124 (5.5%); pseudo and forward-shift matched 0. All four families stay separate, fixed-family Holm is non-significant, and cross-pair outcome overlap keeps inference descriptive/unvalidated. |
-| 13. Structural outcomes before P&L | **Substantial; semantic and study gaps remain** | Direction, target/invalidation, MFE/MAE, path/time, next-structure, FVG, and half-life outcomes exist. Origin Zone terminal provenance now fails closed. Structural Leg still lacks the requested path metrics and explicit `ATR_at_leg_start`. The frozen r2 projection contains 50 repeated protected-assignment context references; current producer/reducer custody is hardened, but Protected-Swing survival and matched Origin-Zone first-retest require fresh independently frozen estimands/matching rules. |
+| 13. Structural outcomes before P&L | **Canonical definition complete; empirical programs remain** | One factual `StructuralOutcomeEngine` now owns target/invalidation precedence, same-bar ambiguity, native-bar gaps, horizon censoring, MFE and MAE. Structural Leg v2 freezes its full path, close/extreme efficiency, close/wick MAE, tick amplitude, duration, and strictly-prior `ATR_at_leg_start` ancestry. Protected-Swing survival and matched first-retest effects still require fresh independently frozen studies. |
 | 14. OHLCV geometry / MBO mechanism | **Phase 6 two-week study complete** | The final registered extension supports only Acceptance continuation and Displacement impact for Phase 7 evidence. Sweep/MSS are underpowered; the historical FVG first-concrete-lifecycle proxy (`fvg_retest_response`) is unsupported and is not a true first-retest estimand. No Week 3 is authorized. |
 | 15. Arrow-by-arrow causal chain | **Full diagnostic executed; sparse after E2** | v3 proves E2 through strict source ancestry and E3–E5 through separately labelled exact-BAR composition; E6 has no samples. Phase 6 MBO evidence remains a distinct study and cannot fill these sparse stages. |
 | 16. Experiment preregistration | **v1.2 v3 r2 frozen and executed as a development diagnostic** | The r2 manifest froze definitions, controls, outcomes, inference, ledgers, identities, input census, and no-authority flags before the complete run. OOS, fitting, inference authority, and semantic acceptance remain closed. |
@@ -177,15 +214,15 @@ limits of the small portable receipt for otherwise Git-ignored local evidence.
 
 | Phase | Status | What is present | What remains |
 |---|---|---|---|
-| 1. Auditable foundation | **Complete for the active v1.2 path after round-two hardening** | Causal clocks, exact tick admission, semantic identity, immutable events/store, source validation, lifecycle uniqueness, replay, fingerprints, and determinism tests. Phase 9 pickles the complete runner, including the active Hypothesis Manager ledger. | A directly queryable append-only belief-update archive across retired scopes is not persisted; the hash-bound input journal can replay it. |
-| 2. Core atomic semantics | **Producer implemented; definition review remains partial** | Swing, Leg, candidate level, touch, penetration, Sweep, Acceptance, Raw Break, FVG lifecycle, and continuous Displacement have executable v1.2 producers. Round 2 hardens tick authority, source contracts, and crossing terminal uniqueness. | Structural Leg path metrics/ATR reference, same-level rearm, multi-bar resolution ancestry, and any `FVG_EXPIRED` definition require a new frozen version. Three other non-emitted kinds remain deliberate aliases/derived state. |
-| 3. Derived structure | **Mixed: core producers exist; target definitions are not complete** | BOS/Protected source chains and the protected external reducer are hardened; MSS, qualified Origin Zone, the existing Mature Balance Range projection, and deterministic Delivery Phase remain executable. | Explicit internal/external generations, base-vs-qualified Origin Zone split, Structural-vs-Balance Range split, persistent Delivery Phase, and any range-extension rule require preregistration and a new version. |
-| 4. Timeframe and relation state | **Complete for the v1.2 role-depth contract** | Timeframe/Relation/Session/Snapshot, append-only Swing role hierarchy, and executable same-timeframe IRL/ERL membership. | A geometric parent/child Swing nesting tree is not implemented; outcome value is not implied by deterministic role assignment. |
+| 1. Auditable foundation | **Complete for the active v1.2 plus additive-v2 path** | Causal clocks, exact tick admission, hash-bound semantic identities, immutable events/store, source-kind and cross-object validation, lifecycle uniqueness, production config admission, checkpoint-schema-v3 restore, replay, fingerprints, and determinism tests. Phase 9 pickles the complete runner, including the active Hypothesis Manager ledger. | A directly queryable append-only belief-update archive across retired scopes is not persisted; the hash-bound input journal can replay it. |
+| 2. Core atomic semantics | **v1.2 producer plus additive foundation-v2 lifecycle complete** | Existing Swing/candidate/touch/penetration/Sweep/Acceptance/Raw Break/FVG/Displacement producers are unchanged. Foundation v2 adds complete Structural Leg paths, same-level rearm, level retirement, competing interaction terminals, boundary attack, and multi-bar formation ancestry. | No arbitrary time TTL or new tutorial SMC detector was added. Any empirical expiry threshold still requires a later study/version. |
+| 3. Derived structure | **Foundation definitions complete; empirical value untested** | Persistent internal/external Structure Generations and transitions, Base Origin Core versus Qualified OB, Structural versus Balance Range, and Delivery Phase Generation are independently represented. MSS starts or updates a forming challenger; it cannot itself confirm an opposite regime. | Range extension remains undefined. Foundation definitions do not validate predictive value or retroactively change v1.2 artifacts. |
+| 4. Timeframe and relation state | **Complete with distinct geometry and relation generations** | Timeframe/Session/Snapshot and role hierarchy remain; Foundation v2 adds geometric Swing assignments, dual range locations, and persistent cross-timeframe Relation Generations. | Outcome value is not implied by deterministic nesting or relation state and remains an empirical question. |
 | 5. Signal Research | **Full registered v1.2 protocol-v3 diagnostic complete** | Frozen r2 produced a complete 36,000-clock run, six hash-bound ledgers, E1–E6 and non-nested proofs, four separate controls, adjacent deltas, exact McNemar, and fixed-family Holm. | E3–E6 and two control families remain sparse/empty; preregister an independent development/validation design rather than relaxing thresholds. No OOS window is open. |
 | 6. MBO mechanism | **Complete for the registered two-week development study** | Primary week plus the preregistered underpowered extension passed engineering/data/statistical audit. Phase 7 allowlist: `acceptance_continuation`, `displacement_impact`; no Week 3. | Keep underpowered Sweep/MSS and the unsupported historical FVG first-concrete-lifecycle proxy excluded. A true first-retest estimand requires a new preregistration. This association result is not causal, OOS, model-fit, or trading authority. |
 | 7. Trading Brain | **Current-scope shadow lifecycle/interfaces integrated; fitted model not admitted** | Exact market facts map to per-path falsification and realized winners inside the current authority scope; the reducer, global dependency guard, DOL ranking, fitted-artifact-only no-target projection, Signal Policy, Trade Intent, and artifact loaders run fail closed in the existing Brain. The read-only readiness checker verifies 7,381 Phase 6 ledger rows and reports 13 blockers without fitting or writing artifacts. Equal priors and zero increments/decay remain neutral; no runtime DOL probability is published without its artifact. | Preregister scope-rollover retirement/archive semantics; bind and execute the already-frozen June W4 temporal/branching design without changing it; narrow the final Brain input to `MarketSnapshot + events`; fit, validate, load, and admit path/DOL/outcome artifacts. Pre-horizon per-path expiry/hazard/prior reversion also need separate definitions and fitted temporal evidence. |
 | 8. Execution Research | **Standalone FSM and entry-method core complete; study/vertical gates not passed** | Seven entry methods can be compared under one frozen intent. Evaluator v1.1 separates entry GTT from analysis end, cancels a remainder when the target resolves before its pending fill, keeps primary-pair eligibility independent of secondary censoring, and rejects off-grid stop/target prices. Execution FSM v1.5 passed focused logic review, and a read-only checker confirms the template remains blocked without opening ledgers or writing artifacts. | Resolve all 12 blockers: freeze method-price provenance plus wait/cancel/stop/target variants and estimands, bind a non-zero intent/minute ledger and outputs, implement the formal runner, execute the paired study, then connect exact risk-approved intents to the FSM. |
-| 9. Shadow Live | **Deterministic parity harness complete; operational gate not passed** | v1.2 binds exact evidence/state identities; a Git-ignored 6,900-clock input and exact 100→200 checkpoint/resume/cold replay receipt exist for the pre-supplement model snapshot. A read-only full-window capacity preflight verifies the completion/checkpoint binding but finds current identity mismatch and grants no run authority. | Rematerialize under the final source snapshot; preregister operational metrics for event/relation churn, evidence-belief consistency, signal expiry, and DOL stability; remove the full-week nonlinear capacity residual if doing that rehearsal; then run the real-time multi-day no-order pilot. |
+| 9. Shadow Live | **Deterministic parity harness complete; operational gate not passed** | v1.2 binds exact evidence/state identities; the historical Git-ignored 6,900-clock input retains its pre-supplement 100→200 receipt, and a separate current Foundation-enabled 200-row file-parity run binds the current model, registry, and Foundation identity. A read-only full-window capacity preflight still evaluates the historical receipt, finds its historical/current identity mismatch, and grants no run authority. | Rematerialize the complete 6,900-clock rehearsal under the final source snapshot if that rehearsal is pursued; preregister operational metrics for event/relation churn, evidence-belief consistency, signal expiry, and DOL stability; remove the full-week nonlinear capacity residual; then run the real-time multi-day no-order pilot. |
 | Final OOS | **Not opened** | Split and sealed-holdout governance exist. | Open only after the vertical chain is stable and preregistered acceptance conditions are met. |
 
 ## PDF target-state conformance
@@ -201,36 +238,38 @@ The complete target state is **not** reached:
 
 | Target area | Current verdict |
 |---|---|
-| Eye/event-state foundation | v1.2 producers are executable and round-two authority seams are hardened; geometric Swing containment, full Structural Leg path metrics, explicit MSS generation, Origin-Zone decomposition, Structural/Balance Range separation, persistent Delivery Phase, `FVG_EXPIRED`, and `DEALING_RANGE_EXTENDED` still need frozen definitions. |
+| Eye/event-state foundation | v1.2 producers remain the immutable atomic authority; foundation v2 supplies geometric Swing containment, complete Structural Leg paths, interaction/structure/relation/delivery generations, Origin/OB decomposition, dual ranges, structural FVG expiry, true first reinteraction, and a shared factual outcome engine. Arbitrary TTL and `DEALING_RANGE_EXTENDED` remain deliberately undefined. |
 | Brain | Current-scope lifecycle and admission interfaces are executable, but the final sole-input boundary, scope retirement archive, fitted probabilities, and non-zero intents are absent. |
 | Signal Research | Full registered diagnostic executed; sparse later chains and empty controls prohibit fitting or semantic promotion. |
 | Execution Research | Order FSM and seven-entry-method core exist; the read-only checker reports 12 blockers, while price provenance, wait/cancel/stop/target variants, formal input/result runner, and empirical study are absent. |
-| Shadow Live | Deterministic file parity is demonstrated on an exact 200-clock prefix; the read-only 6,900-clock capacity estimate is not run authority, and operational metrics, full-week capacity closure, and a real-time multi-day pilot are absent. |
+| Shadow Live | Current Foundation-enabled deterministic file parity is demonstrated on an exact 200-clock prefix; the read-only 6,900-clock capacity estimate is not run authority, and operational metrics, full-week capacity closure, and a real-time multi-day pilot are absent. |
 | OOF/OOS/live execution | Intentionally unopened and unauthorized until the preceding vertical gates pass. |
 
 ## Remaining plan goals
 
 The remaining work is not a request to build another Eye, Brain, or executor.
-It consists of the following explicit definition, evidence, and promotion
-gates:
+The canonical-definition gaps named above were closed by an additive,
+hash-bound foundation instead of silently changing v1.2. Remaining work is
+therefore empirical validation and promotion:
 
-- v1.2 has a causal Swing role-depth hierarchy, but not a geometric
-  parent/child Swing-containment tree. Such a tree needs a separately frozen
-  pivot/leg unit, time/price containment rule, tie-break, and late-confirmation
-  reparent policy before implementation.
-- The current H1 range detector is the sparse two-sided Mature Balance Range
-  evaluated by the 2023 scan. Its legacy `DEALING_RANGE_*` name must not be
-  interpreted as a validated Structural Dealing Range. A new version must split
-  the two identities before IRL/ERL, Delivery Phase, DOL, or Brain range evidence
-  can be promoted.
-- Structural Leg still lacks frozen path-wide efficiency/MAE fields and an
-  explicit `ATR_at_leg_start` source. MSS likewise lacks an explicit internal
-  generation identity. Both require versioned event-schema changes, not a
-  silent field patch.
-- `FVG_EXPIRED` and `DEALING_RANGE_EXTENDED` remain reserved because v1.2 has
-  no registered expiry clock/threshold or range-extension transition. The
-  three other non-emitted enum values are documented aliases/derived state,
-  not unfinished detectors.
+- Geometric nesting, Structural Leg v2, lifecycle generations, dual ranges,
+  structural FVG expiry, and first reinteraction are now replayable
+  definitions. Their market value is unknown; no frozen historical result is
+  relabelled as validation of them.
+- The legacy H1 `DEALING_RANGE_*` detector remains the historical Mature
+  Balance Range. Foundation Structural Range is a separate object and location
+  axis; old evidence is not renamed or reused as Structural Range evidence.
+- `FVG_EXPIRED` remains non-emitted in the v1.2 atomic enum. Foundation v2 can
+  terminate FVG availability only for an exact parent-structure/range/reset/
+  rollover cause and never for an arbitrary bar TTL. `DEALING_RANGE_EXTENDED`
+  remains undefined.
+- Retained v1.2 Swing/pool Touch facts supply the source confirmation BAR rather
+  than a separate pivot BAR. Foundation replay validates their available exact
+  level/clock/lineage facts but does not claim to recompute contact geometry
+  from that transport alone; direct and range-boundary Touch geometry remain
+  independently checked. The other non-inferred transport limits are catalogued
+  in the foundation specification's
+  [explicit replay-seam limits](canonical_semantic_foundation_v2.md#explicit-replay-seam-limits).
 - Protected-Swing survival and matched Origin-Zone first-retest remain
   registered research questions, not completed studies. Their estimands,
   pre-treatment rank/matching rules, competing-risk clocks, horizons, and
@@ -284,11 +323,11 @@ retains its `known_at` and source event IDs. The effective rank/nesting depth is
 the highest causally known assignment; historical Swing events and Legs are
 never rewritten with future authority.
 
-Here `nesting_depth` is the frozen depth of that causal structural-role
-assignment (`micro=0` through `external=3`), not a separately inferred
-geometric parent/child Swing tree. Prominence and duration remain continuous
-features; v1.2 deliberately does not introduce unfitted thresholds that would
-pretend to validate a geometric hierarchy.
+Here the legacy `nesting_depth` field remains the frozen depth of that causal
+structural-role assignment (`micro=0` through `external=3`). Foundation v2
+adds a different `geometric_depth` and append-only parent assignment based only
+on exact time/price containment. Neither depth is evidence that the other is
+important, and no empirical threshold is inferred from the geometry.
 
 IRL/ERL is an executable deterministic candidate classification, not a new
 semantic event. Against the same-timeframe active/mature dealing range, strict
@@ -301,12 +340,14 @@ v1.2 emission:
 
 - `FVG_TOUCHED`: compatibility alias; concrete partial/midpoint/full lifecycle
   events are canonical.
-- `FVG_EXPIRED`: reserved until an expiry rule is preregistered.
+- `FVG_EXPIRED`: still reserved in atomic v1.2; Foundation v2 represents only
+  exact structural/reset expiry causes in its independent lifecycle record.
 - `ORIGIN_ZONE_TOUCHED`: compatibility alias; first intersection is represented
   by `ORIGIN_ZONE_MITIGATED`.
 - `DEALING_RANGE_EXTENDED`: reserved until an extension rule is preregistered.
-- `DELIVERY_PHASE_CHANGED`: compatibility projection alias; Delivery Phase is
-  snapshot-derived.
+- `DELIVERY_PHASE_CHANGED`: compatibility projection alias in v1.2;
+  Foundation v2 wraps the existing classifier in a persistent, parent-bound
+  Delivery Phase Generation without emitting this atomic alias.
 
 The canonical semantic emitter rejects a registry-bound semantic kind unless
 its binding is `canonical_emitted`. Retaining an enum value or reducer import
@@ -357,7 +398,9 @@ and [result](../../experiments/results/smc_semantics_v1_2_2024_06_phase6_mbo_wee
 
 ## Authority summary
 
-- Eye state: deterministic market facts within v1.2.
+- Eye state: deterministic v1.2 atomic facts plus the hash-bound additive
+  foundation-v2 projection; all foundation empirical/Brain/action flags remain
+  false.
 - Phase 6 MBO: registered two-week development association passed; only two
   mechanisms are allowlisted and no further extension is authorized.
 - Phase 7 path/DOL/Signal/Intent: reducer and current-scope path lifecycle
@@ -378,12 +421,13 @@ and [result](../../experiments/results/smc_semantics_v1_2_2024_06_phase6_mbo_wee
   blocked-template checker is read-only and
   reports 12 blockers; the formal runner, method provenance/variants, empirical
   study, and vertical TradeIntent-to-FSM handoff are not complete.
-- Phase 9: v1.2 deterministic parity harness is complete; a 200-clock
-  historical checkpoint/resume/cold-replay prefix is exact, but operational
+- Phase 9: v1.2 deterministic parity harness is complete. The historical
+  checkpoint/resume/cold-replay receipt and a separate current
+  Foundation-enabled 200-clock file-parity run are exact, but operational
   metrics, capacity-safe 6,900-clock replay, and the real-time multi-day pilot
-  are not complete. Its read-only full-window preflight verifies the completion
-  marker/checkpoint SHA binding but exposes historical/current identity mismatch
-  and explicitly withholds run authority.
+  are not complete. The read-only full-window preflight still binds the
+  historical receipt, exposes its historical/current identity mismatch, and
+  explicitly withholds run authority.
 - Decision/Risk/live/OOS: unchanged and fail closed; the final OOS window is
   unopened.
 
@@ -393,9 +437,11 @@ The 430,877,532-byte historical Phase 5 event-study ledger and the roughly
 477-MiB v1.2 r2 event-study ledger are hash-bound formal evidence, not caches or
 cleanup candidates. They exceed common Git-host object limits and must be
 published through Git LFS or an immutable artifact store with path, SHA-256,
-row count, and retrieval location preserved. Until that handoff and the
-current uncommitted source/artifact set are versioned, the working directory
-is not a clean ordinary-Git publication bundle.
+row count, and retrieval location preserved. This release commits the ordinary
+foundation-v2 source/spec/test set; its commit ID is reported at handoff rather
+than embedded in this document. Until the separate large-ledger handoff, the
+evidence publication is not a complete portable bundle. Those ledgers remain
+receipt-bound evidence and are not deleted as cleanup.
 
 The tracked 2023 Eye-authority summary also points to the ignored local
 `outputs/development/eye_authority_case_audit/2023_exact_contract/transmission_audit.json`

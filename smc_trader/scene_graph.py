@@ -31,6 +31,7 @@ from .model import (
     GlobalConflictEvidence,
     GlobalConflictRole,
     GlobalMarketContext,
+    LiquidityInventoryItem,
     LiquidityInventoryLifecycle,
     MarketEpisodeState,
     MarketMode,
@@ -84,6 +85,352 @@ class LiquidityRole(str, Enum):
     INTERMEDIATE_LIQUIDITY = "intermediate_liquidity"
     PRIMARY_DELIVERABLE_TARGET = "primary_deliverable_target"
     TERMINAL_DRAW = "terminal_draw"
+
+
+_FOUNDATION_SOURCE_TO_INVENTORY_KIND: Mapping[str, str] = {
+    "confirmed_swing": "swing",
+    "structural_swing": "swing",
+    "previous_session_high": "previous_session_high",
+    "previous_session_low": "previous_session_low",
+    "previous_day_high": "previous_day_high",
+    "previous_day_low": "previous_day_low",
+    "previous_week_high": "previous_week_high",
+    "previous_week_low": "previous_week_low",
+    "range_boundary": "range_boundary",
+    "mature_range_boundary": "range_boundary",
+    "equal_highs": "equal_highs",
+    "equal_lows": "equal_lows",
+}
+
+
+@dataclass(frozen=True)
+class FoundationDOLInventoryView(LiquidityInventoryItem):
+    """One current DOL join view over a canonical liquidity generation.
+
+    This is a downstream adapter, not another liquidity detector or canonical
+    object.  ``source_ids`` deliberately contains the exact level-creation
+    facts, the semantic interaction-generation identity, and that
+    generation's exact source facts.  Foundation projection record IDs and
+    ``FOUNDATION_STATE_CHANGED`` transport IDs never become ancestry.
+    """
+
+    source_identity: str = ""
+    active_generation_id: str = ""
+    foundation_source_kind: str = ""
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        if (
+            not self.source_identity
+            or not self.active_generation_id
+            or not self.foundation_source_kind
+            or self.lifecycle is not LiquidityInventoryLifecycle.VISIBLE
+        ):
+            raise ValueError("foundation DOL inventory view is invalid")
+
+
+def foundation_dol_inventory(
+    observation: MarketObservation,
+) -> tuple[FoundationDOLInventoryView, ...]:
+    """Resolve current canonical levels from the immutable foundation view.
+
+    The exact legacy source item contributes descriptive rank/strength only;
+    it cannot reactivate a disarmed or retired foundation level.  Formed-pool
+    sources are identity overlays while their compatibility item is visible,
+    never standalone rematerializations after that source disappears.
+    """
+
+    snapshot = getattr(observation, "market_snapshot", None)
+    projection = None if snapshot is None else snapshot.foundation
+    if projection is None:
+        return ()
+    from .semantic_foundation import (
+        FoundationObjectType,
+        FoundationRecordStatus,
+    )
+    from .semantic_lifecycle import LiquidityLevelLifecycle
+
+    legacy_by_id = {
+        item.item_id: item for item in observation.liquidity_inventory
+    }
+    published_by_id: dict[str, object] = {}
+    for state in snapshot.timeframe_states.values():
+        for candidate in state.liquidity.candidates:
+            if candidate.candidate_id in published_by_id:
+                raise ValueError("foundation DOL candidate identity is ambiguous")
+            published_by_id[candidate.candidate_id] = candidate
+    interaction_records = {
+        record.object_id: record
+        for record in projection.latest_records
+        if record.object_type
+        is FoundationObjectType.LIQUIDITY_INTERACTION_GENERATION
+    }
+    protected_source_ids = frozenset(
+        f"swing:{protected_swing_id}"
+        for record in projection.latest_records
+        if (
+            record.object_type is FoundationObjectType.STRUCTURE_GENERATION
+            and record.status is FoundationRecordStatus.ACTIVE
+            and isinstance(
+                protected_swing_id := record.payload.get(
+                    "protected_swing_id"
+                ),
+                str,
+            )
+            and protected_swing_id
+            and isinstance(
+                record.payload.get("protected_swing_assignment_event_id"),
+                str,
+            )
+        )
+    )
+    active_candidate_ids = frozenset(projection.active_dol_candidate_ids)
+    output: list[FoundationDOLInventoryView] = []
+    for level_record in projection.latest_records:
+        if (
+            level_record.object_type is not FoundationObjectType.LIQUIDITY_LEVEL
+            or level_record.status is not FoundationRecordStatus.ACTIVE
+            or level_record.object_id
+            not in active_candidate_ids
+            or level_record.payload.get("lifecycle")
+            not in {
+                LiquidityLevelLifecycle.ACTIVE.value,
+                LiquidityLevelLifecycle.REARMED.value,
+            }
+        ):
+            continue
+        source_identity = str(level_record.payload["source_identity"])
+        source_kind = str(level_record.payload["source_kind"])
+        legacy = legacy_by_id.get(source_identity)
+        published = published_by_id.get(level_record.object_id)
+        # MarketSnapshot is the single public visibility authority.  In
+        # particular, formed-pool identities intentionally have no standalone
+        # canonical candidate after their exact compatibility source leaves.
+        if published is None:
+            continue
+        generation_id = level_record.payload.get("active_generation_id")
+        if not isinstance(generation_id, str) or not generation_id:
+            raise ValueError("active foundation DOL level lacks a generation")
+        generation_record = interaction_records.get(generation_id)
+        if (
+            generation_record is None
+            or generation_record.status is not FoundationRecordStatus.ACTIVE
+            or generation_record.payload.get("level_id")
+            != level_record.object_id
+        ):
+            raise ValueError("foundation DOL generation join is incomplete")
+        history = projection.records_for(
+            FoundationObjectType.LIQUIDITY_LEVEL,
+            level_record.object_id,
+        )
+        if not history:
+            raise ValueError("foundation DOL level lacks creation history")
+        creation_record = history[0]
+        inventory_kind = _FOUNDATION_SOURCE_TO_INVENTORY_KIND.get(source_kind)
+        if source_kind in {"formed_liquidity_pool", "formed_pool"}:
+            inventory_kind = (
+                "equal_highs"
+                if level_record.payload["side"] == "above"
+                else "equal_lows"
+            )
+        if inventory_kind is None:
+            # A source kind not frozen into the compatibility target map may
+            # remain canonical, but it cannot silently enter Brain ranking.
+            continue
+        tick_size = float(level_record.payload["tick_size"])
+        source_timeframe = Timeframe(level_record.payload["source_timeframe"])
+        price = int(level_record.payload["price_ticks"]) * tick_size
+        if (
+            published.timeframe is not source_timeframe
+            or published.side != level_record.payload["side"]
+            or published.lifecycle
+            != LiquidityInventoryLifecycle.VISIBLE.value
+            or published.rank not in {"internal", "external"}
+            or not math.isclose(
+                float(published.price),
+                price,
+                rel_tol=1e-9,
+                abs_tol=1e-9,
+            )
+        ):
+            raise ValueError(
+                "published foundation DOL candidate is inconsistent: "
+                f"level={level_record.object_id}, "
+                f"source={source_identity}, "
+                f"published_tf={published.timeframe.value}, "
+                f"source_tf={source_timeframe.value}, "
+                f"published_side={published.side}, "
+                f"source_side={level_record.payload['side']}, "
+                f"published_lifecycle={published.lifecycle}, "
+                f"published_rank={published.rank}, "
+                f"published_price={published.price}, source_price={price}"
+            )
+        is_protected_swing = source_identity in protected_source_ids
+        if is_protected_swing and published.rank != "external":
+            raise ValueError(
+                "published protected foundation DOL candidate is not external"
+            )
+        output.append(
+            FoundationDOLInventoryView(
+                item_id=level_record.object_id,
+                source_identity=source_identity,
+                active_generation_id=generation_id,
+                timeframe=source_timeframe,
+                side=str(level_record.payload["side"]),
+                price=price,
+                lower_bound=(
+                    int(level_record.payload["lower_bound_ticks"]) * tick_size
+                ),
+                upper_bound=(
+                    int(level_record.payload["upper_bound_ticks"]) * tick_size
+                ),
+                kind=inventory_kind,
+                foundation_source_kind=source_kind,
+                source_ids=tuple(
+                    dict.fromkeys(
+                        (
+                            *(() if legacy is None else legacy.source_ids),
+                            *creation_record.source_event_ids,
+                            generation_id,
+                            *generation_record.source_event_ids,
+                        )
+                    )
+                ),
+                formed_at=creation_record.known_at,
+                confirmed_at=creation_record.known_at,
+                structural_rank=published.rank,
+                strength=float(published.strength),
+                age_bars=published.age_bars,
+                # The legacy liquidity tracker can label a candidate
+                # protected when a structure snapshot first forms, before
+                # the canonical protected-assignment fact exists.  Preserve
+                # that tracker evidence in the legacy inventory, but publish
+                # this canonical join as protected only from an exact live
+                # StructureGeneration assignment.
+                is_protected_swing=is_protected_swing,
+                visibility_strength=(
+                    0.0
+                    if legacy is None
+                    else float(legacy.visibility_strength)
+                ),
+                lifecycle=LiquidityInventoryLifecycle.VISIBLE,
+            )
+        )
+    return tuple(
+        sorted(
+            output,
+            key=lambda item: (
+                item.timeframe.value,
+                item.price,
+                item.item_id,
+            ),
+        )
+    )
+
+
+def current_dol_inventory(
+    observation: MarketObservation,
+) -> tuple[object, ...]:
+    """Return the single exact DOL/target-map inventory consumer view."""
+
+    snapshot = getattr(observation, "market_snapshot", None)
+    projection = None if snapshot is None else snapshot.foundation
+    if projection is None:
+        return tuple(
+            item
+            for item in observation.liquidity_inventory
+            if item.lifecycle is LiquidityInventoryLifecycle.VISIBLE
+            and item.confirmed_at <= observation.asof
+        )
+    from .semantic_foundation import FoundationObjectType
+
+    managed_source_ids = frozenset(
+        str(record.payload["source_identity"])
+        for record in projection.latest_records
+        if record.object_type is FoundationObjectType.LIQUIDITY_LEVEL
+    )
+    legacy = tuple(
+        item
+        for item in observation.liquidity_inventory
+        if item.lifecycle is LiquidityInventoryLifecycle.VISIBLE
+        and item.confirmed_at <= observation.asof
+        and item.item_id not in managed_source_ids
+    )
+    return (*legacy, *foundation_dol_inventory(observation))
+
+
+def dol_level_terminal_sources(
+    observation: MarketObservation,
+    candidate_id: str,
+) -> tuple[str, ...]:
+    """Return exact current terminal ancestry for one DOL identity."""
+
+    if not candidate_id:
+        return ()
+    snapshot = getattr(observation, "market_snapshot", None)
+    projection = None if snapshot is None else snapshot.foundation
+    if projection is not None:
+        from .semantic_foundation import FoundationObjectType
+        from .semantic_lifecycle import LiquidityLevelLifecycle
+
+        level = next(
+            (
+                record
+                for record in projection.latest_records
+                if record.object_type is FoundationObjectType.LIQUIDITY_LEVEL
+                and (
+                    record.object_id == candidate_id
+                    or record.payload.get("source_identity") == candidate_id
+                )
+            ),
+            None,
+        )
+        if level is not None:
+            if level.payload.get("lifecycle") in {
+                LiquidityLevelLifecycle.ACTIVE.value,
+                LiquidityLevelLifecycle.REARMED.value,
+            }:
+                return ()
+            generation_ids = tuple(
+                level.payload.get("interaction_generation_ids", ())
+            )
+            terminal_generation = (
+                None
+                if not generation_ids
+                else next(
+                    (
+                        record
+                        for record in projection.latest_records
+                        if record.object_type
+                        is FoundationObjectType.LIQUIDITY_INTERACTION_GENERATION
+                        and record.object_id == generation_ids[-1]
+                    ),
+                    None,
+                )
+            )
+            return tuple(
+                dict.fromkeys(
+                    (
+                        *level.source_event_ids,
+                        *(generation_ids[-1:] if generation_ids else ()),
+                        *(
+                            ()
+                            if terminal_generation is None
+                            else terminal_generation.source_event_ids
+                        ),
+                    )
+                )
+            )
+    legacy = next(
+        (
+            item
+            for item in observation.liquidity_inventory
+            if item.item_id == candidate_id
+            and item.lifecycle is LiquidityInventoryLifecycle.CONSUMED
+        ),
+        None,
+    )
+    return () if legacy is None else tuple(legacy.source_ids)
 
 
 class SceneEdgeKind(str, Enum):
@@ -2573,6 +2920,256 @@ class TemporalMarketSceneGraph:
         )
         return changed
 
+    def _shadow_foundation_liquidity_source(
+        self,
+        source_identity: str,
+    ) -> None:
+        """Remove one compatibility identity from only the current hot view."""
+
+        for node_id in tuple(self._entity_index.get(source_identity, ())):
+            node = self._nodes.get(node_id)
+            if (
+                node is None
+                or node.kind != "liquidity"
+                or node.entity_id != source_identity
+                or node.market_epoch_id != self._market_epoch_id
+            ):
+                continue
+            self._suppress_current_node(node)
+        getattr(self, "_current_kind_nodes_cache", {}).clear()
+        getattr(self, "_current_neighbors_cache", {}).clear()
+
+    def _suppress_current_node(self, node: SceneNode) -> None:
+        """Suppress one compatibility projection without rewriting history."""
+
+        self._current_epoch_node_ids.discard(node.node_id)
+        self._current_epoch_node_ids_by_kind[node.kind].discard(node.node_id)
+        self._current_epoch_node_ids_by_timeframe[node.timeframe].discard(
+            node.node_id
+        )
+        self._current_epoch_ambiguous_node_ids.discard(node.node_id)
+        if node.kind == "liquidity":
+            for values in self._visible_liquidity_node_ids_by_side.values():
+                values.discard(node.node_id)
+
+    def _foundation_liquidity_node_id(
+        self,
+        *,
+        timeframe: Timeframe | str,
+        level_id: str,
+        generation_id: str,
+    ) -> str:
+        return (
+            f"{self._market_epoch_id}:liquidity:{_value(timeframe)}:"
+            f"{level_id}:{generation_id}"
+        )
+
+    def _adapt_foundation_dol_nodes(
+        self,
+        observation: MarketObservation,
+    ) -> None:
+        """Project canonical level generations into the existing graph view."""
+
+        snapshot = observation.market_snapshot
+        projection = None if snapshot is None else snapshot.foundation
+        if projection is None:
+            return
+        from .semantic_foundation import (
+            FoundationObjectType,
+            FoundationRecordStatus,
+        )
+        from .semantic_lifecycle import LiquidityLevelLifecycle
+
+        level_records = {
+            record.object_id: record
+            for record in projection.latest_records
+            if record.object_type is FoundationObjectType.LIQUIDITY_LEVEL
+        }
+        interaction_records = {
+            record.object_id: record
+            for record in projection.latest_records
+            if record.object_type
+            is FoundationObjectType.LIQUIDITY_INTERACTION_GENERATION
+        }
+        # Once a source has a canonical level lifecycle, the compatibility
+        # node may remain in cold history but cannot independently re-enter
+        # current DOL/obstruction indexes.
+        for record in level_records.values():
+            self._shadow_foundation_liquidity_source(
+                str(record.payload["source_identity"])
+            )
+
+        active_candidates = foundation_dol_inventory(observation)
+        active_generation_ids = frozenset(
+            candidate.active_generation_id for candidate in active_candidates
+        )
+        for record in level_records.values():
+            generation_id = record.payload.get("active_generation_id")
+            if (
+                not isinstance(generation_id, str)
+                or not generation_id
+                or generation_id in active_generation_ids
+            ):
+                continue
+            node_id = self._foundation_liquidity_node_id(
+                timeframe=Timeframe(record.payload["source_timeframe"]),
+                level_id=record.object_id,
+                generation_id=generation_id,
+            )
+            prior = self._nodes.get(node_id)
+            if prior is not None:
+                self._suppress_current_node(prior)
+
+        # Close existing generation-specific nodes before adding a possible
+        # later rearm generation.  A terminal generation is never reopened.
+        for record in interaction_records.values():
+            if record.status is not FoundationRecordStatus.TERMINAL:
+                continue
+            level_id = str(record.payload["level_id"])
+            timeframe = Timeframe(record.payload["source_timeframe"])
+            node_id = self._foundation_liquidity_node_id(
+                timeframe=timeframe,
+                level_id=level_id,
+                generation_id=record.object_id,
+            )
+            prior = self._nodes.get(node_id)
+            if prior is None or _is_terminal(prior.kind, prior.lifecycle):
+                continue
+            level_record = level_records.get(level_id)
+            level_lifecycle = (
+                None
+                if level_record is None
+                else str(level_record.payload.get("lifecycle"))
+            )
+            generation_ids = (
+                ()
+                if level_record is None
+                else tuple(
+                    level_record.payload.get("interaction_generation_ids", ())
+                )
+            )
+            latest_generation = bool(
+                generation_ids and generation_ids[-1] == record.object_id
+            )
+            terminal_state = str(record.payload.get("terminal_state"))
+            retired = bool(
+                terminal_state == "acceptance"
+                or (
+                    latest_generation
+                    and level_lifecycle
+                    in {
+                        LiquidityLevelLifecycle.RETIRED.value,
+                        LiquidityLevelLifecycle.ARCHIVED.value,
+                    }
+                )
+            )
+            self.add_node(
+                replace(
+                    prior,
+                    observed_at=record.known_at,
+                    lifecycle="retired" if retired else "consumed",
+                    ambiguity_state=EvidenceStatus.INVALIDATED,
+                    source_ids=tuple(
+                        dict.fromkeys(
+                            (*prior.source_ids, *record.source_event_ids)
+                        )
+                    ),
+                    resolution_reason=(
+                        str(record.payload.get("terminal_reason"))
+                        if record.payload.get("terminal_reason") is not None
+                        else terminal_state
+                    ),
+                    revision_id="",
+                )
+            )
+
+        for candidate in active_candidates:
+            generation_record = interaction_records[
+                candidate.active_generation_id
+            ]
+            armed_at = aware_timestamp(
+                generation_record.payload["armed_at"],
+                name="foundation_dol.armed_at",
+            )
+            node_id = self._foundation_liquidity_node_id(
+                timeframe=candidate.timeframe,
+                level_id=candidate.item_id,
+                generation_id=candidate.active_generation_id,
+            )
+            scale = (
+                StructuralScale.EXTERNAL
+                if candidate.structural_rank == "external"
+                else StructuralScale.INTERNAL
+            )
+            stored = self.add_node(
+                SceneNode(
+                    node_id=node_id,
+                    kind="liquidity",
+                    timeframe=candidate.timeframe.value,
+                    structural_scale=scale,
+                    direction=(
+                        Direction.LONG
+                        if candidate.side == "above"
+                        else Direction.SHORT
+                    ),
+                    formed_at=armed_at,
+                    confirmed_at=armed_at,
+                    observed_at=generation_record.known_at,
+                    lifecycle=LiquidityInventoryLifecycle.VISIBLE.value,
+                    price_bounds=(
+                        float(candidate.lower_bound),
+                        float(candidate.upper_bound),
+                    ),
+                    invalidation_rule=(
+                        "foundation_interaction_terminal_or_level_retirement"
+                    ),
+                    ambiguity_state=EvidenceStatus.CONFIRMED,
+                    source_ids=tuple(
+                        dict.fromkeys(
+                            (
+                                candidate.source_identity,
+                                *candidate.source_ids,
+                            )
+                        )
+                    ),
+                    entity_id=candidate.item_id,
+                    semantic_attributes=tuple(
+                        sorted(
+                            (
+                                (
+                                    "foundation_interaction_generation_id",
+                                    candidate.active_generation_id,
+                                ),
+                                (
+                                    "foundation_source_kind",
+                                    candidate.foundation_source_kind,
+                                ),
+                                ("inventory_kind", candidate.kind),
+                                (
+                                    "is_protected_swing",
+                                    str(candidate.is_protected_swing).lower(),
+                                ),
+                                (
+                                    "structural_rank",
+                                    candidate.structural_rank,
+                                ),
+                            )
+                        )
+                    ),
+                    descriptive_metrics=(
+                        ("visibility_strength", candidate.visibility_strength),
+                    ),
+                    market_epoch_id=self._market_epoch_id,
+                )
+            )
+            # A formed-pool compatibility source can disappear and later be
+            # replayed at the same causal revision.  Re-admit the unchanged
+            # canonical view explicitly; ``add_node`` correctly avoids
+            # manufacturing a new semantic revision for this case.
+            self._reindex_current_node(stored, prior=None)
+        getattr(self, "_current_kind_nodes_cache", {}).clear()
+        getattr(self, "_current_neighbors_cache", {}).clear()
+
     def _adapt_observation_nodes(
         self,
         observation: MarketObservation,
@@ -3458,6 +4055,7 @@ class TemporalMarketSceneGraph:
             bootstrap=self._last_asof is None or boundary_reset,
             boundary_transition_reasons=boundary_transition_reasons,
         )
+        self._adapt_foundation_dol_nodes(observation)
         self._derive_source_relations(observation)
         self._last_asof = asof
         if not self._revision:
@@ -6239,12 +6837,7 @@ def build_open_market_theses(
         candidate_groups[canonical_id].append(candidate)
     visible_inventory = tuple(
         sorted(
-            (
-                item
-                for item in observation.liquidity_inventory
-                if item.lifecycle is LiquidityInventoryLifecycle.VISIBLE
-                and item.confirmed_at <= observation.asof
-            ),
+            current_dol_inventory(observation),
             key=lambda item: (
                 abs(float(item.price) - float(observation.price)),
                 item.item_id,
@@ -8352,6 +8945,7 @@ def build_hypothesis_states(
 
 __all__ = [
     "EvidenceStatus",
+    "FoundationDOLInventoryView",
     "FocusState",
     "FocusedObservation",
     "HypothesisState",
@@ -8367,6 +8961,9 @@ __all__ = [
     "build_hypothesis_states",
     "build_neutral_market_state",
     "build_open_market_theses",
+    "current_dol_inventory",
+    "dol_level_terminal_sources",
+    "foundation_dol_inventory",
     "market_episode_id",
     "parse_scale_specs",
     "scale_registry_id",

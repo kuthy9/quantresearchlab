@@ -8,12 +8,14 @@ from types import SimpleNamespace
 import pandas as pd
 import pytest
 
+import scripts.run_semantic_signal_research as signal_research_runner
 from smc_trader.model import (
     Direction,
     EventKind,
     EventOrigin,
     MarketEvent,
     Timeframe,
+    to_primitive,
 )
 from smc_trader.semantics import SemanticRegistry
 from smc_trader.signal_research import (
@@ -72,6 +74,68 @@ def _clock(minutes: int) -> pd.Timestamp:
     )
 
 
+def _fixture_rows(
+    rows: list[dict[str, object]],
+    *,
+    signal: dict[str, object] | None = None,
+) -> list[dict[str, object]]:
+    """Bind legacy unit rows to explicit test-only BAR identities."""
+
+    signal = {} if signal is None else signal
+    bound: list[dict[str, object]] = []
+    for index, source in enumerate(rows):
+        row = dict(source)
+        row.setdefault("symbol", signal.get("symbol", "TEST"))
+        row.setdefault("instrument_id", signal.get("instrument_id", 0))
+        row.setdefault("open", row["close"])
+        row.setdefault("timeframe", Timeframe.M1.value)
+        row.setdefault("tick_size", 0.01)
+        if "bar_event_id" not in row:
+            payload = json.dumps(
+                to_primitive({"fixture_index": index, "row": row}),
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            ).encode("utf-8")
+            row["bar_event_id"] = (
+                "research-row:" + hashlib.sha256(payload).hexdigest()
+            )
+        bound.append(row)
+    return bound
+
+
+def _fixture_outcome(
+    signal: dict[str, object],
+    rows: list[dict[str, object]],
+    row_index: dict[pd.Timestamp, int],
+    **parameters: object,
+) -> dict[str, object] | None:
+    return _outcome(
+        signal,
+        _fixture_rows(rows, signal=signal),
+        row_index,
+        _allow_test_compatibility_rows=True,
+        **parameters,
+    )
+
+
+def _fixture_summary(
+    signals: list[dict[str, object]],
+    rows: list[dict[str, object]],
+    row_index: dict[pd.Timestamp, int],
+    *,
+    outcome_parameters: dict[str, object] | None = None,
+) -> dict[str, object]:
+    signal = signals[0] if signals else None
+    return _summary(
+        signals,
+        _fixture_rows(rows, signal=signal),
+        row_index,
+        outcome_parameters=outcome_parameters,
+        _allow_test_compatibility_rows=True,
+    )
+
+
 def test_research_eye_does_not_persist_redundant_state_projections() -> None:
     _, observer = _build_eye()
 
@@ -100,7 +164,7 @@ def test_structural_outcome_starts_after_the_semantic_known_at_bar() -> None:
     ]
     signal = {"known_at": _clock(0), "direction": "long"}
 
-    outcome = _outcome(signal, rows, {_clock(0): 0, _clock(1): 1})
+    outcome = _fixture_outcome(signal, rows, {_clock(0): 0, _clock(1): 1})
 
     assert outcome is not None
     assert outcome["success"] is True
@@ -126,7 +190,7 @@ def test_same_later_bar_target_and_invalidation_is_ambiguous() -> None:
     ]
     signal = {"known_at": _clock(0), "direction": "long"}
 
-    outcome = _outcome(signal, rows, {_clock(0): 0, _clock(1): 1})
+    outcome = _fixture_outcome(signal, rows, {_clock(0): 0, _clock(1): 1})
 
     assert outcome is not None
     assert outcome["ambiguous"] is True
@@ -167,7 +231,7 @@ def test_path_metrics_scan_full_horizon_after_primary_first_hit() -> None:
         "instrument_id": 1,
     }
 
-    outcome = _outcome(
+    outcome = _fixture_outcome(
         signal,
         rows,
         {row["asof"]: index for index, row in enumerate(rows)},
@@ -217,7 +281,7 @@ def test_zone_retest_and_fvg_midpoint_use_later_completed_bars() -> None:
         "zone": (99.0, 101.0),
     }
 
-    outcome = _outcome(
+    outcome = _fixture_outcome(
         signal,
         rows,
         {row["asof"]: index for index, row in enumerate(rows)},
@@ -254,7 +318,7 @@ def test_structural_outcome_censors_at_contract_change() -> None:
         "instrument_id": 1,
     }
 
-    outcome = _outcome(signal, rows, {_clock(0): 0, _clock(1): 1})
+    outcome = _fixture_outcome(signal, rows, {_clock(0): 0, _clock(1): 1})
 
     assert outcome is not None
     assert outcome["resolved"] is False
@@ -293,7 +357,7 @@ def test_window_end_censor_excludes_full_horizon_path_metrics() -> None:
         "direction": "long",
     }
 
-    outcome = _outcome(
+    outcome = _fixture_outcome(
         signal,
         rows,
         {row["asof"]: index for index, row in enumerate(rows)},
@@ -307,7 +371,7 @@ def test_window_end_censor_excludes_full_horizon_path_metrics() -> None:
     assert outcome["mfe_atr"] is None
     assert outcome["continuation_distance_atr"] is None
 
-    summary = _summary(
+    summary = _fixture_summary(
         [signal],
         rows,
         {row["asof"]: index for index, row in enumerate(rows)},
@@ -347,7 +411,7 @@ def test_outcome_censors_on_symbol_change_even_when_instrument_id_repeats() -> N
         "direction": "long",
     }
 
-    outcome = _outcome(
+    outcome = _fixture_outcome(
         signal,
         rows,
         {_clock(0): 0, _clock(1): 1},
@@ -388,12 +452,170 @@ def test_outcome_rejects_signal_entry_row_identity_mismatch() -> None:
     }
 
     with pytest.raises(ResearchContractError, match="exact known_at entry row"):
-        _outcome(
+        _fixture_outcome(
             signal,
             rows,
             {_clock(0): 0, _clock(1): 1},
             horizon=1,
         )
+
+
+def test_formal_outcome_requires_normalized_bar_ids() -> None:
+    signal = {
+        "event_id": "semantic:signal:1",
+        "known_at": _clock(0),
+        "symbol": "NQ",
+        "instrument_id": 1,
+        "direction": "long",
+    }
+    rows = _fixture_rows(
+        [
+            {
+                "asof": _clock(0),
+                "open": 100.0,
+                "high": 100.0,
+                "low": 100.0,
+                "close": 100.0,
+                "atr": 1.0,
+            },
+            {
+                "asof": _clock(1),
+                "open": 100.0,
+                "high": 101.0,
+                "low": 100.0,
+                "close": 101.0,
+                "atr": 1.0,
+            },
+        ],
+        signal=signal,
+    )
+
+    with pytest.raises(
+        ResearchContractError,
+        match="normalized BAR event ID",
+    ):
+        _outcome(
+            signal,
+            rows,
+            {row["asof"]: index for index, row in enumerate(rows)},
+            horizon=1,
+        )
+
+
+def test_unified_outcome_spec_and_result_ids_are_deterministic(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    signal = {
+        "event_id": "semantic:signal:deterministic",
+        "known_at": _clock(0),
+        "symbol": "NQ",
+        "instrument_id": 1,
+        "direction": "long",
+    }
+    rows = [
+        {
+            "asof": _clock(0),
+            "bar_event_id": "normalized-bar:m1:0",
+            "timeframe": Timeframe.M1.value,
+            "tick_size": 0.25,
+            "symbol": "NQ",
+            "instrument_id": 1,
+            "open": 100.0,
+            "high": 100.0,
+            "low": 100.0,
+            "close": 100.0,
+            "atr": 1.0,
+        },
+        {
+            "asof": _clock(1),
+            "bar_event_id": "normalized-bar:m1:1",
+            "timeframe": Timeframe.M1.value,
+            "tick_size": 0.25,
+            "symbol": "NQ",
+            "instrument_id": 1,
+            "open": 100.0,
+            "high": 101.0,
+            "low": 99.75,
+            "close": 100.75,
+            "atr": 1.0,
+        },
+    ]
+    row_index = {row["asof"]: index for index, row in enumerate(rows)}
+    captured_ids: list[tuple[str, str]] = []
+    original_evaluate = signal_research_runner.StructuralOutcomeEngine.evaluate
+
+    def capture_ids(spec: object, bars: object) -> object:
+        outcome = original_evaluate(spec, bars)  # type: ignore[arg-type]
+        captured_ids.append((outcome.spec_id, outcome.outcome_id))
+        return outcome
+
+    monkeypatch.setattr(
+        signal_research_runner.StructuralOutcomeEngine,
+        "evaluate",
+        staticmethod(capture_ids),
+    )
+
+    first = _outcome(signal, rows, row_index, horizon=1)
+    second = _outcome(signal, rows, row_index, horizon=1)
+
+    assert first == second
+    assert len(captured_ids) == 2
+    assert captured_ids[0] == captured_ids[1]
+
+
+def test_unified_outcome_preserves_frozen_signal_research_schema() -> None:
+    rows = [
+        {
+            "asof": _clock(0),
+            "close": 100.0,
+            "high": 100.0,
+            "low": 100.0,
+            "atr": 1.0,
+        },
+        {
+            "asof": _clock(1),
+            "close": 101.0,
+            "high": 101.25,
+            "low": 99.75,
+            "atr": 1.0,
+        },
+    ]
+    outcome = _fixture_outcome(
+        {"known_at": _clock(0), "direction": "long"},
+        rows,
+        {_clock(0): 0, _clock(1): 1},
+        horizon=1,
+    )
+
+    assert outcome is not None
+    assert set(outcome) == {
+        "resolved",
+        "ambiguous",
+        "success",
+        "mfe_atr",
+        "mae_atr",
+        "mfe_over_mae",
+        "continuation_distance_atr",
+        "retracement_depth_atr",
+        "range_extension_atr",
+        "time_to_target_completed_bars",
+        "time_to_invalidation_completed_bars",
+        "time_to_first_retest_completed_bars",
+        "time_to_fvg_midpoint_touch_completed_bars",
+        "observed_completed_bars",
+        "censored_by_contract_change",
+        "censored_by_window_end",
+        "full_horizon_observed",
+        "next_structural_event_id",
+        "next_structural_event_kind",
+        "next_structural_event_direction",
+        "next_structural_event_time",
+        "next_structural_event_known_at",
+        "next_structural_direction_match",
+        "next_qualified_bos_direction",
+        "next_qualified_bos_direction_match",
+    }
+    assert "first_retest_event" not in outcome
 
 
 def test_quartile_cutoffs_are_frozen_once_and_handle_missing_values() -> None:
@@ -992,7 +1214,7 @@ def test_summary_includes_time_to_invalidation() -> None:
         {"asof": _clock(2), "close": 99.0, "high": 100.4, "low": 98.75, "atr": 1.0},
     ]
 
-    value = _summary(
+    value = _fixture_summary(
         [{"known_at": _clock(0), "direction": "long"}],
         rows,
         {row["asof"]: index for index, row in enumerate(rows)},
@@ -1077,7 +1299,7 @@ def test_next_structural_context_persists_identity_and_next_bos_direction() -> N
             "instrument_id": 123,
         },
     ]
-    outcome = _outcome(
+    outcome = _fixture_outcome(
         signal,
         rows,
         {row["asof"]: index for index, row in enumerate(rows)},

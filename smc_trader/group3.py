@@ -9,7 +9,7 @@ import hashlib
 import json
 import math
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping, Sequence
 
 import pandas as pd
 
@@ -37,6 +37,22 @@ from .model import (
     candle_identity,
     price_to_ticks,
 )
+from .semantic_zones import (
+    BaseOriginCore,
+    CompatibleStructureKind,
+    CompletedZoneBar,
+    FVGAvailability,
+    FVGStructuralLifecycle,
+    FVGTerminationCause,
+    QualifiedOrderBlock,
+    ZoneFirstReinteractionTracker,
+    ZoneFirstRetest,
+    ZoneFirstRetestSpec,
+    ZoneObjectKind,
+    bind_fvg_structural_context,
+    qualify_order_block,
+    reduce_fvg_termination,
+)
 
 
 FVG_BOUNDARY_REASONS = frozenset(
@@ -45,6 +61,7 @@ FVG_BOUNDARY_REASONS = frozenset(
         "contract_change_reset",
         "data_anomaly",
         "tick_size_mismatch",
+        "semantic_reset",
     }
 )
 ORDER_BLOCK_BOUNDARY_REASONS = FVG_BOUNDARY_REASONS
@@ -52,6 +69,20 @@ WINDOW_RESET_REASONS = frozenset(
     {
         "registered_session_reset",
         "synthetic_interruption",
+    }
+)
+FOUNDATION_FVG_CENSOR_REASONS = frozenset(
+    {
+        "data_gap_reset",
+        "data_anomaly",
+        "tick_size_mismatch",
+        "synthetic_interruption",
+    }
+)
+FOUNDATION_FVG_EXPIRY_REASONS = frozenset(
+    {
+        "contract_change_reset",
+        "semantic_reset",
     }
 )
 
@@ -128,6 +159,12 @@ class Group3Update:
     order_block_transitions: tuple[OrderBlockState, ...] = ()
     order_block_funnel: tuple[OrderBlockFunnelSnapshot, ...] = ()
     boundary_reason: str | None = None
+    base_origin_cores: tuple[BaseOriginCore, ...] = ()
+    qualified_order_blocks: tuple[QualifiedOrderBlock, ...] = ()
+    first_retests: tuple[ZoneFirstRetest, ...] = ()
+    fvg_structural_lifecycles: tuple[FVGStructuralLifecycle, ...] = ()
+    first_retest_transitions: tuple[ZoneFirstRetest, ...] = ()
+    fvg_structural_transitions: tuple[FVGStructuralLifecycle, ...] = ()
 
     def __post_init__(self) -> None:
         for name in (
@@ -136,6 +173,12 @@ class Group3Update:
             "fvg_transitions",
             "order_block_transitions",
             "order_block_funnel",
+            "base_origin_cores",
+            "qualified_order_blocks",
+            "first_retests",
+            "fvg_structural_lifecycles",
+            "first_retest_transitions",
+            "fvg_structural_transitions",
         ):
             object.__setattr__(self, name, tuple(getattr(self, name)))
         if (
@@ -183,6 +226,69 @@ class Group3Update:
             or len(funnel_clocks) != len(set(funnel_clocks))
         ):
             raise ValueError("Group 3 OB funnel clocks are invalid")
+        typed_foundation = (
+            (self.base_origin_cores, BaseOriginCore),
+            (self.qualified_order_blocks, QualifiedOrderBlock),
+            (self.first_retests, ZoneFirstRetest),
+            (self.fvg_structural_lifecycles, FVGStructuralLifecycle),
+            (self.first_retest_transitions, ZoneFirstRetest),
+            (self.fvg_structural_transitions, FVGStructuralLifecycle),
+        )
+        if any(
+            not isinstance(item, expected)
+            for collection, expected in typed_foundation
+            for item in collection
+        ):
+            raise TypeError("Group 3 foundation projection is not typed")
+        identity_sets = (
+            tuple(item.core_id for item in self.base_origin_cores),
+            tuple(
+                item.qualified_ob_id
+                for item in self.qualified_order_blocks
+            ),
+            tuple(item.object_id for item in self.first_retests),
+            tuple(
+                item.fvg_id for item in self.fvg_structural_lifecycles
+            ),
+        )
+        if any(len(values) != len(set(values)) for values in identity_sets):
+            raise ValueError("Group 3 foundation projection repeats identity")
+        retests_by_id = {
+            item.first_retest_event_id: item for item in self.first_retests
+        }
+        fvg_lifecycles_by_id = {
+            item.fvg_id: item for item in self.fvg_structural_lifecycles
+        }
+        if any(
+            retests_by_id.get(item.first_retest_event_id) != item
+            for item in self.first_retest_transitions
+        ) or any(
+            fvg_lifecycles_by_id.get(item.fvg_id) != item
+            for item in self.fvg_structural_transitions
+        ):
+            raise ValueError(
+                "Group 3 foundation transition is absent from snapshot"
+            )
+        expected_foundation_disposition = (
+            FVGAvailability.CENSORED
+            if self.boundary_reason in FOUNDATION_FVG_CENSOR_REASONS
+            else FVGAvailability.EXPIRED
+            if self.boundary_reason in FOUNDATION_FVG_EXPIRY_REASONS
+            else None
+        )
+        if self.boundary_reason is not None and (
+            (
+                expected_foundation_disposition is None
+                and self.fvg_structural_transitions
+            )
+            or any(
+                item.availability is not expected_foundation_disposition
+                for item in self.fvg_structural_transitions
+            )
+        ):
+            raise ValueError(
+                "Group 3 foundation boundary disposition is inconsistent"
+            )
 
 
 @dataclass(frozen=True)
@@ -191,6 +297,26 @@ class _FrozenOrderBlockCandidate:
     candle_id: str
     cluster: tuple[Candle, ...]
     cluster_ids: tuple[str, ...]
+    source_displacement_state: DisplacementState
+    source_displacement_transition_identity: str
+
+
+@dataclass(frozen=True)
+class _QualifiedOrderBlockSeed:
+    legacy_state: OrderBlockState
+    candidate: _FrozenOrderBlockCandidate
+    compatible_structure_entity_id: str
+    compatible_structure_kind: CompatibleStructureKind
+
+
+@dataclass(frozen=True)
+class _FoundationCompletedSeed:
+    candle: Candle
+    candle_id: str
+    new_base_origin_candidates: tuple[_FrozenOrderBlockCandidate, ...]
+    new_qualified_order_blocks: tuple[_QualifiedOrderBlockSeed, ...]
+    new_fvgs: tuple[FairValueGapState, ...]
+    price_invalidated_fvg_ids: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -270,6 +396,26 @@ class CausalGroup3Tracker:
         self._fvg_order: deque[str] = deque()
         self._order_blocks: dict[str, OrderBlockState] = {}
         self._order_block_order: deque[str] = deque()
+        self._base_origin_cores: dict[str, BaseOriginCore] = {}
+        self._qualified_order_blocks: dict[
+            str,
+            QualifiedOrderBlock,
+        ] = {}
+        self._fvg_structural_lifecycles: dict[
+            str,
+            FVGStructuralLifecycle,
+        ] = {}
+        self._zone_reinteraction_trackers: dict[
+            str,
+            ZoneFirstReinteractionTracker,
+        ] = {}
+        self._pending_foundation_completed: list[
+            _FoundationCompletedSeed
+        ] = []
+        self._pending_foundation_boundary: tuple[
+            str,
+            pd.Timestamp,
+        ] | None = None
         self._exposed_terminal_ids: set[str] = set()
         self._identity: tuple[str, int] | None = None
         self._window_epoch_known = False
@@ -287,12 +433,12 @@ class CausalGroup3Tracker:
         )
         self._last_clock: pd.Timestamp | None = None
         self._last_input_kind: str | None = None
-        self._last_boundary_input: tuple[str, pd.Timestamp] | None = None
-        self._last_candle_input: tuple[
-            Candle,
-            DisplacementUpdate,
-            tuple[Group3BOSSource, ...],
+        self._last_boundary_input: tuple[
+            str,
+            pd.Timestamp,
+            str | None,
         ] | None = None
+        self._last_candle_input: tuple[object, ...] | None = None
         self._last_output: Group3Update | None = None
         self._failed = False
 
@@ -351,6 +497,19 @@ class CausalGroup3Tracker:
         candidate._order_block_order = deque(
             self._order_block_order
         )
+        candidate._base_origin_cores = dict(self._base_origin_cores)
+        candidate._qualified_order_blocks = dict(
+            self._qualified_order_blocks
+        )
+        candidate._fvg_structural_lifecycles = dict(
+            self._fvg_structural_lifecycles
+        )
+        candidate._zone_reinteraction_trackers = dict(
+            self._zone_reinteraction_trackers
+        )
+        candidate._pending_foundation_completed = list(
+            self._pending_foundation_completed
+        )
         candidate._exposed_terminal_ids = set(
             self._exposed_terminal_ids
         )
@@ -367,6 +526,108 @@ class CausalGroup3Tracker:
         tuple[OrderBlockState, ...],
     ]:
         return self._snapshots()
+
+    def current_update(self) -> Group3Update:
+        """Return the compatible legacy + foundation-v2 projection."""
+
+        return self._update()
+
+    def bind_fvg_foundation_context(
+        self,
+        *,
+        fvg_id: str,
+        parent_structure_generation_id: str,
+        structural_range_id: str | None,
+        source_event_ids: Sequence[str],
+    ) -> Group3Update:
+        """Bind one FVG to structure visible at its creation clock."""
+
+        if self._failed:
+            raise RuntimeError("Group 3 tracker is terminally failed")
+        candidate = self._transaction_clone()
+        try:
+            state = candidate._fvg_structural_lifecycles[fvg_id]
+            candidate._fvg_structural_lifecycles[fvg_id] = (
+                bind_fvg_structural_context(
+                    state,
+                    parent_structure_generation_id=(
+                        parent_structure_generation_id
+                    ),
+                    structural_range_id=structural_range_id,
+                    source_event_ids=source_event_ids,
+                )
+            )
+            output = candidate._update()
+            candidate._last_output = output
+        except Exception:
+            self._failed = True
+            raise
+        self._commit(candidate)
+        return output
+
+    def expire_fvg_foundation_context(
+        self,
+        *,
+        cause: FVGTerminationCause,
+        related_entity_id: str,
+        known_at: pd.Timestamp,
+        cause_event_id: str,
+    ) -> Group3Update:
+        """Expire every live FVG owned by one terminated structural object."""
+
+        cause = FVGTerminationCause(cause)
+        if cause not in {
+            FVGTerminationCause.PARENT_STRUCTURE_TERMINATED,
+            FVGTerminationCause.STRUCTURAL_RANGE_REPLACED,
+        }:
+            raise ValueError("FVG contextual expiry cause is not structural")
+        if (
+            not isinstance(related_entity_id, str)
+            or not related_entity_id
+            or not isinstance(cause_event_id, str)
+            or not cause_event_id
+        ):
+            raise ValueError("FVG contextual expiry identity is invalid")
+        clock = aware_timestamp(
+            known_at,
+            name="FVG contextual expiry known_at",
+        )
+        candidate = self._transaction_clone()
+        try:
+            transitions: list[FVGStructuralLifecycle] = []
+            for fvg_id, state in tuple(
+                candidate._fvg_structural_lifecycles.items()
+            ):
+                owner = (
+                    state.parent_structure_generation_id
+                    if cause
+                    is FVGTerminationCause.PARENT_STRUCTURE_TERMINATED
+                    else state.structural_range_id
+                )
+                if (
+                    owner != related_entity_id
+                    or state.availability is not FVGAvailability.ACTIVE
+                ):
+                    continue
+                terminal = candidate._terminate_fvg_foundation(
+                    entity_id=fvg_id,
+                    cause=cause,
+                    known_at=clock,
+                    cause_event_id=cause_event_id,
+                    terminal_event_id=cause_event_id,
+                    related_entity_id=related_entity_id,
+                )
+                if terminal is not None:
+                    transitions.append(terminal)
+            output = candidate._update(
+                fvg_structural_transitions=transitions,
+            )
+            candidate._last_output = output
+        except Exception:
+            self._failed = True
+            raise
+        self._commit(candidate)
+        return output
 
     def _snapshots(
         self,
@@ -386,15 +647,59 @@ class CausalGroup3Tracker:
         )
         return fair_value_gaps, order_blocks
 
+    def _foundation_snapshots(
+        self,
+    ) -> tuple[
+        tuple[BaseOriginCore, ...],
+        tuple[QualifiedOrderBlock, ...],
+        tuple[ZoneFirstRetest, ...],
+        tuple[FVGStructuralLifecycle, ...],
+    ]:
+        base_origin_cores = tuple(
+            self._base_origin_cores[displacement_id]
+            for displacement_id in self._base_origin_cores
+        )
+        qualified_order_blocks = tuple(
+            self._qualified_order_blocks[entity_id]
+            for entity_id in self._order_block_order
+            if entity_id in self._qualified_order_blocks
+        )
+        first_retests = tuple(
+            tracker.first_retest
+            for tracker in self._zone_reinteraction_trackers.values()
+            if tracker.first_retest is not None
+        )
+        fvg_structural_lifecycles = tuple(
+            self._fvg_structural_lifecycles[entity_id]
+            for entity_id in self._fvg_order
+            if entity_id in self._fvg_structural_lifecycles
+        )
+        return (
+            base_origin_cores,
+            qualified_order_blocks,
+            first_retests,
+            fvg_structural_lifecycles,
+        )
+
     def _update(
         self,
         fvg_transitions: Iterable[FairValueGapState] = (),
         order_block_transitions: Iterable[OrderBlockState] = (),
         order_block_funnel: Iterable[OrderBlockFunnelSnapshot] = (),
+        first_retest_transitions: Iterable[ZoneFirstRetest] = (),
+        fvg_structural_transitions: Iterable[
+            FVGStructuralLifecycle
+        ] = (),
         *,
         boundary_reason: str | None = None,
     ) -> Group3Update:
         fair_value_gaps, order_blocks = self._snapshots()
+        (
+            base_origin_cores,
+            qualified_order_blocks,
+            first_retests,
+            fvg_structural_lifecycles,
+        ) = self._foundation_snapshots()
         return Group3Update(
             fair_value_gaps=fair_value_gaps,
             order_blocks=order_blocks,
@@ -402,6 +707,14 @@ class CausalGroup3Tracker:
             order_block_transitions=tuple(order_block_transitions),
             order_block_funnel=tuple(order_block_funnel),
             boundary_reason=boundary_reason,
+            base_origin_cores=base_origin_cores,
+            qualified_order_blocks=qualified_order_blocks,
+            first_retests=first_retests,
+            fvg_structural_lifecycles=fvg_structural_lifecycles,
+            first_retest_transitions=tuple(first_retest_transitions),
+            fvg_structural_transitions=tuple(
+                fvg_structural_transitions
+            ),
         )
 
     def _ticks(self, value: float) -> int:
@@ -416,6 +729,252 @@ class CausalGroup3Tracker:
             candle,
             tick_size=self.protocol.tick_size,
         )
+
+    @staticmethod
+    def _zone_tracker_key(
+        object_kind: ZoneObjectKind,
+        legacy_entity_id: str,
+    ) -> str:
+        return f"{object_kind.value}:{legacy_entity_id}"
+
+    @staticmethod
+    def _bar_source_id(
+        candle_id: str,
+        bar_event_ids_by_candle_id: Mapping[str, str],
+    ) -> str:
+        try:
+            event_id = bar_event_ids_by_candle_id[candle_id]
+        except KeyError as error:
+            raise ValueError(
+                "foundation BAR source is not canonically bound"
+            ) from error
+        if not isinstance(event_id, str) or not event_id:
+            raise ValueError("foundation BAR source identity is invalid")
+        return event_id
+
+    def _prune_foundation_companions(self) -> None:
+        retained_fvg_ids = set(self._fair_value_gaps)
+        retained_order_block_ids = set(self._order_blocks)
+        self._fvg_structural_lifecycles = {
+            entity_id: state
+            for entity_id, state in self._fvg_structural_lifecycles.items()
+            if entity_id in retained_fvg_ids
+        }
+        self._qualified_order_blocks = {
+            entity_id: state
+            for entity_id, state in self._qualified_order_blocks.items()
+            if entity_id in retained_order_block_ids
+        }
+        retained_tracker_keys = {
+            self._zone_tracker_key(ZoneObjectKind.FVG, entity_id)
+            for entity_id in retained_fvg_ids
+        } | {
+            self._zone_tracker_key(
+                ZoneObjectKind.QUALIFIED_ORDER_BLOCK,
+                entity_id,
+            )
+            for entity_id in retained_order_block_ids
+        }
+        self._zone_reinteraction_trackers = {
+            key: tracker
+            for key, tracker in self._zone_reinteraction_trackers.items()
+            if key in retained_tracker_keys
+        }
+        # Base Origin is a frozen observation at displacement STARTED, not a
+        # live qualification candidate.  In particular, exhaustion without a
+        # compatible Q-BOS/MSS must not hindsight-delete the unqualified core.
+
+    def _register_fvg_foundation(
+        self,
+        state: FairValueGapState,
+        *,
+        creation_event_id: str,
+        departure_event_id: str,
+    ) -> None:
+        lifecycle = FVGStructuralLifecycle(
+            fvg_id=state.fvg_id,
+            source_creation_event_id=creation_event_id,
+            symbol=state.symbol,
+            instrument_id=state.instrument_id,
+            timeframe=state.timeframe,
+            created_at=state.formed_at,
+            known_at=state.confirmed_at,
+        )
+        spec = ZoneFirstRetestSpec(
+            object_kind=ZoneObjectKind.FVG,
+            object_id=state.fvg_id,
+            creation_event_id=creation_event_id,
+            symbol=state.symbol,
+            instrument_id=state.instrument_id,
+            timeframe=state.timeframe,
+            direction=state.direction,
+            lower_bound=state.lower_bound,
+            upper_bound=state.upper_bound,
+            tick_size=self.protocol.tick_size,
+            object_created_at=state.formed_at,
+            object_known_at=state.confirmed_at,
+            departure_confirmed_at=state.confirmed_at,
+            departure_source_event_id=departure_event_id,
+            creation_declared_departed=True,
+        )
+        self._fvg_structural_lifecycles[state.fvg_id] = lifecycle
+        self._zone_reinteraction_trackers[
+            self._zone_tracker_key(ZoneObjectKind.FVG, state.fvg_id)
+        ] = ZoneFirstReinteractionTracker(spec)
+
+    def _register_order_block_foundation(
+        self,
+        *,
+        legacy_state: OrderBlockState,
+        qualified: QualifiedOrderBlock,
+        candle: Candle,
+        creation_event_id: str,
+        departure_event_id: str,
+    ) -> None:
+        self._qualified_order_blocks[
+            legacy_state.order_block_id
+        ] = qualified
+        departed = (
+            self._ticks(candle.close)
+            > self._ticks(legacy_state.upper_bound)
+            if legacy_state.direction is Direction.LONG
+            else self._ticks(candle.close)
+            < self._ticks(legacy_state.lower_bound)
+        )
+        spec = ZoneFirstRetestSpec(
+            object_kind=ZoneObjectKind.QUALIFIED_ORDER_BLOCK,
+            object_id=qualified.qualified_ob_id,
+            creation_event_id=creation_event_id,
+            symbol=legacy_state.symbol,
+            instrument_id=legacy_state.instrument_id,
+            timeframe=legacy_state.timeframe,
+            direction=legacy_state.direction,
+            lower_bound=legacy_state.lower_bound,
+            upper_bound=legacy_state.upper_bound,
+            tick_size=self.protocol.tick_size,
+            object_created_at=legacy_state.formed_at,
+            object_known_at=legacy_state.confirmed_at,
+            departure_confirmed_at=(
+                legacy_state.confirmed_at if departed else None
+            ),
+            departure_source_event_id=(
+                departure_event_id if departed else None
+            ),
+            creation_declared_departed=departed,
+        )
+        self._zone_reinteraction_trackers[
+            self._zone_tracker_key(
+                ZoneObjectKind.QUALIFIED_ORDER_BLOCK,
+                legacy_state.order_block_id,
+            )
+        ] = ZoneFirstReinteractionTracker(spec)
+
+    def _advance_first_reinteractions(
+        self,
+        candle: Candle,
+        *,
+        candle_id: str,
+        bar_event_ids_by_candle_id: Mapping[str, str],
+        session: str,
+        context_event_ids: Sequence[str],
+    ) -> list[ZoneFirstRetest]:
+        source = CompletedZoneBar(
+            bar_event_id=self._bar_source_id(
+                candle_id,
+                bar_event_ids_by_candle_id,
+            ),
+            symbol=candle.symbol,
+            instrument_id=candle.instrument_id,
+            timeframe=candle.timeframe,
+            known_at=candle.end,
+            open=candle.open,
+            high=candle.high,
+            low=candle.low,
+            close=candle.close,
+            session=session,
+            context_event_ids=tuple(context_event_ids),
+        )
+        transitions: list[ZoneFirstRetest] = []
+        for key, tracker in tuple(
+            self._zone_reinteraction_trackers.items()
+        ):
+            prior = tracker.first_retest
+            updated = tracker.on_completed_bar(source)
+            self._zone_reinteraction_trackers[key] = updated
+            if prior is None and updated.first_retest is not None:
+                transitions.append(updated.first_retest)
+        return transitions
+
+    def _terminate_fvg_foundation(
+        self,
+        *,
+        entity_id: str,
+        cause: FVGTerminationCause,
+        known_at: pd.Timestamp,
+        cause_event_id: str,
+        terminal_event_id: str,
+        related_entity_id: str | None = None,
+    ) -> FVGStructuralLifecycle | None:
+        state = self._fvg_structural_lifecycles.get(entity_id)
+        if state is None or state.availability is not FVGAvailability.ACTIVE:
+            return None
+        terminal = reduce_fvg_termination(
+            state,
+            cause=cause,
+            known_at=known_at,
+            cause_event_ids=(cause_event_id,),
+            related_entity_id=related_entity_id,
+        )
+        terminal_sources = tuple(
+            dict.fromkeys(
+                (*terminal.terminal_source_event_ids, terminal_event_id)
+            )
+        )
+        terminal = replace(
+            terminal,
+            terminal_event_id=terminal_event_id,
+            terminal_source_event_ids=terminal_sources,
+        )
+        self._fvg_structural_lifecycles[entity_id] = terminal
+        return terminal
+
+    def _advance_fvg_foundation_age(
+        self,
+        candle: Candle,
+        *,
+        bar_event_id: str,
+    ) -> None:
+        """Advance descriptive age from one exact real native BAR.
+
+        This state never expires an FVG.  Elapsed BARs are temporal
+        observations rather than definitional ancestry, so only the
+        continuous count/elapsed time are retained here.  The caller still
+        supplies the exact canonical BAR identity to prevent an unbound
+        runtime heartbeat from advancing the clock.
+        """
+
+        if not candle.real_completed or candle.timeframe is not Timeframe.M5:
+            return
+        if not isinstance(bar_event_id, str) or not bar_event_id:
+            raise ValueError("FVG age update lacks its exact BAR identity")
+        for fvg_id, state in tuple(
+            self._fvg_structural_lifecycles.items()
+        ):
+            if (
+                state.availability is not FVGAvailability.ACTIVE
+                or candle.end <= state.known_at
+            ):
+                continue
+            if candle.end <= state.last_updated_at:
+                raise ValueError("FVG age observations must be strictly ordered")
+            self._fvg_structural_lifecycles[fvg_id] = replace(
+                state,
+                age_bars=state.age_bars + 1,
+                age_seconds=int(
+                    (candle.end - state.known_at).total_seconds()
+                ),
+                last_updated_at=candle.end,
+            )
 
     def _strict_prior_atr(self, current: Candle) -> float:
         """Formation ATR from completed bars strictly preceding current."""
@@ -516,16 +1075,83 @@ class CausalGroup3Tracker:
         self._episode_membership.clear()
         self._active_transition_ids.clear()
         self._ob_candidates.clear()
+        self._pending_foundation_completed.clear()
+        self._prune_foundation_companions()
         if clear_identity:
             self._identity = None
+
+    def _apply_foundation_boundary(
+        self,
+        reason: str,
+        clock: pd.Timestamp,
+        *,
+        boundary_event_id: str | None,
+    ) -> list[FVGStructuralLifecycle]:
+        if reason in FOUNDATION_FVG_CENSOR_REASONS:
+            cause = FVGTerminationCause.DATA_GAP
+        elif reason == "contract_change_reset":
+            cause = FVGTerminationCause.CONTRACT_ROLLOVER
+        elif reason == "semantic_reset":
+            cause = FVGTerminationCause.SEMANTIC_RESET
+        else:
+            return []
+        live_foundation = any(
+            state.availability is FVGAvailability.ACTIVE
+            for state in self._fvg_structural_lifecycles.values()
+        )
+        if live_foundation and boundary_event_id is None:
+            pending = (reason, clock)
+            if (
+                self._pending_foundation_boundary is not None
+                and self._pending_foundation_boundary != pending
+            ):
+                raise ValueError(
+                    "foundation FVG boundary binding is already pending"
+                )
+            self._pending_foundation_boundary = pending
+            return []
+        if boundary_event_id is not None and (
+            not isinstance(boundary_event_id, str)
+            or not boundary_event_id
+        ):
+            raise ValueError(
+                "foundation FVG boundary provenance is invalid"
+            )
+        if boundary_event_id is None:
+            return []
+        transitions: list[FVGStructuralLifecycle] = []
+        for entity_id in tuple(self._fvg_structural_lifecycles):
+            terminal = self._terminate_fvg_foundation(
+                entity_id=entity_id,
+                cause=cause,
+                known_at=clock,
+                cause_event_id=boundary_event_id,
+                terminal_event_id=boundary_event_id,
+            )
+            if terminal is not None:
+                transitions.append(terminal)
+        self._zone_reinteraction_trackers = {
+            key: tracker
+            for key, tracker in self._zone_reinteraction_trackers.items()
+            if tracker.first_retest is not None
+        }
+        self._pending_foundation_boundary = None
+        return transitions
 
     def _apply_boundary(
         self,
         reason: str,
         clock: pd.Timestamp,
+        *,
+        boundary_event_id: str | None,
     ) -> Group3Update:
         fvg_transitions: list[FairValueGapState] = []
         order_block_transitions: list[OrderBlockState] = []
+        fvg_structural_transitions = self._apply_foundation_boundary(
+            reason,
+            clock,
+            boundary_event_id=boundary_event_id,
+        )
         hard_boundary = reason in FVG_BOUNDARY_REASONS
         if hard_boundary:
             for entity_id, state in tuple(
@@ -562,6 +1188,7 @@ class CausalGroup3Tracker:
         output = self._update(
             fvg_transitions,
             order_block_transitions,
+            fvg_structural_transitions=fvg_structural_transitions,
             boundary_reason=reason,
         )
         self._mark_terminals_exposed()
@@ -571,11 +1198,17 @@ class CausalGroup3Tracker:
         self,
         reason: str,
         observed_at: pd.Timestamp,
+        *,
+        foundation_boundary_event_id: str | None = None,
     ) -> Group3Update:
         if self._failed:
             raise RuntimeError("Group 3 tracker is terminally failed")
         clock = aware_timestamp(observed_at, name="group3.boundary")
-        boundary_input = (reason, clock)
+        boundary_input = (
+            reason,
+            clock,
+            foundation_boundary_event_id,
+        )
         if (
             self._last_input_kind == "boundary"
             and self._last_boundary_input == boundary_input
@@ -592,7 +1225,11 @@ class CausalGroup3Tracker:
             raise ValueError("unregistered Group 3 boundary reason")
         candidate = self._transaction_clone()
         try:
-            output = candidate._apply_boundary(reason, clock)
+            output = candidate._apply_boundary(
+                reason,
+                clock,
+                boundary_event_id=foundation_boundary_event_id,
+            )
             candidate._last_input_kind = "boundary"
             candidate._last_boundary_input = boundary_input
             candidate._last_candle_input = None
@@ -1010,7 +1647,7 @@ class CausalGroup3Tracker:
         candle: Candle,
         candle_id: str,
         displacement: DisplacementUpdate,
-    ) -> None:
+    ) -> _FrozenOrderBlockCandidate | None:
         for transition in displacement.transitions:
             state = transition.state
             if state.lifecycle is DisplacementLifecycle.ACTIVE:
@@ -1024,7 +1661,7 @@ class CausalGroup3Tracker:
                 self._active_transition_ids.pop(state.entity_id, None)
                 self._ob_candidates.pop(state.entity_id, None)
         started = tuple(
-            transition.state
+            transition
             for transition in displacement.transitions
             if transition.state.lifecycle
             is DisplacementLifecycle.STARTED
@@ -1035,8 +1672,9 @@ class CausalGroup3Tracker:
                 "one candle cannot start multiple displacement episodes"
             )
         if not started:
-            return
-        state = started[0]
+            return None
+        started_transition = started[0]
+        state = started_transition.state
         history = (*tuple(self._history), candle)
         candle_ids = tuple(self._candle_id(item) for item in history)
         if (
@@ -1053,7 +1691,7 @@ class CausalGroup3Tracker:
         prior_history = history[:seed_index]
         if not prior_history:
             self._ob_candidates[state.entity_id] = None
-            return
+            return None
         anchor = prior_history[-1]
         seed = history[seed_index]
         valid_anchor = (
@@ -1069,7 +1707,7 @@ class CausalGroup3Tracker:
         )
         if not valid_anchor:
             self._ob_candidates[state.entity_id] = None
-            return
+            return None
 
         # The seed-adjacent bar must strictly oppose the displacement.  Only
         # its immediately contiguous reverse/doji predecessors may extend the
@@ -1096,14 +1734,18 @@ class CausalGroup3Tracker:
             next_start = item.start
         cluster = tuple(reversed(reverse_cluster))
         cluster_ids = tuple(self._candle_id(item) for item in cluster)
-        self._ob_candidates[state.entity_id] = (
-            _FrozenOrderBlockCandidate(
-                candle=anchor,
-                candle_id=self._candle_id(anchor),
-                cluster=cluster,
-                cluster_ids=cluster_ids,
-            )
+        candidate = _FrozenOrderBlockCandidate(
+            candle=anchor,
+            candle_id=self._candle_id(anchor),
+            cluster=cluster,
+            cluster_ids=cluster_ids,
+            source_displacement_state=state,
+            source_displacement_transition_identity=(
+                started_transition.transition_id
+            ),
         )
+        self._ob_candidates[state.entity_id] = candidate
+        return candidate
 
     def _remember_membership(
         self,
@@ -1466,7 +2108,7 @@ class CausalGroup3Tracker:
         candle_id = self._candle_id(candle)
         fvg_transitions = self._advance_fvgs(candle)
         order_block_transitions = self._advance_order_blocks(candle)
-        self._freeze_new_displacement_sources(
+        new_base_origin_candidate = self._freeze_new_displacement_sources(
             candle,
             candle_id,
             displacement,
@@ -1492,6 +2134,63 @@ class CausalGroup3Tracker:
         )
         if created_order_block is not None:
             order_block_transitions.append(created_order_block)
+        qualified_seed: _QualifiedOrderBlockSeed | None = None
+        if created_order_block is not None:
+            candidate = self._ob_candidates.get(
+                created_order_block.source_displacement_id
+            )
+            if candidate is None:
+                raise RuntimeError(
+                    "created OB lost its frozen Base Origin candidate"
+                )
+            qualified_seed = _QualifiedOrderBlockSeed(
+                legacy_state=created_order_block,
+                candidate=candidate,
+                compatible_structure_entity_id=(
+                    created_order_block.source_bos_id
+                ),
+                compatible_structure_kind=(
+                    CompatibleStructureKind.MSS_CORE_CONFIRMED
+                    if created_order_block.source_bos_scope
+                    is BOSScope.OPPOSED
+                    else CompatibleStructureKind.QUALIFIED_BOS
+                ),
+            )
+        price_invalidated_fvg_ids = tuple(
+            state.fvg_id
+            for state in fvg_transitions
+            if (
+                state.lifecycle is FairValueGapLifecycle.INVALIDATED
+                and state.transition_reason == "close_through_far_edge"
+            )
+        )
+        if (
+            new_base_origin_candidate is not None
+            or qualified_seed is not None
+            or created_fvg is not None
+            or price_invalidated_fvg_ids
+            or self._zone_reinteraction_trackers
+        ):
+            self._pending_foundation_completed.append(
+                _FoundationCompletedSeed(
+                    candle=candle,
+                    candle_id=candle_id,
+                    new_base_origin_candidates=(
+                        ()
+                        if new_base_origin_candidate is None
+                        else (new_base_origin_candidate,)
+                    ),
+                    new_qualified_order_blocks=(
+                        () if qualified_seed is None else (qualified_seed,)
+                    ),
+                    new_fvgs=(
+                        () if created_fvg is None else (created_fvg,)
+                    ),
+                    price_invalidated_fvg_ids=(
+                        price_invalidated_fvg_ids
+                    ),
+                )
+            )
 
         self._last_clock = candle.end
         output = self._update(
@@ -1502,6 +2201,385 @@ class CausalGroup3Tracker:
         self._mark_terminals_exposed()
         return output
 
+    def _base_origin_from_candidate(
+        self,
+        candidate: _FrozenOrderBlockCandidate,
+        *,
+        bar_event_ids_by_candle_id: Mapping[str, str],
+        displacement_event_ids_by_identity: Mapping[str, str],
+        displacement_event_known_at_by_identity: Mapping[
+            str, pd.Timestamp
+        ],
+    ) -> BaseOriginCore:
+        state = candidate.source_displacement_state
+        try:
+            displacement_event_id = (
+                displacement_event_ids_by_identity[
+                    candidate.source_displacement_transition_identity
+                ]
+            )
+        except KeyError as error:
+            raise ValueError(
+                "Base Origin Core lacks canonical displacement provenance"
+            ) from error
+        try:
+            displacement_known_at = aware_timestamp(
+                displacement_event_known_at_by_identity[
+                    candidate.source_displacement_transition_identity
+                ],
+                name="Base Origin displacement event known_at",
+            )
+        except KeyError as error:
+            raise ValueError(
+                "Base Origin Core lacks its displacement knowledge clock"
+            ) from error
+        cluster = candidate.cluster
+        return BaseOriginCore(
+            symbol=state.symbol,
+            instrument_id=state.instrument_id,
+            timeframe=state.timeframe,
+            direction=state.direction,
+            source_displacement_id=state.entity_id,
+            source_displacement_event_id=displacement_event_id,
+            anchor_bar_event_ids=tuple(
+                self._bar_source_id(
+                    candle_id,
+                    bar_event_ids_by_candle_id,
+                )
+                for candle_id in candidate.cluster_ids
+            ),
+            anchor_candle_ids=candidate.cluster_ids,
+            anchor_completed_at=tuple(item.end for item in cluster),
+            lower_bound=min(float(item.low) for item in cluster),
+            upper_bound=max(float(item.high) for item in cluster),
+            body_lower_bound=min(
+                min(float(item.open), float(item.close))
+                for item in cluster
+            ),
+            body_upper_bound=max(
+                max(float(item.open), float(item.close))
+                for item in cluster
+            ),
+            tick_size=self.protocol.tick_size,
+            formed_at=cluster[-1].end,
+            # Detector lifecycle ``started_at`` is event time.  The core is
+            # knowable only after the exact canonical displacement fact has
+            # been appended, which can be a later completed-bar clock.
+            known_at=displacement_known_at,
+        )
+
+    @staticmethod
+    def _required_event_id(
+        mapping: Mapping[str, str],
+        identity: str,
+        *,
+        name: str,
+    ) -> str:
+        try:
+            event_id = mapping[identity]
+        except KeyError as error:
+            raise ValueError(f"{name} is not canonically bound") from error
+        if not isinstance(event_id, str) or not event_id:
+            raise ValueError(f"{name} canonical event identity is invalid")
+        return event_id
+
+    def _apply_finalize_foundation(
+        self,
+        update: Group3Update,
+        *,
+        bar_event_ids_by_candle_id: Mapping[str, str],
+        displacement_event_ids_by_identity: Mapping[str, str],
+        displacement_event_known_at_by_identity: Mapping[
+            str, pd.Timestamp
+        ],
+        structure_event_ids_by_entity: Mapping[str, str],
+        fvg_creation_event_ids_by_entity: Mapping[str, str],
+        fvg_terminal_event_ids_by_entity: Mapping[str, str],
+        order_block_creation_event_ids_by_entity: Mapping[str, str],
+        sessions_by_clock: Mapping[pd.Timestamp, str],
+        context_event_ids_by_clock: Mapping[
+            pd.Timestamp,
+            Sequence[str],
+        ],
+    ) -> Group3Update:
+        first_retest_transitions: list[ZoneFirstRetest] = list(
+            update.first_retest_transitions
+        )
+        fvg_structural_transitions: list[
+            FVGStructuralLifecycle
+        ] = list(update.fvg_structural_transitions)
+        for completed in self._pending_foundation_completed:
+            candle = completed.candle
+            current_bar_event_id = self._bar_source_id(
+                completed.candle_id,
+                bar_event_ids_by_candle_id,
+            )
+            self._advance_fvg_foundation_age(
+                candle,
+                bar_event_id=current_bar_event_id,
+            )
+            for candidate in completed.new_base_origin_candidates:
+                core = self._base_origin_from_candidate(
+                    candidate,
+                    bar_event_ids_by_candle_id=(
+                        bar_event_ids_by_candle_id
+                    ),
+                    displacement_event_ids_by_identity=(
+                        displacement_event_ids_by_identity
+                    ),
+                    displacement_event_known_at_by_identity=(
+                        displacement_event_known_at_by_identity
+                    ),
+                )
+                existing = self._base_origin_cores.get(
+                    core.source_displacement_id
+                )
+                if existing is not None and existing != core:
+                    raise ValueError(
+                        "Base Origin Core canonical rebinding drifted"
+                    )
+                self._base_origin_cores[
+                    core.source_displacement_id
+                ] = core
+
+            try:
+                session = sessions_by_clock[candle.end]
+            except KeyError as error:
+                raise ValueError(
+                    "first reinteraction lacks its frozen session"
+                ) from error
+            context_event_ids = tuple(
+                context_event_ids_by_clock.get(candle.end, ())
+            )
+            first_retest_transitions.extend(
+                self._advance_first_reinteractions(
+                    candle,
+                    candle_id=completed.candle_id,
+                    bar_event_ids_by_candle_id=(
+                        bar_event_ids_by_candle_id
+                    ),
+                    session=session,
+                    context_event_ids=context_event_ids,
+                )
+            )
+            for fvg_id in completed.price_invalidated_fvg_ids:
+                terminal_event_id = self._required_event_id(
+                    fvg_terminal_event_ids_by_entity,
+                    fvg_id,
+                    name="FVG invalidation terminal",
+                )
+                terminal = self._terminate_fvg_foundation(
+                    entity_id=fvg_id,
+                    cause=FVGTerminationCause.CLOSE_THROUGH_FAR_EDGE,
+                    known_at=candle.end,
+                    cause_event_id=current_bar_event_id,
+                    terminal_event_id=terminal_event_id,
+                )
+                if terminal is not None:
+                    fvg_structural_transitions.append(terminal)
+
+            for seed in completed.new_qualified_order_blocks:
+                displacement_id = (
+                    seed.legacy_state.source_displacement_id
+                )
+                core = self._base_origin_cores.get(displacement_id)
+                if core is None:
+                    core = self._base_origin_from_candidate(
+                        seed.candidate,
+                        bar_event_ids_by_candle_id=(
+                            bar_event_ids_by_candle_id
+                        ),
+                        displacement_event_ids_by_identity=(
+                            displacement_event_ids_by_identity
+                        ),
+                        displacement_event_known_at_by_identity=(
+                            displacement_event_known_at_by_identity
+                        ),
+                    )
+                    self._base_origin_cores[displacement_id] = core
+                compatible_event_id = self._required_event_id(
+                    structure_event_ids_by_entity,
+                    seed.compatible_structure_entity_id,
+                    name="Qualified OB structure source",
+                )
+                qualified = qualify_order_block(
+                    core,
+                    source_displacement_id=displacement_id,
+                    source_displacement_event_id=(
+                        core.source_displacement_event_id
+                    ),
+                    compatible_structure_event_id=compatible_event_id,
+                    compatible_structure_kind=(
+                        seed.compatible_structure_kind
+                    ),
+                    qualified_at=seed.legacy_state.confirmed_at,
+                    known_at=seed.legacy_state.confirmed_at,
+                )
+                creation_event_id = self._required_event_id(
+                    order_block_creation_event_ids_by_entity,
+                    seed.legacy_state.order_block_id,
+                    name="Qualified OB creation source",
+                )
+                departure_event_id = self._required_event_id(
+                    displacement_event_ids_by_identity,
+                    seed.legacy_state.source_active_transition_id,
+                    name="Qualified OB departure source",
+                )
+                self._register_order_block_foundation(
+                    legacy_state=seed.legacy_state,
+                    qualified=qualified,
+                    candle=candle,
+                    creation_event_id=creation_event_id,
+                    departure_event_id=departure_event_id,
+                )
+
+            for state in completed.new_fvgs:
+                creation_event_id = self._required_event_id(
+                    fvg_creation_event_ids_by_entity,
+                    state.fvg_id,
+                    name="FVG creation source",
+                )
+                departure_event_id = (
+                    self._required_event_id(
+                        displacement_event_ids_by_identity,
+                        state.source_active_transition_id,
+                        name="FVG departure source",
+                    )
+                    if state.source_active_transition_id is not None
+                    else self._bar_source_id(
+                        state.source_candle_ids[-1],
+                        bar_event_ids_by_candle_id,
+                    )
+                )
+                self._register_fvg_foundation(
+                    state,
+                    creation_event_id=creation_event_id,
+                    departure_event_id=departure_event_id,
+                )
+        self._pending_foundation_completed.clear()
+        self._prune_foundation_companions()
+        return self._update(
+            update.fvg_transitions,
+            update.order_block_transitions,
+            update.order_block_funnel,
+            first_retest_transitions,
+            fvg_structural_transitions,
+            boundary_reason=update.boundary_reason,
+        )
+
+    def finalize_foundation(
+        self,
+        update: Group3Update,
+        *,
+        bar_event_ids_by_candle_id: Mapping[str, str],
+        displacement_event_ids_by_identity: Mapping[str, str],
+        displacement_event_known_at_by_identity: Mapping[
+            str, pd.Timestamp
+        ],
+        structure_event_ids_by_entity: Mapping[str, str],
+        fvg_creation_event_ids_by_entity: Mapping[str, str],
+        fvg_terminal_event_ids_by_entity: Mapping[str, str],
+        order_block_creation_event_ids_by_entity: Mapping[str, str],
+        sessions_by_clock: Mapping[pd.Timestamp, str],
+        context_event_ids_by_clock: Mapping[
+            pd.Timestamp,
+            Sequence[str],
+        ] | None = None,
+    ) -> Group3Update:
+        """Bind provisional reducer identities to canonical event facts."""
+
+        if self._failed:
+            raise RuntimeError("Group 3 tracker is terminally failed")
+        if not isinstance(update, Group3Update) or update.boundary_reason:
+            raise ValueError(
+                "foundation finalization requires an ordinary Group3Update"
+            )
+        candidate = self._transaction_clone()
+        try:
+            output = candidate._apply_finalize_foundation(
+                update,
+                bar_event_ids_by_candle_id=bar_event_ids_by_candle_id,
+                displacement_event_ids_by_identity=(
+                    displacement_event_ids_by_identity
+                ),
+                displacement_event_known_at_by_identity=(
+                    displacement_event_known_at_by_identity
+                ),
+                structure_event_ids_by_entity=(
+                    structure_event_ids_by_entity
+                ),
+                fvg_creation_event_ids_by_entity=(
+                    fvg_creation_event_ids_by_entity
+                ),
+                fvg_terminal_event_ids_by_entity=(
+                    fvg_terminal_event_ids_by_entity
+                ),
+                order_block_creation_event_ids_by_entity=(
+                    order_block_creation_event_ids_by_entity
+                ),
+                sessions_by_clock=sessions_by_clock,
+                context_event_ids_by_clock=(
+                    {}
+                    if context_event_ids_by_clock is None
+                    else context_event_ids_by_clock
+                ),
+            )
+            candidate._last_output = output
+        except Exception:
+            self._failed = True
+            raise
+        self._commit(candidate)
+        return output
+
+    def finalize_foundation_boundary(
+        self,
+        update: Group3Update,
+        *,
+        boundary_event_id: str | None,
+    ) -> Group3Update:
+        """Bind a deferred uncertain boundary to its canonical event fact."""
+
+        if self._failed:
+            raise RuntimeError("Group 3 tracker is terminally failed")
+        if not isinstance(update, Group3Update) or update.boundary_reason is None:
+            raise ValueError(
+                "foundation boundary finalization requires a boundary update"
+            )
+        pending = self._pending_foundation_boundary
+        if pending is None:
+            return update
+        reason, clock = pending
+        if reason != update.boundary_reason:
+            self._failed = True
+            raise ValueError("foundation boundary reason drifted")
+        candidate = self._transaction_clone()
+        try:
+            transitions = candidate._apply_foundation_boundary(
+                reason,
+                clock,
+                boundary_event_id=boundary_event_id,
+            )
+            if not transitions:
+                raise ValueError(
+                    "foundation boundary lacks a canonical terminal fact"
+                )
+            output = candidate._update(
+                update.fvg_transitions,
+                update.order_block_transitions,
+                update.order_block_funnel,
+                first_retest_transitions=(
+                    update.first_retest_transitions
+                ),
+                fvg_structural_transitions=transitions,
+                boundary_reason=reason,
+            )
+            candidate._last_output = output
+        except Exception:
+            self._failed = True
+            raise
+        self._commit(candidate)
+        return output
+
     def on_completed_5m(
         self,
         candle: Candle,
@@ -1510,6 +2588,10 @@ class CausalGroup3Tracker:
     ) -> Group3Update:
         if self._failed:
             raise RuntimeError("Group 3 tracker is terminally failed")
+        if self._pending_foundation_boundary is not None:
+            raise RuntimeError(
+                "Group 3 foundation boundary requires canonical finalization"
+            )
         if not isinstance(candle, Candle):
             raise TypeError("Group 3 requires a Candle input")
         candle.ohlc_ticks_for(self.protocol.tick_size)
@@ -1603,6 +2685,7 @@ class CausalGroup3Tracker:
                 output = candidate._apply_boundary(
                     mapped_reason,
                     candle.end,
+                    boundary_event_id=None,
                 )
                 candidate._last_input_kind = "candle_boundary"
             else:

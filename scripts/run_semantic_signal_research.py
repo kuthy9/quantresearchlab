@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 from bisect import bisect_right
 from collections import Counter, defaultdict
+from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
 import gc
 import hashlib
 import json
@@ -67,6 +68,12 @@ from smc_trader.signal_research import (  # noqa: E402
     resolve_source_lineage_tokens,
     sha256_file,
     validate_split_authority,
+)
+from smc_trader.structural_outcome import (  # noqa: E402
+    OutcomeBar,
+    OutcomeTerminal,
+    StructuralOutcomeEngine,
+    StructuralOutcomeSpec,
 )
 from smc_trader.validation import load_validation_protocol  # noqa: E402
 
@@ -609,6 +616,7 @@ def _outcome(
     horizon: int = 60,
     target_atr: float = 1.0,
     invalidation_atr: float = 1.0,
+    _allow_test_compatibility_rows: bool = False,
 ) -> dict[str, Any] | None:
     direction = signal.get("direction")
     start_index = row_index.get(signal["known_at"])
@@ -617,27 +625,224 @@ def _outcome(
     start = rows[start_index]
     signal_symbol = signal.get("symbol")
     signal_instrument_id = signal.get("instrument_id")
-    if (signal_symbol is not None and start.get("symbol") != signal_symbol) or (
-        signal_instrument_id is not None
-        and start.get("instrument_id") != signal_instrument_id
+    source_event_id = signal.get("event_id")
+    if _allow_test_compatibility_rows:
+        if signal_symbol is None:
+            signal_symbol = start.get("symbol")
+        if signal_instrument_id is None:
+            signal_instrument_id = start.get("instrument_id")
+        if source_event_id is None:
+            payload = json.dumps(
+                to_primitive(dict(signal)),
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            ).encode("utf-8")
+            source_event_id = (
+                "research-signal:" + hashlib.sha256(payload).hexdigest()
+            )
+    if (
+        not isinstance(source_event_id, str)
+        or not source_event_id.strip()
+        or not isinstance(signal_symbol, str)
+        or not signal_symbol.strip()
+        or type(signal_instrument_id) is not int
+        or signal_instrument_id < 0
+    ):
+        raise ResearchContractError(
+            "structural outcome signal lacks exact event/contract identity"
+        )
+    if (
+        start.get("symbol") != signal_symbol
+        or start.get("instrument_id") != signal_instrument_id
     ):
         raise ResearchContractError(
             "signal identity does not match its exact known_at entry row"
         )
+    if type(horizon) is not int or horizon < 1:
+        raise ResearchContractError("structural outcome horizon must be positive")
+    try:
+        target_multiple = float(target_atr)
+        invalidation_multiple = float(invalidation_atr)
+    except (TypeError, ValueError) as error:
+        raise ResearchContractError(
+            "structural outcome ATR barriers must be numeric"
+        ) from error
+    if (
+        not math.isfinite(target_multiple)
+        or target_multiple <= 0.0
+        or not math.isfinite(invalidation_multiple)
+        or invalidation_multiple <= 0.0
+    ):
+        raise ResearchContractError(
+            "structural outcome ATR barriers must be finite and positive"
+        )
     atr = float(start["atr"])
     if not math.isfinite(atr) or atr <= 0.0:
         return None
-    path = rows[start_index + 1 : start_index + 1 + horizon]
     entry = float(start["close"])
     sign = 1.0 if direction == "long" else -1.0
-    target = entry + sign * target_atr * atr
-    invalidation = entry - sign * invalidation_atr * atr
-    target_offset = None
-    invalidation_offset = None
-    contract_id = signal.get("instrument_id", start.get("instrument_id"))
-    contract_symbol = signal.get("symbol", start.get("symbol"))
-    favorable: list[float] = []
-    adverse: list[float] = []
+    try:
+        tick_size = float(start["tick_size"])
+    except (KeyError, TypeError, ValueError) as error:
+        raise ResearchContractError(
+            "structural outcome entry row lacks its frozen tick size"
+        ) from error
+    if not math.isfinite(tick_size) or tick_size <= 0.0:
+        raise ResearchContractError(
+            "structural outcome entry tick size must be finite and positive"
+        )
+
+    def outward_tick_price(raw_price: float, *, upward: bool) -> float:
+        tick = Decimal(str(tick_size))
+        coordinate = (Decimal(str(raw_price)) / tick).to_integral_value(
+            rounding=ROUND_CEILING if upward else ROUND_FLOOR
+        )
+        return float(coordinate * tick)
+
+    raw_target = entry + sign * target_multiple * atr
+    raw_invalidation = entry - sign * invalidation_multiple * atr
+    target = outward_tick_price(raw_target, upward=sign > 0.0)
+    invalidation = outward_tick_price(
+        raw_invalidation,
+        upward=sign < 0.0,
+    )
+    path_rows = tuple(rows[start_index + 1 : start_index + 1 + horizon])
+    if not rows:
+        raise ResearchContractError("structural outcome row census is empty")
+    start_clock = pd.Timestamp(signal["known_at"])
+    final_clock = pd.Timestamp(rows[-1]["asof"])
+    if start_clock.tzinfo is None or final_clock.tzinfo is None:
+        raise ResearchContractError(
+            "structural outcome clocks must be timezone aware"
+        )
+    window_end_exclusive = final_clock + pd.Timedelta(1, unit="min")
+    horizon_seconds = int(
+        (window_end_exclusive - start_clock).total_seconds()
+    )
+    if horizon_seconds < 1:
+        raise ResearchContractError(
+            "structural outcome observation window is empty"
+        )
+    outcome_bars: list[OutcomeBar] = []
+    row_by_bar_event_id: dict[str, Mapping[str, Any]] = {}
+    for row in path_rows:
+        bar_event_id = row.get("bar_event_id")
+        if (
+            not isinstance(bar_event_id, str)
+            or not bar_event_id.strip()
+            or (
+                bar_event_id.startswith("research-row:")
+                and not _allow_test_compatibility_rows
+            )
+        ):
+            raise ResearchContractError(
+                "formal structural outcome row lacks a normalized BAR event ID"
+            )
+        if bar_event_id in row_by_bar_event_id:
+            raise ResearchContractError(
+                "structural outcome row repeats a BAR event ID"
+            )
+        same_contract = (
+            row.get("symbol") == signal_symbol
+            and row.get("instrument_id") == signal_instrument_id
+        )
+        if same_contract and row.get("tick_size") != tick_size:
+            raise ResearchContractError(
+                "structural outcome row tick size changed inside its window"
+            )
+        try:
+            bar = OutcomeBar(
+                bar_event_id=bar_event_id,
+                symbol=str(row["symbol"]),
+                instrument_id=row["instrument_id"],
+                timeframe=Timeframe(str(row["timeframe"])),
+                known_at=pd.Timestamp(row["asof"]),
+                open=float(row["open"]),
+                high=float(row["high"]),
+                low=float(row["low"]),
+                close=float(row["close"]),
+            )
+        except (KeyError, TypeError, ValueError) as error:
+            raise ResearchContractError(
+                "structural outcome row is not an exact normalized BAR fact"
+            ) from error
+        outcome_bars.append(bar)
+        row_by_bar_event_id[bar_event_id] = row
+    start_bar_event_id = start.get("bar_event_id")
+    if (
+        not isinstance(start_bar_event_id, str)
+        or not start_bar_event_id.strip()
+        or (
+            start_bar_event_id.startswith("research-row:")
+            and not _allow_test_compatibility_rows
+        )
+        or start.get("timeframe") != Timeframe.M1.value
+        or pd.Timestamp(start.get("asof")) != start_clock
+    ):
+        raise ResearchContractError(
+            "formal structural outcome entry row lacks exact M1 BAR identity"
+        )
+    try:
+        OutcomeBar(
+            bar_event_id=start_bar_event_id,
+            symbol=str(start["symbol"]),
+            instrument_id=start["instrument_id"],
+            timeframe=Timeframe(str(start["timeframe"])),
+            known_at=pd.Timestamp(start["asof"]),
+            open=float(start["open"]),
+            high=float(start["high"]),
+            low=float(start["low"]),
+            close=float(start["close"]),
+        )
+        spec = StructuralOutcomeSpec(
+            source_event_id=source_event_id,
+            symbol=signal_symbol,
+            instrument_id=signal_instrument_id,
+            timeframe=Timeframe.M1,
+            direction=Direction(direction),
+            observation_start_known_at=start_clock,
+            observation_window_end_exclusive=window_end_exclusive,
+            reference_price=entry,
+            target_price=target,
+            invalidation_price=invalidation,
+            target_definition=(
+                "directional_target_"
+                f"{target_multiple:g}_atr_outward_to_first_tradable_tick"
+            ),
+            invalidation_definition=(
+                "opposite_direction_invalidation_"
+                f"{invalidation_multiple:g}_atr_outward_to_first_tradable_tick"
+            ),
+            atr_at_start=atr,
+            tick_size=tick_size,
+            horizon_bars=horizon,
+            horizon_seconds=horizon_seconds,
+        )
+        engine_outcome = StructuralOutcomeEngine.evaluate(spec, outcome_bars)
+    except (TypeError, ValueError) as error:
+        raise ResearchContractError(
+            "unified structural outcome evaluation failed closed"
+        ) from error
+
+    observed_rows = tuple(
+        row_by_bar_event_id[event_id]
+        for event_id in engine_outcome.source_bar_event_ids
+    )
+    offset_by_clock = {
+        pd.Timestamp(row["asof"]): offset
+        for offset, row in enumerate(observed_rows, start=1)
+    }
+    target_offset = (
+        None
+        if engine_outcome.target_hit_at is None
+        else offset_by_clock[engine_outcome.target_hit_at]
+    )
+    invalidation_offset = (
+        None
+        if engine_outcome.invalidation_hit_at is None
+        else offset_by_clock[engine_outcome.invalidation_hit_at]
+    )
     favorable_closes: list[float] = []
     retracement_depth = 0.0
     running_favorable_close = entry
@@ -656,22 +861,10 @@ def _outcome(
             zone_bounds = (lower, upper)
     first_retest_offset = None
     fvg_midpoint_offset = None
-    observed_completed_bars = 0
-    censored_by_contract_change = False
-    for offset, row in enumerate(path, start=1):
-        if (contract_id is not None and row.get("instrument_id") != contract_id) or (
-            contract_symbol is not None and row.get("symbol") != contract_symbol
-        ):
-            censored_by_contract_change = True
-            break
-        observed_completed_bars += 1
+    for offset, row in enumerate(observed_rows, start=1):
         high = float(row["high"])
         low = float(row["low"])
         close = float(row["close"])
-        target_hit = high >= target if sign > 0 else low <= target
-        invalidation_hit = low <= invalidation if sign > 0 else high >= invalidation
-        favorable.append((high - entry) if sign > 0 else (entry - low))
-        adverse.append((entry - low) if sign > 0 else (high - entry))
         directional_close = sign * (close - entry)
         favorable_closes.append(directional_close)
         if sign > 0:
@@ -697,37 +890,26 @@ def _outcome(
                 and low <= midpoint <= high
             ):
                 fvg_midpoint_offset = offset
-        if target_hit and target_offset is None:
-            target_offset = offset
-        if invalidation_hit and invalidation_offset is None:
-            invalidation_offset = offset
-    ambiguous = bool(
-        target_offset is not None
-        and invalidation_offset is not None
-        and target_offset == invalidation_offset
+    ambiguous = (
+        engine_outcome.terminal is OutcomeTerminal.AMBIGUOUS_SAME_BAR
     )
-    resolved = bool(
-        not ambiguous and (target_offset is not None or invalidation_offset is not None)
-    )
+    resolved = engine_outcome.terminal in {
+        OutcomeTerminal.TARGET_FIRST,
+        OutcomeTerminal.INVALIDATION_FIRST,
+    }
     success = (
-        bool(
-            target_offset is not None
-            and (invalidation_offset is None or target_offset < invalidation_offset)
-        )
+        engine_outcome.terminal is OutcomeTerminal.TARGET_FIRST
         if resolved
         else None
     )
-    mfe = max(0.0, max(favorable, default=0.0)) / atr
-    mae = max(0.0, max(adverse, default=0.0)) / atr
     continuation_distance = max(0.0, max(favorable_closes, default=0.0)) / atr
     event_high = float(start.get("high", entry))
     event_low = float(start.get("low", entry))
-    observed_path = path[:observed_completed_bars]
     range_extension = (
         max(
             0.0,
             max(
-                (float(row["high"]) for row in observed_path),
+                (float(row["high"]) for row in observed_rows),
                 default=event_high,
             )
             - event_high,
@@ -737,32 +919,40 @@ def _outcome(
             0.0,
             event_low
             - min(
-                (float(row["low"]) for row in observed_path),
+                (float(row["low"]) for row in observed_rows),
                 default=event_low,
             ),
         )
     ) / atr
+    observed_completed_bars = engine_outcome.observed_bars
+    censored_by_contract_change = (
+        engine_outcome.path_censor_reason == "contract_change"
+    )
     censored_by_window_end = (
         not censored_by_contract_change and observed_completed_bars < horizon
     )
-    full_horizon_observed = (
+    full_horizon_observed = engine_outcome.full_horizon_observed
+    if full_horizon_observed != (
         observed_completed_bars == horizon
         and not censored_by_contract_change
         and not censored_by_window_end
-    )
-    full_horizon_mfe = mfe if full_horizon_observed else None
-    full_horizon_mae = mae if full_horizon_observed else None
+    ):
+        raise ResearchContractError(
+            "unified structural outcome censoring disagrees with research schema"
+        )
+    # Historical compatibility proxy only.  It is not the canonical
+    # first_retest_event introduced by the semantic foundation.
     return {
         "resolved": resolved,
         "ambiguous": ambiguous,
         "success": success,
-        "mfe_atr": full_horizon_mfe,
-        "mae_atr": full_horizon_mae,
+        "mfe_atr": engine_outcome.mfe_atr,
+        "mae_atr": engine_outcome.mae_atr,
         "mfe_over_mae": (
-            full_horizon_mfe / full_horizon_mae
-            if full_horizon_mfe is not None
-            and full_horizon_mae is not None
-            and full_horizon_mae > 0.0
+            engine_outcome.mfe_atr / engine_outcome.mae_atr
+            if engine_outcome.mfe_atr is not None
+            and engine_outcome.mae_atr is not None
+            and engine_outcome.mae_atr > 0.0
             else None
         ),
         "continuation_distance_atr": (
@@ -821,12 +1011,24 @@ def _summary(
     row_index: Mapping[pd.Timestamp, int],
     *,
     outcome_parameters: Mapping[str, Any] | None = None,
+    _allow_test_compatibility_rows: bool = False,
 ) -> dict[str, Any]:
     parameters = {} if outcome_parameters is None else dict(outcome_parameters)
     outcomes = [
         value
         for signal in signals
-        if (value := _outcome(signal, rows, row_index, **parameters)) is not None
+        if (
+            value := _outcome(
+                signal,
+                rows,
+                row_index,
+                _allow_test_compatibility_rows=(
+                    _allow_test_compatibility_rows
+                ),
+                **parameters,
+            )
+        )
+        is not None
     ]
     full_horizon_outcomes = [
         value for value in outcomes if value["full_horizon_observed"]
@@ -3418,8 +3620,47 @@ def run(
         atr = float(observation.frame(Timeframe.M1).metrics.get("atr", 0.0))
         if not completed.real_completed:
             continue
+        normalized_bar_roots = tuple(
+            event
+            for event in observation.semantic_events_this_update
+            if event.kind is EventKind.BAR_COMPLETED
+            and event.origin is EventOrigin.NORMALIZED_DATA
+            and event.timeframe is Timeframe.M1
+            and event.known_at == observation.asof
+            and event.event_time == observation.asof
+            and event.evidence.get("real_completed") is True
+            and event.evidence.get("clock_only") is False
+        )
+        if len(normalized_bar_roots) != 1:
+            raise ResearchContractError(
+                "ready real research row lacks one exact normalized M1 BAR root"
+            )
+        normalized_bar_root = normalized_bar_roots[0]
+        normalized_evidence = normalized_bar_root.evidence
+        expected_bar_facts = {
+            "open": float(completed.open),
+            "high": float(completed.high),
+            "low": float(completed.low),
+            "close": float(completed.close),
+            "atr": atr,
+        }
+        if (
+            normalized_evidence.get("symbol") != completed.symbol
+            or normalized_evidence.get("instrument_id")
+            != completed.instrument_id
+            or any(
+                normalized_evidence.get(name) != value
+                for name, value in expected_bar_facts.items()
+            )
+        ):
+            raise ResearchContractError(
+                "normalized M1 BAR root disagrees with the completed research row"
+            )
         row = {
             "asof": observation.asof,
+            "bar_event_id": normalized_bar_root.event_id,
+            "timeframe": Timeframe.M1.value,
+            "tick_size": float(observer.config.tick_size),
             "open": float(completed.open),
             "high": float(completed.high),
             "low": float(completed.low),

@@ -1,0 +1,72 @@
+{
+  "authority": "local_temporary_engineering_evidence_receipt_only",
+  "bindings": {
+    "atomic_semantic_version": "smc_semantics_v1.2",
+    "dol_probability_protocol_fingerprint": "a7f588d35c380d4d9b38a2d5c3aa90ee5e30c49c241696f0d2847fb90b7ad7fe",
+    "dol_ranking_protocol_fingerprint": "be9177601fbdac6e36072dbf7dd8bde46c793e7197d0a9e3662f835ceebbb4be",
+    "execution_protocol_fingerprint": "cc42f67d9a98ea702e957b23e68c9306109f37a36386f58503d3dae1418d5d9b",
+    "foundation_registry_canonical_json_identity": "ac04636919931d774309a0c306764fdf8eb53aee41df0f31d4d94e5b9125732b",
+    "foundation_registry_file_sha256": "dfc4cb29f98fc5015628927e97c725eb491b99f244f154e51552e5950daf927c",
+    "foundation_registry_path": "semantics/foundation_v2_0.yaml",
+    "foundation_version": "smc_semantic_foundation_v2.0",
+    "model_config_path": "configs/model.json",
+    "model_config_sha256": "dbb6662ee748531feeb556ee891745445e4df4f919e402fd1126d939333d84e5",
+    "path_protocol_fingerprint": "d897635cb91fc1cb84647f41eb4c5a6b8a06d05d2e44a1b3471e8e9ff67b0482",
+    "shadow_protocol_id": "shadow-live-protocol:2d19e3769e01019230b10d8b96ad52c7386c1ae0cd72404f41c7d1b9ed78aaf8",
+    "shadow_protocol_path": "configs/shadow_live_v1.json",
+    "shadow_protocol_sha256": "d8e543f54bc6e81bb820be51e02382b5477f8a3e8e676063aa685f0d599e7961",
+    "signal_policy_protocol_fingerprint": "4e8d042fec936f0274c2c3f28655833d2d969c2a38e6a5d2157fcbce2607ee7d"
+  },
+  "input": {
+    "bar_start_first": "2024-06-02T18:00:00-04:00",
+    "bar_start_last": "2024-06-02T21:19:00-04:00",
+    "bytes": 299922,
+    "path": "inputs/phase9_week1_flat_v2_prefix_200.jsonl",
+    "rows": 200,
+    "schema_version": "phase9_shadow_file_input_v2",
+    "sha256": "731d8069982a7bf35e6b1aabe80800e068c4e39c112a18846f5570fded7f2796"
+  },
+  "limits": {
+    "broker_submission_authorized": false,
+    "complete_6900_clock_replay": false,
+    "empirical_validation": false,
+    "mbo_mechanism_study": false,
+    "multi_day_live_pilot": false,
+    "operational_metrics_gate": false,
+    "portable_result_bundle_available": false,
+    "real_time_feed": false,
+    "rolling_oof": false,
+    "sealed_oos_opened": false,
+    "temporary_result_bundle_committed": false,
+    "temporary_result_path_recorded": false
+  },
+  "result": {
+    "accepted_clocks": 200,
+    "approved_intents": 0,
+    "attempted_clocks": 200,
+    "checkpoint_manifest_sha256": "4ad667d48c60a0d68b9debbd6d06f372a2100e8fdc4a4571c381957ecea8fc28",
+    "completed_marker_sha256": "6a97e1c810cd2cef6109f8bddf9ac63763960ba4c551d38b32bcd5a0e9518b91",
+    "coverage_complete": true,
+    "exception_output_count": 0,
+    "execution_events": 0,
+    "external_submission_attempts": 0,
+    "gate_pass": true,
+    "journal_fingerprint_live_and_cold": "21a6b162b0a62268ff25eb6aaca02001eaf2a9cde884a912f4e64e1a35678e25",
+    "parity_exact": true,
+    "parity_records": 200,
+    "parity_records_sha256": "c70e94f3ae3a566a6347d0fe1b5adc9ae0662831afb798e14680453e207a22e3",
+    "record_fingerprint_live_and_cold": "7ae14df74e591ae32b162e7d741a9481fe8bd2fc6dd9670f1c671ab71d5c945c",
+    "run_manifest_sha256": "79e7e441fb2aafb989f6b8b60e0673f88f5b7933d9b62a76c4c74610e421ef64",
+    "status": "complete_engineering_file_replay",
+    "warning_output_count": 0
+  },
+  "runner": {
+    "checkpoint_clocks": 250,
+    "path": "scripts/run_shadow_file_pilot.py",
+    "sha256": "c3524a71861265e30405d5f4413c3fb51f858d119864db7b8f018fdd94324baf",
+    "stop_after_clocks": 200
+  },
+  "schema_version": "phase9_foundation_v2_prefix_receipt_v1",
+  "status": "verified_current_200_clock_engineering_file_parity",
+  "verification_date": "2026-08-23"
+}

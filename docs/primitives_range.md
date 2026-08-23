@@ -12,6 +12,13 @@ This contract freezes the causal meaning of:
 2. one completed-1m `ManipulationState` with lifecycle
    `swept → reaccepted|accepted_outside`.
 
+This file is the retained v1.2 Group-4/Mature Balance Range contract. Its
+`DealingRangeState` name is not Structural Range authority. The additive
+[`smc_semantic_foundation_v2.0`](refactor/canonical_semantic_foundation_v2.md)
+projection preserves this identity as `BalanceRange` and publishes a separate
+Structure-Generation-owned `StructuralRange`; the two may coexist and have
+independent normalized locations.
+
 The executable companion is
 `configs/primitives_range.json`. If this document and that file ever
 disagree, development stops until both are versioned together.

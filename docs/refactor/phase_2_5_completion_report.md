@@ -6,8 +6,8 @@ Last documentation and repository-hygiene review: 2026-08-21
 > Historical v1.1 report. This file preserves the exact January 2024
 > protocol-v2 artifact boundary, counts, hashes, limitations, and acceptance
 > decision as recorded. It is not the current runtime implementation status.
-> v1.2 Swing hierarchy/IRL-ERL, research-protocol-v3 tooling, and the shadow
-> path/DOL Brain were added later. Use
+> v1.2 Swing hierarchy/IRL-ERL, research-protocol-v3 tooling, the shadow
+> path/DOL Brain, and the additive canonical foundation v2 were added later. Use
 > [Current SMC Refactor Implementation Status](current_implementation_status.md)
 > for the current 1–20 and phase matrices. No statement below is retroactively
 > rewritten as v1.2 evidence.

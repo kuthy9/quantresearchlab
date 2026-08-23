@@ -12,14 +12,18 @@ from smc_trader.engine import (
     ContinuousSMCEngine,
     NEUTRAL_ENGINE_CHECKPOINT_SCHEMA_VERSION,
 )
+from smc_trader.market_state import replay_atomic_market_snapshot
 from smc_trader.model import (
     AccountState,
+    Bar,
     EngineSnapshot,
     EventKind,
     NeutralEngineSnapshot,
     Playbook,
     to_primitive,
 )
+from smc_trader.observation import ExecutionRealityInput
+from smc_trader.scene_graph import foundation_dol_inventory
 
 from .helpers import session_bars
 
@@ -39,6 +43,71 @@ def _grid_bars(count: int):
             )
         )
     return output
+
+
+def _foundation_bars(count: int):
+    return [
+        replace(
+            bar,
+            open=(price := 20_000.0 + 0.25 * index),
+            high=price + 0.50,
+            low=price - 0.25,
+            close=price + 0.25,
+        )
+        for index, bar in enumerate(_grid_bars(count))
+    ]
+
+
+def _june_2024_protected_role_and_pool_anchor_bars() -> list[Bar]:
+    """The exact 31-clock production prefix that exposed both DOL joins."""
+
+    rows = (
+        (18590.25, 18598.50, 18576.00, 18595.25, 876.0),
+        (18594.25, 18597.00, 18587.75, 18587.75, 350.0),
+        (18588.50, 18588.50, 18562.25, 18564.50, 594.0),
+        (18563.75, 18567.50, 18557.25, 18560.00, 573.0),
+        (18560.50, 18564.50, 18553.75, 18553.75, 209.0),
+        (18553.75, 18553.75, 18539.25, 18544.25, 494.0),
+        (18542.00, 18547.75, 18539.50, 18546.75, 159.0),
+        (18545.75, 18550.00, 18544.25, 18549.00, 154.0),
+        (18548.00, 18548.25, 18545.75, 18548.25, 80.0),
+        (18548.00, 18549.25, 18545.75, 18547.00, 90.0),
+        (18547.25, 18552.00, 18544.50, 18550.50, 177.0),
+        (18550.00, 18550.00, 18545.75, 18547.25, 96.0),
+        (18547.50, 18554.00, 18546.25, 18551.25, 169.0),
+        (18551.75, 18558.25, 18551.25, 18557.00, 103.0),
+        (18556.50, 18559.75, 18554.00, 18558.75, 123.0),
+        (18560.00, 18571.25, 18559.75, 18570.25, 285.0),
+        (18570.00, 18573.50, 18568.25, 18571.50, 171.0),
+        (18571.00, 18580.00, 18570.00, 18574.25, 230.0),
+        (18574.25, 18576.25, 18572.50, 18575.00, 103.0),
+        (18574.25, 18578.25, 18572.75, 18577.00, 68.0),
+        (18578.00, 18578.50, 18574.00, 18575.50, 64.0),
+        (18575.00, 18575.25, 18571.00, 18572.25, 113.0),
+        (18572.75, 18574.00, 18572.00, 18573.00, 15.0),
+        (18573.50, 18575.25, 18573.00, 18573.75, 37.0),
+        (18572.75, 18576.25, 18572.00, 18576.00, 80.0),
+        (18576.50, 18577.75, 18573.75, 18575.25, 75.0),
+        (18575.75, 18584.25, 18575.75, 18583.75, 158.0),
+        (18583.75, 18584.00, 18581.00, 18581.25, 102.0),
+        (18581.25, 18586.00, 18571.50, 18572.25, 275.0),
+        (18572.00, 18575.50, 18571.25, 18573.25, 55.0),
+        (18572.50, 18575.75, 18572.50, 18574.00, 42.0),
+    )
+    start = pd.Timestamp("2024-06-02T18:00:00-04:00")
+    return [
+        Bar(
+            start=start + pd.Timedelta(minutes=index),
+            open=open_price,
+            high=high,
+            low=low,
+            close=close,
+            volume=volume,
+            symbol="NQM4",
+            instrument_id=13743,
+        )
+        for index, (open_price, high, low, close, volume) in enumerate(rows)
+    ]
 
 
 def _legacy_engine_step(
@@ -236,24 +305,154 @@ def test_same_epoch_brain_reset_or_replacement_cannot_reseed_neutral_context(
 
 
 def test_engine_neutral_state_is_pickle_checkpoint_ready() -> None:
-    bars = _grid_bars(45)
+    bars = _foundation_bars(45)
     engine = ContinuousSMCEngine.from_config(
         "configs/model.json",
         runtime_mode="development",
     )
     for bar in bars[:35]:
-        engine.on_bar(bar)
+        snapshot = engine.on_bar(
+            bar,
+            execution=ExecutionRealityInput(
+                spread_points=0.25,
+                deadline=bar.end + pd.Timedelta(minutes=90),
+                source="checkpoint-test-feed",
+            ),
+        )
+    assert snapshot.observation.execution.source == "checkpoint-test-feed"
+    assert snapshot.observation.execution.spread_points == 0.25
+    assert engine.last_snapshot is not None
+    foundation = engine.last_snapshot.observation.market_snapshot.foundation
+    assert foundation is not None
+    assert foundation.records
+    replayed = replay_atomic_market_snapshot(
+        engine.observer.audit_store.events(),
+        semantic_registry_identity=engine.observer.semantic_registry.identity,
+    )
+    assert (
+        replayed.replay_payload()
+        == engine.last_snapshot.observation.market_snapshot.replay_payload()
+    )
     encoded = pickle.dumps(engine, protocol=pickle.HIGHEST_PROTOCOL)
     resumed = pickle.loads(encoded)
-    assert NEUTRAL_ENGINE_CHECKPOINT_SCHEMA_VERSION == 2
-    assert engine.__getstate__()["_neutral_checkpoint_schema_version"] == 2
+    assert NEUTRAL_ENGINE_CHECKPOINT_SCHEMA_VERSION == 3
+    assert engine.__getstate__()["_neutral_checkpoint_schema_version"] == 3
     assert resumed.neutral_market_state == engine.neutral_market_state
     assert resumed.last_snapshot == engine.last_snapshot
+    assert (
+        resumed.last_snapshot.observation.market_snapshot.foundation
+        == foundation
+    )
+    drifted = pickle.loads(encoded)
+    drifted._foundation_registry_identity = "0" * 64
+    with pytest.raises(ValueError, match="checkpoint neutral market state schema"):
+        pickle.loads(pickle.dumps(drifted, protocol=pickle.HIGHEST_PROTOCOL))
 
     for bar in bars[35:]:
+        reality = ExecutionRealityInput(
+            spread_points=0.25,
+            deadline=bar.end + pd.Timedelta(minutes=90),
+            source="checkpoint-test-feed",
+        )
+        expected = engine.on_bar(bar, execution=reality)
+        actual = resumed.on_bar(bar, execution=reality)
+        assert to_primitive(actual) == to_primitive(expected)
+
+    assert resumed.last_snapshot is not None
+    resumed_replay = replay_atomic_market_snapshot(
+        resumed.observer.audit_store.events(),
+        semantic_registry_identity=resumed.observer.semantic_registry.identity,
+    )
+    assert (
+        resumed_replay.replay_payload()
+        == resumed.last_snapshot.observation.market_snapshot.replay_payload()
+    )
+
+
+def test_2024_06_engine_foundation_dol_role_and_pool_anchor_replay_exact() -> None:
+    bars = _june_2024_protected_role_and_pool_anchor_bars()
+    engine = ContinuousSMCEngine.from_config(
+        "configs/model.json",
+        runtime_mode="development",
+    )
+    for bar in bars[:26]:
+        engine.on_bar(bar)
+    resumed = pickle.loads(pickle.dumps(engine, protocol=pickle.HIGHEST_PROTOCOL))
+
+    final = None
+    for ordinal, bar in enumerate(bars[26:], start=27):
         expected = engine.on_bar(bar)
         actual = resumed.on_bar(bar)
         assert to_primitive(actual) == to_primitive(expected)
+        final = expected
+        if ordinal != 28:
+            continue
+
+        observation = expected.observation
+        tracker_protected = next(
+            item
+            for item in observation.liquidity_inventory
+            if item.kind == "swing"
+            and item.is_protected_swing
+            and item.price == 18_572.0
+        )
+        foundation_view = next(
+            item
+            for item in foundation_dol_inventory(observation)
+            if item.source_identity == tracker_protected.item_id
+        )
+        assert tracker_protected.structural_rank == "external"
+        # The tracker role appears with the initial structure snapshot.  It
+        # must not rewrite the canonical creation-time DOL rank or masquerade
+        # as a protected assignment before that exact semantic event exists.
+        assert foundation_view.structural_rank == "internal"
+        assert foundation_view.is_protected_swing is False
+        assert (
+            engine.observer._foundation_dol_templates[
+                tracker_protected.item_id
+            ].rank
+            == "internal"
+        )
+        assert not any(
+            record.status.value == "active"
+            and record.payload.get("protected_swing_id")
+            == tracker_protected.item_id.removeprefix("swing:")
+            for record in observation.market_snapshot.foundation.latest_records
+            if record.object_type.value == "structure_generation"
+        )
+
+    assert final is not None
+    observation = final.observation
+    projection = observation.market_snapshot.foundation
+    records = {record.object_id: record for record in projection.latest_records}
+    pool_view = next(
+        item
+        for item in foundation_dol_inventory(observation)
+        if records[item.item_id].payload.get("price_anchor_rule")
+        == "near_side_tradable_zone_boundary_for_nontradable_midpoint"
+    )
+    pool_record = records[pool_view.item_id]
+    anchor = (
+        int(pool_record.payload["price_ticks"])
+        * float(pool_record.payload["tick_size"])
+    )
+    published = next(
+        candidate
+        for state in observation.market_snapshot.timeframe_states.values()
+        for candidate in state.liquidity.candidates
+        if candidate.candidate_id == pool_view.item_id
+    )
+    assert pool_view.foundation_source_kind == "formed_liquidity_pool"
+    assert pool_view.price == published.price == anchor
+
+    replayed = replay_atomic_market_snapshot(
+        engine.observer.audit_store.events(),
+        semantic_registry_identity=engine.observer.semantic_registry.identity,
+    )
+    assert (
+        replayed.replay_payload()
+        == observation.market_snapshot.replay_payload()
+    )
 
 
 def test_neutral_only_entry_matches_normal_eye_and_neutral_projection() -> None:
@@ -423,7 +622,7 @@ def test_neutral_only_scene_compaction_preserves_continuation() -> None:
             assert result["after"]["nodes"] <= result["before"]["nodes"]
 
 
-@pytest.mark.parametrize("legacy_version", (None, 1))
+@pytest.mark.parametrize("legacy_version", (None, 1, 2))
 def test_old_engine_checkpoint_without_neutral_schema_fails_closed(
     legacy_version: int | None,
 ) -> None:

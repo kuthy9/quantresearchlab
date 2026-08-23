@@ -16,7 +16,9 @@ definition-bound ImmutableEventStore
     ↓
 per-timeframe reducers + independent RelationState / SessionState
     ↓
-MarketSnapshot (authority = atomic_event_reducer)
+smc_semantic_foundation_v2.0 generation/lifecycle/geometry projection
+    ↓
+MarketSnapshot (atomic authority + replayable foundation records)
     ───── optional development-trader downstream ─────
 Temporal Market Scene Graph + GlobalMarketContext + FocusState
     ↓
@@ -89,18 +91,24 @@ an unsupported study does not by itself erase a valid descriptive primitive.
 The [DOL/Belief/Temporal supplement](docs/refactor/dol_belief_temporal_supplement.md)
 records the correlated-evidence contract, temporal-versus-ancestry boundary,
 the historical FVG first-concrete-lifecycle freeze, and the exact 2024-06
-data-role audit. A true geometric first-retest estimand remains a separately
-preregistered study. June Week 4 passed outcome-blind input preflight, and its
+data-role audit. Foundation v2 now defines and replays a true geometric first-
+retest event, but its empirical estimand/study remains separately gated. June
+Week 4 passed outcome-blind input preflight, and its
 [temporal/branching design](experiments/manifests/smc_semantics_v1_2_2024_06_week4_temporal_branching_construct_v1.yaml)
 is now frozen. The strict identity validator passes without opening market
 data, but execution bindings, mechanism materialization, semantic replay, and
 research results remain absent and the manifest does not authorize a run.
 No probability study has been run, and sealed OOS remains closed.
 
-Relative to the attached target-state prompt, overall conformance remains
-**partial**: the safety-oriented semantic/runtime interfaces are materially
-implemented, while the registered empirical fits, Execution Research,
-operational Shadow Live, rolling OOF, and sealed OOS gates remain incomplete.
+The canonical market-language foundation requested by the target-state prompt
+is now implemented as the separately versioned
+[`smc_semantic_foundation_v2.0`](docs/refactor/canonical_semantic_foundation_v2.md)
+projection. It completes registered object generations, lifecycles, geometric
+Swing nesting, same-level rearm, structure/range/zone separation, first
+reinteraction, multi-bar ancestry, and the shared factual outcome layer
+without rewriting v1.2 facts. Overall research-program conformance remains
+**partial**: empirical fits, complete Execution Research, operational Shadow
+Live, rolling OOF, and sealed OOS gates remain incomplete.
 
 The runtime event envelope is governed by **SMC Semantic Specification v1.2**.
 Every runtime-emitted `MarketEvent` exposes separate `event_time` and
@@ -110,6 +118,27 @@ immutable payload. See
 and the machine-readable
 [`semantics/registry_v1_2.yaml`](semantics/registry_v1_2.yaml). The frozen v1.1
 registry and parameters remain unchanged for historical artifact verification.
+
+The additive canonical object/state contract is governed by
+[`semantics/foundation_v2_0.yaml`](semantics/foundation_v2_0.yaml), identity
+`smc_semantic_foundation_v2.0`. It consumes only exact normalized or v1.2
+semantic-atomic parents and publishes technical replay records with no action
+authority. Its definitions and before/after audit are documented in
+[`Canonical Semantic Foundation v2`](docs/refactor/canonical_semantic_foundation_v2.md).
+The checked-in production model must explicitly set
+`observer.canonical_foundation_enabled=true`; missing, false, or non-boolean
+values fail closed during `ContinuousSMCEngine` construction. The same model
+must bind `observer.canonical_foundation_registry` and the exact canonical
+registry identity; the Engine strict-loads both, freezes the admitted version/
+identity into checkpoint state, and Shadow Live compares them. Engine
+checkpoint schema v3 is the first schema that includes this projection, so
+older schemas cannot resume into the current runtime.
+The exact June-2024 bounded construction/replay census, performance A/B, and
+current Foundation-enabled 200-clock Engine file parity are kept in the
+foundation specification's
+[release-verification table](docs/refactor/canonical_semantic_foundation_v2.md#replay-test-and-empirical-boundary);
+they are engineering evidence, not a 6,900-clock or real-time multi-day Phase-9
+pilot or empirical validation.
 
 The Eye now also publishes an event-sourced hierarchical market contract:
 independent `TimeframeState` objects, cross-timeframe `RelationState` objects,
@@ -121,11 +150,13 @@ parent's own registered confirmation completes. Normal runtime snapshots have
 not a second source of market facts. v1.2 adds append-only
 micro/internal/structural/external Swing roles and executable same-timeframe
 IRL/ERL candidate membership without rewriting earlier events.
-That hierarchy is a causal role-depth projection, not the still-unregistered
-continuous geometric Swing-nesting hierarchy. The existing Group 4 range is
+That hierarchy remains a causal role-depth projection. Foundation v2 adds an
+independent pure geometric containment tree; geometric depth never implies
+structural role. The existing Group 4 range is
 the sparse Mature Balance Range evaluated by the natural scan; its legacy
-`DEALING_RANGE_*` event name must not be read as validation of a generic
-Structural Dealing Range or of downstream range-dependent market meaning.
+`DEALING_RANGE_*` event name remains compatibility state. Foundation v2
+publishes separate Structural Range and Balance Range identities and separate
+normalized locations; this definition split is not predictive validation.
 
 The immutable historical January-2024 v1.1 Phase-5 structural diagnostic is
 bound by the frozen
@@ -208,7 +239,7 @@ Current primitive protocol status:
 | Structure/liquidity | `3.2.0-group12.7` | finite real replay and stratified review passed |
 | Displacement | `3.2.0-displacement-episode.3` | finite real replay and stratified review passed |
 | FVG/order block | `3.2.0-group3.4` | FVG finite replay passed; OB failure coverage sparse |
-| Range/manipulation | `3.2.0-group4.1` | Mature Balance Range implementation has sparse natural coverage; Structural Dealing Range is not separately defined |
+| Range/manipulation | `3.2.0-group4.1` | The legacy v1.2 atomic protocol detects Mature Balance Range only; additive foundation v2 publishes Structural Range separately |
 | Entry/path | `3.2.0-group5.4` | LSR reversal context freezes root/displacement independently of each FVG/OB entry zone; DFP/LSR input authority enabled; FAVR authority disabled and parked |
 
 “Implementation complete” means the typed incremental contract and its
@@ -371,8 +402,15 @@ matched an independent 200-clock cold replay exactly. It also exposed and
 closed a cross-process hash-order defect in revised Scene-Graph edge IDs.
 That receipt binds the pre-supplement path protocol/model bytes
 (`5213b3d6…` / `4214da19…`). The new global dependency-cluster contract changes
-those bindings, so it is historical engineering evidence; a future pilot must
-rematerialize rather than reuse it.
+those bindings, so it remains historical engineering evidence. The current
+Foundation-enabled model has separately passed the same exact 200-row prefix
+under its current model/registry bindings; that result is recorded once in the
+[Foundation release table](docs/refactor/canonical_semantic_foundation_v2.md#replay-test-and-empirical-boundary)
+and the portable
+[machine receipt](docs/evidence/phase9_foundation_v2_prefix_200_receipt.json)
+for that non-portable local evidence.
+This closes only the current-prefix binding check; any complete 6,900-clock
+rehearsal must still be rematerialized rather than reuse the historical output.
 The bounded 200-row input has its own local `COMPLETED.json`; there is no
 6,900-clock completion marker and no actual real-time multi-day shadow pilot,
 so the operational Phase 9 gate is not passed.
@@ -431,11 +469,12 @@ configuration identities are recorded once per run, not repeated in every row.
 
 1. Use the completed v1.2 r2 diagnostic only as development evidence; do not
    relax its sparse-stage/control thresholds or reuse the historical v1.1
-   result as v1.2 evidence. Preregister a later independent validation design,
-   plus separate Protected-Swing survival and matched Origin-Zone first-retest
-   studies. Do not invent geometric Swing nesting, Structural Leg path metrics,
-   explicit MSS generations, FVG expiry, Structural Dealing Range, or range
-   extension rules from the current role-depth/lifecycle code.
+   result as v1.2 evidence. Foundation v2 now defines geometric nesting,
+   complete Structural Leg paths, explicit generations, structural FVG expiry,
+   and separate range types, but none has empirical authority yet. Preregister
+   later independent validation, Protected-Swing survival, and matched
+   Origin-Zone first-retest studies; do not invent fixed FVG TTLs, range
+   extensions, or importance/probability claims from those definitions.
 2. Keep the frozen June Week-4 temporal/branching design outcome-blind; bind a
    separate executable revision to the exact mechanism artifact, runtime
    identities, and 6,900-clock census, then materialize and run that bounded

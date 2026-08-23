@@ -26,14 +26,17 @@ from .artifact_stream import (
     write_stream_manifest,
     write_stream_shard,
 )
+from .foundation_registry import FOUNDATION_VERSION
 from .model import (
     Direction,
     EventKind,
     EventOrigin,
+    FrozenDict,
     MarketEvent,
     SMC_SEMANTIC_VERSION,
     Timeframe,
     aware_timestamp,
+    price_to_ticks,
     to_primitive,
 )
 from .semantics import (
@@ -140,6 +143,14 @@ _SWING_WINDOW_SPANS: Mapping[Timeframe, int] = {
     Timeframe.H1: 2,
     Timeframe.M15: 2,
     Timeframe.M5: 2,
+    Timeframe.M1: 1,
+}
+
+_TIMEFRAME_MINUTES: Mapping[Timeframe, int] = {
+    Timeframe.H4: 240,
+    Timeframe.H1: 60,
+    Timeframe.M15: 15,
+    Timeframe.M5: 5,
     Timeframe.M1: 1,
 }
 
@@ -283,6 +294,7 @@ def _event_digest(event: MarketEvent) -> str:
     # identity. A bounded-memory replay may rediscover the same immutable
     # event after its hot prefix cools and assign a different local ordinal;
     # the append-only audit store must treat that as an idempotent retry.
+    digest_event = replace(event, sequence_no=0)
     if event.is_projection:
         projection_sha256 = _require_sha256(
             event.details.get("projection_sha256"),
@@ -297,12 +309,27 @@ def _event_digest(event: MarketEvent) -> str:
         ).encode("utf-8")
         if hashlib.sha256(projection_payload).hexdigest() != projection_sha256:
             raise ValueError("state projection hash does not bind its payload")
+        # The checked SHA-256 is a content-addressed commitment to the full
+        # projection state.  Bind that commitment (plus every other detail)
+        # into the event digest instead of serializing the often-large state a
+        # second time.  This keeps integrity identical while avoiding two
+        # recursive primitive conversions for every technical projection.
+        digest_event = replace(
+            digest_event,
+            details=FrozenDict(
+                {
+                    key: value
+                    for key, value in event.details.items()
+                    if key != "projection_state"
+                }
+                | {"projection_state_sha256": projection_sha256}
+            ),
+        )
     # Bind every immutable field for both semantic facts and projections.
     # ``sequence_no`` alone is local hot-memory transport and intentionally
     # remains outside identity.
-    value = replace(event, sequence_no=0)
     payload = json.dumps(
-        to_primitive(value),
+        to_primitive(digest_event),
         sort_keys=True,
         separators=(",", ":"),
     )
@@ -979,6 +1006,7 @@ class ImmutableEventStore:
             ImmutableEventStore._validate_structural_leg_contract(
                 event,
                 source_parents=source_parents,
+                available_events=available_events,
             )
 
         if event.kind is EventKind.LIQUIDITY_LEVEL_CREATED:
@@ -1424,6 +1452,7 @@ class ImmutableEventStore:
         event: MarketEvent,
         *,
         source_parents: tuple[MarketEvent, ...],
+        available_events: Mapping[str, MarketEvent],
     ) -> None:
         start, end = source_parents
         leg_id = ImmutableEventStore._required_authoritative_text(event, "leg_id")
@@ -1485,6 +1514,490 @@ class ImmutableEventStore:
         ):
             raise ValueError(
                 "authoritative structural leg direction/endpoint sides conflict"
+            )
+
+        foundation_fields = frozenset(
+            {
+                "amplitude_ticks",
+                "atr_at_leg_start",
+                "atr_source_candle_ids",
+                "close_efficiency",
+                "close_mae_atr",
+                "close_mae_points",
+                "duration_seconds",
+                "extreme_path_efficiency",
+                "foundation_version",
+                "instrument_id",
+                "path_candle_ids",
+                "symbol",
+                "tick_size",
+                "wick_mae_atr",
+                "wick_mae_points",
+            }
+        )
+        foundation_version = event.evidence.get("foundation_version")
+        if foundation_version is None:
+            if foundation_fields.intersection(event.evidence):
+                raise ValueError(
+                    "foundation structural leg fields require an explicit "
+                    "foundation version"
+                )
+            return
+        if foundation_version != FOUNDATION_VERSION:
+            raise ValueError(
+                "foundation structural leg version is unregistered"
+            )
+        missing = foundation_fields - set(event.evidence)
+        if missing:
+            raise ValueError(
+                "foundation structural leg evidence is incomplete: "
+                f"{sorted(missing)}"
+            )
+
+        def declared_id_tuple(name: str) -> tuple[str, ...]:
+            raw = event.evidence.get(name)
+            if isinstance(raw, str):
+                values: tuple[object, ...] = ()
+            else:
+                try:
+                    values = tuple(raw)
+                except TypeError:
+                    values = ()
+            if (
+                not values
+                or len(values) != len(set(values))
+                or any(
+                    not isinstance(value, str) or not value.strip()
+                    for value in values
+                )
+            ):
+                raise ValueError(
+                    f"foundation structural leg {name} is invalid"
+                )
+            return tuple(str(value) for value in values)
+
+        duration_bars = event.evidence.get("duration_bars")
+        duration_seconds = event.evidence.get("duration_seconds")
+        amplitude_ticks = event.evidence.get("amplitude_ticks")
+        instrument_id = event.evidence.get("instrument_id")
+        symbol = event.evidence.get("symbol")
+        if (
+            type(duration_bars) is not int
+            or duration_bars < 2
+            or type(duration_seconds) is not int
+            or duration_seconds <= 0
+            or type(amplitude_ticks) is not int
+            or amplitude_ticks <= 0
+            or type(instrument_id) is not int
+            or instrument_id < 0
+            or not isinstance(symbol, str)
+            or not symbol.strip()
+        ):
+            raise ValueError(
+                "foundation structural leg integer or market identity is invalid"
+            )
+        atr_candle_ids = declared_id_tuple("atr_source_candle_ids")
+        path_candle_ids = declared_id_tuple("path_candle_ids")
+        if len(atr_candle_ids) != 14 or len(path_candle_ids) != duration_bars:
+            raise ValueError(
+                "foundation structural leg ATR/path ancestry count conflicts"
+            )
+        if len(event.context_event_ids) != 14 + duration_bars:
+            raise ValueError(
+                "foundation structural leg lacks exact BAR event context"
+            )
+        atr_bars = tuple(
+            available_events[event_id]
+            for event_id in event.context_event_ids[:14]
+        )
+        path_bars = tuple(
+            available_events[event_id]
+            for event_id in event.context_event_ids[14:]
+        )
+        all_bound_bars = (*atr_bars, *path_bars)
+        for bar in all_bound_bars:
+            ImmutableEventStore._require_real_normalized_bar(
+                bar,
+                timeframe=event.timeframe,
+                contract="foundation structural leg",
+            )
+        if any(
+            bar.evidence.get("symbol") != symbol
+            or bar.evidence.get("instrument_id") != instrument_id
+            for bar in all_bound_bars
+        ):
+            raise ValueError(
+                "foundation structural leg BAR context crosses market identity"
+            )
+
+        atr_clocks = tuple(bar.known_at for bar in atr_bars)
+        path_clocks = tuple(bar.known_at for bar in path_bars)
+        if (
+            atr_clocks != tuple(sorted(atr_clocks))
+            or path_clocks != tuple(sorted(path_clocks))
+            or len(set((*atr_clocks, *path_clocks)))
+            != len(all_bound_bars)
+        ):
+            raise ValueError(
+                "foundation structural leg BAR ancestry must be ordered and unique"
+            )
+
+        interval = pd.Timedelta(
+            int(_TIMEFRAME_MINUTES[event.timeframe]),
+            unit="min",
+        )
+        path_terminal = end_clock + interval
+        eligible_bars = tuple(
+            sorted(
+                (
+                    candidate
+                    for candidate in available_events.values()
+                    if candidate.kind is EventKind.BAR_COMPLETED
+                    and candidate.origin is EventOrigin.NORMALIZED_DATA
+                    and candidate.semantic_version == event.semantic_version
+                    and candidate.timeframe is event.timeframe
+                    and candidate.event_time == candidate.known_at
+                    and candidate.evidence.get("real_completed") is True
+                    and candidate.evidence.get("clock_only") is False
+                    and candidate.evidence.get("symbol") == symbol
+                    and candidate.evidence.get("instrument_id") == instrument_id
+                ),
+                key=lambda candidate: (
+                    candidate.known_at,
+                    candidate.event_id,
+                ),
+            )
+        )
+        eligible_prior = tuple(
+            bar for bar in eligible_bars if bar.known_at <= start_clock
+        )
+        expected_atr_bars = eligible_prior[-14:]
+        expected_path_bars = tuple(
+            bar
+            for bar in eligible_bars
+            if start_clock < bar.known_at <= path_terminal
+        )
+        if (
+            len(expected_atr_bars) != 14
+            or tuple(bar.event_id for bar in atr_bars)
+            != tuple(bar.event_id for bar in expected_atr_bars)
+            or tuple(bar.event_id for bar in path_bars)
+            != tuple(bar.event_id for bar in expected_path_bars)
+        ):
+            raise ValueError(
+                "foundation structural leg does not bind the exact strict-prior "
+                "ATR or native path BARs"
+            )
+
+        detector_ids = tuple(
+            bar.evidence.get("detector_candle_id") for bar in all_bound_bars
+        )
+        declared_detector_ids = (*atr_candle_ids, *path_candle_ids)
+        if (
+            any(
+                not isinstance(value, str) or not value.strip()
+                for value in detector_ids
+            )
+            or detector_ids != declared_detector_ids
+            or event.source_data_ids != declared_detector_ids
+        ):
+            raise ValueError(
+                "foundation structural leg self-reported candle ancestry does "
+                "not bind its normalized BAR parents"
+            )
+
+        span = _SWING_WINDOW_SPANS.get(event.timeframe)
+        if span is None:
+            raise ValueError(
+                "foundation structural leg timeframe is unregistered"
+            )
+        endpoint_pivot_bars: list[MarketEvent] = []
+        for swing in (start, end):
+            if len(swing.source_event_ids) != 2 * span + 1:
+                raise ValueError(
+                    "foundation structural leg endpoint Swing lacks its "
+                    "definitional BAR window"
+                )
+            pivot_bar = available_events.get(swing.source_event_ids[span])
+            if pivot_bar is None:
+                raise ValueError(
+                    "foundation structural leg endpoint Swing pivot is unavailable"
+                )
+            ImmutableEventStore._require_real_normalized_bar(
+                pivot_bar,
+                timeframe=event.timeframe,
+                contract="foundation structural leg endpoint Swing",
+            )
+            endpoint_pivot_bars.append(pivot_bar)
+        start_pivot_bar, end_pivot_bar = endpoint_pivot_bars
+        if (
+            start_pivot_bar.event_id != path_bars[0].event_id
+            or end_pivot_bar.event_id != path_bars[-1].event_id
+            or start_pivot_bar.known_at
+            != ImmutableEventStore._authoritative_clock(start, "pivot_end")
+            or end_pivot_bar.known_at
+            != ImmutableEventStore._authoritative_clock(end, "pivot_end")
+            or start_pivot_bar.known_at != start_clock + interval
+            or end_pivot_bar.known_at != path_terminal
+            or event.known_at != end.known_at
+        ):
+            raise ValueError(
+                "foundation structural leg path endpoints do not bind its "
+                "confirmed Swing pivots and clocks"
+            )
+
+        tick_size = ImmutableEventStore._finite_authoritative_number(
+            event,
+            "tick_size",
+        )
+        if tick_size <= 0.0:
+            raise ValueError(
+                "foundation structural leg tick size must be positive"
+            )
+        try:
+            expected_amplitude_ticks = abs(
+                price_to_ticks(
+                    end_price,
+                    tick_size,
+                    name="structural_leg.end_price",
+                )
+                - price_to_ticks(
+                    start_price,
+                    tick_size,
+                    name="structural_leg.start_price",
+                )
+            )
+        except ValueError as error:
+            raise ValueError(
+                "foundation structural leg endpoint price is off-grid"
+            ) from error
+
+        start_close = ImmutableEventStore._finite_authoritative_number(
+            event,
+            "start_close",
+        )
+        end_close = ImmutableEventStore._finite_authoritative_number(
+            event,
+            "end_close",
+        )
+        amplitude = ImmutableEventStore._finite_authoritative_number(
+            event,
+            "amplitude_points",
+        )
+        atr0 = ImmutableEventStore._finite_authoritative_number(
+            event,
+            "atr_at_leg_start",
+        )
+        amplitude_atr = ImmutableEventStore._finite_authoritative_number(
+            event,
+            "amplitude_atr",
+        )
+        duration_minutes = event.evidence.get("duration_minutes")
+        close_efficiency = ImmutableEventStore._finite_authoritative_number(
+            event,
+            "close_efficiency",
+        )
+        efficiency = ImmutableEventStore._finite_authoritative_number(
+            event,
+            "efficiency",
+        )
+        extreme_efficiency = ImmutableEventStore._finite_authoritative_number(
+            event,
+            "extreme_path_efficiency",
+        )
+        max_retracement = ImmutableEventStore._finite_authoritative_number(
+            event,
+            "max_retracement_points",
+        )
+        max_retracement_atr = (
+            ImmutableEventStore._finite_authoritative_number(
+                event,
+                "max_retracement_atr",
+            )
+        )
+        close_mae = ImmutableEventStore._finite_authoritative_number(
+            event,
+            "close_mae_points",
+        )
+        close_mae_atr = ImmutableEventStore._finite_authoritative_number(
+            event,
+            "close_mae_atr",
+        )
+        wick_mae = ImmutableEventStore._finite_authoritative_number(
+            event,
+            "wick_mae_points",
+        )
+        wick_mae_atr = ImmutableEventStore._finite_authoritative_number(
+            event,
+            "wick_mae_atr",
+        )
+        if (
+            atr0 <= 0.0
+            or amplitude <= 0.0
+            or type(duration_minutes) is not int
+            or duration_minutes <= 0
+            or any(
+                value < 0.0
+                for value in (
+                    max_retracement,
+                    max_retracement_atr,
+                    close_mae,
+                    close_mae_atr,
+                    wick_mae,
+                    wick_mae_atr,
+                )
+            )
+            or any(
+                not 0.0 <= value <= 1.0
+                for value in (
+                    close_efficiency,
+                    efficiency,
+                    extreme_efficiency,
+                )
+            )
+        ):
+            raise ValueError(
+                "foundation structural leg metric domains are invalid"
+            )
+
+        true_ranges: list[float] = []
+        for index, bar in enumerate(eligible_prior):
+            high = ImmutableEventStore._bar_number(bar, "high")
+            low = ImmutableEventStore._bar_number(bar, "low")
+            true_range = high - low
+            if index:
+                prior_close = ImmutableEventStore._bar_number(
+                    eligible_prior[index - 1],
+                    "close",
+                )
+                true_range = max(
+                    true_range,
+                    abs(high - prior_close),
+                    abs(low - prior_close),
+                )
+            true_ranges.append(max(0.0, true_range))
+        expected_atr = sum(true_ranges[-14:]) / 14.0
+
+        closes = tuple(
+            ImmutableEventStore._bar_number(bar, "close")
+            for bar in path_bars
+        )
+        close_travel = sum(
+            abs(right - left)
+            for left, right in zip(closes, closes[1:])
+        )
+        expected_close_efficiency = min(
+            1.0,
+            max(
+                0.0,
+                abs(closes[-1] - closes[0])
+                / max(close_travel, 1e-12),
+            ),
+        )
+        running = closes[0]
+        expected_retracement = 0.0
+        for close in closes[1:]:
+            if expected_direction is Direction.LONG:
+                running = max(running, close)
+                expected_retracement = max(
+                    expected_retracement,
+                    running - close,
+                )
+            else:
+                running = min(running, close)
+                expected_retracement = max(
+                    expected_retracement,
+                    close - running,
+                )
+        directional_extremes = (
+            (
+                start_price,
+                *(
+                    ImmutableEventStore._bar_number(bar, "high")
+                    for bar in path_bars
+                ),
+            )
+            if expected_direction is Direction.LONG
+            else (
+                start_price,
+                *(
+                    ImmutableEventStore._bar_number(bar, "low")
+                    for bar in path_bars
+                ),
+            )
+        )
+        extreme_travel = sum(
+            abs(right - left)
+            for left, right in zip(
+                directional_extremes,
+                directional_extremes[1:],
+            )
+        )
+        expected_extreme_efficiency = min(
+            1.0,
+            max(0.0, amplitude / max(extreme_travel, 1e-12)),
+        )
+        expected_close_mae = (
+            max(0.0, closes[0] - min(closes))
+            if expected_direction is Direction.LONG
+            else max(0.0, max(closes) - closes[0])
+        )
+        expected_wick_mae = (
+            max(
+                0.0,
+                start_price
+                - min(
+                    ImmutableEventStore._bar_number(bar, "low")
+                    for bar in path_bars
+                ),
+            )
+            if expected_direction is Direction.LONG
+            else max(
+                0.0,
+                max(
+                    ImmutableEventStore._bar_number(bar, "high")
+                    for bar in path_bars
+                )
+                - start_price,
+            )
+        )
+
+        expected_seconds = int((end_clock - start_clock).total_seconds())
+        expected_values = (
+            (start_close, closes[0]),
+            (end_close, closes[-1]),
+            (amplitude, abs(end_price - start_price)),
+            (amplitude, amplitude_ticks * tick_size),
+            (atr0, expected_atr),
+            (amplitude_atr, amplitude / atr0),
+            (close_efficiency, expected_close_efficiency),
+            (efficiency, expected_close_efficiency),
+            (extreme_efficiency, expected_extreme_efficiency),
+            (max_retracement, expected_retracement),
+            (max_retracement_atr, expected_retracement / atr0),
+            (close_mae, expected_close_mae),
+            (close_mae_atr, expected_close_mae / atr0),
+            (wick_mae, expected_wick_mae),
+            (wick_mae_atr, expected_wick_mae / atr0),
+        )
+        if (
+            amplitude_ticks != expected_amplitude_ticks
+            or duration_bars != len(path_bars)
+            or duration_seconds != expected_seconds
+            or duration_minutes != expected_seconds // 60
+            or not math.isclose(event.strength, expected_close_efficiency)
+            or any(
+                not math.isclose(
+                    actual,
+                    expected,
+                    rel_tol=1e-9,
+                    abs_tol=1e-9,
+                )
+                for actual, expected in expected_values
+            )
+        ):
+            raise ValueError(
+                "foundation structural leg metrics conflict with bound BARs"
             )
 
     @staticmethod

@@ -428,6 +428,20 @@ def test_eye_authority_mode_preserves_all_typed_state_and_internal_memory() -> N
         light_observation = light.observe(light_reader.on_bar(bar))
 
         assert not full_observation.typed_transition_delta_available
+        non_foundation_events = tuple(
+            event
+            for event in light_observation.semantic_events_this_update
+            if event.kind is not EventKind.FOUNDATION_STATE_CHANGED
+        )
+        assert non_foundation_events == (
+            full_observation.semantic_events_this_update
+        )
+        assert replace(
+            light_observation.market_snapshot,
+            foundation=None,
+            foundation_range_locations={},
+            events_this_update=non_foundation_events,
+        ) == full_observation.market_snapshot
         assert light_observation == replace(
             full_observation,
             execution=light_observation.execution,
@@ -444,8 +458,12 @@ def test_eye_authority_mode_preserves_all_typed_state_and_internal_memory() -> N
             event_durations_minutes={},
             event_ages_minutes={},
             retained_entity_timelines={},
-            incomplete_entity_timeline_keys=(),
-            typed_transition_delta_available=True,
+                incomplete_entity_timeline_keys=(),
+                semantic_events_this_update=(
+                    light_observation.semantic_events_this_update
+                ),
+                market_snapshot=light_observation.market_snapshot,
+                typed_transition_delta_available=True,
             liquidity_inventory_transitions_this_update=(
                 light_observation
                 .liquidity_inventory_transitions_this_update
@@ -486,7 +504,25 @@ def test_eye_authority_mode_preserves_all_typed_state_and_internal_memory() -> N
                 light_observation.group5_step_transitions_this_update
             ),
         )
-        assert light.memory.__dict__ == full.memory.__dict__
+        technical_memory_fields = {
+            "_audit_store",
+            "_audit_pending",
+            "_sequence_counts",
+        }
+        assert {
+            key: value
+            for key, value in light.memory.__dict__.items()
+            if key not in technical_memory_fields
+        } == {
+            key: value
+            for key, value in full.memory.__dict__.items()
+            if key not in technical_memory_fields
+        }
+        assert tuple(
+            event
+            for event in light.audit_store.events()
+            if event.kind is not EventKind.FOUNDATION_STATE_CHANGED
+        ) == full.audit_store.events()
 
     assert light_observation.recent_events == ()
     assert light_observation.event_durations_minutes == {}
@@ -1328,6 +1364,29 @@ def test_eye_authority_mode_rejects_group4_projection_only() -> None:
                 eye_authority_mode=True,
             )
         )
+
+
+@pytest.mark.parametrize(
+    "config",
+    (
+        ObserverConfig(
+            scale_specs=MODEL_SCALE_SPECS,
+            canonical_foundation_enabled=True,
+        ),
+        _all_typed_observer_config(
+            group4_projection_only=True,
+            canonical_foundation_enabled=True,
+        ),
+    ),
+)
+def test_canonical_foundation_requires_fully_typed_atomic_observer(
+    config: ObserverConfig,
+) -> None:
+    with pytest.raises(
+        ValueError,
+        match="canonical-foundation projection requires all typed protocols",
+    ):
+        CausalObserver(config)
 
 
 def test_eye_authority_mode_rejects_graph_without_event_view() -> None:

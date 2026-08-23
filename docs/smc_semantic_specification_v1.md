@@ -1,10 +1,27 @@
-# SMC Semantic Specification v1.2
+# SMC Semantic Specification: v1.2 atomic layer + foundation v2
 
 The current runtime semantic identity is `smc_semantics_v1.2`. Its
 machine-readable authority is
 [`semantics/registry_v1_2.yaml`](../semantics/registry_v1_2.yaml), with frozen
 or deliberately unthresholded parameters in
 [`semantics/parameters_v1_2.yaml`](../semantics/parameters_v1_2.yaml).
+
+The current additive object/lifecycle projection is
+`smc_semantic_foundation_v2.0`, bound to the v1.2 atomic stream by
+[`semantics/foundation_v2_0.yaml`](../semantics/foundation_v2_0.yaml). Its
+human-readable authority is the
+[Canonical Semantic Foundation v2](refactor/canonical_semantic_foundation_v2.md).
+It adds no parallel detector and does not rewrite a v1.2 `MarketEvent` or any
+frozen experiment. `FOUNDATION_STATE_CHANGED` is technical replay transport,
+not a new atomic market fact or trading authority.
+The production Engine admits this additive layer only when the checked-in model
+contains the exact boolean `observer.canonical_foundation_enabled=true`.
+It also requires the exact foundation registry path and canonical identity;
+construction strict-loads them, and Engine/Shadow/checkpoint state freezes and
+compares the admitted foundation version and identity. Missing, false,
+non-boolean, absent, or mismatched bindings fail closed, and pre-v3 Engine
+checkpoints cannot resume because checkpoint schema v3 is the first schema that
+includes foundation state.
 
 [`semantics/registry.yaml`](../semantics/registry.yaml) and
 [`semantics/parameters.yaml`](../semantics/parameters.yaml) remain the immutable
@@ -34,9 +51,10 @@ separates **definition validity** from **empirical validity** for the 17 named
 concepts. A causal, deterministic, replayable definition may remain empirically
 unknown or unsupported. Conversely, coverage or a contemporaneous association
 cannot repair an ambiguous definition or grant predictive/OOS/action authority.
-The frozen v1.2 registry remains the identity of historical artifacts; current
-store/reducer/tick hardening does not rewrite those artifacts or silently create
-a new semantic definition.
+The frozen v1.2 registry remains the identity of historical artifacts. The
+foundation is deliberately a separate versioned identity, so current
+store/reducer/tick hardening and lifecycle completion do not rewrite those
+artifacts or silently change their definitions.
 The [DOL/Belief/Temporal supplement](refactor/dol_belief_temporal_supplement.md)
 is the current authority for dependency-cluster handling, research-only
 temporal links, FVG first-lifecycle freezing, and the 2024-06 data role. It does
@@ -167,9 +185,10 @@ Each `SwingRankAssignment` carries its own `known_at` and source event IDs.
 The current role is the highest causally available assignment; a later
 promotion never rewrites or backdates the original Swing or a historical Leg.
 Prominence remains a continuous feature with no positive v1.2 hard cutoff.
-This is a role-depth projection. It is not the continuous prominence/duration/
-time-and-price-containment hierarchy described as a future target; that target
-requires a new frozen nesting and reparent contract.
+This table remains the v1.2 role-depth projection. Foundation v2 now publishes
+a separate pure time-and-price containment tree with `geometric_depth`,
+parent/child identities, deterministic late-parent supersession, and no BOS or
+future-importance input. Role depth and geometric depth remain independent.
 
 ## Legacy v1.2 range location and IRL/ERL
 
@@ -186,9 +205,14 @@ This membership is deterministic snapshot state, not a canonical event and not
 a claim that the candidate will be delivered.
 The production Group 4 detector is the sparse two-sided Mature Balance Range
 measured by the 2023 natural scan. The legacy `DEALING_RANGE_*` name does not
-establish a separately defined Structural Dealing Range. Until a new semantic
-version splits those identities and consumers, this location must not be
-promoted as structural-range, DOL, or predictive evidence.
+establish a separately defined Structural Dealing Range. Within the v1.2 field
+alone, this location must not be promoted as structural-range, DOL, or
+predictive evidence.
+Foundation v2 now publishes independent `StructuralRange` and `BalanceRange`
+records plus `x_structural_range` and `x_balance_range`; both may coexist, and
+Premium/Discount authority belongs to the Structural Range view. This additive
+view does not retroactively change the legacy dealing-range field or validate
+predictive value.
 
 ## DOL boundary
 
@@ -225,27 +249,29 @@ Five kinds intentionally remain non-emitted in v1.2:
 - `DELIVERY_PHASE_CHANGED`: compatibility projection alias; Delivery Phase is
   deterministically snapshot-derived.
 
-These are deliberate governance decisions, not missing detector emissions. A
-future expiry, extension, or transition event requires a new preregistered
-semantic version and tests.
+These remain deliberate v1.2 atomic-emission decisions. Foundation v2 supplies
+versioned persistent Delivery and structural FVG expiry records over exact
+atomic parents; it does not enable the reserved v1.2 aliases. Range extension
+still has no registered definition.
 
-## Other explicit v1.2 limits
+## v1.2 compatibility limits and v2 resolution
 
-- Delivery Phase is derived from same-timeframe confirmed structure, active
-  Leg, protected-swing intactness, and active-range availability. Explicit
-  range-extension and volatility-compression inputs are not v1.2 phase inputs.
-  It is a deterministic snapshot projection, not yet a persistent independent
-  generation with entered-at and transition source events.
-- FVG and Origin Zone production semantics remain on the existing M5 detector
-  path. Origin Zone is still a qualified composite rather than separately
-  published base geometry plus relations. The existing H1 range path remains
-  Mature Balance Range evidence until a later registered version performs the
-  Structural/Balance split.
-- Structural Leg does not yet persist the requested path-wide close/extreme
-  efficiency, close/wick MAE, full path ancestry, or explicit
-  `ATR_at_leg_start` reference. MSS does not yet carry an explicit internal
-  structure generation identity. These are vNext schema/definition gates, not
-  fields to backfill into frozen events.
+- The v1.2 Delivery value remains a deterministic snapshot classifier.
+  Foundation v2 wraps that existing classifier in a persistent generation with
+  owner, entered/updated/terminal clocks, native-bar age, extrema, and exact
+  transition sources. It does not invent range-extension or compression
+  inputs.
+- FVG and Origin Zone detection stays on the existing M5 path. Foundation v2
+  separates Base Origin Core from Qualified OB, emits a strictly future
+  geometric First Retest, and allows only structural/reset FVG expiry with no
+  arbitrary TTL.
+- A v1.2 Leg remains readable. A foundation-v2 Leg requires the full native
+  path, close/extreme efficiency, close/wick MAE, duration, tick amplitude,
+  exactly 14 strictly prior ATR source bars, and frozen `ATR_at_leg_start`.
+  Missing ancestry remains compatibility v1.2 rather than being backfilled.
+- MSS remains an atomic evidence fact. Foundation v2 starts one FORMING
+  internal challenger/Structure Transition and requires a strictly later
+  independent confirmation; MSS alone never confirms the opposite regime.
 - Deterministic Swing rank and IRL/ERL implementation do not establish outcome
   value; they still require preregistered research.
 - The path/DOL/Signal/Intent shadow path is normalized and auditable but not
@@ -302,14 +328,18 @@ deterministic parity exists behind `NullExecutionGateway`; its 6,900-clock
 historical cold-start input and exact 200-clock checkpoint/resume/cold-replay
 prefix are retained evidence for the earlier path/model bindings
 `5213b3d6…`/`4214da19…`. The current dependency protocol changed those bindings,
-so a future pilot must rematerialize. Its read-only 6,900-clock capacity
-preflight verifies the `COMPLETED.json` to checkpoint-manifest SHA binding but
-finds historical/current identity mismatch and explicitly withholds full-run
-authority. Operational acceptance metrics, the full historical run, and an
-actual real-time multi-day pilot remain open. Calibrated promotion, empirical
-Execution Research, operational Shadow Live, rolling OOF, and final OOS remain
-later gates; conformance to the complete target-state prompt is therefore
-**partial**.
+so that output remains historical. A separate current Foundation-enabled
+Engine run passed the same exact 200-row prefix under the current model/registry
+bindings; its detailed boundary is in the
+[Foundation release table](refactor/canonical_semantic_foundation_v2.md#replay-test-and-empirical-boundary).
+The read-only 6,900-clock capacity preflight still verifies the historical
+`COMPLETED.json` to checkpoint-manifest SHA binding, finds that receipt's
+historical/current identity mismatch, and explicitly withholds full-run
+authority. Operational acceptance metrics, a rematerialized complete
+historical run, and an actual real-time multi-day pilot remain open. Calibrated
+promotion, empirical Execution Research, operational Shadow Live, rolling OOF,
+and final OOS remain later gates; conformance to the complete target-state
+prompt is therefore **partial**.
 The input and checkpoint are ignored local engineering files; their paths,
 hashes, commands, no-replace publication rules, and receipt limitation are
 listed in the
