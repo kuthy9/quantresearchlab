@@ -35,6 +35,7 @@ from .model import (
     Timeframe,
     aware_timestamp,
     candle_identity,
+    price_to_ticks,
 )
 
 
@@ -404,11 +405,11 @@ class CausalGroup3Tracker:
         )
 
     def _ticks(self, value: float) -> int:
-        scaled = float(value) / self.protocol.tick_size
-        rounded = round(scaled)
-        if not math.isfinite(scaled) or abs(scaled - rounded) > 1e-6:
-            raise ValueError("off-grid Group 3 price")
-        return int(rounded)
+        return price_to_ticks(
+            value,
+            self.protocol.tick_size,
+            name="Group 3 price",
+        )
 
     def _candle_id(self, candle: Candle) -> str:
         return candle_identity(
@@ -449,6 +450,7 @@ class CausalGroup3Tracker:
         return state.lifecycle in {
             FairValueGapLifecycle.MITIGATED,
             FairValueGapLifecycle.INVALIDATED,
+            FairValueGapLifecycle.EXPIRED,
         }
 
     @staticmethod
@@ -847,6 +849,9 @@ class CausalGroup3Tracker:
                 state.max_fill_fraction,
                 min(1.0, max(0.0, float(penetration))),
             )
+            midpoint_crossed = bool(
+                state.midpoint_touched_at is None and fill >= 0.5
+            )
             if invalidated:
                 updated = replace(
                     state,
@@ -855,6 +860,9 @@ class CausalGroup3Tracker:
                     last_updated_at=candle.end,
                     age_bars=age,
                     max_fill_fraction=1.0,
+                    midpoint_touched_at=(
+                        state.midpoint_touched_at or candle.end
+                    ),
                     invalidated_at=candle.end,
                     transition_reason="close_through_far_edge",
                 )
@@ -867,6 +875,9 @@ class CausalGroup3Tracker:
                     last_updated_at=candle.end,
                     age_bars=age,
                     max_fill_fraction=1.0,
+                    midpoint_touched_at=(
+                        state.midpoint_touched_at or candle.end
+                    ),
                     mitigated_at=candle.end,
                     transition_reason="far_edge_reached",
                 )
@@ -885,9 +896,21 @@ class CausalGroup3Tracker:
                     age_bars=age,
                     max_fill_fraction=fill,
                     partial_at=state.partial_at or candle.end,
-                    transition_reason="near_edge_penetrated",
+                    midpoint_touched_at=(
+                        candle.end
+                        if midpoint_crossed
+                        else state.midpoint_touched_at
+                    ),
+                    transition_reason=(
+                        "midpoint_touched"
+                        if midpoint_crossed
+                        else "near_edge_penetrated"
+                    ),
                 )
-                if state.lifecycle is FairValueGapLifecycle.OPEN:
+                if (
+                    state.lifecycle is FairValueGapLifecycle.OPEN
+                    or midpoint_crossed
+                ):
                     transitions.append(updated)
             else:
                 updated = replace(
@@ -1487,6 +1510,9 @@ class CausalGroup3Tracker:
     ) -> Group3Update:
         if self._failed:
             raise RuntimeError("Group 3 tracker is terminally failed")
+        if not isinstance(candle, Candle):
+            raise TypeError("Group 3 requires a Candle input")
+        candle.ohlc_ticks_for(self.protocol.tick_size)
         bos_sources = tuple(confirmed_bos)
         if any(
             not isinstance(source, Group3BOSSource)
@@ -1496,8 +1522,7 @@ class CausalGroup3Tracker:
                 "Group 3 requires contract-bound BOS source envelopes"
             )
         if (
-            not isinstance(candle, Candle)
-            or candle.timeframe is not Timeframe.M5
+            candle.timeframe is not Timeframe.M5
             or not candle.complete
             or (candle.expected_minutes, candle.observed_minutes)
             != (5, 5)

@@ -13,7 +13,7 @@ from .market_clock import (
     scheduled_gap_kind,
     special_session_close,
 )
-from .model import Bar, Candle, Timeframe
+from .model import Bar, Candle, Timeframe, ticks_to_price
 from .scene_graph import ScaleSpec, scale_registry_id
 
 
@@ -34,10 +34,17 @@ class ReaderUpdate:
 
 
 class _TimeframeAggregator:
-    def __init__(self, timeframe: Timeframe, minutes: int, anchor_minute: int) -> None:
+    def __init__(
+        self,
+        timeframe: Timeframe,
+        minutes: int,
+        anchor_minute: int,
+        tick_size: float,
+    ) -> None:
         self.timeframe = timeframe
         self.minutes = int(minutes)
         self.anchor_minute = int(anchor_minute)
+        self.tick_size = float(tick_size)
         self._bucket_start: pd.Timestamp | None = None
         self._bucket_end: pd.Timestamp | None = None
         self._bars: list[Bar] = []
@@ -93,14 +100,27 @@ class _TimeframeAggregator:
                 for left, right in zip(bars[:-1], bars[1:])
             )
         )
+        tick_rows = tuple(
+            bar.normalized_ohlc_ticks
+            for bar in bars
+        )
+        if any(row is None for row in tick_rows):
+            raise AssertionError("aggregator received a non-normalized bar")
+        integer_rows = tuple(
+            row for row in tick_rows if row is not None
+        )
+        open_ticks = integer_rows[0][0]
+        high_ticks = max(row[1] for row in integer_rows)
+        low_ticks = min(row[2] for row in integer_rows)
+        close_ticks = integer_rows[-1][3]
         return Candle(
             timeframe=self.timeframe,
             start=self._bucket_start,
             end=self._bucket_end,
-            open=float(bars[0].open),
-            high=float(max(bar.high for bar in bars)),
-            low=float(min(bar.low for bar in bars)),
-            close=float(bars[-1].close),
+            open=ticks_to_price(open_ticks, self.tick_size),
+            high=ticks_to_price(high_ticks, self.tick_size),
+            low=ticks_to_price(low_ticks, self.tick_size),
+            close=ticks_to_price(close_ticks, self.tick_size),
             volume=float(sum(bar.volume for bar in bars)),
             symbol=bars[0].symbol,
             instrument_id=bars[0].instrument_id,
@@ -112,6 +132,13 @@ class _TimeframeAggregator:
             ),
             synthetic_minutes=sum(
                 bar.synthetic_no_trade for bar in bars
+            ),
+            price_tick_size=self.tick_size,
+            normalized_ohlc_ticks=(
+                open_ticks,
+                high_ticks,
+                low_ticks,
+                close_ticks,
             ),
         )
 
@@ -165,6 +192,7 @@ class CausalMarketReader:
         self,
         *,
         scale_specs: Sequence[ScaleSpec],
+        tick_size: float = 0.25,
     ) -> None:
         self.scale_specs = tuple(scale_specs)
         if not self.scale_specs:
@@ -190,6 +218,9 @@ class CausalMarketReader:
             if item.native_timeframe is not None
         }
         self.scale_registry_id = scale_registry_id(self.scale_specs)
+        # Validate the grid before allocating mutable reader state.
+        ticks_to_price(0, tick_size)
+        self.tick_size = float(tick_size)
         self._history: dict[Timeframe, deque[Candle]] = {
             timeframe: deque(
                 maxlen=self._scale_by_timeframe[timeframe].history_limit
@@ -205,6 +236,7 @@ class CausalMarketReader:
                 timeframe,
                 int(self._scale_by_timeframe[timeframe].minutes),
                 18 * 60 if timeframe is Timeframe.H4 else 0,
+                self.tick_size,
             )
             for timeframe in self.active_timeframes
             if timeframe is not Timeframe.M1
@@ -224,8 +256,9 @@ class CausalMarketReader:
         for timeframe in self.active_timeframes:
             self._history_views[timeframe] = ()
 
-    @staticmethod
-    def _one_minute_candle(bar: Bar) -> Candle:
+    def _one_minute_candle(self, bar: Bar) -> Candle:
+        if bar.normalized_ohlc_ticks is None:
+            raise AssertionError("reader minute candle requires normalized OHLC")
         return Candle(
             timeframe=Timeframe.M1,
             start=bar.start,
@@ -242,9 +275,14 @@ class CausalMarketReader:
             complete=True,
             real_minutes=0 if bar.synthetic_no_trade else 1,
             synthetic_minutes=1 if bar.synthetic_no_trade else 0,
+            price_tick_size=self.tick_size,
+            normalized_ohlc_ticks=bar.normalized_ohlc_ticks,
         )
 
     def on_bar(self, bar: Bar) -> ReaderUpdate:
+        # Exact grid admission is the first operation. A rejected vendor bar
+        # cannot reset histories, advance a clock, or change contract state.
+        bar = bar.on_price_grid(self.tick_size)
         anomalies: list[str] = []
         prior_contract = self._contract
         if self._last_bar is not None:

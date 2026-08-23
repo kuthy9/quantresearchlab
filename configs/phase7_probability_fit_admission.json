@@ -1,0 +1,99 @@
+{
+  "schema_version": 1,
+  "protocol_version": "phase7_probability_fit_readiness_v1.0",
+  "status": "blocked_inputs_incomplete",
+  "authority": "readiness_only_no_artifact_fit",
+  "requested_window": {
+    "id": "2024-06-mbo-development",
+    "start": "2024-06-02T00:00:00Z",
+    "end_exclusive": "2024-07-01T00:00:00Z",
+    "validation_or_oos_claim_allowed": false
+  },
+  "phase6_source": {
+    "manifest": {
+      "path": "experiments/manifests/smc_semantics_v1_2_2024_06_phase6_mbo_week2_extension_v3.yaml",
+      "sha256": "99901b1893cdea71615239fd9c536a318ec3c8088f0c491e48cb710b9d0eeafc"
+    },
+    "result": {
+      "path": "experiments/results/smc_semantics_v1_2_2024_06_phase6_mbo_week2_extension_v3.json",
+      "sha256": "98f0f334cbae050a093bebca4cfbb85fcc877e96ba729fe04ea477e2761ddf99"
+    }
+  },
+  "runtime_bindings": {
+    "split_registry": "configs/data_splits.json",
+    "path_protocol": "configs/path_hypotheses.json",
+    "dol_protocol": "configs/dol_probability.json",
+    "model_config": "configs/model.json",
+    "required_temporal_model_slot": "path_temporal_artifact"
+  },
+  "required_labeled_cohort_schema": {
+    "conditional_likelihood": [
+      "competition_set_id",
+      "asof",
+      "known_at",
+      "common_expires_at",
+      "realized_path",
+      "outcome_known_at",
+      "evidence_rule_id",
+      "evidence_observed",
+      "evidence_history_id",
+      "correlation_cluster_id",
+      "market_state_id",
+      "censor_reason",
+      "split_role",
+      "fold_id"
+    ],
+    "hypothesis_specific_temporal": [
+      "competition_set_id",
+      "path",
+      "interval_start",
+      "interval_end",
+      "real_completed_bar",
+      "at_risk",
+      "terminal_status",
+      "terminal_cause",
+      "terminal_known_at",
+      "common_expires_at",
+      "censor_reason",
+      "split_role",
+      "fold_id"
+    ],
+    "path_calibration": [
+      "competition_set_id",
+      "prediction_known_at",
+      "common_expires_at",
+      "realized_path",
+      "outcome_known_at",
+      "raw_path_probabilities",
+      "residual_unknown_probability",
+      "censor_reason",
+      "split_role",
+      "fold_id"
+    ],
+    "dol_calibration": [
+      "competition_set_id",
+      "candidate_set_id",
+      "candidate_id",
+      "path",
+      "prediction_known_at",
+      "common_expires_at",
+      "candidate_eligible",
+      "candidate_feature_schema_id",
+      "raw_candidate_probability",
+      "first_hit_candidate_id",
+      "no_target_before_horizon",
+      "outcome_known_at",
+      "censor_reason",
+      "split_role",
+      "fold_id"
+    ]
+  },
+  "invariants": {
+    "phase6_mechanism_evidence_cannot_fit_probability_artifacts": true,
+    "fit_and_validation_cohorts_must_be_separate": true,
+    "same_development_window_cannot_be_validation_or_oos": true,
+    "cross_fitted_predictions_required_for_calibration": true,
+    "no_target_outcome_required": true,
+    "residual_unknown_path_required": true
+  }
+}

@@ -1,0 +1,226 @@
+{
+  "schema_version": 1,
+  "semantic_version": "smc_semantics_v1.1",
+  "title": "SMC Semantic Specification v1.1",
+  "status": "preregistered_development_contract_not_oos_trading_authority",
+  "parameters_file": "semantics/parameters.yaml",
+  "clock_contract": {
+    "event_time": "the market clock assigned to the occurrence, formation, or source pivot",
+    "known_at": "the first completed-data clock at which the system may use the semantic event",
+    "availability_rule": "an event is unavailable to replay, state, Brain, and research consumers before known_at",
+    "ordering": ["known_at", "sequence_no", "event_id"],
+    "future_inputs_forbidden": ["future bars", "future path", "PnL", "MFE", "MAE", "action labels"]
+  },
+  "layer_boundaries": {
+    "eye": [
+      "data normalization",
+      "atomic semantic event recognition",
+      "single-timeframe state reduction",
+      "deterministic cross-timeframe relation resolution",
+      "candidate target inventory",
+      "market fact publication"
+    ],
+    "brain": [
+      "competing DOL and path hypotheses",
+      "belief updates",
+      "signal evaluation",
+      "trade/no-trade decision"
+    ],
+    "execution": [
+      "entry method selection",
+      "order placement and cancellation",
+      "fill handling",
+      "stop, target, position, and risk management"
+    ]
+  },
+  "event_bindings": [
+    {"concept": "confirmed_swing", "event_kind": "swing_confirmed", "status": "canonical_emitted"},
+    {"concept": "structural_leg", "event_kind": "structural_leg_created", "status": "canonical_emitted"},
+    {"concept": "candidate_liquidity_level", "event_kind": "liquidity_level_created", "status": "canonical_emitted"},
+    {"concept": "liquidity_sweep", "event_kind": "level_touched", "status": "canonical_emitted"},
+    {"concept": "liquidity_sweep", "event_kind": "level_penetrated", "status": "canonical_emitted"},
+    {"concept": "liquidity_sweep", "event_kind": "sweep_confirmed", "status": "canonical_emitted"},
+    {"concept": "acceptance", "event_kind": "acceptance_confirmed", "status": "canonical_emitted"},
+    {"concept": "displacement", "event_kind": "displacement_observed", "status": "canonical_emitted"},
+    {"concept": "raw_boundary_break", "event_kind": "raw_boundary_break", "status": "canonical_emitted"},
+    {"concept": "structure_direction", "event_kind": "structure_direction_confirmed", "status": "canonical_emitted"},
+    {"concept": "qualified_bos", "event_kind": "qualified_bos", "status": "canonical_emitted"},
+    {"concept": "protected_swing", "event_kind": "protected_swing_assigned", "status": "canonical_emitted"},
+    {"concept": "mss_core", "event_kind": "mss_core_confirmed", "status": "canonical_emitted"},
+    {"concept": "fvg", "event_kind": "fvg_created", "status": "canonical_emitted"},
+    {"concept": "fvg", "event_kind": "fvg_partially_filled", "status": "canonical_emitted"},
+    {"concept": "fvg", "event_kind": "fvg_midpoint_touched", "status": "canonical_emitted"},
+    {"concept": "fvg", "event_kind": "fvg_fully_filled", "status": "canonical_emitted"},
+    {"concept": "fvg", "event_kind": "fvg_invalidated", "status": "canonical_emitted"},
+    {"concept": "fvg", "event_kind": "fvg_touched", "status": "compatibility_alias_not_emitted"},
+    {"concept": "fvg", "event_kind": "fvg_expired", "status": "reserved_not_emitted"},
+    {"concept": "order_block_origin_zone", "event_kind": "origin_zone_created", "status": "canonical_emitted"},
+    {"concept": "order_block_origin_zone", "event_kind": "origin_zone_mitigated", "status": "canonical_emitted"},
+    {"concept": "order_block_origin_zone", "event_kind": "origin_zone_invalidated", "status": "canonical_emitted"},
+    {"concept": "order_block_origin_zone", "event_kind": "origin_zone_touched", "status": "reserved_not_emitted"},
+    {"concept": "active_dealing_range", "event_kind": "dealing_range_created", "status": "canonical_emitted"},
+    {"concept": "active_dealing_range", "event_kind": "dealing_range_activated", "status": "canonical_emitted"},
+    {"concept": "active_dealing_range", "event_kind": "dealing_range_invalidated", "status": "canonical_emitted"},
+    {"concept": "active_dealing_range", "event_kind": "dealing_range_replaced", "status": "canonical_emitted"},
+    {"concept": "active_dealing_range", "event_kind": "dealing_range_extended", "status": "reserved_not_emitted"},
+    {"concept": "premium_discount_irl_erl", "event_kind": null, "status": "snapshot_derived"},
+    {"concept": "delivery_phase", "event_kind": null, "status": "snapshot_derived"},
+    {"concept": "delivery_phase", "event_kind": "delivery_phase_changed", "status": "reserved_not_emitted"},
+    {"concept": "dol_candidate", "event_kind": null, "status": "snapshot_derived"}
+  ],
+  "concepts": {
+    "confirmed_swing": {
+      "owner": "eye",
+      "domain_meaning": "A local price turning point and atomic node of the structure tree.",
+      "operational_definition": "A high/low pivot must dominate the frozen left and right windows and is emitted only after the right window completes. In v1.1, prominence_atr is retained as a continuous field and there is no positive hard prominence threshold; the executable minimum of 0.0 is non-restrictive. Duration, magnitude, event_time at the pivot, and known_at at confirmation are retained separately. nesting_depth and semantic_rank are emitted as reserved fields but remain at their default 0/unresolved values in the current detector, so v1.1 makes no executable multi-level hierarchy claim and hierarchy is not inferred from the timeframe name alone.",
+      "hypothesized_relations": ["higher prominence may increase later reaction", "higher prominence may increase liquidity crossing or structural use"],
+      "falsification_conditions": ["small nearby parameter changes produce unrelated structures", "high-prominence pivots do not differ from matched local extrema"],
+      "oos_pass_criteria": ["exact causal replay", "directionally consistent structure across regimes", "a stable parameter plateau rather than a single optimum"],
+      "existing_binding": "smc_trader.structure.StructureTracker / SwingPoint emits SWING_CONFIRMED; SWING_STATE is legacy lifecycle transport"
+    },
+    "structural_leg": {
+      "owner": "eye",
+      "domain_meaning": "The complete price movement between opposite confirmed swings.",
+      "operational_definition": "Create a leg from one confirmed swing to the next opposite confirmed swing and retain direction, amplitude, duration, retracement, travel, and efficiency = abs(close_end-close_start)/sum(abs(delta_close)).",
+      "hypothesized_relations": ["efficient legs may precede displacement", "efficient legs may increase BOS and continuation probability"],
+      "falsification_conditions": ["leg efficiency and amplitude add no information about the next structural outcome"],
+      "oos_pass_criteria": ["leg features add stable incremental information for the next structural event"],
+      "existing_binding": "smc_trader.market_state.build_structural_legs / StructuralLegState emits STRUCTURAL_LEG_CREATED from exactly two SWING_CONFIRMED parents"
+    },
+    "candidate_liquidity_level": {
+      "owner": "eye",
+      "domain_meaning": "An observable price level that may attract orders or become a target; it is not a claim about institutional stops.",
+      "operational_definition": "Create candidates only from registered confirmed swings, equal highs/lows, previous completed session/day/week extremes, and frozen dealing-range boundaries. Preserve source kind, source identity, price, side, age, rank, and lifecycle.",
+      "hypothesized_relations": ["level classes may differ in touch, crossing, rejection, acceptance, and target rates"],
+      "falsification_conditions": ["registered level classes do not differ from matched pseudo-levels"],
+      "oos_pass_criteria": ["at least one class has a stable matched touch, reaction, or target effect"],
+      "existing_binding": "LiquidityInventoryItem, SupportResistanceState, LiquidityPoolState, and active-range boundary inventory emit LIQUIDITY_LEVEL_CREATED; lifecycle state records remain context transport"
+    },
+    "liquidity_sweep": {
+      "owner": "eye",
+      "domain_meaning": "A temporary penetration of a candidate liquidity level followed by return to its prior side.",
+      "operational_definition": "First emit LEVEL_TOUCHED and LEVEL_PENETRATED for one frozen level and crossing_generation_id. Emit SWEEP_CONFIRMED only when a registered later completed close returns to the original side within that event family's frozen resolution window. Preserve exact candidate, penetration, and completed-bar ancestry plus crossed_at/resolved_at; versioned research derives maximum penetration, recovery time, and volume features from that ancestry rather than assuming every terminal event carries one common metric vector.",
+      "hypothesized_relations": ["sweep may precede reversal flow", "sweep may increase opposite displacement or MSS probability"],
+      "falsification_conditions": ["sweeps do not differ from matched touches, wicks, or random crossings"],
+      "oos_pass_criteria": ["stable incremental structural information after trend, session, and volatility controls"],
+      "existing_binding": "the canonical crossing pipeline emits LEVEL_TOUCHED, LEVEL_PENETRATED, and SWEEP_CONFIRMED; ACCEPTANCE_CONFIRMED belongs exclusively to the acceptance concept, while LiquidityPoolState and ManipulationState are context transports"
+    },
+    "acceptance": {
+      "owner": "eye",
+      "domain_meaning": "Sustained trading outside a crossed structural level.",
+      "operational_definition": "After penetration, confirm acceptance only from the registered count of later completed closes outside the frozen level or registered outside time/volume. Sweep/rejection and acceptance are mutually exclusive terminal resolutions for one crossing generation.",
+      "hypothesized_relations": ["acceptance may increase same-direction continuation probability"],
+      "falsification_conditions": ["acceptance does not outperform matched ordinary breaks"],
+      "oos_pass_criteria": ["incremental continuation information after trend, volatility, and session controls"],
+      "existing_binding": "the canonical crossing pipeline emits ACCEPTANCE_CONFIRMED for the same unique crossing_generation_id used by the competing Sweep resolution; BOS_POST_BREAK_STATE, LIQUIDITY_POOL_STATE, and MANIPULATION_STATE are legacy/context transports"
+    },
+    "displacement": {
+      "owner": "eye",
+      "domain_meaning": "Fast, efficient, directionally coherent price delivery.",
+      "operational_definition": "Emit DISPLACEMENT_OBSERVED for each started, active, exhausted, or censored lifecycle transition with exact admitted completed-bar ancestry and the frozen continuous episode metrics: relative ATR, body fraction, directional close location, efficiency, volume ratio/readiness, directional counts, speed, travel, and overlap. FVG creation remains a separately linked later context fact rather than a displacement-definition field. Lifecycle thresholds are versioned parameters; no isolated ATR threshold defines the concept.",
+      "hypothesized_relations": ["higher score may increase structural break and continuation probability", "higher score may correspond to order-flow imbalance"],
+      "falsification_conditions": ["features have no monotone structural relationship", "effects are confined to one period", "MBO shows no corresponding mechanism"],
+      "oos_pass_criteria": ["monotone and stable structural relationship across periods before MBO mechanism validation"],
+      "existing_binding": "CausalDisplacementEye / DisplacementTransitionObservation emits DISPLACEMENT_OBSERVED for all lifecycle transitions; Phase-5 selects evidence.lifecycle == active through a separately frozen research predicate"
+    },
+    "raw_boundary_break": {
+      "owner": "eye",
+      "domain_meaning": "A completed-price break of a pre-existing structural boundary without directional qualification.",
+      "operational_definition": "Emit when a later same-timeframe completed close exceeds the frozen confirmed boundary plus the registered buffer. Keep target identity, break bar, direction, distance, and acceptance state.",
+      "hypothesized_relations": ["raw breaks provide the control population for qualified BOS"],
+      "falsification_conditions": ["registered boundaries do not differ from matched pseudo-boundaries"],
+      "oos_pass_criteria": ["replay-stable break population suitable for nested and non-nested controls"],
+      "existing_binding": "confirmed BreakOfStructureState emits RAW_BOUNDARY_BREAK from the exact target SWING_CONFIRMED and completed break BAR before any directional qualification"
+    },
+    "structure_direction": {
+      "owner": "eye",
+      "domain_meaning": "The confirmed same-timeframe structural direction that exists before a boundary break is classified.",
+      "operational_definition": "Emit STRUCTURE_DIRECTION_CONFIRMED once for a confirmed same-timeframe structure generation from the exact confirmed high and low swing events knowable at that generation's confirmed_at. Preserve direction, structure identity, formation event_time, confirmation known_at, and source swing identities. Child-timeframe direction never rewrites this parent-timeframe fact.",
+      "hypothesized_relations": ["same-timeframe confirmed direction may condition continuation after raw breaks", "direction may condition protected-swing survival and parent-child relations"],
+      "falsification_conditions": ["the direction generation cannot be replayed exactly", "conditioning on confirmed direction adds no information beyond an unqualified raw break"],
+      "oos_pass_criteria": ["exact deterministic replay and stable incremental structural information when used to qualify BOS or MSS"],
+      "existing_binding": "StructureTracker / StructureSequenceState emits STRUCTURE_DIRECTION_CONFIRMED from the exact high and low SWING_CONFIRMED parents; STRUCTURE_STATE is legacy lifecycle transport"
+    },
+    "qualified_bos": {
+      "owner": "eye",
+      "domain_meaning": "A raw boundary break aligned with the current same-timeframe structure direction.",
+      "operational_definition": "Qualify a raw break as BOS only from the direction of the same-timeframe confirmed structure that existed at known_at. Displacement and FVG remain context features, not mandatory definition fields.",
+      "hypothesized_relations": ["BOS may increase continuation, MFE, and protected-swing survival", "displacement may add incremental value"],
+      "falsification_conditions": ["BOS does not differ from matched raw breaks", "structure direction adds no information"],
+      "oos_pass_criteria": ["stable structural outcomes above matched controls"],
+      "existing_binding": "BreakOfStructureState scope=continuation emits QUALIFIED_BOS from the exact RAW_BOUNDARY_BREAK and prior STRUCTURE_DIRECTION_CONFIRMED parents"
+    },
+    "protected_swing": {
+      "owner": "eye",
+      "domain_meaning": "The opposite swing at the origin of the break that keeps the current structure valid.",
+      "operational_definition": "Bind the opposite structural swing of the most recent same-timeframe BOS origin. Keep it protected until the registered acceptance break criterion completes; wick, close, and acceptance breaks remain distinct observations.",
+      "hypothesized_relations": ["protected swings may show higher defense and structural-failure relevance than matched swings"],
+      "falsification_conditions": ["protected and matched same-rank swings have indistinguishable survival and reaction"],
+      "oos_pass_criteria": ["stable survival, break, and transition relationships"],
+      "existing_binding": "a continuation BOS emits PROTECTED_SWING_ASSIGNED from the exact QUALIFIED_BOS, STRUCTURAL_LEG_CREATED, and SWING_CONFIRMED parents; StructureSequenceState.protected_swing_id is the reducer projection"
+    },
+    "mss_core": {
+      "owner": "eye",
+      "domain_meaning": "The first opposite internal structural break.",
+      "operational_definition": "Emit the first confirmed structural-boundary break opposite the internal direction that existed immediately before the break. Prior sweep, displacement, FVG, and parent location are separate context tags.",
+      "hypothesized_relations": ["core MSS may alter the next structural-event distribution", "sweep, displacement, FVG, and parent location may add separable information"],
+      "falsification_conditions": ["MSS core does not differ from matched opposite breaks", "context additions do not improve outcomes"],
+      "oos_pass_criteria": ["MSS alone or a preregistered validated composition has stable incremental value"],
+      "existing_binding": "an opposed BreakOfStructureState emits MSS_CORE_CONFIRMED from the exact RAW_BOUNDARY_BREAK and prior STRUCTURE_DIRECTION_CONFIRMED parents; Sweep, Displacement, and FVG remain optional context evidence"
+    },
+    "fvg": {
+      "owner": "eye",
+      "domain_meaning": "A three-candle non-overlapping price interval.",
+      "operational_definition": "Bullish when low[c3] exceeds high[c1] by the registered minimum gap; bearish is symmetric. Confirm at c3 close and freeze source completed-bar events and bounds. Emit distinct created, partially-filled, midpoint-touched, fully-filled/mitigated, and invalidated observations without backfill. v1.1 has no age-based expiry threshold: FVG_EXPIRED is reserved for a future explicitly registered upstream lifecycle fact and is not in the production-emitted population.",
+      "hypothesized_relations": ["gap size, source displacement, and first-retracement depth may condition continuation"],
+      "falsification_conditions": ["FVG reactions do not differ from matched random zones"],
+      "oos_pass_criteria": ["stable value after trend, volatility, session, size, and distance controls"],
+      "existing_binding": "CausalGroup3Tracker / FairValueGapState emits FVG_CREATED, FVG_PARTIALLY_FILLED, FVG_MIDPOINT_TOUCHED, FVG_FULLY_FILLED, and FVG_INVALIDATED; FVG_TOUCHED is a compatibility alias not emitted by v1.1, and FVG_EXPIRED is reserved/not emitted"
+    },
+    "order_block_origin_zone": {
+      "owner": "eye",
+      "domain_meaning": "The price origin region of a qualifying structural impulse.",
+      "operational_definition": "Use the frozen configured geometry of the last opposite candle or opposite-candle cluster before the qualifying impulse. The zone is derived from the exact impulse and BOS identities and is never treated as an independent causal agent.",
+      "hypothesized_relations": ["first retest may outperform matched impulse-origin control zones"],
+      "falsification_conditions": ["reaction, MAE, and MFE match similar-size and similar-location control zones"],
+      "oos_pass_criteria": ["stable first-retest and fill-to-continuation relationships"],
+      "existing_binding": "CausalGroup3Tracker / OrderBlockState emits ORIGIN_ZONE_CREATED, ORIGIN_ZONE_MITIGATED, and ORIGIN_ZONE_INVALIDATED from exact Displacement, raw-break, and anchor-bar ancestry; ORIGIN_ZONE_TOUCHED is reserved/not emitted in v1.1 and ORDER_BLOCK_STATE is legacy lifecycle transport"
+    },
+    "active_dealing_range": {
+      "owner": "eye",
+      "domain_meaning": "The active external interval through which current structure is delivering.",
+      "operational_definition": "Create from a frozen valid pair of opposite structural anchors and retain source identities and geometry. Four production-reachable invalidation variants remain distinct under DEALING_RANGE_INVALIDATED. The three forming variants each require exactly DEALING_RANGE_CREATED plus the completed H1 terminal BAR and are identified separately by transition_reason: close_beyond_frozen_range_before_activation, forming_source_invalidated, or maturity_deadline_elapsed. The active_acceptance variant requires DEALING_RANGE_CREATED, DEALING_RANGE_ACTIVATED, the completed H1 break BAR, and ACCEPTANCE_CONFIRMED with transition_reason=close_beyond_frozen_range. For the active variant, external acceptance is exactly the first completed H1 close strictly outside a frozen boundary; a wick outside with an H1 close inside does not qualify, and no M-bar hold is claimed. A later explicit replacement may follow invalidation. Never reselect an advantageous range on every bar. DEALING_RANGE_EXTENDED is reserved and is not emitted in v1.1.",
+      "hypothesized_relations": ["normalized location may condition setups and target probabilities"],
+      "falsification_conditions": ["nearby anchor choices produce unstable state", "normalized location adds no information"],
+      "oos_pass_criteria": ["exact replay and stable conditional structural relationships"],
+      "existing_binding": "CausalGroup4Tracker / DealingRangeState emits DEALING_RANGE_CREATED, DEALING_RANGE_ACTIVATED, DEALING_RANGE_INVALIDATED, and DEALING_RANGE_REPLACED; invalidations preserve separate forming-close, forming-source-invalidated, forming-maturity-deadline, or active-acceptance variants, while DEALING_RANGE_EXTENDED is reserved/not emitted in v1.1"
+    },
+    "premium_discount_irl_erl": {
+      "owner": "eye",
+      "domain_meaning": "Continuous position within the active dealing range and whether candidate liquidity is internal or external.",
+      "operational_definition": "Store x=(price-low)/(high-low) continuously and derive Premium/Discount labels only from that value. v1.1 does not populate an authoritative IRL/ERL classification for candidate levels or zones; IRL/ERL membership remains reserved until an explicit snapshot schema and tests are registered.",
+      "hypothesized_relations": ["location may interact with direction, delivery phase, and parent relation"],
+      "falsification_conditions": ["conditional outcomes do not differ by location", "apparent effect is fully explained by trend"],
+      "oos_pass_criteria": ["stable preregistered interaction after controls"],
+      "existing_binding": "snapshot-derived only: DealingRangeState projects continuous normalized_location into TimeframeRangeState and RelationState carries parent-range location; IRL/ERL membership is not populated and no canonical event is claimed"
+    },
+    "delivery_phase": {
+      "owner": "eye",
+      "domain_meaning": "Whether price is balancing, expanding, retracing, attempting reversal, or transitioning.",
+      "operational_definition": "In v1.1, Delivery Phase is a snapshot-derived deterministic dimension, not a canonical transition event. It is derived from same-timeframe confirmed structure, the active structural leg, protected-swing intactness, and active-range availability. Range-extension and volatility-compression inputs are not implemented v1.1 phase inputs. A child direction opposite an intact parent is resolved separately as a parent retracement relation, not a parent vote reversal.",
+      "hypothesized_relations": ["the same sweep, MSS, or FVG may have different outcomes by phase"],
+      "falsification_conditions": ["phase is unstable under replay", "phase explains no conditional outcome difference"],
+      "oos_pass_criteria": ["stable incremental conditional information"],
+      "existing_binding": "snapshot-derived only: MarketSnapshotPublisher deterministically projects same-timeframe structure, active structural leg, protected swing, and active range; DELIVERY_PHASE_CHANGED is reserved/not emitted in v1.1"
+    },
+    "dol_candidate": {
+      "owner": "eye",
+      "domain_meaning": "An unfinished observable price target with descriptive attributes.",
+      "operational_definition": "Publish visible candidate inventory with the attributes currently available from the frozen liquidity state, including side, price, timeframe, source kind, and available strength/rank/age fields. v1.1 does not populate an authoritative path-obstacles field. The Eye must not select one unique DOL or attach a trade probability.",
+      "hypothesized_relations": ["type, distance, parent structure, session, and obstacles may affect hit probability"],
+      "falsification_conditions": ["Brain ranking does not beat nearest-level, trend-only, or random baselines"],
+      "oos_pass_criteria": ["the later Brain ranking is calibrated and rank one outperforms lower-ranked candidates"],
+      "existing_binding": "snapshot-derived candidate inventory from LiquidityInventoryItem and GlobalMarketContext; the Eye emits LIQUIDITY_LEVEL_CREATED for candidate facts but no unique DOL hypothesis or probability event"
+    }
+  }
+}

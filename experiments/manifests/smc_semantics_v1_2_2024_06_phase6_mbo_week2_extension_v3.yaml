@@ -1,0 +1,538 @@
+{
+  "schema_version": 1,
+  "research_protocol_version": 1,
+  "status": "frozen_mbo_development_mechanism_validation_not_oos_not_trading_authority",
+  "experiment_id": "smc_semantics_v1_2_2024_06_phase6_mbo_week2_extension_v3",
+  "frozen_at": "2026-08-22T06:55:17Z",
+  "frozen_before_run": true,
+  "study_mode": "primary_plus_registered_underpowered_extension",
+  "authority": {
+    "mbo_development_only": true,
+    "mechanism_association_only": true,
+    "artifact_fit_allowed": false,
+    "phase7_evidence_allowed_only_if_supported": true,
+    "trading_authority": false,
+    "sealed_holdout_opened": false
+  },
+  "semantic_version": "smc_semantics_v1.2",
+  "contract": {
+    "symbol": "NQM4",
+    "instrument_id": 13743
+  },
+  "warmup_start": "2024-05-26T22:00:00Z",
+  "windows": {
+    "primary": {
+      "id": "2024-06-week-1",
+      "start": "2024-06-02T22:00:00Z",
+      "end_exclusive": "2024-06-07T21:01:00Z",
+      "expected_rows": 6900
+    },
+    "underpowered_extension": {
+      "id": "2024-06-week-2",
+      "start": "2024-06-09T22:00:00Z",
+      "end_exclusive": "2024-06-14T21:01:00Z",
+      "expected_rows": 6900
+    },
+    "extension_rule": "open_week_2_only_if_any_fixed_hypothesis_has_primary_matched_n_below_30;never_open_from_effect_direction_or_p_value"
+  },
+  "reader_census_contract": {
+    "window_id": "2024-06-week-2",
+    "completed_clocks": 6900,
+    "real_completed": 6899,
+    "synthetic_no_trade": 1,
+    "synthetic_decision_clocks": [
+      "2024-06-10T04:14:00Z"
+    ],
+    "synthetic_event_policy": "normalized_M1_clock_root_with_only_registered_terminal_censor_semantic_exception",
+    "synthetic_m5_source_or_control_eligible": false,
+    "mbo_response_window_eligible": true
+  },
+  "synthetic_semantic_exception_policy": {
+    "default_policy": "forbid_semantic_atomic_on_synthetic_m1_clock",
+    "registered_allowlist": [
+      {
+        "kind": "displacement_observed",
+        "timeframe": "5m",
+        "lifecycle": "censored",
+        "terminal_reason": "synthetic_interruption"
+      }
+    ],
+    "registered_clock_policy": "context_root_clocks_must_exactly_equal_all_registered_synthetic_clocks_inside_the_open_closed_terminal_M5_interval",
+    "provenance_policy": {
+      "synthetic_m1_roots": "all_exact_clock_only_M1_BAR_roots_in_open_closed_terminal_M5_interval",
+      "constituent_clock_contract": "exactly_five_unique_contiguous_M1_roots_in_the_terminal_M5_interval",
+      "synthetic_root_namespace": "context_event_ids_only",
+      "source_event_ids": "recursive_normalized_BAR_roots_all_real_completed",
+      "time_order": "event_time_lte_last_real_source_known_at_lt_terminal_known_at;context_root_known_at_lte_terminal_known_at"
+    },
+    "source_data_policy": {
+      "terminal_source_data_ids": "producer_order_unique_detector_candle_ids_set_equal_canonical_sorted_recursive_real_M5_detector_union",
+      "synthetic_context_identifiers": "every_context_root_source_data_ids_and_detector_candle_id_must_be_nonempty_and_disjoint_from_terminal",
+      "missing_extra_or_duplicate_terminal_detector_ids": "fail_closed"
+    },
+    "descendant_sample_exclusion": {
+      "blocked_identities": "allowed_terminal_event_ids_plus_their_synthetic_context_root_ids",
+      "lineage_scan": "recursive_explicit_semantic_atomic_source_plus_context;non_atomic_origins_terminal",
+      "apply_before": [
+        "fvg_creation",
+        "treatment",
+        "raw_control",
+        "M5_candidate_base"
+      ],
+      "formation_clock_lineage": "source_only_M5_ancestry_unchanged",
+      "disposition": "exclude_with_reason_and_blocked_event_ids"
+    },
+    "analysis_policy": "always_exclude_allowed_terminal_from_treatment_control_and_fvg_creation",
+    "audit_policy": "record_allowed_and_rejected_ids_plus_all_synthetic_context_roots_and_recursive_DAG_sha256_and_node_count"
+  },
+  "extension_warmup_synthetic_exception_policy": {
+    "source": "hash_bound_week1_gate_result_only",
+    "prior_clock_registration": "exact_prior_reader_synthetic_clock_with_allowed_audit",
+    "replay_verification": "current_event_and_DAG_legacy_projection_must_equal_hash_bound_prior_audit",
+    "blocked_lineage_import": "prior_allowed_terminal_and_synthetic_context_root_ids",
+    "active_reader_census_scope": "active_extension_window_only",
+    "unregistered_or_missing_prior_exception": "fail_closed"
+  },
+  "extension_displacement_monotonicity_policy": "report_hash_bound_prior_week1_and_current_week2_separately;combined_null_because_compact_ledgers_do_not_bind_all_episode_responses;excluded_from_holm_and_phase7",
+  "week1_gate_result": {
+    "path": "experiments/results/smc_semantics_v1_2_2024_06_phase6_mbo_week1_v5.json",
+    "sha256": "30829d4c39c7d32b04ccf5aa575407433691df269a1526db59af3f3ab580f3f7",
+    "manifest_sha256": "77e5c43a157fc9aa5ac27a1f209daa869e07d649284630a186b3a50b71c689c4",
+    "result_identity": "64ecd3067dc9bd41abbdbe01296af1e1ded8b15e86b020ad66ac02ef74b1fb1d",
+    "ledgers": {
+      "episodes": {
+        "path": "experiments/results/smc_semantics_v1_2_2024_06_phase6_mbo_week1_v5.episodes.jsonl",
+        "rows": 2205,
+        "sha256": "1bf9b1ddc1d73b0362a967a7e02194108c87316bb80f1e4980bcf4911d47f54a"
+      },
+      "matched_pairs": {
+        "path": "experiments/results/smc_semantics_v1_2_2024_06_phase6_mbo_week1_v5.matched_pairs.jsonl",
+        "rows": 90,
+        "sha256": "483a239478e2d4d8a1f6e608f8f59c1b32e3eca69a84458704d9f35f4fcb6759"
+      },
+      "unmatched": {
+        "path": "experiments/results/smc_semantics_v1_2_2024_06_phase6_mbo_week1_v5.unmatched.jsonl",
+        "rows": 1299,
+        "sha256": "8630928c03ae1b3967ed441ea0784c31251610ed7622228944a4a498b0ca496e"
+      }
+    }
+  },
+  "identity_bindings": {
+    "ohlcv_artifact": {
+      "path": "data/processed/nq_1m_previous_session_front_v2_3_2017_2026.parquet",
+      "sha256": "84c9ed4d1de379382bdc41e0fe02e3611373ba182cfeebe09e3832d29cbafd7b"
+    },
+    "ohlcv_manifest": {
+      "path": "data/processed/nq_1m_previous_session_front_v2_3_2017_2026.manifest.json",
+      "sha256": "391415fa23abfde5281c60ad4d882b32ff284b1aedb6298e398ed72036a9042f"
+    },
+    "split_registry": {
+      "path": "configs/data_splits.json",
+      "sha256": "aee2d14f40eb9ebbfc050e9779c5604e06f4811f9e1e929179e25c04fc5f84c8"
+    },
+    "semantic_registry": {
+      "path": "semantics/registry_v1_2.yaml",
+      "sha256": "e393b6d0d72aefa156d476ddc2984bf12ec7bbf37f15b21f158f68f7ae911df1"
+    },
+    "semantic_parameters": {
+      "path": "semantics/parameters_v1_2.yaml",
+      "sha256": "cb9dea88d789cd5f8fe02f92f4993c69714a1af5d8259c8bd0d754b9606457fc"
+    },
+    "model_config": {
+      "path": "configs/model.json",
+      "sha256": "1caacbf766cff166c9a7655c4876a3e0857c6b36223c473ffd4fbf83a1130676"
+    },
+    "structure_protocol": {
+      "path": "configs/primitives_structure_liquidity.json",
+      "sha256": "5a8913907b92b22c5ea67df7056b5464518329adcce883435aadf9008dc7e0e0"
+    },
+    "liquidity_protocol": {
+      "path": "configs/primitives_structure_liquidity.json",
+      "sha256": "5a8913907b92b22c5ea67df7056b5464518329adcce883435aadf9008dc7e0e0"
+    },
+    "displacement_protocol": {
+      "path": "configs/primitives_displacement.json",
+      "sha256": "ef2dd3923e39285bf6f7e2c084ebd2c5bc70aba6adc7ae088286eceabb57d6a8"
+    },
+    "group3_protocol": {
+      "path": "configs/primitives_zones.json",
+      "sha256": "0163d8fc3d41bcd6037bfab05b59e4a44b6558f01d1c73eb95955ea1e0bf8899"
+    },
+    "group4_protocol": {
+      "path": "configs/primitives_range.json",
+      "sha256": "9c5334e52bacd19a896cb326e02c77a3be4f932e9b09579929fdce7d9ccdbdf4"
+    },
+    "group5_protocol": {
+      "path": "configs/primitives_entry.json",
+      "sha256": "47ef091d7c9211718588de90f7260434041836f16dcc40e9d28452d0a3d22a4a"
+    },
+    "mbo_feature_artifact": {
+      "path": "data/processed/mbo_mechanism_phase6_20240609_20240614_v1.parquet",
+      "sha256": "31a9b9b7d22d76695af2da648bfc672cf7ae7c5206533df914e3dd3baf85fe43"
+    },
+    "mbo_feature_manifest": {
+      "path": "data/processed/mbo_mechanism_phase6_20240609_20240614_v1.parquet.manifest.json",
+      "sha256": "fc427ae8b3db73f4ad357916024fe540a95d5d06a4e57318a4ea32198fc6a505"
+    },
+    "raw_mbo_partition_manifest": {
+      "path": "data/raw/nq_mbo/legacy_parquet/manifest.json",
+      "sha256": "9fbaef324de51cdbc60e13ea07acb7015cce6c409545761d7148ec5f7e8045cd"
+    },
+    "runner": {
+      "path": "scripts/run_mbo_mechanism_research.py",
+      "sha256": "3af0b0644e13180131dd6b2b65f203a41e18c260ad12968c415269dfd7739fb0"
+    },
+    "feature_materializer": {
+      "path": "scripts/materialize_mbo_mechanism.py",
+      "sha256": "59f383ebb49e4db87c9e12ce1c118d53ac0daf614d833cf9baf83c73d92093a4"
+    },
+    "runtime_package_init": {
+      "path": "smc_trader/__init__.py",
+      "sha256": "1af6506e108077d05c8174602053fc23fae237526b1097de6bfcd152d50abddf"
+    },
+    "runtime_artifact_stream": {
+      "path": "smc_trader/artifact_stream.py",
+      "sha256": "435b9cd22a8c157b131153657bef7898be8ceb6c67c3d02aaf2c55f70facebb2"
+    },
+    "runtime_mbo": {
+      "path": "smc_trader/mbo.py",
+      "sha256": "10197a18a28f020e11f29aa5fd41958cd984dfe81a4c09ee0a905ad1cd7136aa"
+    },
+    "runtime_market_clock": {
+      "path": "smc_trader/market_clock.py",
+      "sha256": "5e43fe3be976ea8c6586f13bf21e5a1de86ec252a8590299d03aa8432f3561a1"
+    },
+    "runtime_research": {
+      "path": "smc_trader/mbo_mechanism_research.py",
+      "sha256": "c006a5e360ed478a4951b2cc8daadad079ec5deee63dc2cb86df8f8df8e6830a"
+    },
+    "runtime_feature": {
+      "path": "smc_trader/mbo_mechanism.py",
+      "sha256": "3fd6dc1f34fc2b1357f69d90704e9e3b4205bfaa74df9a96c9e2b6b90761966a"
+    },
+    "runtime_signal_research": {
+      "path": "smc_trader/signal_research.py",
+      "sha256": "adaef0fe1e445040dda52c2a8cad84bfbad8c4d43e94b8cf476d786bc7a0dad0"
+    },
+    "runtime_causal": {
+      "path": "smc_trader/causal.py",
+      "sha256": "2199b8a1768f4114b0ecf395890bb6cca027fa2a37341d2da7ac28cd8ed49654"
+    },
+    "runtime_io": {
+      "path": "smc_trader/io.py",
+      "sha256": "000e9676a5d666f19113536499dc35e75c8b8c35320ebf6f8e83c3e59af35967"
+    },
+    "runtime_model": {
+      "path": "smc_trader/model.py",
+      "sha256": "3dc3712cef0bd075a77ae1c642bc564a2929b58efb0c2c3907e352c27bf3f49d"
+    },
+    "runtime_observation": {
+      "path": "smc_trader/observation.py",
+      "sha256": "961d6ac4e75e3df85bc1639cc5d7e9056729f0d7f41ee101266934e68538d8ae"
+    },
+    "runtime_event_store": {
+      "path": "smc_trader/event_store.py",
+      "sha256": "dc60ebbe844d469e5f946d95543863110e9650ed859d9284160dcdc735455ff8"
+    },
+    "runtime_market_state": {
+      "path": "smc_trader/market_state.py",
+      "sha256": "332919d2a0a74e3e3d323344dd643b31b1161a3d825339dab17d14be4a3a356f"
+    },
+    "runtime_semantics": {
+      "path": "smc_trader/semantics.py",
+      "sha256": "8af34d451e7505eba0c6a7176e9dc048ffa97a178a237f3e2c11bf22cc04aa4c"
+    },
+    "runtime_structure": {
+      "path": "smc_trader/structure.py",
+      "sha256": "c8cc9c11fcf74a296850685d7d2f6fa55163a803579345c41f47cfdaa075e15c"
+    },
+    "runtime_liquidity": {
+      "path": "smc_trader/liquidity.py",
+      "sha256": "67f087c212b9c1c8cbe2e1a635eb403a9d56234d801c4ee458483ef01458cd82"
+    },
+    "runtime_displacement": {
+      "path": "smc_trader/displacement.py",
+      "sha256": "9d6af01bb3e7dc819c4dfa7f97895ef5e5aaa45775a7b5a386a8c558a3bf589d"
+    },
+    "runtime_displacement_observer": {
+      "path": "smc_trader/displacement_observer.py",
+      "sha256": "07b7c7d0e8607e7454a918fc77f761dada5bf1b556407049bd3dbaf55de6064e"
+    },
+    "runtime_group3": {
+      "path": "smc_trader/group3.py",
+      "sha256": "eec95c14d0e29dd8d0f6cb036ed46925ececa97f3dab142f9297ec9f8cf2b4e7"
+    },
+    "runtime_group4": {
+      "path": "smc_trader/group4.py",
+      "sha256": "fc83168aa4b8f12616729496d0d9585e285194bac2e69a0c2f5a24550a327ef1"
+    },
+    "runtime_group5": {
+      "path": "smc_trader/group5.py",
+      "sha256": "43561932e0d3faa5d7c5c28dd5ed56ed7c033ba81c26adc54486b9068985b65e"
+    },
+    "runtime_scene_graph": {
+      "path": "smc_trader/scene_graph.py",
+      "sha256": "5036610595ad8e9db74782d268733f586e881b9b123073ad6b2dbc39e91dfccb"
+    },
+    "runtime_validation": {
+      "path": "smc_trader/validation.py",
+      "sha256": "852ef69afcdc3fcca93c74ebbe90350926d0c50a79e846cb2a253c6779580206"
+    },
+    "pyproject": {
+      "path": "pyproject.toml",
+      "sha256": "5728be18add7cd5dcf81af4ad26ceb4e35ae0118f86bac691f5444eb55416afc"
+    },
+    "lockfile": {
+      "path": "uv.lock",
+      "sha256": "a3ad7563abd7ba4aa1a8a5cd7e29b9425d2530c0c8f97b362c09bdd36747aedc"
+    }
+  },
+  "raw_mbo_partition_manifest_sha256": "9fbaef324de51cdbc60e13ea07acb7015cce6c409545761d7148ec5f7e8045cd",
+  "raw_mbo_partitions": [
+    {
+      "path": "data/raw/nq_mbo/legacy_parquet/date=2024-06-09/part-0e5db444e6029c71.parquet",
+      "sha256": "a072487e143b47e6b8d899fd32bff139dc0e547b424ce28c3ca5625fa68bce17"
+    },
+    {
+      "path": "data/raw/nq_mbo/legacy_parquet/date=2024-06-10/part-8d25e123eb41bfa8.parquet",
+      "sha256": "81113756e86ed53aa99a72fc8dbc2449087b17b35ecca34ccc3f409a9ceceb6f"
+    },
+    {
+      "path": "data/raw/nq_mbo/legacy_parquet/date=2024-06-11/part-4aa442e5de5e1f51.parquet",
+      "sha256": "14ae3db9d956645aa0f84e29c46b6597874d3aa363c78f89855d8e19b1beb168"
+    },
+    {
+      "path": "data/raw/nq_mbo/legacy_parquet/date=2024-06-12/part-074494ff335237dc.parquet",
+      "sha256": "6ce5135577b44079bc8ed007486380399ef2fb7f05dd501083c3b96e49735a0d"
+    },
+    {
+      "path": "data/raw/nq_mbo/legacy_parquet/date=2024-06-13/part-42a8a81d9e37efc3.parquet",
+      "sha256": "a47e990611f45bbfc26d9de9033c340854b567f5c39a6eb3a2d7822cdb8c651f"
+    },
+    {
+      "path": "data/raw/nq_mbo/legacy_parquet/date=2024-06-14/part-6d8824b295572513.parquet",
+      "sha256": "de291e1f0f4d98901b0a3d9e9fb922940e5720956fefac81c02c79524689e8dc"
+    }
+  ],
+  "feature_windows": {
+    "pre_context_completed_minutes": 5,
+    "formation": "exact_M5_source_BAR_clocks_expanded_to_completed_M1",
+    "post_response_completed_minutes": 5,
+    "formation_available_at": "semantic_known_at",
+    "post_response_authority": "retrospective_mechanism_validation_only"
+  },
+  "minute_feature_availability": {
+    "event_clock_assignment": "ceil_ts_recv_to_completed_minute_including_exact_decision_clock",
+    "book_change_valid_required_for_ofi_and_mid_delta": true,
+    "invalid_book_change_window_policy": "censor_episode_with_exact_reason_never_fill_zero",
+    "displayed_defense_net_add_semantics": "all_book_A_minus_C_minus_passive_F_proxy_not_same_level_queue_replenishment_or_absorption",
+    "synthetic_clock_mbo_flow_policy": "aggressor_buy_sell_unknown_trade_volume_and_count_plus_passive_bid_ask_unknown_fill_volume_and_count_must_all_equal_zero_displayed_add_cancel_may_be_nonzero"
+  },
+  "hypothesis_family": [
+    "sweep_rejection",
+    "acceptance_continuation",
+    "displacement_impact",
+    "mss_flow_shift",
+    "fvg_retest_response"
+  ],
+  "hypothesis_design": {
+    "sweep_rejection": {
+      "treatment": "M5 sweep_confirmed; direction is the preregistered reaction direction",
+      "control": "forward same-session M5 acceptance_confirmed crossing with candidate-local direction",
+      "primary_metric": "response_aggressor_reversal",
+      "secondary_metrics": [
+        "post_displayed_defense_net_add_per_contract",
+        "post_directional_best_level_ofi_per_contract"
+      ],
+      "expected_effect_direction": "greater_than_control",
+      "causal_claim": false
+    },
+    "acceptance_continuation": {
+      "treatment": "M5 acceptance_confirmed; direction is the preregistered crossing direction",
+      "control": "forward same-session M5 sweep_confirmed crossing with candidate-local direction",
+      "primary_metric": "formation_directional_aggressor_imbalance",
+      "secondary_metrics": [
+        "formation_directional_best_level_ofi_per_contract",
+        "formation_directional_mid_impact_ticks_per_contract"
+      ],
+      "expected_effect_direction": "greater_than_control",
+      "causal_claim": false
+    },
+    "displacement_impact": {
+      "treatment": "M5 displacement_observed with evidence.lifecycle == active",
+      "control": "forward same-session completed M5 clock without an active displacement observation",
+      "continuous_analysis": "descriptive Spearman relationship between frozen displacement score and primary response; no threshold",
+      "primary_metric": "formation_directional_mid_impact_ticks_per_contract",
+      "secondary_metrics": [
+        "formation_directional_aggressor_imbalance",
+        "formation_directional_best_level_ofi_per_contract"
+      ],
+      "expected_effect_direction": "greater_than_control",
+      "causal_claim": false
+    },
+    "mss_flow_shift": {
+      "treatment": "M5 mss_core_confirmed",
+      "control": "forward same-session M5 raw_boundary_break not used by an M5 MSS Core",
+      "primary_metric": "response_directional_ofi_shift",
+      "secondary_metrics": [
+        "post_directional_aggressor_imbalance",
+        "post_directional_best_level_ofi_per_contract"
+      ],
+      "expected_effect_direction": "greater_than_control",
+      "causal_claim": false
+    },
+    "fvg_retest_response": {
+      "treatment": "first concrete successful M5 FVG lifecycle transition per fvg entity: partial, midpoint or full; FVG_TOUCHED alias forbidden",
+      "control": "first concrete failed FVG retest (invalidation) only; this is the sole primary control entering the fixed Holm family",
+      "primary_control_variant": "failed_retest",
+      "pseudo_zone_role": "descriptive_sensitivity_only_excluded_from_holm_and_phase7",
+      "event_variants": {
+        "successful_retest": [
+          "fvg_partially_filled",
+          "fvg_midpoint_touched",
+          "fvg_fully_filled"
+        ],
+        "failed_retest": [
+          "fvg_invalidated"
+        ],
+        "pooling": "forbidden"
+      },
+      "pseudo_zone_protocol": {
+        "construction": "same_width_shifted_farther_on_the_same_directional_side_at_creation_known_at",
+        "exclude_overlap_with_then_known_real_fvg": true,
+        "first_touch_only": true,
+        "maximum_future_m5_bars": 120,
+        "eye_publication": false
+      },
+      "primary_metric": "post_directional_aggressor_imbalance",
+      "secondary_metrics": [
+        "post_displayed_defense_net_add_per_contract",
+        "post_directional_best_level_ofi_per_contract"
+      ],
+      "expected_effect_direction": "greater_than_control",
+      "causal_claim": false
+    }
+  },
+  "matching": {
+    "algorithm": "deterministic_earliest_first_global_nonoverlap_greedy_within_hypothesis",
+    "forward_only": true,
+    "exact_fields": [
+      "symbol",
+      "instrument_id",
+      "study_week",
+      "half_week",
+      "timeframe",
+      "session_phase",
+      "direction",
+      "volatility_bucket",
+      "trend_relation",
+      "relative_volume_bucket"
+    ],
+    "maximum_completed_minute_offset": 3000,
+    "post_response_minutes": 5,
+    "embargo_minutes": 5,
+    "replacement_limit": 1,
+    "candidate_direction": "candidate_local_known_at",
+    "same_clock_treatment_exclusion": true,
+    "inference_clock_set": "formation_plus_post",
+    "within_pair_embargo_completed_minutes": 5,
+    "cross_pair_clock_reuse_within_hypothesis": false,
+    "cross_hypothesis_clock_reuse_restricted": false
+  },
+  "analysis_unit": {
+    "entity_first_rules": {
+      "fvg_retest_response": "first_concrete_lifecycle_transition_per_fvg_entity",
+      "displacement_impact": "first_ACTIVE_observation_per_displacement_entity_by_known_at_then_event_id"
+    },
+    "clock_canonical_identity_fields": [
+      "symbol",
+      "instrument_id",
+      "timeframe",
+      "hypothesis",
+      "event_variant",
+      "control_kind",
+      "known_at",
+      "direction"
+    ],
+    "opposite_direction_same_clock_policy": "exclude_as_ambiguous_before_matching",
+    "constituent_audit": "sorted_event_ids_entities_and_count",
+    "displacement_score_aggregation": "maximum_constituent_score",
+    "candidate_clock_capacity": 1,
+    "source_m5_definition": "transitive_source_only_ancestry_intersected_with_closed_episode_interval_event_time_to_known_at",
+    "source_m5_audit": "event_ids_sorted_by_clock_then_event_id_plus_sha256_count_and_episode_local_formation_clocks"
+  },
+  "matching_context": {
+    "context_clock": "earliest_formation_source_M5_end_minus_5_completed_minutes",
+    "source": "cached_real_completed_M1_at_strict_prior_formation_clock",
+    "strict_prior_fields": [
+      "volatility_bucket",
+      "trend_relation",
+      "relative_volume_bucket"
+    ],
+    "event_clock_field": "session_phase_only",
+    "missing_context_policy": "censor_with_strict_prior_real_completed_m1_context_missing",
+    "unavailable_field_policy": {
+      "atr": "censor_if_none_nonfinite_or_less_than_or_equal_to_zero",
+      "relative_volume": "censor_if_none_nonfinite_or_less_than_zero_zero_is_valid",
+      "trend_direction": "none_maps_to_trend_neutral"
+    },
+    "censor_reasons": [
+      "strict_prior_real_completed_m1_context_missing",
+      "strict_prior_real_completed_m1_context_atr_unavailable",
+      "strict_prior_real_completed_m1_context_relative_volume_unavailable"
+    ],
+    "same_clock_or_post_event_fallback": false
+  },
+  "stability": {
+    "half_week_definition": "within_each_registered_week_before_Wednesday_00_ET_vs_from_Wednesday_00_ET",
+    "extension_half_week_strata": "study_week_x_half_week_no_cross_week_pooling",
+    "session_field": "registered_independent_SessionState.phase",
+    "systematic_reversal": "negative_mean_primary_paired_effect_in_any_stratum_with_at_least_5_pairs"
+  },
+  "inference": {
+    "primary_test": "two_sided_exact_paired_sign_test",
+    "multiple_testing": "holm_fixed_family",
+    "family_order": [
+      "sweep_rejection",
+      "acceptance_continuation",
+      "displacement_impact",
+      "mss_flow_shift",
+      "fvg_retest_response"
+    ],
+    "alpha": 0.05,
+    "paired_ci": "deterministic_paired_percentile_bootstrap",
+    "bootstrap_replicates": 10000,
+    "bootstrap_seed": 20240602,
+    "missing_or_underpowered_p_value": 1.0
+  },
+  "minimum_matched_episodes": 30,
+  "support_rule": {
+    "minimum_primary_matched_n": 30,
+    "holm_adjusted_p_below": 0.05,
+    "paired_primary_ci_excludes_zero_expected_direction": true,
+    "one_secondary_mean_effect_expected_direction": true,
+    "half_week_and_session_no_systematic_sign_reversal": true,
+    "stability_stratum_minimum_n": 5,
+    "unsupported_or_underpowered_excluded_from_phase7": true
+  },
+  "engineering_pass_rule": {
+    "identity_and_lineage_verified": true,
+    "raw_partition_hashes_verified": true,
+    "exact_completed_clock_census": true,
+    "real_completed_ohlcv_clock_coverage": 1.0,
+    "registered_synthetic_mbo_response_clock_allowed": true,
+    "registered_synthetic_semantic_exception_verified": true,
+    "unique_event_and_episode_identity": true,
+    "no_future_book_or_source_bar_clock": true,
+    "fixed_family_inference_completed": true,
+    "individual_mechanism_support_not_required": true
+  },
+  "ledger_definition": {
+    "episodes": "compact_canonical_json_lines_no_audit_store_dump",
+    "matched_pairs": "compact_canonical_json_lines_with_exact_feature_clocks_and_explicit_primary_or_descriptive_comparison",
+    "unmatched": "compact_canonical_json_lines_reason_only"
+  },
+  "parameter_search_space": {},
+  "claim_scope": "development association only; no causal, OOS, model-fit or trading claim",
+  "notes": "FROZEN BEFORE EXTENSION RUN. Registered Week-2 development mechanism diagnostic only; not causal, OOS, model-fit, Phase-7 admission by itself, or trading authority. Week 2 was opened solely because the hash-bound Week-1 v5 fixed family contained n<30. The active artifact and Reader census are exactly 6900 Week-2 clocks (6899 real plus the single synthetic_no_trade decision clock 2024-06-10T04:14:00Z). A synthetic-interruption M5 terminal may settle on the later M5 boundary only when all exact clock-only M1 roots in its open-closed constituent interval are context-only, exactly cover the registered synthetic clocks, and pass the full event/DAG audit; it remains excluded with all descendants from every analysis sample. Deterministic warmup may admit only the exact Week-1 aligned synthetic terminal exception via the strict legacy audit projection from the hash-bound v5 result; active Reader census remains Week-2-only. Stability uses study_week x half_week without cross-week pooling. Displacement monotonicity reports Week 1 and Week 2 separately and leaves combined null. The v5 result transitively binds and the loader revalidates all three compact ledger row counts and SHA-256 identities. Expected output stem: experiments/results/smc_semantics_v1_2_2024_06_phase6_mbo_week2_extension_v3."
+}

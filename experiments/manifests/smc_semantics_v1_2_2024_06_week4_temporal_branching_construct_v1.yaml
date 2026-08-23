@@ -1,0 +1,258 @@
+{
+  "schema_version": 1,
+  "research_protocol_version": "temporal_branching_construct_v1",
+  "status": "preregistered_development_design_execution_bindings_pending_not_authorized_to_run",
+  "experiment_id": "smc_semantics_v1_2_2024_06_week4_temporal_branching_construct_v1",
+  "frozen_at": "2026-08-23T07:51:40-04:00",
+  "frozen_before_outcome_run": true,
+  "authority": {
+    "development_reuse_only": true,
+    "diagnostic_association_only": true,
+    "causal_proof": false,
+    "artifact_fit_allowed": false,
+    "production_threshold_selection_allowed": false,
+    "trading_authority": false,
+    "oos_claim_allowed": false,
+    "sealed_holdout_opened": false
+  },
+  "semantic_version": "smc_semantics_v1.2",
+  "window": {
+    "window_id": "2024-06-week-4",
+    "start": "2024-06-23T22:00:00Z",
+    "end_exclusive": "2024-06-28T21:01:00Z",
+    "expected_completed_m1_clocks": 6900,
+    "symbol": "NQU4",
+    "instrument_id": 4358,
+    "contract_selection": "highest_total_volume_from_strictly_prior_completed_Globex_session"
+  },
+  "input_authority": {
+    "ohlcv_canonical_split_label": "rolling_oof",
+    "ohlcv_experiment_role": "previously_opened_reused_development_not_oof",
+    "mbo_canonical_split_label": "development",
+    "joint_claim_role": "development_diagnostic_not_oof",
+    "reason": "2024-06 OHLCV and MBO have already been opened for iterative semantic and mechanism diagnostics",
+    "rolling_oof_contribution_allowed": false,
+    "sealed_oos_contribution_allowed": false
+  },
+  "execution_bindings": {
+    "status": "pending_before_execution",
+    "ohlcv_artifact": "data/processed/nq_1m_previous_session_front_v2_3_2017_2026.parquet",
+    "mbo_partition_manifest": "data/raw/nq_mbo/legacy_parquet/manifest.json",
+    "registered_month_bbo_artifact": "data/processed/mbo_execution_dev_202406_v2_3_clockfix.parquet",
+    "week4_mbo_mechanism_artifact": null,
+    "week4_mbo_mechanism_manifest": null,
+    "runtime_identity_sha256": null,
+    "raw_partition_sha256_bindings": null,
+    "reader_census": null,
+    "execution_authorized": false
+  },
+  "analysis_population": {
+    "timeframe": "5m",
+    "root_interaction_kinds": [
+      "acceptance_confirmed",
+      "sweep_confirmed"
+    ],
+    "response_kind": "displacement_observed",
+    "response_predicate": "evidence.lifecycle == 'active' using the already-frozen semantic threshold",
+    "transition_kinds": [
+      "qualified_bos",
+      "mss_core_confirmed",
+      "raw_boundary_break"
+    ],
+    "direction_policy": "same_explicit_research_direction",
+    "market_identity_policy": "same_symbol_and_instrument_id",
+    "generation_policy": "crossing_generation_is_retained_as_a_conditioning_field_when_available_not_inferred_for_response_or_transition",
+    "parent_context_policy": "retained_as_conditioning_fields_not_hard_relation_gates",
+    "duplicate_policy": "canonical_same_kind_market_clock_direction_episode_with_all_constituent_event_ids_retained"
+  },
+  "temporal_sensitivity": {
+    "clock": "completed_M5_decision_clock",
+    "minimum_completed_bars": 1,
+    "maximum_completed_bars_grid": [1, 2, 3],
+    "same_clock_policy": "separate_exact_constituent_M5_BAR_composition_never_temporal_predecessor",
+    "window_selection_policy": "report_every_grid_member_no_selection_from_development_results",
+    "claim": "candidate_temporal_association_not_ancestry_not_causal_proof"
+  },
+  "branch_graph": {
+    "temporal_relations": [
+      {
+        "relation_id": "acceptance_to_displacement_later",
+        "stage": "interaction_to_response",
+        "previous_kind": "acceptance_confirmed",
+        "current_kind": "displacement_observed",
+        "previous_timeframe": "5m",
+        "current_timeframe": "5m",
+        "mode": "registered_temporal_episode",
+        "registered_episode_definition": "same_market_same_direction_strictly_later_completed_M5_candidate_association_v1"
+      },
+      {
+        "relation_id": "sweep_to_displacement_later",
+        "stage": "interaction_to_response",
+        "previous_kind": "sweep_confirmed",
+        "current_kind": "displacement_observed",
+        "previous_timeframe": "5m",
+        "current_timeframe": "5m",
+        "mode": "registered_temporal_episode",
+        "registered_episode_definition": "same_market_same_direction_strictly_later_completed_M5_candidate_association_v1"
+      },
+      {
+        "relation_id": "displacement_to_qualified_bos_later",
+        "stage": "response_to_transition",
+        "previous_kind": "displacement_observed",
+        "current_kind": "qualified_bos",
+        "previous_timeframe": "5m",
+        "current_timeframe": "5m",
+        "mode": "registered_temporal_episode",
+        "registered_episode_definition": "same_market_same_direction_strictly_later_completed_M5_candidate_association_v1"
+      },
+      {
+        "relation_id": "displacement_to_mss_later",
+        "stage": "response_to_transition",
+        "previous_kind": "displacement_observed",
+        "current_kind": "mss_core_confirmed",
+        "previous_timeframe": "5m",
+        "current_timeframe": "5m",
+        "mode": "registered_temporal_episode",
+        "registered_episode_definition": "same_market_same_direction_strictly_later_completed_M5_candidate_association_v1"
+      },
+      {
+        "relation_id": "displacement_to_raw_break_later",
+        "stage": "response_to_transition",
+        "previous_kind": "displacement_observed",
+        "current_kind": "raw_boundary_break",
+        "previous_timeframe": "5m",
+        "current_timeframe": "5m",
+        "mode": "registered_temporal_episode",
+        "registered_episode_definition": "same_market_same_direction_strictly_later_completed_M5_candidate_association_v1"
+      }
+    ],
+    "same_clock_composition_relations": [
+      {
+        "relation_id": "acceptance_to_displacement_same_clock_composition",
+        "stage": "interaction_to_response",
+        "previous_kind": "acceptance_confirmed",
+        "current_kind": "displacement_observed",
+        "previous_timeframe": "5m",
+        "current_timeframe": "5m",
+        "mode": "cross_timeframe_constituent_bar_composition",
+        "constituent_bar_timeframe": "5m",
+        "same_clock_only": true
+      },
+      {
+        "relation_id": "sweep_to_displacement_same_clock_composition",
+        "stage": "interaction_to_response",
+        "previous_kind": "sweep_confirmed",
+        "current_kind": "displacement_observed",
+        "previous_timeframe": "5m",
+        "current_timeframe": "5m",
+        "mode": "cross_timeframe_constituent_bar_composition",
+        "constituent_bar_timeframe": "5m",
+        "same_clock_only": true
+      },
+      {
+        "relation_id": "displacement_to_qualified_bos_same_clock_composition",
+        "stage": "response_to_transition",
+        "previous_kind": "displacement_observed",
+        "current_kind": "qualified_bos",
+        "previous_timeframe": "5m",
+        "current_timeframe": "5m",
+        "mode": "cross_timeframe_constituent_bar_composition",
+        "constituent_bar_timeframe": "5m",
+        "same_clock_only": true
+      },
+      {
+        "relation_id": "displacement_to_mss_same_clock_composition",
+        "stage": "response_to_transition",
+        "previous_kind": "displacement_observed",
+        "current_kind": "mss_core_confirmed",
+        "previous_timeframe": "5m",
+        "current_timeframe": "5m",
+        "mode": "cross_timeframe_constituent_bar_composition",
+        "constituent_bar_timeframe": "5m",
+        "same_clock_only": true
+      },
+      {
+        "relation_id": "displacement_to_raw_break_same_clock_composition",
+        "stage": "response_to_transition",
+        "previous_kind": "displacement_observed",
+        "current_kind": "raw_boundary_break",
+        "previous_timeframe": "5m",
+        "current_timeframe": "5m",
+        "mode": "cross_timeframe_constituent_bar_composition",
+        "constituent_bar_timeframe": "5m",
+        "same_clock_only": true
+      }
+    ],
+    "mass_categories": [
+      "unresolved_interaction",
+      "response_without_registered_transition",
+      "registered_transition_observed"
+    ],
+    "denominator_policy": "retain_every_root_in_exactly_one_mass_category_at_every_grid_member",
+    "sibling_branch_policy": "retain_all_eligible_predecessors_and_all_terminal_siblings_no_single_chain_selection"
+  },
+  "mbo_response": {
+    "role": "retrospective_continuous_descriptive_vector_not_semantic_event_not_known_at_evidence",
+    "anchor_kinds": [
+      "acceptance_confirmed",
+      "sweep_confirmed",
+      "displacement_observed"
+    ],
+    "post_response_completed_m5_bars_grid": [1, 2, 3],
+    "post_response_completed_m1_minutes_grid": [5, 10, 15],
+    "raw_additive_components_retained": [
+      "aggressor_buy_volume",
+      "aggressor_sell_volume",
+      "aggressor_unknown_volume",
+      "best_level_ofi_contracts",
+      "mid_change_ticks",
+      "displayed_bid_add_volume",
+      "displayed_ask_add_volume",
+      "displayed_bid_cancel_volume",
+      "displayed_ask_cancel_volume",
+      "passive_bid_fill_volume",
+      "passive_ask_fill_volume"
+    ],
+    "stable_derived_metrics_retained": [
+      "directional_aggressor_imbalance",
+      "directional_best_level_ofi_per_contract",
+      "directional_mid_impact_ticks_per_contract",
+      "displayed_defense_net_add_per_contract",
+      "defensive_passive_fill_fraction",
+      "mean_spread_ticks",
+      "book_valid_clock_fraction"
+    ],
+    "classification_policy": "raw_values_are_primary_any_sign_label_is_descriptive_only_and_never_a_gate",
+    "displayed_flow_semantics": "all_book_proxy_not_same_level_queue_replenishment_or_absorption",
+    "invalid_book_change_policy": "censor_exact_window_with_reason_never_fill_zero",
+    "future_feature_authority": "retrospective_construct_diagnostic_only"
+  },
+  "reporting": {
+    "required_grid_outputs": [
+      "root_mass_census",
+      "all_typed_edge_ledger_rows",
+      "all_terminal_sibling_ids",
+      "delta_bars",
+      "delta_seconds",
+      "continuous_MBO_response_vector",
+      "conditioning_field_census"
+    ],
+    "probability_role": "descriptive_conditional_frequency_only_not_fitted_likelihood_artifact",
+    "missing_category_policy": "report_zero_count_categories_explicitly",
+    "no_primary_window": true,
+    "no_effect_driven_extension": true
+  },
+  "excluded_estimands": {
+    "fvg_first_retest": "excluded_until_a_true_geometry_derived_first_retest_event_exists_the_historical_first_concrete_lifecycle_proxy_is_not_eligible",
+    "entry_method": "execution_research_out_of_scope",
+    "trade_pnl": "signal_construct_diagnostic_out_of_scope",
+    "path_or_dol_artifact_fit": "requires_separate_train_validation_freeze_protocol",
+    "production_threshold": "development_diagnostic_cannot_authorize_one"
+  },
+  "parameter_search_space": {
+    "maximum_completed_m5_bars": [1, 2, 3]
+  },
+  "selection_policy": "all_preregistered_grid_members_are_reported_no_result_based_window_selection",
+  "claim_scope": "development candidate temporal association and contemporaneous or retrospective mechanism description only",
+  "notes": "DESIGN FROZEN, EXECUTION CLOSED. Before any market replay, bind the Week4 mechanism artifact, exact raw partitions, all runtime identities, and the Reader real/synthetic 6,900-clock census in a separate executable revision. This file does not authorize materialization or a full-window run."
+}

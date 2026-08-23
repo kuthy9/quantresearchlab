@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import hashlib
 import json
 from pathlib import Path
 from typing import Any, Iterable, Mapping
@@ -11,6 +12,10 @@ from .calibration import (
 )
 from .causal import CausalMarketReader
 from .decision import DecisionConfig, UtilityDecisionLayer
+from .dol_probability import (
+    load_dol_probability_model_artifact,
+    load_dol_probability_protocol,
+)
 from .model import (
     AccountState,
     Bar,
@@ -31,6 +36,13 @@ from .observation import (
 )
 from .playbooks import BrainConfig, PlaybookBrain
 from .playbook_registry import load_playbook_registry
+from .signal_policy import (
+    load_dol_calibration_artifact,
+    load_outcome_model_artifact,
+    load_path_likelihood_artifact,
+    load_signal_artifact_pins,
+    load_signal_policy_protocol,
+)
 from .risk import RiskLimits, StructuralRiskEngine
 from .scene_graph import (
     build_neutral_market_state,
@@ -172,6 +184,10 @@ class ContinuousSMCEngine:
         self._last_snapshot: EngineSnapshot | NeutralEngineSnapshot | None = None
         self._last_belief_position: PositionSnapshot | None = None
         self._neutral_market_state: NeutralMarketState | None = None
+        # Exact model bytes used to construct this runtime.  Shadow parity
+        # binds this identity so two engines with coincidentally equal early
+        # outputs cannot be mistaken for the same registered runtime.
+        self._model_config_sha256: str | None = None
         self._neutral_checkpoint_schema_version = (
             NEUTRAL_ENGINE_CHECKPOINT_SCHEMA_VERSION
         )
@@ -235,14 +251,19 @@ class ContinuousSMCEngine:
         source = Path(path)
         if not source.is_absolute() and not source.exists():
             source = Path(__file__).resolve().parents[1] / source
-        payload: dict[str, Any] = json.loads(source.read_text(encoding="utf-8"))
+        raw_config = source.read_bytes()
+        payload: dict[str, Any] = json.loads(raw_config)
         if payload.get("schema_version") != 1:
             raise ValueError("model.schema_version must be 1")
         scales_raw = payload.get("scales")
         if not isinstance(scales_raw, list) or not scales_raw:
             raise ValueError("model.scales must register the current causal scale stack")
         scale_specs = parse_scale_specs(scales_raw)
-        reader = CausalMarketReader(scale_specs=scale_specs)
+        tick_size = float(payload.get("tick_size", 0.25))
+        reader = CausalMarketReader(
+            scale_specs=scale_specs,
+            tick_size=tick_size,
+        )
         observer_raw = payload.get("observer")
         if not isinstance(observer_raw, Mapping):
             raise ValueError("model.observer must bind all typed primitive protocols")
@@ -277,7 +298,7 @@ class ContinuousSMCEngine:
                         for spec in scale_specs
                     )
                 },
-                tick_size=float(payload.get("tick_size", 0.25)),
+                tick_size=tick_size,
                 point_value=float(payload.get("point_value", 20.0)),
                 structure_protocol=observer_raw.get("structure_protocol"),
                 liquidity_protocol=observer_raw.get(
@@ -289,6 +310,12 @@ class ContinuousSMCEngine:
                 group3_protocol=observer_raw.get("group3_protocol"),
                 group4_protocol=observer_raw.get("group4_protocol"),
                 group5_protocol=observer_raw.get("group5_protocol"),
+                semantic_registry=str(
+                    observer_raw.get(
+                        "semantic_registry",
+                        "semantics/registry_v1_2.yaml",
+                    )
+                ),
                 scale_specs=scale_specs,
             )
         )
@@ -359,9 +386,176 @@ class ContinuousSMCEngine:
                 "live execution readiness is incomplete: "
                 "typed_brain_calibration_ready"
             )
+        path_hypotheses_raw = payload.get("path_hypotheses")
+        if not isinstance(path_hypotheses_raw, Mapping):
+            raise ValueError(
+                "model.path_hypotheses must bind the shadow path protocol"
+            )
+        path_protocol_path = path_hypotheses_raw.get("protocol")
+        expected_path_fingerprint = path_hypotheses_raw.get(
+            "path_protocol_fingerprint"
+        )
+        expected_dol_fingerprint = path_hypotheses_raw.get(
+            "dol_protocol_fingerprint"
+        )
+        if any(
+            not isinstance(value, str) or not value.strip()
+            for value in (
+                path_protocol_path,
+                expected_path_fingerprint,
+                expected_dol_fingerprint,
+            )
+        ):
+            raise ValueError(
+                "model.path_hypotheses requires protocol and exact fingerprints"
+            )
+        dol_probability_raw = payload.get("dol_probability")
+        if (
+            not isinstance(dol_probability_raw, Mapping)
+            or set(dol_probability_raw)
+            != {
+                "protocol",
+                "protocol_fingerprint",
+                "model_artifact",
+                "model_artifact_fingerprint",
+            }
+            or not isinstance(dol_probability_raw.get("protocol"), str)
+            or not str(dol_probability_raw.get("protocol")).strip()
+            or not isinstance(
+                dol_probability_raw.get("protocol_fingerprint"),
+                str,
+            )
+            or len(dol_probability_raw["protocol_fingerprint"]) != 64
+        ):
+            raise ValueError(
+                "model.dol_probability must bind the exact shadow protocol"
+            )
+        dol_model_path = dol_probability_raw.get("model_artifact")
+        dol_model_fingerprint = dol_probability_raw.get(
+            "model_artifact_fingerprint"
+        )
+        if (dol_model_path is None) != (dol_model_fingerprint is None) or (
+            dol_model_path is not None
+            and (
+                not isinstance(dol_model_path, str)
+                or not dol_model_path.strip()
+                or not isinstance(dol_model_fingerprint, str)
+                or len(dol_model_fingerprint) != 64
+            )
+        ):
+            raise ValueError(
+                "model.dol_probability artifact path and fingerprint must "
+                "be admitted together"
+            )
+        dol_probability_protocol = load_dol_probability_protocol(
+            dol_probability_raw["protocol"]
+        )
+        dol_probability_model_artifact = (
+            None
+            if dol_model_path is None
+            else load_dol_probability_model_artifact(
+                dol_model_path,
+                protocol=dol_probability_protocol,
+                expected_fingerprint=dol_model_fingerprint,
+            )
+        )
+        signal_policy_raw = payload.get("signal_policy")
+        if (
+            not isinstance(signal_policy_raw, Mapping)
+            or set(signal_policy_raw)
+            != {
+                "protocol",
+                "protocol_fingerprint",
+                "path_likelihood_artifact",
+                "dol_calibration_artifact",
+                "outcome_model_artifact",
+                "artifact_pins",
+            }
+            or not isinstance(signal_policy_raw.get("protocol"), str)
+            or not str(signal_policy_raw.get("protocol")).strip()
+            or not isinstance(
+                signal_policy_raw.get("protocol_fingerprint"),
+                str,
+            )
+            or len(signal_policy_raw["protocol_fingerprint"]) != 64
+        ):
+            raise ValueError(
+                "model.signal_policy must bind the exact fail-closed shadow "
+                "protocol"
+            )
+        signal_artifact_names = (
+            "path_likelihood_artifact",
+            "dol_calibration_artifact",
+            "outcome_model_artifact",
+            "artifact_pins",
+        )
+        supplied_signal_artifacts = tuple(
+            signal_policy_raw.get(name) is not None
+            for name in signal_artifact_names
+        )
+        if any(supplied_signal_artifacts) and not all(supplied_signal_artifacts):
+            raise ValueError(
+                "model.signal_policy artifacts must be admitted as one exact set"
+            )
+        path_likelihood_artifact = None
+        dol_calibration_artifact = None
+        outcome_model_artifact = None
+        signal_artifact_pins = None
+        if all(supplied_signal_artifacts):
+            pins_binding = signal_policy_raw["artifact_pins"]
+            if (
+                not isinstance(pins_binding, Mapping)
+                or set(pins_binding) != {"path", "admission_id"}
+                or any(
+                    not isinstance(pins_binding.get(name), str)
+                    or not pins_binding[name].strip()
+                    for name in ("path", "admission_id")
+                )
+                or any(
+                    not isinstance(signal_policy_raw[name], str)
+                    or not signal_policy_raw[name].strip()
+                    for name in signal_artifact_names[:-1]
+                )
+                or dol_probability_model_artifact is None
+            ):
+                raise ValueError(
+                    "model.signal_policy artifact set or external pins are invalid"
+                )
+            signal_artifact_pins = load_signal_artifact_pins(
+                pins_binding["path"],
+                expected_admission_id=pins_binding["admission_id"],
+            )
+            path_likelihood_artifact = load_path_likelihood_artifact(
+                signal_policy_raw["path_likelihood_artifact"],
+                expected_artifact_id=(
+                    signal_artifact_pins.path_likelihood_artifact_id
+                ),
+            )
+            dol_calibration_artifact = load_dol_calibration_artifact(
+                signal_policy_raw["dol_calibration_artifact"],
+                expected_artifact_id=(
+                    signal_artifact_pins.dol_calibration_artifact_id
+                ),
+            )
+            outcome_model_artifact = load_outcome_model_artifact(
+                signal_policy_raw["outcome_model_artifact"],
+                expected_artifact_id=(
+                    signal_artifact_pins.outcome_model_artifact_id
+                ),
+            )
+        # Loading the protocol here provides an early exact-fingerprint check;
+        # PlaybookBrain repeats the binding at its ownership boundary.
+        signal_policy_protocol = load_signal_policy_protocol(
+            signal_policy_raw["protocol"]
+        )
+        if (
+            signal_policy_protocol.fingerprint
+            != signal_policy_raw["protocol_fingerprint"]
+        ):
+            raise ValueError("model Signal Policy fingerprint is stale")
         brain = PlaybookBrain(
             BrainConfig(
-                tick_size=float(payload.get("tick_size", 0.25)),
+                tick_size=tick_size,
                 minimum_remaining_path_R=float(
                     payload.get("risk", {}).get(
                         "minimum_target_R",
@@ -371,6 +565,24 @@ class ContinuousSMCEngine:
             ),
             registry=registry,
             calibrator=calibrator,
+            path_hypotheses_protocol=path_protocol_path,
+            expected_path_protocol_fingerprint=expected_path_fingerprint,
+            expected_dol_protocol_fingerprint=expected_dol_fingerprint,
+            dol_probability_protocol=dol_probability_raw["protocol"],
+            expected_dol_probability_protocol_fingerprint=(
+                dol_probability_raw["protocol_fingerprint"]
+            ),
+            dol_probability_model_artifact=(
+                dol_probability_model_artifact
+            ),
+            signal_policy_protocol=signal_policy_raw["protocol"],
+            expected_signal_policy_fingerprint=(
+                signal_policy_raw["protocol_fingerprint"]
+            ),
+            path_likelihood_artifact=path_likelihood_artifact,
+            dol_calibration_artifact=dol_calibration_artifact,
+            outcome_model_artifact=outcome_model_artifact,
+            signal_artifact_pins=signal_artifact_pins,
         )
         decision_raw = payload.get("decision", {})
         decision = UtilityDecisionLayer(
@@ -407,10 +619,10 @@ class ContinuousSMCEngine:
                     risk_raw.get("minimum_minutes_to_deadline", 5)
                 ),
                 minimum_target_R=float(risk_raw.get("minimum_target_R", 1.0)),
-                tick_size=float(payload.get("tick_size", 0.25)),
+                tick_size=tick_size,
             )
         )
-        return cls(
+        engine = cls(
             reader=reader,
             observer=observer,
             brain=brain,
@@ -420,6 +632,12 @@ class ContinuousSMCEngine:
             action_disabled_playbooks=action_disabled_playbooks,
             _readiness_token=_LIVE_READINESS_TOKEN,
         )
+        engine._model_config_sha256 = hashlib.sha256(raw_config).hexdigest()
+        return engine
+
+    @property
+    def model_config_sha256(self) -> str | None:
+        return getattr(self, "_model_config_sha256", None)
 
     @property
     def last_snapshot(self) -> EngineSnapshot | NeutralEngineSnapshot | None:
@@ -486,6 +704,16 @@ class ContinuousSMCEngine:
                 scene_graph=scene_graph,
                 scene_delta=scene_delta,
             )
+        # Phase 7 shadow projection is an append-only belief surface.  It can
+        # freeze never-submit Trade Intents, but the legacy Decision/Risk path
+        # below still consumes exactly the same action-candidate interface.
+        project_shadow_trade_intents = getattr(
+            self.brain,
+            "project_shadow_trade_intents",
+            None,
+        )
+        if callable(project_shadow_trade_intents):
+            belief = project_shadow_trade_intents(belief, account)
         decision_belief = (
             RuntimeActionBeliefView(
                 belief,
@@ -502,6 +730,7 @@ class ContinuousSMCEngine:
             decision=decision,
             risk=risk,
             neutral_market_state=neutral_market_state,
+            market_snapshot=getattr(observation, "market_snapshot", None),
         )
         self._last_snapshot = snapshot
         self._last_belief_position = resolved_belief_position
@@ -533,6 +762,7 @@ class ContinuousSMCEngine:
         snapshot = NeutralEngineSnapshot(
             observation=observation,
             neutral_market_state=neutral_market_state,
+            market_snapshot=getattr(observation, "market_snapshot", None),
         )
         self._last_snapshot = snapshot
         self._neutral_market_state = neutral_market_state

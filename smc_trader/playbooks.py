@@ -7,13 +7,32 @@ from dataclasses import dataclass, field, replace
 import hashlib
 import json
 import math
+from pathlib import Path
 from typing import Collection, Mapping, Sequence
 
 import pandas as pd
 
 from .calibration import TypedBrainCalibrator
+from .dol_ranking import (
+    DOLCandidateFact,
+    DOLDirection,
+    DOLObstructionFact,
+    DOLObstructionViewFact,
+    DOLRankingProtocol,
+    DOLRankingResult,
+    load_dol_ranking_protocol,
+    rank_dol_candidates,
+)
+from .dol_probability import (
+    DOLProbabilityModelArtifact,
+    DOLProbabilityProtocol,
+    DOLProbabilityResult,
+    load_dol_probability_protocol,
+    marginalize_dol_probabilities,
+)
 from .market_clock import MARKET_TIMEZONE, special_session_close
 from .model import (
+    AccountState,
     BOSLifecycle,
     BOSPostBreakState,
     BOSScope,
@@ -27,6 +46,7 @@ from .model import (
     EntryLocationState,
     Evidence,
     EventKind,
+    EventOrigin,
     FVGQualification,
     FairValueGapLifecycle,
     FrozenLSRContext,
@@ -43,9 +63,11 @@ from .model import (
     LiquidityLevel,
     LiquidityRoute,
     MarketBelief,
+    MarketEvent,
     MarketObservation,
     ManipulationLifecycle,
     ManipulationState,
+    ScaleRelation,
     MicroBOSReference,
     OpenMarketThesis,
     ContextThesisState,
@@ -58,6 +80,7 @@ from .model import (
     PlaybookPhase,
     PositionSnapshot,
     QualifiedReacceptanceLifecycle,
+    SMC_SEMANTIC_VERSION,
     SequenceStepState,
     StructuralLevel,
     StructureLifecycle,
@@ -65,6 +88,36 @@ from .model import (
     TradePlan,
     aware_timestamp,
     clamp,
+    to_primitive,
+)
+from .path_belief import (
+    HypothesisManager,
+    PathBeliefProtocol,
+    PathBeliefUpdateRecord,
+    PathCompetitionSetState,
+    PathKind,
+    PathOutcomeEvent,
+    PathStatus,
+    PathTerminalEvent,
+    create_path_competition_set,
+    load_path_belief_protocol,
+)
+from .signal_policy import (
+    AdmittedDOLCalibrationArtifact,
+    AdmittedPathLikelihoodArtifact,
+    SignalArtifactPins,
+    SignalAssessment,
+    SignalEvaluationContext,
+    SignalPolicyProtocol,
+    TargetBeforeInvalidationArtifact,
+    assess_signal,
+    load_signal_policy_protocol,
+)
+from .trade_intent import (
+    EntryMethod,
+    TradeIntent,
+    TradeIntentError,
+    build_trade_intent,
 )
 from .playbook_registry import (
     PlaybookProtocol,
@@ -3536,7 +3589,7 @@ def _lsr_location_connected_to_manipulation(
         # surface.  Graph-backed production updates fail closed below.
         return True
     local_episode_connected = bool(
-        scene_graph.find_path(
+        scene_graph.find_action_path(
             (
                 location.location_id,
                 location.source_zone_id,
@@ -3552,7 +3605,7 @@ def _lsr_location_connected_to_manipulation(
         for item in observation.path_sequences
     )
     context_connected = bool(
-        scene_graph.find_path(
+        scene_graph.find_action_path(
             (
                 pool_path.sequence_id
                 if pool_path_is_current
@@ -7597,12 +7650,12 @@ def _favr_graph_broken_index(
         )
         if not (
             evaluation.entry_location_id == location_id
-            and scene_graph.has_direct_relation(
+            and scene_graph.find_causal_path(
                 (manipulation_id,),
-                SceneEdgeKind.PRECEDES,
                 (displacement_id,),
-                source_kind="manipulation",
-                target_kind="displacement",
+                # One direct admitted semantic/provenance edge is required.
+                # The diagnostic PRECEDES edge is intentionally excluded.
+                max_depth=1,
             )
             and zone_created
             and zone_return
@@ -7719,7 +7772,7 @@ def _require_connected_graph_sequence(
             )
             if not left_sources or right.value <= 0.0:
                 continue
-            if not scene_graph.find_path(
+            if not scene_graph.find_action_path(
                 left_sources,
                 right.source_ids,
                 max_depth=6,
@@ -10468,6 +10521,703 @@ def _build_context_episode_views(
     return contexts, episodes
 
 
+def _shadow_path_for_thesis(
+    thesis: OpenMarketThesis,
+) -> PathKind | None:
+    """Map only an explicit existing thesis relation to one registered path."""
+
+    if thesis.mechanism == "range_failed_auction":
+        return PathKind.FAILED_BREAKOUT
+    return {
+        "aligned": PathKind.CONTINUATION,
+        "local_countertrend": PathKind.DEEPER_RETRACEMENT,
+        "challenges_incumbent": PathKind.REVERSAL,
+    }.get(thesis.authority_relation)
+
+
+def _shadow_real_completed_clock(observation: MarketObservation) -> bool:
+    frame = observation.frames.get(Timeframe.M1)
+    geometry = None if frame is None else frame.candle_structure
+    return bool(geometry is not None and geometry.real_completed)
+
+
+def _shadow_dol_facts(
+    observation: MarketObservation,
+    context: GlobalMarketContext,
+) -> tuple[
+    Mapping[str, tuple[DOLCandidateFact, ...]],
+    Mapping[str, DOLObstructionViewFact],
+    Mapping[str, tuple[tuple[str, str], ...]],
+]:
+    """Adapt exact current facts without scanning or price-based fallback."""
+
+    path_candidates: dict[str, set[PathKind]] = {}
+    for thesis in context.open_market_theses:
+        path = _shadow_path_for_thesis(thesis)
+        if path is None or thesis.lifecycle == "invalidated":
+            continue
+        for candidate_id in thesis.draw_candidate_ids:
+            path_candidates.setdefault(candidate_id, set()).add(path)
+
+    inventory = _inventory_item_map(observation)
+    by_direction: dict[str, tuple[DOLCandidateFact, ...]] = {}
+    exclusions: dict[str, tuple[tuple[str, str], ...]] = {}
+    obstruction_facts: dict[str, DOLObstructionViewFact] = {}
+    for direction in Direction:
+        direction_key = direction.value
+        side = direction.opposing_liquidity_side
+        resolved: list[DOLCandidateFact] = []
+        unresolved: list[tuple[str, str]] = []
+        for candidate_id in context.external_draw_candidates.get(side, ()):
+            item = inventory.get(candidate_id)
+            if item is None:
+                unresolved.append((candidate_id, "exact_inventory_join_missing"))
+                continue
+            paths = path_candidates.get(candidate_id, set())
+            if not paths:
+                unresolved.append((candidate_id, "path_association_missing"))
+                continue
+            if len(paths) != 1:
+                unresolved.append((candidate_id, "path_association_ambiguous"))
+                continue
+            if item.side != side:
+                unresolved.append((candidate_id, "inventory_side_mismatch"))
+                continue
+            if not item.source_ids:
+                unresolved.append((candidate_id, "candidate_source_ids_missing"))
+                continue
+            if item.structural_rank not in {"internal", "external"}:
+                unresolved.append(
+                    (candidate_id, "candidate_structural_rank_unregistered")
+                )
+                continue
+            try:
+                fact = DOLCandidateFact(
+                    candidate_id=item.item_id,
+                    timeframe=item.timeframe.value,
+                    side=item.side,
+                    target_price=float(item.price),
+                    source_kind=item.kind,
+                    source_ids=tuple(item.source_ids),
+                    structural_rank=item.structural_rank,
+                    strength=float(item.strength),
+                    age_real_completed_bars=item.age_bars,
+                    path=next(iter(paths)),
+                )
+            except (TypeError, ValueError):
+                unresolved.append((candidate_id, "candidate_fact_contract_invalid"))
+                continue
+            resolved.append(fact)
+        view = context.obstruction_views[direction_key]
+        hard = tuple(
+            DOLObstructionFact(
+                obstruction_id=item.obstruction_id,
+                lower_bound=float(item.lower_bound),
+                upper_bound=float(item.upper_bound),
+                hard=True,
+                source_kind=item.source_kind,
+                source_ids=tuple(item.source_ids),
+            )
+            for item in view.hard_barriers
+        )
+        soft = tuple(
+            DOLObstructionFact(
+                obstruction_id=item.obstruction_id,
+                lower_bound=float(item.lower_bound),
+                upper_bound=float(item.upper_bound),
+                hard=False,
+                source_kind=item.source_kind,
+                source_ids=tuple(item.source_ids),
+            )
+            for item in view.soft_frictions
+        )
+        by_direction[direction_key] = tuple(resolved)
+        exclusions[direction_key] = tuple(sorted(unresolved))
+        obstruction_facts[direction_key] = DOLObstructionViewFact(
+            direction=DOLDirection(direction_key),
+            hard_barriers=hard,
+            soft_frictions=soft,
+        )
+    return by_direction, obstruction_facts, exclusions
+
+
+def _shadow_canonical_event_map(
+    observation: MarketObservation,
+) -> Mapping[str, MarketEvent]:
+    """Return exact canonical semantic events visible to this Brain clock."""
+
+    events_by_id: dict[str, MarketEvent] = {}
+    for event in (
+        *observation.recent_events,
+        *observation.semantic_events_this_update,
+        *(
+            event
+            for timeline in observation.retained_entity_timelines.values()
+            for event in timeline
+        ),
+    ):
+        if (
+            event.origin is not EventOrigin.SEMANTIC_ATOMIC
+            or event.semantic_version != SMC_SEMANTIC_VERSION
+            or event.known_at > observation.asof
+        ):
+            continue
+        identity_payload = {
+            "semantic_version": event.semantic_version,
+            "semantic_type": event.kind.value,
+            "event_time": event.event_time,
+            "known_at": event.known_at,
+            "timeframe": event.timeframe.value,
+            "side": event.side,
+            "price": event.price,
+            "direction": (
+                None if event.direction is None else event.direction.value
+            ),
+            "source_event_ids": event.source_event_ids,
+            "source_data_ids": event.source_data_ids,
+            "source_entity_ids": event.source_entity_ids,
+            "context_event_ids": event.context_event_ids,
+            "origin": event.origin.value,
+            "evidence": event.evidence,
+            "zone": event.zone,
+        }
+        canonical_event_id = hashlib.sha256(
+            json.dumps(
+                to_primitive(identity_payload),
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()[:24]
+        if event.event_id != canonical_event_id:
+            continue
+        prior = events_by_id.get(event.event_id)
+        if prior is not None and prior != event:
+            raise ValueError("one canonical semantic event has conflicting payloads")
+        events_by_id[event.event_id] = event
+    return events_by_id
+
+
+_PATH_RUNTIME_WINNER_RULES: Mapping[PathKind, str] = {
+    PathKind.CONTINUATION: (
+        "accepted_continuation_bos_bound_to_frozen_authority"
+    ),
+    PathKind.DEEPER_RETRACEMENT: (
+        "accepted_opposed_bos_on_connected_lower_scale_while_"
+        "frozen_authority_intact"
+    ),
+    PathKind.REVERSAL: "accepted_opposed_bos_bound_to_frozen_authority",
+    PathKind.BALANCE: "authoritative_balance_range_activation",
+    PathKind.FAILED_BREAKOUT: (
+        "rejected_bos_crossing_bound_to_frozen_authority"
+    ),
+    PathKind.RESIDUAL_UNKNOWN: "never_realized",
+}
+_PATH_RUNTIME_FALSIFICATION_RULES: Mapping[PathKind, str] = {
+    PathKind.CONTINUATION: "frozen_authority_opposed_mss_core_confirmed",
+    PathKind.DEEPER_RETRACEMENT: (
+        "frozen_authority_continuation_bos_confirmed"
+    ),
+    PathKind.REVERSAL: "frozen_authority_continuation_bos_confirmed",
+    PathKind.BALANCE: "frozen_authority_directional_bos_confirmed",
+    PathKind.FAILED_BREAKOUT: "realized_competitor_only",
+    PathKind.RESIDUAL_UNKNOWN: "never_before_common_horizon",
+}
+
+
+def _validate_shadow_path_resolution_protocol(
+    protocol: PathBeliefProtocol,
+) -> None:
+    runtime = protocol.runtime_resolution
+    if (
+        runtime.protocol_version != "path_runtime_resolution_phase7_v1.0"
+        or runtime.entry_episode_terminal_authority is not False
+        or any(
+            runtime.winner_rule(path) != rule
+            for path, rule in _PATH_RUNTIME_WINNER_RULES.items()
+        )
+        or any(
+            runtime.falsification_rule(path) != rule
+            for path, rule in _PATH_RUNTIME_FALSIFICATION_RULES.items()
+        )
+        or any(
+            runtime.expiry_rule(path) != "shared_common_horizon"
+            for path in PathKind
+        )
+    ):
+        raise ValueError("unsupported path runtime resolution protocol")
+
+
+def _shadow_path_resolution_events(
+    observation: MarketObservation,
+    context: GlobalMarketContext,
+    state: PathCompetitionSetState,
+    protocol: PathBeliefProtocol,
+) -> tuple[tuple[PathTerminalEvent, ...], tuple[PathOutcomeEvent, ...]]:
+    """Map exact global market facts into the existing pure reducer API.
+
+    Local setup/EntryEpisode objects are intentionally absent.  A structural
+    fact must bind either the competition set's frozen authority structure or
+    an unambiguous connected lower-scale relation to that authority.
+    """
+
+    _validate_shadow_path_resolution_protocol(protocol)
+    if (
+        state.status is not PathStatus.ACTIVE
+        or observation.asof <= state.asof
+        or observation.asof >= state.common_expires_at
+    ):
+        return (), ()
+    authority = next(
+        (
+            layer
+            for layer in context.authority_stack
+            if layer.structure_id == state.authority_structure_id
+        ),
+        None,
+    )
+    if authority is None:
+        return (), ()
+
+    events = _shadow_canonical_event_map(observation)
+    current = tuple(
+        sorted(
+            (
+                event
+                for event in events.values()
+                if event.known_at == observation.asof
+            ),
+            key=lambda event: event.event_id,
+        )
+    )
+    raw_breaks = {
+        event.event_id: event
+        for event in events.values()
+        if event.kind is EventKind.RAW_BOUNDARY_BREAK
+    }
+
+    def raw_source_structure_id(raw_break: MarketEvent) -> str | None:
+        bos_id = raw_break.evidence.get("bos_id")
+        target_swing_id = raw_break.evidence.get("target_swing_id")
+        break_bar_id = raw_break.evidence.get("break_bar_id")
+        displacement_id = raw_break.evidence.get("source_displacement_id")
+        entity_ids = raw_break.source_entity_ids
+        valid_entities = bool(
+            isinstance(bos_id, str)
+            and bos_id
+            and isinstance(target_swing_id, str)
+            and target_swing_id
+            and len(entity_ids) in {3, 4}
+            and entity_ids[0] == bos_id
+            and entity_ids[1] == target_swing_id
+            and (
+                (displacement_id is None and len(entity_ids) == 3)
+                or (
+                    isinstance(displacement_id, str)
+                    and displacement_id
+                    and len(entity_ids) == 4
+                    and entity_ids[3] == displacement_id
+                )
+            )
+        )
+        if (
+            not valid_entities
+            or raw_break.direction is None
+            or raw_break.evidence.get("scope")
+            not in {"continuation", "opposed"}
+            or raw_break.evidence.get("break_standard")
+            != "close_beyond_confirmed_boundary"
+            or not isinstance(break_bar_id, str)
+            or not break_bar_id
+            or raw_break.source_data_ids != (break_bar_id,)
+            or len(raw_break.source_event_ids) != 2
+            or not raw_break.context_event_ids
+            or raw_break.event_time != raw_break.known_at
+        ):
+            return None
+        return entity_ids[2]
+
+    def structural_raw_parent(
+        event: MarketEvent,
+    ) -> tuple[MarketEvent, str] | None:
+        bos_id = event.evidence.get("bos_id")
+        candidates = tuple(
+            raw_breaks[event_id]
+            for event_id in event.source_event_ids
+            if event_id in raw_breaks
+            and raw_breaks[event_id].evidence.get("bos_id") == bos_id
+        )
+        if len(candidates) != 1:
+            return None
+        raw_break = candidates[0]
+        source_structure_id = raw_source_structure_id(raw_break)
+        if (
+            source_structure_id is None
+            or raw_break.known_at != event.known_at
+            or raw_break.timeframe is not event.timeframe
+            or raw_break.side != event.side
+            or raw_break.price != event.price
+            or raw_break.direction is not event.direction
+            or raw_break.evidence.get("scope") != event.evidence.get("scope")
+            or len(event.source_event_ids) != 2
+            or event.source_entity_ids != (bos_id, source_structure_id)
+        ):
+            return None
+        return raw_break, source_structure_id
+
+    terminal_sources: dict[PathKind, tuple[str, set[str]]] = {}
+
+    def add_terminal(path: PathKind, reason: str, source_id: str) -> None:
+        if state.member(path).status is not PathStatus.ACTIVE:
+            return
+        prior = terminal_sources.get(path)
+        if prior is not None and prior[0] != reason:
+            raise ValueError("one path has conflicting global falsification facts")
+        sources = {source_id} if prior is None else prior[1]
+        sources.add(source_id)
+        terminal_sources[path] = (reason, sources)
+
+    for event in current:
+        raw_parent = structural_raw_parent(event)
+        bound_to_authority = bool(
+            raw_parent is not None
+            and raw_parent[1] == state.authority_structure_id
+        )
+        if not bound_to_authority:
+            continue
+        if (
+            event.kind is EventKind.MSS_CORE_CONFIRMED
+            and event.evidence.get("scope") == "opposed"
+        ):
+            add_terminal(
+                PathKind.CONTINUATION,
+                "frozen_authority_opposed_mss_core_confirmed",
+                event.event_id,
+            )
+            add_terminal(
+                PathKind.BALANCE,
+                "frozen_authority_directional_bos_confirmed",
+                event.event_id,
+            )
+        elif (
+            event.kind is EventKind.QUALIFIED_BOS
+            and event.evidence.get("scope") == "continuation"
+        ):
+            for path in (PathKind.DEEPER_RETRACEMENT, PathKind.REVERSAL):
+                add_terminal(
+                    path,
+                    "frozen_authority_continuation_bos_confirmed",
+                    event.event_id,
+                )
+            add_terminal(
+                PathKind.BALANCE,
+                "frozen_authority_directional_bos_confirmed",
+                event.event_id,
+            )
+
+    def raw_break_for(
+        event: MarketEvent,
+    ) -> tuple[MarketEvent, str] | None:
+        """Resolve only the exact BOS crossing shape emitted by Observation.
+
+        A BOS terminal crossing owns penetration/bar parents; the earlier raw
+        break is contextual ancestry.  Requiring that production shape keeps
+        an unrelated acceptance/sweep (or a canonical-looking forged event)
+        from deciding the global path competition.
+        """
+
+        bos_id = event.evidence.get("bos_id")
+        if not isinstance(bos_id, str) or not bos_id:
+            return None
+        candidates = tuple(
+            raw_breaks[event_id]
+            for event_id in event.context_event_ids
+            if event_id in raw_breaks
+            and raw_breaks[event_id].evidence.get("bos_id") == bos_id
+        )
+        if len(candidates) != 1:
+            return None
+        raw_break = candidates[0]
+        target_swing_id = raw_break.evidence.get("target_swing_id")
+        level_id = (
+            None
+            if not isinstance(target_swing_id, str) or not target_swing_id
+            else f"swing:{target_swing_id}"
+        )
+        source_structure_id = raw_source_structure_id(raw_break)
+        crossing_generation = (
+            None
+            if level_id is None
+            else hashlib.sha256(
+                (
+                    f"{SMC_SEMANTIC_VERSION}|crossing-v1|"
+                    f"{event.timeframe.value}|{level_id}|"
+                    f"{raw_break.known_at.isoformat()}"
+                ).encode("utf-8")
+            ).hexdigest()[:24]
+        )
+        expected_resolution = (
+            "held_outside"
+            if event.kind is EventKind.ACCEPTANCE_CONFIRMED
+            else "returned_inside"
+        )
+        direction_matches = (
+            event.direction is raw_break.direction
+            if event.kind is EventKind.ACCEPTANCE_CONFIRMED
+            else event.direction is not None
+            and raw_break.direction is not None
+            and event.direction is not raw_break.direction
+        )
+        if (
+            source_structure_id is None
+            or raw_break.known_at >= event.known_at
+            or event.event_time != raw_break.known_at
+            or event.timeframe is not raw_break.timeframe
+            or event.side != raw_break.side
+            or event.price != raw_break.price
+            or not direction_matches
+            or len(event.source_event_ids) != 2
+            or len(event.context_event_ids) < 2
+            or event.evidence.get("level_id") != level_id
+            or event.evidence.get("target_swing_id") != target_swing_id
+            or event.source_entity_ids != (level_id,)
+            or event.evidence.get("crossing_generation_id")
+            != crossing_generation
+            or event.evidence.get("crossed_at")
+            != raw_break.known_at.isoformat()
+            or event.evidence.get("resolved_at")
+            != event.known_at.isoformat()
+            or event.evidence.get("resolution_bars") != 1
+            or event.evidence.get("resolution") != expected_resolution
+        ):
+            return None
+        return raw_break, source_structure_id
+
+    winners: list[tuple[PathKind, str, tuple[str, ...]]] = []
+    timeframe_rank = {
+        Timeframe.M1: 0,
+        Timeframe.M5: 1,
+        Timeframe.M15: 2,
+        Timeframe.H1: 3,
+        Timeframe.H4: 4,
+    }
+    for event in current:
+        if event.kind not in {
+            EventKind.ACCEPTANCE_CONFIRMED,
+            EventKind.SWEEP_CONFIRMED,
+        }:
+            continue
+        raw_parent = raw_break_for(event)
+        if raw_parent is None:
+            continue
+        raw_break, source_structure_id = raw_parent
+        source_ids = tuple(sorted((event.event_id, raw_break.event_id)))
+        bound_to_authority = (
+            source_structure_id == state.authority_structure_id
+        )
+        scope = raw_break.evidence.get("scope")
+        if event.kind is EventKind.SWEEP_CONFIRMED:
+            if (
+                bound_to_authority
+                and event.evidence.get("resolution") == "returned_inside"
+            ):
+                winners.append(
+                    (
+                        PathKind.FAILED_BREAKOUT,
+                        "rejected_bos_crossing_bound_to_frozen_authority",
+                        source_ids,
+                    )
+                )
+            continue
+        if event.evidence.get("resolution") != "held_outside":
+            continue
+        if bound_to_authority and scope == "continuation":
+            winners.append(
+                (
+                    PathKind.CONTINUATION,
+                    "accepted_continuation_bos_bound_to_frozen_authority",
+                    source_ids,
+                )
+            )
+            continue
+        if bound_to_authority and scope == "opposed":
+            winners.append(
+                (
+                    PathKind.REVERSAL,
+                    "accepted_opposed_bos_bound_to_frozen_authority",
+                    source_ids,
+                )
+            )
+            continue
+        relation = context.scale_relation_details.get(event.timeframe.value)
+        if (
+            scope == "opposed"
+            and event.direction is not None
+            and event.direction is not authority.direction
+            and authority.status == "intact"
+            and context.dominant_authority_layer is not None
+            and context.dominant_authority_layer.structure_id
+            == state.authority_structure_id
+            and timeframe_rank[event.timeframe]
+            < timeframe_rank[authority.timeframe]
+            and relation is not None
+            and relation.authority_layer_id == state.authority_structure_id
+            and relation.direction is event.direction
+            and not set(relation.evidence_ids).isdisjoint(
+                {
+                    str(raw_break.evidence["bos_id"]),
+                    raw_break.event_id,
+                }
+            )
+            and relation.graph_connected
+            and not relation.ambiguous
+            and relation.relation
+            in {
+                ScaleRelation.NORMAL_PULLBACK,
+                ScaleRelation.MATERIAL_OPPOSITION,
+            }
+        ):
+            winners.append(
+                (
+                    PathKind.DEEPER_RETRACEMENT,
+                    (
+                        "accepted_opposed_bos_on_connected_lower_scale_"
+                        "while_frozen_authority_intact"
+                    ),
+                    source_ids,
+                )
+            )
+
+    balance = context.balance_context
+    if balance is not None and balance.status == "authoritative":
+        for event in current:
+            if (
+                event.kind is EventKind.DEALING_RANGE_ACTIVATED
+                and event.timeframe is balance.timeframe
+                and (
+                    event.evidence.get("range_id") == balance.context_id
+                    or balance.context_id in event.source_entity_ids
+                )
+            ):
+                winners.append(
+                    (
+                        PathKind.BALANCE,
+                        "authoritative_balance_range_activation",
+                        (event.event_id,),
+                    )
+                )
+
+    distinct_winners = {path for path, _, _ in winners}
+    if len(distinct_winners) > 1:
+        raise ValueError("same clock has ambiguous path realized-winner facts")
+    outcomes: tuple[PathOutcomeEvent, ...] = ()
+    if winners:
+        winner = winners[0][0]
+        reason = winners[0][1]
+        if any(item[1] != reason for item in winners):
+            raise ValueError("one path has conflicting realized-winner rules")
+        if state.member(winner).status is not PathStatus.ACTIVE:
+            raise ValueError("a falsified path cannot become the realized winner")
+        outcome_sources = tuple(
+            sorted({source for _, _, sources in winners for source in sources})
+        )
+        outcomes = (
+            protocol.make_outcome_event(
+                competition_set_id=state.competition_set_id,
+                winner_path=winner,
+                reason=reason,
+                source_event_ids=outcome_sources,
+                known_at=observation.asof,
+            ),
+        )
+    # The frozen reducer contract applies same-clock path terminals before
+    # descriptive evidence or an outcome.  A path cannot be realized on the
+    # same clock that an exact global fact falsifies that path.
+    if outcomes and outcomes[0].winner_path in terminal_sources:
+        outcomes = ()
+
+    terminals = tuple(
+        protocol.make_terminal_event(
+            competition_set_id=state.competition_set_id,
+            path=path,
+            rule_id="registered_path_invalidation",
+            reason=reason,
+            source_event_ids=tuple(sorted(sources)),
+            known_at=observation.asof,
+        )
+        for path, (reason, sources) in sorted(
+            terminal_sources.items(),
+            key=lambda item: item[0].value,
+        )
+        if not outcomes or outcomes[0].winner_path is not path
+    )
+    return terminals, outcomes
+
+
+def _shadow_path_contribution_specs(
+    observation: MarketObservation,
+    context: GlobalMarketContext,
+    *,
+    seen_tokens: Collection[tuple[str, ...]],
+    unresolved_dependency_cluster: str | None = None,
+) -> tuple[
+    tuple[tuple[str, ...], str, tuple[str, ...], str], ...
+]:
+    """Admit only exact Phase 6 mechanism events into the path ledger.
+
+    DFP/LSR/FAVR candidates, open-thesis projections, DOL obstacles and local
+    EntryEpisode lifecycles are deliberately absent.  Phase 6 admitted the two
+    mechanism families as evidence sources; it did not estimate path
+    likelihoods, so the production protocol assigns neutral increments.  A
+    synthetic/admitted likelihood protocol without a registered dependency
+    resolver receives one conservative competition-set cluster: it cannot
+    multiply repeated or cross-family facts by default.
+    """
+
+    del context  # Scope ownership remains with the caller, not a playbook.
+    events_by_id = {
+        event_id: event
+        for event_id, event in _shadow_canonical_event_map(observation).items()
+        if event.known_at == observation.asof
+    }
+
+    output: list[tuple[tuple[str, ...], str, tuple[str, ...], str]] = []
+    for event in sorted(events_by_id.values(), key=lambda item: item.event_id):
+        if event.timeframe is not Timeframe.M5:
+            continue
+        if event.kind is EventKind.ACCEPTANCE_CONFIRMED:
+            family_instance = event.evidence.get("crossing_generation_id")
+            rule_id = "acceptance_continuation"
+        elif (
+            event.kind is EventKind.DISPLACEMENT_OBSERVED
+            and event.evidence.get("lifecycle") == "active"
+        ):
+            family_instance = event.evidence.get("displacement_id")
+            rule_id = "displacement_impact"
+        else:
+            continue
+        if not isinstance(family_instance, str) or not family_instance:
+            continue
+        source_ids = (event.event_id,)
+        # The correlation namespace is global.  Rule/family labels describe
+        # provenance; they must not make one upstream fact independent merely
+        # by changing the evidence family.
+        correlation_key = (
+            f"semantic-entity:{family_instance}"
+            if unresolved_dependency_cluster is None
+            else unresolved_dependency_cluster
+        )
+        token = (
+            "phase6_admitted",
+            rule_id,
+            correlation_key,
+            "source_event_ids",
+            event.event_id,
+        )
+        if token not in seen_tokens:
+            output.append((token, rule_id, source_ids, correlation_key))
+    return tuple(output)
+
+
 class PlaybookBrain:
     """Updates six playbook-direction beliefs; it never chooses an action.
 
@@ -10481,6 +11231,18 @@ class PlaybookBrain:
         config: BrainConfig | None = None,
         registry: PlaybookRegistry | None = None,
         calibrator: TypedBrainCalibrator | None = None,
+        path_hypotheses_protocol: str | Path = "configs/path_hypotheses.json",
+        expected_path_protocol_fingerprint: str | None = None,
+        expected_dol_protocol_fingerprint: str | None = None,
+        dol_probability_protocol: str | Path = "configs/dol_probability.json",
+        expected_dol_probability_protocol_fingerprint: str | None = None,
+        dol_probability_model_artifact: DOLProbabilityModelArtifact | None = None,
+        signal_policy_protocol: str | Path = "configs/signal_policy.json",
+        expected_signal_policy_fingerprint: str | None = None,
+        path_likelihood_artifact: AdmittedPathLikelihoodArtifact | None = None,
+        dol_calibration_artifact: AdmittedDOLCalibrationArtifact | None = None,
+        outcome_model_artifact: TargetBeforeInvalidationArtifact | None = None,
+        signal_artifact_pins: SignalArtifactPins | None = None,
     ) -> None:
         self.config = config or BrainConfig()
         self.registry = registry or load_playbook_registry()
@@ -10495,7 +11257,130 @@ class PlaybookBrain:
             and self.calibrator.registry_hash != self.registry.fingerprint
         ):
             raise ValueError("brain calibration does not match playbook registry")
+        self.path_protocol: PathBeliefProtocol = load_path_belief_protocol(
+            path_hypotheses_protocol
+        )
+        self.dol_protocol: DOLRankingProtocol = load_dol_ranking_protocol(
+            path_hypotheses_protocol
+        )
+        if (
+            expected_path_protocol_fingerprint is not None
+            and expected_path_protocol_fingerprint
+            != self.path_protocol.fingerprint
+        ):
+            raise ValueError("brain path protocol fingerprint is stale")
+        if (
+            expected_dol_protocol_fingerprint is not None
+            and expected_dol_protocol_fingerprint
+            != self.dol_protocol.fingerprint
+        ):
+            raise ValueError("brain DOL protocol fingerprint is stale")
+        self.dol_probability_protocol: DOLProbabilityProtocol = (
+            load_dol_probability_protocol(dol_probability_protocol)
+        )
+        if (
+            self.dol_probability_protocol.ranking_protocol_fingerprint
+            != self.dol_protocol.fingerprint
+        ):
+            raise ValueError(
+                "brain DOL probability and ranking protocols disagree"
+            )
+        if (
+            expected_dol_probability_protocol_fingerprint is not None
+            and expected_dol_probability_protocol_fingerprint
+            != self.dol_probability_protocol.fingerprint
+        ):
+            raise ValueError("brain DOL probability protocol fingerprint is stale")
+        if (
+            dol_probability_model_artifact is not None
+            and (
+                not isinstance(
+                    dol_probability_model_artifact,
+                    DOLProbabilityModelArtifact,
+                )
+                or dol_probability_model_artifact.protocol_fingerprint
+                != self.dol_probability_protocol.fingerprint
+                or dol_probability_model_artifact.ranking_protocol_fingerprint
+                != self.dol_protocol.fingerprint
+            )
+        ):
+            raise ValueError("brain DOL probability artifact binding is stale")
+        self.dol_probability_model_artifact = dol_probability_model_artifact
+        self.signal_policy: SignalPolicyProtocol = load_signal_policy_protocol(
+            signal_policy_protocol
+        )
+        if (
+            expected_signal_policy_fingerprint is not None
+            and expected_signal_policy_fingerprint != self.signal_policy.fingerprint
+        ):
+            raise ValueError("brain Signal Policy fingerprint is stale")
+        admission_types = (
+            (path_likelihood_artifact, AdmittedPathLikelihoodArtifact),
+            (dol_calibration_artifact, AdmittedDOLCalibrationArtifact),
+            (outcome_model_artifact, TargetBeforeInvalidationArtifact),
+        )
+        if any(
+            artifact is not None and not isinstance(artifact, expected)
+            for artifact, expected in admission_types
+        ):
+            raise TypeError("brain shadow admissions must use exact artifact types")
+        supplied_admission = any(
+            artifact is not None
+            for artifact, _ in admission_types
+        ) or signal_artifact_pins is not None
+        if self.path_protocol.can_apply_bayesian_update and not supplied_admission:
+            raise ValueError(
+                "Bayesian path updates require a separately pinned artifact set"
+            )
+        if supplied_admission and (
+            path_likelihood_artifact is None
+            or dol_calibration_artifact is None
+            or outcome_model_artifact is None
+            or not isinstance(signal_artifact_pins, SignalArtifactPins)
+            or dol_probability_model_artifact is None
+            or not self.path_protocol.can_apply_bayesian_update
+            or path_likelihood_artifact.source_path_protocol_fingerprint
+            != self.path_protocol.fingerprint
+            or path_likelihood_artifact.source_path_model_version
+            != self.path_protocol.model_version
+            or dol_probability_model_artifact.source_path_protocol_fingerprint
+            != self.path_protocol.fingerprint
+            or dol_probability_model_artifact.source_path_model_version
+            != self.path_protocol.model_version
+            or outcome_model_artifact.path_likelihood_artifact_id
+            != path_likelihood_artifact.artifact_id
+            or outcome_model_artifact.dol_calibration_artifact_id
+            != dol_calibration_artifact.artifact_id
+            or outcome_model_artifact.signal_policy_fingerprint
+            != self.signal_policy.fingerprint
+            or signal_artifact_pins.signal_policy_fingerprint
+            != self.signal_policy.fingerprint
+            or signal_artifact_pins.path_protocol_fingerprint
+            != self.path_protocol.fingerprint
+            or signal_artifact_pins.path_likelihood_artifact_id
+            != path_likelihood_artifact.artifact_id
+            or signal_artifact_pins.dol_calibration_artifact_id
+            != dol_calibration_artifact.artifact_id
+            or signal_artifact_pins.outcome_model_artifact_id
+            != outcome_model_artifact.artifact_id
+            or signal_artifact_pins.dol_probability_model_fingerprint
+            != dol_probability_model_artifact.fingerprint
+        ):
+            raise ValueError("brain shadow artifact admission binding is stale")
+        self.path_likelihood_artifact = path_likelihood_artifact
+        self.dol_calibration_artifact = dol_calibration_artifact
+        self.outcome_model_artifact = outcome_model_artifact
+        self.signal_artifact_pins = signal_artifact_pins
         self._belief: MarketBelief | None = None
+        self.hypothesis_manager = HypothesisManager(self.path_protocol)
+        self._path_competition_state: PathCompetitionSetState | None = None
+        self._path_scope_key: tuple[str, ...] | None = None
+        self._path_seen_evidence_tokens: set[tuple[str, ...]] = set()
+        self._dol_probability_results: dict[str, DOLProbabilityResult] = {}
+        self._signal_real_completed_bar_anchors: dict[
+            str,
+            tuple[str, str, pd.Timestamp, int],
+        ] = {}
         self._candidate_priors: dict[str, HypothesisBelief] = {}
         self._candidate_theses: dict[str, OpenMarketThesis] = {}
         self._candidate_epoch_id: str | None = None
@@ -10524,6 +11409,12 @@ class PlaybookBrain:
 
     def reset(self) -> None:
         self._belief = None
+        self.hypothesis_manager.reset()
+        self._path_competition_state = None
+        self._path_scope_key = None
+        self._path_seen_evidence_tokens.clear()
+        self._dol_probability_results.clear()
+        self._signal_real_completed_bar_anchors.clear()
         self._candidate_priors.clear()
         self._candidate_theses.clear()
         self._candidate_epoch_id = None
@@ -10535,6 +11426,511 @@ class PlaybookBrain:
         self._lsr_retired_seed_keys.clear()
         self._lsr_context_bindings.clear()
         self._lsr_terminal_episode_ids.clear()
+
+    def _update_shadow_path_diagnostics(
+        self,
+        observation: MarketObservation,
+        global_context: GlobalMarketContext | None,
+        context_theses: Mapping[str, ContextThesisState],
+        lifecycle_candidates: Mapping[str, HypothesisBelief],
+        previous_belief: MarketBelief | None,
+    ) -> tuple[
+        PathCompetitionSetState | None,
+        tuple[PathBeliefUpdateRecord, ...],
+        Mapping[str, DOLRankingResult],
+        Mapping[str, tuple[tuple[str, str], ...]],
+    ]:
+        """Advance the existing Brain's path diagnostics exactly once."""
+
+        # Typed setup/entry lifecycles remain available to the legacy Brain,
+        # but cannot update or terminalize a market-path competition set.
+        del context_theses, lifecycle_candidates, previous_belief
+
+        authority = (
+            None
+            if global_context is None
+            else global_context.dominant_authority_layer
+        )
+        if global_context is None or authority is None:
+            self.hypothesis_manager.reset()
+            self._path_competition_state = None
+            self._path_scope_key = None
+            self._path_seen_evidence_tokens.clear()
+            self._dol_probability_results.clear()
+            self._signal_real_completed_bar_anchors.clear()
+            return None, (), {}, {}
+
+        instrument_id = f"{observation.symbol}:{observation.instrument_id}"
+        state = self._path_competition_state
+        horizon = _market_lifecycle_deadline(observation.asof)
+        if horizon <= observation.asof:
+            if (
+                state is not None
+                and state.status is PathStatus.ACTIVE
+                and observation.asof >= state.common_expires_at
+            ):
+                if observation.asof <= state.asof:
+                    raise ValueError("path horizon clock did not advance")
+                if self.hypothesis_manager.state != state:
+                    raise ValueError("hypothesis manager state is out of sync")
+                state, record = self.hypothesis_manager.advance(
+                    asof=observation.asof,
+                    real_completed_bar=_shadow_real_completed_clock(
+                        observation
+                    ),
+                )
+                self._path_competition_state = state
+                self._dol_probability_results.clear()
+                self._signal_real_completed_bar_anchors.clear()
+                return state, (record,), {}, {}
+            self.hypothesis_manager.reset()
+            self._path_competition_state = None
+            self._path_scope_key = None
+            self._path_seen_evidence_tokens.clear()
+            self._dol_probability_results.clear()
+            self._signal_real_completed_bar_anchors.clear()
+            return None, (), {}, {}
+        horizon_id = f"market-session:{horizon.isoformat()}"
+        scope_key = (
+            instrument_id,
+            global_context.market_epoch_id,
+            authority.structure_id,
+            horizon_id,
+            self.path_protocol.fingerprint,
+        )
+        new_scope = state is None or self._path_scope_key != scope_key
+        if (
+            not new_scope
+            and state is not None
+            and state.status is not PathStatus.ACTIVE
+        ):
+            if observation.asof < state.asof:
+                raise ValueError("path diagnostic clock moved backwards")
+            carried = (
+                state
+                if observation.asof == state.asof
+                else replace(state, asof=observation.asof)
+            )
+            self.hypothesis_manager.state = carried
+            self._path_competition_state = carried
+            self._dol_probability_results.clear()
+            self._signal_real_completed_bar_anchors.clear()
+            return carried, (), {}, {}
+        working_manager = self.hypothesis_manager
+        working_seen_tokens = set(self._path_seen_evidence_tokens)
+        if new_scope:
+            working_manager = HypothesisManager(self.path_protocol)
+            working_seen_tokens = set()
+            state = create_path_competition_set(
+                self.path_protocol,
+                instrument_id=instrument_id,
+                market_epoch_id=global_context.market_epoch_id,
+                authority_structure_id=authority.structure_id,
+                horizon_id=horizon_id,
+                formed_at=observation.asof,
+                common_expires_at=horizon,
+            )
+        else:
+            working_manager = self.hypothesis_manager.fork()
+        assert state is not None
+
+        candidate_facts, obstruction_facts, exclusions = _shadow_dol_facts(
+            observation,
+            global_context,
+        )
+
+        def rankings_for(
+            current: PathCompetitionSetState,
+        ) -> dict[str, DOLRankingResult]:
+            return {
+                direction.value: rank_dol_candidates(
+                    self.dol_protocol,
+                    direction=DOLDirection(direction.value),
+                    current_price=float(observation.price),
+                    external_draw_candidates=candidate_facts[direction.value],
+                    obstruction_view=obstruction_facts[direction.value],
+                    path_state=current,
+                )
+                for direction in Direction
+            }
+
+        def probabilities_for(
+            current: PathCompetitionSetState,
+        ) -> dict[str, DOLProbabilityResult]:
+            # Candidate ranking remains available as a development feature,
+            # but an unfitted heuristic must never be published by the Brain
+            # as a probability distribution.  The standalone marginalizer
+            # also requires an exact fitted/admitted model artifact; runtime
+            # projection opens under that same fail-closed boundary.
+            if (
+                current.status is not PathStatus.ACTIVE
+                or self.dol_probability_model_artifact is None
+            ):
+                return {}
+            return {
+                direction.value: marginalize_dol_probabilities(
+                    self.dol_probability_protocol,
+                    ranking_protocol=self.dol_protocol,
+                    direction=DOLDirection(direction.value),
+                    current_price=float(observation.price),
+                    external_draw_candidates=candidate_facts[direction.value],
+                    obstruction_view=obstruction_facts[direction.value],
+                    path_state=current,
+                    model_artifact=self.dol_probability_model_artifact,
+                )
+                for direction in Direction
+            }
+
+        specs = list(
+            _shadow_path_contribution_specs(
+                observation,
+                global_context,
+                seen_tokens=working_seen_tokens,
+                unresolved_dependency_cluster=(
+                    None
+                    if not self.path_protocol.can_apply_bayesian_update
+                    else (
+                        "unresolved-dependency-cluster:"
+                        f"{state.competition_set_id}"
+                    )
+                ),
+            )
+        )
+        # DOL obstruction, setup and EntryEpisode facts are consumers of the
+        # path state, never evidence that changes market-path probability.
+        specs = sorted(specs, key=lambda value: value[0])
+        contributions = tuple(
+            self.path_protocol.make_contribution(
+                competition_set_id=state.competition_set_id,
+                rule_id=rule_id,
+                source_event_ids=source_ids,
+                known_at=observation.asof,
+                correlation_key=correlation_key,
+                require_admitted=True,
+            )
+            for _, rule_id, source_ids, correlation_key in specs
+        )
+        real_completed = _shadow_real_completed_clock(observation)
+        records: tuple[PathBeliefUpdateRecord, ...]
+        if new_scope:
+            state, record = working_manager.initialize_state(
+                state,
+                contributions=contributions,
+                real_completed_bar=real_completed,
+            )
+            records = (record,)
+        else:
+            terminal_events, outcome_events = _shadow_path_resolution_events(
+                observation,
+                global_context,
+                state,
+                self.path_protocol,
+            )
+            if observation.asof < state.asof:
+                raise ValueError("path diagnostic clock moved backwards")
+            if observation.asof == state.asof:
+                if contributions or terminal_events or outcome_events:
+                    raise ValueError(
+                        "same-clock path evidence changed after initialization"
+                    )
+                records = ()
+            else:
+                if working_manager.state != state:
+                    raise ValueError("hypothesis manager state is out of sync")
+                state, record = working_manager.advance(
+                    asof=observation.asof,
+                    contributions=contributions,
+                    terminal_events=terminal_events,
+                    outcome_events=outcome_events,
+                    real_completed_bar=real_completed,
+                )
+                records = (record,)
+        active = state.status is PathStatus.ACTIVE
+        rankings = rankings_for(state) if active else {}
+        probabilities = probabilities_for(state) if active else {}
+        self.hypothesis_manager = working_manager
+        self._path_scope_key = scope_key
+        self._path_seen_evidence_tokens = set(working_seen_tokens)
+        self._path_seen_evidence_tokens.update(
+            token for token, _, _, _ in specs
+        )
+        self._path_competition_state = state
+        self._dol_probability_results = probabilities
+        if new_scope:
+            self._signal_real_completed_bar_anchors.clear()
+        return state, records, rankings, (exclusions if active else {})
+
+    def _shadow_admission_diagnostics(self) -> tuple[str, ...]:
+        diagnostics: list[str] = []
+        if self.dol_probability_model_artifact is None:
+            diagnostics.append("dol_probability_model_artifact_missing")
+        if self.path_likelihood_artifact is None:
+            diagnostics.append("path_likelihood_artifact_missing")
+        if self.dol_calibration_artifact is None:
+            diagnostics.append("dol_calibration_artifact_missing")
+        if self.outcome_model_artifact is None:
+            diagnostics.append("outcome_model_artifact_missing")
+        if self.signal_artifact_pins is None:
+            diagnostics.append("signal_artifact_pins_missing")
+        return tuple(diagnostics) or ("all_shadow_artifacts_admitted",)
+
+    def _project_shadow_signal_assessments(
+        self,
+        observation: MarketObservation,
+        belief: MarketBelief,
+    ) -> MarketBelief:
+        """Evaluate current typed setups without touching action candidates."""
+
+        if belief.asof != observation.asof:
+            raise ValueError("shadow signal projection requires current belief")
+        diagnostics: dict[str, tuple[str, ...]] = {
+            "__admission__": self._shadow_admission_diagnostics(),
+        }
+        assessments: dict[str, SignalAssessment] = {}
+        state = belief.path_competition_state
+        if state is None or state.status is not PathStatus.ACTIVE:
+            self._signal_real_completed_bar_anchors.clear()
+            diagnostics["__path__"] = ("active_path_competition_set_missing",)
+            return replace(
+                belief,
+                signal_assessments=assessments,
+                trade_intents={},
+                shadow_signal_rejections=diagnostics,
+            )
+
+        live_anchor_ids = {
+            candidate_id
+            for candidate_id, candidate in belief.thesis_candidates.items()
+            for episode in (belief.entry_episodes.get(candidate_id),)
+            if (
+                candidate.phase is PlaybookPhase.EXECUTABLE
+                and episode is not None
+                and episode.phase is PlaybookPhase.EXECUTABLE
+                and candidate.candidate_id == episode.candidate_id
+                and candidate.episode_id == episode.episode_id
+                and candidate.plan == episode.plan
+            )
+        }
+        self._signal_real_completed_bar_anchors = {
+            candidate_id: anchor
+            for candidate_id, anchor in (
+                self._signal_real_completed_bar_anchors.items()
+            )
+            if candidate_id in live_anchor_ids
+            and anchor[0] == state.competition_set_id
+        }
+        anomaly_ids = tuple(
+            sorted(
+                set(
+                    (*observation.anomalies, *observation.execution.anomalies)
+                )
+            )
+        )
+        for candidate_id, candidate in sorted(belief.thesis_candidates.items()):
+            if candidate.phase is not PlaybookPhase.EXECUTABLE:
+                continue
+            episode = belief.entry_episodes.get(candidate_id)
+            if episode is None:
+                diagnostics[candidate_id] = ("typed_entry_episode_missing",)
+                continue
+            exact_lifecycle = bool(
+                candidate.candidate_id == episode.candidate_id
+                and candidate.episode_id == episode.episode_id
+                and candidate.plan == episode.plan
+                and episode.phase is PlaybookPhase.EXECUTABLE
+            )
+            real_completed_age: int | None = None
+            if exact_lifecycle:
+                anchor_identity = (
+                    state.competition_set_id,
+                    episode.episode_id,
+                    candidate.phase_started_at,
+                )
+                anchor = self._signal_real_completed_bar_anchors.get(candidate_id)
+                if (
+                    anchor is None
+                    or anchor[:3] != anchor_identity
+                    or anchor[3] > state.real_completed_bar_count
+                ):
+                    anchor = (*anchor_identity, state.real_completed_bar_count)
+                    self._signal_real_completed_bar_anchors[candidate_id] = anchor
+                real_completed_age = state.real_completed_bar_count - anchor[3]
+            probability = belief.dol_probabilities.get(candidate.direction.value)
+            if probability is None:
+                diagnostics[candidate_id] = (
+                    "current_dol_probability_result_missing",
+                )
+                continue
+            plan = candidate.plan
+            if plan is None or not plan.selected_draw_id:
+                diagnostics[candidate_id] = ("trade_plan_draw_missing",)
+                continue
+            candidate_draw_id = plan.selected_draw_id
+            source_ids = tuple(
+                sorted(
+                    {
+                        value
+                        for value in (
+                            candidate.initiating_event_id,
+                            episode.initiating_event_id,
+                        )
+                        if value
+                    }
+                )
+            )
+            if not source_ids:
+                diagnostics[candidate_id] = (
+                    "initiating_event_source_missing",
+                )
+                continue
+            risk_points = None if plan is None else float(plan.risk_points)
+            estimated_cost_R = (
+                None
+                if risk_points is None or risk_points <= 0.0
+                else float(
+                    observation.execution.expected_round_trip_cost_points
+                )
+                / risk_points
+            )
+            evaluation_payload = {
+                "asof": observation.asof.isoformat(),
+                "candidate_id": candidate_id,
+                "execution_source": observation.execution.source,
+                "execution_data_age_seconds": (
+                    observation.execution.data_age_seconds
+                ),
+                "anomalies": anomaly_ids,
+                "cost_R": estimated_cost_R,
+            }
+            evaluation_id = hashlib.sha256(
+                json.dumps(
+                    evaluation_payload,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest()[:24]
+            try:
+                assessment = assess_signal(
+                    self.signal_policy,
+                    asof=observation.asof,
+                    symbol=observation.symbol,
+                    instrument_id=state.instrument_id,
+                    path_state=state,
+                    dol_ranking=probability,
+                    dol_candidate_id=candidate_draw_id,
+                    setup_candidate=candidate,
+                    entry_episode=episode,
+                    evaluation=SignalEvaluationContext(
+                        coverage_id=f"signal-coverage:{evaluation_id}",
+                        coverage_fraction=0.0 if anomaly_ids else 1.0,
+                        ood_assessment_id=f"signal-ood:{evaluation_id}",
+                        out_of_distribution=bool(anomaly_ids),
+                        cost_estimate_id=(
+                            None
+                            if estimated_cost_R is None
+                            else f"signal-cost:{evaluation_id}"
+                        ),
+                        estimated_cost_R=estimated_cost_R,
+                        source_event_ids=source_ids,
+                        real_completed_bars_since_setup=real_completed_age,
+                    ),
+                    path_likelihood_artifact=self.path_likelihood_artifact,
+                    dol_calibration_artifact=self.dol_calibration_artifact,
+                    outcome_model_artifact=self.outcome_model_artifact,
+                    dol_probability_model_artifact=(
+                        self.dol_probability_model_artifact
+                    ),
+                    path_protocol=self.path_protocol,
+                    artifact_pins=self.signal_artifact_pins,
+                )
+            except (TypeError, ValueError) as error:
+                # This append-only component cannot take down the established
+                # Brain/Decision path.  Contract mismatches remain explicit
+                # shadow diagnostics and produce no intent.
+                diagnostics[candidate_id] = (
+                    f"signal_assessment_not_built:{error}",
+                )
+                continue
+            assessments[candidate_id] = assessment
+            if assessment.rejection_reasons:
+                diagnostics[candidate_id] = tuple(
+                    reason.value for reason in assessment.rejection_reasons
+                )
+        return replace(
+            belief,
+            signal_assessments=assessments,
+            trade_intents={},
+            shadow_signal_rejections=diagnostics,
+        )
+
+    def project_shadow_trade_intents(
+        self,
+        belief: MarketBelief,
+        account: AccountState,
+    ) -> MarketBelief:
+        """Freeze eligible shadow intents; never call Decision/Risk/Execution."""
+
+        if not isinstance(account, AccountState):
+            raise TypeError("shadow Trade Intent projection requires AccountState")
+        if self._belief is None or belief != self._belief:
+            raise ValueError("shadow Trade Intent projection requires current belief")
+        intents: dict[str, TradeIntent] = {}
+        diagnostics = {
+            identity: tuple(values)
+            for identity, values in belief.shadow_signal_rejections.items()
+        }
+        account_payload = {
+            "asof": belief.asof.isoformat(),
+            "equity": account.equity,
+            "open_risk_fraction": account.open_risk_fraction,
+            "requested_risk_fraction": account.requested_risk_fraction,
+            "quantity": account.quantity,
+            "point_value": account.point_value,
+            "position": to_primitive(account.position),
+        }
+        account_id = hashlib.sha256(
+            json.dumps(
+                account_payload,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()[:24]
+        methods = (
+            EntryMethod.FVG_50_LIMIT,
+            EntryMethod.OB_50_LIMIT,
+            EntryMethod.RECLAIM_ENTRY,
+            EntryMethod.MARKET_ENTRY,
+        )
+        for candidate_id, assessment in belief.signal_assessments.items():
+            if not assessment.eligible:
+                continue
+            candidate = belief.thesis_candidates.get(candidate_id)
+            episode = belief.entry_episodes.get(candidate_id)
+            if candidate is None or episode is None:
+                diagnostics[candidate_id] = ("typed_setup_missing_at_intent",)
+                continue
+            try:
+                intents[candidate_id] = build_trade_intent(
+                    assessment,
+                    asof=belief.asof,
+                    setup_candidate=candidate,
+                    entry_episode=episode,
+                    account=account,
+                    account_snapshot_id=f"account-snapshot:{account_id}",
+                    risk_budget_id=f"risk-budget:{account_id}",
+                    entry_method_preferences=methods,
+                )
+            except (TradeIntentError, TypeError, ValueError) as error:
+                diagnostics[candidate_id] = (
+                    f"trade_intent_not_built:{error}",
+                )
+        projected = replace(
+            belief,
+            trade_intents=intents,
+            shadow_signal_rejections=diagnostics,
+        )
+        self._belief = projected
+        return projected
 
     def update(
         self,
@@ -10552,6 +11948,19 @@ class PlaybookBrain:
         base here before applying terminal routing and typed thesis building.
         """
 
+        previous_belief = self._belief
+        previous_hypothesis_manager = self.hypothesis_manager.fork()
+        previous_path_competition_state = self._path_competition_state
+        previous_path_scope_key = self._path_scope_key
+        previous_path_seen_evidence_tokens = set(
+            self._path_seen_evidence_tokens
+        )
+        previous_dol_probability_results = dict(
+            self._dol_probability_results
+        )
+        previous_signal_real_completed_bar_anchors = dict(
+            self._signal_real_completed_bar_anchors
+        )
         token = _LSR_CONNECTION_MEMO.set({})
         try:
             return self._update_without_connection_memo(
@@ -10561,6 +11970,24 @@ class PlaybookBrain:
                 scene_delta=scene_delta,
                 precomputed_global_context=precomputed_global_context,
             )
+        except Exception:
+            # Path/DOL state is an append-only projection of a completed Brain
+            # clock.  A later Focus, MarketBelief or shadow-signal failure must
+            # not leave that projection ahead of the last published belief.
+            self._belief = previous_belief
+            self.hypothesis_manager = previous_hypothesis_manager
+            self._path_competition_state = previous_path_competition_state
+            self._path_scope_key = previous_path_scope_key
+            self._path_seen_evidence_tokens = (
+                previous_path_seen_evidence_tokens
+            )
+            self._dol_probability_results = (
+                previous_dol_probability_results
+            )
+            self._signal_real_completed_bar_anchors = (
+                previous_signal_real_completed_bar_anchors
+            )
+            raise
         finally:
             _LSR_CONNECTION_MEMO.reset(token)
 
@@ -12411,6 +13838,18 @@ class PlaybookBrain:
                 scene_graph,
                 thesis_candidates,
             )
+        (
+            path_competition_state,
+            path_update_records,
+            dol_rankings,
+            dol_candidate_exclusions,
+        ) = self._update_shadow_path_diagnostics(
+            observation,
+            global_context,
+            context_theses,
+            lifecycle_candidates,
+            previous_belief,
+        )
         base_belief = MarketBelief(
             asof=observation.asof,
             hypotheses=hypotheses,
@@ -12424,6 +13863,17 @@ class PlaybookBrain:
             ),
             context_theses=context_theses,
             entry_episodes=entry_episodes,
+            path_competition_state=path_competition_state,
+            path_update_records_this_clock=path_update_records,
+            dol_rankings=dol_rankings,
+            dol_probabilities=self._dol_probability_results,
+            dol_candidate_exclusions=dol_candidate_exclusions,
+            path_protocol_status=self.path_protocol.status,
+            path_authority=self.path_protocol.authority,
+            dol_probability_protocol_fingerprint=(
+                self.dol_probability_protocol.fingerprint
+            ),
+            signal_policy_protocol_fingerprint=self.signal_policy.fingerprint,
         )
         if scene_graph is not None:
             ranked_candidates = base_belief.ranked()
@@ -12620,9 +14070,25 @@ class PlaybookBrain:
                 ),
                 context_theses=context_theses,
                 entry_episodes=entry_episodes,
+                path_competition_state=path_competition_state,
+                path_update_records_this_clock=path_update_records,
+                dol_rankings=dol_rankings,
+                dol_probabilities=self._dol_probability_results,
+                dol_candidate_exclusions=dol_candidate_exclusions,
+                path_protocol_status=self.path_protocol.status,
+                path_authority=self.path_protocol.authority,
+                dol_probability_protocol_fingerprint=(
+                    self.dol_probability_protocol.fingerprint
+                ),
+                signal_policy_protocol_fingerprint=self.signal_policy.fingerprint,
             )
         else:
             self._belief = base_belief
+
+        self._belief = self._project_shadow_signal_assessments(
+            observation,
+            self._belief,
+        )
 
         # Root-specific priors are live working state, not an archive.  Keep
         # current analytical roots, the one frozen root that may own a

@@ -9,6 +9,25 @@
     "live_execution_allowed": false
   },
   "playbook_registry": "configs/playbooks.json",
+  "path_hypotheses": {
+    "protocol": "configs/path_hypotheses.json",
+    "path_protocol_fingerprint": "d897635cb91fc1cb84647f41eb4c5a6b8a06d05d2e44a1b3471e8e9ff67b0482",
+    "dol_protocol_fingerprint": "be9177601fbdac6e36072dbf7dd8bde46c793e7197d0a9e3662f835ceebbb4be"
+  },
+  "dol_probability": {
+    "protocol": "configs/dol_probability.json",
+    "protocol_fingerprint": "a7f588d35c380d4d9b38a2d5c3aa90ee5e30c49c241696f0d2847fb90b7ad7fe",
+    "model_artifact": null,
+    "model_artifact_fingerprint": null
+  },
+  "signal_policy": {
+    "protocol": "configs/signal_policy.json",
+    "protocol_fingerprint": "4e8d042fec936f0274c2c3f28655833d2d969c2a38e6a5d2157fcbce2607ee7d",
+    "path_likelihood_artifact": null,
+    "dol_calibration_artifact": null,
+    "outcome_model_artifact": null,
+    "artifact_pins": null
+  },
   "calibration_artifact": null,
   "timezone": "America/New_York",
   "tick_size": 0.25,
@@ -64,6 +83,7 @@
     }
   ],
   "observer": {
+    "semantic_registry": "semantics/registry_v1_2.yaml",
     "atr_period": 14,
     "memory_events": 512,
     "structure_protocol": "configs/primitives_structure_liquidity.json",

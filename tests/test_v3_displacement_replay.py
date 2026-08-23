@@ -6,7 +6,11 @@ import pytest
 
 from smc_trader.calibration_replay import ReplayCheckpointStore
 from smc_trader.causal import CausalMarketReader, ReaderUpdate
-from smc_trader.displacement import DisplacementLifecycle, DisplacementProtocol
+from smc_trader.displacement import (
+    CausalDisplacementTracker,
+    DisplacementLifecycle,
+    DisplacementProtocol,
+)
 from smc_trader.displacement_observer import CausalDisplacementEye, READER_ANOMALY_WHITELIST
 from smc_trader.model import (
     Bar,
@@ -230,6 +234,89 @@ def test_exp013_boundary_m5_xor() -> None:
     assert eye.last_batch == ()
 
 
+def test_displacement_eye_rejects_off_grid_m5_before_boundary_mutation() -> None:
+    eye, index, _ = _started_eye()
+    candidate = _m5(index, (101.0, 102.0, 101.0, 101.1))
+    before = (
+        repr(eye.tracker.__dict__),
+        tuple(eye._transitions),
+        eye.last_observation,
+        eye.last_update,
+        eye.last_batch,
+    )
+
+    with pytest.raises(ValueError, match="off-grid"):
+        eye.on_update(
+            _update(
+                candidate.end,
+                m5=(candidate,),
+                anomalies=("contract_change_history_reset",),
+            )
+        )
+
+    assert (
+        repr(eye.tracker.__dict__),
+        tuple(eye._transitions),
+        eye.last_observation,
+        eye.last_update,
+        eye.last_batch,
+    ) == before
+
+
+@pytest.mark.parametrize(
+    "case",
+    ("real", "gap", "synthetic"),
+    ids=("real-candle", "gap-boundary", "synthetic-boundary"),
+)
+def test_displacement_rejects_off_grid_before_any_state_change(
+    case: str,
+) -> None:
+    tracker = CausalDisplacementTracker(_protocol())
+    for index in range(15):
+        tracker.on_completed_5m(
+            _m5(index, (100.0, 101.0, 100.0, 100.0))
+        )
+    started = tracker.on_completed_5m(_m5(15))
+    assert started.state is not None
+    assert started.state.lifecycle is DisplacementLifecycle.STARTED
+    before = repr(tracker.__dict__)
+    malformed = _m5(
+        17 if case == "gap" else 16,
+        (101.0, 102.0, 101.0, 101.1),
+    )
+    if case == "synthetic":
+        malformed = replace(
+            malformed,
+            real_minutes=0,
+            synthetic_minutes=5,
+        )
+
+    with pytest.raises(ValueError, match="off-grid"):
+        tracker.on_completed_5m(malformed)
+
+    assert repr(tracker.__dict__) == before
+    assert tracker._failed is False
+
+
+def test_displacement_rejects_retry_from_different_stored_grid() -> None:
+    tracker = CausalDisplacementTracker(_protocol())
+    candle = _m5(0, (100.0, 101.0, 100.0, 100.0))
+    tracker.on_completed_5m(candle)
+    retry = replace(
+        candle,
+        price_tick_size=0.5,
+        normalized_ohlc_ticks=None,
+    )
+    assert retry == candle
+    before = repr(tracker.__dict__)
+
+    with pytest.raises(ValueError, match="grid disagrees"):
+        tracker.on_completed_5m(retry)
+
+    assert repr(tracker.__dict__) == before
+    assert tracker._failed is False
+
+
 def test_observer_reuses_displacement_on_exact_boundary_retry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -266,7 +353,216 @@ def test_observer_reuses_displacement_on_exact_boundary_retry(
     assert retried.displacement.asof == update.asof
 
 
-def test_group3_derived_data_anomaly_is_auditable_without_memory_leak() -> None:
+def test_observer_synthetic_displacement_terminal_uses_context_only_clock_root() -> None:
+    observer = CausalObserver(
+        ObserverConfig(
+            scale_specs=CORE_TEST_SCALE_SPECS,
+            displacement_protocol=str(PROTOCOL_PATH),
+        )
+    )
+    for index in range(15):
+        observer.observe(
+            _update(
+                _m5(index).end,
+                m5=(_m5(index, (100.0, 101.0, 100.0, 100.0)),),
+            )
+        )
+    observer.observe(_update(_m5(15).end, m5=(_m5(15),)))
+    active = _m5(16, (101.0, 102.0, 101.0, 102.0))
+    active_observation = observer.observe(
+        _update(active.end, m5=(active,))
+    )
+    assert active_observation.displacement is not None
+    assert active_observation.displacement.lifecycle == "active"
+
+    synthetic_m5 = replace(
+        _m5(17, (102.0, 102.0, 102.0, 102.0)),
+        real_minutes=4,
+        synthetic_minutes=1,
+    )
+    base_update = _update(synthetic_m5.end, m5=(synthetic_m5,))
+    for minute_offset in range(4, 0, -1):
+        observer.observe(
+            _update(
+                synthetic_m5.end
+                - pd.Timedelta(minutes=minute_offset)
+            )
+        )
+    synthetic_m1 = Candle(
+        timeframe=Timeframe.M1,
+        start=synthetic_m5.end - pd.Timedelta(minutes=1),
+        end=synthetic_m5.end,
+        open=102.0,
+        high=102.0,
+        low=102.0,
+        close=102.0,
+        volume=0.0,
+        symbol="NQH5",
+        instrument_id=1,
+        observed_minutes=1,
+        expected_minutes=1,
+        complete=True,
+        real_minutes=0,
+        synthetic_minutes=1,
+    )
+    newly = {**base_update.newly_completed, Timeframe.M1: (synthetic_m1,)}
+    histories = {**base_update.histories, Timeframe.M1: (synthetic_m1,)}
+    observation = observer.observe(
+        replace(
+            base_update,
+            completed_1m=synthetic_m1,
+            newly_completed=newly,
+            histories=histories,
+        )
+    )
+    terminal = next(
+        event
+        for event in observation.semantic_events_this_update
+        if (
+            event.kind is EventKind.DISPLACEMENT_OBSERVED
+            and event.evidence.get("lifecycle") == "censored"
+            and event.evidence.get("terminal_reason")
+            == "synthetic_interruption"
+        )
+    )
+    assert len(terminal.context_event_ids) == 1
+    context = observer.audit_store.get(terminal.context_event_ids[0])
+    assert context is not None
+    assert context.kind is EventKind.BAR_COMPLETED
+    assert context.timeframe is Timeframe.M1
+    assert context.known_at == terminal.known_at == synthetic_m1.end
+    assert context.evidence["clock_only"] is True
+    assert context.evidence["real_completed"] is False
+    assert context.event_id not in terminal.source_event_ids
+    source_events = tuple(
+        observer.audit_store.get(event_id)
+        for event_id in terminal.source_event_ids
+    )
+    assert source_events
+    assert all(event is not None for event in source_events)
+    assert all(event.evidence["real_completed"] is True for event in source_events)
+    expected_detector_ids = tuple(
+        sorted(event.evidence["detector_candle_id"] for event in source_events)
+    )
+    assert terminal.source_data_ids == tuple(
+        terminal.evidence["admitted_candle_ids"]
+    )
+    assert tuple(sorted(terminal.source_data_ids)) == expected_detector_ids
+    assert len(terminal.source_data_ids) == len(set(terminal.source_data_ids))
+    assert not set(terminal.source_data_ids).intersection(context.source_data_ids)
+    assert context.evidence["detector_candle_id"] not in terminal.source_data_ids
+    assert max(event.known_at for event in source_events) < terminal.known_at
+
+
+def test_synthetic_displacement_terminal_uses_all_interior_m1_roots() -> None:
+    observer = CausalObserver(
+        ObserverConfig(
+            scale_specs=CORE_TEST_SCALE_SPECS,
+            displacement_protocol=str(PROTOCOL_PATH),
+        )
+    )
+    for index in range(15):
+        observer.observe(
+            _update(
+                _m5(index).end,
+                m5=(_m5(index, (100.0, 101.0, 100.0, 100.0)),),
+            )
+        )
+    observer.observe(_update(_m5(15).end, m5=(_m5(15),)))
+    active = _m5(16, (101.0, 102.0, 101.0, 102.0))
+    observer.observe(_update(active.end, m5=(active,)))
+
+    incomplete_m5 = replace(
+        _m5(17, (102.0, 102.0, 102.0, 102.0)),
+        real_minutes=3,
+        synthetic_minutes=2,
+    )
+    synthetic_ends = (
+        incomplete_m5.end - pd.Timedelta(minutes=3),
+        incomplete_m5.end - pd.Timedelta(minutes=2),
+    )
+    for minute_end in (
+        incomplete_m5.end - pd.Timedelta(minutes=4),
+        *synthetic_ends,
+        incomplete_m5.end - pd.Timedelta(minutes=1),
+    ):
+        update = _update(minute_end)
+        if minute_end in synthetic_ends:
+            synthetic_m1 = replace(
+                update.completed_1m,
+                volume=0.0,
+                real_minutes=0,
+                synthetic_minutes=1,
+            )
+            update = replace(
+                update,
+                completed_1m=synthetic_m1,
+                newly_completed={
+                    **update.newly_completed,
+                    Timeframe.M1: (synthetic_m1,),
+                },
+                histories={
+                    **update.histories,
+                    Timeframe.M1: (synthetic_m1,),
+                },
+            )
+        observer.observe(update)
+
+    observation = observer.observe(
+        _update(incomplete_m5.end, m5=(incomplete_m5,))
+    )
+    terminal = next(
+        event
+        for event in observation.semantic_events_this_update
+        if (
+            event.kind is EventKind.DISPLACEMENT_OBSERVED
+            and event.evidence.get("lifecycle") == "censored"
+            and event.evidence.get("terminal_reason")
+            == "synthetic_interruption"
+        )
+    )
+    roots = tuple(
+        observer.audit_store.get(event_id)
+        for event_id in terminal.context_event_ids
+    )
+
+    assert all(root is not None for root in roots)
+    assert tuple(root.known_at for root in roots if root is not None) == (
+        synthetic_ends
+    )
+    assert all(
+        root.evidence["clock_only"] is True
+        and root.evidence["real_completed"] is False
+        for root in roots
+        if root is not None
+    )
+    assert terminal.known_at == incomplete_m5.end
+    assert terminal.known_at not in synthetic_ends
+
+
+def test_synthetic_terminal_rejects_incomplete_m1_constituent_index() -> None:
+    observer = CausalObserver(
+        ObserverConfig(
+            scale_specs=CORE_TEST_SCALE_SPECS,
+            displacement_protocol=str(PROTOCOL_PATH),
+        )
+    )
+    terminal_clock = BASE + pd.Timedelta(minutes=5)
+    for minute_offset in (4, 3, 1, 0):
+        observer.observe(
+            _update(
+                terminal_clock
+                - pd.Timedelta(minutes=minute_offset)
+            )
+        )
+
+    with pytest.raises(ValueError, match="five contiguous unique M1 roots"):
+        observer._synthetic_m1_context_event_ids_for_m5_terminal(
+            terminal_clock
+        )
+
+
+def test_off_grid_detector_candle_fails_closed_before_group3_projection() -> None:
     observer = CausalObserver(
         ObserverConfig(
             scale_specs=CORE_TEST_SCALE_SPECS,
@@ -311,20 +607,24 @@ def test_group3_derived_data_anomaly_is_auditable_without_memory_leak() -> None:
         index,
         (102.25, 102.5, 102.0, 102.1),
     )
-    boundary = observer.observe(
-        _update(off_grid.end, m5=(off_grid,))
+    before_displacement = repr(observer._displacement_eye.__dict__)
+    before_group3 = repr(observer._group3_tracker.__dict__)
+    with pytest.raises(ValueError, match="off-grid"):
+        observer.observe(_update(off_grid.end, m5=(off_grid,)))
+
+    # This path intentionally bypasses the production Reader.  Exact grid
+    # admission still precedes every detector boundary/cache path, so the
+    # corrected same-clock input remains replayable without rounded ancestry.
+    assert repr(observer._displacement_eye.__dict__) == before_displacement
+    assert repr(observer._group3_tracker.__dict__) == before_group3
+    assert observer._terminal_failure is None
+    corrected = replace(off_grid, close=102.25)
+    recovered = observer.observe(
+        _update(corrected.end, m5=(corrected,))
     )
-    assert boundary.displacement is not None
-    assert boundary.displacement.latest_transition is not None
-    assert boundary.displacement.latest_transition.reason == "data_anomaly"
-    assert boundary.frames[Timeframe.M5].fair_value_gaps == ()
-    assert len(boundary.group3_boundary_fvg_transitions) == 1
-    invalidated = boundary.group3_boundary_fvg_transitions[0]
-    assert invalidated.fvg_id == created_id
-    assert invalidated.transition_reason == "data_anomaly"
-    assert all(
-        not key.startswith("fvg:")
-        for key in boundary.retained_entity_timelines
+    assert any(
+        state.fvg_id == created_id
+        for state in recovered.frames[Timeframe.M5].fair_value_gaps
     )
 
 
@@ -421,7 +721,10 @@ def test_exp013_isolated_transition_capacity_noninterference() -> None:
     assert (len(observation.recent_transitions), len(ids)) == (64, 64)
     assert seed_id not in ids
     assert not any(isinstance(item, MarketEvent) for item in observation.recent_transitions)
-    assert all("displacement" not in item.value for item in EventKind)
+    # Displacement transitions remain isolated from this EventMemory even
+    # though the public phase-2 semantic contract now registers an atomic
+    # ``displacement_observed`` event kind for the full Observer pipeline.
+    assert EventKind.DISPLACEMENT_OBSERVED.value == "displacement_observed"
     assert not hasattr(eye, "memory")
     assert memory.recent() == before
 

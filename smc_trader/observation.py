@@ -5,6 +5,7 @@ from bisect import bisect_right
 from collections import deque
 from dataclasses import dataclass, field, fields, is_dataclass, replace
 import hashlib
+import json
 import math
 from typing import Iterable, Mapping, Sequence
 
@@ -19,6 +20,7 @@ from .displacement_observer import (
     REGISTERED_CLOSURE_ANOMALIES,
     CausalDisplacementEye,
 )
+from .event_store import ImmutableEventStore, event_order_key
 from .group3 import (
     CausalGroup3Tracker,
     FVG_BOUNDARY_REASONS,
@@ -54,6 +56,7 @@ from .model import (
     Direction,
     EntryLocationState,
     EventKind,
+    EventOrigin,
     ExecutionObservation,
     FairValueGapState,
     FairValueGapLifecycle,
@@ -80,8 +83,17 @@ from .model import (
     SwingLifecycle,
     SwingRelation,
     Timeframe,
+    SMC_SEMANTIC_VERSION,
+    candle_identity,
     clamp,
+    to_primitive,
     typed_event_entity_key,
+)
+from .market_state import (
+    MarketSnapshot,
+    MarketSnapshotPublisher,
+    build_structural_legs,
+    session_name_phase,
 )
 from .scene_graph import (
     ScaleSpec,
@@ -89,6 +101,7 @@ from .scene_graph import (
     TemporalMarketSceneGraph,
     scale_registry_id,
 )
+from .semantics import SemanticRegistry
 from .structure import StructureConfig, StructureTracker
 
 
@@ -113,12 +126,14 @@ class ObserverConfig:
     group3_protocol: str | None = None
     group4_protocol: str | None = None
     group5_protocol: str | None = None
+    semantic_registry: str = "semantics/registry_v1_2.yaml"
     scale_specs: tuple[ScaleSpec, ...] = ()
     project_scene_graph: bool = True
     materialize_event_view: bool = True
     group4_projection_only: bool = False
     eye_authority_mode: bool = False
     typed_transition_delta_transport: bool = False
+    persist_state_projections: bool = True
 
 
 @dataclass(frozen=True)
@@ -235,10 +250,23 @@ class _ReferencePeriod:
     started_at: pd.Timestamp
     last_end: pd.Timestamp
     high: float
+    high_at: pd.Timestamp
     low: float
+    low_at: pd.Timestamp
     symbol: str
     instrument_id: int
     coverage_complete: bool
+
+
+@dataclass(frozen=True)
+class _ReferenceCandidateSource:
+    """Frozen clocks needed to publish one completed-period candidate."""
+
+    extreme_at: pd.Timestamp
+    admitted_at: pd.Timestamp
+    period_started_at: pd.Timestamp
+    period_last_end: pd.Timestamp
+    replaces_level_id: str | None = None
 
 
 _REFERENCE_KINDS = {
@@ -791,16 +819,19 @@ class EventMemory:
                     FairValueGapLifecycle.PARTIAL.value,
                     FairValueGapLifecycle.MITIGATED.value,
                     FairValueGapLifecycle.INVALIDATED.value,
+                    FairValueGapLifecycle.EXPIRED.value,
                 }
             ),
             FairValueGapLifecycle.PARTIAL.value: frozenset(
                 {
                     FairValueGapLifecycle.MITIGATED.value,
                     FairValueGapLifecycle.INVALIDATED.value,
+                    FairValueGapLifecycle.EXPIRED.value,
                 }
             ),
             FairValueGapLifecycle.MITIGATED.value: frozenset(),
             FairValueGapLifecycle.INVALIDATED.value: frozenset(),
+            FairValueGapLifecycle.EXPIRED.value: frozenset(),
         },
         "order_block": {
             OrderBlockLifecycle.CREATED.value: frozenset(
@@ -887,7 +918,12 @@ class EventMemory:
         ),
     }
 
-    def __init__(self, maximum_events: int) -> None:
+    def __init__(
+        self,
+        maximum_events: int,
+        *,
+        audit_store: ImmutableEventStore | None = None,
+    ) -> None:
         if type(maximum_events) is not int or maximum_events < 1:
             raise ValueError(
                 "event memory maximum_events must be a positive integer"
@@ -912,6 +948,9 @@ class EventMemory:
         # after each individual append when the clock table is above its
         # bounded cleanup threshold.
         self._sequence_counts_prune_pending = False
+        self._semantic_version: str | None = None
+        self._audit_store = audit_store
+        self._audit_pending: list[MarketEvent] = []
 
     @property
     def last_minute_end(self) -> pd.Timestamp | None:
@@ -921,14 +960,18 @@ class EventMemory:
     def clock_coverage_start(self) -> pd.Timestamp | None:
         return self._clock_coverage_start
 
+    @property
+    def semantic_version(self) -> str | None:
+        return self._semantic_version
+
     @staticmethod
     def _required_event_clock(event: MarketEvent) -> pd.Timestamp:
         age_origin = (
             event.formed_at
             or event.confirmed_at
-            or event.observed_at
+            or event.event_time
         )
-        return min(age_origin, event.observed_at)
+        return min(age_origin, event.known_at)
 
     def set_clock_coverage_start(
         self,
@@ -1156,16 +1199,52 @@ class EventMemory:
             and event.formed_at == event.observed_at
         )
 
+    def _retain_recent_event(self, event: MarketEvent) -> None:
+        """Retain one event in the bounded hot view without duplicating it."""
+
+        if event.event_id in self._ids:
+            return
+        if len(self._events) == self._events.maxlen and self._events:
+            removed = self._events[0]
+            self._ids.discard(removed.event_id)
+            if removed.entity_id is None:
+                self._closed_durations.pop(
+                    removed.event_id,
+                    None,
+                )
+            if removed.entity_id is not None:
+                latest_entity = self._latest_by_entity.get(
+                    removed.entity_id
+                )
+                if (
+                    latest_entity is not None
+                    and latest_entity.event_id == removed.event_id
+                ):
+                    self._latest_by_entity.pop(
+                        removed.entity_id,
+                        None,
+                    )
+        self._events.append(event)
+        self._ids.add(event.event_id)
+
     def append(
         self,
         event: MarketEvent,
         *,
         include_in_recent: bool = True,
         sequence_floor: int | None = None,
-    ) -> None:
+        audit: bool = True,
+    ) -> MarketEvent:
         if type(include_in_recent) is not bool:
             raise ValueError(
                 "event-memory recent inclusion flag must be boolean"
+            )
+        if (
+            self._semantic_version is not None
+            and event.semantic_version != self._semantic_version
+        ):
+            raise ValueError(
+                "event memory cannot mix semantic versions"
             )
         if (
             sequence_floor is not None
@@ -1198,9 +1277,11 @@ class EventMemory:
                 raise ValueError(
                     "market event id conflicts with retained payload"
                 )
-            return
+            return existing
         if entity_key is not None:
             self._validate_timeline_append(entity_key, event)
+        if self._semantic_version is None:
+            self._semantic_version = event.semantic_version
         starts_incomplete = bool(
             entity_key is not None
             and entity_key not in self._entity_timelines
@@ -1214,29 +1295,10 @@ class EventMemory:
         if sequence_floor is not None:
             sequence_no += sequence_floor
         event = replace(event, sequence_no=sequence_no)
+        if audit and self._audit_store is not None:
+            self._audit_pending.append(event)
         if include_in_recent:
-            if len(self._events) == self._events.maxlen and self._events:
-                removed = self._events[0]
-                self._ids.discard(removed.event_id)
-                if removed.entity_id is None:
-                    self._closed_durations.pop(
-                        removed.event_id,
-                        None,
-                    )
-                if removed.entity_id is not None:
-                    latest_entity = self._latest_by_entity.get(
-                        removed.entity_id
-                    )
-                    if (
-                        latest_entity is not None
-                        and latest_entity.event_id == removed.event_id
-                    ):
-                        self._latest_by_entity.pop(
-                            removed.entity_id,
-                            None,
-                        )
-            self._events.append(event)
-            self._ids.add(event.event_id)
+            self._retain_recent_event(event)
         if entity_key is not None:
             self._entity_timelines.setdefault(entity_key, []).append(
                 event
@@ -1260,6 +1322,69 @@ class EventMemory:
                 self._closed_durations[event.event_id] = 0
         if len(self._sequence_counts) > self._events.maxlen * 2:
             self._sequence_counts_prune_pending = True
+        return event
+
+    def flush_audit(self) -> int:
+        """Atomically append this update's events in canonical availability order."""
+
+        if self._audit_store is None or not self._audit_pending:
+            self._audit_pending.clear()
+            return 0
+        ordered = tuple(sorted(self._audit_pending, key=event_order_key))
+        appended = self._audit_store.append_batch(ordered)
+        self._audit_pending.clear()
+        return appended
+
+    def audit_event_including_pending(self, event_id: str) -> MarketEvent | None:
+        """Resolve an exact audit event without flushing the current update."""
+
+        pending = tuple(
+            event for event in self._audit_pending if event.event_id == event_id
+        )
+        if len(pending) > 1:
+            raise ValueError("pending audit event identity is duplicated")
+        committed = (
+            None if self._audit_store is None else self._audit_store.get(event_id)
+        )
+        if pending and committed is not None and pending[0] != committed:
+            raise ValueError("pending audit event conflicts with committed identity")
+        return pending[0] if pending else committed
+
+    def transfer_pending_from(self, prior: "EventMemory") -> int:
+        """Move uncommitted events while preserving audit and causal timelines.
+
+        Typed live prefixes are already retained solely for a terminal join;
+        they deliberately do not re-enter the new epoch's bounded recent view.
+        """
+
+        if not isinstance(prior, EventMemory) or prior is self:
+            raise TypeError("pending event-memory source is invalid")
+        if self._audit_store is not prior._audit_store:
+            raise ValueError("pending events cannot change audit store")
+        if self._audit_pending:
+            raise ValueError("pending events require an empty destination")
+        pending = tuple(prior._audit_pending)
+        for event in pending:
+            entity_key = typed_event_entity_key(event)
+            existing = self._existing_event(event.event_id, entity_key)
+            if existing is not None:
+                if (
+                    self._normalized_event(existing)
+                    != self._normalized_event(event)
+                ):
+                    raise ValueError(
+                        "pending event conflicts with retained boundary prefix"
+                    )
+                transferred = existing
+            else:
+                transferred = self.append(
+                    event,
+                    include_in_recent=event.event_id in prior._ids,
+                    audit=False,
+                )
+            self._audit_pending.append(transferred)
+        prior._audit_pending.clear()
+        return len(pending)
 
     def sync_retained_entity_timelines(
         self,
@@ -1413,6 +1538,17 @@ class EventMemory:
             key: list(prior._entity_timelines[key])
             for key in keys
         }
+        versions = {
+            event.semantic_version
+            for timeline in timelines.values()
+            for event in timeline
+        }
+        if len(versions) > 1 or (
+            versions
+            and prior.semantic_version not in versions
+        ):
+            raise ValueError("boundary prefix mixes semantic versions")
+        self._semantic_version = prior.semantic_version
         if any(
             event.observed_at > clock
             for timeline in timelines.values()
@@ -1585,7 +1721,7 @@ class EventMemory:
                 origin = (
                     event.formed_at
                     or event.confirmed_at
-                    or event.observed_at
+                    or event.event_time
                 )
                 ages[event.event_id] = max(
                     0,
@@ -1611,13 +1747,39 @@ def _event(
     ended_at: pd.Timestamp | None = None,
     direction: Direction | None = None,
     transition_reason: str | None = None,
+    event_time: pd.Timestamp | None = None,
+    known_at: pd.Timestamp | None = None,
+    semantic_version: str = SMC_SEMANTIC_VERSION,
+    evidence: Mapping[str, object] | None = None,
+    zone: tuple[float, float] | None = None,
+    source_event_ids: Iterable[str] = (),
+    source_data_ids: Iterable[str] = (),
+    source_entity_ids: Iterable[str] = (),
+    context_event_ids: Iterable[str] = (),
+    origin: EventOrigin = EventOrigin.LEGACY_TRANSPORT,
 ) -> MarketEvent:
     source_ids = tuple(
         str(value) for value in source_ids if value is not None
     )
+    explicit_event_ids = tuple(
+        str(value) for value in source_event_ids if value is not None
+    )
+    data_ids = tuple(
+        str(value) for value in source_data_ids if value is not None
+    )
+    entity_ids = tuple(
+        str(value) for value in source_entity_ids if value is not None
+    )
+    context_ids = tuple(
+        str(value) for value in context_event_ids if value is not None
+    )
     raw = (
-        f"{kind.value}|{observed_at.isoformat()}|{timeframe.value}|{side}|"
-        f"{price}|{'|'.join(source_ids)}|{entity_id}|{lifecycle}"
+        f"{semantic_version}|{kind.value}|{observed_at.isoformat()}|"
+        f"{timeframe.value}|{side}|"
+        f"{price}|{'|'.join(source_ids)}|{'|'.join(explicit_event_ids)}|"
+        f"{'|'.join(data_ids)}|{'|'.join(entity_ids)}|"
+        f"{'|'.join(context_ids)}|{EventOrigin(origin).value}|"
+        f"{entity_id}|{lifecycle}"
     )
     return MarketEvent(
         event_id=hashlib.sha256(raw.encode("utf-8")).hexdigest()[:24],
@@ -1636,6 +1798,16 @@ def _event(
         ended_at=ended_at,
         direction=direction,
         transition_reason=transition_reason,
+        event_time=event_time or observed_at,
+        known_at=known_at or observed_at,
+        semantic_version=semantic_version,
+        evidence={} if evidence is None else dict(evidence),
+        zone=zone,
+        source_event_ids=explicit_event_ids,
+        source_data_ids=data_ids,
+        source_entity_ids=entity_ids,
+        context_event_ids=context_ids,
+        origin=origin,
     )
 
 
@@ -1719,6 +1891,22 @@ class CausalObserver:
 
     def __init__(self, config: ObserverConfig) -> None:
         self.config = config
+        self.semantic_registry = SemanticRegistry.from_file(
+            self.config.semantic_registry
+        )
+        self.audit_store = ImmutableEventStore(
+            semantic_version=self.semantic_registry.semantic_version,
+            definition_identity=self.semantic_registry.definition_identity,
+        )
+        self.market_snapshot_publisher = MarketSnapshotPublisher(
+            semantic_registry_identity=self.semantic_registry.identity,
+            # The normal Trading Eye is event-authoritative.  The explicitly
+            # constrained Group-4 authority scanner does not publish atomic
+            # BAR/semantic facts and therefore remains a labelled projection
+            # compatibility mode instead of pretending to be atomic.
+            atomic_authority=not self.config.group4_projection_only,
+        )
+        self.last_market_snapshot: MarketSnapshot | None = None
         if type(self.config.project_scene_graph) is not bool:
             raise ValueError("scene-graph projection flag must be boolean")
         if type(self.config.materialize_event_view) is not bool:
@@ -1730,6 +1918,10 @@ class CausalObserver:
         if type(self.config.typed_transition_delta_transport) is not bool:
             raise ValueError(
                 "typed transition delta transport flag must be boolean"
+            )
+        if type(self.config.persist_state_projections) is not bool:
+            raise ValueError(
+                "state-projection persistence flag must be boolean"
             )
         if self.config.eye_authority_mode:
             if (
@@ -1821,6 +2013,10 @@ class CausalObserver:
             if self.config.structure_protocol is not None
             else None
         )
+        # Keep the exact registered detector contract available to the
+        # semantic publisher.  In particular, a confirmed swing must source
+        # the complete left/pivot/right bar window used by this config.
+        self._structure_config = structure_config
         if (
             self.config.liquidity_protocol is not None
             and structure_config is None
@@ -2003,7 +2199,10 @@ class CausalObserver:
             else None
         )
         self._group5_boundary_update: Group5Update | None = None
-        self.memory = EventMemory(self.config.memory_events)
+        self.memory = EventMemory(
+            self.config.memory_events,
+            audit_store=self.audit_store,
+        )
         self._terminal_failure: str | None = None
         self._last_displacement_input: tuple[object, ...] | None = None
         self._last_displacement_observation = None
@@ -2014,6 +2213,70 @@ class CausalObserver:
         ] = deque(
             maxlen=max(2048, self.config.memory_events * 4)
         )
+        self._known_structural_leg_ids: set[str] = set()
+        self._known_structural_leg_order: deque[str] = deque(
+            maxlen=max(2048, self.config.memory_events * 4)
+        )
+        self._confirmed_swing_event_ids: dict[str, str] = {}
+        self._structural_leg_event_ids: dict[str, str] = {}
+        self._structure_direction_event_ids: dict[str, str] = {}
+        self._latest_structure_direction_event_ids: dict[
+            Timeframe,
+            str,
+        ] = {}
+        self._bar_event_ids_by_candle_id: dict[str, str] = {}
+        self._bar_close_by_candle_id: dict[str, float] = {}
+        self._bar_close_by_event_id: dict[str, float] = {}
+        self._bar_event_ids_by_timeframe: dict[
+            Timeframe,
+            list[tuple[pd.Timestamp, str]],
+        ] = {
+            timeframe: [] for timeframe in self._active_timeframes
+        }
+        # Keep the inclusive normalized M1 clock/root index above for session
+        # replay and cold-prefix initialization.  Semantic detectors consume
+        # only real-completed bars, matching StructureTracker and the other
+        # primitive reducers that treat synthetic no-trade minutes as clock
+        # advancement only.
+        self._real_bar_event_ids_by_timeframe: dict[
+            Timeframe,
+            list[tuple[pd.Timestamp, str]],
+        ] = {
+            timeframe: [] for timeframe in self._active_timeframes
+        }
+        self._level_touch_event_ids: dict[
+            tuple[str, pd.Timestamp],
+            str,
+        ] = {}
+        self._candidate_level_event_ids: dict[str, str] = {}
+        self._known_level_touch_ids: set[str] = set()
+        # Source reducers expose complete touch histories for live zones.
+        # Evicting these occurrence keys causes old touches to be rediscovered
+        # on every later frame, so retain the compact IDs for the contract
+        # epoch and clear them only at a hard boundary.
+        self._known_level_touch_order: deque[str] = deque()
+        self._penetration_event_ids: dict[
+            tuple[str, Timeframe, pd.Timestamp],
+            str,
+        ] = {}
+        self._raw_break_event_ids: dict[str, str] = {}
+        self._displacement_event_ids: dict[str, str] = {}
+        self._protected_swing_event_ids: dict[str, str] = {}
+        self._terminal_crossing_events: dict[str, MarketEvent] = {}
+        self._fvg_created_event_ids: dict[str, str] = {}
+        self._origin_zone_created_event_ids: dict[str, str] = {}
+        self._range_created_event_ids: dict[str, str] = {}
+        self._range_active_event_ids: dict[str, str] = {}
+        self._range_boundary_level_ids: dict[tuple[str, str], str] = {}
+        self._last_invalidated_range_event_id: str | None = None
+        self._known_displacement_transition_ids: set[str] = set()
+        self._known_displacement_transition_order: deque[str] = deque(
+            maxlen=max(512, self.config.memory_events * 2)
+        )
+        self._structural_leg_cache: dict[
+            Timeframe,
+            tuple[tuple[str, ...], tuple],
+        ] = {}
         self._last_frame_cutoff: dict[Timeframe, pd.Timestamp] = {}
         self._known_structure_events: set[
             tuple[str, BOSLifecycle]
@@ -2048,8 +2311,16 @@ class CausalObserver:
             str,
             tuple[pd.Timestamp, LiquidityInventoryItem],
         ] = {}
+        self._pending_level_crossings: dict[
+            str,
+            tuple[pd.Timestamp, LiquidityInventoryItem],
+        ] = {}
         self._reference_periods: dict[str, _ReferencePeriod] = {}
         self._reference_inventory: dict[str, LiquidityInventoryItem] = {}
+        self._reference_candidate_sources: dict[
+            str,
+            _ReferenceCandidateSource,
+        ] = {}
         self._reference_last_end: pd.Timestamp | None = None
         self._reference_coverage_start: pd.Timestamp | None = None
         # Optional transport cache for authority scans and bounded diagnostics.
@@ -2092,6 +2363,8 @@ class CausalObserver:
         boundary_symbol: str,
         boundary_instrument_id: int,
     ) -> None:
+        self.market_snapshot_publisher.on_boundary()
+        self.last_market_snapshot = None
         # Delta transport is an authority-scan projection, not causal state.
         # A hard epoch boundary must not retain prior-contract signatures.
         self._typed_delta_signatures.clear()
@@ -2129,7 +2402,10 @@ class CausalObserver:
             for timeframe in self._active_timeframes
         }
         prior_memory = self.memory
-        self.memory = EventMemory(self.config.memory_events)
+        self.memory = EventMemory(
+            self.config.memory_events,
+            audit_store=self.audit_store,
+        )
         self.memory._synthetic_run_starts_ns = list(
             prior_memory._synthetic_run_starts_ns
         )
@@ -2148,9 +2424,57 @@ class CausalObserver:
             prior_memory,
             asof=observed_at,
         )
+        self.memory.transfer_pending_from(prior_memory)
+        self._append_semantic_atomic(
+            EventKind.MARKET_EPOCH_RESET,
+            observed_at,
+            Timeframe.M1,
+            None,
+            None,
+            0.0,
+            (),
+            {
+                "reason": reason,
+                "reset_anomalies": tuple(reset_anomalies),
+                "new_symbol": boundary_symbol,
+                "new_instrument_id": boundary_instrument_id,
+            },
+            event_time=observed_at,
+        )
         self._prior = None
         self._known_level_ids.clear()
         self._known_level_order.clear()
+        self._known_structural_leg_ids.clear()
+        self._known_structural_leg_order.clear()
+        self._confirmed_swing_event_ids.clear()
+        self._structural_leg_event_ids.clear()
+        self._structure_direction_event_ids.clear()
+        self._latest_structure_direction_event_ids.clear()
+        self._bar_event_ids_by_candle_id.clear()
+        self._bar_close_by_candle_id.clear()
+        self._bar_close_by_event_id.clear()
+        for bar_events in self._bar_event_ids_by_timeframe.values():
+            bar_events.clear()
+        for bar_events in self._real_bar_event_ids_by_timeframe.values():
+            bar_events.clear()
+        self._level_touch_event_ids.clear()
+        self._candidate_level_event_ids.clear()
+        self._known_level_touch_ids.clear()
+        self._known_level_touch_order.clear()
+        self._penetration_event_ids.clear()
+        self._raw_break_event_ids.clear()
+        self._displacement_event_ids.clear()
+        self._protected_swing_event_ids.clear()
+        self._terminal_crossing_events.clear()
+        self._fvg_created_event_ids.clear()
+        self._origin_zone_created_event_ids.clear()
+        self._range_created_event_ids.clear()
+        self._range_active_event_ids.clear()
+        self._range_boundary_level_ids.clear()
+        self._last_invalidated_range_event_id = None
+        self._known_displacement_transition_ids.clear()
+        self._known_displacement_transition_order.clear()
+        self._structural_leg_cache.clear()
         self._last_frame_cutoff.clear()
         self._known_structure_events.clear()
         self._known_structure_event_order.clear()
@@ -2163,8 +2487,10 @@ class CausalObserver:
         self._liquidity_snapshot_cache.clear()
         self._inventory_consumption.clear()
         self._pending_pool_sweeps.clear()
+        self._pending_level_crossings.clear()
         self._reference_periods.clear()
         self._reference_inventory.clear()
+        self._reference_candidate_sources.clear()
         self._reference_last_end = None
         self._reference_coverage_start = None
         for item in (
@@ -2605,6 +2931,1032 @@ class CausalObserver:
                 "the causal history tail"
             )
 
+    def _append_semantic_atomic(
+        self,
+        kind: EventKind,
+        known_at: pd.Timestamp,
+        timeframe: Timeframe,
+        side: str | None,
+        price: float | None,
+        strength: float,
+        source_event_ids: Iterable[str] = (),
+        evidence: Mapping[str, object] | None = None,
+        *,
+        direction: Direction | None = None,
+        event_time: pd.Timestamp | None = None,
+        zone: tuple[float, float] | None = None,
+        source_data_ids: Iterable[str] = (),
+        source_entity_ids: Iterable[str] = (),
+        context_event_ids: Iterable[str] = (),
+    ) -> MarketEvent:
+        registry = getattr(self, "semantic_registry", None)
+        if registry is None:
+            raise ValueError(
+                "canonical semantic emitter requires a loaded registry"
+            )
+        # Epoch reset is journal/control infrastructure rather than an SMC
+        # semantic concept.  It intentionally remains outside the semantic
+        # registry while sharing the immutable append path.
+        if (
+            kind is not EventKind.MARKET_EPOCH_RESET
+            and kind not in registry.canonical_emitted_event_kinds
+        ):
+            binding = registry.event_binding_by_kind.get(kind)
+            status = "unregistered" if binding is None else binding.status
+            raise ValueError(
+                "canonical semantic emitter rejects non-emitted event kind: "
+                f"{kind.value} ({status})"
+            )
+        source_event_ids = tuple(
+            dict.fromkeys(
+                str(value) for value in source_event_ids if value is not None
+            )
+        )
+        source_data_ids = tuple(
+            dict.fromkeys(
+                str(value) for value in source_data_ids if value is not None
+            )
+        )
+        source_entity_ids = tuple(
+            dict.fromkeys(
+                str(value) for value in source_entity_ids if value is not None
+            )
+        )
+        context_event_ids = tuple(
+            dict.fromkeys(
+                str(value) for value in context_event_ids if value is not None
+            )
+        )
+        session_name, session_phase = session_name_phase(known_at)
+        payload = {
+            "canonical_semantic": True,
+            "projection_only": False,
+            "session_name": session_name,
+            "session_phase": session_phase,
+            **({} if evidence is None else dict(evidence)),
+        }
+        event = _event(
+            kind,
+            known_at,
+            timeframe,
+            side,
+            price,
+            strength,
+            source_event_ids,
+            payload,
+            direction=direction,
+            event_time=event_time or known_at,
+            known_at=known_at,
+            evidence=payload,
+            zone=zone,
+            source_event_ids=source_event_ids,
+            source_data_ids=source_data_ids,
+            source_entity_ids=source_entity_ids,
+            context_event_ids=context_event_ids,
+            origin=EventOrigin.SEMANTIC_ATOMIC,
+        )
+        identity_payload = {
+            "semantic_version": event.semantic_version,
+            "semantic_type": event.kind.value,
+            "event_time": event.event_time,
+            "known_at": event.known_at,
+            "timeframe": event.timeframe.value,
+            "side": event.side,
+            "price": event.price,
+            "direction": (
+                None if event.direction is None else event.direction.value
+            ),
+            "source_event_ids": event.source_event_ids,
+            "source_data_ids": event.source_data_ids,
+            "source_entity_ids": event.source_entity_ids,
+            "context_event_ids": event.context_event_ids,
+            "origin": event.origin.value,
+            "evidence": event.evidence,
+            "zone": event.zone,
+        }
+        event = replace(
+            event,
+            event_id=hashlib.sha256(
+                json.dumps(
+                    to_primitive(identity_payload),
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest()[:24],
+        )
+        existing = self.audit_store.get(event.event_id)
+        if existing is not None:
+            # Event identity intentionally excludes the convenience
+            # ``strength`` score: a long-lived zone can revise that score
+            # after the touch occurred. If a bounded hot-memory key is later
+            # evicted and the same occurrence is rediscovered, retain the
+            # first-known frozen score rather than rewriting history or
+            # creating a second semantic occurrence.
+            retry = replace(
+                event,
+                sequence_no=existing.sequence_no,
+                strength=existing.strength,
+            )
+            if retry != existing:
+                raise ValueError(
+                    "canonical semantic event id conflicts with audit history: "
+                    f"{event.event_id} ({event.kind.value})"
+                )
+            return existing
+        self.memory.append(event, include_in_recent=False)
+        return event
+
+    def _normalized_crossing_level_id(self, level_id: str) -> str:
+        value = str(level_id)
+        if value.startswith("swing:"):
+            return value
+        if (
+            value in self._confirmed_swing_event_ids
+            and f"swing:{value}" in self._candidate_level_event_ids
+        ):
+            return f"swing:{value}"
+        return value
+
+    def _crossing_generation_id(
+        self,
+        *,
+        level_id: str,
+        timeframe: Timeframe,
+        crossed_at: pd.Timestamp,
+    ) -> str:
+        normalized_level_id = self._normalized_crossing_level_id(level_id)
+        payload = (
+            f"{self.semantic_registry.semantic_version}|crossing-v1|"
+            f"{timeframe.value}|{normalized_level_id}|"
+            f"{pd.Timestamp(crossed_at).isoformat()}"
+        )
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:24]
+
+    def _penetration_key(
+        self,
+        *,
+        level_id: str,
+        timeframe: Timeframe,
+        crossed_at: pd.Timestamp,
+    ) -> tuple[str, Timeframe, pd.Timestamp]:
+        """Return the unique lookup key for one crossing generation."""
+
+        return (
+            self._normalized_crossing_level_id(level_id),
+            timeframe,
+            pd.Timestamp(crossed_at),
+        )
+
+    def _live_protected_assignments(
+        self,
+        timeframe: Timeframe,
+        *,
+        asof: pd.Timestamp,
+    ) -> tuple[tuple[str, str, MarketEvent], ...]:
+        """Resolve the exact pending-or-committed protection for one TF.
+
+        ``_protected_swing_event_ids`` is the producer-side custody index for
+        the assignment that the persistent market-state reducer considers
+        live.  Reading through ``audit_event_including_pending`` is important:
+        an assignment and a later break may be published at the same observer
+        clock before the atomic audit batch is flushed.
+        """
+
+        clock = pd.Timestamp(asof)
+        if clock.tzinfo is None:
+            raise ValueError("protected-swing custody clock must be aware")
+        assignments: list[tuple[str, str, MarketEvent]] = []
+        for swing_id, event_id in tuple(
+            self._protected_swing_event_ids.items()
+        ):
+            event = self.memory.audit_event_including_pending(event_id)
+            if (
+                event is None
+                or event.kind is not EventKind.PROTECTED_SWING_ASSIGNED
+                or not event.is_canonical_semantic
+                or event.evidence.get("protected_swing_id") != swing_id
+                or swing_id not in event.source_entity_ids
+                or event.direction not in {Direction.LONG, Direction.SHORT}
+                or event.price is None
+                or event.known_at > clock
+            ):
+                raise ValueError(
+                    "live protected-swing custody references an invalid "
+                    f"assignment: {swing_id} -> {event_id}"
+                )
+            if event.timeframe is timeframe:
+                assignments.append((swing_id, event_id, event))
+        if len(assignments) > 1:
+            raise ValueError(
+                "one timeframe cannot retain multiple live protected-swing "
+                "assignments"
+            )
+        return tuple(assignments)
+
+    def _replace_live_protected_assignment(
+        self,
+        event: MarketEvent,
+        prior_assignments: tuple[tuple[str, str, MarketEvent], ...],
+    ) -> None:
+        """Publish a successfully appended assignment into producer custody."""
+
+        protected_swing_id = event.evidence.get("protected_swing_id")
+        if (
+            event.kind is not EventKind.PROTECTED_SWING_ASSIGNED
+            or not event.is_canonical_semantic
+            or not isinstance(protected_swing_id, str)
+            or not protected_swing_id
+            or protected_swing_id not in event.source_entity_ids
+        ):
+            raise ValueError(
+                "protected-swing custody requires a valid assignment"
+            )
+        for swing_id, event_id, prior in prior_assignments:
+            if prior.timeframe is not event.timeframe:
+                raise ValueError(
+                    "protected-swing replacement crossed timeframe custody"
+                )
+            if self._protected_swing_event_ids.get(swing_id) == event_id:
+                self._protected_swing_event_ids.pop(swing_id)
+        self._protected_swing_event_ids[protected_swing_id] = event.event_id
+
+    def _append_crossing_resolution(
+        self,
+        kind: EventKind,
+        resolved_at: pd.Timestamp,
+        timeframe: Timeframe,
+        side: str,
+        price: float,
+        strength: float,
+        source_event_ids: Iterable[str],
+        evidence: Mapping[str, object],
+        *,
+        direction: Direction,
+        crossed_at: pd.Timestamp,
+        zone: tuple[float, float] | None = None,
+        context_event_ids: Iterable[str] = (),
+    ) -> MarketEvent:
+        """Append exactly one terminal result for one crossing generation."""
+
+        if kind not in {
+            EventKind.SWEEP_CONFIRMED,
+            EventKind.ACCEPTANCE_CONFIRMED,
+        }:
+            raise ValueError("crossing terminal kind must be sweep or acceptance")
+        level_id = str(evidence.get("level_id", ""))
+        if not level_id:
+            raise ValueError("crossing terminal requires a level_id")
+        generation_id = self._crossing_generation_id(
+            level_id=level_id,
+            timeframe=timeframe,
+            crossed_at=crossed_at,
+        )
+        normalized_level_id = self._normalized_crossing_level_id(level_id)
+        protected_swing_id = (
+            normalized_level_id.removeprefix("swing:")
+            if normalized_level_id.startswith("swing:")
+            else normalized_level_id
+        )
+        protected_event_id = self._protected_swing_event_ids.get(
+            protected_swing_id
+        )
+        protected_assignment = (
+            self.memory.audit_event_including_pending(protected_event_id)
+            if protected_event_id is not None
+            else None
+        )
+        if (
+            protected_assignment is not None
+            and protected_assignment.known_at > pd.Timestamp(resolved_at)
+        ):
+            raise ValueError(
+                "protected assignment cannot be known after crossing "
+                "resolution"
+            )
+        source_ids = tuple(source_event_ids)
+        context_ids = tuple(context_event_ids)
+        if (
+            protected_event_id is not None
+            and protected_event_id not in context_ids
+        ):
+            context_ids = (*context_ids, protected_event_id)
+        prior = self._terminal_crossing_events.get(generation_id)
+        if prior is not None:
+            if (
+                prior.kind is not kind
+                or prior.direction is not direction
+                or prior.side != side
+                or prior.timeframe is not timeframe
+                or prior.known_at != pd.Timestamp(resolved_at)
+                or prior.event_time != pd.Timestamp(crossed_at)
+                or prior.evidence.get("crossing_generation_id")
+                != generation_id
+                or prior.evidence.get("crossed_at")
+                != pd.Timestamp(crossed_at).isoformat()
+            ):
+                raise ValueError(
+                    "one crossing generation produced conflicting terminal "
+                    f"resolutions: {generation_id}"
+                )
+            return prior
+        payload = {
+            **dict(evidence),
+            "crossing_generation_id": generation_id,
+            "crossed_at": pd.Timestamp(crossed_at).isoformat(),
+            "resolved_at": pd.Timestamp(resolved_at).isoformat(),
+            **(
+                {
+                    "protected_swing_id": protected_swing_id,
+                    "protected_swing_event_id": protected_event_id,
+                }
+                if protected_event_id is not None
+                else {}
+            ),
+        }
+        event = self._append_semantic_atomic(
+            kind,
+            resolved_at,
+            timeframe,
+            side,
+            price,
+            strength,
+            source_ids,
+            payload,
+            direction=direction,
+            event_time=crossed_at,
+            zone=zone,
+            source_entity_ids=(normalized_level_id,),
+            context_event_ids=context_ids,
+        )
+        self._terminal_crossing_events[generation_id] = event
+        opposite_assignment_direction = (
+            Direction.SHORT
+            if (
+                protected_assignment is not None
+                and protected_assignment.direction is Direction.LONG
+            )
+            else Direction.LONG
+            if (
+                protected_assignment is not None
+                and protected_assignment.direction is Direction.SHORT
+            )
+            else None
+        )
+        if (
+            kind is EventKind.ACCEPTANCE_CONFIRMED
+            and protected_assignment is not None
+            and protected_assignment.kind
+            is EventKind.PROTECTED_SWING_ASSIGNED
+            and protected_assignment.is_canonical_semantic
+            and (
+                protected_assignment.timeframe is timeframe
+                or (
+                    timeframe is Timeframe.M1
+                    and event.evidence.get("source_timeframe")
+                    == protected_assignment.timeframe.value
+                )
+            )
+            and protected_assignment.evidence.get("protected_swing_id")
+            == protected_swing_id
+            and protected_swing_id
+            in protected_assignment.source_entity_ids
+            and event.kind is EventKind.ACCEPTANCE_CONFIRMED
+            and event.direction is opposite_assignment_direction
+            and event.evidence.get("protected_swing_id")
+            == protected_swing_id
+            and event.evidence.get("protected_swing_event_id")
+            == protected_event_id
+            and protected_event_id in event.context_event_ids
+            and self._protected_swing_event_ids.get(protected_swing_id)
+            == protected_event_id
+        ):
+            # Acceptance terminalizes only the exact live assignment that it
+            # names.  Comparing the captured event ID before popping prevents
+            # a stale crossing from deleting a newer assignment of the same
+            # swing; failed appends never reach this mutation.
+            self._protected_swing_event_ids.pop(protected_swing_id)
+        return event
+
+    def _resolve_zone_crossing_if_due(
+        self,
+        zone: SupportResistanceState,
+        *,
+        asof: pd.Timestamp,
+    ) -> MarketEvent | None:
+        """Resolve a frozen S/R-zone penetration on its first later TF bar."""
+
+        if zone.broken_at is None:
+            return None
+        penetration_event_id = self._penetration_event_ids.get(
+            self._penetration_key(
+                level_id=zone.zone_id,
+                timeframe=zone.timeframe,
+                crossed_at=zone.broken_at,
+            )
+        )
+        if penetration_event_id is None:
+            return None
+        generation_id = self._crossing_generation_id(
+            level_id=zone.zone_id,
+            timeframe=zone.timeframe,
+            crossed_at=zone.broken_at,
+        )
+        prior = self._terminal_crossing_events.get(generation_id)
+        if prior is not None:
+            return prior
+        next_bar = next(
+            (
+                (clock, event_id)
+                for clock, event_id in self._real_bar_event_ids_by_timeframe[
+                    zone.timeframe
+                ]
+                if zone.broken_at < clock <= asof
+            ),
+            None,
+        )
+        if next_bar is None:
+            return None
+        resolved_at, resolution_bar_event_id = next_bar
+        resolved_close = self._bar_close_by_event_id.get(
+            resolution_bar_event_id
+        )
+        if resolved_close is None:
+            raise ValueError(
+                "zone crossing resolution lacks its frozen completed close"
+            )
+        accepted_outside = (
+            resolved_close < zone.lower_bound
+            if zone.side == "support"
+            else resolved_close > zone.upper_bound
+        )
+        crossing_direction = (
+            Direction.SHORT
+            if zone.side == "support"
+            else Direction.LONG
+        )
+        reaction_direction = (
+            crossing_direction
+            if accepted_outside
+            else (
+                Direction.LONG
+                if crossing_direction is Direction.SHORT
+                else Direction.SHORT
+            )
+        )
+        return self._append_crossing_resolution(
+            (
+                EventKind.ACCEPTANCE_CONFIRMED
+                if accepted_outside
+                else EventKind.SWEEP_CONFIRMED
+            ),
+            resolved_at,
+            zone.timeframe,
+            "below" if zone.side == "support" else "above",
+            zone.anchor_price,
+            zone.strength,
+            (penetration_event_id, resolution_bar_event_id),
+            {
+                "level_id": zone.zone_id,
+                "source_kind": zone.source_kind,
+                "resolution_bars": 1,
+                "resolved_close": float(resolved_close),
+                "resolution": (
+                    "later_close_held_outside_frozen_zone"
+                    if accepted_outside
+                    else "later_close_returned_inside_frozen_zone"
+                ),
+            },
+            direction=reaction_direction,
+            crossed_at=zone.broken_at,
+            zone=(zone.lower_bound, zone.upper_bound),
+        )
+
+    def _resolve_swing_crossing_if_due(
+        self,
+        swing,
+        *,
+        timeframe: Timeframe,
+        asof: pd.Timestamp,
+    ) -> MarketEvent | None:
+        """Resolve a confirmed-swing price crossing on the next TF close."""
+
+        if swing.broken_at is None:
+            return None
+        level_id = f"swing:{swing.swing_id}"
+        penetration_event_id = self._penetration_event_ids.get(
+            self._penetration_key(
+                level_id=level_id,
+                timeframe=timeframe,
+                crossed_at=swing.broken_at,
+            )
+        )
+        if penetration_event_id is None:
+            return None
+        generation_id = self._crossing_generation_id(
+            level_id=level_id,
+            timeframe=timeframe,
+            crossed_at=swing.broken_at,
+        )
+        prior = self._terminal_crossing_events.get(generation_id)
+        if prior is not None:
+            return prior
+        next_bar = next(
+            (
+                (clock, event_id)
+                for clock, event_id in self._real_bar_event_ids_by_timeframe[
+                    timeframe
+                ]
+                if swing.broken_at < clock <= asof
+            ),
+            None,
+        )
+        if next_bar is None:
+            return None
+        resolved_at, resolution_bar_event_id = next_bar
+        resolved_close = self._bar_close_by_event_id.get(
+            resolution_bar_event_id
+        )
+        if resolved_close is None:
+            raise ValueError(
+                "swing crossing resolution lacks its completed close"
+            )
+        crossed_above = swing.side.value == "high"
+        accepted_outside = (
+            resolved_close > swing.price
+            if crossed_above
+            else resolved_close < swing.price
+        )
+        crossing_direction = (
+            Direction.LONG if crossed_above else Direction.SHORT
+        )
+        reaction_direction = (
+            crossing_direction
+            if accepted_outside
+            else (
+                Direction.SHORT
+                if crossing_direction is Direction.LONG
+                else Direction.LONG
+            )
+        )
+        return self._append_crossing_resolution(
+            (
+                EventKind.ACCEPTANCE_CONFIRMED
+                if accepted_outside
+                else EventKind.SWEEP_CONFIRMED
+            ),
+            resolved_at,
+            timeframe,
+            "above" if crossed_above else "below",
+            swing.price,
+            clamp(swing.magnitude_atr),
+            (penetration_event_id, resolution_bar_event_id),
+            {
+                "level_id": level_id,
+                "source_kind": "confirmed_swing",
+                "target_swing_id": swing.swing_id,
+                "resolution_bars": 1,
+                "resolved_close": float(resolved_close),
+                "resolution": (
+                    "later_close_held_outside_confirmed_swing_price"
+                    if accepted_outside
+                    else "later_close_returned_inside_confirmed_swing_price"
+                ),
+            },
+            direction=reaction_direction,
+            crossed_at=swing.broken_at,
+            zone=(swing.price, swing.price),
+        )
+
+    def _append_completed_bar_event(
+        self,
+        candle: Candle,
+        *,
+        atr: float,
+        data_complete: bool,
+    ) -> MarketEvent:
+        """Append one normalized data fact consumed by event reducers.
+
+        This is deliberately not an SMC interpretation.  Its external data
+        identity is carried in evidence so derived semantic events can later
+        distinguish event lineage from raw candle/entity provenance.
+        """
+
+        data_id = hashlib.sha256(
+            json.dumps(
+                to_primitive(
+                    {
+                        "data_type": "completed_ohlcv_bar",
+                        "timeframe": candle.timeframe,
+                        "start": candle.start,
+                        "end": candle.end,
+                        "open": float(candle.open),
+                        "high": float(candle.high),
+                        "low": float(candle.low),
+                        "close": float(candle.close),
+                        "volume": float(candle.volume),
+                        "symbol": candle.symbol,
+                        "instrument_id": int(candle.instrument_id),
+                        "complete": bool(candle.complete),
+                        "observed_minutes": candle.observed_minutes,
+                        "expected_minutes": candle.expected_minutes,
+                        "real_minutes": candle.real_minutes,
+                        "synthetic_minutes": candle.synthetic_minutes,
+                    }
+                ),
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        try:
+            detector_candle_id = candle_identity(
+                candle,
+                tick_size=self.config.tick_size,
+            )
+        except ValueError:
+            # Normalization must remain able to audit off-grid vendor/test
+            # bars even though registered semantic detectors reject them.
+            # Such a bar can be replayed by its exact data digest, but it can
+            # never masquerade as a tick-grid detector candle identity.
+            detector_candle_id = data_id
+        session_name, session_phase = session_name_phase(candle.end)
+        bar_evidence = {
+            "event_category": "normalized_data",
+            "source_data_ids": (data_id,),
+            "detector_candle_id": detector_candle_id,
+            # The enabled owner registry is part of the normalized M1 replay
+            # contract.  One completed M1 fact can therefore initialize empty
+            # higher-timeframe state without inventing a completed HTF bar or
+            # consulting the rich FrameObservation projection.
+            "active_timeframes": (
+                tuple(
+                    timeframe.value
+                    for timeframe in self._active_timeframes
+                )
+                if candle.timeframe is Timeframe.M1
+                else ()
+            ),
+            "scale_registry_id": self._scale_registry_id,
+            "open": float(candle.open),
+            "high": float(candle.high),
+            "low": float(candle.low),
+            "close": float(candle.close),
+            "volume": float(candle.volume),
+            "atr": float(atr),
+            "data_complete": bool(data_complete),
+            "real_completed": bool(candle.real_completed),
+            "clock_only": not candle.real_completed,
+            "symbol": candle.symbol,
+            "instrument_id": int(candle.instrument_id),
+            "session_name": session_name,
+            "session_phase": session_phase,
+        }
+        event = _event(
+            EventKind.BAR_COMPLETED,
+            candle.end,
+            candle.timeframe,
+            None,
+            float(candle.close),
+            0.0,
+            (),
+            bar_evidence,
+            event_time=candle.end,
+            known_at=candle.end,
+            evidence=bar_evidence,
+            source_data_ids=(data_id,),
+            source_entity_ids=(
+                f"scale_registry:{self._scale_registry_id}",
+            ),
+            origin=EventOrigin.NORMALIZED_DATA,
+        )
+        existing = self.audit_store.get(event.event_id)
+        if existing is not None:
+            self._bar_event_ids_by_candle_id[detector_candle_id] = (
+                existing.event_id
+            )
+            self._bar_close_by_candle_id[detector_candle_id] = float(
+                candle.close
+            )
+            self._bar_close_by_event_id[existing.event_id] = float(
+                candle.close
+            )
+            if not any(
+                event_id == existing.event_id
+                for _, event_id in self._bar_event_ids_by_timeframe[
+                    candle.timeframe
+                ]
+            ):
+                self._bar_event_ids_by_timeframe[candle.timeframe].append(
+                    (candle.end, existing.event_id)
+                )
+            if candle.real_completed and not any(
+                event_id == existing.event_id
+                for _, event_id in self._real_bar_event_ids_by_timeframe[
+                    candle.timeframe
+                ]
+            ):
+                self._real_bar_event_ids_by_timeframe[
+                    candle.timeframe
+                ].append((candle.end, existing.event_id))
+            return existing
+        self.memory.append(event, include_in_recent=False)
+        self._bar_event_ids_by_candle_id[detector_candle_id] = event.event_id
+        self._bar_close_by_candle_id[detector_candle_id] = float(candle.close)
+        self._bar_close_by_event_id[event.event_id] = float(candle.close)
+        self._bar_event_ids_by_timeframe[candle.timeframe].append(
+            (candle.end, event.event_id)
+        )
+        if candle.real_completed:
+            self._real_bar_event_ids_by_timeframe[
+                candle.timeframe
+            ].append((candle.end, event.event_id))
+        return event
+
+    def _append_available_bar_events(
+        self,
+        update: ReaderUpdate,
+        histories: Mapping[Timeframe, Sequence[Candle]],
+        frames: Mapping[Timeframe, FrameObservation],
+    ) -> None:
+        """Publish normalized bars before semantics that consume them.
+
+        On the first attached snapshot the observer may receive a retained
+        causal prefix rather than one bar.  We publish that prefix once and
+        calculate each bar's ATR only from bars available through that bar;
+        using the final frame ATR for old bars would itself leak the future
+        into the normalized event stream.  Later updates publish only the
+        newly completed bars and may reuse the frame's current causal ATR.
+        """
+
+        candidates: list[tuple[Candle, float, bool]] = []
+        coverage_start = self.memory.clock_coverage_start
+        for timeframe in self._active_timeframes:
+            frame = frames[timeframe]
+            known_bars = self._bar_event_ids_by_timeframe[timeframe]
+            if known_bars:
+                for candle in update.newly_completed.get(timeframe, ()):
+                    if (
+                        candle.complete
+                        and (
+                            candle.real_completed
+                            or candle.timeframe is Timeframe.M1
+                        )
+                        and (
+                            coverage_start is None
+                            or candle.end >= coverage_start
+                        )
+                    ):
+                        candidates.append(
+                            (
+                                candle,
+                                float(frame.metrics.get("atr", 0.0)),
+                                bool(frame.ready),
+                            )
+                        )
+                continue
+
+            eligible_history = tuple(
+                candle
+                for candle in histories[timeframe]
+                if (
+                    candle.complete
+                    and (
+                        candle.real_completed
+                        or candle.timeframe is Timeframe.M1
+                    )
+                    and (
+                        coverage_start is None
+                        or candle.end >= coverage_start
+                    )
+                )
+            )
+            true_ranges: deque[float] = deque(
+                maxlen=max(1, self.config.atr_period)
+            )
+            prior_close: float | None = None
+            real_bars_seen = 0
+            for candle in eligible_history:
+                if candle.real_completed:
+                    real_bars_seen += 1
+                    true_range = (
+                        float(candle.high - candle.low)
+                        if prior_close is None
+                        else max(
+                            float(candle.high - candle.low),
+                            abs(float(candle.high) - prior_close),
+                            abs(float(candle.low) - prior_close),
+                        )
+                    )
+                    true_ranges.append(max(0.0, true_range))
+                    prior_close = float(candle.close)
+                positive = tuple(value for value in true_ranges if value > 0.0)
+                causal_atr = (
+                    float(np.mean(positive)) if positive else 0.0
+                )
+                candidates.append(
+                    (
+                        candle,
+                        causal_atr,
+                        real_bars_seen
+                        >= self.config.minimum_bars[timeframe],
+                    )
+                )
+
+        for candle, atr, data_complete in sorted(
+            candidates,
+            key=lambda value: (
+                value[0].end,
+                value[0].timeframe.value,
+                value[0].start,
+            ),
+        ):
+            self._append_completed_bar_event(
+                candle,
+                atr=atr,
+                data_complete=data_complete,
+            )
+
+    def _bar_event_id_for_candle_id(self, candle_id: str) -> str:
+        try:
+            return self._bar_event_ids_by_candle_id[candle_id]
+        except KeyError as error:
+            raise ValueError(
+                "semantic source candle has no BAR_COMPLETED event: "
+                f"{candle_id}"
+            ) from error
+
+    def _bar_event_id_at(
+        self,
+        timeframe: Timeframe,
+        known_at: pd.Timestamp,
+    ) -> str:
+        clock = pd.Timestamp(known_at)
+        for event_clock, event_id in reversed(
+            self._real_bar_event_ids_by_timeframe[timeframe]
+        ):
+            if event_clock == clock:
+                return event_id
+            if event_clock < clock:
+                break
+        raise ValueError(
+            "semantic occurrence has no exact completed-bar source: "
+            f"{timeframe.value}@{clock.isoformat()}"
+        )
+
+    def _clock_root_event_id_at(
+        self,
+        timeframe: Timeframe,
+        known_at: pd.Timestamp,
+    ) -> str:
+        """Return one exact normalized BAR root, including clock-only M1."""
+
+        clock = pd.Timestamp(known_at)
+        matches = tuple(
+            event_id
+            for event_clock, event_id in self._bar_event_ids_by_timeframe[
+                timeframe
+            ]
+            if event_clock == clock
+        )
+        if len(matches) != 1:
+            raise ValueError(
+                "semantic context requires one exact inclusive clock root: "
+                f"{timeframe.value}@{clock.isoformat()}"
+            )
+        event = self.memory.audit_event_including_pending(matches[0])
+        if (
+            event is None
+            or event.origin is not EventOrigin.NORMALIZED_DATA
+            or event.kind is not EventKind.BAR_COMPLETED
+            or event.timeframe is not timeframe
+            or event.event_time != clock
+            or event.known_at != clock
+        ):
+            raise ValueError("inclusive clock root is not an exact normalized BAR")
+        return event.event_id
+
+    def _synthetic_m1_context_event_ids_for_m5_terminal(
+        self,
+        known_at: pd.Timestamp,
+    ) -> tuple[str, ...]:
+        """Return every clock-only M1 constituent of an incomplete M5 bar."""
+
+        clock = pd.Timestamp(known_at)
+        interval_start = clock - pd.Timedelta(minutes=5)
+        current_root_id = self._clock_root_event_id_at(Timeframe.M1, clock)
+        current_root = self.memory.audit_event_including_pending(
+            current_root_id
+        )
+        if current_root is None:
+            raise ValueError(
+                "synthetic displacement terminal lacks its current M1 root"
+            )
+        market_identity = (
+            current_root.evidence.get("symbol"),
+            current_root.evidence.get("instrument_id"),
+        )
+        interval_roots: list[tuple[pd.Timestamp, str]] = []
+        roots: list[tuple[pd.Timestamp, str]] = []
+        for event_clock, event_id in self._bar_event_ids_by_timeframe[
+            Timeframe.M1
+        ]:
+            if not interval_start < event_clock <= clock:
+                continue
+            event = self.memory.audit_event_including_pending(event_id)
+            if (
+                event is None
+                or event.origin is not EventOrigin.NORMALIZED_DATA
+                or event.kind is not EventKind.BAR_COMPLETED
+                or event.timeframe is not Timeframe.M1
+                or event.event_time != event_clock
+                or event.known_at != event_clock
+            ):
+                raise ValueError(
+                    "synthetic displacement M5 interval has an invalid M1 root"
+                )
+            real_completed = event.evidence.get("real_completed")
+            clock_only = event.evidence.get("clock_only")
+            if (
+                not isinstance(real_completed, bool)
+                or not isinstance(clock_only, bool)
+                or clock_only is not (not real_completed)
+                or (
+                    event.evidence.get("symbol"),
+                    event.evidence.get("instrument_id"),
+                )
+                != market_identity
+            ):
+                raise ValueError(
+                    "synthetic displacement M5 interval has inconsistent M1 "
+                    "root evidence"
+                )
+            interval_roots.append((event_clock, event.event_id))
+            if clock_only:
+                roots.append((event_clock, event.event_id))
+        ordered_interval = tuple(sorted(interval_roots))
+        expected_clocks = tuple(
+            interval_start + pd.Timedelta(minutes=offset)
+            for offset in range(1, 6)
+        )
+        if (
+            len(ordered_interval) != 5
+            or tuple(item[0] for item in ordered_interval) != expected_clocks
+            or len({item[1] for item in ordered_interval}) != 5
+        ):
+            raise ValueError(
+                "synthetic displacement M5 interval lacks five contiguous "
+                "unique M1 roots"
+            )
+        ordered = tuple(sorted(roots))
+        event_ids = tuple(item[1] for item in ordered)
+        if (
+            not ordered
+            or len(ordered) != len(set(ordered))
+            or len(event_ids) != len(set(event_ids))
+        ):
+            raise ValueError(
+                "synthetic displacement terminal lacks exact clock-only M1 "
+                "constituent roots"
+            )
+        clocks = tuple(item[0] for item in ordered)
+        if len(clocks) != len(set(clocks)):
+            raise ValueError(
+                "synthetic displacement M5 interval repeats an M1 root clock"
+            )
+        return tuple(item[1] for item in ordered)
+
+    def _swing_window_event_ids(self, swing) -> tuple[str, ...]:
+        if self._structure_config is None:
+            raise ValueError("confirmed swing lacks a structure protocol")
+        span = self._structure_config.span_for(swing.timeframe)
+        bar_events = self._real_bar_event_ids_by_timeframe[swing.timeframe]
+        pivot_index = next(
+            (
+                index
+                for index, (clock, _) in enumerate(bar_events)
+                if clock == swing.pivot_end
+            ),
+            None,
+        )
+        if (
+            pivot_index is None
+            or pivot_index < span
+            or pivot_index + span >= len(bar_events)
+        ):
+            raise ValueError(
+                "confirmed swing lacks its full registered bar window"
+            )
+        window = tuple(
+            event_id
+            for _, event_id in bar_events[
+                pivot_index - span : pivot_index + span + 1
+            ]
+        )
+        if bar_events[pivot_index + span][0] != swing.confirmed_at:
+            raise ValueError(
+                "confirmed swing bar window and known_at disagree"
+            )
+        return window
+
     def _append_reference_zone_admission_prefixes(
         self,
         zone: SupportResistanceState,
@@ -2675,6 +4027,7 @@ class CausalObserver:
                     transition_reason=transition_reason,
                 ),
                 include_in_recent=False,
+                audit=False,
             )
 
         append_prefix(
@@ -2726,6 +4079,9 @@ class CausalObserver:
             raise ValueError(
                 "frame event clock cannot exceed the observation cutoff"
             )
+        atomic_bar_roots_available = bool(
+            self._real_bar_event_ids_by_timeframe[frame.timeframe]
+        )
         for swing in frame.swings:
             key = (swing.swing_id, swing.lifecycle)
             if self._remember_bounded(
@@ -2752,8 +4108,7 @@ class CausalObserver:
                     in {SwingRelation.LH, SwingRelation.LL}
                     else None
                 )
-                self.memory.append(
-                    _event(
+                swing_state_event = _event(
                         EventKind.SWING_STATE,
                         observed_at,
                         frame.timeframe,
@@ -2781,6 +4136,12 @@ class CausalObserver:
                             "delta_ticks": swing.delta_ticks,
                             "delta_points": swing.delta_points,
                             "magnitude_atr": swing.magnitude_atr,
+                            "prominence_atr": swing.prominence_atr,
+                            "confirmation_delay_bars": (
+                                swing.confirmation_delay_bars
+                            ),
+                            "nesting_depth": swing.nesting_depth,
+                            "semantic_rank": swing.semantic_rank.value,
                         },
                         entity_id=swing.swing_id,
                         lifecycle=swing.lifecycle.value,
@@ -2797,8 +4158,263 @@ class CausalObserver:
                         ),
                         direction=direction,
                         transition_reason=swing.failure_reason,
+                        event_time=(
+                            swing.pivot_start
+                            if swing.lifecycle
+                            in {
+                                SwingLifecycle.FORMING,
+                                SwingLifecycle.CONFIRMED,
+                            }
+                            else observed_at
+                        ),
+                    )
+                self.memory.append(swing_state_event)
+                if (
+                    swing.lifecycle
+                    in {SwingLifecycle.CONFIRMED, SwingLifecycle.BROKEN}
+                    and swing.confirmed_at is not None
+                    and swing.swing_id
+                    not in self._confirmed_swing_event_ids
+                    and atomic_bar_roots_available
+                ):
+                    source_bar_events = self._swing_window_event_ids(
+                        swing
+                    )
+                    canonical = self._append_semantic_atomic(
+                        EventKind.SWING_CONFIRMED,
+                        swing.confirmed_at,
+                        frame.timeframe,
+                        "above" if swing.side.value == "high" else "below",
+                        swing.price,
+                        clamp(swing.magnitude_atr),
+                        source_bar_events,
+                        {
+                            "source_entity_id": swing.swing_id,
+                            "side": swing.side.value,
+                            "relation": swing.relation.value,
+                            "pivot_start": swing.pivot_start.isoformat(),
+                            "pivot_end": swing.pivot_end.isoformat(),
+                            "prominence_atr": swing.prominence_atr,
+                            "legacy_same_side_magnitude_atr": (
+                                swing.magnitude_atr
+                            ),
+                            "confirmation_delay_bars": (
+                                swing.confirmation_delay_bars
+                            ),
+                            "nesting_depth": swing.nesting_depth,
+                            "semantic_rank": swing.semantic_rank.value,
+                            "delta_ticks": swing.delta_ticks,
+                            "confirmation_delay_minutes": int(
+                                (
+                                    swing.confirmed_at - swing.pivot_start
+                                ).total_seconds()
+                                // 60
+                            ),
+                        },
+                        direction=direction,
+                        event_time=swing.pivot_start,
+                        source_entity_ids=(swing.swing_id,),
+                        context_event_ids=(swing_state_event.event_id,),
+                    )
+                    self._confirmed_swing_event_ids[swing.swing_id] = (
+                        canonical.event_id
+                    )
+                    swing_level_id = f"swing:{swing.swing_id}"
+                    candidate = self._append_semantic_atomic(
+                        EventKind.LIQUIDITY_LEVEL_CREATED,
+                        swing.confirmed_at,
+                        frame.timeframe,
+                        "above" if swing.side.value == "high" else "below",
+                        swing.price,
+                        clamp(swing.magnitude_atr),
+                        (canonical.event_id,),
+                        {
+                            "level_id": swing_level_id,
+                            "candidate_only": True,
+                            "source_kind": "confirmed_swing",
+                            "source_swing_id": swing.swing_id,
+                            "semantic_rank": swing.semantic_rank.value,
+                        },
+                        event_time=swing.pivot_start,
+                        zone=(swing.price, swing.price),
+                        source_entity_ids=(swing_level_id, swing.swing_id),
+                    )
+                    self._candidate_level_event_ids[swing_level_id] = (
+                        candidate.event_id
+                    )
+                if (
+                    swing.lifecycle is SwingLifecycle.BROKEN
+                    and swing.broken_at is not None
+                    and atomic_bar_roots_available
+                ):
+                    swing_level_id = f"swing:{swing.swing_id}"
+                    candidate_event_id = self._candidate_level_event_ids.get(
+                        swing_level_id
+                    )
+                    if candidate_event_id is None:
+                        raise ValueError(
+                            "broken swing lacks its candidate liquidity level"
+                        )
+                    penetration_key = self._penetration_key(
+                        level_id=swing_level_id,
+                        timeframe=frame.timeframe,
+                        crossed_at=swing.broken_at,
+                    )
+                    if penetration_key not in self._penetration_event_ids:
+                        break_bar_event_id = self._bar_event_id_at(
+                            frame.timeframe,
+                            swing.broken_at,
+                        )
+                        touch_event = self._append_semantic_atomic(
+                            EventKind.LEVEL_TOUCHED,
+                            swing.broken_at,
+                            frame.timeframe,
+                            (
+                                "above"
+                                if swing.side.value == "high"
+                                else "below"
+                            ),
+                            swing.price,
+                            clamp(swing.magnitude_atr),
+                            (candidate_event_id, break_bar_event_id),
+                            {
+                                "level_id": swing_level_id,
+                                "source_kind": "confirmed_swing",
+                                "target_swing_id": swing.swing_id,
+                                "touch_reason": "raw_swing_price_crossing",
+                            },
+                            event_time=swing.broken_at,
+                            zone=(swing.price, swing.price),
+                            source_entity_ids=(
+                                swing_level_id,
+                                swing.swing_id,
+                            ),
+                        )
+                        crossing_generation_id = (
+                            self._crossing_generation_id(
+                                level_id=swing_level_id,
+                                timeframe=frame.timeframe,
+                                crossed_at=swing.broken_at,
+                            )
+                        )
+                        penetrated = self._append_semantic_atomic(
+                            EventKind.LEVEL_PENETRATED,
+                            swing.broken_at,
+                            frame.timeframe,
+                            (
+                                "above"
+                                if swing.side.value == "high"
+                                else "below"
+                            ),
+                            swing.price,
+                            clamp(swing.magnitude_atr),
+                            (
+                                candidate_event_id,
+                                touch_event.event_id,
+                                break_bar_event_id,
+                            ),
+                            {
+                                "level_id": swing_level_id,
+                                "source_kind": "confirmed_swing",
+                                "target_swing_id": swing.swing_id,
+                                "penetration_standard": (
+                                    "strict_close_beyond_confirmed_swing_"
+                                    "price"
+                                ),
+                                "crossing_generation_id": (
+                                    crossing_generation_id
+                                ),
+                                "crossed_at": (
+                                    swing.broken_at.isoformat()
+                                ),
+                            },
+                            direction=(
+                                Direction.LONG
+                                if swing.side.value == "high"
+                                else Direction.SHORT
+                            ),
+                            event_time=swing.broken_at,
+                            zone=(swing.price, swing.price),
+                            source_entity_ids=(
+                                swing_level_id,
+                                swing.swing_id,
+                            ),
+                        )
+                        self._penetration_event_ids[penetration_key] = (
+                            penetrated.event_id
+                        )
+            if (
+                swing.lifecycle is SwingLifecycle.BROKEN
+                and swing.broken_at is not None
+                and atomic_bar_roots_available
+            ):
+                # Lifecycle projection is deduplicated above, but a crossing
+                # remains pending until the first *later* native-timeframe
+                # close.  Revisit it on subsequent frame updates.
+                self._resolve_swing_crossing_if_due(
+                    swing,
+                    timeframe=frame.timeframe,
+                    asof=event_clock,
+                )
+        for leg in frame.structural_legs:
+            if not self._remember_bounded(
+                leg.leg_id,
+                known=self._known_structural_leg_ids,
+                order=self._known_structural_leg_order,
+            ):
+                continue
+            source_event_ids = tuple(
+                event_id
+                for swing_id in leg.source_swing_ids
+                if (
+                    event_id := self._confirmed_swing_event_ids.get(
+                        swing_id
                     )
                 )
+            )
+            if len(source_event_ids) != 2:
+                if not atomic_bar_roots_available:
+                    continue
+                raise ValueError(
+                    "structural leg requires exactly two confirmed-swing "
+                    "source events"
+                )
+            canonical_leg = self._append_semantic_atomic(
+                EventKind.STRUCTURAL_LEG_CREATED,
+                leg.known_at,
+                frame.timeframe,
+                "above" if leg.direction is Direction.LONG else "below",
+                leg.end_price,
+                clamp(leg.efficiency),
+                source_event_ids,
+                {
+                    "leg_id": leg.leg_id,
+                    "start_swing_id": leg.start_swing_id,
+                    "end_swing_id": leg.end_swing_id,
+                    "start_event_time": leg.start_event_time.isoformat(),
+                    "end_event_time": leg.end_event_time.isoformat(),
+                    "start_price": leg.start_price,
+                    "end_price": leg.end_price,
+                    "start_close": leg.start_close,
+                    "end_close": leg.end_close,
+                    "amplitude_points": leg.amplitude_points,
+                    "amplitude_atr": leg.amplitude_atr,
+                    "duration_bars": leg.duration_bars,
+                    "duration_minutes": leg.duration_minutes,
+                    "efficiency": leg.efficiency,
+                    "max_retracement_points": (
+                        leg.max_retracement_points
+                    ),
+                    "max_retracement_atr": leg.max_retracement_atr,
+                    "rank": leg.rank.value,
+                },
+                direction=leg.direction,
+                event_time=leg.end_event_time,
+                source_entity_ids=(leg.leg_id, *leg.source_swing_ids),
+            )
+            self._structural_leg_event_ids[leg.leg_id] = (
+                canonical_leg.event_id
+            )
         for state in frame.structures:
             if (
                 state.structure_id is None
@@ -2827,8 +4443,7 @@ class CausalObserver:
                 if state.lifecycle is StructureLifecycle.CONFIRMED
                 else state.formed_at
             )
-            self.memory.append(
-                _event(
+            structure_state_event = _event(
                     EventKind.STRUCTURE_STATE,
                     observed_at,
                     frame.timeframe,
@@ -2869,7 +4484,83 @@ class CausalObserver:
                     direction=state.direction,
                     transition_reason=state.failure_reason,
                 )
-            )
+            self.memory.append(structure_state_event)
+            if (
+                state.lifecycle is StructureLifecycle.CONFIRMED
+                and state.confirmed_at is not None
+                and atomic_bar_roots_available
+            ):
+                # ``latest_*`` belongs to the current snapshot and may point
+                # to a swing confirmed after this structure generation.  A
+                # retrospective first attach must reconstruct parents from
+                # facts that were actually knowable at ``confirmed_at``.
+                causal_swings = tuple(
+                    max(
+                        (
+                            swing
+                            for swing in frame.swings
+                            if (
+                                swing.side.value == side
+                                and swing.confirmed_at is not None
+                                and swing.confirmed_at <= state.confirmed_at
+                                and swing.swing_id
+                                in self._confirmed_swing_event_ids
+                            )
+                        ),
+                        key=lambda swing: (
+                            swing.confirmed_at,
+                            swing.pivot_start,
+                            swing.swing_id,
+                        ),
+                    )
+                    for side in ("high", "low")
+                )
+                source_swing_events = tuple(
+                    self._confirmed_swing_event_ids[swing.swing_id]
+                    for swing in causal_swings
+                )
+                if len(source_swing_events) != 2:
+                    raise ValueError(
+                        "confirmed structure requires its exact high and low "
+                        "swing events"
+                    )
+                structure_direction_event = self._append_semantic_atomic(
+                    EventKind.STRUCTURE_DIRECTION_CONFIRMED,
+                    state.confirmed_at,
+                    frame.timeframe,
+                    (
+                        "above"
+                        if state.direction is Direction.LONG
+                        else "below"
+                    ),
+                    state.protected_price,
+                    clamp(state.cumulative_magnitude_atr),
+                    source_swing_events,
+                    {
+                        "structure_id": state.structure_id,
+                        "direction": state.direction.value,
+                        "source_high_id": causal_swings[0].swing_id,
+                        "source_low_id": causal_swings[1].swing_id,
+                        "sequence_count": state.sequence_count,
+                        "candidate_protected_swing_id": (
+                            state.protected_swing_id
+                        ),
+                    },
+                    direction=state.direction,
+                    event_time=state.formed_at,
+                    source_entity_ids=(
+                        state.structure_id,
+                        causal_swings[0].swing_id,
+                        causal_swings[1].swing_id,
+                    ),
+                    context_event_ids=(structure_state_event.event_id,),
+                )
+                self._structure_direction_event_ids[state.structure_id] = (
+                    structure_direction_event.event_id
+                )
+                self._latest_structure_direction_event_ids[
+                    frame.timeframe
+                ] = structure_direction_event.event_id
         for zone in frame.support_resistance:
             revision = (
                 zone.lifecycle.value,
@@ -2889,6 +4580,10 @@ class CausalObserver:
                 zone.zone_id
             )
             if prior_revision == revision:
+                self._resolve_zone_crossing_if_due(
+                    zone,
+                    asof=event_clock,
+                )
                 continue
             lifecycle_revision = bool(
                 prior_revision is None
@@ -2906,6 +4601,17 @@ class CausalObserver:
                 )
                 or zone.confirmed_at
             )
+            if prior_revision is None and self._prior is not None:
+                # Completed reference-period levels are admitted only when
+                # the next period is observed. Their source geometry was
+                # complete earlier, but the semantic level first becomes
+                # available at this admission clock.
+                observed_at = max(observed_at, event_clock)
+            availability_floor = (
+                observed_at
+                if prior_revision is None
+                else zone.confirmed_at
+            )
             if not lifecycle_revision:
                 observed_at = max(
                     observed_at,
@@ -2917,8 +4623,7 @@ class CausalObserver:
                     final_observed_at=observed_at,
                 )
             self._liquidity_entity_revisions[zone.zone_id] = revision
-            self.memory.append(
-                _event(
+            zone_state_event = _event(
                     EventKind.SUPPORT_RESISTANCE_STATE,
                     observed_at,
                     frame.timeframe,
@@ -2981,6 +4686,164 @@ class CausalObserver:
                         else "support_resistance_evidence_revised"
                     ),
                 )
+            self.memory.append(zone_state_event)
+            if zone.zone_id not in self._candidate_level_event_ids:
+                source_swing_events = tuple(
+                    event_id
+                    for source_id in zone.causal_source_ids
+                    if (
+                        event_id
+                        := self._confirmed_swing_event_ids.get(source_id)
+                    )
+                )
+                created = self._append_semantic_atomic(
+                    EventKind.LIQUIDITY_LEVEL_CREATED,
+                    observed_at,
+                    frame.timeframe,
+                    "below" if zone.side == "support" else "above",
+                    zone.anchor_price,
+                    zone.strength,
+                    source_swing_events,
+                    {
+                        "level_id": zone.zone_id,
+                        "candidate_only": True,
+                        "source_kind": zone.source_kind,
+                        "source_ids": zone.source_ids,
+                        "structural_rank": zone.structural_rank,
+                        "is_protected_swing": zone.is_protected_swing,
+                    },
+                    event_time=zone.formed_at,
+                    zone=(zone.lower_bound, zone.upper_bound),
+                    source_entity_ids=(zone.zone_id, *zone.causal_source_ids),
+                    context_event_ids=(zone_state_event.event_id,),
+                )
+                self._candidate_level_event_ids[zone.zone_id] = (
+                    created.event_id
+                )
+            candidate_event_id = self._candidate_level_event_ids[
+                zone.zone_id
+            ]
+            for touch_ordinal, touch_at in enumerate(
+                zone.touch_times,
+                start=1,
+            ):
+                if (
+                    touch_at <= zone.confirmed_at
+                    or touch_at < availability_floor
+                ):
+                    continue
+                touch_identity = (
+                    f"{zone.zone_id}|{pd.Timestamp(touch_at).isoformat()}"
+                )
+                if not self._remember_bounded(
+                    touch_identity,
+                    known=self._known_level_touch_ids,
+                    order=self._known_level_touch_order,
+                ):
+                    continue
+                if not atomic_bar_roots_available:
+                    continue
+                bar_event_id = self._bar_event_id_at(
+                    frame.timeframe,
+                    touch_at,
+                )
+                touch_event = self._append_semantic_atomic(
+                    EventKind.LEVEL_TOUCHED,
+                    touch_at,
+                    frame.timeframe,
+                    "below" if zone.side == "support" else "above",
+                    zone.anchor_price,
+                    zone.strength,
+                    (candidate_event_id, bar_event_id),
+                    {
+                        "level_id": zone.zone_id,
+                        "touch_ordinal": touch_ordinal,
+                        "source_kind": zone.source_kind,
+                    },
+                    event_time=touch_at,
+                    zone=(zone.lower_bound, zone.upper_bound),
+                )
+                self._level_touch_event_ids[
+                    (zone.zone_id, pd.Timestamp(touch_at))
+                ] = touch_event.event_id
+            if (
+                zone.broken_at is not None
+                and self._penetration_key(
+                    level_id=zone.zone_id,
+                    timeframe=frame.timeframe,
+                    crossed_at=zone.broken_at,
+                ) not in self._penetration_event_ids
+            ):
+                if not atomic_bar_roots_available:
+                    continue
+                penetration_known_at = max(
+                    zone.broken_at,
+                    availability_floor,
+                )
+                bar_event_id = self._bar_event_id_at(
+                    frame.timeframe,
+                    zone.broken_at,
+                )
+                touch_key = (zone.zone_id, pd.Timestamp(zone.broken_at))
+                touch_event_id = self._level_touch_event_ids.get(touch_key)
+                if touch_event_id is None:
+                    touch_event = self._append_semantic_atomic(
+                        EventKind.LEVEL_TOUCHED,
+                        penetration_known_at,
+                        frame.timeframe,
+                        "below" if zone.side == "support" else "above",
+                        zone.anchor_price,
+                        zone.strength,
+                        (candidate_event_id, bar_event_id),
+                        {
+                            "level_id": zone.zone_id,
+                            "touch_ordinal": zone.total_touch_count + 1,
+                            "source_kind": zone.source_kind,
+                            "touch_reason": "boundary_crossing",
+                        },
+                        event_time=zone.broken_at,
+                        zone=(zone.lower_bound, zone.upper_bound),
+                    )
+                    touch_event_id = touch_event.event_id
+                    self._level_touch_event_ids[touch_key] = touch_event_id
+                crossing_generation_id = self._crossing_generation_id(
+                    level_id=zone.zone_id,
+                    timeframe=frame.timeframe,
+                    crossed_at=zone.broken_at,
+                )
+                penetrated = self._append_semantic_atomic(
+                    EventKind.LEVEL_PENETRATED,
+                    penetration_known_at,
+                    frame.timeframe,
+                    "below" if zone.side == "support" else "above",
+                    zone.anchor_price,
+                    zone.strength,
+                    (candidate_event_id, touch_event_id, bar_event_id),
+                    {
+                        "level_id": zone.zone_id,
+                        "source_kind": zone.source_kind,
+                        "penetration_standard": "close_beyond_frozen_zone",
+                        "crossing_generation_id": crossing_generation_id,
+                        "crossed_at": zone.broken_at.isoformat(),
+                    },
+                    direction=(
+                        Direction.SHORT
+                        if zone.side == "support"
+                        else Direction.LONG
+                    ),
+                    event_time=zone.broken_at,
+                    zone=(zone.lower_bound, zone.upper_bound),
+                )
+                self._penetration_event_ids[
+                    self._penetration_key(
+                        level_id=zone.zone_id,
+                        timeframe=frame.timeframe,
+                        crossed_at=zone.broken_at,
+                    )
+                ] = penetrated.event_id
+            self._resolve_zone_crossing_if_due(
+                zone,
+                asof=event_clock,
             )
         for pool in frame.liquidity_pools:
             if pool.lifecycle is not LiquidityPoolLifecycle.FORMED:
@@ -3001,14 +4864,18 @@ class CausalObserver:
                 prior_revision is None
                 or prior_revision[0] != pool.lifecycle.value
             )
-            self.memory.append(
-                _event(
+            pool_observed_at = (
+                max(pool.confirmed_at, event_clock)
+                if prior_revision is None and self._prior is not None
+                else (
+                    pool.confirmed_at
+                    if lifecycle_revision
+                    else pool.touch_times[-1]
+                )
+            )
+            pool_state_event = _event(
                     EventKind.LIQUIDITY_POOL_STATE,
-                    (
-                        pool.confirmed_at
-                        if lifecycle_revision
-                        else pool.touch_times[-1]
-                    ),
+                    pool_observed_at,
                     frame.timeframe,
                     pool.side,
                     pool.midpoint,
@@ -3040,7 +4907,81 @@ class CausalObserver:
                         else "liquidity_pool_membership_revised"
                     ),
                 )
-            )
+            self.memory.append(pool_state_event)
+            if entity_id not in self._candidate_level_event_ids:
+                source_swing_events = tuple(
+                    event_id
+                    for source_id in pool.member_swing_ids
+                    if (
+                        event_id
+                        := self._confirmed_swing_event_ids.get(source_id)
+                    )
+                )
+                created = self._append_semantic_atomic(
+                    EventKind.LIQUIDITY_LEVEL_CREATED,
+                    pool_observed_at,
+                    frame.timeframe,
+                    pool.side,
+                    pool.midpoint,
+                    pool.strength,
+                    source_swing_events,
+                    {
+                        "level_id": entity_id,
+                        "candidate_only": True,
+                        "source_kind": "formed_liquidity_pool",
+                        "member_swing_ids": pool.member_swing_ids,
+                    },
+                    event_time=pool.formed_at,
+                    zone=(pool.lower_bound, pool.upper_bound),
+                    source_entity_ids=(entity_id, *pool.member_swing_ids),
+                    context_event_ids=(pool_state_event.event_id,),
+                )
+                self._candidate_level_event_ids[entity_id] = (
+                    created.event_id
+                )
+            candidate_event_id = self._candidate_level_event_ids[
+                entity_id
+            ]
+            for touch_ordinal, touch_at in enumerate(
+                pool.touch_times,
+                start=1,
+            ):
+                if touch_at <= pool.confirmed_at:
+                    continue
+                touch_identity = (
+                    f"{entity_id}|{pd.Timestamp(touch_at).isoformat()}"
+                )
+                if not self._remember_bounded(
+                    touch_identity,
+                    known=self._known_level_touch_ids,
+                    order=self._known_level_touch_order,
+                ):
+                    continue
+                if not atomic_bar_roots_available:
+                    continue
+                bar_event_id = self._bar_event_id_at(
+                    frame.timeframe,
+                    touch_at,
+                )
+                touch_event = self._append_semantic_atomic(
+                    EventKind.LEVEL_TOUCHED,
+                    touch_at,
+                    frame.timeframe,
+                    pool.side,
+                    pool.midpoint,
+                    pool.strength,
+                    (candidate_event_id, bar_event_id),
+                    {
+                        "level_id": entity_id,
+                        "touch_ordinal": touch_ordinal,
+                        "source_kind": "formed_liquidity_pool",
+                    },
+                    event_time=touch_at,
+                    zone=(pool.lower_bound, pool.upper_bound),
+                )
+                self._level_touch_event_ids[
+                    (entity_id, pd.Timestamp(touch_at))
+                ] = touch_event.event_id
         for item in frame.structure_breaks:
             key = (item.bos_id, item.lifecycle)
             is_new_lifecycle = self._remember_bounded(
@@ -3051,7 +4992,7 @@ class CausalObserver:
             if is_new_lifecycle and not self.memory.has_entity_lifecycle(
                 f"bos:{item.bos_id}", item.lifecycle.value
             ):
-                self.memory.append(_event(
+                bos_state_event = _event(
                     (
                         EventKind.BOS_STATE
                         if item.lifecycle is BOSLifecycle.PENDING
@@ -3120,7 +5061,310 @@ class CausalObserver:
                         if item.lifecycle is BOSLifecycle.CONFIRMED
                         else item.failure_reason
                     ),
-                ))
+                )
+                self.memory.append(bos_state_event)
+                if (
+                    item.lifecycle is BOSLifecycle.CONFIRMED
+                    and item.resolved_at is not None
+                    and atomic_bar_roots_available
+                ):
+                    target_event_id = (
+                        self._confirmed_swing_event_ids.get(
+                            item.target_swing_id
+                        )
+                    )
+                    if target_event_id is None or item.break_bar_id is None:
+                        raise ValueError(
+                            "raw boundary break lacks its target swing or "
+                            "break-bar identity"
+                        )
+                    break_bar_event_id = self._bar_event_id_for_candle_id(
+                        item.break_bar_id
+                    )
+                    break_close = self._bar_close_by_candle_id[
+                        item.break_bar_id
+                    ]
+                    raw_break = self._append_semantic_atomic(
+                        EventKind.RAW_BOUNDARY_BREAK,
+                        item.resolved_at,
+                        frame.timeframe,
+                        (
+                            "above"
+                            if item.direction is Direction.LONG
+                            else "below"
+                        ),
+                        item.target_price,
+                        item.strength,
+                        (target_event_id, break_bar_event_id),
+                        {
+                            "bos_id": item.bos_id,
+                            "target_swing_id": item.target_swing_id,
+                            "scope": item.scope.value,
+                            "break_bar_id": item.break_bar_id,
+                            "break_distance_atr": item.break_distance_atr,
+                            "break_close": break_close,
+                            "break_buffer_ticks": 0,
+                            "comparison": "strict_close_beyond",
+                            "break_standard": (
+                                "close_beyond_confirmed_boundary"
+                            ),
+                            "source_displacement_id": (
+                                item.source_displacement_id
+                            ),
+                        },
+                        direction=item.direction,
+                        event_time=item.resolved_at,
+                        source_data_ids=(item.break_bar_id,),
+                        source_entity_ids=(
+                            item.bos_id,
+                            item.target_swing_id,
+                            *((
+                                item.source_structure_id,
+                            ) if item.source_structure_id else ()),
+                            *((
+                                item.source_displacement_id,
+                            ) if item.source_displacement_id else ()),
+                        ),
+                        context_event_ids=(
+                            bos_state_event.event_id,
+                            *((
+                                self._displacement_event_ids[
+                                    item.source_displacement_id
+                                ],
+                            ) if (
+                                item.source_displacement_id
+                                in self._displacement_event_ids
+                            ) else ()),
+                        ),
+                    )
+                    self._raw_break_event_ids[item.bos_id] = (
+                        raw_break.event_id
+                    )
+                    live_protected_assignments = ()
+                    continuation_opposes_live_protection = False
+                    if item.scope is BOSScope.CONTINUATION:
+                        live_protected_assignments = (
+                            self._live_protected_assignments(
+                                frame.timeframe,
+                                asof=item.resolved_at,
+                            )
+                        )
+                        live_protected_event = (
+                            live_protected_assignments[0][2]
+                            if live_protected_assignments
+                            else None
+                        )
+                        continuation_opposes_live_protection = bool(
+                            live_protected_event is not None
+                            and live_protected_event.direction
+                            is not item.direction
+                        )
+                    if (
+                        item.scope is BOSScope.CONTINUATION
+                        and not continuation_opposes_live_protection
+                    ):
+                        structure_direction_event_id = (
+                            self._structure_direction_event_ids.get(
+                                item.source_structure_id
+                            )
+                            if item.source_structure_id is not None
+                            else None
+                        )
+                        if structure_direction_event_id is None:
+                            raise ValueError(
+                                "qualified BOS lacks the exact prior "
+                                "structure-direction event"
+                            )
+                        qualified_bos = self._append_semantic_atomic(
+                            EventKind.QUALIFIED_BOS,
+                            item.resolved_at,
+                            frame.timeframe,
+                            (
+                                "above"
+                                if item.direction is Direction.LONG
+                                else "below"
+                            ),
+                            item.target_price,
+                            item.strength,
+                            (
+                                raw_break.event_id,
+                                structure_direction_event_id,
+                            ),
+                            {
+                                "bos_id": item.bos_id,
+                                "scope": item.scope.value,
+                                "qualification": (
+                                    "aligned_with_confirmed_structure"
+                                ),
+                                "displacement_context_present": bool(
+                                    item.source_displacement_id
+                                ),
+                            },
+                            direction=item.direction,
+                            event_time=item.resolved_at,
+                            source_entity_ids=(
+                                item.bos_id,
+                                item.source_structure_id,
+                            ),
+                        )
+                        origin_leg = next(
+                            (
+                                leg
+                                for leg in reversed(frame.structural_legs)
+                                if (
+                                    leg.end_swing_id
+                                    == item.target_swing_id
+                                    and leg.direction is item.direction
+                                )
+                            ),
+                            None,
+                        )
+                        if origin_leg is not None:
+                            origin_swing = next(
+                                (
+                                    swing
+                                    for swing in frame.swings
+                                    if swing.swing_id
+                                    == origin_leg.start_swing_id
+                                ),
+                                None,
+                            )
+                            if origin_swing is not None:
+                                protected_source = (
+                                    self._confirmed_swing_event_ids.get(
+                                        origin_swing.swing_id
+                                    )
+                                )
+                                origin_leg_event_id = (
+                                    self._structural_leg_event_ids.get(
+                                        origin_leg.leg_id
+                                    )
+                                )
+                                if (
+                                    protected_source is None
+                                    or origin_leg_event_id is None
+                                ):
+                                    raise ValueError(
+                                        "protected swing lacks its exact "
+                                        "swing or structural-leg event"
+                                    )
+                                live_protected_event = (
+                                    live_protected_assignments[0][2]
+                                    if live_protected_assignments
+                                    else None
+                                )
+                                protection_is_monotonic = bool(
+                                    live_protected_event is None
+                                    or (
+                                        item.direction is Direction.LONG
+                                        and origin_swing.price
+                                        >= float(live_protected_event.price)
+                                    )
+                                    or (
+                                        item.direction is Direction.SHORT
+                                        and origin_swing.price
+                                        <= float(live_protected_event.price)
+                                    )
+                                )
+                                if protection_is_monotonic:
+                                    protected_event = (
+                                        self._append_semantic_atomic(
+                                            EventKind.PROTECTED_SWING_ASSIGNED,
+                                            item.resolved_at,
+                                            frame.timeframe,
+                                            (
+                                                "below"
+                                                if item.direction
+                                                is Direction.LONG
+                                                else "above"
+                                            ),
+                                            origin_swing.price,
+                                            clamp(origin_leg.efficiency),
+                                            (
+                                                qualified_bos.event_id,
+                                                origin_leg_event_id,
+                                                protected_source,
+                                            ),
+                                            {
+                                                "bos_id": item.bos_id,
+                                                "structure_id": (
+                                                    item.source_structure_id
+                                                ),
+                                                "origin_leg_id": (
+                                                    origin_leg.leg_id
+                                                ),
+                                                "protected_swing_id": (
+                                                    origin_swing.swing_id
+                                                ),
+                                                "break_standard": (
+                                                    "later_acceptance_beyond"
+                                                ),
+                                            },
+                                            direction=item.direction,
+                                            event_time=(
+                                                origin_swing.pivot_start
+                                            ),
+                                            source_entity_ids=(
+                                                item.bos_id,
+                                                item.source_structure_id,
+                                                origin_leg.leg_id,
+                                                origin_swing.swing_id,
+                                            ),
+                                        )
+                                    )
+                                    self._replace_live_protected_assignment(
+                                        protected_event,
+                                        live_protected_assignments,
+                                    )
+                    elif item.scope is BOSScope.OPPOSED:
+                        structure_direction_event_id = (
+                            self._structure_direction_event_ids.get(
+                                item.source_structure_id
+                            )
+                            if item.source_structure_id is not None
+                            else None
+                        )
+                        if structure_direction_event_id is None:
+                            raise ValueError(
+                                "MSS Core lacks the exact prior "
+                                "structure-direction event"
+                            )
+                        self._append_semantic_atomic(
+                            EventKind.MSS_CORE_CONFIRMED,
+                            item.resolved_at,
+                            frame.timeframe,
+                            (
+                                "above"
+                                if item.direction is Direction.LONG
+                                else "below"
+                            ),
+                            item.target_price,
+                            item.strength,
+                            (
+                                raw_break.event_id,
+                                structure_direction_event_id,
+                            ),
+                            {
+                                "bos_id": item.bos_id,
+                                "scope": item.scope.value,
+                                "core_definition": (
+                                    "first_opposed_confirmed_boundary_break"
+                                ),
+                                "prior_sweep": None,
+                                "displacement_context_present": bool(
+                                    item.source_displacement_id
+                                ),
+                                "legacy_mss_qualified_context": (
+                                    item.mss_qualified
+                                ),
+                            },
+                            direction=item.direction,
+                            event_time=item.resolved_at,
+                            source_entity_ids=(
+                                item.bos_id,
+                                item.source_structure_id,
+                            ),
+                        )
             post_break_at = item.accepted_at or item.rejected_at
             if (
                 item.lifecycle is BOSLifecycle.CONFIRMED
@@ -3128,7 +5372,7 @@ class CausalObserver:
                 and item.post_break_state is not None
             ):
                 self.memory.append(
-                    _event(
+                    post_break_event := _event(
                         EventKind.BOS_POST_BREAK_STATE,
                         post_break_at,
                         frame.timeframe,
@@ -3172,19 +5416,103 @@ class CausalObserver:
                         ),
                     )
                 )
+                raw_event_id = self._raw_break_event_ids.get(item.bos_id)
+                if raw_event_id is not None:
+                    crossing_level_id = f"swing:{item.target_swing_id}"
+                    if (
+                        crossing_level_id
+                        not in self._candidate_level_event_ids
+                    ):
+                        raise ValueError(
+                            "BOS post-break resolution lacks its raw-swing "
+                            "candidate-level identity"
+                        )
+                    penetration_event_id = self._penetration_event_ids.get(
+                        self._penetration_key(
+                            level_id=crossing_level_id,
+                            timeframe=frame.timeframe,
+                            crossed_at=item.resolved_at,
+                        )
+                    )
+                    if penetration_event_id is None:
+                        raise ValueError(
+                            "BOS post-break resolution lacks its canonical "
+                            "penetration event"
+                        )
+                    accepted = item.accepted_at is not None
+                    resolution_bar_event_id = self._bar_event_id_at(
+                        frame.timeframe,
+                        post_break_at,
+                    )
+                    reaction_direction = (
+                        item.direction
+                        if accepted
+                        else (
+                            Direction.SHORT
+                            if item.direction is Direction.LONG
+                            else Direction.LONG
+                        )
+                    )
+                    self._append_crossing_resolution(
+                        (
+                            EventKind.ACCEPTANCE_CONFIRMED
+                            if accepted
+                            else EventKind.SWEEP_CONFIRMED
+                        ),
+                        post_break_at,
+                        frame.timeframe,
+                        (
+                            "above"
+                            if item.direction is Direction.LONG
+                            else "below"
+                        ),
+                        item.target_price,
+                        item.strength,
+                        (
+                            penetration_event_id,
+                            resolution_bar_event_id,
+                        ),
+                        {
+                            "bos_id": item.bos_id,
+                            "level_id": crossing_level_id,
+                            "target_swing_id": item.target_swing_id,
+                            "resolution_bars": 1,
+                            "resolution": (
+                                "held_outside"
+                                if accepted
+                                else "returned_inside"
+                            ),
+                        },
+                        direction=reaction_direction,
+                        crossed_at=item.resolved_at,
+                        context_event_ids=(
+                            raw_event_id,
+                            post_break_event.event_id,
+                        ),
+                    )
 
     def _record_group3_events(
         self,
         update: Group3Update,
     ) -> None:
         for state in update.fvg_transitions:
-            observed_at = state.state_started_at
+            midpoint_revision = bool(
+                state.lifecycle is FairValueGapLifecycle.PARTIAL
+                and state.transition_reason == "midpoint_touched"
+            )
+            observed_at = (
+                state.midpoint_touched_at
+                if midpoint_revision
+                else state.state_started_at
+            )
+            if observed_at is None:
+                raise ValueError("FVG transition lacks its causal clock")
             terminal = state.lifecycle in {
                 FairValueGapLifecycle.MITIGATED,
                 FairValueGapLifecycle.INVALIDATED,
+                FairValueGapLifecycle.EXPIRED,
             }
-            self.memory.append(
-                _event(
+            fvg_state_event = _event(
                     EventKind.FVG_STATE,
                     observed_at,
                     Timeframe.M5,
@@ -3201,6 +5529,7 @@ class CausalObserver:
                         *state.source_candle_ids,
                     ),
                     {
+                        "state_revision": midpoint_revision,
                         "protocol_hash": state.protocol_hash,
                         "qualification": state.qualification.value,
                         "lower_bound": state.lower_bound,
@@ -3215,6 +5544,11 @@ class CausalObserver:
                         "age_bars": state.age_bars,
                         "max_fill_fraction": (
                             state.max_fill_fraction
+                        ),
+                        "midpoint_touched_at": (
+                            None
+                            if state.midpoint_touched_at is None
+                            else state.midpoint_touched_at.isoformat()
                         ),
                         "source_displacement_protocol_hash": (
                             state.source_displacement_protocol_hash
@@ -3237,24 +5571,161 @@ class CausalObserver:
                             for value in state.source_candle_starts
                         ),
                     },
-                    entity_id=state.fvg_id,
-                    lifecycle=state.lifecycle.value,
+                    entity_id=(None if midpoint_revision else state.fvg_id),
+                    lifecycle=(
+                        None
+                        if midpoint_revision
+                        else state.lifecycle.value
+                    ),
                     formed_at=state.formed_at,
                     confirmed_at=state.confirmed_at,
                     ended_at=observed_at if terminal else None,
                     direction=state.direction,
                     transition_reason=state.transition_reason,
-                ),
+                )
+            self.memory.append(
+                fvg_state_event,
                 include_in_recent=False,
             )
+            if state.lifecycle is FairValueGapLifecycle.OPEN:
+                source_bar_events = tuple(
+                    self._bar_event_id_for_candle_id(candle_id)
+                    for candle_id in state.source_candle_ids
+                )
+                if len(source_bar_events) != 3:
+                    raise ValueError(
+                        "FVG creation requires exactly three completed-bar "
+                        "source events"
+                    )
+                displacement_context_id = self._displacement_event_ids.get(
+                    state.source_active_transition_id
+                ) or self._displacement_event_ids.get(
+                    state.source_displacement_id
+                )
+                created = self._append_semantic_atomic(
+                    EventKind.FVG_CREATED,
+                    state.confirmed_at,
+                    Timeframe.M5,
+                    (
+                        "below"
+                        if state.direction is Direction.LONG
+                        else "above"
+                    ),
+                    state.midpoint,
+                    state.strength,
+                    source_bar_events,
+                    {
+                        "fvg_id": state.fvg_id,
+                        "qualification": state.qualification.value,
+                        "width_ticks": state.width_ticks,
+                        "width_atr": state.width_atr,
+                        "source_displacement_id": (
+                            state.source_displacement_id
+                        ),
+                        "source_candle_ids": state.source_candle_ids,
+                    },
+                    direction=state.direction,
+                    event_time=state.formed_at,
+                    zone=(state.lower_bound, state.upper_bound),
+                    source_data_ids=state.source_candle_ids,
+                    source_entity_ids=(
+                        state.fvg_id,
+                        state.source_displacement_id,
+                    ),
+                    context_event_ids=(
+                        fvg_state_event.event_id,
+                        *((
+                            displacement_context_id,
+                        ) if displacement_context_id else ()),
+                    ),
+                )
+                self._fvg_created_event_ids[state.fvg_id] = (
+                    created.event_id
+                )
+            elif state.lifecycle in {
+                FairValueGapLifecycle.PARTIAL,
+                FairValueGapLifecycle.MITIGATED,
+                FairValueGapLifecycle.INVALIDATED,
+                FairValueGapLifecycle.EXPIRED,
+            }:
+                created_event_id = self._fvg_created_event_ids.get(
+                    state.fvg_id
+                )
+                if created_event_id is None:
+                    raise ValueError(
+                        "FVG lifecycle transition lacks its creation event"
+                    )
+                lifecycle_kind = {
+                    FairValueGapLifecycle.PARTIAL: (
+                        EventKind.FVG_MIDPOINT_TOUCHED
+                        if midpoint_revision
+                        else EventKind.FVG_PARTIALLY_FILLED
+                    ),
+                    FairValueGapLifecycle.MITIGATED: (
+                        EventKind.FVG_FULLY_FILLED
+                    ),
+                    FairValueGapLifecycle.INVALIDATED: (
+                        EventKind.FVG_INVALIDATED
+                    ),
+                    FairValueGapLifecycle.EXPIRED: EventKind.FVG_EXPIRED,
+                }[state.lifecycle]
+                try:
+                    transition_bar_event_id = self._bar_event_id_at(
+                        Timeframe.M5,
+                        observed_at,
+                    )
+                except ValueError:
+                    transition_bar_event_id = None
+                source_event_ids = (
+                    created_event_id,
+                    *((
+                        transition_bar_event_id,
+                    ) if transition_bar_event_id else ()),
+                )
+                evidence = {
+                    "fvg_id": state.fvg_id,
+                    "lifecycle": state.lifecycle.value,
+                    "max_fill_fraction": state.max_fill_fraction,
+                    "midpoint_touched": bool(
+                        state.midpoint_touched_at is not None
+                    ),
+                    "midpoint_touched_at": (
+                        None
+                        if state.midpoint_touched_at is None
+                        else state.midpoint_touched_at.isoformat()
+                    ),
+                    "fully_filled": bool(
+                        state.lifecycle
+                        is FairValueGapLifecycle.MITIGATED
+                    ),
+                    "transition_reason": state.transition_reason,
+                }
+                self._append_semantic_atomic(
+                    lifecycle_kind,
+                    observed_at,
+                    Timeframe.M5,
+                    (
+                        "below"
+                        if state.direction is Direction.LONG
+                        else "above"
+                    ),
+                    state.midpoint,
+                    state.strength,
+                    source_event_ids,
+                    evidence,
+                    direction=state.direction,
+                    event_time=observed_at,
+                    zone=(state.lower_bound, state.upper_bound),
+                    source_entity_ids=(state.fvg_id,),
+                    context_event_ids=(fvg_state_event.event_id,),
+                )
         for state in update.order_block_transitions:
             observed_at = state.state_started_at
             terminal = state.lifecycle in {
                 OrderBlockLifecycle.MITIGATED,
                 OrderBlockLifecycle.FAILED,
             }
-            self.memory.append(
-                _event(
+            order_block_state_event = _event(
                     EventKind.ORDER_BLOCK_STATE,
                     observed_at,
                     Timeframe.M5,
@@ -3336,8 +5807,235 @@ class CausalObserver:
                     ended_at=observed_at if terminal else None,
                     direction=state.direction,
                     transition_reason=state.transition_reason,
-                ),
+                )
+            self.memory.append(
+                order_block_state_event,
                 include_in_recent=False,
+            )
+            created_event_id = self._origin_zone_created_event_ids.get(
+                state.order_block_id
+            )
+            if state.lifecycle in {
+                OrderBlockLifecycle.CREATED,
+                OrderBlockLifecycle.UNTESTED,
+            } and created_event_id is None:
+                displacement_event_id = self._displacement_event_ids.get(
+                    state.source_active_transition_id
+                ) or self._displacement_event_ids.get(
+                    state.source_displacement_id
+                )
+                raw_break_event_id = self._raw_break_event_ids.get(
+                    state.source_bos_id
+                )
+                if (
+                    displacement_event_id is None
+                    or raw_break_event_id is None
+                ):
+                    raise ValueError(
+                        "origin zone lacks its exact displacement or raw "
+                        "boundary-break event"
+                    )
+                anchor_bar_events = tuple(
+                    self._bar_event_id_for_candle_id(candle_id)
+                    for candle_id in state.anchor_candle_ids
+                )
+                created = self._append_semantic_atomic(
+                    EventKind.ORIGIN_ZONE_CREATED,
+                    state.confirmed_at,
+                    Timeframe.M5,
+                    (
+                        "below"
+                        if state.direction is Direction.LONG
+                        else "above"
+                    ),
+                    state.midpoint,
+                    state.strength,
+                    (
+                        displacement_event_id,
+                        raw_break_event_id,
+                        *anchor_bar_events,
+                    ),
+                    {
+                        "origin_zone_id": state.order_block_id,
+                        "geometry": "frozen_group3_order_block_range",
+                        "source_displacement_id": (
+                            state.source_displacement_id
+                        ),
+                        "source_bos_id": state.source_bos_id,
+                        "anchor_candle_ids": state.anchor_candle_ids,
+                        "lifecycle": state.lifecycle.value,
+                    },
+                    direction=state.direction,
+                    event_time=state.formed_at,
+                    zone=(state.lower_bound, state.upper_bound),
+                    source_data_ids=state.anchor_candle_ids,
+                    source_entity_ids=(
+                        state.order_block_id,
+                        state.source_displacement_id,
+                        state.source_bos_id,
+                    ),
+                    context_event_ids=(order_block_state_event.event_id,),
+                )
+                self._origin_zone_created_event_ids[
+                    state.order_block_id
+                ] = created.event_id
+            elif state.lifecycle in {
+                OrderBlockLifecycle.MITIGATED,
+                OrderBlockLifecycle.FAILED,
+            }:
+                if created_event_id is None:
+                    raise ValueError(
+                        "origin-zone terminal transition lacks creation event"
+                    )
+                try:
+                    transition_bar_event_id = self._bar_event_id_at(
+                        Timeframe.M5,
+                        observed_at,
+                    )
+                except ValueError:
+                    transition_bar_event_id = None
+                source_events = (
+                    created_event_id,
+                    *((
+                        transition_bar_event_id,
+                    ) if transition_bar_event_id else ()),
+                )
+                self._append_semantic_atomic(
+                    (
+                        EventKind.ORIGIN_ZONE_MITIGATED
+                        if state.lifecycle
+                        is OrderBlockLifecycle.MITIGATED
+                        else EventKind.ORIGIN_ZONE_INVALIDATED
+                    ),
+                    observed_at,
+                    Timeframe.M5,
+                    (
+                        "below"
+                        if state.direction is Direction.LONG
+                        else "above"
+                    ),
+                    state.midpoint,
+                    state.strength,
+                    source_events,
+                    {
+                        "origin_zone_id": state.order_block_id,
+                        "lifecycle": state.lifecycle.value,
+                        "transition_reason": state.transition_reason,
+                    },
+                    direction=state.direction,
+                    event_time=observed_at,
+                    zone=(state.lower_bound, state.upper_bound),
+                    source_entity_ids=(state.order_block_id,),
+                    context_event_ids=(order_block_state_event.event_id,),
+                )
+
+    def _record_displacement_events(
+        self,
+        displacement,
+    ) -> None:
+        if displacement is None:
+            return
+        for transition in displacement.transitions_this_update:
+            if not self._remember_bounded(
+                transition.transition_id,
+                known=self._known_displacement_transition_ids,
+                order=self._known_displacement_transition_order,
+            ):
+                continue
+            metrics = {
+                str(name): float(value)
+                for name, value in transition.state_metrics
+            }
+            source_bar_events = tuple(
+                self._bar_event_id_for_candle_id(candle_id)
+                for candle_id in transition.admitted_candle_ids
+            )
+            source_bar_facts = tuple(
+                self.memory.audit_event_including_pending(event_id)
+                for event_id in source_bar_events
+            )
+            if not source_bar_facts or any(
+                event is None
+                or event.origin is not EventOrigin.NORMALIZED_DATA
+                or event.kind is not EventKind.BAR_COMPLETED
+                or event.timeframe is not Timeframe.M5
+                or event.evidence.get("real_completed") is not True
+                or event.evidence.get("clock_only") is not False
+                or not isinstance(
+                    event.evidence.get("detector_candle_id"), str
+                )
+                or not event.evidence.get("detector_candle_id")
+                for event in source_bar_facts
+            ):
+                raise ValueError(
+                    "displacement semantic source BAR detector lineage is invalid"
+                )
+            source_bar_detector_ids = tuple(
+                str(event.evidence["detector_candle_id"])
+                for event in source_bar_facts
+                if event is not None
+            )
+            if (
+                len(source_bar_detector_ids)
+                != len(set(source_bar_detector_ids))
+                or len(transition.admitted_candle_ids)
+                != len(set(transition.admitted_candle_ids))
+                or set(source_bar_detector_ids)
+                != set(transition.admitted_candle_ids)
+            ):
+                raise ValueError(
+                    "displacement admitted detector candle lineage is invalid"
+                )
+            synthetic_context_event_ids: tuple[str, ...] = ()
+            if (
+                transition.lifecycle == "censored"
+                and transition.reason == "synthetic_interruption"
+            ):
+                synthetic_context_event_ids = (
+                    self._synthetic_m1_context_event_ids_for_m5_terminal(
+                        transition.observed_at,
+                    )
+                )
+            displacement_event = self._append_semantic_atomic(
+                EventKind.DISPLACEMENT_OBSERVED,
+                transition.observed_at,
+                Timeframe.M5,
+                (
+                    "above"
+                    if transition.direction is Direction.LONG
+                    else "below"
+                ),
+                None,
+                clamp(metrics.get("efficiency", 0.0)),
+                source_bar_events,
+                {
+                    "transition_id": transition.transition_id,
+                    "displacement_id": transition.entity_id,
+                    "lifecycle": transition.lifecycle,
+                    "terminal_reason": transition.reason,
+                    "state_metrics": metrics,
+                    "admitted_candle_ids": (
+                        transition.admitted_candle_ids
+                    ),
+                    "prefix_last_admitted_at": (
+                        None
+                        if transition.prefix_last_admitted_at is None
+                        else transition.prefix_last_admitted_at.isoformat()
+                    ),
+                },
+                direction=transition.direction,
+                event_time=(
+                    transition.started_at or transition.observed_at
+                ),
+                source_data_ids=transition.admitted_candle_ids,
+                source_entity_ids=(transition.entity_id,),
+                context_event_ids=synthetic_context_event_ids,
+            )
+            self._displacement_event_ids[transition.transition_id] = (
+                displacement_event.event_id
+            )
+            self._displacement_event_ids[transition.entity_id] = (
+                displacement_event.event_id
             )
 
     def _record_group4_events(
@@ -3465,8 +6163,7 @@ class CausalObserver:
             terminal = (
                 state.lifecycle is DealingRangeLifecycle.BROKEN
             )
-            self.memory.append(
-                _event(
+            range_state_event = _event(
                     EventKind.DEALING_RANGE_STATE,
                     state.state_started_at,
                     Timeframe.H1,
@@ -3506,9 +6203,359 @@ class CausalObserver:
                     confirmed_at=state.mature_at,
                     ended_at=state.broken_at if terminal else None,
                     transition_reason=state.transition_reason,
-                ),
+                )
+            self.memory.append(
+                range_state_event,
                 include_in_recent=False,
             )
+            if boundary_reason is not None:
+                # Contract/data-gap resets censor the previous market epoch;
+                # they are not a market-observed H1 acceptance.  Preserve the
+                # lifecycle timeline transport, while the MARKET_EPOCH_RESET
+                # event owns the authoritative causal transition.
+                continue
+            range_kind = {
+                DealingRangeLifecycle.FORMING: (
+                    EventKind.DEALING_RANGE_CREATED
+                ),
+                DealingRangeLifecycle.MATURE: (
+                    EventKind.DEALING_RANGE_ACTIVATED
+                ),
+                DealingRangeLifecycle.BROKEN: (
+                    EventKind.DEALING_RANGE_INVALIDATED
+                ),
+            }[state.lifecycle]
+            created_event_id = self._range_created_event_ids.get(
+                state.range_id
+            )
+            active_event_id = self._range_active_event_ids.get(
+                state.range_id
+            )
+            anchor_event_ids = tuple(
+                dict.fromkeys(
+                    event_id
+                    for event_id in (
+                        self._candidate_level_event_ids.get(
+                            state.lower_source_zone_id
+                        ),
+                        self._candidate_level_event_ids.get(
+                            state.upper_source_zone_id
+                        ),
+                        *(
+                            self._confirmed_swing_event_ids.get(swing_id)
+                            for swing_id in (
+                                *state.lower_source_member_swing_ids,
+                                *state.upper_source_member_swing_ids,
+                            )
+                        ),
+                    )
+                    if event_id is not None
+                )
+            )
+            try:
+                transition_bar_event_id = self._bar_event_id_at(
+                    Timeframe.H1,
+                    state.state_started_at,
+                )
+            except ValueError:
+                transition_bar_event_id = None
+            if (
+                state.lifecycle is not DealingRangeLifecycle.FORMING
+                and created_event_id is None
+                and transition_bar_event_id is None
+            ):
+                # Private compatibility callers can project an isolated range
+                # lifecycle state without its normalized history.  Keep only
+                # the legacy lifecycle transport in that case; an authoritative
+                # semantic transition may never invent missing ancestry.
+                continue
+            external_acceptance_event_id: str | None = None
+            if (
+                state.lifecycle is DealingRangeLifecycle.BROKEN
+                and state.transition_reason == "close_beyond_frozen_range"
+                and active_event_id is not None
+            ):
+                if transition_bar_event_id is None:
+                    raise ValueError(
+                        "active dealing-range acceptance lacks its exact "
+                        "completed H1 BAR event"
+                    )
+                accepted_close = self._bar_close_by_event_id.get(
+                    transition_bar_event_id
+                )
+                if accepted_close is None:
+                    raise ValueError(
+                        "active dealing-range acceptance lacks its frozen "
+                        "completed H1 close"
+                    )
+                if accepted_close < state.lower_bound:
+                    accepted_side = "below"
+                    accepted_price = float(state.lower_bound)
+                    accepted_direction = Direction.SHORT
+                elif accepted_close > state.upper_bound:
+                    accepted_side = "above"
+                    accepted_price = float(state.upper_bound)
+                    accepted_direction = Direction.LONG
+                else:
+                    raise ValueError(
+                        "close-beyond range transition does not close "
+                        "strictly outside its frozen bounds"
+                    )
+                level_id = self._range_boundary_level_ids.get(
+                    (state.range_id, accepted_side)
+                )
+                if level_id is None:
+                    raise ValueError(
+                        "active dealing-range acceptance lacks its frozen "
+                        "candidate boundary identity"
+                    )
+                candidate_event_id = self._candidate_level_event_ids.get(
+                    level_id
+                )
+                if candidate_event_id is None:
+                    raise ValueError(
+                        "active dealing-range boundary lacks its candidate "
+                        "creation event"
+                    )
+                crossing_generation_id = self._crossing_generation_id(
+                    level_id=level_id,
+                    timeframe=Timeframe.H1,
+                    crossed_at=state.state_started_at,
+                )
+                touch_event = self._append_semantic_atomic(
+                    EventKind.LEVEL_TOUCHED,
+                    state.state_started_at,
+                    Timeframe.H1,
+                    accepted_side,
+                    accepted_price,
+                    state.strength,
+                    (candidate_event_id, transition_bar_event_id),
+                    {
+                        "level_id": level_id,
+                        "range_id": state.range_id,
+                        "source_kind": "mature_range_boundary",
+                        "touch_reason": "external_h1_close_crossing",
+                    },
+                    event_time=state.state_started_at,
+                    zone=(accepted_price, accepted_price),
+                    source_entity_ids=(level_id, state.range_id),
+                )
+                penetrated_event = self._append_semantic_atomic(
+                    EventKind.LEVEL_PENETRATED,
+                    state.state_started_at,
+                    Timeframe.H1,
+                    accepted_side,
+                    accepted_price,
+                    state.strength,
+                    (
+                        candidate_event_id,
+                        touch_event.event_id,
+                        transition_bar_event_id,
+                    ),
+                    {
+                        "level_id": level_id,
+                        "range_id": state.range_id,
+                        "source_kind": "mature_range_boundary",
+                        "penetration_standard": (
+                            "first_completed_h1_close_strictly_outside_"
+                            "frozen_range"
+                        ),
+                        "crossing_generation_id": crossing_generation_id,
+                        "crossed_at": state.state_started_at.isoformat(),
+                        "accepted_close": float(accepted_close),
+                    },
+                    direction=accepted_direction,
+                    event_time=state.state_started_at,
+                    zone=(accepted_price, accepted_price),
+                    source_entity_ids=(level_id, state.range_id),
+                )
+                accepted_event = self._append_crossing_resolution(
+                    EventKind.ACCEPTANCE_CONFIRMED,
+                    state.state_started_at,
+                    Timeframe.H1,
+                    accepted_side,
+                    accepted_price,
+                    state.strength,
+                    (
+                        penetrated_event.event_id,
+                        transition_bar_event_id,
+                    ),
+                    {
+                        "level_id": level_id,
+                        "range_id": state.range_id,
+                        "source_kind": "mature_range_boundary",
+                        "acceptance_bars": 1,
+                        "accepted_close": float(accepted_close),
+                        "resolution_standard": (
+                            "first_completed_h1_close_strictly_outside_"
+                            "frozen_range"
+                        ),
+                    },
+                    direction=accepted_direction,
+                    crossed_at=state.state_started_at,
+                    zone=(accepted_price, accepted_price),
+                )
+                external_acceptance_event_id = accepted_event.event_id
+            if state.lifecycle is DealingRangeLifecycle.FORMING:
+                range_sources = anchor_event_ids
+            else:
+                if created_event_id is None:
+                    raise ValueError(
+                        "dealing-range transition lacks its creation event"
+                    )
+                range_sources = (
+                    created_event_id,
+                    *((active_event_id,) if active_event_id else ()),
+                    *((
+                        transition_bar_event_id,
+                    ) if transition_bar_event_id else ()),
+                    *((
+                        external_acceptance_event_id,
+                    ) if external_acceptance_event_id else ()),
+                )
+            semantic_transition_reason = state.transition_reason
+            if (
+                state.lifecycle is DealingRangeLifecycle.BROKEN
+                and state.transition_reason == "close_beyond_frozen_range"
+                and active_event_id is None
+            ):
+                # A forming candidate can fail before it ever becomes the
+                # active range.  It has no activated boundary inventory and
+                # therefore cannot manufacture the active-range Acceptance
+                # ancestry used by a mature range invalidation.
+                semantic_transition_reason = (
+                    "close_beyond_frozen_range_before_activation"
+                )
+            range_event = self._append_semantic_atomic(
+                range_kind,
+                state.state_started_at,
+                Timeframe.H1,
+                None,
+                state.midpoint,
+                state.strength,
+                range_sources,
+                {
+                    "range_id": state.range_id,
+                    "lifecycle": state.lifecycle.value,
+                    "lower_bound": state.lower_bound,
+                    "upper_bound": state.upper_bound,
+                    "normalized_location_unclamped": None,
+                    "lower_source_zone_id": (
+                        state.lower_source_zone_id
+                    ),
+                    "upper_source_zone_id": (
+                        state.upper_source_zone_id
+                    ),
+                    "source_member_swing_ids": (
+                        *state.lower_source_member_swing_ids,
+                        *state.upper_source_member_swing_ids,
+                    ),
+                    "transition_reason": semantic_transition_reason,
+                },
+                event_time=(
+                    state.formed_at
+                    if state.lifecycle is DealingRangeLifecycle.FORMING
+                    else state.state_started_at
+                ),
+                zone=(state.lower_bound, state.upper_bound),
+                source_entity_ids=(
+                    state.range_id,
+                    state.lower_source_zone_id,
+                    state.upper_source_zone_id,
+                    *state.lower_source_member_swing_ids,
+                    *state.upper_source_member_swing_ids,
+                ),
+                context_event_ids=(range_state_event.event_id,),
+            )
+            if state.lifecycle is DealingRangeLifecycle.FORMING:
+                self._range_created_event_ids[state.range_id] = (
+                    range_event.event_id
+                )
+                if self._last_invalidated_range_event_id is not None:
+                    self._append_semantic_atomic(
+                        EventKind.DEALING_RANGE_REPLACED,
+                        state.state_started_at,
+                        Timeframe.H1,
+                        None,
+                        state.midpoint,
+                        state.strength,
+                        (
+                            self._last_invalidated_range_event_id,
+                            range_event.event_id,
+                        ),
+                        {
+                            "replacement_range_id": state.range_id,
+                            "replacement_standard": (
+                                "new_registered_range_after_invalidation"
+                            ),
+                        },
+                        event_time=state.formed_at,
+                        zone=(state.lower_bound, state.upper_bound),
+                    )
+                    self._last_invalidated_range_event_id = None
+            elif state.lifecycle is DealingRangeLifecycle.MATURE:
+                self._range_active_event_ids[state.range_id] = (
+                    range_event.event_id
+                )
+                boundary_items = tuple(
+                    item
+                    for item in update.range_boundary_inventory
+                    if item.kind == "range_boundary"
+                    and state.range_id in item.source_ids
+                )
+                if {item.side for item in boundary_items} != {
+                    "above",
+                    "below",
+                }:
+                    if transition_bar_event_id is not None:
+                        raise ValueError(
+                            "active dealing range lacks its two frozen "
+                            "boundary inventory identities"
+                        )
+                    # Private legacy projector fixtures may exercise the
+                    # lifecycle transport without first registering normalized
+                    # BAR roots.  They are not an authoritative semantic DAG,
+                    # so do not manufacture boundary identities for them.
+                    boundary_items = ()
+                for item in boundary_items:
+                    self._range_boundary_level_ids[
+                        (state.range_id, item.side)
+                    ] = item.item_id
+                    if item.item_id in self._candidate_level_event_ids:
+                        continue
+                    candidate = self._append_semantic_atomic(
+                        EventKind.LIQUIDITY_LEVEL_CREATED,
+                        state.state_started_at,
+                        Timeframe.H1,
+                        item.side,
+                        item.price,
+                        item.strength,
+                        (range_event.event_id,),
+                        {
+                            "level_id": item.item_id,
+                            "range_id": state.range_id,
+                            "candidate_only": True,
+                            "source_kind": "mature_range_boundary",
+                            "source_ids": item.source_ids,
+                            "source_confirmed_at": (
+                                item.confirmed_at.isoformat()
+                            ),
+                        },
+                        event_time=item.confirmed_at,
+                        zone=(item.lower_bound, item.upper_bound),
+                        source_entity_ids=(
+                            item.item_id,
+                            state.range_id,
+                            *item.source_ids,
+                        ),
+                    )
+                    self._candidate_level_event_ids[item.item_id] = (
+                        candidate.event_id
+                    )
+            elif state.lifecycle is DealingRangeLifecycle.BROKEN:
+                self._last_invalidated_range_event_id = (
+                    range_event.event_id
+                )
 
         # A hard reset has already replaced EventMemory and imported only
         # transitionable old-epoch prefixes.  Join a range's BROKEN transition
@@ -3528,8 +6575,7 @@ class CausalObserver:
                 or (not terminal and not include_creations)
             ):
                 continue
-            self.memory.append(
-                _event(
+            manipulation_state_event = _event(
                     EventKind.MANIPULATION_STATE,
                     (
                         state.censored_at
@@ -3607,7 +6653,9 @@ class CausalObserver:
                         else state.resolved_at if terminal else None
                     ),
                     transition_reason=state.transition_reason,
-                ),
+                )
+            self.memory.append(
+                manipulation_state_event,
                 include_in_recent=False,
                 sequence_floor=(
                     None
@@ -3615,6 +6663,85 @@ class CausalObserver:
                     else EventMemory._GROUP4_CREATION_SEQUENCE_FLOOR
                 ),
             )
+            if terminal and not state.deadline_elapsed:
+                accepted = (
+                    state.lifecycle
+                    is ManipulationLifecycle.ACCEPTED_OUTSIDE
+                )
+                penetration_event_id = self._penetration_event_ids.get(
+                    self._penetration_key(
+                        level_id=state.source_inventory_item_id,
+                        timeframe=Timeframe.M1,
+                        crossed_at=state.formed_at,
+                    )
+                )
+                if penetration_event_id is None:
+                    if not self._real_bar_event_ids_by_timeframe[Timeframe.M1]:
+                        # Legacy private lifecycle fixtures do not register
+                        # normalized roots and therefore cannot publish an
+                        # authoritative terminal semantic.
+                        continue
+                    raise ValueError(
+                        "Group 4 terminal resolution lacks its canonical "
+                        "penetration event"
+                    )
+                resolution_bar_event_id = self._bar_event_id_at(
+                    Timeframe.M1,
+                    state.resolved_at,
+                )
+                self._append_crossing_resolution(
+                    (
+                        EventKind.ACCEPTANCE_CONFIRMED
+                        if accepted
+                        else EventKind.SWEEP_CONFIRMED
+                    ),
+                    state.resolved_at,
+                    Timeframe.M1,
+                    state.side,
+                    (
+                        state.reentry_price
+                        if state.reentry_price is not None
+                        else state.sweep_extreme
+                    ),
+                    state.strength,
+                    (penetration_event_id, resolution_bar_event_id),
+                    {
+                        "level_id": state.source_inventory_item_id,
+                        "manipulation_id": state.manipulation_id,
+                        "source_kind": state.source_kind,
+                        "source_timeframe": state.source_timeframe.value,
+                        "penetration_atr": state.penetration_atr,
+                        "outside_completed_bars": (
+                            state.outside_completed_bars
+                        ),
+                        "outside_run": state.outside_run,
+                        "inside_hold_bars": state.inside_hold_bars,
+                        "resolution": (
+                            "registered_outside_acceptance"
+                            if accepted
+                            else "registered_reacceptance"
+                        ),
+                    },
+                    direction=(
+                        (
+                            Direction.LONG
+                            if state.side == "above"
+                            else Direction.SHORT
+                        )
+                        if accepted
+                        else (
+                            Direction.SHORT
+                            if state.side == "above"
+                            else Direction.LONG
+                        )
+                    ),
+                    crossed_at=state.formed_at,
+                    zone=(
+                        state.source_lower_bound,
+                        state.source_upper_bound,
+                    ),
+                    context_event_ids=(manipulation_state_event.event_id,),
+                )
 
     def _record_group5_events(self, update: Group5Update) -> None:
         if update.boundary_reason is not None:
@@ -4045,6 +7172,9 @@ class CausalObserver:
         self,
         family: str,
         period: _ReferencePeriod,
+        *,
+        admitted_at: pd.Timestamp,
+        replaces_by_kind: Mapping[str, str],
     ) -> None:
         # These extrema are aggregated and projected by the completed-1m
         # clock; period identity lives in ``kind`` rather than pretending
@@ -4055,9 +7185,9 @@ class CausalObserver:
             "day": 0.90,
             "week": 1.00,
         }[family]
-        for side, suffix, price in (
-            ("above", "high", period.high),
-            ("below", "low", period.low),
+        for side, suffix, price, extreme_at in (
+            ("above", "high", period.high, period.high_at),
+            ("below", "low", period.low, period.low_at),
         ):
             kind = f"previous_{family}_{suffix}"
             item_id = (
@@ -4086,6 +7216,15 @@ class CausalObserver:
                 is_protected_swing=False,
                 visibility_strength=visibility,
             )
+            self._reference_candidate_sources[item_id] = (
+                _ReferenceCandidateSource(
+                    extreme_at=extreme_at,
+                    admitted_at=admitted_at,
+                    period_started_at=period.started_at,
+                    period_last_end=period.last_end,
+                    replaces_level_id=replaces_by_kind.get(kind),
+                )
+            )
 
     def _advance_reference_periods(
         self,
@@ -4112,7 +7251,9 @@ class CausalObserver:
                     started_at=period_start,
                     last_end=candle.end,
                     high=float(candle.high),
+                    high_at=candle.end,
                     low=float(candle.low),
+                    low_at=candle.end,
                     symbol=candle.symbol,
                     instrument_id=int(candle.instrument_id),
                     coverage_complete=bool(
@@ -4123,11 +7264,15 @@ class CausalObserver:
                 )
                 continue
             if current.key == key:
+                new_high = float(candle.high) > current.high
+                new_low = float(candle.low) < current.low
                 self._reference_periods[family] = replace(
                     current,
                     last_end=candle.end,
                     high=max(current.high, float(candle.high)),
+                    high_at=(candle.end if new_high else current.high_at),
                     low=min(current.low, float(candle.low)),
+                    low_at=(candle.end if new_low else current.low_at),
                 )
                 continue
             retired = tuple(
@@ -4147,6 +7292,12 @@ class CausalObserver:
                     f"previous_{family}_high",
                     f"previous_{family}_low",
                 }
+            }
+            retired_ids = {item.item_id for item in retired}
+            self._reference_candidate_sources = {
+                item_id: source
+                for item_id, source in self._reference_candidate_sources.items()
+                if item_id not in retired_ids
             }
             if append_retirement_events:
                 for item in retired:
@@ -4169,7 +7320,12 @@ class CausalObserver:
                         )
                     )
             if current.coverage_complete:
-                self._materialize_reference_period(family, current)
+                self._materialize_reference_period(
+                    family,
+                    current,
+                    admitted_at=candle.end,
+                    replaces_by_kind={item.kind: item.item_id for item in retired},
+                )
             period_start = self._reference_period_start(
                 family,
                 candle,
@@ -4179,11 +7335,111 @@ class CausalObserver:
                 started_at=period_start,
                 last_end=candle.end,
                 high=float(candle.high),
+                high_at=candle.end,
                 low=float(candle.low),
+                low_at=candle.end,
                 symbol=candle.symbol,
                 instrument_id=int(candle.instrument_id),
                 coverage_complete=True,
             )
+
+    def _publish_reference_candidate_events(self) -> None:
+        """Publish visible completed-period extrema at their admission clock.
+
+        Reference inventory is built before normalized BAR facts are appended.
+        This second pass runs immediately after those roots exist, so a level is
+        authoritative before any touch while retaining the exact extreme bar
+        and the first completed M1 bar that made the prior period knowable.
+        """
+
+        if self.config.group4_projection_only:
+            return
+        visible_ids = set(self._reference_inventory)
+        self._reference_candidate_sources = {
+            item_id: source
+            for item_id, source in self._reference_candidate_sources.items()
+            if item_id in visible_ids
+        }
+        missing_sources = visible_ids - set(self._reference_candidate_sources)
+        if missing_sources:
+            raise ValueError(
+                "reference candidates lack frozen source clocks: "
+                + ", ".join(sorted(missing_sources))
+            )
+        ordered = sorted(
+            self._reference_inventory.values(),
+            key=lambda item: (
+                self._reference_candidate_sources[item.item_id].admitted_at,
+                item.kind,
+                item.item_id,
+            ),
+        )
+        for item in ordered:
+            if item.item_id in self._candidate_level_event_ids:
+                continue
+            source = self._reference_candidate_sources.get(item.item_id)
+            if source is None:
+                raise ValueError(
+                    "reference candidate lacks its frozen source clocks"
+                )
+            extreme_bar_event_id = self._bar_event_id_at(
+                Timeframe.M1,
+                source.extreme_at,
+            )
+            admission_bar_event_id = self._bar_event_id_at(
+                Timeframe.M1,
+                source.admitted_at,
+            )
+            evidence: dict[str, object] = {
+                "level_id": item.item_id,
+                "candidate_only": True,
+                "source_kind": item.kind,
+                "source_inventory_kind": item.kind,
+                "source_ids": item.source_ids,
+                "source_confirmed_at": source.period_last_end.isoformat(),
+                "reference_period_started_at": (
+                    source.period_started_at.isoformat()
+                ),
+                "reference_period_last_completed_at": (
+                    source.period_last_end.isoformat()
+                ),
+                "reference_extreme_at": source.extreme_at.isoformat(),
+                "reference_admitted_at": source.admitted_at.isoformat(),
+                "reference_extreme_tie_rule": (
+                    "first_completed_m1_at_extreme"
+                ),
+                "rank": item.structural_rank,
+                "strength": float(item.strength),
+            }
+            replacement_event_id = (
+                None
+                if source.replaces_level_id is None
+                else self._candidate_level_event_ids.get(
+                    source.replaces_level_id
+                )
+            )
+            if replacement_event_id is not None:
+                evidence["replaces_level_id"] = source.replaces_level_id
+                evidence["replaces_level_event_id"] = replacement_event_id
+            candidate = self._append_semantic_atomic(
+                EventKind.LIQUIDITY_LEVEL_CREATED,
+                source.admitted_at,
+                Timeframe.M1,
+                item.side,
+                item.price,
+                item.strength,
+                (extreme_bar_event_id, admission_bar_event_id),
+                evidence,
+                event_time=source.extreme_at,
+                zone=(item.lower_bound, item.upper_bound),
+                source_entity_ids=(item.item_id, *item.source_ids),
+                context_event_ids=(
+                    ()
+                    if replacement_event_id is None
+                    else (replacement_event_id,)
+                ),
+            )
+            self._candidate_level_event_ids[item.item_id] = candidate.event_id
 
     @staticmethod
     def _pool_close_outside(
@@ -4202,9 +7458,13 @@ class CausalObserver:
         candle: Candle,
         *,
         atr: float,
+        defer_resolution: bool = False,
     ) -> None:
         if self.config.group4_projection_only:
             return
+        semantic_source_kind = (
+            "confirmed_swing" if item.kind == "swing" else item.kind
+        )
         outside = self._pool_close_outside(item, candle)
         extreme = candle.high if item.side == "above" else candle.low
         distance = (
@@ -4212,6 +7472,163 @@ class CausalObserver:
             if item.side == "above"
             else item.lower_bound - extreme
         )
+        try:
+            bar_event_id = self._bar_event_id_at(Timeframe.M1, candle.end)
+        except ValueError:
+            # Direct compatibility projection callers may intentionally omit
+            # the normalized event stream.  Preserve their legacy lifecycle
+            # transport, but never manufacture a canonical semantic fact
+            # without a BAR_COMPLETED root.
+            self.memory.append(
+                _event(
+                    (
+                        EventKind.LIQUIDITY_CONSUMED
+                        if outside
+                        else EventKind.LIQUIDITY_SWEEP
+                    ),
+                    candle.end,
+                    Timeframe.M1,
+                    item.side,
+                    extreme,
+                    clamp(distance / max(atr, self.config.tick_size)),
+                    (item.item_id,),
+                    {
+                        "source_timeframe": item.timeframe.value,
+                        "source_kind": item.kind,
+                        "close_accepted_outside": outside,
+                        "frozen_lower_bound": item.lower_bound,
+                        "frozen_upper_bound": item.upper_bound,
+                    },
+                )
+            )
+            return
+        candidate_event_id = self._candidate_level_event_ids.get(
+            item.item_id
+        )
+        if candidate_event_id is None:
+            source_events = tuple(
+                event_id
+                for source_id in item.source_ids
+                if (
+                    event_id
+                    := self._confirmed_swing_event_ids.get(source_id)
+                )
+            )
+            if not source_events:
+                try:
+                    source_events = (
+                        self._bar_event_id_at(
+                            item.timeframe,
+                            item.confirmed_at,
+                        ),
+                    )
+                except ValueError:
+                    source_events = ()
+            candidate = self._append_semantic_atomic(
+                EventKind.LIQUIDITY_LEVEL_CREATED,
+                candle.end,
+                item.timeframe,
+                item.side,
+                item.price,
+                item.strength,
+                source_events,
+                {
+                    "level_id": item.item_id,
+                    "candidate_only": True,
+                    "source_kind": semantic_source_kind,
+                    "source_inventory_kind": item.kind,
+                    "source_ids": item.source_ids,
+                    "admitted_from_inventory": True,
+                    "source_confirmed_at": item.confirmed_at.isoformat(),
+                },
+                event_time=item.formed_at,
+                zone=(item.lower_bound, item.upper_bound),
+                source_entity_ids=(item.item_id, *item.source_ids),
+            )
+            candidate_event_id = candidate.event_id
+            self._candidate_level_event_ids[item.item_id] = (
+                candidate_event_id
+            )
+        touch_identity = f"{item.item_id}|{candle.end.isoformat()}"
+        touch_event_id = self._level_touch_event_ids.get(
+            (item.item_id, pd.Timestamp(candle.end))
+        )
+        if self._remember_bounded(
+            touch_identity,
+            known=self._known_level_touch_ids,
+            order=self._known_level_touch_order,
+        ):
+            touch_event = self._append_semantic_atomic(
+                EventKind.LEVEL_TOUCHED,
+                candle.end,
+                Timeframe.M1,
+                item.side,
+                item.price,
+                item.strength,
+                (candidate_event_id, bar_event_id),
+                {
+                    "level_id": item.item_id,
+                    "source_timeframe": item.timeframe.value,
+                    "source_kind": semantic_source_kind,
+                    "source_inventory_kind": item.kind,
+                },
+                event_time=candle.end,
+                zone=(item.lower_bound, item.upper_bound),
+            )
+            touch_event_id = touch_event.event_id
+            self._level_touch_event_ids[
+                (item.item_id, pd.Timestamp(candle.end))
+            ] = touch_event_id
+        if touch_event_id is None:
+            raise ValueError(
+                "level penetration lacks its exact touch event"
+            )
+        crossing_generation_id = self._crossing_generation_id(
+            level_id=item.item_id,
+            timeframe=Timeframe.M1,
+            crossed_at=candle.end,
+        )
+        penetration = self._append_semantic_atomic(
+            EventKind.LEVEL_PENETRATED,
+            candle.end,
+            Timeframe.M1,
+            item.side,
+            extreme,
+            clamp(distance / max(atr, self.config.tick_size)),
+            (candidate_event_id, touch_event_id, bar_event_id),
+            {
+                "level_id": item.item_id,
+                "source_timeframe": item.timeframe.value,
+                "source_kind": semantic_source_kind,
+                "source_inventory_kind": item.kind,
+                "penetration_points": max(0.0, distance),
+                "close_accepted_outside": outside,
+                "frozen_lower_bound": item.lower_bound,
+                "frozen_upper_bound": item.upper_bound,
+                "penetration_standard": (
+                    "intrabar_trade_beyond_frozen_candidate_level"
+                ),
+                "strict_close_beyond_confirmed_swing_price": bool(
+                    item.kind == "swing" and outside
+                ),
+                "crossing_generation_id": crossing_generation_id,
+                "crossed_at": candle.end.isoformat(),
+            },
+            direction=(
+                Direction.LONG
+                if item.side == "above"
+                else Direction.SHORT
+            ),
+            event_time=candle.end,
+            zone=(item.lower_bound, item.upper_bound),
+        )
+        self._penetration_event_ids[
+            self._penetration_key(
+                level_id=item.item_id,
+                timeframe=Timeframe.M1,
+                crossed_at=candle.end,
+            )
+        ] = penetration.event_id
         self.memory.append(
             _event(
                 (
@@ -4234,6 +7651,29 @@ class CausalObserver:
                 },
             )
         )
+        if not outside and not defer_resolution:
+            self._append_crossing_resolution(
+                EventKind.SWEEP_CONFIRMED,
+                candle.end,
+                Timeframe.M1,
+                item.side,
+                extreme,
+                clamp(distance / max(atr, self.config.tick_size)),
+                (penetration.event_id, bar_event_id),
+                {
+                    "level_id": item.item_id,
+                    "resolution_bars": 0,
+                    "resolution": "same_bar_close_returned_inside",
+                    "penetration_points": max(0.0, distance),
+                },
+                direction=(
+                    Direction.SHORT
+                    if item.side == "above"
+                    else Direction.LONG
+                ),
+                crossed_at=candle.end,
+                zone=(item.lower_bound, item.upper_bound),
+            )
 
     def _append_projected_pool_sweep_events(
         self,
@@ -4248,6 +7688,7 @@ class CausalObserver:
             item,
             candle,
             atr=atr,
+            defer_resolution=True,
         )
         outside = self._pool_close_outside(item, candle)
         extreme = candle.high if item.side == "above" else candle.low
@@ -4276,12 +7717,13 @@ class CausalObserver:
         self,
         item: LiquidityInventoryItem,
         candle: Candle,
+        *,
+        crossed_at: pd.Timestamp | None = None,
     ) -> None:
         if self.config.group4_projection_only:
             return
         outside = self._pool_close_outside(item, candle)
-        self.memory.append(
-            _event(
+        resolution_state_event = _event(
                 EventKind.LIQUIDITY_POOL_STATE,
                 candle.end,
                 item.timeframe,
@@ -4308,6 +7750,83 @@ class CausalObserver:
                     else "close_returned_inside"
                 ),
             )
+        self.memory.append(resolution_state_event)
+        try:
+            resolution_bar_event_id = self._bar_event_id_at(
+                Timeframe.M1,
+                candle.end,
+            )
+        except ValueError:
+            return
+        penetration_event_id = (
+            None
+            if crossed_at is None
+            else self._penetration_event_ids.get(
+                self._penetration_key(
+                    level_id=item.item_id,
+                    timeframe=Timeframe.M1,
+                    crossed_at=crossed_at,
+                )
+            )
+        )
+        if self._group4_tracker is not None:
+            # A source admitted by registered Group 4 is resolved solely by
+            # that manipulation protocol.  Rejected/unadmitted pool sources
+            # still need the generic crossing terminal; otherwise a published
+            # penetration would remain permanently unresolved.
+            group4_claims_source = any(
+                state.source_inventory_item_id == item.item_id
+                for state in self._group4_tracker.snapshot().manipulations
+            )
+            if group4_claims_source:
+                return
+        if penetration_event_id is None:
+            raise ValueError(
+                "projected pool resolution lacks its canonical penetration"
+            )
+        if crossed_at is None:
+            raise ValueError(
+                "canonical projected pool resolution requires its original "
+                "crossing clock"
+            )
+        self._append_crossing_resolution(
+            (
+                EventKind.ACCEPTANCE_CONFIRMED
+                if outside
+                else EventKind.SWEEP_CONFIRMED
+            ),
+            candle.end,
+            Timeframe.M1,
+            item.side,
+            candle.close,
+            item.strength,
+            (penetration_event_id, resolution_bar_event_id),
+            {
+                "level_id": item.item_id,
+                "source_timeframe": item.timeframe.value,
+                "resolution_bars": 1,
+                "resolution": (
+                    "later_close_held_outside"
+                    if outside
+                    else "later_close_returned_inside"
+                ),
+            },
+            direction=(
+                (
+                    Direction.LONG
+                    if item.side == "above"
+                    else Direction.SHORT
+                )
+                if outside
+                else (
+                    Direction.SHORT
+                    if item.side == "above"
+                    else Direction.LONG
+                )
+            ),
+            crossed_at=crossed_at,
+            zone=(item.lower_bound, item.upper_bound),
+            context_event_ids=(resolution_state_event.event_id,),
         )
 
     def _bootstrap_inventory_lifecycles(
@@ -4405,6 +7924,26 @@ class CausalObserver:
                         self.config.atr_period,
                     ),
                 )
+                if self._pool_close_outside(item, sweep_candle):
+                    resolution_candle = next(
+                        (
+                            candle
+                            for index, candle in eligible
+                            if index > sweep_index
+                        ),
+                        None,
+                    )
+                    if resolution_candle is None:
+                        self._pending_level_crossings[item.item_id] = (
+                            sweep_candle.end,
+                            item,
+                        )
+                    else:
+                        self._append_level_resolution_event(
+                            item,
+                            resolution_candle,
+                            crossed_at=sweep_candle.end,
+                        )
                 continue
             resolution_candle = next(
                 (
@@ -4466,6 +8005,7 @@ class CausalObserver:
                 self._append_projected_pool_resolution_event(
                     item,
                     resolution_candle,
+                    crossed_at=sweep_candle.end,
                 )
 
     def _resolve_pending_pool_sweeps(
@@ -4474,7 +8014,7 @@ class CausalObserver:
         *,
         append_events: bool = True,
         projected_pool_states: dict[str, LiquidityPoolState] | None = None,
-    ) -> tuple[tuple[LiquidityInventoryItem, Candle], ...]:
+    ) -> tuple[tuple[LiquidityInventoryItem, Candle, pd.Timestamp], ...]:
         """Resolve pending sweeps before any same-clock HTF state update."""
 
         if type(append_events) is not bool:
@@ -4482,7 +8022,9 @@ class CausalObserver:
         bar = update.completed_1m
         if not bar.real_completed:
             return ()
-        resolved: list[tuple[LiquidityInventoryItem, Candle]] = []
+        resolved: list[
+            tuple[LiquidityInventoryItem, Candle, pd.Timestamp]
+        ] = []
         for item_id, (swept_at, item) in tuple(
             self._pending_pool_sweeps.items()
         ):
@@ -4499,10 +8041,115 @@ class CausalObserver:
             if projected_pool_states is not None:
                 projected_pool_states[projected.pool_id] = projected
             if append_events:
-                self._append_projected_pool_resolution_event(item, bar)
+                self._append_projected_pool_resolution_event(
+                    item,
+                    bar,
+                    crossed_at=swept_at,
+                )
             else:
-                resolved.append((item, bar))
+                resolved.append((item, bar, swept_at))
             self._pending_pool_sweeps.pop(item_id, None)
+        return tuple(resolved)
+
+    def _append_level_resolution_event(
+        self,
+        item: LiquidityInventoryItem,
+        candle: Candle,
+        *,
+        crossed_at: pd.Timestamp,
+    ) -> None:
+        """Resolve one non-pool penetration on the next completed real bar."""
+
+        outside = self._pool_close_outside(item, candle)
+        try:
+            resolution_bar_event_id = self._bar_event_id_at(
+                Timeframe.M1,
+                candle.end,
+            )
+        except ValueError:
+            return
+        penetration_event_id = self._penetration_event_ids.get(
+            self._penetration_key(
+                level_id=item.item_id,
+                timeframe=Timeframe.M1,
+                crossed_at=crossed_at,
+            )
+        )
+        if penetration_event_id is None:
+            raise ValueError(
+                "level resolution lacks its exact crossing penetration"
+            )
+        self._append_crossing_resolution(
+            (
+                EventKind.ACCEPTANCE_CONFIRMED
+                if outside
+                else EventKind.SWEEP_CONFIRMED
+            ),
+            candle.end,
+            Timeframe.M1,
+            item.side,
+            float(candle.close),
+            item.strength,
+            (penetration_event_id, resolution_bar_event_id),
+            {
+                "level_id": item.item_id,
+                "source_timeframe": item.timeframe.value,
+                "source_kind": item.kind,
+                "resolution_bars": 1,
+                "resolution": (
+                    "later_close_held_outside"
+                    if outside
+                    else "later_close_returned_inside"
+                ),
+                "crossed_at": crossed_at.isoformat(),
+            },
+            direction=(
+                (
+                    Direction.LONG
+                    if item.side == "above"
+                    else Direction.SHORT
+                )
+                if outside
+                else (
+                    Direction.SHORT
+                    if item.side == "above"
+                    else Direction.LONG
+                )
+            ),
+            crossed_at=crossed_at,
+            zone=(item.lower_bound, item.upper_bound),
+        )
+
+    def _resolve_pending_level_crossings(
+        self,
+        update: ReaderUpdate,
+        *,
+        append_events: bool = True,
+    ) -> tuple[tuple[LiquidityInventoryItem, Candle, pd.Timestamp], ...]:
+        """Resolve generic candidate penetrations without a pool lifecycle."""
+
+        if type(append_events) is not bool:
+            raise TypeError("level-resolution event flag must be boolean")
+        bar = update.completed_1m
+        if not bar.real_completed:
+            return ()
+        resolved: list[
+            tuple[LiquidityInventoryItem, Candle, pd.Timestamp]
+        ] = []
+        for item_id, (crossed_at, item) in tuple(
+            self._pending_level_crossings.items()
+        ):
+            if update.asof <= crossed_at:
+                continue
+            if append_events:
+                self._append_level_resolution_event(
+                    item,
+                    bar,
+                    crossed_at=crossed_at,
+                )
+            else:
+                resolved.append((item, bar, crossed_at))
+            self._pending_level_crossings.pop(item_id, None)
         return tuple(resolved)
 
     def _project_inventory(
@@ -4614,6 +8261,11 @@ class CausalObserver:
                     bar,
                     atr=atr,
                 )
+                if self._pool_close_outside(item, bar):
+                    self._pending_level_crossings[item.item_id] = (
+                        update.asof,
+                        item,
+                    )
 
         output: list[LiquidityInventoryItem] = []
         for item in base_inventory:
@@ -4698,6 +8350,7 @@ class CausalObserver:
     ) -> MarketObservation:
         if self._terminal_failure is not None:
             raise RuntimeError(self._terminal_failure)
+        audit_start = len(self.audit_store)
         if self._prior is not None and update.asof <= self._prior.asof:
             raise ValueError(
                 "observer received a duplicate or out-of-order "
@@ -4781,6 +8434,16 @@ class CausalObserver:
                     else "data_gap_reset"
                 )
                 try:
+                    if (
+                        displacement is not None
+                        and not self.config.group4_projection_only
+                    ):
+                        # Boundary transitions close the prior displacement
+                        # epoch and therefore still reference its normalized
+                        # bars.  Publish those immutable terminal facts before
+                        # clearing the prior-epoch BAR lookup tables.
+                        self._record_displacement_events(displacement)
+                        displacement = None
                     self._reset_contract_state(
                         reason=reason,
                         observed_at=update.asof,
@@ -4825,6 +8488,12 @@ class CausalObserver:
         try:
             deferred_pool_resolution_events = (
                 self._resolve_pending_pool_sweeps(
+                    update,
+                    append_events=False,
+                )
+            )
+            deferred_level_resolution_events = (
+                self._resolve_pending_level_crossings(
                     update,
                     append_events=False,
                 )
@@ -4955,6 +8624,55 @@ class CausalObserver:
                         semantic_tail.close,
                         atr,
                     )
+            protected_swing_ids = tuple(
+                item.protected_swing_id
+                for item in structures
+                if item.protected_swing_id is not None
+                and item.lifecycle is StructureLifecycle.CONFIRMED
+            )
+            structural_swing_ids = tuple(
+                item.target_swing_id
+                for item in visible_breaks
+                if item.lifecycle is BOSLifecycle.CONFIRMED
+            )
+            resolved_swing_ids = tuple(
+                item.swing_id
+                for item in swings
+                if (
+                    item.lifecycle
+                    in {SwingLifecycle.CONFIRMED, SwingLifecycle.BROKEN}
+                    and item.confirmed_at is not None
+                )
+            )
+            cached_legs = self._structural_leg_cache.get(timeframe)
+            if (
+                cached_legs is not None
+                and cached_legs[0] == resolved_swing_ids
+            ):
+                structural_legs = cached_legs[1]
+            else:
+                projected_legs = build_structural_legs(
+                    timeframe,
+                    swings,
+                    histories[timeframe],
+                    atr=atr,
+                    protected_swing_ids=protected_swing_ids,
+                    structural_swing_ids=structural_swing_ids,
+                )
+                frozen_by_id = {
+                    item.leg_id: item
+                    for item in (
+                        () if cached_legs is None else cached_legs[1]
+                    )
+                }
+                structural_legs = tuple(
+                    frozen_by_id.get(item.leg_id, item)
+                    for item in projected_legs
+                )
+                self._structural_leg_cache[timeframe] = (
+                    resolved_swing_ids,
+                    structural_legs,
+                )
             frames[timeframe] = replace(
                 frame,
                 metrics=metrics,
@@ -4969,6 +8687,7 @@ class CausalObserver:
                     self._pool_formation_source(item)
                     for item in liquidity_pools
                 ),
+                structural_legs=structural_legs,
             )
         if Timeframe.M5 in frames:
             frames[Timeframe.M5] = replace(
@@ -4992,6 +8711,26 @@ class CausalObserver:
                 "last checkpoint"
             )
             raise
+        if not self.config.group4_projection_only:
+            try:
+                # Normalized data facts are the roots of the semantic DAG.
+                # Publish them before Displacement, Group 3, structure, or
+                # liquidity events attempt to reference the consumed bars.
+                self._append_available_bar_events(
+                    update,
+                    histories,
+                    frames,
+                )
+                self._publish_reference_candidate_events()
+                self._record_displacement_events(displacement)
+            except Exception:
+                self._terminal_failure = (
+                    "normalized bar/reference/displacement semantic projection "
+                    "failed "
+                    "after state may have changed; discard this observer "
+                    "and resume from the last checkpoint"
+                )
+                raise
         for timeframe, tracker in self._liquidity_trackers.items():
             if timeframe not in liquidity_snapshots:
                 liquidity_snapshots[timeframe] = (
@@ -5096,10 +8835,21 @@ class CausalObserver:
                 raise
         try:
             if not self.config.group4_projection_only:
-                for item, candle in deferred_pool_resolution_events:
+                for item, candle, crossed_at in deferred_pool_resolution_events:
                     self._append_projected_pool_resolution_event(
                         item,
                         candle,
+                        crossed_at=crossed_at,
+                    )
+                for (
+                    item,
+                    candle,
+                    crossed_at,
+                ) in deferred_level_resolution_events:
+                    self._append_level_resolution_event(
+                        item,
+                        candle,
+                        crossed_at=crossed_at,
                     )
             projected_pool_states: dict[str, LiquidityPoolState] = {}
             liquidity_inventory = self._project_inventory(
@@ -5379,7 +9129,52 @@ class CausalObserver:
         for timeframe, frame in frames.items():
             if not frame.ready:
                 anomalies.append(f"warmup_{timeframe.value}")
+        market_anomalies = tuple(dict.fromkeys(anomalies))
         anomalies.extend(execution.anomalies)
+        try:
+            self.memory.flush_audit()
+            semantic_events = self.audit_store.events_since(audit_start)
+            market_snapshot, projection_events = (
+                self.market_snapshot_publisher.publish(
+                    asof=update.asof,
+                    symbol=update.completed_1m.symbol,
+                    instrument_id=update.completed_1m.instrument_id,
+                    price=float(update.completed_1m.close),
+                    completed_1m=update.completed_1m,
+                    frames=frames,
+                    inventory=liquidity_inventory,
+                    displacement=displacement,
+                    semantic_events=semantic_events,
+                    anomalies=market_anomalies,
+                    emit_projection_events=(
+                        self.config.persist_state_projections
+                    ),
+                )
+            )
+            if self.config.persist_state_projections:
+                for event in projection_events:
+                    self.memory.append(
+                        event,
+                        include_in_recent=False,
+                        sequence_floor=(
+                            EventMemory._GROUP4_CREATION_SEQUENCE_FLOOR
+                            + 1_000_000
+                        ),
+                    )
+                self.memory.flush_audit()
+            semantic_events = self.audit_store.events_since(audit_start)
+            market_snapshot = replace(
+                market_snapshot,
+                events_this_update=semantic_events,
+            )
+            self.last_market_snapshot = market_snapshot
+        except Exception:
+            self._terminal_failure = (
+                "hierarchical state publication or audit commit failed after "
+                "reducers advanced; discard this observer and resume from "
+                "the last checkpoint"
+            )
+            raise
         incomplete_timeline_keys = (
             self.memory.incomplete_entity_keys()
             if (
@@ -5658,6 +9453,8 @@ class CausalObserver:
                 recent_events=recent_events,
                 event_durations_minutes=event_durations_minutes,
                 execution=execution,
+                semantic_events_this_update=semantic_events,
+                market_snapshot=market_snapshot,
                 anomalies=tuple(dict.fromkeys(anomalies)),
                 displacement=displacement,
                 liquidity_inventory=liquidity_inventory,

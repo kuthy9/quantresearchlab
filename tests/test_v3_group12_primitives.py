@@ -15,6 +15,7 @@ from smc_trader.liquidity import (
     LiquidityConfig,
     LiquidityProtocolError,
 )
+from smc_trader.market_state import replay_atomic_market_snapshot
 from smc_trader.model import (
     BOS_CONFIRMATION_REASON,
     BOSLifecycle,
@@ -135,6 +136,75 @@ def _swing(
     )
 
 
+def _append_authoritative_high_swing_root(
+    observer: CausalObserver,
+    *,
+    swing_id: str,
+    pivot_index: int,
+    price: float,
+) -> MarketEvent:
+    window = (
+        _candle(
+            pivot_index - 1,
+            open_=price - 0.75,
+            high=price - 0.5,
+            low=price - 1.0,
+            close=price - 0.75,
+        ),
+        _candle(
+            pivot_index,
+            open_=price - 0.5,
+            high=price,
+            low=price - 0.75,
+            close=price - 0.25,
+        ),
+        _candle(
+            pivot_index + 1,
+            open_=price - 0.25,
+            high=price - 0.25,
+            low=price - 1.0,
+            close=price - 0.75,
+        ),
+    )
+    bar_event_ids = tuple(
+        observer._append_completed_bar_event(
+            candle,
+            atr=1.0,
+            data_complete=True,
+        ).event_id
+        for candle in window
+    )
+    pivot = window[1]
+    confirmed_at = window[-1].end
+    event = observer._append_semantic_atomic(
+        EventKind.SWING_CONFIRMED,
+        confirmed_at,
+        Timeframe.M1,
+        "above",
+        price,
+        0.25,
+        bar_event_ids,
+        {
+            "source_entity_id": swing_id,
+            "side": "high",
+            "relation": "hh",
+            "pivot_start": pivot.start.isoformat(),
+            "pivot_end": pivot.end.isoformat(),
+            "prominence_atr": 0.5,
+            "legacy_same_side_magnitude_atr": 0.25,
+            "confirmation_delay_bars": 1,
+            "nesting_depth": 0,
+            "semantic_rank": "micro",
+            "delta_ticks": 1,
+            "confirmation_delay_minutes": 2,
+        },
+        event_time=pivot.start,
+        source_entity_ids=(swing_id,),
+    )
+    observer._confirmed_swing_event_ids[swing_id] = event.event_id
+    return event
+
+
 def _with_authoritative_liquidity(
     observation,
     *,
@@ -176,6 +246,271 @@ def _with_authoritative_liquidity(
         liquidity_inventory=inventory,
         liquidity_pool_states=pools,
     )
+
+
+def test_confirmed_swing_crossing_key_is_timeframe_scoped_and_resolves() -> None:
+    observer = CausalObserver(
+        ObserverConfig(scale_specs=CORE_TEST_SCALE_SPECS)
+    )
+    crossed_at = BASE + pd.Timedelta(minutes=5)
+    swing = replace(
+        _swing(
+            "swing-crossing",
+            side=SwingSide.HIGH,
+            price=100.0,
+            confirmed_index=0,
+        ),
+        lifecycle=SwingLifecycle.BROKEN,
+        pivot_start=BASE - pd.Timedelta(minutes=1),
+        pivot_end=BASE,
+        confirmation_delay_bars=1,
+        broken_at=crossed_at,
+        failure_reason="close_beyond_swing",
+    )
+    level_id = f"swing:{swing.swing_id}"
+    generation_id = observer._crossing_generation_id(
+        level_id=level_id,
+        timeframe=Timeframe.M1,
+        crossed_at=crossed_at,
+    )
+    m1_key = observer._penetration_key(
+        level_id=level_id,
+        timeframe=Timeframe.M1,
+        crossed_at=crossed_at,
+    )
+    m5_key = observer._penetration_key(
+        level_id=level_id,
+        timeframe=Timeframe.M5,
+        crossed_at=crossed_at,
+    )
+    assert m1_key != m5_key
+
+    swing_window = (
+        _candle(
+            -2,
+            open_=98.5,
+            high=99.0,
+            low=98.0,
+            close=98.75,
+        ),
+        _candle(
+            -1,
+            open_=99.0,
+            high=100.0,
+            low=98.75,
+            close=99.5,
+        ),
+        _candle(
+            0,
+            open_=99.25,
+            high=99.5,
+            low=98.5,
+            close=99.0,
+        ),
+    )
+    swing_bar_event_ids = tuple(
+        observer._append_completed_bar_event(
+            candle,
+            atr=1.0,
+            data_complete=True,
+        ).event_id
+        for candle in swing_window
+    )
+    swing_root = observer._append_semantic_atomic(
+        EventKind.SWING_CONFIRMED,
+        swing.confirmed_at,
+        Timeframe.M1,
+        "above",
+        swing.price,
+        swing.magnitude_atr,
+        swing_bar_event_ids,
+        {
+            "source_entity_id": swing.swing_id,
+            "side": "high",
+            "relation": swing.relation.value,
+            "pivot_start": swing.pivot_start.isoformat(),
+            "pivot_end": swing.pivot_end.isoformat(),
+            "prominence_atr": swing.prominence_atr,
+            "legacy_same_side_magnitude_atr": swing.magnitude_atr,
+            "confirmation_delay_bars": 1,
+            "nesting_depth": swing.nesting_depth,
+            "semantic_rank": swing.semantic_rank.value,
+            "delta_ticks": swing.delta_ticks,
+            "confirmation_delay_minutes": 2,
+        },
+        event_time=swing.pivot_start,
+        source_entity_ids=(swing.swing_id,),
+    )
+
+    break_bar = _candle(
+        4,
+        open_=99.75,
+        high=100.5,
+        low=99.5,
+        close=100.25,
+    )
+    break_bar_event = observer._append_completed_bar_event(
+        break_bar,
+        atr=1.0,
+        data_complete=True,
+    )
+    candidate = observer._append_semantic_atomic(
+        EventKind.LIQUIDITY_LEVEL_CREATED,
+        swing.confirmed_at,
+        Timeframe.M1,
+        "above",
+        swing.price,
+        swing.magnitude_atr,
+        (swing_root.event_id,),
+        {
+            "level_id": level_id,
+            "source_kind": "confirmed_swing",
+            "candidate_only": True,
+            "source_swing_id": swing.swing_id,
+            "semantic_rank": swing.semantic_rank.value,
+        },
+        event_time=swing.pivot_start,
+        zone=(swing.price, swing.price),
+        source_entity_ids=(level_id, swing.swing_id),
+    )
+    touch = observer._append_semantic_atomic(
+        EventKind.LEVEL_TOUCHED,
+        crossed_at,
+        Timeframe.M1,
+        "above",
+        swing.price,
+        swing.magnitude_atr,
+        (candidate.event_id, break_bar_event.event_id),
+        {
+            "level_id": level_id,
+            "source_kind": "confirmed_swing",
+        },
+        event_time=crossed_at,
+        zone=(swing.price, swing.price),
+    )
+    penetration = observer._append_semantic_atomic(
+        EventKind.LEVEL_PENETRATED,
+        crossed_at,
+        Timeframe.M1,
+        "above",
+        swing.price,
+        swing.magnitude_atr,
+        (candidate.event_id, touch.event_id, break_bar_event.event_id),
+        {
+            "level_id": level_id,
+            "source_kind": "confirmed_swing",
+            "crossing_generation_id": generation_id,
+            "crossed_at": crossed_at.isoformat(),
+        },
+        direction=Direction.LONG,
+        event_time=crossed_at,
+        zone=(swing.price, swing.price),
+    )
+    observer._penetration_event_ids[m1_key] = penetration.event_id
+    observer._confirmed_swing_event_ids[swing.swing_id] = swing_root.event_id
+    observer._candidate_level_event_ids[level_id] = candidate.event_id
+    crossing_frame = FrameObservation(
+        timeframe=Timeframe.M1,
+        cutoff=crossed_at,
+        bars=1,
+        metrics={"atr": 1.0},
+        ready=True,
+        swings=(swing,),
+    )
+    observer._record_frame_events(
+        crossing_frame,
+        True,
+        event_clock=crossed_at,
+    )
+    penetration_event_id = observer._penetration_event_ids.get(m1_key)
+    assert penetration_event_id is not None
+    observer._penetration_event_ids[m5_key] = "other-timeframe-penetration"
+    assert generation_id not in observer._terminal_crossing_events
+
+    synthetic_resolution = _candle(
+        5,
+        open_=100.0,
+        high=100.0,
+        low=100.0,
+        close=100.0,
+        synthetic=True,
+    )
+    synthetic_root = observer._append_completed_bar_event(
+        synthetic_resolution,
+        atr=1.0,
+        data_complete=True,
+    )
+    observer._record_frame_events(
+        replace(crossing_frame, cutoff=synthetic_resolution.end),
+        True,
+        event_clock=synthetic_resolution.end,
+    )
+    assert generation_id not in observer._terminal_crossing_events
+    assert synthetic_root.event_id in {
+        event_id
+        for _, event_id in observer._bar_event_ids_by_timeframe[
+            Timeframe.M1
+        ]
+    }
+    with pytest.raises(
+        ValueError,
+        match="no exact completed-bar source",
+    ):
+        observer._bar_event_id_at(
+            Timeframe.M1,
+            synthetic_resolution.end,
+        )
+
+    resolution_bar = _candle(
+        6,
+        open_=100.0,
+        high=100.5,
+        low=99.75,
+        close=100.25,
+    )
+    observer._append_completed_bar_event(
+        resolution_bar,
+        atr=1.0,
+        data_complete=True,
+    )
+    observer._record_frame_events(
+        replace(crossing_frame, cutoff=resolution_bar.end),
+        True,
+        event_clock=resolution_bar.end,
+    )
+    terminal = observer._terminal_crossing_events.get(generation_id)
+
+    assert terminal is not None
+    assert terminal.kind is EventKind.ACCEPTANCE_CONFIRMED
+    assert terminal.source_event_ids[0] == penetration_event_id
+    assert terminal.evidence["crossing_generation_id"] == generation_id
+    assert terminal.evidence["resolved_at"] == resolution_bar.end.isoformat()
+    observer.memory.flush_audit()
+    assert observer.audit_store.get(terminal.event_id) is not None
+    assert {
+        observer.audit_store.get(event_id).kind
+        for event_id in terminal.source_event_ids
+    } == {
+        EventKind.LEVEL_PENETRATED,
+        EventKind.BAR_COMPLETED,
+    }
+    with pytest.raises(
+        ValueError,
+        match="conflicting terminal resolutions",
+    ):
+        observer._append_crossing_resolution(
+            EventKind.ACCEPTANCE_CONFIRMED,
+            resolution_bar.end + pd.Timedelta(minutes=1),
+            Timeframe.M1,
+            "above",
+            float(resolution_bar.close),
+            swing.magnitude_atr,
+            terminal.source_event_ids,
+            {"level_id": level_id},
+            direction=Direction.LONG,
+            crossed_at=crossed_at,
+            zone=(swing.price, swing.price),
+        )
 
 
 def _inventory_swing_source(
@@ -1002,6 +1337,60 @@ def test_swing_candidate_remains_visible_until_registered_resolution_clock() -> 
             observed_at=confirmed.pivot_end,
             confirmed_at=confirmed.pivot_end,
         )
+
+
+def test_confirmed_swing_uses_two_sided_local_prominence_not_same_side_delta() -> None:
+    candles = (
+        _candle(0, open_=99.5, high=100.0, low=99.0, close=99.5),
+        _candle(1, open_=100.0, high=102.0, low=100.0, close=101.0),
+        _candle(2, open_=100.0, high=100.5, low=99.5, close=100.0),
+    )
+    accepted = StructureTracker(
+        Timeframe.M1,
+        replace(StructureConfig(), minimum_prominence_atr=1.0),
+    )
+    rejected = StructureTracker(
+        Timeframe.M1,
+        replace(StructureConfig(), minimum_prominence_atr=1.5),
+    )
+
+    for candle in candles:
+        accepted.on_candle(candle)
+        rejected.on_candle(candle)
+
+    accepted_swing = next(
+        item
+        for item in accepted.snapshot()[0]
+        if item.pivot_start == candles[1].start
+        and item.side is SwingSide.HIGH
+    )
+    rejected_swing = next(
+        item
+        for item in rejected.snapshot()[0]
+        if item.pivot_start == candles[1].start
+        and item.side is SwingSide.HIGH
+    )
+
+    assert accepted_swing.lifecycle is SwingLifecycle.CONFIRMED
+    assert accepted_swing.prominence_atr == pytest.approx(1.5)
+    assert accepted_swing.magnitude_atr == 0.0
+    assert accepted_swing.confirmation_delay_bars == 1
+    assert rejected_swing.lifecycle is SwingLifecycle.CONFIRMED
+
+    stricter = StructureTracker(
+        Timeframe.M1,
+        replace(StructureConfig(), minimum_prominence_atr=1.75),
+    )
+    for candle in candles:
+        stricter.on_candle(candle)
+    failed = next(
+        item
+        for item in stricter.snapshot()[0]
+        if item.pivot_start == candles[1].start
+        and item.side is SwingSide.HIGH
+    )
+    assert failed.lifecycle is SwingLifecycle.FORMATION_FAILED
+    assert failed.failure_reason == "insufficient_prominence"
 
 
 def test_pending_bos_cannot_hide_raw_break_strength() -> None:
@@ -1925,6 +2314,271 @@ def test_previous_session_reference_retires_into_completed_replacement() -> None
     assert {
         event.details["replacement_period"] for event in retirements
     } == {"2025-01-07"}
+
+
+def test_reference_candidate_publishes_at_admission_with_exact_extreme_bars() -> None:
+    observer = CausalObserver(
+        ObserverConfig(scale_specs=CORE_TEST_SCALE_SPECS)
+    )
+    observer._reference_coverage_start = pd.Timestamp(
+        "2025-01-05 18:00",
+        tz=TZ,
+    )
+
+    def reference_candle(start: str, high: float, low: float) -> Candle:
+        clock = pd.Timestamp(start, tz=TZ)
+        return replace(
+            _candle(0, open_=100.0, high=high, low=low, close=100.0),
+            start=clock,
+            end=clock + pd.Timedelta(minutes=1),
+        )
+
+    first = reference_candle("2025-01-06 17:57", 101.0, 99.0)
+    extrema = reference_candle("2025-01-06 17:58", 103.0, 97.0)
+    equal_extrema = reference_candle("2025-01-06 17:59", 103.0, 97.0)
+    admission = reference_candle("2025-01-06 18:00", 102.0, 98.0)
+    for candle in (first, extrema, equal_extrema, admission):
+        observer._append_completed_bar_event(
+            candle,
+            atr=1.0,
+            data_complete=True,
+        )
+        observer._advance_reference_periods(
+            candle,
+            append_retirement_events=True,
+        )
+
+    observer._publish_reference_candidate_events()
+    observer.memory.flush_audit()
+    candidates = {
+        event.evidence["source_kind"]: event
+        for event in observer.audit_store.events()
+        if event.kind is EventKind.LIQUIDITY_LEVEL_CREATED
+        and str(event.evidence.get("source_kind", "")).startswith(
+            "previous_session_"
+        )
+    }
+
+    assert set(candidates) == {
+        "previous_session_high",
+        "previous_session_low",
+    }
+    for event in candidates.values():
+        assert event.known_at == admission.end
+        assert event.event_time == extrema.end
+        assert event.evidence["reference_extreme_tie_rule"] == (
+            "first_completed_m1_at_extreme"
+        )
+        assert event.evidence["rank"] == "external"
+        assert event.evidence["strength"] == pytest.approx(0.75)
+        parents = tuple(
+            observer.audit_store.get(event_id)
+            for event_id in event.source_event_ids
+        )
+        assert tuple(parent.kind for parent in parents) == (
+            EventKind.BAR_COMPLETED,
+            EventKind.BAR_COMPLETED,
+        )
+        assert {parent.known_at for parent in parents} == {
+            extrema.end,
+            admission.end,
+        }
+
+
+def test_reference_candidate_replacement_is_explicit_and_not_duplicated() -> None:
+    observer = CausalObserver(
+        ObserverConfig(scale_specs=CORE_TEST_SCALE_SPECS)
+    )
+    observer._reference_coverage_start = pd.Timestamp(
+        "2025-01-05 18:00",
+        tz=TZ,
+    )
+
+    def reference_candle(start: str, high: float, low: float) -> Candle:
+        clock = pd.Timestamp(start, tz=TZ)
+        return replace(
+            _candle(0, open_=100.0, high=high, low=low, close=100.0),
+            start=clock,
+            end=clock + pd.Timedelta(minutes=1),
+        )
+
+    first_session_tail = reference_candle(
+        "2025-01-06 17:59", 101.0, 99.0
+    )
+    first_admission = reference_candle(
+        "2025-01-06 18:00", 102.0, 98.0
+    )
+    for candle in (first_session_tail, first_admission):
+        observer._append_completed_bar_event(
+            candle,
+            atr=1.0,
+            data_complete=True,
+        )
+        observer._advance_reference_periods(
+            candle,
+            append_retirement_events=True,
+        )
+    observer._publish_reference_candidate_events()
+    observer.memory.flush_audit()
+    first_candidates = {
+        event.evidence["source_kind"]: event
+        for event in observer.audit_store.events()
+        if event.kind is EventKind.LIQUIDITY_LEVEL_CREATED
+        and str(event.evidence.get("source_kind", "")).startswith(
+            "previous_session_"
+        )
+    }
+
+    second_admission = reference_candle(
+        "2025-01-07 18:00", 104.0, 96.0
+    )
+    observer._append_completed_bar_event(
+        second_admission,
+        atr=1.0,
+        data_complete=True,
+    )
+    observer._advance_reference_periods(
+        second_admission,
+        append_retirement_events=True,
+    )
+    observer._publish_reference_candidate_events()
+    observer._publish_reference_candidate_events()
+    observer.memory.flush_audit()
+    candidates = tuple(
+        event
+        for event in observer.audit_store.events()
+        if event.kind is EventKind.LIQUIDITY_LEVEL_CREATED
+        and str(event.evidence.get("source_kind", "")).startswith(
+            "previous_session_"
+        )
+    )
+    replacements = candidates[-2:]
+
+    assert len(candidates) == 4
+    assert {
+        event.evidence["replaces_level_id"] for event in replacements
+    } == {
+        event.evidence["level_id"]
+        for event in first_candidates.values()
+    }
+    for event in replacements:
+        replaced = first_candidates[event.evidence["source_kind"]]
+        assert event.evidence["replaces_level_event_id"] == replaced.event_id
+        assert event.context_event_ids == (replaced.event_id,)
+        assert tuple(
+            observer.audit_store.get(event_id).kind
+            for event_id in event.source_event_ids
+        ) == (
+            EventKind.BAR_COMPLETED,
+            EventKind.BAR_COMPLETED,
+        )
+    assert len(
+        {
+            event.evidence["level_id"]
+            for event in replacements
+        }
+    ) == 2
+    replayed = replay_atomic_market_snapshot(
+        observer.audit_store.events(),
+        semantic_registry_identity=observer.semantic_registry.identity,
+    )
+    replayed_session = tuple(
+        item
+        for item in replayed.timeframe_states[
+            Timeframe.M1
+        ].liquidity.candidates
+        if item.source_kind.startswith("previous_session_")
+    )
+    assert {
+        item.candidate_id for item in replayed_session if item.side == "above"
+    } == {
+        event.evidence["level_id"]
+        for event in replacements
+        if event.side == "above"
+    }
+    assert {
+        item.candidate_id for item in replayed_session if item.side == "below"
+    } == {
+        event.evidence["level_id"]
+        for event in replacements
+        if event.side == "below"
+    }
+
+
+def test_reference_candidate_cold_bootstrap_keeps_latest_and_reset_clears() -> None:
+    observer = CausalObserver(
+        ObserverConfig(scale_specs=CORE_TEST_SCALE_SPECS)
+    )
+    observer._reference_coverage_start = pd.Timestamp(
+        "2025-01-05 18:00",
+        tz=TZ,
+    )
+
+    def reference_candle(start: str, high: float, low: float) -> Candle:
+        clock = pd.Timestamp(start, tz=TZ)
+        return replace(
+            _candle(0, open_=100.0, high=high, low=low, close=100.0),
+            start=clock,
+            end=clock + pd.Timedelta(minutes=1),
+        )
+
+    candles = (
+        reference_candle("2025-01-06 17:59", 101.0, 99.0),
+        reference_candle("2025-01-06 18:00", 102.0, 98.0),
+        reference_candle("2025-01-07 18:00", 103.0, 97.0),
+    )
+    for candle in candles:
+        observer._append_completed_bar_event(
+            candle,
+            atr=1.0,
+            data_complete=True,
+        )
+        observer._advance_reference_periods(
+            candle,
+            append_retirement_events=False,
+        )
+
+    observer._publish_reference_candidate_events()
+    observer.memory.flush_audit()
+    session_candidates = tuple(
+        event
+        for event in observer.audit_store.events()
+        if event.kind is EventKind.LIQUIDITY_LEVEL_CREATED
+        and str(event.evidence.get("source_kind", "")).startswith(
+            "previous_session_"
+        )
+    )
+
+    assert len(session_candidates) == 2
+    assert all(
+        ":session:2025-01-07:" in event.evidence["level_id"]
+        for event in session_candidates
+    )
+    assert all(
+        "replaces_level_id" not in event.evidence
+        for event in session_candidates
+    )
+
+    observer._reset_contract_state(
+        reason="contract_change_history_reset",
+        observed_at=candles[-1].end + pd.Timedelta(minutes=1),
+        reset_anomalies=("contract_change_history_reset",),
+        boundary_symbol="NQM5",
+        boundary_instrument_id=2,
+    )
+
+    assert observer._reference_periods == {}
+    assert observer._reference_inventory == {}
+    assert observer._reference_candidate_sources == {}
+    assert observer._candidate_level_event_ids == {}
+    assert all(
+        not events
+        for events in observer._bar_event_ids_by_timeframe.values()
+    )
+    assert all(
+        not events
+        for events in observer._real_bar_event_ids_by_timeframe.values()
+    )
 
 
 def test_reference_sr_has_real_source_identity_and_independent_lifecycle() -> None:
@@ -2983,6 +3637,18 @@ def test_observer_pool_event_projection_and_timeline_wiring() -> None:
         age_bars=formed.age_bars,
         strength=formed.strength,
     )
+    _append_authoritative_high_swing_root(
+        observer,
+        swing_id="pool-a",
+        pivot_index=-5,
+        price=101.0,
+    )
+    _append_authoritative_high_swing_root(
+        observer,
+        swing_id="pool-b",
+        pivot_index=-2,
+        price=101.0,
+    )
     formation_frame = FrameObservation(
         timeframe=Timeframe.M1,
         cutoff=confirmed_at,
@@ -3001,6 +3667,11 @@ def test_observer_pool_event_projection_and_timeline_wiring() -> None:
         low=100.5,
         close=101.0,
     )
+    observer._append_completed_bar_event(
+        sweep_candle,
+        atr=1.0,
+        data_complete=True,
+    )
     observer._append_projected_pool_sweep_events(
         inventory,
         sweep_candle,
@@ -3013,10 +3684,35 @@ def test_observer_pool_event_projection_and_timeline_wiring() -> None:
         low=100.5,
         close=101.0,
     )
+    observer._append_completed_bar_event(
+        resolution_candle,
+        atr=1.0,
+        data_complete=True,
+    )
     observer._append_projected_pool_resolution_event(
         inventory,
         resolution_candle,
+        crossed_at=sweep_candle.end,
     )
+    observer.memory.flush_audit()
+    terminal = next(
+        event
+        for event in observer.audit_store.events()
+        if (
+            event.kind is EventKind.SWEEP_CONFIRMED
+            and event.evidence.get("level_id") == inventory.item_id
+        )
+    )
+    terminal_sources = tuple(
+        observer.audit_store.get(event_id)
+        for event_id in terminal.source_event_ids
+    )
+    assert tuple(event.kind for event in terminal_sources) == (
+        EventKind.LEVEL_PENETRATED,
+        EventKind.BAR_COMPLETED,
+    )
+    assert terminal.direction is Direction.SHORT
+    assert terminal_sources[0].direction is Direction.LONG
     rejected = replace(
         formed,
         lifecycle=LiquidityPoolLifecycle.REJECTED,

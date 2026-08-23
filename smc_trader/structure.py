@@ -10,6 +10,7 @@ from collections import deque
 from dataclasses import dataclass, replace
 import hashlib
 import json
+import math
 from pathlib import Path
 from typing import Sequence, TypeVar
 
@@ -28,10 +29,12 @@ from .model import (
     StructureSequenceState,
     SwingLifecycle,
     SwingPoint,
+    SwingRank,
     SwingRelation,
     SwingSide,
     Timeframe,
     candle_identity,
+    price_to_ticks,
 )
 
 
@@ -54,6 +57,7 @@ class StructureConfig:
     tick_size: float = 0.25
     retained_swings: int = 256
     retained_bos: int = 64
+    minimum_prominence_atr: float = 0.0
 
     def __post_init__(self) -> None:
         if not self.protocol_version or not self.protocol_hash:
@@ -86,6 +90,8 @@ class StructureConfig:
             or self.retained_swings < 8
             or self.retained_bos < 4
             or self.retained_swings < self.retained_bos + 2
+            or not math.isfinite(float(self.minimum_prominence_atr))
+            or self.minimum_prominence_atr < 0.0
         ):
             raise StructureProtocolError("invalid structure tracker bounds")
 
@@ -124,6 +130,9 @@ class StructureConfig:
             ),
             atr_period=int(atr_period),
             tick_size=float(tick_size),
+            minimum_prominence_atr=float(
+                payload.get("swing_prominence_atr", 0.0)
+            ),
         )
 
 
@@ -311,7 +320,11 @@ class StructureTracker:
         )
 
     def _ticks(self, value: float) -> int:
-        return int(round(float(value) / self.config.tick_size))
+        return price_to_ticks(
+            value,
+            self.config.tick_size,
+            name="structure price",
+        )
 
     def _atr(self) -> float:
         positive = [value for value in self._true_ranges if value > 0]
@@ -402,6 +415,34 @@ class StructureTracker:
             return all(value < pivot_ticks for value in values)
         return all(value > pivot_ticks for value in values)
 
+    def _local_prominence_atr(
+        self,
+        side: SwingSide,
+        pivot: Candle,
+        left: Sequence[Candle],
+        right: Sequence[Candle],
+    ) -> float:
+        """Return causal two-sided local pivot prominence at confirmation.
+
+        For a high, both sides must descend from the pivot; for a low, both
+        sides must ascend from it.  The weaker side is the registered local
+        prominence.  The ATR is the value available at the confirmation
+        clock, never a later full-sample statistic.
+        """
+
+        if not left or not right:
+            return 0.0
+        if side is SwingSide.HIGH:
+            pivot_price = float(pivot.high)
+            left_excursion = pivot_price - min(float(item.low) for item in left)
+            right_excursion = pivot_price - min(float(item.low) for item in right)
+        else:
+            pivot_price = float(pivot.low)
+            left_excursion = max(float(item.high) for item in left) - pivot_price
+            right_excursion = max(float(item.high) for item in right) - pivot_price
+        prominence = max(0.0, min(left_excursion, right_excursion))
+        return prominence / max(self._atr(), self.config.tick_size)
+
     def _build_resolved_swing(
         self,
         side: SwingSide,
@@ -409,6 +450,8 @@ class StructureTracker:
         *,
         confirmed: bool,
         observed_at: pd.Timestamp,
+        prominence_atr: float,
+        failure_reason: str | None = None,
     ) -> _SwingRecord:
         price = float(pivot.high if side is SwingSide.HIGH else pivot.low)
         price_ticks = self._ticks(price)
@@ -449,8 +492,16 @@ class StructureTracker:
             delta_ticks=delta_ticks,
             delta_points=delta_points,
             magnitude_atr=abs(delta_points) / max(atr, self.config.tick_size),
+            prominence_atr=prominence_atr,
+            confirmation_delay_bars=self.swing_span,
+            # Every causally confirmed pivot is the immutable MICRO atom.
+            # Higher roles are assigned later by the event-sourced timeframe
+            # hierarchy; the detector never rewrites this source object.
+            semantic_rank=(
+                SwingRank.MICRO if confirmed else SwingRank.UNRESOLVED
+            ),
             age_bars=0,
-            failure_reason=None if confirmed else "right_side_invalidated",
+            failure_reason=None if confirmed else failure_reason,
         )
         return _SwingRecord(
             point=point,
@@ -1121,8 +1172,19 @@ class StructureTracker:
             for side in (SwingSide.HIGH, SwingSide.LOW)
             if self._candidate_is_left_extreme(side, pivot, left)
         )
-        confirmations = {
+        right_confirmations = {
             side: self._right_confirms(side, pivot, right)
+            for side in candidates
+        }
+        prominences = {
+            side: self._local_prominence_atr(side, pivot, left, right)
+            for side in candidates
+        }
+        confirmations = {
+            side: bool(
+                right_confirmations[side]
+                and prominences[side] >= self.config.minimum_prominence_atr
+            )
             for side in candidates
         }
         if sum(confirmations.values()) > 1:
@@ -1138,6 +1200,12 @@ class StructureTracker:
                 pivot,
                 confirmed=confirmed,
                 observed_at=observed_at,
+                prominence_atr=prominences[side],
+                failure_reason=(
+                    "right_side_invalidated"
+                    if not right_confirmations[side]
+                    else "insufficient_prominence"
+                ),
             )
             self._append_swing(record)
             if confirmed:
@@ -1153,6 +1221,9 @@ class StructureTracker:
             raise StructureProtocolError(
                 "structure tracker accepts only complete candles of its timeframe"
             )
+        # Detector admission is exact and precedes every tracker mutation.
+        # All subsequent swing/raw-break comparisons use integer coordinates.
+        candle.ohlc_ticks_for(self.config.tick_size)
         contract = (candle.symbol, int(candle.instrument_id))
         if self._contract is not None and contract != self._contract:
             raise StructureProtocolError(

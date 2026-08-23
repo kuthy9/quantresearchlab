@@ -1,0 +1,137 @@
+{
+  "protocol_version": "neutral-b2-eye-market-episode-transport-audit-1.0.0",
+  "purpose": "train_only_raw_eye_to_market_episode_event_and_trajectory_transport_diagnostic_before_any_b2_redefinition_or_training",
+  "population": {
+    "split_role": "train",
+    "validation_opened": false,
+    "holdout_opened": false,
+    "outcome_fields_used": false,
+    "profiles": [
+      {
+        "name": "neutral_representation_train_2019_02",
+        "rows": 1001,
+        "input_manifest_sha256": "bfea8fb3e41688120f9e3a1fb7f57ce30ec85cd064d3ab28ea18a14d1673de5f",
+        "run_manifest_sha256": "5f879047e3dbf37e8b1962bf6b0d1fd67778327a478f594a47c0aef649fc2b13"
+      },
+      {
+        "name": "neutral_representation_train_2019_08",
+        "rows": 1270,
+        "input_manifest_sha256": "774cbef9ac626689775587e2d5f4717fdeec943e005673098a3bf07b32b30764",
+        "run_manifest_sha256": "dab063eccafc8fbc793e94a8ff38981b26eea9241c8fe2e6552f2c245691cd8f"
+      },
+      {
+        "name": "neutral_representation_train_2020_02",
+        "rows": 1152,
+        "input_manifest_sha256": "a38691e524cc49545ec3ab08d3671b885cea08cf571627df33663be82158f2f8",
+        "run_manifest_sha256": "37cc7eb93a8005cdf7da4169f37f49a96ca7598b055cf7f9368eb2581f8d78ff"
+      },
+      {
+        "name": "neutral_representation_train_2020_08",
+        "rows": 996,
+        "input_manifest_sha256": "4dd1030be7e16d99c9a9fcd8e05284584ffbe1aca63fd20ce34da431d7f395cf",
+        "run_manifest_sha256": "ffdd24d1f40dfb0e45be0422fd293ee5724d74161aca4f6e14f77c6fe5a7d6ff"
+      },
+      {
+        "name": "neutral_representation_train_2021_02",
+        "rows": 1190,
+        "input_manifest_sha256": "443d2465233ffc8b036629561f72acc9ae89705f369afe8cf5f9f72b238c945a",
+        "run_manifest_sha256": "576b355e0203c633108a1647be0da973fd2b93619d2bd9666a46643d3bd5a08e"
+      },
+      {
+        "name": "neutral_representation_train_2021_08",
+        "rows": 1111,
+        "input_manifest_sha256": "369bf80cae2291112b61d2fb8aa6fe1dd637d71d31e8fce7e90b920cebb5c02d",
+        "run_manifest_sha256": "d34bc76e0939bf9e64d2113f12b4850948d834a5834165e77ede23d5e823502d"
+      }
+    ]
+  },
+  "raw_eye_runtime": {
+    "pipeline": "CausalMarketReader_to_CausalObserver_eye_authority_mode_without_SceneGraph_or_MarketEpisode",
+    "warmup_calendar_days": 14,
+    "allow_data_gap_reset": true,
+    "brain_used": false,
+    "decision_used": false,
+    "risk_used": false,
+    "execution_used": false,
+    "outcome_used": false,
+    "scene_graph_used": false,
+    "market_episode_used": false,
+    "model_sha256": "85b582e03428aa74306b444ee878aada618f4369f65e82522d416a9756576f30",
+    "protocol_sha256": {
+      "group12": "5a8913907b92b22c5ea67df7056b5464518329adcce883435aadf9008dc7e0e0",
+      "displacement": "ef2dd3923e39285bf6f7e2c084ebd2c5bc70aba6adc7ae088286eceabb57d6a8",
+      "group3": "0163d8fc3d41bcd6037bfab05b59e4a44b6558f01d1c73eb95955ea1e0bf8899",
+      "group4": "9c5334e52bacd19a896cb326e02c77a3be4f932e9b09579929fdce7d9ccdbdf4",
+      "group5": "47ef091d7c9211718588de90f7260434041836f16dcc40e9d28452d0a3d22a4a"
+    },
+    "runtime_file_sha256": {
+      "smc_trader/causal.py": "2199b8a1768f4114b0ecf395890bb6cca027fa2a37341d2da7ac28cd8ed49654",
+      "smc_trader/group3.py": "df4ac419dc5acefb1a3762bcb54a9e84c127eaca132554e54f3531e54413cd53",
+      "smc_trader/group4.py": "fc83168aa4b8f12616729496d0d9585e285194bac2e69a0c2f5a24550a327ef1",
+      "smc_trader/group5.py": "43561932e0d3faa5d7c5c28dd5ed56ed7c033ba81c26adc54486b9068985b65e",
+      "smc_trader/io.py": "000e9676a5d666f19113536499dc35e75c8b8c35320ebf6f8e83c3e59af35967",
+      "smc_trader/model.py": "311a388880e717c5b4c155011f411889cda27f1908b87904969d0d20a8d6ea36",
+      "smc_trader/observation.py": "d6f972df4b34729effc5b3740f3f86c8c8294ef67f2bf80e0bdd00a2e70506db",
+      "scripts/run_eye_authority_scan.py": "98364e6893ea4df7ee58746c79628b8be90de96476da5f73657c31c5f4757be9"
+    }
+  },
+  "trajectory_definition_under_test": {
+    "context_kind": "zone_return",
+    "grain": "one_first_active_unresolved_pullback_anchor_per_raw_eye_path_sequence",
+    "required_path_prefix": [
+      "zone_visible",
+      "departure_confirmed",
+      "first_pullback"
+    ],
+    "anchor_excludes_steps": [
+      "location_left",
+      "micro_bos_confirmed",
+      "micro_bos_opposed",
+      "micro_bos_simultaneous",
+      "reacceptance_failed"
+    ],
+    "horizon_completed_real_source_1m_bars": 60,
+    "classes": [
+      "confirmed_continuation",
+      "failed_or_opposed",
+      "returned_to_range_unconfirmed",
+      "continued_unresolved"
+    ],
+    "confirmed_continuation_first_roles": ["micro_bos_confirmed"],
+    "failed_or_opposed_first_roles": [
+      "location_left",
+      "micro_bos_opposed",
+      "reacceptance_failed"
+    ],
+    "returned_to_range_unconfirmed_requires_roles": [
+      "reference_reclaimed",
+      "reacceptance_held"
+    ],
+    "right_censoring": "anchor_plus_60_reaches_next_raw_eye_reset_or_run_source_end",
+    "diagnostic_only": true
+  },
+  "transport_comparison": {
+    "join": "raw_eye_path_sequence_id_equals_market_episode_entry_path_id",
+    "anchor_clock_match": "raw_eye_first_pullback_step_clock_equals_first_market_episode_anchor_path_clock",
+    "step_preservation": "every_raw_eye_path_step_known_by_horizon_is_present_in_a_market_episode_snapshot_no_later_than_that_horizon",
+    "trajectory_preservation": "same_frozen_four_class_rule_on_raw_eye_history_and_market_episode_snapshots",
+    "market_episode_source": "existing_frozen_train_input_artifacts_only"
+  },
+  "unknown_scale_taxonomy": {
+    "genuinely_uncertain": [
+      "ambiguous",
+      "not_ready",
+      "authority_unresolved",
+      "no_structural_evidence"
+    ],
+    "graph_unconnected": ["graph_disconnected"],
+    "field_missing": "required_scale_relation_detail_or_reason_field_absent",
+    "audit_aggregation_loss": "one_or_more_known_15m_5m_1m_relations_exist_but_the_frozen_local_majority_aggregation_returns_unknown"
+  },
+  "verdict_rules": {
+    "connection_layer_gap": "raw_eye_has_all_four_classes_and_market_episode_does_not_or_joined_event_transport_is_incomplete",
+    "definition_or_eye_expression_gap": "raw_eye_and_market_episode_both_lack_the_same_classes",
+    "eye_semantic_candidate": "raw_eye_never_emits_the_required_roles_for_a_missing_class;human_blind_review_still_required",
+    "b2_model_in_scope": "only_after_raw_eye_class_support_transport_and_unknown_reason_coverage_are_complete"
+  }
+}

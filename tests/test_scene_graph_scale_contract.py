@@ -26,6 +26,7 @@ from smc_trader.model import (
 )
 from smc_trader.observation import CausalObserver, ObserverConfig
 from smc_trader.scene_graph import (
+    _open_thesis_closure,
     EvidenceStatus,
     FocusState,
     FocusedObservation,
@@ -1556,6 +1557,81 @@ def test_order_block_has_displacement_and_bos_creation_edges() -> None:
     assert creators == {displacement.node_id, bos.node_id}
 
 
+def test_precedes_stays_diagnostic_but_cannot_form_a_causal_path_or_thesis() -> None:
+    graph = TemporalMarketSceneGraph()
+    t0 = _clock("2025-01-06 09:00")
+    manipulation = graph.add_node(
+        _node(
+            "diagnostic-manipulation",
+            "manipulation",
+            Timeframe.M1,
+            t0,
+            direction=Direction.SHORT,
+            lifecycle="reaccepted",
+        )
+    )
+    displacement = graph.add_node(
+        _node(
+            "diagnostic-displacement",
+            "displacement",
+            Timeframe.M5,
+            t0 + pd.Timedelta(minutes=1),
+            direction=Direction.LONG,
+            lifecycle="active",
+        )
+    )
+    fvg = graph.add_node(
+        _node(
+            "diagnostic-fvg",
+            "fvg",
+            Timeframe.M5,
+            t0 + pd.Timedelta(minutes=2),
+            direction=Direction.LONG,
+            lifecycle="open",
+        )
+    )
+    graph._add_relation(
+        manipulation.node_id,
+        SceneEdgeKind.PRECEDES,
+        displacement.node_id,
+        t0 + pd.Timedelta(minutes=2),
+        (manipulation.node_id, displacement.node_id),
+    )
+    graph._add_relation(
+        displacement.node_id,
+        SceneEdgeKind.CREATES,
+        fvg.node_id,
+        t0 + pd.Timedelta(minutes=2),
+        (displacement.node_id, fvg.node_id),
+    )
+
+    diagnostic_path = graph.find_path(
+        (manipulation.node_id,),
+        (fvg.node_id,),
+    )
+    assert SceneEdgeKind.PRECEDES.value in diagnostic_path
+    assert graph.has_direct_relation(
+        (manipulation.node_id,),
+        SceneEdgeKind.PRECEDES,
+        (displacement.node_id,),
+    )
+    assert not graph.find_causal_path(
+        (manipulation.node_id,),
+        (fvg.node_id,),
+    )
+    assert not graph.find_action_path(
+        (manipulation.node_id,),
+        (fvg.node_id,),
+    )
+    assert SceneEdgeKind.CREATES.value in graph.find_causal_path(
+        (displacement.node_id,),
+        (fvg.node_id,),
+    )
+    assert {node.node_id for node in _open_thesis_closure(graph, manipulation)} == {
+        manipulation.node_id
+    }
+
+
 def test_dfp_and_lsr_source_chains_are_reachable_but_not_invented() -> None:
     graph = TemporalMarketSceneGraph()
     t0 = _clock("2025-01-06 09:00")
@@ -2725,6 +2801,16 @@ def test_observer_transfers_revised_edge_ids_into_observation() -> None:
     observer.scene_graph = SimpleNamespace(update=lambda observation: delta)
     observation = observer.observe(update)
     assert observation.scene_revised_edge_ids == ("edge:closed-test",)
+
+
+def test_scene_delta_canonicalizes_unordered_revised_edge_identities() -> None:
+    delta = SceneGraphDelta(
+        asof=_clock("2025-03-10 09:01"),
+        revision_id="scene:canonical-revised-edges",
+        revised_edge_ids=("edge:z", "edge:a"),
+    )
+
+    assert delta.revised_edge_ids == ("edge:a", "edge:z")
 
 
 def test_runtime_compaction_bounds_cold_history_and_fails_closed() -> None:

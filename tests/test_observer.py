@@ -1536,6 +1536,14 @@ def test_projected_pool_state_overrides_preprojection_snapshot(
     m1_tracker = observer._liquidity_trackers[Timeframe.M1]
     original_snapshot = m1_tracker.snapshot
 
+    # This test isolates post-projection cache behavior and injects a pool
+    # directly, without its two canonical Swing parents.  Mark its candidate
+    # as already recorded so the fixture does not manufacture an invalid
+    # authoritative liquidity event; provenance is covered independently.
+    observer._candidate_level_event_ids[visible.item_id] = (
+        "projection-cache-existing-candidate"
+    )
+
     def formation_snapshot():
         zones, _, _ = original_snapshot()
         return zones, (formed,), (visible,)

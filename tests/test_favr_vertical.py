@@ -841,7 +841,7 @@ def test_favr_stable_context_identity_keeps_its_generic_contract() -> None:
     ) is not None
 
 
-def test_favr_scene_graph_forms_continuously_via_public_update() -> None:
+def test_favr_scene_graph_keeps_precedes_diagnostic_without_action_authority() -> None:
     graph, observation, _, mature, manipulation = (
         _favr_public_scene_graph()
     )
@@ -937,11 +937,17 @@ def test_favr_scene_graph_forms_continuously_via_public_update() -> None:
         observation,
         scene_graph=graph,
     ).hypotheses["failed_auction_value_return:long"]
-    assert hypothesis.phase is PlaybookPhase.EXECUTABLE
+    assert hypothesis.phase is not PlaybookPhase.EXECUTABLE
     assert hypothesis.sequence is not None
-    assert hypothesis.sequence.complete
-    assert all(hypothesis.hard_gate_results.values())
-    assert hypothesis.plan is not None
+    assert not hypothesis.sequence.complete
+    assert not hypothesis.hard_gate_results[
+        "opposite_displacement_zone_inside_range"
+    ]
+    assert not hypothesis.hard_gate_results[
+        "first_pullback_to_frozen_zone"
+    ]
+    assert not hypothesis.hard_gate_results["aligned_entry_trigger"]
+    assert hypothesis.plan is None
 
 
 def test_favr_scene_graph_missing_middle_relation_fails_closed() -> None:

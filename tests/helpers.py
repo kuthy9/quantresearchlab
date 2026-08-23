@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import fields, replace
+from decimal import Decimal, ROUND_HALF_UP
 import json
 import math
 from pathlib import Path
@@ -36,6 +37,7 @@ from smc_trader.model import (
     SwingSide,
     Timeframe,
     TradePlan,
+    ticks_to_price,
 )
 from smc_trader.scene_graph import parse_scale_specs, scale_registry_id
 
@@ -105,13 +107,24 @@ def session_bars(
     trade_dates = pd.bdate_range(first_trade_date, periods=sessions)
     output: list[Bar] = []
     counter = 0
+
+    def test_grid_price(value: float) -> float:
+        coordinate = (
+            Decimal(str(value)) / Decimal("0.25")
+        ).to_integral_value(rounding=ROUND_HALF_UP)
+        return ticks_to_price(int(coordinate), 0.25)
+
     for trade_date in trade_dates:
         start = (trade_date - pd.Timedelta(days=1) + pd.Timedelta(hours=18)).tz_localize(TZ)
         end = (trade_date + pd.Timedelta(hours=17)).tz_localize(TZ)
         for timestamp in pd.date_range(start, end, freq="1min", inclusive="left"):
             center = 20_000.0 + 0.012 * counter + 7.0 * math.sin(counter / 47.0)
-            open_price = center - 0.12 * math.sin(counter / 9.0)
-            close = center + 0.12 * math.sin(counter / 9.0)
+            open_price = test_grid_price(
+                center - 0.12 * math.sin(counter / 9.0)
+            )
+            close = test_grid_price(
+                center + 0.12 * math.sin(counter / 9.0)
+            )
             output.append(
                 Bar(
                     start=timestamp,

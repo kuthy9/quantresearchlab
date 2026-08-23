@@ -2,6 +2,8 @@
 __pycache__/
 *.py[cod]
 .pytest_cache/
+.mypy_cache/
+.ruff_cache/
 .venv*/
 *.egg-info/
 
@@ -13,3 +15,13 @@ outputs/
 reports/
 artifacts/
 archive/
+
+# Oversized or non-runtime research ledgers remain locally hash-bound evidence.
+# They require Git LFS or an immutable artifact-store receipt rather than
+# ordinary Git. Compact manifests/results retain their path, row count, byte
+# count, and SHA-256 identity. The three small final Phase-6 ledgers are
+# explicitly portable because the Phase-7 readiness audit verifies them.
+experiments/results/*.jsonl
+!experiments/results/smc_semantics_v1_2_2024_06_phase6_mbo_week2_extension_v3.episodes.jsonl
+!experiments/results/smc_semantics_v1_2_2024_06_phase6_mbo_week2_extension_v3.matched_pairs.jsonl
+!experiments/results/smc_semantics_v1_2_2024_06_phase6_mbo_week2_extension_v3.unmatched.jsonl

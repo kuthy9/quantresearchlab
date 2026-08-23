@@ -105,6 +105,30 @@ class SceneEdgeKind(str, Enum):
     PRECEDES = "PRECEDES"
 
 
+_CAUSAL_PATH_RELATIONS = frozenset(
+    {
+        SceneEdgeKind.BREAKS,
+        SceneEdgeKind.CREATES,
+        SceneEdgeKind.SWEEPS,
+        SceneEdgeKind.RETURNS_TO,
+        SceneEdgeKind.CONFIRMS,
+        SceneEdgeKind.SOURCED_FROM,
+        SceneEdgeKind.RESOLVES,
+    }
+)
+_ACTION_CONNECTIVITY_RELATIONS = frozenset(
+    {
+        SceneEdgeKind.ANCHORS,
+        SceneEdgeKind.LOCATED_AT,
+        *_CAUSAL_PATH_RELATIONS,
+        SceneEdgeKind.CONTAINED_BY,
+        SceneEdgeKind.ALIGNS_WITH,
+        SceneEdgeKind.OPPOSES,
+        SceneEdgeKind.PROMOTED_FROM,
+    }
+)
+
+
 _HOT_STATE_KINDS = frozenset(
     {
         "swing",
@@ -398,6 +422,13 @@ class SceneGraphDelta:
             "resolution_event_ids",
         ):
             values = tuple(getattr(self, name))
+            # Multiple existing edges can be revised while adapting one
+            # completed clock.  Their identity set has no causal sequence,
+            # and the upstream traversal can originate from hash-backed
+            # indexes.  Canonicalize it here so a process restart with a
+            # different PYTHONHASHSEED cannot change Observation parity.
+            if name == "revised_edge_ids":
+                values = tuple(sorted(values))
             object.__setattr__(self, name, values)
             if len(values) != len(set(values)):
                 raise ValueError("scene delta contains duplicate identities")
@@ -3608,7 +3639,13 @@ class TemporalMarketSceneGraph:
         *,
         max_depth: int = 8,
         asof: pd.Timestamp | None = None,
+        allowed_relations: Iterable[SceneEdgeKind | str] | None = None,
     ) -> tuple[str, ...]:
+        relation_allowlist = (
+            None
+            if allowed_relations is None
+            else frozenset(SceneEdgeKind(value) for value in allowed_relations)
+        )
         starts = tuple(
             dict.fromkeys(
                 node_id
@@ -3634,11 +3671,61 @@ class TemporalMarketSceneGraph:
             if len(path) > max_depth:
                 continue
             for neighbor, edge in self._neighbors(node_id, asof=asof):
+                if (
+                    relation_allowlist is not None
+                    and edge.relation not in relation_allowlist
+                ):
+                    continue
                 if neighbor in seen:
                     continue
                 seen.add(neighbor)
                 queue.append((neighbor, (*path, edge.relation.value, neighbor)))
         return ()
+
+    def find_causal_path(
+        self,
+        source_ids: Sequence[str],
+        target_ids: Sequence[str],
+        *,
+        max_depth: int = 8,
+        asof: pd.Timestamp | None = None,
+    ) -> tuple[str, ...]:
+        """Resolve only registered semantic/provenance connectivity.
+
+        Diagnostic temporal association such as ``PRECEDES`` remains visible
+        through :meth:`find_path`, but it cannot satisfy a causal/action gate.
+        """
+
+        return self.find_path(
+            source_ids,
+            target_ids,
+            max_depth=max_depth,
+            asof=asof,
+            allowed_relations=_CAUSAL_PATH_RELATIONS,
+        )
+
+    def find_action_path(
+        self,
+        source_ids: Sequence[str],
+        target_ids: Sequence[str],
+        *,
+        max_depth: int = 8,
+        asof: pd.Timestamp | None = None,
+    ) -> tuple[str, ...]:
+        """Resolve admitted semantic connectivity for an action gate.
+
+        This admits explicit scale/composition relations in addition to source
+        provenance.  Temporal ``PRECEDES`` and dynamic path-obstruction edges
+        remain diagnostic only and cannot manufacture setup connectivity.
+        """
+
+        return self.find_path(
+            source_ids,
+            target_ids,
+            max_depth=max_depth,
+            asof=asof,
+            allowed_relations=_ACTION_CONNECTIVITY_RELATIONS,
+        )
 
     def has_direct_relation(
         self,
@@ -5968,18 +6055,7 @@ def _open_thesis_direction(
     return root.direction
 
 
-_OPEN_THESIS_CAUSAL_RELATIONS = frozenset(
-    {
-        SceneEdgeKind.BREAKS,
-        SceneEdgeKind.CREATES,
-        SceneEdgeKind.SWEEPS,
-        SceneEdgeKind.RETURNS_TO,
-        SceneEdgeKind.CONFIRMS,
-        SceneEdgeKind.SOURCED_FROM,
-        SceneEdgeKind.RESOLVES,
-        SceneEdgeKind.PRECEDES,
-    }
-)
+_OPEN_THESIS_CAUSAL_RELATIONS = _CAUSAL_PATH_RELATIONS
 _OPEN_THESIS_LEAF_KINDS = frozenset(
     {
         "structure",
@@ -6047,27 +6123,6 @@ def _open_thesis_closure(
     )
 
 
-def _preceding_manipulation_id(
-    graph: TemporalMarketSceneGraph,
-    displacement: SceneNode,
-) -> str | None:
-    candidates = []
-    for neighbor_id, edge in graph._neighbors(displacement.node_id):
-        if (
-            edge.relation is not SceneEdgeKind.PRECEDES
-            or edge.target_node_id != displacement.node_id
-        ):
-            continue
-        neighbor = graph._nodes.get(neighbor_id)
-        if neighbor is not None and neighbor.kind == "manipulation":
-            candidates.append(neighbor)
-    if not candidates:
-        return None
-    return _context_identity(
-        min(candidates, key=lambda value: (value.formed_at, value.node_id))
-    )
-
-
 def _canonical_open_thesis_root_id(
     candidate: SceneNode,
     observation: MarketObservation,
@@ -6076,9 +6131,7 @@ def _canonical_open_thesis_root_id(
     """Collapse later path/zone roots into their initiating episode root."""
 
     if candidate.kind == "displacement":
-        return _preceding_manipulation_id(graph, candidate) or _context_identity(
-            candidate
-        )
+        return _context_identity(candidate)
     if candidate.kind != "path_sequence":
         return _context_identity(candidate)
     path = next(
@@ -6109,9 +6162,7 @@ def _canonical_open_thesis_root_id(
     )
     if displacement is None:
         return location.source_displacement_id
-    return _preceding_manipulation_id(graph, displacement) or (
-        location.source_displacement_id
-    )
+    return location.source_displacement_id
 
 
 def _is_supporting_open_thesis_trigger(node: SceneNode) -> bool:

@@ -25,6 +25,7 @@ from .model import (
     Timeframe,
     aware_timestamp,
     candle_identity,
+    price_to_ticks,
 )
 
 
@@ -310,11 +311,11 @@ class CausalDisplacementTracker:
         return None if self._open is None else self._open.state
 
     def _ticks(self, value: float) -> int:
-        scaled = float(value) / self.protocol.tick_size
-        rounded = round(scaled)
-        if not math.isfinite(scaled) or abs(scaled - rounded) > 1e-6:
-            raise ValueError("off-grid price")
-        return int(rounded)
+        return price_to_ticks(
+            value,
+            self.protocol.tick_size,
+            name="displacement price",
+        )
 
     def _candle_id(self, candle: Candle) -> str:
         return candle_identity(
@@ -484,7 +485,9 @@ class CausalDisplacementTracker:
             real_episode_bar_count=1,
             age_minutes_at_last_admitted=0,
             net_points=net,
-            net_ticks=int(round(net / self.protocol.tick_size)),
+            net_ticks=int(q) * (
+                self._ticks(candle.close) - self._ticks(candle.open)
+            ),
             relative_atr=relative,
             travel_points=travel,
             efficiency=max(net, 0.0)
@@ -647,7 +650,10 @@ class CausalDisplacementTracker:
                 (candle.end - prior.started_at).total_seconds() // 60
             ),
             net_points=net,
-            net_ticks=int(round(net / self.protocol.tick_size)),
+            net_ticks=int(q) * (
+                self._ticks(candle.close)
+                - self._ticks(prior.origin_price)
+            ),
             relative_atr=relative,
             travel_points=travel,
             efficiency=max(net, 0.0)
@@ -933,6 +939,9 @@ class CausalDisplacementTracker:
     def on_completed_5m(self, candle: Candle) -> DisplacementUpdate:
         if self._failed:
             raise RuntimeError("displacement tracker is terminally failed")
+        if not isinstance(candle, Candle):
+            raise TypeError("a Candle input is required")
+        candle.ohlc_ticks_for(self.protocol.tick_size)
         if candle.timeframe is not Timeframe.M5 or not candle.complete:
             raise ValueError("a completed 5m candle is required")
         if self._last_clock is not None and candle.end <= self._last_clock:

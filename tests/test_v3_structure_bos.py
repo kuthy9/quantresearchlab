@@ -105,6 +105,24 @@ def test_tick_relation_table_is_exact_and_atr_independent() -> None:
     assert relation(SwingSide.LOW, 100, 100) is SwingRelation.EL
 
 
+def test_structure_rejects_off_grid_detector_candle_before_mutation() -> None:
+    tracker = _tracker()
+    before = tracker.snapshot()
+    malformed = _candle(
+        0,
+        100.375,
+        99.875,
+        open_=100.125,
+        close=100.125,
+    )
+
+    with pytest.raises(ValueError, match="off-grid"):
+        tracker.on_candle(malformed)
+
+    assert tracker.last_end is None
+    assert tracker.snapshot() == before
+
+
 def test_swing_span_is_one_for_m1_and_two_for_other_enabled_frames() -> None:
     config = StructureConfig.from_file(STRUCTURE_PROTOCOL)
     assert config.span_for(Timeframe.M1) == 1
@@ -241,11 +259,11 @@ def test_bull_structure_locks_and_protected_level_can_only_tighten() -> None:
     # protected price, so it cannot loosen protection from 9.00 to 8.75.
     later = [
         _candle(11, 12.0, 8.5, open_=9.5, close=9.5),
-        _candle(12, 11.5, 9.2),
-        _candle(13, 11.0, 9.1),
+        _candle(12, 11.5, 9.25, open_=10.25, close=10.25),
+        _candle(13, 11.0, 9.0),
         _candle(14, 11.5, 8.75, open_=9.25, close=9.25),
         _candle(15, 12.0, 9.0),
-        _candle(16, 12.5, 9.1),
+        _candle(16, 12.5, 9.25, open_=10.75, close=10.75),
     ]
     for candle in later:
         tracker.on_candle(candle)

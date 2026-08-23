@@ -1,15 +1,87 @@
 """Shared immutable contracts for the continuous SMC engine."""
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field, is_dataclass
+from dataclasses import dataclass, field, fields, is_dataclass, replace
+from decimal import Decimal, InvalidOperation
 from enum import Enum
 import hashlib
 import json
 import math
 from pathlib import Path
-from typing import Any, Mapping
+from typing import TYPE_CHECKING, Any, Mapping
 
 import pandas as pd
+
+from .dol_probability import DOLProbabilityResult
+from .dol_ranking import DOLRankingResult
+from .path_belief import PathBeliefUpdateRecord, PathCompetitionSetState
+
+if TYPE_CHECKING:
+    from .market_state import MarketSnapshot
+
+
+SMC_SEMANTIC_VERSION = "smc_semantics_v1.2"
+
+
+def _deep_freeze(value: Any) -> Any:
+    """Return an audit-safe immutable copy of a semantic payload."""
+
+    if isinstance(value, FrozenDict):
+        return value
+    if isinstance(value, Mapping):
+        return FrozenDict(value)
+    if isinstance(value, (tuple, list)):
+        return tuple(_deep_freeze(item) for item in value)
+    if isinstance(value, (set, frozenset)):
+        return tuple(
+            sorted(
+                (_deep_freeze(item) for item in value),
+                key=repr,
+            )
+        )
+    return value
+
+
+class FrozenDict(dict):
+    """A pickle/JSON-friendly mapping that rejects post-construction edits.
+
+    ``dataclass(frozen=True)`` protects only the event attributes themselves;
+    a normal ``dict`` stored in ``details`` could still be mutated and would
+    silently rewrite history.  This small dict subclass retains compatibility
+    with existing serializers and readers while closing that hole.
+    """
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        values = dict(*args, **kwargs)
+        dict.__init__(
+            self,
+            {
+                key: _deep_freeze(item)
+                for key, item in values.items()
+            },
+        )
+
+    @staticmethod
+    def _immutable(*_args: Any, **_kwargs: Any) -> None:
+        raise TypeError("semantic event payload is immutable")
+
+    __setitem__ = _immutable
+    __delitem__ = _immutable
+    clear = _immutable
+    pop = _immutable
+    popitem = _immutable
+    setdefault = _immutable
+    update = _immutable
+    __ior__ = _immutable
+
+    def __copy__(self) -> "FrozenDict":
+        return self
+
+    def __deepcopy__(self, _memo: dict[int, Any]) -> "FrozenDict":
+        return self
+
+    def __reduce__(self) -> tuple[type["FrozenDict"], tuple[dict[Any, Any]]]:
+        return FrozenDict, (dict(self),)
 
 
 class Direction(str, Enum):
@@ -111,6 +183,43 @@ class Action(str, Enum):
 
 
 class EventKind(str, Enum):
+    # Canonical preregistered semantic events.  The older ``*_STATE`` kinds
+    # below remain compatibility lifecycle transport for existing reducers.
+    MARKET_EPOCH_RESET = "market_epoch_reset"
+    BAR_COMPLETED = "bar_completed"
+    SWING_CONFIRMED = "swing_confirmed"
+    STRUCTURAL_LEG_CREATED = "structural_leg_created"
+    LIQUIDITY_LEVEL_CREATED = "liquidity_level_created"
+    LEVEL_TOUCHED = "level_touched"
+    LEVEL_PENETRATED = "level_penetrated"
+    SWEEP_CONFIRMED = "sweep_confirmed"
+    ACCEPTANCE_CONFIRMED = "acceptance_confirmed"
+    DISPLACEMENT_OBSERVED = "displacement_observed"
+    FVG_CREATED = "fvg_created"
+    FVG_TOUCHED = "fvg_touched"
+    FVG_PARTIALLY_FILLED = "fvg_partially_filled"
+    FVG_MIDPOINT_TOUCHED = "fvg_midpoint_touched"
+    FVG_FULLY_FILLED = "fvg_fully_filled"
+    FVG_INVALIDATED = "fvg_invalidated"
+    FVG_EXPIRED = "fvg_expired"
+    RAW_BOUNDARY_BREAK = "raw_boundary_break"
+    STRUCTURE_DIRECTION_CONFIRMED = "structure_direction_confirmed"
+    QUALIFIED_BOS = "qualified_bos"
+    PROTECTED_SWING_ASSIGNED = "protected_swing_assigned"
+    MSS_CORE_CONFIRMED = "mss_core_confirmed"
+    DEALING_RANGE_CREATED = "dealing_range_created"
+    DEALING_RANGE_ACTIVATED = "dealing_range_activated"
+    DEALING_RANGE_EXTENDED = "dealing_range_extended"
+    DEALING_RANGE_INVALIDATED = "dealing_range_invalidated"
+    DEALING_RANGE_REPLACED = "dealing_range_replaced"
+    DELIVERY_PHASE_CHANGED = "delivery_phase_changed"
+    ORIGIN_ZONE_CREATED = "origin_zone_created"
+    ORIGIN_ZONE_TOUCHED = "origin_zone_touched"
+    ORIGIN_ZONE_MITIGATED = "origin_zone_mitigated"
+    ORIGIN_ZONE_INVALIDATED = "origin_zone_invalidated"
+    TIMEFRAME_STATE_CHANGED = "timeframe_state_changed"
+    RELATION_STATE_CHANGED = "relation_state_changed"
+    SESSION_STATE_CHANGED = "session_state_changed"
     SWING_FORMED = "swing_formed"
     SWING_STATE = "swing_state"
     STRUCTURE_STATE = "structure_state"
@@ -129,6 +238,15 @@ class EventKind(str, Enum):
     LIQUIDITY_RETIRED = "liquidity_retired"
     STRUCTURE_BREAK = "structure_break"
     STRUCTURE_BREAK_FAILED = "structure_break_failed"
+
+
+class EventOrigin(str, Enum):
+    """Authority class for one immutable market-event record."""
+
+    NORMALIZED_DATA = "normalized_data"
+    SEMANTIC_ATOMIC = "semantic_atomic"
+    STATE_PROJECTION = "state_projection"
+    LEGACY_TRANSPORT = "legacy_transport"
 
 
 class SwingSide(str, Enum):
@@ -151,6 +269,14 @@ class SwingLifecycle(str, Enum):
     CONFIRMED = "confirmed"
     BROKEN = "broken"
     FORMATION_FAILED = "formation_failed"
+
+
+class SwingRank(str, Enum):
+    UNRESOLVED = "unresolved"
+    MICRO = "micro"
+    INTERNAL = "internal"
+    STRUCTURAL = "structural"
+    EXTERNAL = "external"
 
 
 class StructureLifecycle(str, Enum):
@@ -205,6 +331,7 @@ class FairValueGapLifecycle(str, Enum):
     PARTIAL = "partial"
     MITIGATED = "mitigated"
     INVALIDATED = "invalidated"
+    EXPIRED = "expired"
 
 
 class FVGQualification(str, Enum):
@@ -401,6 +528,124 @@ def clamp(value: float, low: float = 0.0, high: float = 1.0) -> float:
     return float(min(high, max(low, value)))
 
 
+def _finite_decimal(value: Any, *, name: str) -> Decimal:
+    """Parse one numeric contract value without binary-float rounding."""
+
+    if isinstance(value, bool):
+        raise ValueError(f"{name} must be a finite number")
+    try:
+        parsed = Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must be a finite number") from exc
+    if not parsed.is_finite():
+        raise ValueError(f"{name} must be a finite number")
+    return parsed
+
+
+def _tick_size_decimal(tick_size: Any) -> Decimal:
+    parsed = _finite_decimal(tick_size, name="tick_size")
+    if parsed <= 0:
+        raise ValueError("tick_size must be positive")
+    return parsed
+
+
+def price_to_ticks(
+    price: Any,
+    tick_size: Any,
+    *,
+    name: str = "price",
+) -> int:
+    """Return the exact integer grid coordinate for one vendor price.
+
+    Decimal text parsing plus integer-ratio arithmetic is intentional:
+    admission never depends on binary floats, banker's rounding, or the
+    process-wide Decimal precision context.
+    """
+
+    parsed_price = _finite_decimal(price, name=name)
+    parsed_tick = _tick_size_decimal(tick_size)
+    price_numerator, price_denominator = parsed_price.as_integer_ratio()
+    tick_numerator, tick_denominator = parsed_tick.as_integer_ratio()
+    coordinate_numerator = price_numerator * tick_denominator
+    coordinate_denominator = price_denominator * tick_numerator
+    integral, remainder = divmod(
+        coordinate_numerator,
+        coordinate_denominator,
+    )
+    if remainder:
+        raise ValueError(
+            f"{name} is off-grid for tick_size {parsed_tick}"
+        )
+    return integral
+
+
+def ticks_to_price(
+    ticks: int,
+    tick_size: Any,
+    *,
+    name: str = "ticks",
+) -> float:
+    """Return the canonical float projection of an integer tick coordinate."""
+
+    if type(ticks) is not int:
+        raise ValueError(f"{name} must be an integer")
+    tick_numerator, tick_denominator = (
+        _tick_size_decimal(tick_size).as_integer_ratio()
+    )
+    return (ticks * tick_numerator) / tick_denominator
+
+
+def ohlc_to_ticks(
+    open_price: Any,
+    high_price: Any,
+    low_price: Any,
+    close_price: Any,
+    tick_size: Any,
+) -> tuple[int, int, int, int]:
+    """Validate vendor/detector OHLC and return its integer representation."""
+
+    output = (
+        price_to_ticks(open_price, tick_size, name="open"),
+        price_to_ticks(high_price, tick_size, name="high"),
+        price_to_ticks(low_price, tick_size, name="low"),
+        price_to_ticks(close_price, tick_size, name="close"),
+    )
+    open_ticks, high_ticks, low_ticks, close_ticks = output
+    if (
+        high_ticks < max(open_ticks, close_ticks)
+        or low_ticks > min(open_ticks, close_ticks)
+        or high_ticks < low_ticks
+    ):
+        raise ValueError("integer OHLC geometry is invalid")
+    return output
+
+
+def _validate_normalized_ohlc(
+    *,
+    values: tuple[Any, Any, Any, Any],
+    price_tick_size: float | None,
+    normalized_ohlc_ticks: tuple[int, int, int, int] | None,
+) -> tuple[float | None, tuple[int, int, int, int] | None]:
+    if price_tick_size is None:
+        if normalized_ohlc_ticks is not None:
+            raise ValueError(
+                "normalized OHLC ticks require their price tick size"
+            )
+        return None, None
+    canonical_tick = float(_tick_size_decimal(price_tick_size))
+    expected = ohlc_to_ticks(*values, canonical_tick)
+    if normalized_ohlc_ticks is None:
+        return canonical_tick, expected
+    supplied = tuple(normalized_ohlc_ticks)
+    if (
+        len(supplied) != 4
+        or any(type(value) is not int for value in supplied)
+        or supplied != expected
+    ):
+        raise ValueError("stored normalized OHLC ticks disagree with prices")
+    return canonical_tick, supplied
+
+
 @dataclass(frozen=True)
 class Bar:
     """One completed 1m bar; ``start`` is the minute open timestamp."""
@@ -415,6 +660,11 @@ class Bar:
     instrument_id: int
     synthetic_no_trade: bool = False
     data_gap_before_minutes: int = 0
+    price_tick_size: float | None = field(default=None, compare=False)
+    normalized_ohlc_ticks: tuple[int, int, int, int] | None = field(
+        default=None,
+        compare=False,
+    )
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "start", aware_timestamp(self.start, name="bar.start"))
@@ -431,10 +681,49 @@ class Bar:
             raise ValueError("bar data-gap duration cannot be negative")
         if self.synthetic_no_trade and self.data_gap_before_minutes:
             raise ValueError("synthetic no-trade bar cannot also begin a data gap")
+        price_tick_size, normalized_ticks = _validate_normalized_ohlc(
+            values=(self.open, self.high, self.low, self.close),
+            price_tick_size=self.price_tick_size,
+            normalized_ohlc_ticks=self.normalized_ohlc_ticks,
+        )
+        object.__setattr__(self, "price_tick_size", price_tick_size)
+        object.__setattr__(self, "normalized_ohlc_ticks", normalized_ticks)
 
     @property
     def end(self) -> pd.Timestamp:
         return self.start + pd.Timedelta(minutes=1)
+
+    @property
+    def open_ticks(self) -> int | None:
+        return None if self.normalized_ohlc_ticks is None else self.normalized_ohlc_ticks[0]
+
+    @property
+    def high_ticks(self) -> int | None:
+        return None if self.normalized_ohlc_ticks is None else self.normalized_ohlc_ticks[1]
+
+    @property
+    def low_ticks(self) -> int | None:
+        return None if self.normalized_ohlc_ticks is None else self.normalized_ohlc_ticks[2]
+
+    @property
+    def close_ticks(self) -> int | None:
+        return None if self.normalized_ohlc_ticks is None else self.normalized_ohlc_ticks[3]
+
+    def on_price_grid(self, tick_size: float) -> "Bar":
+        """Return this immutable bar with exact normalized tick coordinates."""
+
+        requested = _tick_size_decimal(tick_size)
+        if self.price_tick_size is not None:
+            if _tick_size_decimal(self.price_tick_size) != requested:
+                raise ValueError(
+                    "bar price grid disagrees with reader tick size"
+                )
+            return self
+        return replace(
+            self,
+            price_tick_size=float(requested),
+            normalized_ohlc_ticks=None,
+        )
 
 
 @dataclass(frozen=True)
@@ -454,6 +743,11 @@ class Candle:
     complete: bool
     real_minutes: int | None = None
     synthetic_minutes: int = 0
+    price_tick_size: float | None = field(default=None, compare=False)
+    normalized_ohlc_ticks: tuple[int, int, int, int] | None = field(
+        default=None,
+        compare=False,
+    )
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "start", aware_timestamp(self.start, name="candle.start"))
@@ -501,35 +795,64 @@ class Candle:
                 "candle real/synthetic provenance is inconsistent"
             )
         object.__setattr__(self, "real_minutes", real_minutes)
+        price_tick_size, normalized_ticks = _validate_normalized_ohlc(
+            values=(self.open, self.high, self.low, self.close),
+            price_tick_size=self.price_tick_size,
+            normalized_ohlc_ticks=self.normalized_ohlc_ticks,
+        )
+        object.__setattr__(self, "price_tick_size", price_tick_size)
+        object.__setattr__(self, "normalized_ohlc_ticks", normalized_ticks)
 
     @property
     def real_completed(self) -> bool:
         return bool(self.complete and self.synthetic_minutes == 0)
 
+    @property
+    def open_ticks(self) -> int | None:
+        return None if self.normalized_ohlc_ticks is None else self.normalized_ohlc_ticks[0]
+
+    @property
+    def high_ticks(self) -> int | None:
+        return None if self.normalized_ohlc_ticks is None else self.normalized_ohlc_ticks[1]
+
+    @property
+    def low_ticks(self) -> int | None:
+        return None if self.normalized_ohlc_ticks is None else self.normalized_ohlc_ticks[2]
+
+    @property
+    def close_ticks(self) -> int | None:
+        return None if self.normalized_ohlc_ticks is None else self.normalized_ohlc_ticks[3]
+
+    def ohlc_ticks_for(self, tick_size: float) -> tuple[int, int, int, int]:
+        """Read stored ticks on the same grid or validate a direct test candle."""
+
+        requested = _tick_size_decimal(tick_size)
+        if self.price_tick_size is not None:
+            if _tick_size_decimal(self.price_tick_size) != requested:
+                raise ValueError("candle price grid disagrees with detector tick size")
+            if self.normalized_ohlc_ticks is None:
+                raise AssertionError("normalized candle lost its integer OHLC")
+            return self.normalized_ohlc_ticks
+        return ohlc_to_ticks(
+            self.open,
+            self.high,
+            self.low,
+            self.close,
+            float(requested),
+        )
+
 
 def candle_identity(candle: Candle, *, tick_size: float) -> str:
     """Return one shared candle identity for every semantic reducer."""
 
-    tick = float(tick_size)
-    if not math.isfinite(tick) or tick <= 0.0:
-        raise ValueError("candle identity requires a positive tick size")
-
-    def ticks(value: float) -> int:
-        scaled = float(value) / tick
-        rounded = round(scaled)
-        if not math.isfinite(scaled) or abs(scaled - rounded) > 1e-6:
-            raise ValueError("candle identity received an off-grid price")
-        return int(rounded)
+    ticks = candle.ohlc_ticks_for(tick_size)
 
     parts = (
         "candle-v1",
         candle.timeframe.value,
         candle.start.isoformat(),
         candle.end.isoformat(),
-        str(ticks(candle.open)),
-        str(ticks(candle.high)),
-        str(ticks(candle.low)),
-        str(ticks(candle.close)),
+        *(str(value) for value in ticks),
         format(float(candle.volume), ".17g"),
         candle.symbol,
         str(candle.instrument_id),
@@ -588,11 +911,18 @@ class SwingPoint:
     delta_ticks: int = 0
     delta_points: float = 0.0
     magnitude_atr: float = 0.0
+    # Legacy ``magnitude_atr`` is the distance from the prior same-side
+    # swing.  Local pivot prominence is a distinct, preregistered feature.
+    prominence_atr: float = 0.0
+    confirmation_delay_bars: int = 0
+    nesting_depth: int = 0
+    semantic_rank: SwingRank = SwingRank.UNRESOLVED
     age_bars: int = 0
     broken_at: pd.Timestamp | None = None
     failure_reason: str | None = None
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "semantic_rank", SwingRank(self.semantic_rank))
         if not self.swing_id or not self.symbol or int(self.instrument_id) < 0:
             raise ValueError("swing identity is invalid")
         if not math.isfinite(float(self.price)) or self.price <= 0:
@@ -671,24 +1001,123 @@ class SwingPoint:
         if self.lifecycle is not SwingLifecycle.BROKEN and self.broken_at is not None:
             raise ValueError("only broken swing may have broken_at")
         expected_reason = {
-            SwingLifecycle.FORMATION_FAILED: "right_side_invalidated",
+            SwingLifecycle.FORMATION_FAILED: {
+                "right_side_invalidated",
+                "insufficient_prominence",
+            },
             SwingLifecycle.BROKEN: "close_beyond_swing",
         }.get(self.lifecycle)
         if expected_reason is None and self.failure_reason is not None:
             raise ValueError(
                 "open or confirmed swing cannot carry a failure reason"
             )
-        if expected_reason is not None and self.failure_reason != expected_reason:
+        if expected_reason is not None and (
+            self.failure_reason not in expected_reason
+            if isinstance(expected_reason, set)
+            else self.failure_reason != expected_reason
+        ):
             raise ValueError(
                 "terminal swing requires its registered failure reason"
             )
-        if self.age_bars < 0:
+        if (
+            self.age_bars < 0
+            or type(self.confirmation_delay_bars) is not int
+            or self.confirmation_delay_bars < 0
+            or type(self.nesting_depth) is not int
+            or self.nesting_depth < 0
+        ):
             raise ValueError("swing age cannot be negative")
         if not all(
             math.isfinite(float(value))
-            for value in (self.delta_points, self.magnitude_atr)
-        ) or self.magnitude_atr < 0:
+            for value in (
+                self.delta_points,
+                self.magnitude_atr,
+                self.prominence_atr,
+            )
+        ) or self.magnitude_atr < 0 or self.prominence_atr < 0:
             raise ValueError("swing magnitude is invalid")
+
+
+@dataclass(frozen=True)
+class StructuralLegState:
+    """One replay-stable movement between opposite confirmed swings."""
+
+    leg_id: str
+    timeframe: Timeframe
+    direction: Direction
+    start_swing_id: str
+    end_swing_id: str
+    start_event_time: pd.Timestamp
+    end_event_time: pd.Timestamp
+    known_at: pd.Timestamp
+    start_price: float
+    end_price: float
+    start_close: float
+    end_close: float
+    amplitude_points: float
+    amplitude_atr: float
+    duration_bars: int
+    duration_minutes: int
+    efficiency: float
+    max_retracement_points: float
+    max_retracement_atr: float
+    rank: SwingRank = SwingRank.INTERNAL
+    source_swing_ids: tuple[str, str] = ("", "")
+
+    def __post_init__(self) -> None:
+        for name in ("start_event_time", "end_event_time", "known_at"):
+            object.__setattr__(
+                self,
+                name,
+                aware_timestamp(getattr(self, name), name=f"leg.{name}"),
+            )
+        object.__setattr__(self, "rank", SwingRank(self.rank))
+        source_ids = tuple(self.source_swing_ids)
+        object.__setattr__(self, "source_swing_ids", source_ids)
+        continuous = (
+            self.start_price,
+            self.end_price,
+            self.start_close,
+            self.end_close,
+            self.amplitude_points,
+            self.amplitude_atr,
+            self.efficiency,
+            self.max_retracement_points,
+            self.max_retracement_atr,
+        )
+        expected_direction = (
+            Direction.LONG
+            if self.end_price > self.start_price
+            else Direction.SHORT
+        )
+        if (
+            not self.leg_id
+            or not self.start_swing_id
+            or not self.end_swing_id
+            or self.start_swing_id == self.end_swing_id
+            or source_ids != (self.start_swing_id, self.end_swing_id)
+            or self.start_event_time >= self.end_event_time
+            or self.known_at < self.end_event_time
+            or self.direction is not expected_direction
+            or any(not math.isfinite(float(value)) for value in continuous)
+            or min(
+                self.start_price,
+                self.end_price,
+                self.start_close,
+                self.end_close,
+            )
+            <= 0.0
+            or self.amplitude_points <= 0.0
+            or self.amplitude_atr < 0.0
+            or not 0.0 <= self.efficiency <= 1.0
+            or self.max_retracement_points < 0.0
+            or self.max_retracement_atr < 0.0
+            or type(self.duration_bars) is not int
+            or self.duration_bars < 2
+            or type(self.duration_minutes) is not int
+            or self.duration_minutes <= 0
+        ):
+            raise ValueError("structural leg geometry or provenance is invalid")
 
 
 @dataclass(frozen=True)
@@ -2597,8 +3026,10 @@ class FairValueGapState:
     age_bars: int
     max_fill_fraction: float
     partial_at: pd.Timestamp | None = None
+    midpoint_touched_at: pd.Timestamp | None = None
     mitigated_at: pd.Timestamp | None = None
     invalidated_at: pd.Timestamp | None = None
+    expired_at: pd.Timestamp | None = None
     transition_reason: str | None = None
 
     def __post_init__(self) -> None:
@@ -2740,8 +3171,10 @@ class FairValueGapState:
                 )
         for name in (
             "partial_at",
+            "midpoint_touched_at",
             "mitigated_at",
             "invalidated_at",
+            "expired_at",
         ):
             value = getattr(self, name)
             if value is not None:
@@ -2776,8 +3209,10 @@ class FairValueGapState:
             value
             for value in (
                 self.partial_at,
+                self.midpoint_touched_at,
                 self.mitigated_at,
                 self.invalidated_at,
+                self.expired_at,
             )
             if value is not None
         )
@@ -2786,6 +3221,18 @@ class FairValueGapState:
             for value in transition_clocks
         ):
             raise ValueError("FVG transition clock is outside its lifecycle")
+        if (
+            self.partial_at is not None
+            and self.midpoint_touched_at is not None
+            and self.partial_at > self.midpoint_touched_at
+        ):
+            raise ValueError("FVG midpoint touch cannot predate partial fill")
+        if (
+            self.midpoint_touched_at is not None
+            and self.mitigated_at is not None
+            and self.midpoint_touched_at > self.mitigated_at
+        ):
+            raise ValueError("FVG mitigation cannot predate midpoint touch")
         if (
             self.partial_at is not None
             and self.mitigated_at is not None
@@ -2822,8 +3269,10 @@ class FairValueGapState:
                     value is not None
                     for value in (
                         self.partial_at,
+                        self.midpoint_touched_at,
                         self.mitigated_at,
                         self.invalidated_at,
+                        self.expired_at,
                         self.transition_reason,
                     )
                 )
@@ -2836,6 +3285,11 @@ class FairValueGapState:
                 or not 0.0 < raw_fill < 1.0
                 or self.mitigated_at is not None
                 or self.invalidated_at is not None
+                or self.expired_at is not None
+                or (
+                    (raw_fill >= 0.5)
+                    != (self.midpoint_touched_at is not None)
+                )
                 or not self.transition_reason
             ):
                 raise ValueError("partial FVG lifecycle is inconsistent")
@@ -2846,19 +3300,31 @@ class FairValueGapState:
                 or self.last_updated_at != self.mitigated_at
                 or not math.isclose(raw_fill, 1.0, abs_tol=1e-12)
                 or self.invalidated_at is not None
+                or self.expired_at is not None
+                or self.midpoint_touched_at is None
                 or not self.transition_reason
             ):
                 raise ValueError("mitigated FVG lifecycle is inconsistent")
-        elif (
+        elif self.lifecycle is FairValueGapLifecycle.INVALIDATED and (
             self.invalidated_at is None
             or self.state_started_at != self.invalidated_at
             or self.last_updated_at != self.invalidated_at
             or self.mitigated_at is not None
+            or self.expired_at is not None
             or not self.transition_reason
         ):
             raise ValueError(
                 "invalidated FVG requires its clock and reason"
             )
+        elif self.lifecycle is FairValueGapLifecycle.EXPIRED and (
+            self.expired_at is None
+            or self.state_started_at != self.expired_at
+            or self.last_updated_at != self.expired_at
+            or self.mitigated_at is not None
+            or self.invalidated_at is not None
+            or not self.transition_reason
+        ):
+            raise ValueError("expired FVG lifecycle is inconsistent")
 
 
 @dataclass(frozen=True)
@@ -4224,11 +4690,164 @@ class MarketEvent:
     direction: Direction | None = None
     transition_reason: str | None = None
     sequence_no: int = 0
+    event_time: pd.Timestamp | None = None
+    known_at: pd.Timestamp | None = None
+    semantic_version: str = SMC_SEMANTIC_VERSION
+    evidence: Mapping[str, Any] = field(default_factory=dict)
+    zone: tuple[float, float] | None = None
+    # ``source_ids`` remains the legacy compatibility surface.  New semantic
+    # producers must classify provenance explicitly so event ancestry cannot
+    # be confused with raw-data, entity, or contextual evidence identities.
+    # These fields intentionally live at the end of the dataclass to preserve
+    # every existing positional constructor call.
+    source_event_ids: tuple[str, ...] = ()
+    source_data_ids: tuple[str, ...] = ()
+    source_entity_ids: tuple[str, ...] = ()
+    context_event_ids: tuple[str, ...] = ()
+    origin: EventOrigin = EventOrigin.LEGACY_TRANSPORT
 
     def __post_init__(self) -> None:
         object.__setattr__(
             self, "observed_at", aware_timestamp(self.observed_at, name="event.observed_at")
         )
+        event_time = self.event_time or self.observed_at
+        known_at = self.known_at or self.observed_at
+        object.__setattr__(
+            self,
+            "event_time",
+            aware_timestamp(event_time, name="event.event_time"),
+        )
+        object.__setattr__(
+            self,
+            "known_at",
+            aware_timestamp(known_at, name="event.known_at"),
+        )
+        if self.known_at != self.observed_at:
+            raise ValueError(
+                "event observed_at is the legacy alias of known_at and must match"
+            )
+        if self.event_time > self.known_at:
+            raise ValueError("event cannot be known before its market event time")
+        if (
+            not isinstance(self.semantic_version, str)
+            or not self.semantic_version.strip()
+        ):
+            raise ValueError("event semantic_version is required")
+        try:
+            origin = EventOrigin(self.origin)
+        except (TypeError, ValueError) as error:
+            raise ValueError("event origin is invalid") from error
+        object.__setattr__(self, "origin", origin)
+        details = FrozenDict(self.details)
+        evidence = details if not self.evidence else FrozenDict(self.evidence)
+        object.__setattr__(self, "details", details)
+        object.__setattr__(self, "evidence", evidence)
+        source_namespaces: dict[str, tuple[str, ...]] = {}
+        for name in (
+            "source_ids",
+            "source_event_ids",
+            "source_data_ids",
+            "source_entity_ids",
+            "context_event_ids",
+        ):
+            raw_values = getattr(self, name)
+            if isinstance(raw_values, str):
+                raise ValueError(
+                    f"event {name} identities must be a sequence"
+                )
+            try:
+                values = tuple(raw_values)
+            except TypeError as error:
+                raise ValueError(
+                    f"event {name} identities must be a sequence"
+                ) from error
+            if any(
+                not isinstance(value, str) or not value.strip()
+                for value in values
+            ):
+                raise ValueError(
+                    f"event {name} identities must be non-empty text"
+                )
+            if len(values) != len(set(values)):
+                if name == "source_ids":
+                    # Older lifecycle transports legitimately repeated one
+                    # entity through several structural roles.  Preserve
+                    # that API while exposing a stable de-duplicated alias.
+                    values = tuple(dict.fromkeys(values))
+                else:
+                    raise ValueError(
+                        f"event {name} identities must be unique"
+                    )
+            source_namespaces[name] = values
+
+        legacy_source_ids = source_namespaces["source_ids"]
+        explicit_event_ids = source_namespaces["source_event_ids"]
+        classified_event_ancestry = origin in {
+            EventOrigin.SEMANTIC_ATOMIC,
+            EventOrigin.STATE_PROJECTION,
+        }
+        if classified_event_ancestry:
+            if (
+                legacy_source_ids
+                and explicit_event_ids
+                and legacy_source_ids != explicit_event_ids
+            ):
+                raise ValueError(
+                    "canonical event source_ids must equal "
+                    "source_event_ids"
+                )
+            # This is the only compatibility normalization that is
+            # unambiguous: a canonical producer supplied just one of the two
+            # event-ancestry spellings.  Mixed raw/entity identities must use
+            # their explicit namespaces instead.
+            canonical_event_ids = explicit_event_ids or legacy_source_ids
+            legacy_source_ids = canonical_event_ids
+            explicit_event_ids = canonical_event_ids
+        elif not explicit_event_ids:
+            # Preserve the former ``source_event_ids`` alias for old,
+            # non-canonical lifecycle fixtures and consumers.
+            explicit_event_ids = legacy_source_ids
+
+        source_namespaces["source_ids"] = legacy_source_ids
+        source_namespaces["source_event_ids"] = explicit_event_ids
+        for name, values in source_namespaces.items():
+            object.__setattr__(self, name, values)
+
+        explicit_namespaces = {
+            name: source_namespaces[name]
+            for name in (
+                "source_event_ids",
+                "source_data_ids",
+                "source_entity_ids",
+                "context_event_ids",
+            )
+        }
+        owners: dict[str, str] = {}
+        for name, values in explicit_namespaces.items():
+            for value in values:
+                previous = owners.setdefault(value, name)
+                if previous != name:
+                    raise ValueError(
+                        "event provenance identities must be mutually "
+                        f"exclusive across namespaces: {value!r} appears "
+                        f"in {previous} and {name}"
+                    )
+        zone = self.zone
+        if zone is None:
+            lower = details.get("lower_bound")
+            upper = details.get("upper_bound")
+            if lower is not None and upper is not None:
+                zone = (float(lower), float(upper))
+        if zone is not None:
+            if (
+                not isinstance(zone, (tuple, list))
+                or len(zone) != 2
+                or not all(math.isfinite(float(value)) for value in zone)
+                or float(zone[0]) > float(zone[1])
+            ):
+                raise ValueError("event zone is invalid")
+            zone = (float(zone[0]), float(zone[1]))
+        object.__setattr__(self, "zone", zone)
         object.__setattr__(self, "strength", clamp(self.strength))
         for name in ("formed_at", "confirmed_at", "ended_at"):
             value = getattr(self, name)
@@ -4262,6 +4881,24 @@ class MarketEvent:
             raise ValueError("terminal event requires a transition reason")
         if self.transition_reason == "":
             raise ValueError("event transition reason cannot be empty")
+
+    @property
+    def semantic_type(self) -> str:
+        """Canonical semantic name used by the v1 event contract."""
+
+        return self.kind.value
+
+    @property
+    def is_canonical_semantic(self) -> bool:
+        """Whether this is an authoritative preregistered semantic fact."""
+
+        return self.origin is EventOrigin.SEMANTIC_ATOMIC
+
+    @property
+    def is_projection(self) -> bool:
+        """Whether this event is a rebuildable state projection."""
+
+        return self.origin is EventOrigin.STATE_PROJECTION
 
 
 _TYPED_EVENT_ENTITY_PREFIXES: Mapping[EventKind, str] = {
@@ -4320,6 +4957,7 @@ class FrameObservation:
     fair_value_gaps: tuple[FairValueGapState, ...] = ()
     order_blocks: tuple[OrderBlockState, ...] = ()
     dealing_ranges: tuple[DealingRangeState, ...] = ()
+    structural_legs: tuple[StructuralLegState, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "cutoff", aware_timestamp(self.cutoff, name="frame.cutoff"))
@@ -4364,6 +5002,15 @@ class FrameObservation:
             if item.timeframe is not self.timeframe:
                 raise ValueError(
                     "frame contains a dealing range from another timeframe"
+                )
+        for item in self.structural_legs:
+            if item.timeframe is not self.timeframe:
+                raise ValueError(
+                    "frame contains a structural leg from another timeframe"
+                )
+            if item.known_at > self.cutoff:
+                raise ValueError(
+                    "frame contains a future-known structural leg"
                 )
         for swing in self.swings:
             if (
@@ -4773,6 +5420,8 @@ class MarketObservation:
     recent_events: tuple[MarketEvent, ...]
     event_durations_minutes: Mapping[str, int]
     execution: ExecutionObservation
+    semantic_events_this_update: tuple[MarketEvent, ...] = ()
+    market_snapshot: "MarketSnapshot | None" = None
     anomalies: tuple[str, ...] = ()
     displacement: DisplacementObservation | None = None
     liquidity_inventory: tuple[LiquidityInventoryItem, ...] = ()
@@ -4890,6 +5539,26 @@ class MarketObservation:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "asof", aware_timestamp(self.asof, name="observation.asof"))
+        object.__setattr__(
+            self,
+            "semantic_events_this_update",
+            tuple(self.semantic_events_this_update),
+        )
+        if any(
+            not isinstance(event, MarketEvent)
+            or event.known_at > self.asof
+            for event in self.semantic_events_this_update
+        ):
+            raise ValueError(
+                "observation semantic event delta contains future or invalid data"
+            )
+        if (
+            self.market_snapshot is not None
+            and self.market_snapshot.asof != self.asof
+        ):
+            raise ValueError(
+                "observation and hierarchical market snapshot clocks differ"
+            )
         active_timeframes = tuple(self.active_timeframes)
         if not active_timeframes:
             raise ValueError("observation requires an explicit scale registry")
@@ -6255,6 +6924,51 @@ class TradePlan:
         elif self.lsr_context is not None:
             raise ValueError("only LSR may carry frozen Context provenance")
 
+    @property
+    def causal_observation_clocks(self) -> tuple[pd.Timestamp, ...]:
+        """All observations that causally support this frozen plan.
+
+        Prospective deadlines are deliberately excluded: they bound plan
+        validity but are expected to be later than the assessment clock.
+        """
+
+        clocks = [
+            self.invalidation.observed_at,
+            *(
+                clock
+                for target in self.targets
+                for clock in (target.formed_at, target.confirmed_at)
+            ),
+        ]
+        if self.draw_selection is not None:
+            clocks.extend(
+                (
+                    self.draw_selection.source_confirmed_at,
+                    self.draw_selection.selected_at,
+                )
+            )
+        if self.liquidity_route is not None:
+            clocks.append(self.liquidity_route.selected_at)
+        if self.range_auction is not None:
+            clocks.extend(
+                (
+                    self.range_auction.mature_at,
+                    self.range_auction.swept_at,
+                    self.range_auction.reentry_candidate_at,
+                    self.range_auction.reentered_at,
+                )
+            )
+        if self.lsr_context is not None:
+            clocks.extend(
+                (
+                    self.lsr_context.swept_at,
+                    self.lsr_context.reaccepted_at,
+                    self.lsr_context.displacement_active_at,
+                    self.lsr_context.displacement_observed_at,
+                )
+            )
+        return tuple(clocks)
+
 
 @dataclass(frozen=True)
 class PlanFeasibility:
@@ -6928,6 +7642,51 @@ class HypothesisBelief:
         return self.candidate_id or (
             f"{self.playbook.value}:{self.direction.value}"
         )
+
+    @property
+    def causal_observation_clocks(self) -> tuple[pd.Timestamp, ...]:
+        """All observations that causally support this belief snapshot."""
+
+        clocks = [
+            self.phase_started_at,
+            *(evidence.observed_at for evidence in self.supporting),
+            *(evidence.observed_at for evidence in self.contradicting),
+            *(
+                clock
+                for target in self.deliverable_targets
+                for clock in (target.formed_at, target.confirmed_at)
+            ),
+        ]
+        if self.invalidation is not None:
+            clocks.append(self.invalidation.observed_at)
+        if self.plan is not None:
+            clocks.extend(self.plan.causal_observation_clocks)
+        if self.sequence is not None:
+            if self.sequence.started_at is not None:
+                clocks.append(self.sequence.started_at)
+            clocks.extend(
+                step.observed_at
+                for step in self.sequence.steps
+                if step.observed_at is not None
+            )
+        if self.terminal_at is not None:
+            clocks.append(self.terminal_at)
+        if self.thesis_draw is not None:
+            clocks.extend(
+                (self.thesis_draw.formed_at, self.thesis_draw.confirmed_at)
+            )
+        if self.draw_selection is not None:
+            clocks.extend(
+                (
+                    self.draw_selection.source_confirmed_at,
+                    self.draw_selection.selected_at,
+                )
+            )
+        if self.liquidity_route is not None:
+            clocks.append(self.liquidity_route.selected_at)
+        if self.selected_trigger is not None:
+            clocks.append(self.selected_trigger.observed_at)
+        return tuple(clocks)
 
     @property
     def selected_trigger_kind(self) -> str | None:
@@ -7679,6 +8438,22 @@ class EntryEpisodeState:
         ):
             raise ValueError("entry episode identity or lifecycle is invalid")
 
+    @property
+    def causal_observation_clocks(self) -> tuple[pd.Timestamp, ...]:
+        """All observations that causally support this episode snapshot."""
+
+        clocks = [self.formed_at, self.updated_at]
+        for value in (self.first_pullback_at, self.terminal_at):
+            if value is not None:
+                clocks.append(value)
+        if self.selected_trigger is not None:
+            clocks.append(self.selected_trigger.observed_at)
+        if self.invalidation is not None:
+            clocks.append(self.invalidation.observed_at)
+        if self.plan is not None:
+            clocks.extend(self.plan.causal_observation_clocks)
+        return tuple(clocks)
+
 
 @dataclass(frozen=True)
 class GlobalMarketContext:
@@ -8382,6 +9157,38 @@ class MarketBelief:
     entry_episodes: Mapping[str, EntryEpisodeState] = field(
         default_factory=dict
     )
+    path_competition_state: PathCompetitionSetState | None = None
+    path_update_records_this_clock: tuple[
+        PathBeliefUpdateRecord,
+        ...,
+    ] = ()
+    dol_rankings: Mapping[str, DOLRankingResult] = field(
+        default_factory=dict
+    )
+    # Phase 7 path-marginal distributions.  The legacy rankings above remain
+    # visible for diagnostics and compatibility, but Signal Policy consumes
+    # these complete candidate-plus-no-target distributions.
+    dol_probabilities: Mapping[str, DOLProbabilityResult] = field(
+        default_factory=dict
+    )
+    dol_candidate_exclusions: Mapping[
+        str,
+        tuple[tuple[str, str], ...],
+    ] = field(
+        default_factory=dict
+    )
+    path_protocol_status: str = "development_unvalidated"
+    path_authority: str = "shadow_only"
+    dol_probability_protocol_fingerprint: str | None = None
+    signal_policy_protocol_fingerprint: str | None = None
+    # Kept structurally typed here to avoid a model -> signal_policy -> model
+    # import cycle.  __post_init__ validates the immutable shadow authority
+    # boundary and exact current-clock identities.
+    signal_assessments: Mapping[str, Any] = field(default_factory=dict)
+    trade_intents: Mapping[str, Any] = field(default_factory=dict)
+    shadow_signal_rejections: Mapping[str, tuple[str, ...]] = field(
+        default_factory=dict
+    )
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "asof", aware_timestamp(self.asof, name="belief.asof"))
@@ -8400,8 +9207,226 @@ class MarketBelief:
             "unresolved_ambiguities",
             tuple(self.unresolved_ambiguities),
         )
+        path_records = tuple(self.path_update_records_this_clock)
+        dol_rankings = dict(self.dol_rankings)
+        dol_probabilities = FrozenDict(self.dol_probabilities)
+        signal_assessments = FrozenDict(self.signal_assessments)
+        trade_intents = FrozenDict(self.trade_intents)
+        shadow_signal_rejections = FrozenDict(
+            {
+                str(key): tuple(values)
+                for key, values in self.shadow_signal_rejections.items()
+            }
+        )
+        dol_unresolved = {
+            str(key): tuple(values)
+            for key, values in self.dol_candidate_exclusions.items()
+        }
+        object.__setattr__(
+            self,
+            "path_update_records_this_clock",
+            path_records,
+        )
+        object.__setattr__(self, "dol_rankings", dol_rankings)
+        object.__setattr__(self, "dol_probabilities", dol_probabilities)
+        object.__setattr__(self, "signal_assessments", signal_assessments)
+        object.__setattr__(self, "trade_intents", trade_intents)
+        object.__setattr__(
+            self,
+            "shadow_signal_rejections",
+            shadow_signal_rejections,
+        )
+        object.__setattr__(
+            self,
+            "dol_candidate_exclusions",
+            dol_unresolved,
+        )
+        path_state = self.path_competition_state
+        # A caller that deliberately projects away the complete legacy path
+        # scope (for example a Decision-neutral A/B view) also projects away
+        # every subordinate Phase 7 object.  This is safer than retaining a
+        # detached probability or intent and preserves the historical
+        # ``dataclasses.replace(... path_competition_state=None ...)`` API.
+        if (
+            path_state is None
+            and not path_records
+            and not dol_rankings
+            and not dol_unresolved
+        ):
+            dol_probabilities = FrozenDict()
+            signal_assessments = FrozenDict()
+            trade_intents = FrozenDict()
+            object.__setattr__(self, "dol_probabilities", dol_probabilities)
+            object.__setattr__(self, "signal_assessments", signal_assessments)
+            object.__setattr__(self, "trade_intents", trade_intents)
+        if (
+            self.path_protocol_status != "development_unvalidated"
+            or self.path_authority != "shadow_only"
+            or any(
+                not isinstance(record, PathBeliefUpdateRecord)
+                or record.asof != self.asof
+                for record in path_records
+            )
+            or any(
+                not identity
+                or any(
+                    not isinstance(value, (tuple, list))
+                    or len(value) != 2
+                    or not value[0]
+                    or not value[1]
+                    for value in values
+                )
+                or len(values) != len({value[0] for value in values})
+                for identity, values in dol_unresolved.items()
+            )
+            or any(
+                not identity
+                or not values
+                or len(values) != len(set(values))
+                or any(not isinstance(value, str) or not value for value in values)
+                for identity, values in shadow_signal_rejections.items()
+            )
+        ):
+            raise ValueError("belief path diagnostics are not shadow-only")
+        if path_state is None:
+            if (
+                path_records
+                or dol_rankings
+                or dol_probabilities
+                or dol_unresolved
+                or signal_assessments
+                or trade_intents
+            ):
+                raise ValueError(
+                    "belief path diagnostics require a current competition set"
+                )
+        else:
+            if not isinstance(path_state, PathCompetitionSetState):
+                raise ValueError("belief path diagnostic scope is inconsistent")
+            path_active = path_state.status.value == "active"
+            expected_direction_keys = {
+                Direction.LONG.value,
+                Direction.SHORT.value,
+            }
+            if (
+                path_state.asof != self.asof
+                or path_state.protocol_status != self.path_protocol_status
+                or path_state.authority != self.path_authority
+                or any(
+                    record.competition_set_id
+                    != path_state.competition_set_id
+                    for record in path_records
+                )
+                or (
+                    path_active
+                    and (
+                        set(dol_rankings) != expected_direction_keys
+                        or set(dol_probabilities)
+                        not in (set(), expected_direction_keys)
+                        or set(dol_unresolved) != expected_direction_keys
+                    )
+                )
+                or (
+                    not path_active
+                    and (
+                        dol_rankings
+                        or dol_probabilities
+                        or dol_unresolved
+                        or signal_assessments
+                        or trade_intents
+                    )
+                )
+                or any(
+                    not isinstance(result, DOLRankingResult)
+                    or result.direction.value != direction
+                    or result.competition_set_id
+                    != path_state.competition_set_id
+                    or result.path_asof != path_state.asof
+                    or result.status != self.path_protocol_status
+                    or result.authority != self.path_authority
+                    for direction, result in dol_rankings.items()
+                )
+                or any(
+                    not isinstance(result, DOLProbabilityResult)
+                    or result.direction.value != direction
+                    or result.competition_set_id
+                    != path_state.competition_set_id
+                    or result.path_asof != path_state.asof
+                    or result.status != self.path_protocol_status
+                    or result.authority != self.path_authority
+                    or result.action_authority is not False
+                    or result.path_protocol_fingerprint
+                    != path_state.protocol_fingerprint
+                    or result.path_model_version != path_state.model_version
+                    or result.protocol_fingerprint
+                    != self.dol_probability_protocol_fingerprint
+                    for direction, result in dol_probabilities.items()
+                )
+            ):
+                raise ValueError("belief path diagnostic scope is inconsistent")
+        if (
+            (dol_probabilities and (
+                not isinstance(self.dol_probability_protocol_fingerprint, str)
+                or len(self.dol_probability_protocol_fingerprint) != 64
+            ))
+            or ((signal_assessments or trade_intents) and (
+                not isinstance(self.signal_policy_protocol_fingerprint, str)
+                or len(self.signal_policy_protocol_fingerprint) != 64
+            ))
+            or any(
+                key != getattr(value, "candidate_id", None)
+                or getattr(value, "assessed_at", None) != self.asof
+                or getattr(value, "authority", None) != "shadow_only"
+                or getattr(value, "can_authorize_trade", None) is not False
+                or key not in self.thesis_candidates
+                or getattr(value, "competition_set_id", None)
+                != (
+                    None
+                    if path_state is None
+                    else path_state.competition_set_id
+                )
+                or getattr(value, "instrument_id", None)
+                != (None if path_state is None else path_state.instrument_id)
+                or getattr(value, "policy_protocol_fingerprint", None)
+                != self.signal_policy_protocol_fingerprint
+                or getattr(value, "direction", None)
+                is not self.thesis_candidates[key].direction
+                or getattr(value, "dol_ranking_id", None)
+                != getattr(
+                    dol_probabilities.get(
+                        self.thesis_candidates[key].direction.value
+                    ),
+                    "probability_id",
+                    None,
+                )
+                for key, value in signal_assessments.items()
+            )
+            or any(
+                key != getattr(value, "candidate_id", None)
+                or getattr(value, "created_at", None) != self.asof
+                or getattr(value, "authority", None) != "shadow_only"
+                or getattr(value, "submission_allowed", None) is not False
+                or key not in signal_assessments
+                or getattr(value, "signal_id", None)
+                != getattr(signal_assessments[key], "signal_id", None)
+                or getattr(value, "policy_protocol_fingerprint", None)
+                != self.signal_policy_protocol_fingerprint
+                or getattr(value, "competition_set_id", None)
+                != (
+                    None
+                    if path_state is None
+                    else path_state.competition_set_id
+                )
+                for key, value in trade_intents.items()
+            )
+        ):
+            raise ValueError("belief shadow signal outputs are inconsistent")
         if any(
             key != hypothesis.key
+            or any(
+                clock > self.asof
+                for clock in hypothesis.causal_observation_clocks
+            )
             or hypothesis.phase_started_at > self.asof
             or any(
                 evidence.observed_at > self.asof
@@ -8480,6 +9505,10 @@ class MarketBelief:
             key != candidate.candidate_id
             or candidate.required_root_id is None
             or candidate.record_kind != "root_candidate"
+            or any(
+                clock > self.asof
+                for clock in candidate.causal_observation_clocks
+            )
             or candidate.phase_started_at > self.asof
             or (
                 candidate.market_thesis_root_id
@@ -8499,6 +9528,10 @@ class MarketBelief:
             key != candidate.candidate_id
             or candidate.required_root_id is None
             or candidate.record_kind != "retained_episode"
+            or any(
+                clock > self.asof
+                for clock in candidate.causal_observation_clocks
+            )
             or candidate.phase_started_at > self.asof
             or candidate.market_thesis_root_id
             != candidate.required_root_id
@@ -8529,6 +9562,10 @@ class MarketBelief:
                 key != candidate.candidate_id
                 or candidate.required_root_id is None
                 or candidate.record_kind != "position_management"
+                or any(
+                    clock > self.asof
+                    for clock in candidate.causal_observation_clocks
+                )
                 or candidate.phase_started_at > self.asof
                 or candidate.market_thesis_root_id
                 != candidate.required_root_id
@@ -8641,6 +9678,10 @@ class MarketBelief:
         if any(
             key != episode.candidate_id
             or episode.parent_context_thesis_id not in context_theses
+            or any(
+                clock > self.asof
+                for clock in episode.causal_observation_clocks
+            )
             or episode.updated_at > self.asof
             or key not in candidate_ids
             for key, episode in entry_episodes.items()
@@ -9098,6 +10139,7 @@ class EngineSnapshot:
     decision: Decision
     risk: RiskAssessment
     neutral_market_state: NeutralMarketState | None = None
+    market_snapshot: "MarketSnapshot | None" = None
 
 
 @dataclass(frozen=True)
@@ -9106,6 +10148,7 @@ class NeutralEngineSnapshot:
 
     observation: MarketObservation
     neutral_market_state: NeutralMarketState
+    market_snapshot: "MarketSnapshot | None" = None
 
     def __post_init__(self) -> None:
         if (
@@ -9113,6 +10156,10 @@ class NeutralEngineSnapshot:
             or self.observation.asof != self.neutral_market_state.asof
             or self.observation.scene_revision_id
             != self.neutral_market_state.scene_revision_id
+            or (
+                self.market_snapshot is not None
+                and self.market_snapshot.asof != self.observation.asof
+            )
         ):
             raise ValueError(
                 "neutral Engine snapshot observation and state differ"
@@ -9121,7 +10168,14 @@ class NeutralEngineSnapshot:
 
 def to_primitive(value: Any) -> Any:
     if is_dataclass(value):
-        return {key: to_primitive(item) for key, item in asdict(value).items()}
+        # ``asdict`` recursively deep-copies the entire object graph before
+        # this function recursively normalizes it a second time. Market
+        # snapshots contain immutable nested histories, so field-wise reading
+        # is both semantically exact and materially cheaper during replay.
+        return {
+            item.name: to_primitive(getattr(value, item.name))
+            for item in fields(value)
+        }
     if isinstance(value, Enum):
         return value.value
     if isinstance(value, pd.Timestamp):

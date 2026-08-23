@@ -15,6 +15,7 @@ from smc_trader.engine import (
 from smc_trader.model import (
     AccountState,
     EngineSnapshot,
+    EventKind,
     NeutralEngineSnapshot,
     Playbook,
     to_primitive,
@@ -502,6 +503,32 @@ def test_hard_reset_advances_epoch_and_clears_neutral_context(
     )
     reset = engine.on_bar(reset_bar)
     assert expected_anomaly in reset.observation.anomalies
+    boundary_events = reset.observation.semantic_events_this_update
+    epoch_reset = next(
+        event
+        for event in boundary_events
+        if event.kind is EventKind.MARKET_EPOCH_RESET
+    )
+    displacement_terminals = tuple(
+        event
+        for event in boundary_events
+        if event.kind is EventKind.DISPLACEMENT_OBSERVED
+        and event.evidence.get("lifecycle") != "active"
+    )
+    assert displacement_terminals
+    assert all(
+        engine.observer.audit_store.get(event.event_id) == event
+        for event in displacement_terminals
+    )
+    reset_order = (
+        epoch_reset.known_at,
+        epoch_reset.sequence_no,
+        epoch_reset.event_id,
+    )
+    assert all(
+        (event.known_at, event.sequence_no, event.event_id) < reset_order
+        for event in displacement_terminals
+    )
     assert reset.neutral_market_state is not None
     assert reset.belief.global_context is not None
     assert (

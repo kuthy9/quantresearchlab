@@ -1,0 +1,118 @@
+{
+  "schema_version": 1,
+  "semantic_version": "smc_semantics_v1.2",
+  "status": "preregistered_development_parameters_not_oos_authorized",
+  "data_split_registry": "configs/data_splits.json",
+  "freeze_policy": {
+    "definition": "freeze semantic definitions, split, primary outcome, controls, search range, and acceptance rule before final out-of-sample evaluation",
+    "parameter_change": "any semantic parameter change requires a new semantic version and fresh validation",
+    "null_value": "null means retain the continuous feature without thresholding in v1.2"
+  },
+  "parameters": {
+    "k_left": {
+      "values_by_timeframe": {
+        "4H": 2,
+        "1H": 2,
+        "15m": 2,
+        "5m": 2,
+        "1m": 1
+      },
+      "status": "frozen_existing_protocol",
+      "source": "configs/primitives_structure_liquidity.json:swing_span_by_timeframe"
+    },
+    "k_right": {
+      "values_by_timeframe": {
+        "4H": 2,
+        "1H": 2,
+        "15m": 2,
+        "5m": 2,
+        "1m": 1
+      },
+      "status": "frozen_existing_protocol",
+      "source": "configs/primitives_structure_liquidity.json:swing_span_by_timeframe"
+    },
+    "prominence_ATR": {
+      "value": null,
+      "detector_default": 0,
+      "threshold_semantics": "v1.2 applies no positive hard prominence cutoff; the executable minimum of 0.0 is non-restrictive and prominence_atr is retained as a continuous field",
+      "status": "continuous_feature_no_positive_hard_threshold",
+      "source": "smc_trader.structure.StructureConfig.minimum_prominence_atr default 0.0 and SwingPoint.prominence_atr"
+    },
+    "break_buffer_ticks": {
+      "value": 0,
+      "comparison": "strict_close_beyond",
+      "status": "frozen_existing_protocol",
+      "source": "configs/primitives_structure_liquidity.json:bos.confirmation"
+    },
+    "sweep_window": {
+      "values": {
+        "pool_post_cross_resolution_bars": 1,
+        "range_manipulation_real_1m_bars": 5
+      },
+      "status": "frozen_existing_protocol_by_event_family",
+      "source": "Group 1-2 pool resolution and configs/primitives_range.json:engineering_parameters.resolution_deadline_real_1m_bars"
+    },
+    "acceptance_bars": {
+      "values": {
+        "bos_post_break_later_bars": 1,
+        "range_manipulation_real_1m_outside_closes": 2,
+        "active_dealing_range_external_acceptance_completed_h1_closes": 1
+      },
+      "status": "frozen_existing_protocol_by_event_family",
+      "source": "configs/primitives_structure_liquidity.json:bos.post_break_acceptance and configs/primitives_range.json:engineering_parameters.outside_acceptance_closes plus configs/primitives_range.json:dealing_range.break.mature_break",
+      "scope_note": "the two-close setting belongs to the real-1m range-manipulation resolver; active dealing-range external acceptance is the first completed H1 close strictly outside the frozen range"
+    },
+    "min_fvg_ticks": {
+      "value": 1,
+      "comparison": "strict_non_overlap_on_tick_grid",
+      "status": "frozen_existing_protocol",
+      "source": "configs/primitives_zones.json:fvg.geometry"
+    },
+    "fvg_expiry_bars": {
+      "value": null,
+      "status": "reserved_explicit_event_only_no_v1_2_detector_age_threshold",
+      "source": "smc_trader.group3.CausalGroup3Tracker and FairValueGapLifecycle.EXPIRED",
+      "expiry_semantics": "v1.2 does not infer expiry from age; FVG_EXPIRED is reserved and the current v1.2 detector emits no expiry event"
+    },
+    "dealing_range_extension": {
+      "value": null,
+      "status": "reserved_not_emitted_v1_2",
+      "source": "EventKind.DEALING_RANGE_EXTENDED reservation and CausalGroup4Tracker v1.2 lifecycle",
+      "extension_semantics": "the v1.2 range lifecycle emits created, activated, invalidated, and replaced facts; extended is reserved and has no detector rule or canonical emission"
+    },
+    "displacement_score_threshold": {
+      "value": null,
+      "status": "continuous_features_and_lifecycle_retained",
+      "source": "configs/primitives_displacement.json:metrics"
+    },
+    "swing_hierarchy_roles": {
+      "values": {
+        "swing_confirmed": "micro",
+        "structural_leg_endpoint": "internal",
+        "structure_direction_source": "structural",
+        "protected_swing_assignment": "external"
+      },
+      "nesting_depths": {
+        "micro": 0,
+        "internal": 1,
+        "structural": 2,
+        "external": 3
+      },
+      "status": "frozen_event_sourced_role_mapping",
+      "source": "smc_trader.market_state.SwingHierarchyView"
+    },
+    "candidate_range_membership": {
+      "values": {
+        "active_lifecycles": [
+          "active",
+          "mature"
+        ],
+        "inside_comparison": "low < candidate_price < high",
+        "boundary_and_outside_role": "erl",
+        "inactive_role": "unresolved"
+      },
+      "status": "frozen_deterministic_snapshot_projection",
+      "source": "smc_trader.market_state._candidate_range_membership"
+    }
+  }
+}

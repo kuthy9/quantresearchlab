@@ -216,27 +216,28 @@ class CausalDisplacementEye:
         boundary = _boundary_reason(anomalies)
         transitions: list[DisplacementTransition] = []
         batch: list[tuple[Candle, DisplacementUpdate]] = []
+        candles = tuple(update.newly_completed.get(Timeframe.M5, ()))
+        invalid_candle = any(
+            not isinstance(candle, Candle)
+            or candle.timeframe is not Timeframe.M5
+            or not candle.complete
+            or candle.end > asof
+            for candle in candles
+        )
+        invalid_order = any(
+            right.end <= left.end
+            for left, right in zip(candles[:-1], candles[1:])
+        )
+        if invalid_candle or invalid_order:
+            raise ValueError("reader supplied invalid ordered completed M5")
+        for candle in candles:
+            candle.ohlc_ticks_for(self._tracker.protocol.tick_size)
 
         if boundary is not None:
             result = self._tracker.on_boundary(boundary, asof)
             state = result.state
             transitions.extend(result.transitions)
         else:
-            candles = tuple(
-                update.newly_completed.get(Timeframe.M5, ())
-            )
-            invalid_candle = any(
-                candle.timeframe is not Timeframe.M5
-                or not candle.complete
-                or candle.end > asof
-                for candle in candles
-            )
-            invalid_order = any(
-                right.end <= left.end
-                for left, right in zip(candles[:-1], candles[1:])
-            )
-            if invalid_candle or invalid_order:
-                raise ValueError("reader supplied invalid ordered completed M5")
             state = self._tracker.snapshot()
             for candle in candles:
                 result = self._tracker.on_completed_5m(candle)

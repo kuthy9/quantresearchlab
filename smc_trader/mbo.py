@@ -21,6 +21,7 @@ F_SNAPSHOT = 32
 F_MBP = 16
 F_BAD_TS_RECV = 8
 F_MAYBE_BAD_BOOK = 4
+F_PUBLISHER_SPECIFIC = 2
 VALID_ACTIONS = frozenset({"A", "M", "C", "R", "T", "F", "N"})
 VALID_SIDES = frozenset({"A", "B", "N"})
 MBO_COLUMNS = (
@@ -635,6 +636,7 @@ class MinuteExecutionRealityStore:
 
 __all__ = [
     "F_LAST",
+    "F_PUBLISHER_SPECIFIC",
     "F_SNAPSHOT",
     "MBOBookSnapshot",
     "MBOOrderBook",

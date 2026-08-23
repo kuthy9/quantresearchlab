@@ -1360,6 +1360,10 @@ def test_observer_records_group4_range_terminal_only_at_boundary_clock(
         {range_key, manipulation_key},
         asof=swept.swept_at,
     )
+    pending_before_boundary = {
+        event.event_id for event in observer.memory._audit_pending
+    }
+    assert pending_before_boundary
 
     boundary_at = swept.swept_at + pd.Timedelta(minutes=1)
     reader = CausalMarketReader(scale_specs=CORE_TEST_SCALE_SPECS)
@@ -1392,6 +1396,10 @@ def test_observer_records_group4_range_terminal_only_at_boundary_clock(
     assert boundary_update.anomalies == (boundary_anomaly,)
 
     boundary_observation = observer.observe(boundary_update)
+    assert all(
+        observer.audit_store.get(event_id) is not None
+        for event_id in pending_before_boundary
+    )
 
     (terminal_range,) = (
         boundary_observation.group4_boundary_range_transitions

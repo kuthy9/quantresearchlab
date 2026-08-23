@@ -1,0 +1,259 @@
+{
+  "protocol_version": "neutral-b2-mechanism-semantic-audit-1.0.0",
+  "purpose": "train_only_causal_role_mechanism_and_fixed_horizon_trajectory_audit_before_b2_preregistration",
+  "population": {
+    "split_role": "train",
+    "validation_opened": false,
+    "holdout_opened": false,
+    "profiles": [
+      {
+        "input_manifest_sha256": "bfea8fb3e41688120f9e3a1fb7f57ce30ec85cd064d3ab28ea18a14d1673de5f",
+        "name": "neutral_representation_train_2019_02",
+        "rows": 1001,
+        "run_manifest_sha256": "5f879047e3dbf37e8b1962bf6b0d1fd67778327a478f594a47c0aef649fc2b13"
+      },
+      {
+        "input_manifest_sha256": "774cbef9ac626689775587e2d5f4717fdeec943e005673098a3bf07b32b30764",
+        "name": "neutral_representation_train_2019_08",
+        "rows": 1270,
+        "run_manifest_sha256": "dab063eccafc8fbc793e94a8ff38981b26eea9241c8fe2e6552f2c245691cd8f"
+      },
+      {
+        "input_manifest_sha256": "a38691e524cc49545ec3ab08d3671b885cea08cf571627df33663be82158f2f8",
+        "name": "neutral_representation_train_2020_02",
+        "rows": 1152,
+        "run_manifest_sha256": "37cc7eb93a8005cdf7da4169f37f49a96ca7598b055cf7f9368eb2581f8d78ff"
+      },
+      {
+        "input_manifest_sha256": "4dd1030be7e16d99c9a9fcd8e05284584ffbe1aca63fd20ce34da431d7f395cf",
+        "name": "neutral_representation_train_2020_08",
+        "rows": 996,
+        "run_manifest_sha256": "ffdd24d1f40dfb0e45be0422fd293ee5724d74161aca4f6e14f77c6fe5a7d6ff"
+      },
+      {
+        "input_manifest_sha256": "443d2465233ffc8b036629561f72acc9ae89705f369afe8cf5f9f72b238c945a",
+        "name": "neutral_representation_train_2021_02",
+        "rows": 1190,
+        "run_manifest_sha256": "576b355e0203c633108a1647be0da973fd2b93619d2bd9666a46643d3bd5a08e"
+      },
+      {
+        "input_manifest_sha256": "369bf80cae2291112b61d2fb8aa6fe1dd637d71d31e8fce7e90b920cebb5c02d",
+        "name": "neutral_representation_train_2021_08",
+        "rows": 1111,
+        "run_manifest_sha256": "d34bc76e0939bf9e64d2113f12b4850948d834a5834165e77ede23d5e823502d"
+      }
+    ]
+  },
+  "grain": "one_first_unresolved_pullback_anchor_per_run_epoch_market_episode_bound_to_its_entry_path_id",
+  "decision_time_feature_policy": {
+    "current_episode_path_only": true,
+    "path_binding": "group5_path.sequence_id_equals_market_case.entry_path_id",
+    "same_row_snapshot_merge": "longest_monotone_path_prefix_then_latest_last_updated_at",
+    "absolute_long_short_used_as_model_feature": false,
+    "identities_prices_strengths_and_timestamps_used_as_model_features": false,
+    "all_five_prefix_frame_ranges_nonempty": true,
+    "required_path_prefix": [
+      "zone_visible",
+      "departure_confirmed",
+      "first_pullback"
+    ],
+    "anchor_requires_active_path": true,
+    "anchor_excludes_steps": [
+      "location_left",
+      "micro_bos_confirmed",
+      "micro_bos_opposed",
+      "micro_bos_simultaneous",
+      "reacceptance_failed"
+    ],
+    "linked_eye_context": "event.context_id_equals_market_case.entry_location_id",
+    "linked_graph": "relation_descriptor_connected_component_of_depth_one_seeded_by_entry_path_id_or_entry_location_id_within_current_delta",
+    "forbidden_key_markers": [
+      "action",
+      "deadline",
+      "decision",
+      "entry",
+      "invalidation",
+      "mae",
+      "mfe",
+      "outcome",
+      "playbook",
+      "pnl",
+      "profit",
+      "risk",
+      "shadow",
+      "stop",
+      "target"
+    ],
+    "allowed_eye_fields": {
+      "group5_micro_bos_transitions_this_update": [
+        "bos_direction",
+        "context_kind",
+        "expected_direction",
+        "qualified",
+        "relation",
+        "scope"
+      ],
+      "group5_reacceptance_transitions_this_update": [
+        "context_kind",
+        "direction",
+        "lifecycle",
+        "transition_reason"
+      ],
+      "group5_path_steps": [
+        "direction",
+        "kind",
+        "reason",
+        "same_clock_relation"
+      ]
+    },
+    "micro_bos_outcome_policy": "exclude_the_outcome_named_field_even_when_it_is_a_same_clock_reference_alignment_enum",
+    "allowed_graph_descriptor_fields": [
+      "change_kind",
+      "lifecycle",
+      "relation"
+    ],
+    "allowed_graph_endpoint_fields": [
+      "kind",
+      "lifecycle",
+      "role",
+      "structural_scale",
+      "timeframe"
+    ]
+  },
+  "mechanism_templates": {
+    "core_templates": [
+      "pullback_rejection",
+      "pullback_reference_left"
+    ],
+    "audited_but_excluded_from_pair_learning": [
+      "pullback_plain",
+      "pullback_rejection_reference_left"
+    ],
+    "pullback_rejection": {
+      "required_roles": [
+        "zone_visible",
+        "departure_confirmed",
+        "first_pullback",
+        "wick_rejection"
+      ],
+      "forbidden_current_roles": [
+        "reference_left"
+      ]
+    },
+    "pullback_reference_left": {
+      "required_roles": [
+        "zone_visible",
+        "departure_confirmed",
+        "first_pullback",
+        "reference_left"
+      ],
+      "forbidden_current_roles": [
+        "wick_rejection"
+      ]
+    },
+    "relative_direction": "each_directional_fact_is_with_mechanism_against_mechanism_or_unknown_relative_to_entry_path.direction",
+    "higher_timeframe_role": "1H_relation_in_aligned_normal_pullback_material_opposition;unknown_excluded",
+    "local_scale_role": "material_opposition_if_any_15m_5m_1m_opposes_else_aligned_if_at_least_two_align_else_normal_pullback_if_at_least_two_pull_back_else_unknown",
+    "mechanism_key": [
+      "template",
+      "higher_timeframe_role",
+      "local_scale_role"
+    ]
+  },
+  "pair_construction": {
+    "positive": "same_mechanism_key_and_different_episode_and_different_et_date",
+    "hard_negative_template_conflict": "same_window_session_phase_absolute_direction_higher_timeframe_role_local_scale_role_but_pullback_rejection_vs_pullback_reference_left",
+    "hard_negative_higher_timeframe_conflict": "same_window_session_phase_absolute_direction_template_local_scale_role_but_material_opposition_vs_aligned_or_normal_pullback",
+    "hard_negative_local_scale_conflict": "same_window_session_phase_absolute_direction_template_higher_timeframe_role_but_material_opposition_vs_aligned_or_normal_pullback",
+    "negative_sampling": "one_deterministic_hash_min_candidate_per_query_per_available_conflict_type",
+    "positive_sampling": "one_deterministic_hash_min_candidate_per_query",
+    "absolute_direction_is_matching_only_not_model_input": true,
+    "unknown_relation_is_excluded": true
+  },
+  "trajectory_target": {
+    "horizon_completed_real_source_1m_bars": 60,
+    "label_clock": "strictly_after_anchor_source_replay_ordinal_through_anchor_plus_60_inclusive",
+    "same_episode_and_entry_path_only": true,
+    "classes": [
+      "confirmed_continuation",
+      "failed_or_opposed",
+      "returned_to_range_unconfirmed",
+      "continued_unresolved"
+    ],
+    "confirmed_continuation_first_roles": [
+      "micro_bos_confirmed"
+    ],
+    "failed_or_opposed_first_roles": [
+      "location_left",
+      "micro_bos_opposed",
+      "reacceptance_failed"
+    ],
+    "returned_to_range_unconfirmed_requires_roles": [
+      "reference_reclaimed",
+      "reacceptance_held"
+    ],
+    "resolution_precedence": "first_new_confirmed_or_failed_role_in_path_order;return_to_range_only_when_no_resolution_within_horizon",
+    "continued_unresolved": "full_horizon_observed_without_resolution_or_completed_return_to_range",
+    "right_censoring": "unresolved_anchor_plus_60_reaches_next_market_epoch_start_or_run_source_end",
+    "next_lifecycle_role": "auxiliary_diagnostic_only"
+  },
+  "cross_scale_semantics": {
+    "relations": [
+      "aligned",
+      "normal_pullback",
+      "material_opposition",
+      "unknown"
+    ],
+    "aligned": "candidate_positive_relation_between_timeframe_pool_and_fused_pool",
+    "normal_pullback": "distinct_relational_target_not_a_positive_alignment_pair",
+    "material_opposition": "distinct_relational_target_and_candidate_hard_negative",
+    "unknown": "excluded_from_alignment_loss",
+    "force_all_five_timeframes_identical": false
+  },
+  "evaluation": {
+    "folds": "leave_one_train_window_out",
+    "baseline": "laplace_trajectory_prior_by_mechanism_template",
+    "classifier": "bernoulli_naive_bayes_on_decision_time_semantic_tokens",
+    "laplace_alpha": 1.0,
+    "minimum_train_document_frequency": 5,
+    "shuffle": "permute_all_non_template_semantic_token_groups_within_window_template_session_phase",
+    "shuffle_repetitions": 100,
+    "shuffle_seed": 170022,
+    "field_ablation_groups": [
+      "path_roles",
+      "linked_eye",
+      "connected_graph",
+      "scale_relations",
+      "observable_context"
+    ],
+    "blind_review_pairs": 60,
+    "blind_review_positive_pairs": 30,
+    "blind_review_hard_negative_pairs": 30,
+    "blind_review_seed": 170023
+  },
+  "go_no_go_gates": {
+    "feature_eligible_anchor_fraction_min": 0.25,
+    "core_template_anchors_min": 100,
+    "core_template_windows_min": 6,
+    "core_template_each_window_min": 5,
+    "positive_pair_query_coverage_min": 0.75,
+    "positive_pair_query_coverage_each_window_min": 0.75,
+    "hard_negative_query_coverage_min": 0.50,
+    "hard_negative_query_coverage_each_window_min": 0.50,
+    "uncensored_trajectory_fraction_min": 0.95,
+    "trajectory_entropy_bits_min": 1.0,
+    "trajectory_minority_share_min": 0.05,
+    "trajectory_each_class_windows_min": 4,
+    "oof_nll_relative_improvement_over_template_prior_min": 0.02,
+    "oof_balanced_accuracy_lift_over_template_prior_min": 0.02,
+    "oof_improvement_above_shuffle_p95": true,
+    "positive_trajectory_purity_lift_over_template_chance_min": 0.10,
+    "hard_negative_trajectory_disagreement_lift_over_template_chance_min": 0.10,
+    "effective_ablation_groups_min": 2,
+    "ablation_effective_nll_degradation_min": 0.002,
+    "ablation_effective_balanced_accuracy_drop_min": 0.005,
+    "human_blind_review_agreement_min": 0.80,
+    "all_required": true
+  },
+  "decision": "preregister_b2_only_after_all_automated_gates_and_external_blind_review_pass;validation_and_holdout_remain_closed_during_this_audit"
+}

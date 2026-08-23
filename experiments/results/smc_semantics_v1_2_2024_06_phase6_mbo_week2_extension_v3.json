@@ -1,0 +1,1181 @@
+{
+  "active_window": {
+    "end_exclusive": "2024-06-14T21:01:00+00:00",
+    "id": "2024-06-week-2",
+    "start": "2024-06-09T22:00:00+00:00"
+  },
+  "causal_claim": false,
+  "coverage": {
+    "current_week_episode_rows": 2185,
+    "current_week_matched_pair_rows": 86,
+    "displacement_units": {
+      "active_semantic_events": 48,
+      "all_active_clocks_excluded_from_controls": 48,
+      "canonical_clock_units": 48,
+      "first_active_entity_units": 48
+    },
+    "episode_rows": 4390,
+    "eye_replayed_bars_including_warmup": 20460,
+    "feature_rows": 6900,
+    "fvg_pseudo_zone_descriptive_matching": {
+      "canonical_requested": 180,
+      "comparison": "fvg_successful_vs_pseudo_zone_descriptive_sensitivity",
+      "edge_window_eligible": 4,
+      "eligible_controls": 24,
+      "feature_window_eligible": 179,
+      "holm_included": false,
+      "overlap_exclusions": 0,
+      "packed": 4,
+      "packed_coverage": 0.0223463687150838,
+      "phase7_evidence_admission": false
+    },
+    "fvg_variants": {
+      "failed_entity_first_retests": 58,
+      "failed_primary_control_canonical_clock_units": 56,
+      "pooling": "forbidden",
+      "primary_comparison": "successful_retest_vs_failed_retest",
+      "pseudo_zone_canonical_controls": 25,
+      "pseudo_zone_comparison": "descriptive_sensitivity_only_excluded_from_holm_and_phase7",
+      "successful_canonical_clock_units": 180,
+      "successful_entity_first_retests": 187
+    },
+    "matched_pair_rows": 176,
+    "ohlcv_real_source_rows": 6899,
+    "primary_fixed_holm_pair_rows": 171,
+    "primary_matching": {
+      "acceptance_continuation": {
+        "canonical_requested": 146,
+        "edge_window_eligible": 26,
+        "eligible_controls": 70,
+        "feature_window_eligible": 146,
+        "overlap_exclusions": 7,
+        "packed": 19,
+        "packed_coverage": 0.13013698630136986
+      },
+      "displacement_impact": {
+        "canonical_requested": 48,
+        "edge_window_eligible": 39,
+        "eligible_controls": 1316,
+        "feature_window_eligible": 48,
+        "overlap_exclusions": 1,
+        "packed": 38,
+        "packed_coverage": 0.7916666666666666
+      },
+      "fvg_retest_response": {
+        "canonical_requested": 180,
+        "edge_window_eligible": 30,
+        "eligible_controls": 54,
+        "feature_window_eligible": 179,
+        "overlap_exclusions": 16,
+        "packed": 14,
+        "packed_coverage": 0.0782122905027933
+      },
+      "mss_flow_shift": {
+        "canonical_requested": 50,
+        "edge_window_eligible": 0,
+        "eligible_controls": 66,
+        "feature_window_eligible": 50,
+        "overlap_exclusions": 0,
+        "packed": 0,
+        "packed_coverage": 0.0
+      },
+      "sweep_rejection": {
+        "canonical_requested": 71,
+        "edge_window_eligible": 16,
+        "eligible_controls": 146,
+        "feature_window_eligible": 70,
+        "overlap_exclusions": 5,
+        "packed": 11,
+        "packed_coverage": 0.15714285714285714
+      }
+    },
+    "prior_week1_episode_rows": 2205,
+    "prior_week1_matched_pair_rows": 90,
+    "pseudo_zone_descriptive_pair_rows": 5,
+    "reader_active_census": {
+      "completed": 6900,
+      "contract_changes": 0,
+      "contracts": [
+        [
+          "NQM4",
+          13743
+        ]
+      ],
+      "data_gap_resets": 0,
+      "first": "2024-06-09T22:01:00+00:00",
+      "last": "2024-06-14T21:00:00+00:00",
+      "real": 6899,
+      "synthetic": 1,
+      "synthetic_decision_clocks": [
+        "2024-06-10T04:14:00+00:00"
+      ]
+    },
+    "registered_synthetic_mbo_response_rows": 1,
+    "semantic_event_ids_seen": 271933,
+    "strict_prior_context_censor_reasons": {
+      "strict_prior_real_completed_m1_context_missing": 15
+    },
+    "synthetic_semantic_exception_gate": {
+      "allowed": [
+        {
+          "canonical_real_M5_detector_candle_id_union": [
+            "34689257183bb910a87558ee220bc887b7a89ce3db12ac226d1a508c4c142385"
+          ],
+          "clock_scope": "hash_bound_prior_week_warmup",
+          "context_event_ids": [
+            "11632e6458a7d9b24023e95b"
+          ],
+          "dag_edge_count": 2,
+          "dag_node_count": 3,
+          "dag_sha256": "eb0f9037b4ef1a2d8838a23560487e41ad75eda4c34788ad2c209994ae4496be",
+          "disposition": "allowed_but_excluded_from_all_analysis_samples",
+          "event_id": "c98a4dddf1bb74a2ae6c4275",
+          "kind": "displacement_observed",
+          "known_at": "2024-06-07T03:10:00+00:00",
+          "last_real_source_known_at": "2024-06-07T03:05:00+00:00",
+          "lifecycle": "censored",
+          "source_event_ids": [
+            "72507611bfe60adf194537a4"
+          ],
+          "synthetic_context_clocks": [
+            "2024-06-07T03:10:00+00:00"
+          ],
+          "synthetic_context_event_ids": [
+            "11632e6458a7d9b24023e95b"
+          ],
+          "synthetic_context_root_count": 1,
+          "synthetic_context_roots": [
+            {
+              "detector_candle_id": "ffe34c82d7b5997b702bfb002ad488f12d2fb2793b309ed5a27b30b83e35a94a",
+              "event_id": "11632e6458a7d9b24023e95b",
+              "known_at": "2024-06-07T03:10:00+00:00",
+              "source_data_ids": [
+                "52055b3e12d8a1b78e83c6c3122318cfce23a747125a8e440ba922db72884a4c"
+              ]
+            }
+          ],
+          "terminal_detector_candle_id_count": 1,
+          "terminal_detector_candle_ids_producer_order": [
+            "34689257183bb910a87558ee220bc887b7a89ce3db12ac226d1a508c4c142385"
+          ],
+          "terminal_reason": "synthetic_interruption",
+          "timeframe": "5m"
+        },
+        {
+          "canonical_real_M5_detector_candle_id_union": [
+            "db82804953a1b2f52024b823b52072d7c15609741ef03eab65d691eacc0db6f0"
+          ],
+          "clock_scope": "active_registered_window",
+          "context_event_ids": [
+            "873e9ef65db8c034f6162ea3"
+          ],
+          "dag_edge_count": 2,
+          "dag_node_count": 3,
+          "dag_sha256": "81c76b1b741d1ec2ac95278151c5509f8a64b7160424aef21b04c84d3795c179",
+          "disposition": "allowed_but_excluded_from_all_analysis_samples",
+          "event_id": "8eefe3c21ac611092c75e3f0",
+          "kind": "displacement_observed",
+          "known_at": "2024-06-10T04:15:00+00:00",
+          "last_real_source_known_at": "2024-06-10T04:10:00+00:00",
+          "lifecycle": "censored",
+          "source_event_ids": [
+            "d07dd4e0a5fb051ca9f20ed4"
+          ],
+          "synthetic_context_clocks": [
+            "2024-06-10T04:14:00+00:00"
+          ],
+          "synthetic_context_event_ids": [
+            "873e9ef65db8c034f6162ea3"
+          ],
+          "synthetic_context_root_count": 1,
+          "synthetic_context_roots": [
+            {
+              "detector_candle_id": "e470f6478a04f66fe382539369f73ba7330e6eed7921b4a6a15ca8b189747e5d",
+              "event_id": "873e9ef65db8c034f6162ea3",
+              "known_at": "2024-06-10T04:14:00+00:00",
+              "source_data_ids": [
+                "b77955956f60d6d39d45a3d2d47af7fe52cf3877a722ea423d5f64d4028dd827"
+              ]
+            }
+          ],
+          "terminal_detector_candle_id_count": 1,
+          "terminal_detector_candle_ids_producer_order": [
+            "db82804953a1b2f52024b823b52072d7c15609741ef03eab65d691eacc0db6f0"
+          ],
+          "terminal_reason": "synthetic_interruption",
+          "timeframe": "5m"
+        }
+      ],
+      "allowed_by_clock_scope": {
+        "active_registered_window": 1,
+        "hash_bound_prior_week_warmup": 1
+      },
+      "allowed_count": 2,
+      "blocked_lineage_event_count": 4,
+      "blocked_lineage_event_ids": [
+        "11632e6458a7d9b24023e95b",
+        "873e9ef65db8c034f6162ea3",
+        "8eefe3c21ac611092c75e3f0",
+        "c98a4dddf1bb74a2ae6c4275"
+      ],
+      "descendant_sample_exclusion_count": 0,
+      "extension_warmup_policy": {
+        "active_reader_census_scope": "active_extension_window_only",
+        "blocked_lineage_import": "prior_allowed_terminal_and_synthetic_context_root_ids",
+        "prior_clock_registration": "exact_prior_reader_synthetic_clock_with_allowed_audit",
+        "replay_verification": "current_event_and_DAG_legacy_projection_must_equal_hash_bound_prior_audit",
+        "source": "hash_bound_week1_gate_result_only",
+        "unregistered_or_missing_prior_exception": "fail_closed"
+      },
+      "policy": {
+        "analysis_policy": "always_exclude_allowed_terminal_from_treatment_control_and_fvg_creation",
+        "audit_policy": "record_allowed_and_rejected_ids_plus_all_synthetic_context_roots_and_recursive_DAG_sha256_and_node_count",
+        "default_policy": "forbid_semantic_atomic_on_synthetic_m1_clock",
+        "descendant_sample_exclusion": {
+          "apply_before": [
+            "fvg_creation",
+            "treatment",
+            "raw_control",
+            "M5_candidate_base"
+          ],
+          "blocked_identities": "allowed_terminal_event_ids_plus_their_synthetic_context_root_ids",
+          "disposition": "exclude_with_reason_and_blocked_event_ids",
+          "formation_clock_lineage": "source_only_M5_ancestry_unchanged",
+          "lineage_scan": "recursive_explicit_semantic_atomic_source_plus_context;non_atomic_origins_terminal"
+        },
+        "provenance_policy": {
+          "constituent_clock_contract": "exactly_five_unique_contiguous_M1_roots_in_the_terminal_M5_interval",
+          "source_event_ids": "recursive_normalized_BAR_roots_all_real_completed",
+          "synthetic_m1_roots": "all_exact_clock_only_M1_BAR_roots_in_open_closed_terminal_M5_interval",
+          "synthetic_root_namespace": "context_event_ids_only",
+          "time_order": "event_time_lte_last_real_source_known_at_lt_terminal_known_at;context_root_known_at_lte_terminal_known_at"
+        },
+        "registered_allowlist": [
+          {
+            "kind": "displacement_observed",
+            "lifecycle": "censored",
+            "terminal_reason": "synthetic_interruption",
+            "timeframe": "5m"
+          }
+        ],
+        "registered_clock_policy": "context_root_clocks_must_exactly_equal_all_registered_synthetic_clocks_inside_the_open_closed_terminal_M5_interval",
+        "source_data_policy": {
+          "missing_extra_or_duplicate_terminal_detector_ids": "fail_closed",
+          "synthetic_context_identifiers": "every_context_root_source_data_ids_and_detector_candle_id_must_be_nonempty_and_disjoint_from_terminal",
+          "terminal_source_data_ids": "producer_order_unique_detector_candle_ids_set_equal_canonical_sorted_recursive_real_M5_detector_union"
+        }
+      },
+      "prior_warmup_registration": {
+        "expected_audit_count": 1,
+        "policy": {
+          "active_reader_census_scope": "active_extension_window_only",
+          "blocked_lineage_import": "prior_allowed_terminal_and_synthetic_context_root_ids",
+          "prior_clock_registration": "exact_prior_reader_synthetic_clock_with_allowed_audit",
+          "replay_verification": "current_event_and_DAG_legacy_projection_must_equal_hash_bound_prior_audit",
+          "source": "hash_bound_week1_gate_result_only",
+          "unregistered_or_missing_prior_exception": "fail_closed"
+        },
+        "prior_result_identity": "64ecd3067dc9bd41abbdbe01296af1e1ded8b15e86b020ad66ac02ef74b1fb1d",
+        "registered_clocks": [
+          "2024-06-07T03:10:00+00:00"
+        ],
+        "replayed_verified_count": 1
+      },
+      "rejected": [],
+      "rejected_count": 0
+    },
+    "window_censor_reasons": {
+      "book_change_invalid_in_required_window": 7,
+      "missing_completed_feature_clock": 9
+    }
+  },
+  "displacement_continuous_monotonicity": {
+    "combined": null,
+    "combined_unavailable_reason": "registered compact week-1 ledgers do not bind every displacement score/response observation",
+    "current_week2": {
+      "n": 48,
+      "spearman_rho": 0.02405916546404182,
+      "threshold_selected": false
+    },
+    "holm_included": false,
+    "phase7_evidence_admission": false,
+    "policy": "report_hash_bound_prior_week1_and_current_week2_separately;combined_null_because_compact_ledgers_do_not_bind_all_episode_responses;excluded_from_holm_and_phase7",
+    "prior_week1": {
+      "n": 53,
+      "spearman_rho": 0.02496079694770474,
+      "threshold_selected": false
+    },
+    "threshold_selected": false
+  },
+  "elapsed_seconds": 1952.5909048339818,
+  "engineering_status": "pass",
+  "experiment_id": "smc_semantics_v1_2_2024_06_phase6_mbo_week2_extension_v3",
+  "extension_required": true,
+  "feature_artifact": "data/processed/mbo_mechanism_phase6_20240609_20240614_v1.parquet",
+  "feature_artifact_sha256": "31a9b9b7d22d76695af2da648bfc672cf7ae7c5206533df914e3dd3baf85fe43",
+  "feature_manifest": "data/processed/mbo_mechanism_phase6_20240609_20240614_v1.parquet.manifest.json",
+  "feature_protocol_sha256": "aa1280350656d9640822d2925e71240e1f37544e29dc58acb727c067683585a7",
+  "further_extension_authorized": false,
+  "fvg_pseudo_zone_descriptive_sensitivity": {
+    "causal_claim": false,
+    "comparison": "fvg_successful_vs_pseudo_zone_descriptive_sensitivity",
+    "control_mean": 0.01707346170910205,
+    "descriptive_bootstrap_ci_high": 0.06586995169279206,
+    "descriptive_bootstrap_ci_low": -0.1814238743449298,
+    "holm_included": false,
+    "hypothesis": "fvg_retest_response",
+    "mean_effect": -0.05419648760907079,
+    "paired_n": 5,
+    "phase7_evidence_admission": false,
+    "primary_metric": "post_directional_aggressor_imbalance",
+    "support_verdict": "not_applicable_descriptive_only",
+    "treatment_mean": -0.037123025899968735
+  },
+  "holm": {
+    "adjusted_p_values": {
+      "acceptance_continuation": 7.275957614183426e-10,
+      "displacement_impact": 2.4456626290086008e-06,
+      "fvg_retest_response": 1.0,
+      "mss_flow_shift": 1.0,
+      "sweep_rejection": 1.0
+    },
+    "family_order": [
+      "sweep_rejection",
+      "acceptance_continuation",
+      "displacement_impact",
+      "mss_flow_shift",
+      "fvg_retest_response"
+    ],
+    "missing_as_one": [
+      "sweep_rejection",
+      "mss_flow_shift"
+    ],
+    "raw_p_values": {
+      "acceptance_continuation": 1.4551915228366852e-10,
+      "displacement_impact": 6.114156572521502e-07,
+      "fvg_retest_response": 0.720100131817162,
+      "mss_flow_shift": 1.0,
+      "sweep_rejection": 1.0
+    },
+    "rejected": {
+      "acceptance_continuation": true,
+      "displacement_impact": true,
+      "fvg_retest_response": false,
+      "mss_flow_shift": false,
+      "sweep_rejection": false
+    }
+  },
+  "ledgers": {
+    "episodes": {
+      "path": "experiments/results/smc_semantics_v1_2_2024_06_phase6_mbo_week2_extension_v3.episodes.jsonl",
+      "rows": 4390,
+      "sha256": "75880c29cfcf7d8452d314a1cf615dd3b278333792edb2caca1d3c23276b81d3"
+    },
+    "matched_pairs": {
+      "path": "experiments/results/smc_semantics_v1_2_2024_06_phase6_mbo_week2_extension_v3.matched_pairs.jsonl",
+      "rows": 176,
+      "sha256": "f312e21f33df2bf1f72eac6d06ae33468ff07e32e7376a97ded257905969e73a"
+    },
+    "unmatched": {
+      "path": "experiments/results/smc_semantics_v1_2_2024_06_phase6_mbo_week2_extension_v3.unmatched.jsonl",
+      "rows": 2815,
+      "sha256": "39d1e00389750ab84c40aec49afc7a612cce5fc8b97a8f41ad54193ae6175742"
+    }
+  },
+  "limitations": [
+    "development association only; no causal claim",
+    "post-event windows are retrospective mechanism validation and are not live evidence",
+    "registered OHLCV synthetic no-trade decision clocks have real MBO/BBO rows with zero trade/fill flow and may appear in retrospective MBO response windows; they cannot become M5 sources/control bases or emit any sample-eligible semantic event",
+    "the sole registered synthetic-context semantic exception is a displacement CENSORED/synthetic_interruption terminal; every exact clock-only M1 root in its M5 constituent interval is context-only, the terminal may settle on the later M5 boundary, and it plus all descendants are excluded from every analysis sample",
+    "FVG pseudo-zone results are descriptive sensitivity only and are excluded from the five-test Holm family and Phase-7 evidence admission",
+    "primary inference uses deterministic earliest-first hypothesis-local packing; formation/post MBO clocks are not reused within a hypothesis and the packing is not maximum-cardinality",
+    "displayed-defense net-add is an all-book A/C/F proxy, not same-level queue replenishment or absorption",
+    "unsupported and underpowered mechanisms are excluded from Phase 7",
+    "in an extension result displacement score monotonicity is reported separately for hash-bound week 1 and current week 2; no combined value is reconstructed from compact ledgers"
+  ],
+  "manifest_path": "experiments/manifests/smc_semantics_v1_2_2024_06_phase6_mbo_week2_extension_v3.yaml",
+  "manifest_sha256": "99901b1893cdea71615239fd9c536a318ec3c8088f0c491e48cb710b9d0eeafc",
+  "mechanisms": {
+    "acceptance_continuation": {
+      "causal_claim": false,
+      "holm_adjusted_p_value": 7.275957614183426e-10,
+      "holm_rejected": true,
+      "primary_ci_expected_direction": true,
+      "primary_effect": {
+        "ci_high": 0.18542678642102903,
+        "ci_low": 0.11006149554438023,
+        "control_mean": -0.03792088247593471,
+        "exact_sign_p_value": 1.4551915228366852e-10,
+        "mean_effect": 0.1452195654215035,
+        "negative": 1,
+        "paired_n": 39,
+        "positive": 38,
+        "ties": 0,
+        "treatment_mean": 0.1072986829455688
+      },
+      "primary_matched_n": 39,
+      "primary_metric": "formation_directional_aggressor_imbalance",
+      "secondary_effects": {
+        "formation_directional_best_level_ofi_per_contract": {
+          "ci_high": 0.018006485580204862,
+          "ci_low": 0.006746817696846424,
+          "control_mean": 0.000692123377053289,
+          "exact_sign_p_value": 1.429926123819314e-05,
+          "mean_effect": 0.012312325640684355,
+          "negative": 6,
+          "paired_n": 39,
+          "positive": 33,
+          "ties": 0,
+          "treatment_mean": 0.013004449017737642
+        },
+        "formation_directional_mid_impact_ticks_per_contract": {
+          "ci_high": 0.0441899024675987,
+          "ci_low": 0.027954634807254932,
+          "control_mean": -0.003973104868688343,
+          "exact_sign_p_value": 3.608874976634979e-08,
+          "mean_effect": 0.036113882877731075,
+          "negative": 3,
+          "paired_n": 39,
+          "positive": 36,
+          "ties": 0,
+          "treatment_mean": 0.032140778009042734
+        }
+      },
+      "secondary_expected_direction": true,
+      "stability_complete": true,
+      "status": "supported",
+      "strata": {
+        "session_phase": {
+          "afternoon_delivery": {
+            "ci_high": 0.06555460115875693,
+            "ci_low": 0.06555460115875693,
+            "control_mean": -0.0464326160815402,
+            "exact_sign_p_value": 1.0,
+            "mean_effect": 0.06555460115875693,
+            "negative": 0,
+            "paired_n": 1,
+            "positive": 1,
+            "stability_eligible": false,
+            "ties": 0,
+            "treatment_mean": 0.019121985077216727
+          },
+          "closing_rotation": {
+            "ci_high": 0.10490292180433025,
+            "ci_low": 0.10490292180433025,
+            "control_mean": -0.07203907203907203,
+            "exact_sign_p_value": 1.0,
+            "mean_effect": 0.10490292180433025,
+            "negative": 0,
+            "paired_n": 1,
+            "positive": 1,
+            "stability_eligible": false,
+            "ties": 0,
+            "treatment_mean": 0.03286384976525822
+          },
+          "midday_balance": {
+            "ci_high": 0.09503536841724775,
+            "ci_low": 0.02051189454673475,
+            "control_mean": -0.01831639011593167,
+            "exact_sign_p_value": 0.125,
+            "mean_effect": 0.05428213801169587,
+            "negative": 0,
+            "paired_n": 4,
+            "positive": 4,
+            "stability_eligible": false,
+            "ties": 0,
+            "treatment_mean": 0.035965747895764205
+          },
+          "morning_delivery": {
+            "ci_high": 0.10922491077988546,
+            "ci_low": 0.09215232930619283,
+            "control_mean": -0.024108697451542052,
+            "exact_sign_p_value": 0.5,
+            "mean_effect": 0.10068862004303913,
+            "negative": 0,
+            "paired_n": 2,
+            "positive": 2,
+            "stability_eligible": false,
+            "ties": 0,
+            "treatment_mean": 0.0765799225914971
+          },
+          "overnight_delivery": {
+            "ci_high": 0.21045770875166875,
+            "ci_low": 0.1208075332278298,
+            "control_mean": -0.03996644429271067,
+            "exact_sign_p_value": 2.9802322387695312e-08,
+            "mean_effect": 0.16369676568847377,
+            "negative": 1,
+            "paired_n": 31,
+            "positive": 30,
+            "stability_eligible": true,
+            "ties": 0,
+            "treatment_mean": 0.12373032139576312
+          }
+        },
+        "study_week_x_half_week": {
+          "week_1:first_half": {
+            "ci_high": 0.1999612398924099,
+            "ci_low": 0.06821139799908647,
+            "control_mean": -0.043890182669692315,
+            "exact_sign_p_value": 0.00390625,
+            "mean_effect": 0.1246976515146762,
+            "negative": 0,
+            "paired_n": 9,
+            "positive": 9,
+            "stability_eligible": true,
+            "ties": 0,
+            "treatment_mean": 0.08080746884498387
+          },
+          "week_1:second_half": {
+            "ci_high": 0.2278249681157416,
+            "ci_low": 0.07337361271564137,
+            "control_mean": -0.019373933056155954,
+            "exact_sign_p_value": 0.01171875,
+            "mean_effect": 0.1489485705395191,
+            "negative": 1,
+            "paired_n": 11,
+            "positive": 10,
+            "stability_eligible": true,
+            "ties": 0,
+            "treatment_mean": 0.12957463748336315
+          },
+          "week_2:first_half": {
+            "ci_high": 0.32209713842554344,
+            "ci_low": 0.09852274125527095,
+            "control_mean": -0.08004075637501751,
+            "exact_sign_p_value": 0.0078125,
+            "mean_effect": 0.20154335427037753,
+            "negative": 0,
+            "paired_n": 8,
+            "positive": 8,
+            "stability_eligible": true,
+            "ties": 0,
+            "treatment_mean": 0.12150259789536
+          },
+          "week_2:second_half": {
+            "ci_high": 0.14864846230004558,
+            "ci_low": 0.09027870002497242,
+            "control_mean": -0.020951223446942502,
+            "exact_sign_p_value": 0.0009765625,
+            "mean_effect": 0.11731846160989283,
+            "negative": 0,
+            "paired_n": 11,
+            "positive": 11,
+            "stability_eligible": true,
+            "ties": 0,
+            "treatment_mean": 0.09636723816295033
+          }
+        }
+      },
+      "systematic_sign_reversal": false
+    },
+    "displacement_impact": {
+      "causal_claim": false,
+      "holm_adjusted_p_value": 2.4456626290086008e-06,
+      "holm_rejected": true,
+      "primary_ci_expected_direction": true,
+      "primary_effect": {
+        "ci_high": 0.02526128088955224,
+        "ci_low": 0.014419361288459321,
+        "control_mean": 0.026072290608635654,
+        "exact_sign_p_value": 6.114156572521502e-07,
+        "mean_effect": 0.01964935754102295,
+        "negative": 16,
+        "paired_n": 75,
+        "positive": 59,
+        "ties": 0,
+        "treatment_mean": 0.0457216481496586
+      },
+      "primary_matched_n": 75,
+      "primary_metric": "formation_directional_mid_impact_ticks_per_contract",
+      "secondary_effects": {
+        "formation_directional_aggressor_imbalance": {
+          "ci_high": 0.09749527062377038,
+          "ci_low": 0.03968248442404399,
+          "control_mean": 0.07299777545981993,
+          "exact_sign_p_value": 0.0004496479716438124,
+          "mean_effect": 0.0685779373652225,
+          "negative": 22,
+          "paired_n": 75,
+          "positive": 53,
+          "ties": 0,
+          "treatment_mean": 0.14157571282504247
+        },
+        "formation_directional_best_level_ofi_per_contract": {
+          "ci_high": 0.022606139255153847,
+          "ci_low": 0.0009255341017108373,
+          "control_mean": 0.013852783343456425,
+          "exact_sign_p_value": 0.020298406990107445,
+          "mean_effect": 0.011440947113197715,
+          "negative": 27,
+          "paired_n": 75,
+          "positive": 48,
+          "ties": 0,
+          "treatment_mean": 0.025293730456654142
+        }
+      },
+      "secondary_expected_direction": true,
+      "stability_complete": true,
+      "status": "supported",
+      "strata": {
+        "session_phase": {
+          "afternoon_delivery": {
+            "ci_high": 0.0037631988398081095,
+            "ci_low": -0.0017340862454977633,
+            "control_mean": 0.01102435590026433,
+            "exact_sign_p_value": 1.0,
+            "mean_effect": 0.0005943569023744611,
+            "negative": 5,
+            "paired_n": 10,
+            "positive": 5,
+            "stability_eligible": true,
+            "ties": 0,
+            "treatment_mean": 0.01161871280263879
+          },
+          "closing_rotation": {
+            "ci_high": 0.023819539117258016,
+            "ci_low": -0.0031114246757776576,
+            "control_mean": 0.025441921731086354,
+            "exact_sign_p_value": 1.0,
+            "mean_effect": 0.01035405722074018,
+            "negative": 1,
+            "paired_n": 2,
+            "positive": 1,
+            "stability_eligible": false,
+            "ties": 0,
+            "treatment_mean": 0.03579597895182653
+          },
+          "morning_delivery": {
+            "ci_high": 0.00984855205717037,
+            "ci_low": 0.0022572451030711586,
+            "control_mean": 0.005219664390294893,
+            "exact_sign_p_value": 0.21875,
+            "mean_effect": 0.006083281567131918,
+            "negative": 1,
+            "paired_n": 6,
+            "positive": 5,
+            "stability_eligible": true,
+            "ties": 0,
+            "treatment_mean": 0.011302945957426811
+          },
+          "opening_expansion": {
+            "ci_high": 0.004157407223230047,
+            "ci_low": -0.005072265257175719,
+            "control_mean": 0.007477271917138934,
+            "exact_sign_p_value": 1.0,
+            "mean_effect": -0.000457429016972836,
+            "negative": 1,
+            "paired_n": 2,
+            "positive": 1,
+            "stability_eligible": false,
+            "ties": 0,
+            "treatment_mean": 0.007019842900166098
+          },
+          "overnight_delivery": {
+            "ci_high": 0.03363665266159033,
+            "ci_low": 0.02018856120038622,
+            "control_mean": 0.03252780074219498,
+            "exact_sign_p_value": 6.973810151578164e-08,
+            "mean_effect": 0.026807368707786043,
+            "negative": 7,
+            "paired_n": 52,
+            "positive": 45,
+            "stability_eligible": true,
+            "ties": 0,
+            "treatment_mean": 0.05933516944998103
+          },
+          "pre_open": {
+            "ci_high": 0.01751561561576885,
+            "ci_low": -0.0017154773247747522,
+            "control_mean": 0.0188587414708906,
+            "exact_sign_p_value": 1.0,
+            "mean_effect": 0.0058273759792587575,
+            "negative": 1,
+            "paired_n": 3,
+            "positive": 2,
+            "stability_eligible": false,
+            "ties": 0,
+            "treatment_mean": 0.02468611745014936
+          }
+        },
+        "study_week_x_half_week": {
+          "week_1:first_half": {
+            "ci_high": 0.027478758597352014,
+            "ci_low": 0.008895998544234738,
+            "control_mean": 0.030469916164607445,
+            "exact_sign_p_value": 0.04138946533203125,
+            "mean_effect": 0.018210504902611318,
+            "negative": 5,
+            "paired_n": 20,
+            "positive": 15,
+            "stability_eligible": true,
+            "ties": 0,
+            "treatment_mean": 0.04868042106721877
+          },
+          "week_1:second_half": {
+            "ci_high": 0.024795651372252193,
+            "ci_low": 0.008591602771614734,
+            "control_mean": 0.022123898956748565,
+            "exact_sign_p_value": 0.049041748046875,
+            "mean_effect": 0.01670935764087578,
+            "negative": 4,
+            "paired_n": 17,
+            "positive": 13,
+            "stability_eligible": true,
+            "ties": 0,
+            "treatment_mean": 0.03883325659762435
+          },
+          "week_2:first_half": {
+            "ci_high": 0.02933328730810662,
+            "ci_low": 0.005611438928803368,
+            "control_mean": 0.026254577602863132,
+            "exact_sign_p_value": 0.049041748046875,
+            "mean_effect": 0.016523575279688833,
+            "negative": 4,
+            "paired_n": 17,
+            "positive": 13,
+            "stability_eligible": true,
+            "ties": 0,
+            "treatment_mean": 0.04277815288255196
+          },
+          "week_2:second_half": {
+            "ci_high": 0.038324302413030885,
+            "ci_low": 0.014755785407284864,
+            "control_mean": 0.02493282718295841,
+            "exact_sign_p_value": 0.0014896392822265625,
+            "mean_effect": 0.025930088470233165,
+            "negative": 3,
+            "paired_n": 21,
+            "positive": 18,
+            "stability_eligible": true,
+            "ties": 0,
+            "treatment_mean": 0.05086291565319158
+          }
+        }
+      },
+      "systematic_sign_reversal": false
+    },
+    "fvg_retest_response": {
+      "causal_claim": false,
+      "holm_adjusted_p_value": 1.0,
+      "holm_rejected": false,
+      "primary_ci_expected_direction": false,
+      "primary_effect": {
+        "ci_high": 0.06337620855916289,
+        "ci_low": -0.06339271840739857,
+        "control_mean": -0.011769227221566168,
+        "exact_sign_p_value": 0.720100131817162,
+        "mean_effect": -0.000115887801402358,
+        "negative": 14,
+        "paired_n": 31,
+        "positive": 17,
+        "ties": 0,
+        "treatment_mean": -0.011885115022968535
+      },
+      "primary_matched_n": 31,
+      "primary_metric": "post_directional_aggressor_imbalance",
+      "secondary_effects": {
+        "post_directional_best_level_ofi_per_contract": {
+          "ci_high": 0.014974654036529336,
+          "ci_low": -0.023456687752021407,
+          "control_mean": 0.0009802812480170038,
+          "exact_sign_p_value": 1.0,
+          "mean_effect": -0.00323398076900333,
+          "negative": 15,
+          "paired_n": 31,
+          "positive": 16,
+          "ties": 0,
+          "treatment_mean": -0.0022536995209863266
+        },
+        "post_displayed_defense_net_add_per_contract": {
+          "ci_high": 0.13945043050789394,
+          "ci_low": -0.20047102849695453,
+          "control_mean": -0.5192999496794924,
+          "exact_sign_p_value": 0.47312965989112854,
+          "mean_effect": -0.029237834418026874,
+          "negative": 13,
+          "paired_n": 31,
+          "positive": 18,
+          "ties": 0,
+          "treatment_mean": -0.5485377840975194
+        }
+      },
+      "secondary_expected_direction": false,
+      "stability_complete": true,
+      "status": "unsupported",
+      "strata": {
+        "session_phase": {
+          "afternoon_delivery": {
+            "ci_high": 0.07352430156555953,
+            "ci_low": 0.0486943751327143,
+            "control_mean": -0.03427659737263952,
+            "exact_sign_p_value": 0.5,
+            "mean_effect": 0.06110933834913691,
+            "negative": 0,
+            "paired_n": 2,
+            "positive": 2,
+            "stability_eligible": false,
+            "ties": 0,
+            "treatment_mean": 0.026832740976497394
+          },
+          "midday_balance": {
+            "ci_high": 0.021921608901620898,
+            "ci_low": 0.021921608901620898,
+            "control_mean": -0.08647955549223536,
+            "exact_sign_p_value": 1.0,
+            "mean_effect": 0.021921608901620898,
+            "negative": 0,
+            "paired_n": 1,
+            "positive": 1,
+            "stability_eligible": false,
+            "ties": 0,
+            "treatment_mean": -0.06455794659061447
+          },
+          "morning_delivery": {
+            "ci_high": 0.05813281253756509,
+            "ci_low": -0.07027954487154704,
+            "control_mean": -0.006145580000149124,
+            "exact_sign_p_value": 1.0,
+            "mean_effect": -0.003227603309278952,
+            "negative": 1,
+            "paired_n": 3,
+            "positive": 2,
+            "stability_eligible": false,
+            "ties": 0,
+            "treatment_mean": -0.009373183309428074
+          },
+          "overnight_delivery": {
+            "ci_high": 0.0722325154701,
+            "ci_low": -0.08093530569262057,
+            "control_mean": -0.007655062145223582,
+            "exact_sign_p_value": 1.0,
+            "mean_effect": -0.005521999900621244,
+            "negative": 13,
+            "paired_n": 25,
+            "positive": 12,
+            "stability_eligible": true,
+            "ties": 0,
+            "treatment_mean": -0.01317706204584483
+          }
+        },
+        "study_week_x_half_week": {
+          "week_1:first_half": {
+            "ci_high": 0.10529387346850766,
+            "ci_low": -0.09425505983841405,
+            "control_mean": -0.018581971357740118,
+            "exact_sign_p_value": 1.0,
+            "mean_effect": 5.0123270768682846e-05,
+            "negative": 4,
+            "paired_n": 9,
+            "positive": 5,
+            "stability_eligible": true,
+            "ties": 0,
+            "treatment_mean": -0.018531848086971434
+          },
+          "week_1:second_half": {
+            "ci_high": 0.009099236248614558,
+            "ci_low": -0.21516808878495186,
+            "control_mean": 0.050007717730487476,
+            "exact_sign_p_value": 1.0,
+            "mean_effect": -0.09647507854560003,
+            "negative": 4,
+            "paired_n": 8,
+            "positive": 4,
+            "stability_eligible": true,
+            "ties": 0,
+            "treatment_mean": -0.046467360815112546
+          },
+          "week_2:first_half": {
+            "ci_high": 0.09226230731907464,
+            "ci_low": -0.04034832101042764,
+            "control_mean": -0.046720524153146765,
+            "exact_sign_p_value": 1.0,
+            "mean_effect": 0.01798726911211039,
+            "negative": 3,
+            "paired_n": 6,
+            "positive": 3,
+            "stability_eligible": true,
+            "ties": 0,
+            "treatment_mean": -0.028733255041036382
+          },
+          "week_2:second_half": {
+            "ci_high": 0.2435136390640839,
+            "ci_low": -0.07254418764985432,
+            "control_mean": -0.039668362321738676,
+            "exact_sign_p_value": 0.7265625,
+            "mean_effect": 0.08247917280146831,
+            "negative": 3,
+            "paired_n": 8,
+            "positive": 5,
+            "stability_eligible": true,
+            "ties": 0,
+            "treatment_mean": 0.04281081047972962
+          }
+        }
+      },
+      "systematic_sign_reversal": true
+    },
+    "mss_flow_shift": {
+      "causal_claim": false,
+      "holm_adjusted_p_value": 1.0,
+      "holm_rejected": false,
+      "primary_ci_expected_direction": false,
+      "primary_effect": {
+        "ci_high": 0.026117662738349007,
+        "ci_low": -0.014496471447574882,
+        "control_mean": -0.02436843742816614,
+        "exact_sign_p_value": 1.0,
+        "mean_effect": 0.005810595645387062,
+        "negative": 1,
+        "paired_n": 2,
+        "positive": 1,
+        "ties": 0,
+        "treatment_mean": -0.01855784178277908
+      },
+      "primary_matched_n": 2,
+      "primary_metric": "response_directional_ofi_shift",
+      "secondary_effects": {
+        "post_directional_aggressor_imbalance": {
+          "ci_high": 0.3131883614823342,
+          "ci_low": 0.20982631528994905,
+          "control_mean": -0.09215361598907723,
+          "exact_sign_p_value": 0.5,
+          "mean_effect": 0.2615073383861416,
+          "negative": 0,
+          "paired_n": 2,
+          "positive": 2,
+          "ties": 0,
+          "treatment_mean": 0.1693537223970644
+        },
+        "post_directional_best_level_ofi_per_contract": {
+          "ci_high": 0.04879160146530688,
+          "ci_low": -0.004754974848935429,
+          "control_mean": -0.023744680232980375,
+          "exact_sign_p_value": 1.0,
+          "mean_effect": 0.022018313308185725,
+          "negative": 1,
+          "paired_n": 2,
+          "positive": 1,
+          "ties": 0,
+          "treatment_mean": -0.0017263669247946506
+        }
+      },
+      "secondary_expected_direction": true,
+      "stability_complete": false,
+      "status": "underpowered",
+      "strata": {
+        "session_phase": {
+          "overnight_delivery": {
+            "ci_high": 0.026117662738349007,
+            "ci_low": -0.014496471447574882,
+            "control_mean": -0.02436843742816614,
+            "exact_sign_p_value": 1.0,
+            "mean_effect": 0.005810595645387062,
+            "negative": 1,
+            "paired_n": 2,
+            "positive": 1,
+            "stability_eligible": false,
+            "ties": 0,
+            "treatment_mean": -0.01855784178277908
+          }
+        },
+        "study_week_x_half_week": {
+          "week_1:first_half": {
+            "ci_high": -0.014496471447574882,
+            "ci_low": -0.014496471447574882,
+            "control_mean": -0.014130869899923017,
+            "exact_sign_p_value": 1.0,
+            "mean_effect": -0.014496471447574882,
+            "negative": 1,
+            "paired_n": 1,
+            "positive": 0,
+            "stability_eligible": false,
+            "ties": 0,
+            "treatment_mean": -0.0286273413474979
+          },
+          "week_1:second_half": {
+            "ci_high": 0.026117662738349007,
+            "ci_low": 0.026117662738349007,
+            "control_mean": -0.03460600495640927,
+            "exact_sign_p_value": 1.0,
+            "mean_effect": 0.026117662738349007,
+            "negative": 0,
+            "paired_n": 1,
+            "positive": 1,
+            "stability_eligible": false,
+            "ties": 0,
+            "treatment_mean": -0.00848834221806026
+          }
+        }
+      },
+      "systematic_sign_reversal": false
+    },
+    "sweep_rejection": {
+      "causal_claim": false,
+      "holm_adjusted_p_value": 1.0,
+      "holm_rejected": false,
+      "primary_ci_expected_direction": true,
+      "primary_effect": {
+        "ci_high": 0.24786924558852946,
+        "ci_low": 0.09119060216523507,
+        "control_mean": -0.11275574085145564,
+        "exact_sign_p_value": 0.0002771615982055664,
+        "mean_effect": 0.1710916999504013,
+        "negative": 3,
+        "paired_n": 24,
+        "positive": 21,
+        "ties": 0,
+        "treatment_mean": 0.05833595909894566
+      },
+      "primary_matched_n": 24,
+      "primary_metric": "response_aggressor_reversal",
+      "secondary_effects": {
+        "post_directional_best_level_ofi_per_contract": {
+          "ci_high": 0.008225700187484598,
+          "ci_low": -0.04252910503723914,
+          "control_mean": 0.00525809818025618,
+          "exact_sign_p_value": 1.0,
+          "mean_effect": -0.015662986365451523,
+          "negative": 12,
+          "paired_n": 24,
+          "positive": 12,
+          "ties": 0,
+          "treatment_mean": -0.010404888185195344
+        },
+        "post_displayed_defense_net_add_per_contract": {
+          "ci_high": 0.14259800233986095,
+          "ci_low": -0.18152994776706255,
+          "control_mean": -0.5692830748756005,
+          "exact_sign_p_value": 0.8388197422027588,
+          "mean_effect": -0.012767917770062276,
+          "negative": 13,
+          "paired_n": 24,
+          "positive": 11,
+          "ties": 0,
+          "treatment_mean": -0.5820509926456628
+        }
+      },
+      "secondary_expected_direction": false,
+      "stability_complete": true,
+      "status": "underpowered",
+      "strata": {
+        "session_phase": {
+          "afternoon_delivery": {
+            "ci_high": 0.12105629843091739,
+            "ci_low": 0.003054298284292542,
+            "control_mean": 0.007618741105667532,
+            "exact_sign_p_value": 0.625,
+            "mean_effect": 0.06609569471946329,
+            "negative": 1,
+            "paired_n": 4,
+            "positive": 3,
+            "stability_eligible": false,
+            "ties": 0,
+            "treatment_mean": 0.07371443582513083
+          },
+          "morning_delivery": {
+            "ci_high": 0.10798208223023309,
+            "ci_low": 0.07233072871303467,
+            "control_mean": -0.09123526523559575,
+            "exact_sign_p_value": 0.5,
+            "mean_effect": 0.09015640547163388,
+            "negative": 0,
+            "paired_n": 2,
+            "positive": 2,
+            "stability_eligible": false,
+            "ties": 0,
+            "treatment_mean": -0.001078859763961864
+          },
+          "overnight_delivery": {
+            "ci_high": 0.2996592823565808,
+            "ci_low": 0.10159783901825532,
+            "control_mean": -0.1418967896881341,
+            "exact_sign_p_value": 0.001312255859375,
+            "mean_effect": 0.20341695605491722,
+            "negative": 2,
+            "paired_n": 18,
+            "positive": 16,
+            "stability_eligible": true,
+            "ties": 0,
+            "treatment_mean": 0.06152016636678313
+          }
+        },
+        "study_week_x_half_week": {
+          "week_1:first_half": {
+            "ci_high": 0.29012338834860063,
+            "ci_low": -0.017307094006345433,
+            "control_mean": -0.08749978252621708,
+            "exact_sign_p_value": 0.0390625,
+            "mean_effect": 0.14568565487325247,
+            "negative": 1,
+            "paired_n": 9,
+            "positive": 8,
+            "stability_eligible": true,
+            "ties": 0,
+            "treatment_mean": 0.05818587234703539
+          },
+          "week_1:second_half": {
+            "ci_high": 0.4754296750439099,
+            "ci_low": 0.21251089732462997,
+            "control_mean": -0.2421270102306099,
+            "exact_sign_p_value": 0.125,
+            "mean_effect": 0.3225828452212627,
+            "negative": 0,
+            "paired_n": 4,
+            "positive": 4,
+            "stability_eligible": false,
+            "ties": 0,
+            "treatment_mean": 0.08045583499065277
+          },
+          "week_2:first_half": {
+            "ci_high": 0.20329183498563538,
+            "ci_low": -0.0014857217236306508,
+            "control_mean": -0.050827454759502934,
+            "exact_sign_p_value": 0.21875,
+            "mean_effect": 0.10478879006331593,
+            "negative": 1,
+            "paired_n": 6,
+            "positive": 5,
+            "stability_eligible": true,
+            "ties": 0,
+            "treatment_mean": 0.053961335303812995
+          },
+          "week_2:second_half": {
+            "ci_high": 0.3218716551954771,
+            "ci_low": 0.05015760023439143,
+            "control_mean": -0.12903339364390487,
+            "exact_sign_p_value": 0.375,
+            "mean_effect": 0.17519315673708252,
+            "negative": 1,
+            "paired_n": 5,
+            "positive": 4,
+            "stability_eligible": true,
+            "ties": 0,
+            "treatment_mean": 0.04615976309317765
+          }
+        }
+      },
+      "systematic_sign_reversal": false
+    }
+  },
+  "phase7_evidence_allowlist": [
+    "acceptance_continuation",
+    "displacement_impact"
+  ],
+  "phase7_excluded_mechanisms": [
+    "sweep_rejection",
+    "mss_flow_shift",
+    "fvg_retest_response"
+  ],
+  "raw_partition_hashes_verified": true,
+  "registered_extension_consumed": true,
+  "result_identity": "8e69ca54f4a6c8c1ae11878a9a0552c037910c54bfa3478aef443b1a27a6bc77",
+  "semantic_version": "smc_semantics_v1.2",
+  "status": "phase6_engineering_complete_mechanism_support_reported_separately",
+  "study_mode": "primary_plus_registered_underpowered_extension",
+  "week1_gate_result": {
+    "path": "experiments/results/smc_semantics_v1_2_2024_06_phase6_mbo_week1_v5.json",
+    "result_identity": "64ecd3067dc9bd41abbdbe01296af1e1ded8b15e86b020ad66ac02ef74b1fb1d",
+    "sha256": "30829d4c39c7d32b04ccf5aa575407433691df269a1526db59af3f3ab580f3f7"
+  }
+}

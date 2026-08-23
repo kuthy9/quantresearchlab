@@ -1,12 +1,264 @@
 from __future__ import annotations
 
+from decimal import Decimal, localcontext
+
 import pandas as pd
 import pytest
 
 from smc_trader.causal import CausalClockError, CausalMarketReader
-from smc_trader.model import Bar, Candle, Timeframe
+from smc_trader.model import (
+    Bar,
+    Candle,
+    Timeframe,
+    candle_identity,
+    price_to_ticks,
+    ticks_to_price,
+)
 
 from .helpers import MODEL_SCALE_SPECS, session_bars
+
+
+@pytest.mark.parametrize("off_grid", (100.125, 100.375, 100.1))
+def test_exact_price_grid_rejects_half_ticks_without_reader_mutation(
+    off_grid: float,
+) -> None:
+    reader = CausalMarketReader(
+        scale_specs=MODEL_SCALE_SPECS,
+        tick_size=0.25,
+    )
+    reader.on_bar(
+        Bar(
+            pd.Timestamp("2025-01-06 10:00", tz="America/New_York"),
+            100.0,
+            100.25,
+            99.75,
+            100.0,
+            10.0,
+            "NQH5",
+            1,
+        )
+    )
+    before = (
+        reader.last_asof,
+        reader._contract,
+        {
+            timeframe: reader.window(timeframe, 100)
+            for timeframe in reader.active_timeframes
+        },
+        {
+            timeframe: (
+                aggregator._bucket_start,
+                aggregator._bucket_end,
+                tuple(aggregator._bars),
+            )
+            for timeframe, aggregator in reader._aggregators.items()
+        },
+    )
+    rejected = Bar(
+        pd.Timestamp("2025-01-06 10:07", tz="America/New_York"),
+        off_grid,
+        off_grid + 0.25,
+        off_grid - 0.25,
+        off_grid,
+        10.0,
+        "NQM5",
+        2,
+        data_gap_before_minutes=6,
+    )
+
+    with pytest.raises(ValueError, match="off-grid"):
+        reader.on_bar(rejected)
+
+    after = (
+        reader.last_asof,
+        reader._contract,
+        {
+            timeframe: reader.window(timeframe, 100)
+            for timeframe in reader.active_timeframes
+        },
+        {
+            timeframe: (
+                aggregator._bucket_start,
+                aggregator._bucket_end,
+                tuple(aggregator._bars),
+            )
+            for timeframe, aggregator in reader._aggregators.items()
+        },
+    )
+    assert after == before
+
+
+@pytest.mark.parametrize(
+    ("tick_size", "coordinates"),
+    (
+        (0.25, (-401, -1, 0, 1, 401)),
+        (0.1, (-1001, -3, 0, 3, 1001)),
+    ),
+)
+def test_exact_price_tick_roundtrip(
+    tick_size: float,
+    coordinates: tuple[int, ...],
+) -> None:
+    for coordinate in coordinates:
+        price = ticks_to_price(coordinate, tick_size)
+        assert price_to_ticks(price, tick_size) == coordinate
+
+
+@pytest.mark.parametrize(
+    ("price", "tick_size"),
+    (
+        (Decimal("10000000000000000000000000000.1"), Decimal("1")),
+        (Decimal("1.00000000000000000000000000001"), Decimal("1")),
+    ),
+)
+def test_exact_price_grid_does_not_depend_on_decimal_context_precision(
+    price: Decimal,
+    tick_size: Decimal,
+) -> None:
+    with pytest.raises(ValueError, match="off-grid"):
+        price_to_ticks(price, tick_size)
+
+    exact_coordinate = 10**40
+    assert price_to_ticks(Decimal(exact_coordinate), tick_size) == (
+        exact_coordinate
+    )
+
+
+def test_tick_projection_does_not_depend_on_decimal_context_precision() -> None:
+    with localcontext() as context:
+        context.prec = 3
+        projected = ticks_to_price(123457, Decimal("0.25"))
+
+    assert projected == 30864.25
+    assert price_to_ticks(projected, Decimal("0.25")) == 123457
+
+
+def test_candle_identity_reuses_exact_price_grid() -> None:
+    candle = Candle(
+        timeframe=Timeframe.M1,
+        start=pd.Timestamp("2025-01-06 10:00", tz="America/New_York"),
+        end=pd.Timestamp("2025-01-06 10:01", tz="America/New_York"),
+        open=100.0,
+        high=100.25,
+        low=100.0,
+        close=100.1,
+        volume=10.0,
+        symbol="NQH5",
+        instrument_id=1,
+        observed_minutes=1,
+        expected_minutes=1,
+        complete=True,
+    )
+    with pytest.raises(ValueError, match="off-grid"):
+        candle_identity(candle, tick_size=0.25)
+
+
+def test_reader_aggregates_and_exposes_integer_ohlc_ticks() -> None:
+    reader = CausalMarketReader(
+        scale_specs=MODEL_SCALE_SPECS,
+        tick_size=0.25,
+    )
+    rows = (
+        (100.0, 100.25, 99.75, 100.25),
+        (100.25, 100.75, 100.0, 100.5),
+        (100.5, 101.0, 99.5, 100.75),
+        (100.75, 100.75, 100.25, 100.5),
+        (100.5, 100.75, 100.0, 100.25),
+    )
+    update = None
+    for index, (open_, high, low, close) in enumerate(rows):
+        update = reader.on_bar(
+            Bar(
+                pd.Timestamp(
+                    f"2025-01-06 10:0{index}",
+                    tz="America/New_York",
+                ),
+                open_,
+                high,
+                low,
+                close,
+                10.0,
+                "NQH5",
+                1,
+            )
+        )
+        assert update.completed_1m.normalized_ohlc_ticks == tuple(
+            price_to_ticks(value, 0.25)
+            for value in (open_, high, low, close)
+        )
+    assert update is not None
+    aggregated = update.newly_completed[Timeframe.M5][0]
+    assert aggregated.normalized_ohlc_ticks == (400, 404, 398, 401)
+    assert (
+        aggregated.open,
+        aggregated.high,
+        aggregated.low,
+        aggregated.close,
+    ) == (100.0, 101.0, 99.5, 100.25)
+
+
+def test_reader_tick_aggregation_ignores_decimal_context_precision() -> None:
+    reader = CausalMarketReader(
+        scale_specs=MODEL_SCALE_SPECS,
+        tick_size=0.25,
+    )
+    update = None
+    with localcontext() as context:
+        context.prec = 2
+        for index in range(5):
+            update = reader.on_bar(
+                Bar(
+                    pd.Timestamp(
+                        f"2025-01-06 10:0{index}",
+                        tz="America/New_York",
+                    ),
+                    30864.25,
+                    30864.75 + 0.25 * index,
+                    30864.0,
+                    30864.5,
+                    10.0,
+                    "NQH5",
+                    1,
+                )
+            )
+
+    assert update is not None
+    aggregated = update.newly_completed[Timeframe.M5][0]
+    assert aggregated.normalized_ohlc_ticks == (
+        123457,
+        123463,
+        123456,
+        123458,
+    )
+    assert reader.last_asof == update.asof
+    assert len(reader.window(Timeframe.M1, 10)) == 5
+    assert len(reader.window(Timeframe.M5, 10)) == 1
+
+
+def test_reader_rejects_pre_normalized_bar_from_a_different_grid() -> None:
+    reader = CausalMarketReader(
+        scale_specs=MODEL_SCALE_SPECS,
+        tick_size=0.25,
+    )
+    bar = Bar(
+        pd.Timestamp("2025-01-06 10:00", tz="America/New_York"),
+        100.0,
+        100.5,
+        99.5,
+        100.0,
+        10.0,
+        "NQH5",
+        1,
+        price_tick_size=0.5,
+    )
+
+    with pytest.raises(ValueError, match="grid disagrees"):
+        reader.on_bar(bar)
+    assert reader.last_asof is None
+    assert all(
+        reader.window(timeframe, 1) == ()
+        for timeframe in reader.active_timeframes
+    )
 
 
 def test_reader_emits_only_completed_higher_timeframe_bars() -> None:

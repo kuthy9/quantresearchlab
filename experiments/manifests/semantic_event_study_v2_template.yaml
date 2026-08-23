@@ -1,0 +1,309 @@
+{
+  "schema_version": 2,
+  "status": "template_incomplete_not_authorized_to_run",
+  "experiment_id": null,
+  "frozen_at": null,
+  "frozen_before_run": false,
+  "authority": {
+    "diagnostic_only": true,
+    "artifact_fit_allowed": false,
+    "trading_authority": false,
+    "oos_opened": false
+  },
+  "semantic_version": "smc_semantics_v1.1",
+  "semantic_registry": "semantics/registry.yaml",
+  "semantic_registry_identity": null,
+  "identity_bindings": {
+    "semantic_registry": {"path": "semantics/registry.yaml", "sha256": null},
+    "semantic_parameters": {"path": "semantics/parameters.yaml", "sha256": null},
+    "dataset_manifest": {"path": "data/processed/nq_1m_previous_session_front_v2_3_2017_2026.manifest.json", "sha256": null},
+    "split_registry": {"path": "configs/data_splits.json", "sha256": null},
+    "model_config": {"path": "configs/model.json", "sha256": null},
+    "structure_protocol": {"path": "configs/primitives_structure_liquidity.json", "sha256": null},
+    "liquidity_protocol": {"path": "configs/primitives_structure_liquidity.json", "sha256": null},
+    "displacement_protocol": {"path": "configs/primitives_displacement.json", "sha256": null},
+    "group3_protocol": {"path": "configs/primitives_zones.json", "sha256": null},
+    "group4_protocol": {"path": "configs/primitives_range.json", "sha256": null},
+    "group5_protocol": {"path": "configs/primitives_entry.json", "sha256": null},
+    "runner": {"path": "scripts/run_semantic_signal_research.py", "sha256": null},
+    "pyproject": {"path": "pyproject.toml", "sha256": null},
+    "lockfile": {"path": "uv.lock", "sha256": null},
+    "runtime_package_init": {"path": "smc_trader/__init__.py", "sha256": null},
+    "runtime_artifact_stream": {"path": "smc_trader/artifact_stream.py", "sha256": null},
+    "runtime_causal": {"path": "smc_trader/causal.py", "sha256": null},
+    "runtime_io": {"path": "smc_trader/io.py", "sha256": null},
+    "runtime_market_clock": {"path": "smc_trader/market_clock.py", "sha256": null},
+    "runtime_model": {"path": "smc_trader/model.py", "sha256": null},
+    "runtime_observation": {"path": "smc_trader/observation.py", "sha256": null},
+    "runtime_semantics": {"path": "smc_trader/semantics.py", "sha256": null},
+    "runtime_event_store": {"path": "smc_trader/event_store.py", "sha256": null},
+    "runtime_market_state": {"path": "smc_trader/market_state.py", "sha256": null},
+    "runtime_structure": {"path": "smc_trader/structure.py", "sha256": null},
+    "runtime_liquidity": {"path": "smc_trader/liquidity.py", "sha256": null},
+    "runtime_displacement": {"path": "smc_trader/displacement.py", "sha256": null},
+    "runtime_displacement_observer": {"path": "smc_trader/displacement_observer.py", "sha256": null},
+    "runtime_group3": {"path": "smc_trader/group3.py", "sha256": null},
+    "runtime_group4": {"path": "smc_trader/group4.py", "sha256": null},
+    "runtime_group5": {"path": "smc_trader/group5.py", "sha256": null},
+    "runtime_scene_graph": {"path": "smc_trader/scene_graph.py", "sha256": null},
+    "runtime_signal_research": {"path": "smc_trader/signal_research.py", "sha256": null},
+    "runtime_validation": {"path": "smc_trader/validation.py", "sha256": null}
+  },
+  "dataset_version": {
+    "path": "data/processed/nq_1m_previous_session_front_v2_3_2017_2026.parquet",
+    "sha256": null,
+    "manifest_path": "data/processed/nq_1m_previous_session_front_v2_3_2017_2026.manifest.json",
+    "manifest_sha256": null,
+    "split_registry": "configs/data_splits.json",
+    "split_registry_sha256": null,
+    "split_role": "brain_calibration_trial",
+    "use_restriction": "diagnostic_only_forbidden_from_artifact_fitting"
+  },
+  "allowed_split_roles": {
+    "warmup": ["brain_validation"],
+    "diagnostic": ["brain_calibration_trial"]
+  },
+  "instrument_universe": ["NQ previous-completed-session causal front"],
+  "contract_handling": "strict_previous_completed_session_front; reset causal state on instrument_id change",
+  "session_definition": "independent cross-timeframe SessionState on America/New_York completed 1m clock",
+  "warmup_period": {
+    "start": "2023-12-24T00:00:00-05:00",
+    "end_exclusive": "2024-01-01T00:00:00-05:00",
+    "outcomes_opened": false
+  },
+  "diagnostic_period": {
+    "start": "2024-01-01T00:00:00-05:00",
+    "end_exclusive": "2024-02-01T00:00:00-05:00"
+  },
+  "train_period": "not_used_in_this_fixed_diagnostic",
+  "validation_period": "not_used_in_this_fixed_diagnostic",
+  "out_of_sample_period": "not_opened",
+  "input_census": {
+    "diagnostic_data_gap_policy": "fail_closed_on_diagnostic_data_gap_history_reset",
+    "expected_emitted_bars_including_warmup": 36000,
+    "expected_diagnostic_completed_bars": 30479,
+    "expected_diagnostic_real_rows": 30477,
+    "expected_diagnostic_ready_real_rows": 30477,
+    "expected_diagnostic_synthetic_bars": 2,
+    "expected_warmup_data_gap_resets": 0,
+    "expected_diagnostic_data_gap_resets": 0,
+    "expected_contract_changes": 0,
+    "expected_last_processed_asof": "2024-02-01T00:00:00-05:00",
+    "expected_last_diagnostic_asof": "2024-01-31T23:59:00-05:00"
+  },
+  "event_definition": {
+    "atomic_population": [
+      "swing_confirmed",
+      "structural_leg_created",
+      "liquidity_level_created",
+      "level_touched",
+      "level_penetrated",
+      "sweep_confirmed",
+      "acceptance_confirmed",
+      "displacement_observed",
+      "raw_boundary_break",
+      "structure_direction_confirmed",
+      "qualified_bos",
+      "protected_swing_assigned",
+      "mss_core_confirmed",
+      "fvg_created",
+      "fvg_partially_filled",
+      "fvg_midpoint_touched",
+      "fvg_fully_filled",
+      "fvg_invalidated",
+      "dealing_range_created",
+      "dealing_range_activated",
+      "dealing_range_invalidated",
+      "dealing_range_replaced",
+      "origin_zone_created",
+      "origin_zone_mitigated",
+      "origin_zone_invalidated"
+    ],
+    "research_selection": {
+      "displacement_observed": {
+        "predicate": "evidence.lifecycle == 'active'"
+      }
+    },
+    "range_invalidation_variants": {
+      "forming_close_before_activation": {
+        "transition_reason": "close_beyond_frozen_range_before_activation",
+        "required_source_kinds": [
+          "dealing_range_created",
+          "bar_completed"
+        ]
+      },
+      "forming_source_invalidated": {
+        "transition_reason": "forming_source_invalidated",
+        "required_source_kinds": [
+          "dealing_range_created",
+          "bar_completed"
+        ]
+      },
+      "forming_maturity_deadline_elapsed": {
+        "transition_reason": "maturity_deadline_elapsed",
+        "required_source_kinds": [
+          "dealing_range_created",
+          "bar_completed"
+        ]
+      },
+      "active_acceptance": {
+        "transition_reason": "close_beyond_frozen_range",
+        "required_source_kinds": [
+          "dealing_range_created",
+          "dealing_range_activated",
+          "bar_completed",
+          "acceptance_confirmed"
+        ]
+      }
+    },
+    "range_invalidation_pooling": "forbidden_summarize_each_variant_separately",
+    "signal_direction_assignment": {
+      "explicit_event_direction": "use_event_direction",
+      "level_touched_above": "short",
+      "level_touched_below": "long",
+      "otherwise": "not_outcome_eligible"
+    },
+    "state_projection_persistence": "disabled_in_diagnostic_redundant_non_authoritative_transport",
+    "snapshot_authority": "atomic_event_reducer",
+    "parent_relation_priority": {
+      "1m": ["5m"],
+      "5m": ["1h", "15m"],
+      "15m": ["1h"],
+      "1h": ["4h"],
+      "4h": []
+    },
+    "chain_edges": {
+      "E1_to_E2": {
+        "previous_kind": "level_touched",
+        "previous_timeframe": "1m",
+        "current_kind": "sweep_confirmed",
+        "current_timeframe": "1m",
+        "maximum_completed_bars": 5,
+        "source_lineage_required": true
+      },
+      "E2_to_E3": {
+        "previous_kind": "sweep_confirmed",
+        "previous_timeframe": "1m",
+        "current_kind": "displacement_observed",
+        "current_timeframe": "5m",
+        "maximum_completed_bars": 30,
+        "source_lineage_required": true
+      },
+      "E3_to_E4": {
+        "previous_kind": "displacement_observed",
+        "previous_timeframe": "5m",
+        "current_kind": "mss_core_confirmed",
+        "current_timeframe": "5m",
+        "maximum_completed_bars": 30,
+        "source_lineage_required": true
+      },
+      "E4_to_E5": {
+        "previous_kind": "mss_core_confirmed",
+        "previous_timeframe": "5m",
+        "current_kind": "fvg_created",
+        "current_timeframe": "5m",
+        "maximum_completed_bars": 15,
+        "source_lineage_required": true
+      }
+    },
+    "non_nested_links": {
+      "mss_prior_sweep": {
+        "previous_kind": "sweep_confirmed",
+        "previous_timeframe": "1m",
+        "current_kind": "mss_core_confirmed",
+        "current_timeframe": "5m",
+        "maximum_completed_bars": 30,
+        "source_lineage_required": true
+      },
+      "mss_prior_displacement": {
+        "previous_kind": "displacement_observed",
+        "previous_timeframe": "5m",
+        "current_kind": "mss_core_confirmed",
+        "current_timeframe": "5m",
+        "maximum_completed_bars": 30,
+        "source_lineage_required": true
+      },
+      "fvg_prior_displacement": {
+        "previous_kind": "displacement_observed",
+        "previous_timeframe": "5m",
+        "current_kind": "fvg_created",
+        "current_timeframe": "5m",
+        "maximum_completed_bars": 15,
+        "source_lineage_required": true
+      }
+    },
+    "parent_relation_stratification": ["event kind", "event timeframe", "event direction versus parent direction"],
+    "session_stratification": ["event kind", "event timeframe", "session phase"]
+  },
+  "control_definition": {
+    "population": "completed real 1m rows with no canonical atomic event at that known_at",
+    "exact_match": [
+      "symbol",
+      "instrument_id",
+      "session phase",
+      "ATR quartile",
+      "M1 internal direction",
+      "nearest candidate-level distance quartile",
+      "relative-volume quartile"
+    ],
+    "selection": "one deterministic nearest-completed-bar unused control per E1 event where available",
+    "comparison_population": "C0 and E1 both use only successfully paired rows",
+    "candidate_rows_require_zero_atomic_events": true,
+    "same_matched_cohort_required": true,
+    "exact_instrument_identity_required": true,
+    "pseudo_levels": "not_run_in_this_diagnostic",
+    "time_shifted_events": "not_run_in_this_diagnostic"
+  },
+  "ledger_definition": {
+    "event_study": "canonical_json_lines_v1",
+    "control_pairs": "canonical_json_lines_v1",
+    "source_chains": "canonical_json_lines_v1"
+  },
+  "parameter_search_space": {},
+  "primary_outcome": {
+    "name": "target_before_invalidation",
+    "entry": "completed 1m close at semantic known_at",
+    "target": "one contemporaneous M1 ATR in semantic direction",
+    "invalidation": "one contemporaneous M1 ATR opposite semantic direction",
+    "horizon": "60 later completed real 1m bars",
+    "target_atr": 1.0,
+    "invalidation_atr": 1.0,
+    "horizon_completed_bars": 60,
+    "same_bar_tie": "ambiguous_and_excluded",
+    "path_scan": "full_same_contract_completed_bar_horizon",
+    "first_hit_rule": "first_target_or_invalidation_determines_primary",
+    "incomplete_horizon_policy": "retain_primary_only_if_resolved_before_censoring_and_exclude_full_horizon_path_metrics"
+  },
+  "secondary_outcomes": {
+    "mfe_atr": "maximum favorable intrabar excursion from the known_at close across the full same-contract completed-bar horizon, divided by known_at ATR",
+    "mae_atr": "maximum adverse intrabar excursion from the known_at close across the full same-contract completed-bar horizon, divided by known_at ATR",
+    "mfe_over_mae": "mfe_atr divided by mae_atr when mae_atr is positive",
+    "continuation_distance_atr": "maximum favorable completed-bar close displacement from the known_at close across the full same-contract horizon, divided by known_at ATR",
+    "retracement_depth_atr": "maximum completed-bar close pullback from the running directionally favorable close watermark, divided by known_at ATR",
+    "range_extension_atr": "maximum directional extension beyond the known_at bar extreme across the full same-contract horizon, divided by known_at ATR",
+    "time_to_target_completed_bars": "first later completed real 1m bar touching the frozen ATR target",
+    "time_to_invalidation_completed_bars": "first later completed real 1m bar touching the frozen ATR invalidation",
+    "time_to_first_retest_completed_bars": "first later completed real 1m bar overlapping the event zone; null when no event zone exists or no retest occurs",
+    "time_to_fvg_midpoint_touch_completed_bars": "first later completed real 1m bar touching the frozen FVG-zone midpoint; null for non-FVG events, missing zones, or no touch",
+    "next_structural_event_id": "identity of the first strictly later same-instrument raw boundary break, qualified BOS, or MSS Core",
+    "next_structural_event_kind": "kind of the first strictly later same-instrument raw boundary break, qualified BOS, or MSS Core",
+    "next_structural_event_direction": "direction of the first strictly later same-instrument raw boundary break, qualified BOS, or MSS Core",
+    "next_structural_event_time": "event_time of the first strictly later same-instrument structural event",
+    "next_structural_event_known_at": "known_at of the first strictly later same-instrument structural event",
+    "next_structural_direction_match": "whether the next structural event direction equals the assigned signal direction",
+    "next_qualified_bos_direction": "direction of the first strictly later same-instrument qualified BOS",
+    "next_qualified_bos_direction_match": "whether the next qualified BOS direction equals the assigned signal direction",
+    "signal_half_life_completed_bars": "cohort median of the first target-or-invalidation completed-bar offset over resolved non-ambiguous samples"
+  },
+  "primary_metric": "Laplace-smoothed target_before_invalidation rate with raw n and ambiguity count",
+  "minimum_sample_requirement": 30,
+  "cost_assumptions": "not_applicable_for_structural_signal_research",
+  "multiple_testing_method": "Holm family-wise adjustment required before any inferential claim; diagnostic reports descriptive estimates only",
+  "acceptance_rule": "none; diagnostic cannot admit a semantic, tune a threshold, fit a Brain artifact, or authorize trading",
+  "rejection_rule": "record sparse, contradictory, or non-monotone results without changing frozen definitions from this window",
+  "limitations": [
+    "protected_swing_survival requires a separate preregistered survival/censoring protocol and is not computed by this diagnostic",
+    "origin-zone/Order Block reaction requires a separate first-retest reaction and matched-zone control protocol and is not computed by this diagnostic"
+  ],
+  "notes": "UNEXECUTED TEMPLATE. Copy to a new manifest, fill exact current SHA-256 identities, set a unique experiment_id/frozen_at, then change status and frozen_before_run only after independent review. The runner rejects this template as-is."
+}

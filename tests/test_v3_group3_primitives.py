@@ -794,6 +794,43 @@ def test_fvg_open_partial_mitigated_and_frozen_geometry(
     assert _frozen(mitigated, _FVG_FROZEN_FIELDS) == frozen
 
 
+@pytest.mark.parametrize("direction", (Direction.LONG, Direction.SHORT))
+def test_fvg_emits_a_later_midpoint_crossing_without_rewriting_partial(
+    direction: Direction,
+) -> None:
+    harness, created, _, _, _ = _form_fvg(direction)
+    shallow, midpoint = (
+        (
+            (102.0, 102.25, 101.25, 101.75),
+            (101.75, 102.0, 101.0, 101.25),
+        )
+        if direction is Direction.LONG
+        else (
+            (98.0, 98.75, 97.75, 98.25),
+            (98.25, 99.0, 98.0, 98.75),
+        )
+    )
+
+    first_output = harness.send(shallow)[-1]
+    first = _fvg_by_id(first_output, created.fvg_id)
+    assert first.lifecycle is FairValueGapLifecycle.PARTIAL
+    assert first.max_fill_fraction == pytest.approx(0.25)
+    assert first.midpoint_touched_at is None
+
+    midpoint_output = harness.send(midpoint)[-1]
+    advanced = _fvg_by_id(midpoint_output, created.fvg_id)
+    transition = next(
+        item
+        for item in midpoint_output.fvg_transitions
+        if item.fvg_id == created.fvg_id
+    )
+    assert advanced.lifecycle is FairValueGapLifecycle.PARTIAL
+    assert advanced.partial_at == first.partial_at
+    assert advanced.midpoint_touched_at == transition.last_updated_at
+    assert transition.transition_reason == "midpoint_touched"
+    assert transition.max_fill_fraction >= 0.5
+
+
 @pytest.mark.parametrize(
     ("direction", "values", "expected"),
     (
@@ -930,6 +967,55 @@ def test_boundary_exact_retry_and_same_clock_conflict() -> None:
             clock,
         )
     assert harness.group3.snapshot() == before
+
+
+@pytest.mark.parametrize(
+    "synthetic",
+    (False, True),
+    ids=("real-candle", "synthetic-boundary"),
+)
+def test_group3_rejects_off_grid_before_any_state_change(
+    synthetic: bool,
+) -> None:
+    harness = _Harness()
+    harness.send((100.0, 100.5, 99.5, 100.0))
+    malformed = _candle(
+        harness.index,
+        (100.0, 100.5, 99.75, 100.1),
+        real_minutes=0 if synthetic else 5,
+        synthetic_minutes=5 if synthetic else 0,
+    )
+    before = pickle.dumps(harness.group3)
+
+    with pytest.raises(ValueError, match="off-grid"):
+        harness.group3.on_completed_5m(
+            malformed,
+            DisplacementUpdate(None),
+        )
+
+    assert pickle.dumps(harness.group3) == before
+    assert harness.group3._failed is False
+
+
+def test_group3_rejects_exact_retry_from_different_stored_grid() -> None:
+    harness = _Harness()
+    candle, displacement, _, output = harness.send(
+        (100.0, 100.5, 99.5, 100.0)
+    )
+    retry = replace(
+        candle,
+        price_tick_size=0.5,
+        normalized_ohlc_ticks=None,
+    )
+    assert retry == candle
+    before = pickle.dumps(harness.group3)
+
+    with pytest.raises(ValueError, match="grid disagrees"):
+        harness.group3.on_completed_5m(retry, displacement)
+
+    assert pickle.dumps(harness.group3) == before
+    assert harness.group3._last_output is output
+    assert harness.group3._failed is False
 
 
 def test_fvg_synthetic_boundary_cannot_touch_or_age_live_zone() -> None:
