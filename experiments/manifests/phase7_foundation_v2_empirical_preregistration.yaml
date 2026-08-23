@@ -1,0 +1,128 @@
+{
+  "schema_version": 1,
+  "experiment_id": "phase7_foundation_v2_empirical_preregistration_v1",
+  "protocol_version": "phase7_foundation_v2_empirical_preregistration_v1.0",
+  "status": "preregistered_implementation_only_cohorts_not_materialized_models_not_fitted",
+  "frozen_at": "2026-08-23T18:58:10Z",
+  "frozen_before_cohort_materialization_or_fit": true,
+  "repository_base_commit": "4f7351a0ac45213d5e5c685a35c4dd0443de0a4b",
+  "authority": {
+    "research_only": true,
+    "shadow_only": true,
+    "cohort_materialization_authorized": false,
+    "artifact_fit_authorized": false,
+    "admission_execution_authorized": false,
+    "action_authority": false,
+    "sealed_oos_reveal_authorized": false,
+    "sealed_oos_opened": false
+  },
+  "protocol_binding": {
+    "path": "configs/phase7_foundation_v2_empirical.json",
+    "sha256": "0af7f448d632d0a9392ab536ea1335daeb6350e63a0aedc73edc62f3635d1973"
+  },
+  "implementation_bindings": {
+    "probability_cohorts": {
+      "path": "smc_trader/probability_cohorts.py",
+      "sha256": "cde1cd2314cca921242be498e8a0d277b5115f094f05b39f5999e3b68cfa3282"
+    },
+    "probability_fit": {
+      "path": "smc_trader/probability_fit.py",
+      "sha256": "6a79f01f6c66c54bf7ae4c5b5d3313c6de5cb380c3096bb776f6071ecbeeb55e"
+    },
+    "probability_admission": {
+      "path": "smc_trader/probability_admission.py",
+      "sha256": "688c9f587d090114c34f1c372a14c34a27444dc31cacb7c9a9f97719a89f9a37"
+    }
+  },
+  "semantic_bindings": {
+    "foundation_registry": {
+      "path": "semantics/foundation_v2_0.yaml",
+      "sha256": "dfc4cb29f98fc5015628927e97c725eb491b99f244f154e51552e5950daf927c",
+      "identity": "ac04636919931d774309a0c306764fdf8eb53aee41df0f31d4d94e5b9125732b"
+    },
+    "path_protocol": {
+      "path": "configs/path_hypotheses.json",
+      "sha256": "d897635cb91fc1cb84647f41eb4c5a6b8a06d05d2e44a1b3471e8e9ff67b0482"
+    },
+    "dol_protocol": {
+      "path": "configs/dol_probability.json",
+      "sha256": "b46b1e8b7d30ba826093373590aab5c21a9fc6b79f8f65378ebaf310b0a0532d",
+      "protocol_fingerprint": "a7f588d35c380d4d9b38a2d5c3aa90ee5e30c49c241696f0d2847fb90b7ad7fe",
+      "ranking_fingerprint": "be9177601fbdac6e36072dbf7dd8bde46c793e7197d0a9e3662f835ceebbb4be"
+    }
+  },
+  "runtime_resolution_contract": {
+    "protocol_version": "path_runtime_resolution_phase7_foundation_v2_empirical_v1.0",
+    "residual_unknown_winner_rule": "clean_common_horizon_without_registered_winner_realizes_residual_unknown",
+    "residual_unknown_factual_outcome_reason": "common_horizon_without_registered_winner",
+    "same_clock_precedence": "registered_factual_winner_or_falsification_precedes_model_expiry_then_evidence_update",
+    "non_residual_expiry_rule": "registered_factual_terminal_precedes_admitted_hypothesis_specific_expiry_capped_by_shared_common_horizon",
+    "residual_unknown_expiry_rule": "shared_common_horizon_only",
+    "residual_horizon_bar_source_required": true
+  },
+  "development_data_bindings": {
+    "split_registry": {
+      "path": "configs/data_splits.json",
+      "sha256": "aee2d14f40eb9ebbfc050e9779c5604e06f4811f9e1e929179e25c04fc5f84c8"
+    },
+    "ohlcv": {
+      "path": "data/processed/nq_1m_previous_session_front_v2_3_2017_2026.parquet",
+      "sha256": "84c9ed4d1de379382bdc41e0fe02e3611373ba182cfeebe09e3832d29cbafd7b"
+    },
+    "june_2024_mbo_execution_reality": {
+      "path": "data/processed/mbo_execution_dev_202406_v2_3_clockfix.parquet",
+      "sha256": "8dc1df19e4b3bcf3c829a2b07c69552a583e667224d89305f78aaae21b73b1ed",
+      "path_or_dol_predictor_allowed": false
+    },
+    "june_2024_role": "previously_opened_reused_development_not_rolling_oof_not_sealed_oos"
+  },
+  "frozen_model_contract": {
+    "history_likelihood": "Jeffreys-smoothed P(next_evidence_history | previous_evidence_history, eventual_path)",
+    "path_temporal": "real-completed-M1-bar path-specific competing-risk life table",
+    "prior_reversion": "path-specific evidence half-life toward frozen prior",
+    "path_calibration": "positive temperature plus path bias with residual_unknown bias fixed to zero",
+    "dol_probability": "path-conditioned candidate-set softmax with candidate adjustment fixed to zero and explicit no-target",
+    "dol_first_hit_tie": "censor_ambiguous_same_bar",
+    "rolling_split": "whole-session and whole-generation group split with 14-calendar-day outcome purge and 5-trading-session embargo",
+    "admission": "cluster-bootstrap log-loss superiority plus Brier ECE coverage support and fold-stability gates"
+  },
+  "cohort_bindings": {
+    "development_fit": null,
+    "development_cross_fit": null,
+    "calibration": null,
+    "historical_validation": null,
+    "rolling_oof": null,
+    "sealed_oos": null
+  },
+  "artifact_bindings": {
+    "history_likelihood": null,
+    "path_temporal": null,
+    "prior_reversion": null,
+    "path_calibration": null,
+    "dol_probability": null,
+    "path_admission_receipt": null,
+    "dol_admission_receipt": null,
+    "sealed_oos_final_receipt": null
+  },
+  "execution_gate": {
+    "state": "closed",
+    "reason": "this manifest freezes design and implementation identities only; no cohort or fitted artifact is bound",
+    "required_before_fit": [
+      "clean repository commit and environment identity",
+      "no-overwrite cohort destinations",
+      "independent fit cross-fit calibration and rolling-OOF cohort bindings",
+      "machine-validated purge embargo and whole-generation grouping",
+      "explicit command receipt binding every source and implementation hash"
+    ],
+    "sealed_oos_policy": "single final reveal only after all non-sealed artifacts and admission thresholds are frozen; this file grants no reveal authority"
+  },
+  "prohibitions": [
+    "no sealed source discovery read materialization fit calibration admission or reveal",
+    "no empirical result encoded in this preregistration",
+    "no June 2024 claim as rolling OOF or sealed OOS",
+    "no MBO post-event mechanism response as a path or DOL direction predictor",
+    "no random-row split or candidate-row independence",
+    "no overwrite of cohort model receipt or manifest",
+    "no action or order authority"
+  ]
+}

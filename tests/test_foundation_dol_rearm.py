@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from types import SimpleNamespace
 
 import pandas as pd
 
@@ -35,6 +36,7 @@ from smc_trader.scene_graph import (
     TemporalMarketSceneGraph,
     current_dol_inventory,
     dol_level_terminal_sources,
+    foundation_dol_inventory,
     update_global_market_context,
 )
 from smc_trader.semantic_foundation import FoundationProjectionReducer
@@ -246,6 +248,46 @@ def _real_bar_ordinals(adapter: CanonicalFoundationAdapter):
         clock.timeframe: clock.count
         for clock in adapter.lifecycle.real_bar_clocks
     }
+
+
+def test_dol_inventory_is_materialized_once_per_immutable_observation() -> None:
+    adapter = CanonicalFoundationAdapter(tick_size=TICK)
+    _seed_level(adapter, label="above-level", price=100.0)
+    base = market_observation(asof=_clock(0), price=99.0)
+    observation = _observation(
+        base,
+        minute=0,
+        price=99.0,
+        projection=adapter.projection,
+        source_identity="above-level",
+        source_item=_source_item(base),
+    )
+
+    foundation_first = foundation_dol_inventory(observation)
+    current_first = current_dol_inventory(observation)
+    assert foundation_dol_inventory(observation) is foundation_first
+    assert current_dol_inventory(observation) is current_first
+
+    equivalent_observation = replace(observation)
+    assert equivalent_observation is not observation
+    assert foundation_dol_inventory(equivalent_observation) == foundation_first
+    assert current_dol_inventory(equivalent_observation) == current_first
+
+
+def test_dol_inventory_bypasses_cache_for_non_weakrefable_compatibility_view() -> None:
+    base = market_observation(asof=_clock(0), price=99.0)
+    observation = SimpleNamespace(
+        asof=base.asof,
+        liquidity_inventory=base.liquidity_inventory,
+        market_snapshot=None,
+    )
+
+    assert current_dol_inventory(observation) == tuple(
+        item
+        for item in base.liquidity_inventory
+        if item.lifecycle is LiquidityInventoryLifecycle.VISIBLE
+        and item.confirmed_at <= base.asof
+    )
 
 
 def test_sweep_departure_generation_two_reenters_graph_context_and_brain() -> None:

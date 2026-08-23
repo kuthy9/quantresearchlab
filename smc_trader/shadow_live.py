@@ -43,6 +43,10 @@ from .observation import ExecutionRealityInput
 SHADOW_LIVE_SCHEMA_VERSION = "phase9_shadow_live_v1.2"
 SHADOW_LIVE_STATUS = "engineering_validation_only"
 SHADOW_LIVE_AUTHORITY = "null_gateway_no_external_submission"
+SHADOW_COMPONENT_DIGEST_VERSION = "phase9_shadow_component_digest_v1"
+SHADOW_LEGACY_COMPONENT_DIGEST_VERSION = (
+    "phase9_shadow_component_digest_legacy_v1_2"
+)
 SHADOW_RECORD_FIELDS = (
     "input_digest",
     "journal_prefix_fingerprint",
@@ -80,7 +84,29 @@ SHADOW_RUNTIME_BINDING_KEYS = (
     "model_config_sha256",
     "path_protocol_fingerprint",
     "semantic_version",
+    "shadow_component_digest_version",
     "signal_policy_protocol_fingerprint",
+)
+_LEGACY_SHADOW_RUNTIME_BINDING_KEYS = tuple(
+    key
+    for key in SHADOW_RUNTIME_BINDING_KEYS
+    if key != "shadow_component_digest_version"
+)
+SHADOW_COMPACT_RUNTIME_CHECKPOINT_SCHEMA = "shadow_compact_runtime_v2"
+_LEGACY_SHADOW_COMPACT_RUNTIME_CHECKPOINT_SCHEMA = (
+    "shadow_compact_runtime_v1"
+)
+
+_SHADOW_COMPONENT_FINGERPRINT_FIELDS = tuple(
+    name
+    for name in SHADOW_RECORD_FIELDS
+    if name
+    not in {
+        "input_digest",
+        "journal_prefix_fingerprint",
+        "protocol_id",
+        "external_submission_attempts",
+    }
 )
 
 
@@ -127,6 +153,374 @@ def _canonical_json(value: Any) -> str:
 
 def _digest(value: Any) -> str:
     return hashlib.sha256(_canonical_json(value).encode("utf-8")).hexdigest()
+
+
+def _digest_primitive(value: Any) -> str:
+    """Hash an already-normalized JSON value without walking it again."""
+
+    encoded = json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _component_digest(
+    role: str,
+    payload: Mapping[str, Any],
+    *,
+    version: str,
+) -> str:
+    return _digest_primitive(
+        {
+            "component_digest_version": version,
+            "role": role,
+            "payload": payload,
+        }
+    )
+
+
+@dataclass(frozen=True)
+class ShadowComponentDigestBundle:
+    """One version-bound set of exact parity component fingerprints."""
+
+    version: str
+    fingerprints: tuple[tuple[str, str], ...]
+    bundle_id: str = field(init=False)
+
+    def __post_init__(self) -> None:
+        values = tuple(self.fingerprints)
+        object.__setattr__(self, "fingerprints", values)
+        if (
+            self.version
+            not in {
+                SHADOW_COMPONENT_DIGEST_VERSION,
+                SHADOW_LEGACY_COMPONENT_DIGEST_VERSION,
+            }
+            or tuple(key for key, _ in values)
+            != _SHADOW_COMPONENT_FINGERPRINT_FIELDS
+        ):
+            raise ShadowLiveError("shadow component digest bundle changed")
+        for key, value in values:
+            _sha256_text(value, name=f"component digest {key}")
+        object.__setattr__(
+            self,
+            "bundle_id",
+            "shadow-component-bundle:"
+            + _component_digest(
+                "bundle",
+                dict(values),
+                version=self.version,
+            ),
+        )
+
+    def as_record_fields(self) -> dict[str, str]:
+        return dict(self.fingerprints)
+
+
+def _execution_component_maps(
+    runner: "ShadowLiveRunner",
+) -> tuple[dict[str, str], dict[str, str]]:
+    return (
+        {
+            identity: fsm.store.event_fingerprint
+            for identity, fsm in sorted(runner.execution_fsms.items())
+        },
+        {
+            identity: fsm.store.state_fingerprint
+            for identity, fsm in sorted(runner.execution_fsms.items())
+        },
+    )
+
+
+def _legacy_shadow_component_digest_bundle(
+    runner: "ShadowLiveRunner",
+    snapshot: EngineSnapshot,
+) -> ShadowComponentDigestBundle:
+    """Retain exact v1.2 fingerprint semantics for old checkpoints."""
+
+    market = snapshot.market_snapshot
+    belief = snapshot.belief
+    execution_event_map, execution_state_map = _execution_component_maps(
+        runner
+    )
+    values = {
+        "observation_fingerprint": _digest(snapshot.observation),
+        "audit_event_store_fingerprint": (
+            runner.engine.observer.audit_store.fingerprint()
+        ),
+        "market_snapshot_fingerprint": (
+            _digest(None) if market is None else market.fingerprint
+        ),
+        "market_state_fingerprint": (
+            _digest(None)
+            if market is None
+            else _digest(market.replay_payload())
+        ),
+        "relation_fingerprint": (
+            _digest(None) if market is None else _digest(market.relations)
+        ),
+        "session_fingerprint": (
+            _digest(None) if market is None else _digest(market.session)
+        ),
+        "neutral_market_state_fingerprint": _digest(
+            snapshot.neutral_market_state
+        ),
+        "belief_fingerprint": _digest(belief),
+        "path_state_fingerprint": _digest(belief.path_competition_state),
+        "path_update_fingerprint": _digest(
+            belief.path_update_records_this_clock
+        ),
+        "dol_probability_fingerprint": _digest(belief.dol_probabilities),
+        "signal_assessment_fingerprint": _digest(belief.signal_assessments),
+        "trade_intent_fingerprint": _digest(belief.trade_intents),
+        "decision_fingerprint": _digest(snapshot.decision),
+        "risk_fingerprint": _digest(snapshot.risk),
+        "engine_snapshot_fingerprint": _digest(snapshot),
+        "runtime_action_policy_fingerprint": (
+            runner._runtime_action_policy_fingerprint
+        ),
+        "runtime_bindings_fingerprint": (
+            runner._runtime_bindings_fingerprint
+        ),
+        "execution_approval_fingerprint": _digest(
+            runner._approval_digests
+        ),
+        "execution_event_fingerprint": _digest(execution_event_map),
+        "execution_state_fingerprint": _digest(execution_state_map),
+    }
+    return ShadowComponentDigestBundle(
+        version=SHADOW_LEGACY_COMPONENT_DIGEST_VERSION,
+        fingerprints=tuple(
+            (name, values[name])
+            for name in _SHADOW_COMPONENT_FINGERPRINT_FIELDS
+        ),
+    )
+
+
+def _current_shadow_component_digest_bundle(
+    runner: "ShadowLiveRunner",
+    snapshot: EngineSnapshot,
+) -> ShadowComponentDigestBundle:
+    """Traverse each large immutable component at most once per clock."""
+
+    market = snapshot.market_snapshot
+    observation = snapshot.observation
+    belief = snapshot.belief
+    if observation.market_snapshot is not market:
+        raise ShadowLiveError(
+            "shadow observation and Engine snapshot market identities differ"
+        )
+
+    if market is None:
+        market_snapshot_fingerprint = _component_digest(
+            "market_snapshot",
+            {"present": False},
+            version=SHADOW_COMPONENT_DIGEST_VERSION,
+        )
+        market_state_fingerprint = _component_digest(
+            "market_replay_state",
+            {"present": False},
+            version=SHADOW_COMPONENT_DIGEST_VERSION,
+        )
+        relation_fingerprint = _digest_primitive(None)
+        session_fingerprint = _digest_primitive(None)
+    else:
+        timeframe_primitive = to_primitive(market.timeframe_states)
+        relation_primitive = to_primitive(market.relations)
+        session_primitive = to_primitive(market.session)
+        events_primitive = to_primitive(market.events_this_update)
+        range_locations_primitive = to_primitive(
+            market.foundation_range_locations
+        )
+        timeframe_fingerprint = _digest_primitive(timeframe_primitive)
+        relation_fingerprint = _digest_primitive(relation_primitive)
+        session_fingerprint = _digest_primitive(session_primitive)
+        events_fingerprint = _digest_primitive(events_primitive)
+        range_locations_fingerprint = _digest_primitive(
+            range_locations_primitive
+        )
+        foundation = market.foundation
+        foundation_component = (
+            None
+            if foundation is None
+            else {
+                "component_fingerprint": foundation.component_fingerprint,
+                "asof": to_primitive(foundation.asof),
+                "foundation_version": foundation.foundation_version,
+                "registry_identity": foundation.registry_identity,
+            }
+        )
+        market_snapshot_fingerprint = _component_digest(
+            "market_snapshot",
+            {
+                "asof": to_primitive(market.asof),
+                "symbol": market.symbol,
+                "instrument_id": market.instrument_id,
+                "price": market.price,
+                "semantic_version": market.semantic_version,
+                "semantic_registry_identity": (
+                    market.semantic_registry_identity
+                ),
+                "timeframe_states_fingerprint": timeframe_fingerprint,
+                "relations_fingerprint": relation_fingerprint,
+                "session_fingerprint": session_fingerprint,
+                "events_this_update_fingerprint": events_fingerprint,
+                "labels": to_primitive(market.labels),
+                "authority": to_primitive(market.authority),
+                "foundation": foundation_component,
+                "foundation_range_locations_fingerprint": (
+                    range_locations_fingerprint
+                ),
+            },
+            version=SHADOW_COMPONENT_DIGEST_VERSION,
+        )
+        market_state_fingerprint = _component_digest(
+            "market_replay_state",
+            {
+                "timeframes_fingerprint": timeframe_fingerprint,
+                "relations_fingerprint": relation_fingerprint,
+                "session_fingerprint": session_fingerprint,
+                "authority": to_primitive(market.authority),
+                "foundation": foundation_component,
+                "foundation_range_locations_fingerprint": (
+                    range_locations_fingerprint
+                ),
+            },
+            version=SHADOW_COMPONENT_DIGEST_VERSION,
+        )
+
+    observation_primitive = {
+        item.name: (
+            {
+                "component_digest_version": SHADOW_COMPONENT_DIGEST_VERSION,
+                "fingerprint": market_snapshot_fingerprint,
+            }
+            if item.name == "market_snapshot"
+            else to_primitive(getattr(observation, item.name))
+        )
+        for item in fields(observation)
+    }
+    observation_fingerprint = _component_digest(
+        "market_observation",
+        observation_primitive,
+        version=SHADOW_COMPONENT_DIGEST_VERSION,
+    )
+
+    belief_primitive = to_primitive(belief)
+    belief_fingerprint = _digest_primitive(belief_primitive)
+    path_state_fingerprint = _digest_primitive(
+        belief_primitive["path_competition_state"]
+    )
+    path_update_fingerprint = _digest_primitive(
+        belief_primitive["path_update_records_this_clock"]
+    )
+    dol_probability_fingerprint = _digest_primitive(
+        belief_primitive["dol_probabilities"]
+    )
+    signal_assessment_fingerprint = _digest_primitive(
+        belief_primitive["signal_assessments"]
+    )
+    trade_intent_fingerprint = _digest_primitive(
+        belief_primitive["trade_intents"]
+    )
+    neutral_market_state_fingerprint = _digest_primitive(
+        to_primitive(snapshot.neutral_market_state)
+    )
+    decision_fingerprint = _digest_primitive(to_primitive(snapshot.decision))
+    risk_fingerprint = _digest_primitive(to_primitive(snapshot.risk))
+    engine_snapshot_fingerprint = _component_digest(
+        "engine_snapshot",
+        {
+            "observation_fingerprint": observation_fingerprint,
+            "belief_fingerprint": belief_fingerprint,
+            "decision_fingerprint": decision_fingerprint,
+            "risk_fingerprint": risk_fingerprint,
+            "neutral_market_state_fingerprint": (
+                neutral_market_state_fingerprint
+            ),
+            "market_snapshot_fingerprint": market_snapshot_fingerprint,
+        },
+        version=SHADOW_COMPONENT_DIGEST_VERSION,
+    )
+    execution_event_map, execution_state_map = _execution_component_maps(
+        runner
+    )
+    values = {
+        "observation_fingerprint": observation_fingerprint,
+        "audit_event_store_fingerprint": (
+            runner.engine.observer.audit_store.fingerprint()
+        ),
+        "market_snapshot_fingerprint": market_snapshot_fingerprint,
+        "market_state_fingerprint": market_state_fingerprint,
+        "relation_fingerprint": relation_fingerprint,
+        "session_fingerprint": session_fingerprint,
+        "neutral_market_state_fingerprint": (
+            neutral_market_state_fingerprint
+        ),
+        "belief_fingerprint": belief_fingerprint,
+        "path_state_fingerprint": path_state_fingerprint,
+        "path_update_fingerprint": path_update_fingerprint,
+        "dol_probability_fingerprint": dol_probability_fingerprint,
+        "signal_assessment_fingerprint": signal_assessment_fingerprint,
+        "trade_intent_fingerprint": trade_intent_fingerprint,
+        "decision_fingerprint": decision_fingerprint,
+        "risk_fingerprint": risk_fingerprint,
+        "engine_snapshot_fingerprint": engine_snapshot_fingerprint,
+        "runtime_action_policy_fingerprint": (
+            runner._runtime_action_policy_fingerprint
+        ),
+        "runtime_bindings_fingerprint": (
+            runner._runtime_bindings_fingerprint
+        ),
+        "execution_approval_fingerprint": _digest_primitive(
+            to_primitive(runner._approval_digests)
+        ),
+        "execution_event_fingerprint": _digest_primitive(
+            to_primitive(execution_event_map)
+        ),
+        "execution_state_fingerprint": _digest_primitive(
+            to_primitive(execution_state_map)
+        ),
+    }
+    return ShadowComponentDigestBundle(
+        version=SHADOW_COMPONENT_DIGEST_VERSION,
+        fingerprints=tuple(
+            (name, values[name])
+            for name in _SHADOW_COMPONENT_FINGERPRINT_FIELDS
+        ),
+    )
+
+
+class _CanonicalStringSequenceDigest:
+    """Incrementally hash the exact canonical JSON representation of strings."""
+
+    def __init__(self, values: Iterable[str] = ()) -> None:
+        self._hasher = hashlib.sha256()
+        self._hasher.update(b"[")
+        self._count = 0
+        for value in values:
+            self.append(value)
+
+    @property
+    def count(self) -> int:
+        return self._count
+
+    def append(self, value: str) -> None:
+        _identity(value, name="incremental digest value")
+        if self._count:
+            self._hasher.update(b",")
+        self._hasher.update(_canonical_json(value).encode("utf-8"))
+        self._count += 1
+
+    @property
+    def fingerprint(self) -> str:
+        current = self._hasher.copy()
+        current.update(b"]")
+        return current.hexdigest()
 
 
 @dataclass(frozen=True)
@@ -362,6 +756,9 @@ def shadow_runtime_bindings_from_model_config(
             "execution_protocol_fingerprint": EXECUTION_PROTOCOL_FINGERPRINT,
             "foundation_registry_identity": foundation_registry.identity,
             "foundation_version": foundation_registry.foundation_version,
+            "shadow_component_digest_version": (
+                SHADOW_COMPONENT_DIGEST_VERSION
+            ),
         }
     except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
         raise ShadowLiveError("model config lacks exact shadow runtime bindings") from exc
@@ -370,7 +767,12 @@ def shadow_runtime_bindings_from_model_config(
     for key, value in bindings.items():
         if not isinstance(value, str) or not value:
             raise ShadowLiveError(f"shadow runtime binding {key} is invalid")
-        if key not in {"semantic_version", "foundation_version"} and (
+        if key == "shadow_component_digest_version":
+            if value != SHADOW_COMPONENT_DIGEST_VERSION:
+                raise ShadowLiveError(
+                    "shadow component digest version binding changed"
+                )
+        elif key not in {"semantic_version", "foundation_version"} and (
             len(value) != 64
             or any(character not in "0123456789abcdef" for character in value)
         ):
@@ -626,6 +1028,10 @@ class ShadowInputJournal:
     def __init__(self) -> None:
         self._attempts: list[ShadowClockInput] = []
         self._events: list[ShadowClockInput] = []
+        self._attempt_digests: list[str] = []
+        self._event_digests: list[str] = []
+        self._attempt_sequence_digest = _CanonicalStringSequenceDigest()
+        self._event_sequence_digest = _CanonicalStringSequenceDigest()
         self._by_feed_id: dict[str, ShadowClockInput] = {}
         self._by_clock: dict[pd.Timestamp, str] = {}
         self._execution_evidence_digests: dict[str, str] = {}
@@ -641,11 +1047,11 @@ class ShadowInputJournal:
 
     @property
     def fingerprint(self) -> str:
-        return _digest(tuple(item.input_digest for item in self._events))
+        return self._event_sequence_digest.fingerprint
 
     @property
     def attempt_fingerprint(self) -> str:
-        return _digest(tuple(item.input_digest for item in self._attempts))
+        return self._attempt_sequence_digest.fingerprint
 
     def __len__(self) -> int:
         return len(self._events)
@@ -657,6 +1063,35 @@ class ShadowInputJournal:
         if not isinstance(value, ShadowClockInput):
             raise TypeError("shadow journal attempts require ShadowClockInput")
         self._attempts.append(value)
+        self._attempt_digests.append(value.input_digest)
+        self._attempt_sequence_digest.append(value.input_digest)
+
+    def require_incremental_consistent(self) -> None:
+        """Check constant-time invariants used on the per-clock hot path."""
+
+        if (
+            len(self._attempt_digests) != len(self._attempts)
+            or len(self._event_digests) != len(self._events)
+            or self._attempt_sequence_digest.count != len(self._attempts)
+            or self._event_sequence_digest.count != len(self._events)
+            or len(self._by_feed_id) != len(self._events)
+            or len(self._by_clock) != len(self._events)
+            or (
+                self._events
+                and (
+                    self._event_digests[-1] != self._events[-1].input_digest
+                    or self._by_feed_id.get(self._events[-1].feed_event_id)
+                    is not self._events[-1]
+                    or self._by_clock.get(self._events[-1].bar.end)
+                    != self._events[-1].feed_event_id
+                )
+            )
+            or (
+                self._attempts
+                and self._attempt_digests[-1] != self._attempts[-1].input_digest
+            )
+        ):
+            raise ShadowLiveError("shadow journal incremental indexes drifted")
 
     def require_consistent(self) -> None:
         """Rebuild every mutable index from immutable accepted events."""
@@ -671,6 +1106,13 @@ class ShadowInputJournal:
             != self._execution_evidence_digests
             or clone._account_evidence_digests != self._account_evidence_digests
             or any(not isinstance(value, ShadowClockInput) for value in self._attempts)
+            or self._attempt_digests
+            != [value.input_digest for value in self._attempts]
+            or self._event_digests != [value.input_digest for value in self._events]
+            or self._attempt_sequence_digest.count != len(self._attempts)
+            or self._event_sequence_digest.count != len(self._events)
+            or self.attempt_fingerprint != _digest(tuple(self._attempt_digests))
+            or self.fingerprint != _digest(tuple(self._event_digests))
         ):
             raise ShadowLiveError("shadow journal indexes or evidence registry drifted")
         accepted_index = 0
@@ -682,6 +1124,26 @@ class ShadowInputJournal:
                 accepted_index += 1
         if accepted_index != len(self._events):
             raise ShadowLiveError("shadow accepted journal is not ordered within attempts")
+
+    def __getstate__(self) -> dict[str, Any]:
+        state = dict(self.__dict__)
+        state.pop("_attempt_sequence_digest", None)
+        state.pop("_event_sequence_digest", None)
+        return state
+
+    def __setstate__(self, state: Mapping[str, Any]) -> None:
+        self.__dict__.update(state)
+        if "_attempt_digests" not in self.__dict__:
+            self._attempt_digests = [value.input_digest for value in self._attempts]
+        if "_event_digests" not in self.__dict__:
+            self._event_digests = [value.input_digest for value in self._events]
+        self._attempt_sequence_digest = _CanonicalStringSequenceDigest(
+            self._attempt_digests
+        )
+        self._event_sequence_digest = _CanonicalStringSequenceDigest(
+            self._event_digests
+        )
+        self.require_consistent()
 
     def append(self, value: ShadowClockInput) -> bool:
         if not isinstance(value, ShadowClockInput):
@@ -730,6 +1192,8 @@ class ShadowInputJournal:
                 "account evidence identity conflicts with immutable content"
             )
         self._events.append(value)
+        self._event_digests.append(value.input_digest)
+        self._event_sequence_digest.append(value.input_digest)
         self._by_feed_id[value.feed_event_id] = value
         self._by_clock[value.bar.end] = value.feed_event_id
         self._execution_evidence_digests[
@@ -952,12 +1416,26 @@ class ShadowLiveRunner:
         ):
             raise ShadowLiveError("shadow runner runtime bindings are duplicated")
         binding_items = tuple(sorted(raw_binding_items))
+        binding_keys = tuple(key for key, _ in binding_items)
         if (
-            tuple(key for key, _ in binding_items) != SHADOW_RUNTIME_BINDING_KEYS
+            binding_keys
+            not in {
+                SHADOW_RUNTIME_BINDING_KEYS,
+                _LEGACY_SHADOW_RUNTIME_BINDING_KEYS,
+            }
             or any(not isinstance(value, str) or not value for _, value in binding_items)
         ):
             raise ShadowLiveError("shadow runner runtime bindings are incomplete")
         binding_map = dict(binding_items)
+        component_digest_version = binding_map.get(
+            "shadow_component_digest_version",
+            SHADOW_LEGACY_COMPONENT_DIGEST_VERSION,
+        )
+        if component_digest_version not in {
+            SHADOW_COMPONENT_DIGEST_VERSION,
+            SHADOW_LEGACY_COMPONENT_DIGEST_VERSION,
+        }:
+            raise ShadowLiveError("shadow component digest version changed")
         if (
             engine.model_config_sha256 != binding_map["model_config_sha256"]
             or SMC_SEMANTIC_VERSION != binding_map["semantic_version"]
@@ -998,8 +1476,41 @@ class ShadowLiveRunner:
         self.execution_fsms: dict[str, ExecutionFSM] = {}
         self._approval_digests: dict[str, str] = {}
         self._records: list[ShadowParityRecord] = []
+        self._record_ids: list[str] = []
+        self._record_sequence_digest = _CanonicalStringSequenceDigest()
         self._by_feed_id: dict[str, ShadowParityRecord] = {}
         self._failure: ShadowFailureRecord | None = None
+        self._rebuild_component_digest_caches()
+
+    def _rebuild_component_digest_caches(self) -> None:
+        binding_map = dict(self.runtime_bindings)
+        component_digest_version = binding_map.get(
+            "shadow_component_digest_version",
+            SHADOW_LEGACY_COMPONENT_DIGEST_VERSION,
+        )
+        if component_digest_version not in {
+            SHADOW_COMPONENT_DIGEST_VERSION,
+            SHADOW_LEGACY_COMPONENT_DIGEST_VERSION,
+        }:
+            raise ShadowLiveError("shadow component digest version changed")
+        self._component_digest_version = component_digest_version
+        self._runtime_action_policy_fingerprint = _digest(
+            self.engine.runtime_action_policy_identity
+        )
+        self._runtime_bindings_fingerprint = _digest(self.runtime_bindings)
+
+    def _component_digest_bundle(
+        self,
+        snapshot: EngineSnapshot,
+    ) -> ShadowComponentDigestBundle:
+        if self._component_digest_version == SHADOW_COMPONENT_DIGEST_VERSION:
+            return _current_shadow_component_digest_bundle(self, snapshot)
+        if (
+            self._component_digest_version
+            == SHADOW_LEGACY_COMPONENT_DIGEST_VERSION
+        ):
+            return _legacy_shadow_component_digest_bundle(self, snapshot)
+        raise ShadowLiveError("shadow component digest version is unregistered")
 
     def _require_runtime_bindings(self) -> None:
         """Reject checkpoint/config/code drift before every clock is consumed."""
@@ -1011,6 +1522,16 @@ class ShadowLiveRunner:
         binding_map = dict(self.runtime_bindings)
         current = shadow_runtime_bindings_from_model_config(
             self.model_config_path
+        )
+        expected_bindings = (
+            current
+            if self._component_digest_version
+            == SHADOW_COMPONENT_DIGEST_VERSION
+            else tuple(
+                item
+                for item in current
+                if item[0] != "shadow_component_digest_version"
+            )
         )
         try:
             model_payload = json.loads(self.model_config_path.read_text(encoding="utf-8"))
@@ -1029,7 +1550,7 @@ class ShadowLiveRunner:
         except (KeyError, TypeError, ValueError, json.JSONDecodeError):
             model_contract_matches = False
         if (
-            current != self.runtime_bindings
+            expected_bindings != self.runtime_bindings
             or not model_contract_matches
             or self.engine.model_config_sha256 != binding_map["model_config_sha256"]
             or SMC_SEMANTIC_VERSION != binding_map["semantic_version"]
@@ -1050,12 +1571,45 @@ class ShadowLiveRunner:
         ):
             raise ShadowLiveError("shadow runtime bindings drifted after restore")
 
-    def _require_internal_consistency(self) -> None:
-        self.journal.require_consistent()
-        expected_records = {record.feed_event_id: record for record in self._records}
+    def _require_internal_consistency(self, *, deep: bool = True) -> None:
+        if deep:
+            self.journal.require_consistent()
+        else:
+            self.journal.require_incremental_consistent()
+        expected_records = (
+            {record.feed_event_id: record for record in self._records}
+            if deep
+            else None
+        )
         if (
-            len(expected_records) != len(self._records)
-            or self._by_feed_id != expected_records
+            len(self._record_ids) != len(self._records)
+            or self._record_sequence_digest.count != len(self._records)
+            or (
+                deep
+                and (
+                    len(expected_records) != len(self._records)
+                    or self._by_feed_id != expected_records
+                    or self._record_ids
+                    != [record.record_id for record in self._records]
+                    or self.record_fingerprint != _digest(tuple(self._record_ids))
+                )
+            )
+            or (
+                not deep
+                and (
+                    len(self._by_feed_id) != len(self._records)
+                    or (
+                        self._records
+                        and (
+                            self._record_ids[-1] != self._records[-1].record_id
+                            or self._by_feed_id.get(
+                                self._records[-1].feed_event_id
+                            )
+                            is not self._records[-1]
+                        )
+                    )
+                )
+            )
             or set(self.execution_fsms) != set(self._approval_digests)
             or type(self.engine) is not ContinuousSMCEngine
             or self.engine.runtime_mode != "development"
@@ -1069,11 +1623,29 @@ class ShadowLiveRunner:
                 _digest(fsm.approved) != self._approval_digests[identity]
                 for identity, fsm in self.execution_fsms.items()
             )
+            or self._runtime_action_policy_fingerprint
+            != _digest(self.engine.runtime_action_policy_identity)
+            or self._runtime_bindings_fingerprint
+            != _digest(self.runtime_bindings)
         ):
             raise ShadowLiveError("shadow runner indexes or approvals drifted")
 
+    def __getstate__(self) -> dict[str, Any]:
+        state = dict(self.__dict__)
+        state.pop("_record_sequence_digest", None)
+        state.pop("_component_digest_version", None)
+        state.pop("_runtime_action_policy_fingerprint", None)
+        state.pop("_runtime_bindings_fingerprint", None)
+        return state
+
     def __setstate__(self, state: Mapping[str, Any]) -> None:
         self.__dict__.update(state)
+        if "_record_ids" not in self.__dict__:
+            self._record_ids = [record.record_id for record in self._records]
+        self._record_sequence_digest = _CanonicalStringSequenceDigest(
+            self._record_ids
+        )
+        self._rebuild_component_digest_caches()
         self._require_internal_consistency()
         self._require_runtime_bindings()
         audit = audit_shadow_parity(self, self)
@@ -1089,11 +1661,135 @@ class ShadowLiveRunner:
 
     @property
     def record_fingerprint(self) -> str:
-        return _digest(tuple(item.record_id for item in self._records))
+        return self._record_sequence_digest.fingerprint
 
     @property
     def failure(self) -> ShadowFailureRecord | None:
         return self._failure
+
+    def compact_runtime_checkpoint(self) -> dict[str, Any]:
+        """Externalize journal/record history while retaining runtime state.
+
+        Phase-9 v3 keeps those immutable histories in its fsynced WAL.  This
+        checkpoint therefore serializes the Engine and execution reducers but
+        not every prior input and parity record a second time.
+        """
+
+        self._require_internal_consistency(deep=False)
+        self._require_runtime_bindings()
+        if self._failure is not None or self.gateway.submission_attempts != 0:
+            raise ShadowLiveError("only a healthy no-order runner can checkpoint")
+        return {
+            "schema_version": (
+                SHADOW_COMPACT_RUNTIME_CHECKPOINT_SCHEMA
+                if self._component_digest_version
+                == SHADOW_COMPONENT_DIGEST_VERSION
+                else _LEGACY_SHADOW_COMPACT_RUNTIME_CHECKPOINT_SCHEMA
+            ),
+            "engine": self.engine,
+            "protocol": self.protocol,
+            "runtime_bindings": self.runtime_bindings,
+            "model_config_path": str(self.model_config_path),
+            "execution_fsms": self.execution_fsms,
+            "approval_digests": self._approval_digests,
+            "journal_events": len(self.journal),
+            "journal_fingerprint": self.journal.fingerprint,
+            "attempt_fingerprint": self.journal.attempt_fingerprint,
+            "records": len(self._records),
+            "record_fingerprint": self.record_fingerprint,
+            "last_record_id": (
+                None if not self._records else self._records[-1].record_id
+            ),
+            "external_submission_attempts": 0,
+        }
+
+    @classmethod
+    def from_compact_runtime_checkpoint(
+        cls,
+        state: Mapping[str, Any],
+        *,
+        journal_events: Sequence[ShadowClockInput],
+        records: Sequence[ShadowParityRecord],
+    ) -> "ShadowLiveRunner":
+        """Restore compact runtime state against exact WAL-backed histories."""
+
+        expected_fields = {
+            "schema_version",
+            "engine",
+            "protocol",
+            "runtime_bindings",
+            "model_config_path",
+            "execution_fsms",
+            "approval_digests",
+            "journal_events",
+            "journal_fingerprint",
+            "attempt_fingerprint",
+            "records",
+            "record_fingerprint",
+            "last_record_id",
+            "external_submission_attempts",
+        }
+        if (
+            not isinstance(state, Mapping)
+            or set(state) != expected_fields
+            or state.get("schema_version")
+            not in {
+                SHADOW_COMPACT_RUNTIME_CHECKPOINT_SCHEMA,
+                _LEGACY_SHADOW_COMPACT_RUNTIME_CHECKPOINT_SCHEMA,
+            }
+            or state.get("external_submission_attempts") != 0
+            or state.get("journal_events") != len(journal_events)
+            or state.get("records") != len(records)
+            or len(journal_events) != len(records)
+        ):
+            raise ShadowLiveError("compact shadow runtime checkpoint changed")
+        runner = cls.__new__(cls)
+        runner.engine = state["engine"]
+        runner.protocol = state["protocol"]
+        runner.runtime_bindings = tuple(state["runtime_bindings"])
+        runner.model_config_path = Path(state["model_config_path"])
+        runner.gateway = NullExecutionGateway()
+        runner.execution_fsms = dict(state["execution_fsms"])
+        runner._approval_digests = dict(state["approval_digests"])
+        runner.journal = ShadowInputJournal()
+        for value in journal_events:
+            runner.journal.record_attempt(value)
+            if not runner.journal.append(value):
+                raise ShadowLiveError("compact checkpoint WAL contains a duplicate")
+        runner._records = list(records)
+        runner._record_ids = [record.record_id for record in records]
+        runner._record_sequence_digest = _CanonicalStringSequenceDigest(
+            runner._record_ids
+        )
+        runner._by_feed_id = {record.feed_event_id: record for record in records}
+        runner._failure = None
+        runner._rebuild_component_digest_caches()
+        expected_checkpoint_schema = (
+            SHADOW_COMPACT_RUNTIME_CHECKPOINT_SCHEMA
+            if runner._component_digest_version
+            == SHADOW_COMPONENT_DIGEST_VERSION
+            else _LEGACY_SHADOW_COMPACT_RUNTIME_CHECKPOINT_SCHEMA
+        )
+        if any(
+            record.feed_event_id != value.feed_event_id
+            or record.input_digest != value.input_digest
+            for record, value in zip(records, journal_events, strict=True)
+        ) or state.get("schema_version") != expected_checkpoint_schema:
+            raise ShadowLiveError("compact checkpoint histories do not align")
+        runner._require_internal_consistency()
+        runner._require_runtime_bindings()
+        if (
+            runner.journal.fingerprint != state["journal_fingerprint"]
+            or runner.journal.attempt_fingerprint
+            != state["attempt_fingerprint"]
+            or runner.record_fingerprint != state["record_fingerprint"]
+            or (
+                None if not records else records[-1].record_id
+            )
+            != state["last_record_id"]
+        ):
+            raise ShadowLiveError("compact checkpoint history fingerprint differs")
+        return runner
 
     def _stage_execution_updates(
         self,
@@ -1255,7 +1951,7 @@ class ShadowLiveRunner:
             raise TypeError("shadow runner requires ShadowClockInput")
         self.journal.record_attempt(value)
         try:
-            self._require_internal_consistency()
+            self._require_internal_consistency(deep=False)
             self._require_runtime_bindings()
             if self.gateway.submission_attempts:
                 raise ShadowLiveError(
@@ -1303,61 +1999,18 @@ class ShadowLiveRunner:
                 raise ShadowLiveError(
                     "shadow snapshot clock differs from completed input"
                 )
-            market = snapshot.market_snapshot
-            belief = snapshot.belief
-            execution_event_map = {
-                identity: fsm.store.event_fingerprint
-                for identity, fsm in sorted(self.execution_fsms.items())
-            }
-            execution_state_map = {
-                identity: fsm.store.state_fingerprint
-                for identity, fsm in sorted(self.execution_fsms.items())
-            }
+            component_fields = self._component_digest_bundle(
+                snapshot
+            ).as_record_fields()
             record = ShadowParityRecord(
                 sequence=len(self._records) + 1,
                 feed_event_id=value.feed_event_id,
                 asof=snapshot.observation.asof,
                 input_digest=value.input_digest,
                 journal_prefix_fingerprint=self.journal.fingerprint,
-                observation_fingerprint=_digest(snapshot.observation),
-                audit_event_store_fingerprint=(
-                    self.engine.observer.audit_store.fingerprint()
-                ),
-                market_snapshot_fingerprint=(
-                    _digest(None) if market is None else market.fingerprint
-                ),
-                market_state_fingerprint=(
-                    _digest(None) if market is None else _digest(market.replay_payload())
-                ),
-                relation_fingerprint=(
-                    _digest(None) if market is None else _digest(market.relations)
-                ),
-                session_fingerprint=(
-                    _digest(None) if market is None else _digest(market.session)
-                ),
-                neutral_market_state_fingerprint=_digest(
-                    snapshot.neutral_market_state
-                ),
-                belief_fingerprint=_digest(belief),
-                path_state_fingerprint=_digest(belief.path_competition_state),
-                path_update_fingerprint=_digest(
-                    belief.path_update_records_this_clock
-                ),
-                dol_probability_fingerprint=_digest(belief.dol_probabilities),
-                signal_assessment_fingerprint=_digest(belief.signal_assessments),
-                trade_intent_fingerprint=_digest(belief.trade_intents),
-                decision_fingerprint=_digest(snapshot.decision),
-                risk_fingerprint=_digest(snapshot.risk),
-                engine_snapshot_fingerprint=_digest(snapshot),
-                runtime_action_policy_fingerprint=_digest(
-                    self.engine.runtime_action_policy_identity
-                ),
-                runtime_bindings_fingerprint=_digest(self.runtime_bindings),
-                execution_approval_fingerprint=_digest(self._approval_digests),
-                execution_event_fingerprint=_digest(execution_event_map),
-                execution_state_fingerprint=_digest(execution_state_map),
                 protocol_id=self.protocol.protocol_id,
                 external_submission_attempts=self.gateway.submission_attempts,
+                **component_fields,
             )
             if self.gateway.submission_attempts:
                 raise ShadowLiveError("external submission occurred during shadow update")
@@ -1365,6 +2018,8 @@ class ShadowLiveRunner:
             self._record_failure(value, exc)
             raise
         self._records.append(record)
+        self._record_ids.append(record.record_id)
+        self._record_sequence_digest.append(record.record_id)
         self._by_feed_id[value.feed_event_id] = record
         return record
 
@@ -1429,15 +2084,15 @@ def audit_shadow_parity(
             except Exception:
                 violations.append("journal_or_runtime_consistency")
             events = runner.journal.events
-            runtime_fingerprint = _digest(runner.runtime_bindings)
+            runtime_fingerprint = runner._runtime_bindings_fingerprint
+            prefix_digest = _CanonicalStringSequenceDigest()
             for index, record in enumerate(runner.records):
                 if index >= len(events):
                     violations.append("record_without_journal_input")
                     break
                 value = events[index]
-                expected_prefix = _digest(
-                    tuple(item.input_digest for item in events[: index + 1])
-                )
+                prefix_digest.append(value.input_digest)
+                expected_prefix = prefix_digest.fingerprint
                 if record.sequence != index + 1:
                     violations.append("record_sequence")
                 if record.feed_event_id != value.feed_event_id:
@@ -1490,75 +2145,43 @@ def audit_shadow_parity(
                     violations.append("engine_last_snapshot_missing")
                 else:
                     market = snapshot.market_snapshot
-                    belief = snapshot.belief
-                    terminal_values = {
-                        "observation_fingerprint": _digest(snapshot.observation),
-                        "audit_event_store_fingerprint": (
-                            runner.engine.observer.audit_store.fingerprint()
-                        ),
-                        "market_snapshot_fingerprint": (
-                            _digest(None) if market is None else market.fingerprint
-                        ),
-                        "market_state_fingerprint": (
-                            _digest(None)
-                            if market is None
-                            else _digest(market.replay_payload())
-                        ),
-                        "relation_fingerprint": (
-                            _digest(None) if market is None else _digest(market.relations)
-                        ),
-                        "session_fingerprint": (
-                            _digest(None) if market is None else _digest(market.session)
-                        ),
-                        "neutral_market_state_fingerprint": _digest(
-                            snapshot.neutral_market_state
-                        ),
-                        "belief_fingerprint": _digest(belief),
-                        "path_state_fingerprint": _digest(
-                            belief.path_competition_state
-                        ),
-                        "path_update_fingerprint": _digest(
-                            belief.path_update_records_this_clock
-                        ),
-                        "dol_probability_fingerprint": _digest(
-                            belief.dol_probabilities
-                        ),
-                        "signal_assessment_fingerprint": _digest(
-                            belief.signal_assessments
-                        ),
-                        "trade_intent_fingerprint": _digest(belief.trade_intents),
-                        "decision_fingerprint": _digest(snapshot.decision),
-                        "risk_fingerprint": _digest(snapshot.risk),
-                        "engine_snapshot_fingerprint": _digest(snapshot),
-                        "runtime_action_policy_fingerprint": _digest(
-                            runner.engine.runtime_action_policy_identity
-                        ),
-                        "runtime_bindings_fingerprint": runtime_fingerprint,
-                        "execution_approval_fingerprint": _digest(
-                            runner._approval_digests
-                        ),
-                        "execution_event_fingerprint": _digest(
-                            {
-                                identity: fsm.store.event_fingerprint
-                                for identity, fsm in sorted(
-                                    runner.execution_fsms.items()
-                                )
-                            }
-                        ),
-                        "execution_state_fingerprint": _digest(
-                            {
-                                identity: fsm.store.state_fingerprint
-                                for identity, fsm in sorted(
-                                    runner.execution_fsms.items()
-                                )
-                            }
-                        ),
-                    }
+                    terminal_values = runner._component_digest_bundle(
+                        snapshot
+                    ).as_record_fields()
                     violations.extend(
                         f"terminal_{name}"
                         for name, value in terminal_values.items()
                         if getattr(final_record, name) != value
                     )
+                    if (
+                        runner._component_digest_version
+                        == SHADOW_COMPONENT_DIGEST_VERSION
+                        and market is not None
+                    ):
+                        try:
+                            from .market_state import (
+                                replay_atomic_market_snapshot,
+                            )
+
+                            replayed_market = replay_atomic_market_snapshot(
+                                runner.engine.observer.audit_store.events(),
+                                semantic_registry_identity=(
+                                    market.semantic_registry_identity
+                                ),
+                                semantic_version=market.semantic_version,
+                                expected_timeframes=(
+                                    market.timeframe_states.keys()
+                                ),
+                            )
+                            if (
+                                replayed_market.replay_payload()
+                                != market.replay_payload()
+                            ):
+                                violations.append(
+                                    "market_full_replay_payload"
+                                )
+                        except Exception:
+                            violations.append("market_full_replay_payload")
             return tuple(dict.fromkeys(violations))
 
         for side, runner in (
@@ -1658,11 +2281,14 @@ def replay_shadow_journal(
 
 __all__ = [
     "NullExecutionGateway",
+    "SHADOW_COMPONENT_DIGEST_VERSION",
+    "SHADOW_LEGACY_COMPONENT_DIGEST_VERSION",
     "SHADOW_LIVE_AUTHORITY",
     "SHADOW_LIVE_SCHEMA_VERSION",
     "SHADOW_RECORD_FIELDS",
     "SHADOW_RUNTIME_BINDING_KEYS",
     "ShadowClockInput",
+    "ShadowComponentDigestBundle",
     "ShadowInputJournal",
     "ShadowFailureRecord",
     "ShadowLiveError",

@@ -1,0 +1,49 @@
+{
+  "schema_version": "phase9_shadow_operational_v1",
+  "status": "engineering_historical_simulation_only",
+  "historical_simulation_only": true,
+  "real_time_live_claim_allowed": false,
+  "external_submission_allowed": false,
+  "external_capacity_authorization_required": true,
+  "self_authorization_allowed": false,
+  "clock_policy": {
+    "calendar": "registered_cme_equity_index_minutes",
+    "completed_bar_interval_seconds": 60,
+    "duplicate": "same_feed_id_same_digest_idempotent",
+    "conflicting_duplicate": "terminal_fail_closed",
+    "out_of_order": "terminal_fail_closed",
+    "gap": "pause_before_journal_and_require_exact_ordered_backfill"
+  },
+  "durability_policy": {
+    "wal": "append_flush_fsync_before_process",
+    "commit": "append_flush_fsync_after_process",
+    "checkpoint": "content_addressed_engine_plus_compact_cursor",
+    "checkpoint_interval_clocks": 250,
+    "recovery_point_objective_accepted_clocks": 0
+  },
+  "mapping_policy": {
+    "historical": "exact_bundle_contract_mapping",
+    "current_live": "separate_versioned_effective_interval_binding_required",
+    "silent_rollover_allowed": false
+  },
+  "operational_metrics": {
+    "minimum_complete_sessions": 5,
+    "maximum_recovery_time_seconds": 300,
+    "maximum_conflicting_duplicates": 0,
+    "maximum_accepted_out_of_order_clocks": 0,
+    "maximum_unrecovered_expected_clock_gaps": 0,
+    "maximum_external_submission_attempts": 0,
+    "maximum_parity_mismatches": 0,
+    "maximum_semantic_event_duplicate_identities": 0,
+    "maximum_relation_restart_without_termination": 0,
+    "maximum_evidence_belief_orphans": 0,
+    "maximum_signal_expiry_violations": 0,
+    "maximum_dol_identity_drifts": 0
+  },
+  "authority": {
+    "historical_file_simulation_is_real_time_evidence": false,
+    "metrics_can_self_authorize_capacity": false,
+    "metrics_can_open_sealed_oos": false,
+    "metrics_can_authorize_trading": false
+  }
+}

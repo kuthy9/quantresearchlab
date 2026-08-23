@@ -10537,6 +10537,67 @@ def _shadow_real_completed_clock(observation: MarketObservation) -> bool:
     return bool(geometry is not None and geometry.real_completed)
 
 
+def _shadow_real_completed_bar_source_ids(
+    observation: MarketObservation,
+) -> tuple[str, ...]:
+    """Return the exact current normalized M1 BAR identity when available.
+
+    Temporal expiry and residual-at-horizon outcomes are factual lifecycle
+    transitions, so a boolean candle projection is not sufficient ancestry.
+    Production observations carry exactly one normalized BAR in the current
+    update.  Lightweight compatibility fixtures may omit it; those fixtures
+    remain usable while no transition requiring a BAR source is attempted.
+    """
+
+    matches = tuple(
+        event
+        for event in observation.semantic_events_this_update
+        if event.origin is EventOrigin.NORMALIZED_DATA
+        and event.kind is EventKind.BAR_COMPLETED
+        and event.timeframe is Timeframe.M1
+        and event.known_at == observation.asof
+        and event.event_time == observation.asof
+        and event.evidence.get("real_completed") is True
+        and event.evidence.get("clock_only") is False
+    )
+    if not matches:
+        return ()
+    if len(matches) != 1:
+        raise ValueError("one Brain clock has ambiguous normalized M1 BAR sources")
+    event = matches[0]
+    evidence = event.evidence
+    close = evidence.get("close")
+    if (
+        isinstance(close, bool)
+        or not isinstance(close, (int, float))
+        or isinstance(event.price, bool)
+        or not isinstance(event.price, (int, float))
+        or isinstance(observation.price, bool)
+        or not isinstance(observation.price, (int, float))
+    ):
+        raise ValueError("normalized M1 BAR source has invalid price evidence")
+    if (
+        evidence.get("symbol") != observation.symbol
+        or evidence.get("instrument_id") != observation.instrument_id
+        or len(event.source_data_ids) != 1
+        or not event.event_id
+        or not math.isclose(
+            float(close),
+            float(event.price),
+            rel_tol=0.0,
+            abs_tol=0.0,
+        )
+        or not math.isclose(
+            float(event.price),
+            float(observation.price),
+            rel_tol=0.0,
+            abs_tol=0.0,
+        )
+    ):
+        raise ValueError("normalized M1 BAR source conflicts with Brain observation")
+    return (event.event_id,)
+
+
 def _shadow_dol_facts(
     observation: MarketObservation,
     context: GlobalMarketContext,
@@ -10718,27 +10779,62 @@ _PATH_RUNTIME_FALSIFICATION_RULES: Mapping[PathKind, str] = {
     PathKind.FAILED_BREAKOUT: "realized_competitor_only",
     PathKind.RESIDUAL_UNKNOWN: "never_before_common_horizon",
 }
+_PATH_EMPIRICAL_RUNTIME_VERSION = (
+    "path_runtime_resolution_phase7_foundation_v2_empirical_v1.0"
+)
+_PATH_EMPIRICAL_RESIDUAL_WINNER_RULE = (
+    "clean_common_horizon_without_registered_winner_"
+    "realizes_residual_unknown"
+)
+_PATH_EMPIRICAL_EXPIRY_RULE = (
+    "registered_factual_terminal_precedes_admitted_hypothesis_specific_"
+    "expiry_capped_by_shared_common_horizon"
+)
 
 
 def _validate_shadow_path_resolution_protocol(
     protocol: PathBeliefProtocol,
 ) -> None:
     runtime = protocol.runtime_resolution
-    if (
-        runtime.protocol_version != "path_runtime_resolution_phase7_v1.0"
-        or runtime.entry_episode_terminal_authority is not False
-        or any(
-            runtime.winner_rule(path) != rule
+    base_contract = bool(
+        runtime.protocol_version == "path_runtime_resolution_phase7_v1.0"
+        and protocol.temporal_model is None
+        and all(
+            runtime.winner_rule(path) == rule
             for path, rule in _PATH_RUNTIME_WINNER_RULES.items()
         )
+        and all(
+            runtime.expiry_rule(path) == "shared_common_horizon"
+            for path in PathKind
+        )
+    )
+    empirical_contract = bool(
+        runtime.protocol_version == _PATH_EMPIRICAL_RUNTIME_VERSION
+        and protocol.temporal_model is not None
+        and all(
+            runtime.winner_rule(path) == (
+                _PATH_EMPIRICAL_RESIDUAL_WINNER_RULE
+                if path is PathKind.RESIDUAL_UNKNOWN
+                else _PATH_RUNTIME_WINNER_RULES[path]
+            )
+            for path in PathKind
+        )
+        and all(
+            runtime.expiry_rule(path) == (
+                "shared_common_horizon_only"
+                if path is PathKind.RESIDUAL_UNKNOWN
+                else _PATH_EMPIRICAL_EXPIRY_RULE
+            )
+            for path in PathKind
+        )
+    )
+    if (
+        runtime.entry_episode_terminal_authority is not False
         or any(
             runtime.falsification_rule(path) != rule
             for path, rule in _PATH_RUNTIME_FALSIFICATION_RULES.items()
         )
-        or any(
-            runtime.expiry_rule(path) != "shared_common_horizon"
-            for path in PathKind
-        )
+        or not (base_contract or empirical_contract)
     ):
         raise ValueError("unsupported path runtime resolution protocol")
 
@@ -11474,6 +11570,9 @@ class PlaybookBrain:
                     real_completed_bar=_shadow_real_completed_clock(
                         observation
                     ),
+                    clock_source_event_ids=(
+                        _shadow_real_completed_bar_source_ids(observation)
+                    ),
                 )
                 self._path_competition_state = state
                 self._dol_probability_results.clear()
@@ -11639,6 +11738,9 @@ class PlaybookBrain:
                     terminal_events=terminal_events,
                     outcome_events=outcome_events,
                     real_completed_bar=real_completed,
+                    clock_source_event_ids=(
+                        _shadow_real_completed_bar_source_ids(observation)
+                    ),
                 )
                 records = (record,)
         active = state.status is PathStatus.ACTIVE

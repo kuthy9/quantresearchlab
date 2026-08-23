@@ -100,6 +100,83 @@ def _synthetic_three_family_protocol(tmp_path: Path):
     return load_path_belief_protocol(destination)
 
 
+def _residual_horizon_protocol(tmp_path: Path):
+    payload = json.loads(
+        Path("configs/path_hypotheses.json").read_text(encoding="utf-8")
+    )
+    payload["model_version"] = "residual-horizon-regression-v1"
+    payload["runtime_resolution"]["protocol_version"] = (
+        "path_runtime_resolution_phase7_v1.1"
+    )
+    payload["runtime_resolution"]["realized_winner_rules"][
+        "residual_unknown"
+    ] = (
+        "clean_common_horizon_without_registered_winner_"
+        "realizes_residual_unknown"
+    )
+    destination = tmp_path / "residual_horizon_path_model.json"
+    destination.write_text(json.dumps(payload), encoding="utf-8")
+    return load_path_belief_protocol(destination)
+
+
+def _temporal_protocol(tmp_path: Path):
+    payload = json.loads(
+        Path("configs/path_hypotheses.json").read_text(encoding="utf-8")
+    )
+    payload["model_version"] = "temporal-survival-regression-v1"
+    payload["model_admission_status"] = "diagnostic_likelihood_admitted"
+    payload["likelihood_artifact_status"] = "diagnostic_admitted"
+    payload["terminal_rules"]["hypothesis_temporal_expiry"] = "expired"
+    likelihoods = {
+        "continuation": 0.6,
+        "deeper_retracement": 0.2,
+        "reversal": 0.1,
+        "balance": 0.1,
+        "failed_breakout": 0.1,
+        "residual_unknown": 0.3,
+    }
+    payload["evidence_rules"]["acceptance_continuation"][
+        "conditional_likelihood"
+    ] = likelihoods
+    payload["evidence_rules"]["displacement_impact"][
+        "conditional_likelihood"
+    ] = {path.value: 0.5 for path in PathKind}
+    for rule in payload["evidence_rules"].values():
+        rule.pop("log_likelihood_increment")
+    zero_hazards = {
+        path.value: [0.0, 0.0, 0.0] for path in PathKind
+    }
+    temporal = {
+        "schema_version": 1,
+        "artifact_id": "path-temporal:test:v1",
+        "source_dataset_id": "dataset:test:temporal",
+        "fit_manifest_sha256": "1" * 64,
+        "age_bin_upper_bounds": [1, 3],
+        "realized_hazards": zero_hazards,
+        "falsified_hazards": zero_hazards,
+        "superseded_hazards": zero_hazards,
+        "evidence_half_life_bars": {
+            path.value: 1.0 for path in PathKind
+        },
+        "expiry_bars": {
+            path.value: (
+                2 if path is PathKind.CONTINUATION else None
+            )
+            for path in PathKind
+        },
+        "status": "fitted_admitted_shadow",
+        "authority": "shadow_only",
+        "action_authority": False,
+    }
+    temporal["artifact_fingerprint"] = path_belief_module._canonical_hash(
+        temporal
+    )
+    payload["temporal_model"] = temporal
+    destination = tmp_path / "temporal_path_model.json"
+    destination.write_text(json.dumps(payload), encoding="utf-8")
+    return load_path_belief_protocol(destination)
+
+
 def _pristine(protocol):
     return create_path_competition_set(
         protocol,
@@ -627,6 +704,129 @@ def test_explicit_outcome_realizes_one_winner_and_terminalizes_competitors() -> 
         protocol=protocol,
     )
     assert restored.state == realized
+
+
+def test_common_horizon_realizes_residual_with_exact_clock_source(
+    tmp_path: Path,
+) -> None:
+    protocol = _residual_horizon_protocol(tmp_path)
+    manager, state = _initialized_manager(protocol)
+
+    realized, record = manager.advance(
+        asof=EXPIRY,
+        real_completed_bar=True,
+        clock_source_event_ids=("event:bar:common-horizon",),
+    )
+
+    assert realized.status is PathStatus.REALIZED
+    assert realized.winner_path is PathKind.RESIDUAL_UNKNOWN
+    assert realized.realized_at == EXPIRY
+    assert realized.outcome_source_event_ids == (
+        "event:bar:common-horizon",
+    )
+    assert realized.member(PathKind.RESIDUAL_UNKNOWN).status is PathStatus.REALIZED
+    assert realized.member(PathKind.RESIDUAL_UNKNOWN).probability == 1.0
+    assert record.applied_outcome_event is not None
+    assert record.applied_outcome_event.reason == (
+        "common_horizon_without_registered_winner"
+    )
+    restored = HypothesisManager.from_checkpoint(
+        manager.checkpoint_payload(),
+        protocol=protocol,
+    )
+    assert restored.state == realized
+
+
+def test_common_horizon_residual_requires_exact_clock_source(
+    tmp_path: Path,
+) -> None:
+    protocol = _residual_horizon_protocol(tmp_path)
+    manager, _state = _initialized_manager(protocol)
+
+    with pytest.raises(ValueError, match="exact horizon source"):
+        manager.advance(
+            asof=EXPIRY,
+            real_completed_bar=True,
+        )
+
+
+def test_temporal_model_reverts_evidence_then_expires_one_path(
+    tmp_path: Path,
+) -> None:
+    protocol = _temporal_protocol(tmp_path)
+    pristine = _pristine(protocol)
+    evidence = protocol.make_contribution(
+        competition_set_id=pristine.competition_set_id,
+        rule_id="acceptance_continuation",
+        source_event_ids=("event:acceptance:temporal",),
+        known_at=T0,
+        correlation_key="acceptance_continuation:temporal",
+        require_admitted=True,
+    )
+    manager = HypothesisManager(protocol)
+    state, _ = manager.initialize_state(
+        pristine,
+        contributions=(evidence,),
+        real_completed_bar=True,
+    )
+
+    first, first_record = manager.advance(
+        asof=T0 + pd.Timedelta(minutes=1),
+        real_completed_bar=True,
+        clock_source_event_ids=("event:bar:temporal:1",),
+    )
+    expected_log = 0.5 * math.log(0.6)
+    assert first.member(PathKind.CONTINUATION).log_weight == pytest.approx(
+        expected_log
+    )
+    assert first_record.decay_applied
+
+    second, second_record = manager.advance(
+        asof=T0 + pd.Timedelta(minutes=2),
+        real_completed_bar=True,
+        clock_source_event_ids=("event:bar:temporal:2",),
+    )
+    continuation = second.member(PathKind.CONTINUATION)
+    assert continuation.status is PathStatus.EXPIRED
+    assert continuation.terminal_reason == "temporal_survival_expiry:2"
+    assert continuation.terminal_source_event_ids == (
+        "event:bar:temporal:2",
+    )
+    assert second.status is PathStatus.ACTIVE
+    assert second_record.applied_terminal_events[0].path is PathKind.CONTINUATION
+    assert sum(
+        member.probability
+        for member in second.members
+        if member.status is PathStatus.ACTIVE
+    ) == pytest.approx(1.0)
+    restored = HypothesisManager.from_checkpoint(
+        manager.checkpoint_payload(),
+        protocol=protocol,
+    )
+    assert restored.state == second
+
+
+def test_temporal_expiry_requires_exact_real_bar_source(
+    tmp_path: Path,
+) -> None:
+    protocol = _temporal_protocol(tmp_path)
+    manager, _state = _initialized_manager(protocol)
+    manager.advance(
+        asof=T0 + pd.Timedelta(minutes=1),
+        real_completed_bar=True,
+        clock_source_event_ids=("event:bar:temporal:first",),
+    )
+    manager.advance(
+        asof=T0 + pd.Timedelta(minutes=2),
+        real_completed_bar=True,
+        clock_source_event_ids=("event:bar:temporal:second",),
+    )
+
+    with pytest.raises(ValueError, match="exact real-bar source"):
+        manager.advance(
+            asof=T0 + pd.Timedelta(minutes=3),
+            real_completed_bar=True,
+        )
 
 
 def test_outcome_preserves_a_competitor_that_expired_before_realization() -> None:

@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Materialize the frozen Phase-6 Week-1 clocks for a Phase-9 file rehearsal.
+"""Materialize frozen Phase-6 W1/W2 clocks for a Phase-9 file rehearsal.
 
 The artifact is a deterministic historical input journal for the existing
 ``run_shadow_file_pilot.py`` engineering path.  It is deliberately cold-start,
-flat-account, zero-order, and non-live.  It reads only the hash-bound Week-1
-MBO minute feature artifact and causal OHLCV source; raw MBO and sealed OOS
-data are never opened.
+flat-account, zero-order, and non-live.  It reads only one explicitly selected,
+hash-bound June development-window MBO feature artifact and the causal OHLCV
+source; raw MBO and sealed OOS data are never opened.
 """
 from __future__ import annotations
 
@@ -48,21 +48,39 @@ from smc_trader.shadow_live import (  # noqa: E402
     load_shadow_live_protocol,
     shadow_runtime_bindings_from_model_config,
 )
+from smc_trader.shadow_operational import (  # noqa: E402
+    HistoricalShadowWindow,
+    build_phase9_bundle_v3_payload,
+    load_shadow_operational_protocol,
+    phase9_historical_window,
+    runtime_code_environment_identity,
+    validate_phase9_bundle_v3_payload,
+)
 
 
 MATERIALIZER_SCHEMA_VERSION = "phase9_shadow_week1_materialization_v1"
+HISTORICAL_WINDOW_MATERIALIZER_SCHEMA_VERSION = (
+    "phase9_shadow_historical_window_materialization_v1"
+)
 MATERIALIZER_STATUS = "complete_historical_cold_start_file_input"
 BUNDLE_PUBLISH_PROTOCOL = "same_directory_exclusive_output_commit_v1"
 WEEK1_MANIFEST = (
-    ROOT
-    / "experiments/manifests/"
+    ROOT / "experiments/manifests/"
     "smc_semantics_v1_2_2024_06_phase6_mbo_week1_v5.yaml"
 )
 WEEK1_MANIFEST_SHA256 = (
     "77e5c43a157fc9aa5ac27a1f209daa869e07d649284630a186b3a50b71c689c4"
 )
+WEEK2_MANIFEST = (
+    ROOT / "experiments/manifests/"
+    "smc_semantics_v1_2_2024_06_phase6_mbo_week2_extension_v2.yaml"
+)
+WEEK2_MANIFEST_SHA256 = (
+    "d52ec00832ab4b8784c3f67aa1415bebf30b3d56056867072a80a26718f00b02"
+)
 MODEL_CONFIG = ROOT / "configs/model.json"
 SHADOW_PROTOCOL = ROOT / "configs/shadow_live_v1.json"
+SHADOW_OPERATIONAL_PROTOCOL = ROOT / "configs/phase9_shadow_operational_v1.json"
 SHADOW_FILE_RUNNER = ROOT / "scripts/run_shadow_file_pilot.py"
 
 WINDOW_ID = "2024-06-week-1"
@@ -72,9 +90,7 @@ SYMBOL = "NQM4"
 INSTRUMENT_ID = 13743
 EXPECTED_ROWS = 6900
 EXPECTED_REAL_ROWS = 6899
-EXPECTED_SYNTHETIC_CLOCKS = (
-    pd.Timestamp("2024-06-07T03:10:00Z"),
-)
+EXPECTED_SYNTHETIC_CLOCKS = (pd.Timestamp("2024-06-07T03:10:00Z"),)
 TICK_SIZE = 0.25
 POINT_VALUE = 20.0
 ACCOUNT_EQUITY = 100_000.0
@@ -106,8 +122,47 @@ _REQUIRED_FEATURE_COLUMNS = frozenset(
 )
 
 
+@dataclass(frozen=True)
+class _RegisteredMaterializationWindow:
+    window: HistoricalShadowWindow
+    manifest_path: Path
+    manifest_sha256: str
+    experiment_id: str
+    study_mode: str
+    manifest_window_key: str
+
+
+_REGISTERED_WINDOWS = {
+    "W1": _RegisteredMaterializationWindow(
+        window=phase9_historical_window("W1"),
+        manifest_path=WEEK1_MANIFEST,
+        manifest_sha256=WEEK1_MANIFEST_SHA256,
+        experiment_id="smc_semantics_v1_2_phase6_mbo_2024_06_week1_v5",
+        study_mode="primary_week_only",
+        manifest_window_key="primary",
+    ),
+    "W2": _RegisteredMaterializationWindow(
+        window=phase9_historical_window("W2"),
+        manifest_path=WEEK2_MANIFEST,
+        manifest_sha256=WEEK2_MANIFEST_SHA256,
+        experiment_id=("smc_semantics_v1_2_2024_06_phase6_mbo_week2_extension_v2"),
+        study_mode="primary_plus_registered_underpowered_extension",
+        manifest_window_key="underpowered_extension",
+    ),
+}
+
+
+def registered_materialization_window(
+    window_id: str,
+) -> _RegisteredMaterializationWindow:
+    try:
+        return _REGISTERED_WINDOWS[window_id]
+    except (KeyError, TypeError) as exc:
+        raise ShadowWeek1MaterializationError("window_id must be W1 or W2") from exc
+
+
 class ShadowWeek1MaterializationError(ValueError):
-    """Raised when the bounded Week-1 input contract fails closed."""
+    """Raised when the bounded W1/W2 input contract fails closed."""
 
 
 def _duplicate_guard(pairs: Sequence[tuple[str, Any]]) -> dict[str, Any]:
@@ -158,11 +213,13 @@ def _timestamp(value: Any, *, name: str) -> pd.Timestamp:
 def _bound_source(
     bindings: Mapping[str, Any],
     key: str,
+    *,
+    window_alias: str = "W1",
 ) -> tuple[Path, str]:
     raw = bindings.get(key)
     if not isinstance(raw, Mapping) or set(raw) != {"path", "sha256"}:
         raise ShadowWeek1MaterializationError(
-            f"Week-1 manifest {key} binding changed"
+            f"{window_alias} manifest {key} binding changed"
         )
     relative = raw.get("path")
     expected_hash = raw.get("sha256")
@@ -174,64 +231,74 @@ def _bound_source(
         or len(expected_hash) != 64
     ):
         raise ShadowWeek1MaterializationError(
-            f"Week-1 manifest {key} binding is invalid"
+            f"{window_alias} manifest {key} binding is invalid"
         )
     path = ROOT / relative
     _regular_file(path, name=key)
     actual_hash = sha256_file(path)
     if actual_hash != expected_hash:
         raise ShadowWeek1MaterializationError(
-            f"Week-1 manifest {key} SHA-256 differs"
+            f"{window_alias} manifest {key} SHA-256 differs"
         )
     return path, actual_hash
 
 
 def _registered_sources(
-    manifest_path: str | Path = WEEK1_MANIFEST,
+    manifest_path: str | Path | None = None,
+    *,
+    registered_window: _RegisteredMaterializationWindow | None = None,
 ) -> tuple[Mapping[str, Any], dict[str, tuple[Path, str]]]:
-    path = Path(manifest_path)
-    _regular_file(path, name="Week-1 v5 manifest")
-    if sha256_file(path) != WEEK1_MANIFEST_SHA256:
+    registered = registered_window or registered_materialization_window("W1")
+    window = registered.window
+    path = Path(manifest_path or registered.manifest_path)
+    _regular_file(path, name=f"{window.alias} frozen manifest")
+    if sha256_file(path) != registered.manifest_sha256:
         raise ShadowWeek1MaterializationError(
-            "Week-1 v5 manifest SHA-256 differs from the frozen gate"
+            f"{window.alias} manifest SHA-256 differs from the frozen gate"
         )
-    manifest = _read_json(path, name="Week-1 v5 manifest")
-    primary = manifest.get("windows", {}).get("primary", {})
+    manifest = _read_json(path, name=f"{window.alias} frozen manifest")
+    selected = manifest.get("windows", {}).get(
+        registered.manifest_window_key,
+        {},
+    )
     census = manifest.get("reader_census_contract", {})
     authority = manifest.get("authority", {})
     contract = manifest.get("contract", {})
     if (
-        manifest.get("experiment_id")
-        != "smc_semantics_v1_2_phase6_mbo_2024_06_week1_v5"
-        or manifest.get("study_mode") != "primary_week_only"
+        manifest.get("experiment_id") != registered.experiment_id
+        or manifest.get("study_mode") != registered.study_mode
         or manifest.get("frozen_before_run") is not True
         or authority.get("sealed_holdout_opened") is not False
-        or primary.get("id") != WINDOW_ID
-        or _timestamp(primary.get("start"), name="Week-1 start") != WINDOW_START
-        or _timestamp(primary.get("end_exclusive"), name="Week-1 end")
-        != WINDOW_END
-        or primary.get("expected_rows") != EXPECTED_ROWS
-        or contract != {"symbol": SYMBOL, "instrument_id": INSTRUMENT_ID}
-        or census.get("window_id") != WINDOW_ID
-        or census.get("completed_clocks") != EXPECTED_ROWS
-        or census.get("real_completed") != EXPECTED_REAL_ROWS
-        or census.get("synthetic_no_trade") != len(EXPECTED_SYNTHETIC_CLOCKS)
+        or selected.get("id") != window.window_id
+        or _timestamp(selected.get("start"), name=f"{window.alias} start")
+        != window.start
+        or _timestamp(
+            selected.get("end_exclusive"),
+            name=f"{window.alias} end",
+        )
+        != window.end_exclusive
+        or selected.get("expected_rows") != window.rows
+        or contract != {"symbol": window.symbol, "instrument_id": window.instrument_id}
+        or census.get("window_id") != window.window_id
+        or census.get("completed_clocks") != window.rows
+        or census.get("real_completed") != window.real_rows
+        or census.get("synthetic_no_trade") != len(window.synthetic_clocks)
         or tuple(
             _timestamp(value, name="registered synthetic clock")
             for value in census.get("synthetic_decision_clocks", ())
         )
-        != EXPECTED_SYNTHETIC_CLOCKS
+        != window.synthetic_clocks
     ):
         raise ShadowWeek1MaterializationError(
-            "Week-1 v5 window, contract, authority, or census changed"
+            f"{window.alias} window, contract, authority, or census changed"
         )
     bindings = manifest.get("identity_bindings")
     if not isinstance(bindings, Mapping):
         raise ShadowWeek1MaterializationError(
-            "Week-1 v5 identity bindings are missing"
+            f"{window.alias} identity bindings are missing"
         )
     sources = {
-        key: _bound_source(bindings, key)
+        key: _bound_source(bindings, key, window_alias=window.alias)
         for key in (
             _FEATURE_BINDING,
             _FEATURE_MANIFEST_BINDING,
@@ -244,30 +311,29 @@ def _registered_sources(
     feature_manifest_path, _ = sources[_FEATURE_MANIFEST_BINDING]
     feature_manifest = _read_json(
         feature_manifest_path,
-        name="Week-1 feature manifest",
+        name=f"{window.alias} feature manifest",
     )
     output = feature_manifest.get("output", {})
     if (
-        feature_manifest.get("artifact_kind")
-        != "mbo_minute_mechanism_features"
+        feature_manifest.get("artifact_kind") != "mbo_minute_mechanism_features"
         or feature_manifest.get("sealed_holdout_read") is not False
         or feature_manifest.get("contract_selection_causal") is not True
         or _timestamp(feature_manifest.get("start"), name="feature start")
-        != WINDOW_START
+        != window.start
         or _timestamp(
             feature_manifest.get("end_exclusive"),
             name="feature end",
         )
-        != WINDOW_END
-        or feature_manifest.get("symbol") != SYMBOL
-        or feature_manifest.get("instrument_id") != INSTRUMENT_ID
+        != window.end_exclusive
+        or feature_manifest.get("symbol") != window.symbol
+        or feature_manifest.get("instrument_id") != window.instrument_id
         or output.get("path") != str(feature_path.relative_to(ROOT))
         or output.get("sha256") != feature_hash
-        or output.get("rows") != EXPECTED_ROWS
-        or output.get("valid_book_rows") != EXPECTED_ROWS
+        or output.get("rows") != window.rows
+        or output.get("valid_book_rows") != window.rows
     ):
         raise ShadowWeek1MaterializationError(
-            "Week-1 feature manifest contract changed"
+            f"{window.alias} feature manifest contract changed"
         )
 
     ohlcv_path, _ = sources[_OHLCV_BINDING]
@@ -288,49 +354,67 @@ def _registered_sources(
     return manifest, sources
 
 
-def _week1_bars(path: Path) -> tuple[Bar, ...]:
-    loaded = load_ohlcv(path, start=WINDOW_START, end=WINDOW_END)
+def _window_bars(
+    path: Path,
+    window: HistoricalShadowWindow,
+) -> tuple[Bar, ...]:
+    loaded = load_ohlcv(path, start=window.start, end=window.end_exclusive)
     if loaded.warnings or not loaded.contract_selection_causal:
         raise ShadowWeek1MaterializationError(
-            "Week-1 OHLCV is not the clean causal previous-session front"
+            f"{window.alias} OHLCV is not the clean causal previous-session front"
         )
     bars = tuple(
         bar
         for bar in iter_completed_bars(loaded.frame)
-        if WINDOW_START <= bar.end.tz_convert("UTC") < WINDOW_END
+        if window.start <= bar.end.tz_convert("UTC") < window.end_exclusive
     )
     synthetic = tuple(
         bar.end.tz_convert("UTC") for bar in bars if bar.synthetic_no_trade
     )
     if (
-        len(bars) != EXPECTED_ROWS
-        or sum(not bar.synthetic_no_trade for bar in bars) != EXPECTED_REAL_ROWS
-        or synthetic != EXPECTED_SYNTHETIC_CLOCKS
+        len(bars) != window.rows
+        or sum(not bar.synthetic_no_trade for bar in bars) != window.real_rows
+        or synthetic != window.synthetic_clocks
         or any(bar.data_gap_before_minutes != 0 for bar in bars)
-        or {bar.symbol for bar in bars} != {SYMBOL}
-        or {bar.instrument_id for bar in bars} != {INSTRUMENT_ID}
+        or {bar.symbol for bar in bars} != {window.symbol}
+        or {bar.instrument_id for bar in bars} != {window.instrument_id}
         or any(right.end <= left.end for left, right in zip(bars, bars[1:]))
     ):
         raise ShadowWeek1MaterializationError(
-            "causal OHLCV replay differs from the frozen Week-1 census"
+            f"causal OHLCV replay differs from the frozen {window.alias} census"
         )
     return bars
 
 
-def _week1_features(path: Path) -> pd.DataFrame:
+def _week1_bars(path: Path) -> tuple[Bar, ...]:
+    """Compatibility wrapper for the original W1-only tests/callers."""
+
+    return _window_bars(path, phase9_historical_window("W1"))
+
+
+def _window_features(
+    path: Path,
+    window: HistoricalShadowWindow,
+) -> pd.DataFrame:
     values = validate_mbo_mechanism_frame(
         pd.read_parquet(path),
-        expected_start=WINDOW_START,
-        expected_end=WINDOW_END,
-        expected_symbol=SYMBOL,
-        expected_instrument_id=INSTRUMENT_ID,
-        expected_rows=EXPECTED_ROWS,
+        expected_start=window.start,
+        expected_end=window.end_exclusive,
+        expected_symbol=window.symbol,
+        expected_instrument_id=window.instrument_id,
+        expected_rows=window.rows,
     )
     if not values["book_valid"].all():
         raise ShadowWeek1MaterializationError(
-            "Week-1 shadow input requires one valid BBO for every clock"
+            f"{window.alias} shadow input requires one valid BBO for every clock"
         )
     return values
+
+
+def _week1_features(path: Path) -> pd.DataFrame:
+    """Compatibility wrapper for the original W1-only tests/callers."""
+
+    return _window_features(path, phase9_historical_window("W1"))
 
 
 def _finite_number(value: Any, *, name: str) -> float:
@@ -352,7 +436,12 @@ def _whole_size(value: Any, *, name: str) -> float:
     return result
 
 
-def _clock_input(bar: Bar, row: Mapping[str, Any]) -> ShadowClockInput:
+def _clock_input(
+    bar: Bar,
+    row: Mapping[str, Any],
+    *,
+    identity_namespace: str = "phase9-week1",
+) -> ShadowClockInput:
     decision_clock = bar.end.tz_convert("UTC")
     row_clock = _timestamp(row["decision_time"], name="feature decision_time")
     if (
@@ -433,19 +522,16 @@ def _clock_input(bar: Bar, row: Mapping[str, Any]) -> ShadowClockInput:
         1.0,
         bid_size + ask_size,
     )
-    if (
-        not math.isclose(
-            float(execution.depth_imbalance),
-            expected_best_imbalance,
-            rel_tol=0.0,
-            abs_tol=1e-12,
-        )
-        or not math.isclose(
-            float(execution.data_age_seconds),
-            shadow_age_seconds,
-            rel_tol=0.0,
-            abs_tol=1e-9,
-        )
+    if not math.isclose(
+        float(execution.depth_imbalance),
+        expected_best_imbalance,
+        rel_tol=0.0,
+        abs_tol=1e-12,
+    ) or not math.isclose(
+        float(execution.data_age_seconds),
+        shadow_age_seconds,
+        rel_tol=0.0,
+        abs_tol=1e-9,
     ):
         raise ShadowWeek1MaterializationError(
             "execution provider did not recompute best-level imbalance and age"
@@ -454,13 +540,11 @@ def _clock_input(bar: Bar, row: Mapping[str, Any]) -> ShadowClockInput:
     clock_text = decision_clock.isoformat()
     publisher_id = int(_whole_size(row["publisher_id"], name="publisher_id"))
     sequence = int(_whole_size(row["sequence"], name="sequence"))
-    feed_event_id = (
-        f"phase9-week1-feed:{SYMBOL}:{INSTRUMENT_ID}:{clock_text}"
-    )
+    feed_event_id = f"{identity_namespace}-feed:{SYMBOL}:{INSTRUMENT_ID}:{clock_text}"
     execution_event_id = (
-        f"phase9-week1-bbo:{publisher_id}:{sequence}:{clock_text}"
+        f"{identity_namespace}-bbo:{publisher_id}:{sequence}:{clock_text}"
     )
-    account_event_id = f"phase9-week1-flat-account:{clock_text}"
+    account_event_id = f"{identity_namespace}-flat-account:{clock_text}"
     value = ShadowClockInput(
         feed_event_id=feed_event_id,
         received_at=decision_clock + RECEIVED_DELAY,
@@ -504,9 +588,14 @@ def build_shadow_week1_payloads(
     *,
     expected_rows: int = EXPECTED_ROWS,
     expected_synthetic_clocks: Sequence[pd.Timestamp] = EXPECTED_SYNTHETIC_CLOCKS,
+    identity_namespace: str = "phase9-week1",
 ) -> tuple[dict[str, Any], ...]:
     """Build and parse-back the deterministic zero-order clock payloads."""
 
+    if identity_namespace not in {"phase9-week1", "phase9-week2"}:
+        raise ShadowWeek1MaterializationError(
+            "identity_namespace must bind registered W1 or W2"
+        )
     values = pd.DataFrame(features).copy()
     missing = sorted(_REQUIRED_FEATURE_COLUMNS - set(values))
     if missing:
@@ -542,13 +631,15 @@ def build_shadow_week1_payloads(
         for value in expected_synthetic_clocks
     )
     if synthetic != expected_synthetic:
-        raise ShadowWeek1MaterializationError(
-            "synthetic no-trade clock census differs"
-        )
+        raise ShadowWeek1MaterializationError("synthetic no-trade clock census differs")
 
     payloads: list[dict[str, Any]] = []
     for bar, row in zip(bars, values.to_dict("records"), strict=True):
-        value = _clock_input(bar, row)
+        value = _clock_input(
+            bar,
+            row,
+            identity_namespace=identity_namespace,
+        )
         payload = shadow_clock_input_payload(value)
         parsed = shadow_clock_input_from_payload(payload)
         if parsed.input_digest != value.input_digest:
@@ -556,12 +647,8 @@ def build_shadow_week1_payloads(
                 "shadow payload parse-back changed the input identity"
             )
         payloads.append(payload)
-    if (
-        len({item["feed_event_id"] for item in payloads}) != len(payloads)
-        or any(
-            item["approved_intents"] or item["execution_events"]
-            for item in payloads
-        )
+    if len({item["feed_event_id"] for item in payloads}) != len(payloads) or any(
+        item["approved_intents"] or item["execution_events"] for item in payloads
     ):
         raise ShadowWeek1MaterializationError(
             "materialized shadow identities or zero-order policy changed"
@@ -674,10 +761,7 @@ def _destination_lock(destination: Path):
         ) from exc
     try:
         lock_stat = os.fstat(descriptor)
-        if (
-            not stat_module.S_ISREG(lock_stat.st_mode)
-            or lock_stat.st_nlink < 1
-        ):
+        if not stat_module.S_ISREG(lock_stat.st_mode) or lock_stat.st_nlink < 1:
             raise ShadowWeek1MaterializationError(
                 "shadow Week-1 destination lock is not a regular file"
             )
@@ -916,8 +1000,15 @@ def _publish_bundle_exclusive(
 def materialize_shadow_week1_input(
     output_path: str | Path,
     *,
-    manifest_path: str | Path = WEEK1_MANIFEST,
+    manifest_path: str | Path | None = None,
+    bundle_version: int = 1,
+    window_id: str = "W1",
 ) -> Mapping[str, Any]:
+    if type(bundle_version) is not int or bundle_version not in {1, 3}:
+        raise ShadowWeek1MaterializationError("bundle_version must be 1 or 3")
+    registered = registered_materialization_window(window_id)
+    window = registered.window
+    selected_manifest = Path(manifest_path or registered.manifest_path)
     destination = Path(output_path)
     sidecar = _sidecar_path(destination)
     _recover_interrupted_bundle(destination)
@@ -928,25 +1019,35 @@ def materialize_shadow_week1_input(
         or sidecar.is_symlink()
     ):
         raise FileExistsError(
-            "refusing to overwrite the shadow Week-1 input or sidecar"
+            f"refusing to overwrite the shadow {window.alias} input or sidecar"
         )
 
-    _, sources = _registered_sources(manifest_path)
-    bars = _week1_bars(sources[_OHLCV_BINDING][0])
-    features = _week1_features(sources[_FEATURE_BINDING][0])
-    payloads = build_shadow_week1_payloads(bars, features)
+    _, sources = _registered_sources(
+        selected_manifest,
+        registered_window=registered,
+    )
+    bars = _window_bars(sources[_OHLCV_BINDING][0], window)
+    features = _window_features(sources[_FEATURE_BINDING][0], window)
+    payloads = build_shadow_week1_payloads(
+        bars,
+        features,
+        expected_rows=window.rows,
+        expected_synthetic_clocks=window.synthetic_clocks,
+        identity_namespace={"W1": "phase9-week1", "W2": "phase9-week2"}[
+            window.alias
+        ],
+    )
     output_bytes = _jsonl(payloads)
     output_sha256 = hashlib.sha256(output_bytes).hexdigest()
     parsed_digests = tuple(
-        shadow_clock_input_from_payload(payload).input_digest
-        for payload in payloads
+        shadow_clock_input_from_payload(payload).input_digest for payload in payloads
     )
 
     for path, name in (
         (MODEL_CONFIG, "current model config"),
         (SHADOW_PROTOCOL, "current shadow protocol"),
         (SHADOW_FILE_RUNNER, "current shadow file runner"),
-        (Path(__file__).resolve(), "current Week-1 materializer"),
+        (Path(__file__).resolve(), "current historical-window materializer"),
     ):
         _regular_file(path, name=name)
     shadow_protocol_hash = sha256_file(SHADOW_PROTOCOL)
@@ -956,17 +1057,15 @@ def materialize_shadow_week1_input(
     )
     mapping = dict(protocol.instrument_mapping)
     if (
-        mapping.get("vendor_symbol") != SYMBOL
-        or mapping.get("vendor_instrument_id") != INSTRUMENT_ID
-        or float(mapping.get("tick_size", 0.0)) != TICK_SIZE
-        or float(mapping.get("point_value", 0.0)) != POINT_VALUE
+        mapping.get("vendor_symbol") != window.symbol
+        or mapping.get("vendor_instrument_id") != window.instrument_id
+        or float(mapping.get("tick_size", 0.0)) != window.tick_size
+        or float(mapping.get("point_value", 0.0)) != window.point_value
     ):
         raise ShadowWeek1MaterializationError(
-            "current shadow instrument mapping differs from Week-1"
+            f"current shadow instrument mapping differs from {window.alias}"
         )
-    runtime_bindings = dict(
-        shadow_runtime_bindings_from_model_config(MODEL_CONFIG)
-    )
+    runtime_bindings = dict(shadow_runtime_bindings_from_model_config(MODEL_CONFIG))
     source_bindings = {
         key: {
             "path": str(path.relative_to(ROOT)),
@@ -974,29 +1073,33 @@ def materialize_shadow_week1_input(
         }
         for key, (path, digest) in sources.items()
     }
-    sidecar_payload = {
+    sidecar_payload: dict[str, Any] = {
         "format_version": 1,
-        "schema_version": MATERIALIZER_SCHEMA_VERSION,
+        "schema_version": (
+            MATERIALIZER_SCHEMA_VERSION
+            if window.alias == "W1"
+            else HISTORICAL_WINDOW_MATERIALIZER_SCHEMA_VERSION
+        ),
         "input_schema_version": INPUT_SCHEMA_VERSION,
         "status": MATERIALIZER_STATUS,
         "authority": "historical_engineering_file_input_only",
         "contract": {
-            "symbol": SYMBOL,
-            "instrument_id": INSTRUMENT_ID,
-            "tick_size": TICK_SIZE,
-            "point_value": POINT_VALUE,
+            "symbol": window.symbol,
+            "instrument_id": window.instrument_id,
+            "tick_size": window.tick_size,
+            "point_value": window.point_value,
         },
         "window": {
-            "id": WINDOW_ID,
-            "start": WINDOW_START.isoformat(),
-            "end_exclusive": WINDOW_END.isoformat(),
+            "id": window.window_id,
+            "start": window.start.isoformat(),
+            "end_exclusive": window.end_exclusive.isoformat(),
         },
         "census": {
             "rows": len(payloads),
             "real_completed": sum(not bar.synthetic_no_trade for bar in bars),
             "synthetic_no_trade": sum(bar.synthetic_no_trade for bar in bars),
             "synthetic_decision_clocks": [
-                value.isoformat() for value in EXPECTED_SYNTHETIC_CLOCKS
+                value.isoformat() for value in window.synthetic_clocks
             ],
             "first_decision_clock": bars[0].end.tz_convert("UTC").isoformat(),
             "last_decision_clock": bars[-1].end.tz_convert("UTC").isoformat(),
@@ -1004,9 +1107,9 @@ def materialize_shadow_week1_input(
             "contract_changes": 0,
         },
         "source_bindings": {
-            "week1_v5_manifest": {
-                "path": str(Path(manifest_path).resolve().relative_to(ROOT)),
-                "sha256": WEEK1_MANIFEST_SHA256,
+            window.manifest_binding: {
+                "path": str(selected_manifest.resolve().relative_to(ROOT)),
+                "sha256": registered.manifest_sha256,
             },
             **source_bindings,
         },
@@ -1068,6 +1171,30 @@ def materialize_shadow_week1_input(
             ).hexdigest(),
         },
     }
+    if bundle_version == 3:
+        operational_protocol = load_shadow_operational_protocol(
+            SHADOW_OPERATIONAL_PROTOCOL,
+        )
+        runtime_identity = runtime_code_environment_identity(
+            ROOT,
+            require_clean=True,
+        )
+        sidecar_payload = build_phase9_bundle_v3_payload(
+            sidecar_payload,
+            runtime_identity=runtime_identity,
+            operational_protocol=operational_protocol,
+        )
+        validate_phase9_bundle_v3_payload(
+            sidecar_payload,
+            output_path=destination,
+            output_sha256=output_sha256,
+            output_bytes=len(output_bytes),
+            output_rows=len(payloads),
+            runtime_identity=runtime_identity,
+            operational_protocol=operational_protocol,
+            root=ROOT,
+            verify_source_files=True,
+        )
     return _publish_bundle_exclusive(
         destination,
         output_bytes,
@@ -1077,12 +1204,27 @@ def materialize_shadow_week1_input(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Materialize the frozen Week-1 Phase-9 file input",
+        description="Materialize a frozen W1/W2 Phase-9 file input",
     )
     parser.add_argument("--output", required=True)
     parser.add_argument(
+        "--window-id",
+        choices=("W1", "W2"),
+        default="W1",
+        help="registered June development window (default: W1)",
+    )
+    parser.add_argument(
+        "--manifest",
         "--week1-manifest",
-        default=str(WEEK1_MANIFEST.relative_to(ROOT)),
+        dest="manifest_path",
+        help="explicit frozen manifest override; defaults from --window-id",
+    )
+    parser.add_argument(
+        "--bundle-version",
+        type=int,
+        choices=(1, 3),
+        default=1,
+        help="v1 compatibility bundle or current-bound v3 admission bundle",
     )
     return parser.parse_args()
 
@@ -1091,7 +1233,9 @@ def main() -> None:
     args = parse_args()
     result = materialize_shadow_week1_input(
         args.output,
-        manifest_path=args.week1_manifest,
+        manifest_path=args.manifest_path,
+        bundle_version=args.bundle_version,
+        window_id=args.window_id,
     )
     print(json.dumps(result, sort_keys=True, separators=(",", ":")))
 

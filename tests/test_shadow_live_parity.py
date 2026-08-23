@@ -30,6 +30,8 @@ from smc_trader.observation import ExecutionRealityInput
 from smc_trader.trade_intent import EntryMethod
 from smc_trader.shadow_live import (
     NullExecutionGateway,
+    SHADOW_COMPONENT_DIGEST_VERSION,
+    SHADOW_LEGACY_COMPONENT_DIGEST_VERSION,
     ShadowClockInput,
     ShadowInputJournal,
     ShadowFailureRecord,
@@ -52,6 +54,14 @@ PROTOCOL_SHA256 = "d8e543f54bc6e81bb820be51e02382b5477f8a3e8e676063aa685f0d599e7
 
 def _bindings() -> tuple[tuple[str, str], ...]:
     return shadow_runtime_bindings_from_model_config(ROOT / "configs/model.json")
+
+
+def _legacy_bindings() -> tuple[tuple[str, str], ...]:
+    return tuple(
+        item
+        for item in _bindings()
+        if item[0] != "shadow_component_digest_version"
+    )
 
 
 def _engine() -> ContinuousSMCEngine:
@@ -417,6 +427,87 @@ def test_real_engine_shadow_stream_cold_replay_and_restart_are_exact() -> None:
     assert not mismatch.exact_match
     assert "risk_fingerprint" in mismatch.mismatches[-1].fields
     assert mismatch.terminal_fields == ("runner_terminal_state_unavailable",)
+
+
+def test_component_digest_version_is_explicit_and_legacy_v12_replays() -> None:
+    protocol = load_shadow_live_protocol(PROTOCOL_PATH)
+    value = _input(0)
+    current = ShadowLiveRunner(
+        engine=_engine(),
+        protocol=protocol,
+        runtime_bindings=_bindings(),
+    )
+    legacy = ShadowLiveRunner(
+        engine=_engine(),
+        protocol=protocol,
+        runtime_bindings=_legacy_bindings(),
+    )
+    current_record = current.process(value)
+    legacy_record = legacy.process(value)
+
+    assert (
+        current._component_digest_version  # noqa: SLF001 - contract audit
+        == SHADOW_COMPONENT_DIGEST_VERSION
+    )
+    assert (
+        legacy._component_digest_version  # noqa: SLF001 - legacy audit
+        == SHADOW_LEGACY_COMPONENT_DIGEST_VERSION
+    )
+    assert current_record.protocol_id == legacy_record.protocol_id
+    assert (
+        current_record.runtime_bindings_fingerprint
+        != legacy_record.runtime_bindings_fingerprint
+    )
+    assert (
+        current_record.market_snapshot_fingerprint
+        != legacy_record.market_snapshot_fingerprint
+    )
+    assert current.engine.last_snapshot == legacy.engine.last_snapshot
+    assert (
+        current.engine.observer.audit_store.fingerprint()
+        == legacy.engine.observer.audit_store.fingerprint()
+    )
+    assert legacy_record.observation_fingerprint == shadow_live_module._digest(
+        legacy.engine.last_snapshot.observation
+    )
+    assert legacy.compact_runtime_checkpoint()["schema_version"] == (
+        "shadow_compact_runtime_v1"
+    )
+    assert current.compact_runtime_checkpoint()["schema_version"] == (
+        "shadow_compact_runtime_v2"
+    )
+
+    restored_legacy = pickle.loads(pickle.dumps(legacy))
+    assert restored_legacy.records == legacy.records
+    assert (
+        restored_legacy._component_digest_version  # noqa: SLF001
+        == SHADOW_LEGACY_COMPONENT_DIGEST_VERSION
+    )
+
+
+def test_component_digest_final_audit_replays_full_market_payload() -> None:
+    valid = ShadowLiveRunner(
+        engine=_engine(),
+        protocol=load_shadow_live_protocol(PROTOCOL_PATH),
+        runtime_bindings=_bindings(),
+    )
+    for index in range(36):
+        valid.process(_input(index))
+    tampered = pickle.loads(pickle.dumps(valid))
+    projection = tampered.engine.last_snapshot.market_snapshot.foundation
+    assert projection is not None
+    object.__setattr__(
+        projection.records[-1],
+        "record_id",
+        "foundation-record:" + "0" * 64,
+    )
+
+    audit = audit_shadow_parity(valid, tampered)
+    assert not audit.gate_pass
+    assert any(
+        value.endswith("market_full_replay_payload")
+        for value in audit.terminal_fields
+    )
 
 
 def test_execution_fsm_events_are_part_of_the_same_clock_parity_record() -> None:

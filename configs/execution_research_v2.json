@@ -1,0 +1,243 @@
+{
+  "schema_version": "phase8_execution_research_v2.0",
+  "protocol_version": "method_provenance_ofat_runner_contract_v1",
+  "status": "preregistered_infrastructure_only_not_authorized_to_run",
+  "authority": "research_only_never_submit",
+  "ordered_methods": [
+    "market",
+    "fvg_50_limit",
+    "ob_50_limit",
+    "reclaim_limit",
+    "breakout_limit",
+    "aggressive_limit",
+    "passive_limit"
+  ],
+  "method_price_contract": {
+    "unit": "positive_integer_ticks",
+    "availability": "explicit_per_method_preoutcome",
+    "required_lineage": [
+      "source_object_id",
+      "source_generation_id",
+      "source_event_ids",
+      "source_known_at",
+      "derivation_id",
+      "derivation_input_ids",
+      "source_protocol_sha256"
+    ],
+    "known_at_rule": "source_known_at_lte_snapshot_asof",
+    "unavailable_price_imputation_allowed": false,
+    "bare_float_method_prices_allowed": false,
+    "method_rules": {
+      "market": {
+        "source_semantic_type": "causal_arrival_bbo",
+        "derivation_id": "first_causal_valid_best_quote_ticks_v1",
+        "rounding_rule": "reject_off_tick_no_rounding"
+      },
+      "fvg_50_limit": {
+        "source_semantic_type": "fvg_generation",
+        "derivation_id": "fvg_midpoint_ticks_v1",
+        "rounding_rule": "nearest_tick_half_even_v1"
+      },
+      "ob_50_limit": {
+        "source_semantic_type": "qualified_order_block_generation",
+        "derivation_id": "qualified_ob_midpoint_ticks_v1",
+        "rounding_rule": "nearest_tick_half_even_v1"
+      },
+      "reclaim_limit": {
+        "source_semantic_type": "liquidity_interaction_generation",
+        "derivation_id": "first_outside_close_reclaim_ticks_v1",
+        "rounding_rule": "reject_off_tick_no_rounding"
+      },
+      "breakout_limit": {
+        "source_semantic_type": "structure_transition_generation",
+        "derivation_id": "first_confirming_outside_close_ticks_v1",
+        "rounding_rule": "reject_off_tick_no_rounding"
+      },
+      "aggressive_limit": {
+        "source_semantic_type": "causal_arrival_bbo",
+        "derivation_id": "near_quote_one_tick_improvement_v1",
+        "rounding_rule": "exact_integer_tick_arithmetic"
+      },
+      "passive_limit": {
+        "source_semantic_type": "causal_arrival_bbo",
+        "derivation_id": "far_quote_one_tick_improvement_v1",
+        "rounding_rule": "exact_integer_tick_arithmetic"
+      }
+    }
+  },
+  "instruction_selection": {
+    "rule": "first_available_method_in_frozen_trade_intent_preference_order",
+    "known_at": "source_trade_intent.created_at",
+    "derivation_id": "source_trade_intent_first_available_preference_v1",
+    "post_outcome_field_access": false,
+    "missing_disposition": "instruction_not_formed",
+    "entry_method_mapping": {
+      "market_entry": "market",
+      "fvg_50_limit": "fvg_50_limit",
+      "ob_50_limit": "ob_50_limit",
+      "reclaim_entry": "reclaim_limit"
+    }
+  },
+  "policy_definitions": {
+    "wait": {
+      "intent_native_expiry": {
+        "deadline": "source_trade_intent.expires_at",
+        "real_completed_m1_bars": null,
+        "synthetic_or_gap_bars_count": false
+      },
+      "one_completed_m1_bar": {
+        "deadline": "min(source_trade_intent.expires_at,known_at_of_first_subsequent_real_completed_m1_bar)",
+        "real_completed_m1_bars": 1,
+        "synthetic_or_gap_bars_count": false
+      },
+      "five_completed_m1_bars": {
+        "deadline": "min(source_trade_intent.expires_at,known_at_of_fifth_subsequent_real_completed_m1_bar)",
+        "real_completed_m1_bars": 5,
+        "synthetic_or_gap_bars_count": false
+      }
+    },
+    "cancel": {
+      "all_frozen_intent_conditions": {
+        "sources": "exact_source_trade_intent.cancel_conditions_plus_gtt",
+        "evaluation_clock": "causal_known_at",
+        "same_clock_precedence": "stop_then_target_then_cancel_then_fill"
+      },
+      "gtt_only": {
+        "sources": "source_trade_intent.expires_at_only",
+        "evaluation_clock": "causal_known_at",
+        "same_clock_precedence": "gtt_before_new_fill_at_or_after_deadline"
+      },
+      "price_terminal_only": {
+        "sources": "primary_stop_or_primary_target_touch_on_real_completed_m1",
+        "evaluation_clock": "completed_bar_known_at",
+        "same_clock_precedence": "adverse_stop_before_target_before_new_fill"
+      }
+    },
+    "stop": {
+      "intent_structural_invalidation": {
+        "price": "source_trade_intent.invalidation.price_ticks",
+        "known_at_rule": "invalidation.observed_at_lte_intent.created_at",
+        "missing_disposition": "case_rejected"
+      },
+      "entry_zone_failure_boundary": {
+        "price": "long_lower_or_short_upper_boundary_of_selected_method_source_generation",
+        "known_at_rule": "boundary_known_at_lte_intent.created_at",
+        "missing_disposition": "variant_censored_not_imputed"
+      }
+    },
+    "target": {
+      "primary_dol": {
+        "price": "source_trade_intent.targets[0].price_ticks",
+        "known_at_rule": "target.confirmed_at_lte_intent.created_at",
+        "missing_disposition": "case_rejected"
+      },
+      "one_r_capped_by_primary_dol": {
+        "risk_unit": "abs(selected_entry_ticks-primary_stop_ticks)",
+        "long_price": "min(selected_entry_ticks+risk_unit,primary_dol_ticks)",
+        "short_price": "max(selected_entry_ticks-risk_unit,primary_dol_ticks)",
+        "missing_or_nonpositive_disposition": "variant_censored_not_imputed"
+      }
+    }
+  },
+  "variants": [
+    {
+      "variant_id": "primary_v1",
+      "changed_dimension": "primary",
+      "wait_policy_id": "intent_native_expiry",
+      "wait_limit_completed_m1_bars": null,
+      "cancel_policy_id": "all_frozen_intent_conditions",
+      "stop_policy_id": "intent_structural_invalidation",
+      "target_policy_id": "primary_dol",
+      "executable_instruction_eligible": true,
+      "inferential_role": "primary",
+      "outcome_tuning_allowed": false
+    },
+    {
+      "variant_id": "wait_1m_v1",
+      "changed_dimension": "wait",
+      "wait_policy_id": "one_completed_m1_bar",
+      "wait_limit_completed_m1_bars": 1,
+      "cancel_policy_id": "all_frozen_intent_conditions",
+      "stop_policy_id": "intent_structural_invalidation",
+      "target_policy_id": "primary_dol",
+      "executable_instruction_eligible": false,
+      "inferential_role": "ofat_sensitivity",
+      "outcome_tuning_allowed": false
+    },
+    {
+      "variant_id": "wait_5m_v1",
+      "changed_dimension": "wait",
+      "wait_policy_id": "five_completed_m1_bars",
+      "wait_limit_completed_m1_bars": 5,
+      "cancel_policy_id": "all_frozen_intent_conditions",
+      "stop_policy_id": "intent_structural_invalidation",
+      "target_policy_id": "primary_dol",
+      "executable_instruction_eligible": false,
+      "inferential_role": "ofat_sensitivity",
+      "outcome_tuning_allowed": false
+    },
+    {
+      "variant_id": "cancel_gtt_only_v1",
+      "changed_dimension": "cancel",
+      "wait_policy_id": "intent_native_expiry",
+      "wait_limit_completed_m1_bars": null,
+      "cancel_policy_id": "gtt_only",
+      "stop_policy_id": "intent_structural_invalidation",
+      "target_policy_id": "primary_dol",
+      "executable_instruction_eligible": false,
+      "inferential_role": "ofat_sensitivity",
+      "outcome_tuning_allowed": false
+    },
+    {
+      "variant_id": "cancel_price_terminal_only_v1",
+      "changed_dimension": "cancel",
+      "wait_policy_id": "intent_native_expiry",
+      "wait_limit_completed_m1_bars": null,
+      "cancel_policy_id": "price_terminal_only",
+      "stop_policy_id": "intent_structural_invalidation",
+      "target_policy_id": "primary_dol",
+      "executable_instruction_eligible": false,
+      "inferential_role": "ofat_sensitivity",
+      "outcome_tuning_allowed": false
+    },
+    {
+      "variant_id": "stop_entry_zone_failure_v1",
+      "changed_dimension": "stop",
+      "wait_policy_id": "intent_native_expiry",
+      "wait_limit_completed_m1_bars": null,
+      "cancel_policy_id": "all_frozen_intent_conditions",
+      "stop_policy_id": "entry_zone_failure_boundary",
+      "target_policy_id": "primary_dol",
+      "executable_instruction_eligible": false,
+      "inferential_role": "ofat_sensitivity",
+      "outcome_tuning_allowed": false
+    },
+    {
+      "variant_id": "target_1r_capped_dol_v1",
+      "changed_dimension": "target",
+      "wait_policy_id": "intent_native_expiry",
+      "wait_limit_completed_m1_bars": null,
+      "cancel_policy_id": "all_frozen_intent_conditions",
+      "stop_policy_id": "intent_structural_invalidation",
+      "target_policy_id": "one_r_capped_by_primary_dol",
+      "executable_instruction_eligible": false,
+      "inferential_role": "ofat_sensitivity",
+      "outcome_tuning_allowed": false
+    }
+  ],
+  "comparison": {
+    "primary_variant_id": "primary_v1",
+    "sensitivity_design": "fixed_one_factor_at_a_time",
+    "same_intent_pairing_only": true,
+    "result_driven_variant_selection_allowed": false,
+    "post_outcome_method_availability_allowed": false,
+    "primary_metric": "implementation_shortfall_points",
+    "market_comparator": "market"
+  },
+  "runner_contract": {
+    "validate_only_until_manifest_frozen": true,
+    "sealed_input_open_during_validation": false,
+    "artifact_write_during_validation": false,
+    "v1_1_outcome_engine_compatibility": true
+  }
+}

@@ -297,10 +297,18 @@ def test_append_only_replay_checkpoint_and_retirement_filter_are_deterministic()
     )
 
     assert resumed == full
+    assert resumed.component_fingerprint == full.component_fingerprint
+    assert prefix.component_fingerprint != full.component_fingerprint
     assert len(full.records) == 4
     assert full.records_for(
         FoundationObjectType.LIQUIDITY_LEVEL, active.level_id
     ) == (active_record, retired_record)
+    assert full.first_record_for(
+        FoundationObjectType.LIQUIDITY_LEVEL, active.level_id
+    ) is active_record
+    assert full.first_record_for(
+        FoundationObjectType.LIQUIDITY_LEVEL, "missing-level"
+    ) is None
     assert full.latest_records == (retired_interaction_record, retired_record)
     assert full.active_records == ()
     assert full.terminal_records == (retired_interaction_record, retired_record)
@@ -476,10 +484,17 @@ def test_projection_indexes_are_derived_pickle_safe_and_history_equivalent() -> 
     primitive = to_primitive(incremental)
     assert "_record_ids_cache" not in primitive
     assert "_latest_records_by_key_cache" not in primitive
+    assert "_records_by_key_cache" not in primitive
+    assert "_first_records_by_key_cache" not in primitive
+    assert "_component_fingerprint_cache" not in primitive
     assert "_swing_geometry_views_cache" not in primitive
     assert "_swing_assignment_incumbents_cache" not in primitive
     with pytest.raises(TypeError):
         incremental._swing_geometry_views_cache["invented"] = object()
+    with pytest.raises(TypeError):
+        incremental._records_by_key_cache[
+            (FoundationObjectType.SWING_GEOMETRY_NODE, "invented")
+        ] = ()
 
     checkpoint = FoundationProjectionReducer.checkpoint(incremental)
     restored_checkpoint = pickle.loads(pickle.dumps(checkpoint))
@@ -488,3 +503,18 @@ def test_projection_indexes_are_derived_pickle_safe_and_history_equivalent() -> 
     assert restored.latest_records == incremental.latest_records
     assert restored_checkpoint.checkpoint_id == checkpoint.checkpoint_id
     assert restored._record_ids_cache == incremental._record_ids_cache
+    assert restored._records_by_key_cache == incremental._records_by_key_cache
+    assert (
+        restored._first_records_by_key_cache
+        == incremental._first_records_by_key_cache
+    )
+    assert restored.component_fingerprint == incremental.component_fingerprint
+
+    tampered_state = dict(incremental.__getstate__())
+    tampered_state["_component_fingerprint_cache"] = "0" * 64
+    restored_from_tampered_state = object.__new__(FoundationProjection)
+    restored_from_tampered_state.__setstate__(tampered_state)
+    assert (
+        restored_from_tampered_state.component_fingerprint
+        == incremental.component_fingerprint
+    )

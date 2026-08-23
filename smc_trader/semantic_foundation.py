@@ -68,6 +68,11 @@ from .semantic_zones import (
 )
 
 
+FOUNDATION_COMPONENT_FINGERPRINT_VERSION = (
+    "foundation_projection_append_chain_v1"
+)
+
+
 class FoundationObjectType(str, Enum):
     LIQUIDITY_LEVEL = "liquidity_level"
     LIQUIDITY_INTERACTION_GENERATION = "liquidity_interaction_generation"
@@ -200,6 +205,38 @@ def _canonical_digest(value: Mapping[str, Any]) -> str:
         allow_nan=False,
     ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _foundation_component_fingerprint_seed(
+    *,
+    foundation_version: str,
+    registry_identity: str,
+) -> str:
+    return _canonical_digest(
+        {
+            "component_fingerprint_version": (
+                FOUNDATION_COMPONENT_FINGERPRINT_VERSION
+            ),
+            "foundation_version": foundation_version,
+            "registry_identity": registry_identity,
+            "record_chain": "empty",
+        }
+    )
+
+
+def _extend_foundation_component_fingerprint(
+    previous: str,
+    record_id: str,
+) -> str:
+    return _canonical_digest(
+        {
+            "component_fingerprint_version": (
+                FOUNDATION_COMPONENT_FINGERPRINT_VERSION
+            ),
+            "previous": previous,
+            "record_id": record_id,
+        }
+    )
 
 
 def _payload_clock(
@@ -1504,10 +1541,23 @@ class FoundationProjection:
         ):
             raise ValueError("foundation projection history is invalid")
         latest: dict[tuple[FoundationObjectType, str], FoundationRecord] = {}
+        records_by_key: dict[
+            tuple[FoundationObjectType, str],
+            list[FoundationRecord],
+        ] = {}
         geometry_views: dict[str, _SwingGeometryView] = {}
         assignment_incumbents: dict[str, FoundationRecord] = {}
+        component_fingerprint = _foundation_component_fingerprint_seed(
+            foundation_version=self.foundation_version,
+            registry_identity=self.registry_identity,
+        )
         for record in records:
+            component_fingerprint = _extend_foundation_component_fingerprint(
+                component_fingerprint,
+                record.record_id,
+            )
             key = (record.object_type, record.object_id)
+            records_by_key.setdefault(key, []).append(record)
             previous = latest.get(key)
             if previous is not None:
                 _validate_object_revision(previous, record)
@@ -1543,6 +1593,30 @@ class FoundationProjection:
             self,
             "_record_ids_cache",
             frozenset(record.record_id for record in records),
+        )
+        immutable_records_by_key = {
+            key: tuple(history)
+            for key, history in records_by_key.items()
+        }
+        object.__setattr__(
+            self,
+            "_records_by_key_cache",
+            MappingProxyType(immutable_records_by_key),
+        )
+        object.__setattr__(
+            self,
+            "_first_records_by_key_cache",
+            MappingProxyType(
+                {
+                    key: history[0]
+                    for key, history in immutable_records_by_key.items()
+                }
+            ),
+        )
+        object.__setattr__(
+            self,
+            "_component_fingerprint_cache",
+            component_fingerprint,
         )
         object.__setattr__(
             self,
@@ -1644,6 +1718,34 @@ class FoundationProjection:
             "_record_ids_cache",
             previous._record_ids_cache | {record.record_id},
         )
+        records_by_key = dict(previous._records_by_key_cache)
+        records_by_key[key] = (
+            *records_by_key.get(key, ()),
+            record,
+        )
+        object.__setattr__(
+            projection,
+            "_records_by_key_cache",
+            MappingProxyType(records_by_key),
+        )
+        first_records = previous._first_records_by_key_cache
+        if key not in first_records:
+            first_records_update = dict(first_records)
+            first_records_update[key] = record
+            first_records = MappingProxyType(first_records_update)
+        object.__setattr__(
+            projection,
+            "_first_records_by_key_cache",
+            first_records,
+        )
+        object.__setattr__(
+            projection,
+            "_component_fingerprint_cache",
+            _extend_foundation_component_fingerprint(
+                previous._component_fingerprint_cache,
+                record.record_id,
+            ),
+        )
         geometry_views = previous._swing_geometry_views_cache
         if record.object_type is FoundationObjectType.SWING_GEOMETRY_NODE:
             geometry_views_update = dict(geometry_views)
@@ -1728,11 +1830,25 @@ class FoundationProjection:
         object_id: str,
     ) -> tuple[FoundationRecord, ...]:
         kind = FoundationObjectType(object_type)
-        return tuple(
-            record
-            for record in self.records
-            if record.object_type is kind and record.object_id == object_id
+        return self._records_by_key_cache.get((kind, object_id), ())
+
+    def first_record_for(
+        self,
+        object_type: FoundationObjectType,
+        object_id: str,
+    ) -> FoundationRecord | None:
+        """Return one object's immutable first revision in constant time."""
+
+        kind = FoundationObjectType(object_type)
+        return self._first_records_by_key_cache.get(
+            (kind, object_id)
         )
+
+    @property
+    def component_fingerprint(self) -> str:
+        """Versioned append-chain digest for downstream hot-path identity."""
+
+        return self._component_fingerprint_cache
 
 
 def _projection_digest(projection: FoundationProjection) -> str:

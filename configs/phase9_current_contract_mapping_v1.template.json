@@ -1,0 +1,17 @@
+{
+  "schema_version": "phase9_shadow_instrument_mapping_v1",
+  "status": "template_not_authorized",
+  "mapping_id": null,
+  "mapping_version": null,
+  "mode": "current_live_shadow",
+  "logical_instrument_id": "NQ:front",
+  "vendor_symbol": null,
+  "vendor_instrument_id": null,
+  "tick_size": 0.25,
+  "point_value": 20.0,
+  "effective_from": null,
+  "effective_until": null,
+  "source_identity": null,
+  "external_submission_allowed": false,
+  "note": "Template only. A true real-time no-order pilot requires a separately frozen, effective-dated current-contract binding; the historical NQM4 mapping cannot be silently reused."
+}

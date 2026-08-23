@@ -1765,6 +1765,45 @@ def _read_jsonl(path: Path) -> list[dict[str, Any]]:
 
 
 def _report(result: Mapping[str, Any]) -> str:
+    if result.get("comparison_validation_only") is True:
+        evidence_lines = [
+            "## Comparison containment",
+            "",
+            (
+                "No mechanism is admitted from this fixed historical "
+                "comparison. Statistical support remains diagnostic only."
+            ),
+            "",
+            (
+                "Diagnostic support not admitted: `"
+                + ", ".join(
+                    result.get(
+                        "comparison_supported_mechanisms_not_admitted",
+                        (),
+                    )
+                )
+                + "`"
+            ),
+        ]
+    else:
+        evidence_lines = [
+            "## Phase-7 evidence admission",
+            "",
+            (
+                "Only statistically supported mechanisms are admitted; raw "
+                "post-event window values remain retrospective and are never "
+                "live evidence."
+            ),
+            "",
+            (
+                "Allowlist: `"
+                + (
+                    ", ".join(result["phase7_evidence_allowlist"])
+                    or "empty"
+                )
+                + "`"
+            ),
+        ]
     lines = [
         "# Phase 6 — MBO mechanism validation",
         "",
@@ -1818,11 +1857,7 @@ def _report(result: Mapping[str, Any]) -> str:
                 for name, value in result["ledgers"].items()
             ],
             "",
-            "## Phase-7 evidence admission",
-            "",
-            "Only statistically supported mechanisms are admitted; raw post-event window values remain retrospective and are never live evidence.",
-            "",
-            f"Allowlist: `{', '.join(result['phase7_evidence_allowlist']) or 'empty'}`",
+            *evidence_lines,
             "",
             "The displayed-defense net-add metric is an all-book A−C−passive-F proxy. It is not proof of same-level queue replenishment or absorption.",
             "",
@@ -1839,8 +1874,11 @@ def run(
     manifest_path: Path = MANIFEST_PATH,
     output: Path = DEFAULT_OUTPUT,
     verify_raw_partition_hashes: bool = True,
+    comparison_validation_only: bool = False,
 ) -> dict[str, Any]:
     started = time.monotonic()
+    if type(comparison_validation_only) is not bool:
+        raise Phase6ResearchError("comparison_validation_only must be boolean")
     if verify_raw_partition_hashes is not True:
         raise Phase6ResearchError(
             "formal Phase-6 research requires raw partition hash verification"
@@ -1863,6 +1901,7 @@ def run(
         manifest_path,
         root=ROOT,
         verify_raw_partition_hashes=verify_raw_partition_hashes,
+        comparison_validation_only=comparison_validation_only,
     )
     manifest = contract.payload
     feature_raw, feature_protocol_sha = _load_feature_artifact(contract)
@@ -2118,7 +2157,10 @@ def run(
     prior_episode_ledger: list[dict[str, Any]] = []
     prior_pair_ledger: list[dict[str, Any]] = []
     prior_unmatched_ledger: list[dict[str, Any]] = []
-    if contract.prior_week1_ledger_paths is not None:
+    if (
+        contract.prior_week1_ledger_paths is not None
+        and not comparison_validation_only
+    ):
         prior_episode_ledger = _read_jsonl(
             contract.prior_week1_ledger_paths["episodes"]
         )
@@ -2417,6 +2459,16 @@ def run(
             manifest["support_rule"]["stability_stratum_minimum_n"]
         ),
     )
+    if comparison_validation_only:
+        observed_support = tuple(evaluated["phase7_evidence_allowlist"])
+        evaluated = {
+            **evaluated,
+            "phase7_evidence_allowlist": [],
+            "phase7_excluded_mechanisms": list(PHASE6_FIXED_FAMILY),
+            "comparison_supported_mechanisms_not_admitted": list(
+                observed_support
+            ),
+        }
     fvg_pseudo_sensitivity = evaluate_descriptive_sensitivity(
         pseudo_sensitivity_rows,
         hypothesis="fvg_retest_response",
@@ -2435,7 +2487,9 @@ def run(
     )
     displacement_monotonicity = _scoped_displacement_monotonicity(
         current_displacement_monotonicity,
-        prior_week1_result=contract.prior_week1_result,
+        prior_week1_result=(
+            None if comparison_validation_only else contract.prior_week1_result
+        ),
         registered_policy=manifest.get(
             "extension_displacement_monotonicity_policy"
         ),
@@ -2515,7 +2569,11 @@ def run(
 
     result = {
         **evaluated,
-        "status": "phase6_engineering_complete_mechanism_support_reported_separately",
+        "status": (
+            "phase6_foundation_v2_comparison_complete_no_admission"
+            if comparison_validation_only
+            else "phase6_engineering_complete_mechanism_support_reported_separately"
+        ),
         "study_mode": manifest["study_mode"],
         "experiment_id": manifest["experiment_id"],
         "semantic_version": manifest["semantic_version"],
@@ -2551,6 +2609,14 @@ def run(
             == "primary_plus_registered_underpowered_extension"
         ),
         "further_extension_authorized": False,
+        **(
+            {
+                "comparison_contract": dict(manifest["comparison_contract"]),
+                "comparison_validation_only": True,
+            }
+            if comparison_validation_only
+            else {}
+        ),
         "fvg_pseudo_zone_descriptive_sensitivity": fvg_pseudo_sensitivity,
         "coverage": {
             "feature_rows": len(features),
@@ -2665,6 +2731,14 @@ def run(
         },
         "limitations": [
             "development association only; no causal claim",
+            *(
+                [
+                    "fixed Foundation v2 historical comparison only; no OOF, sealed OOS, model admission, or trading authority",
+                    "the W2 prior result authorizes the registered historical window and warmup audit only; prior W1 pairs are excluded from W2 comparison inference",
+                ]
+                if comparison_validation_only
+                else []
+            ),
             "post-event windows are retrospective mechanism validation and are not live evidence",
             "registered OHLCV synthetic no-trade decision clocks have real MBO/BBO rows with zero trade/fill flow and may appear in retrospective MBO response windows; they cannot become M5 sources/control bases or emit any sample-eligible semantic event",
             "the sole registered synthetic-context semantic exception is a displacement CENSORED/synthetic_interruption terminal; every exact clock-only M1 root in its M5 constituent interval is context-only, the terminal may settle on the later M5 boundary, and it plus all descendants are excluded from every analysis sample",

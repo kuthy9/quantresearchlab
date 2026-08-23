@@ -20,6 +20,8 @@ from scripts.materialize_shadow_week1_input import (
     _stage_bundle,
     build_shadow_week1_payloads,
     materialize_shadow_week1_input,
+    parse_args,
+    registered_materialization_window,
 )
 from scripts.run_shadow_file_pilot import shadow_clock_input_from_payload
 from smc_trader.model import Bar
@@ -76,6 +78,41 @@ def _small_sidecar(output: Path, payload: bytes) -> dict[str, object]:
             "bytes": len(payload),
         },
     }
+
+
+def test_materializer_window_selector_freezes_w1_w2_and_defaults_w1(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    week1 = registered_materialization_window("W1")
+    week2 = registered_materialization_window("W2")
+    assert week1.window.window_id == "2024-06-week-1"
+    assert week1.window.synthetic_clocks == (pd.Timestamp("2024-06-07T03:10:00Z"),)
+    assert week2.window.window_id == "2024-06-week-2"
+    assert week2.window.rows == 6900
+    assert week2.window.real_rows == 6899
+    assert week2.window.synthetic_clocks == (pd.Timestamp("2024-06-10T04:14:00Z"),)
+    assert hashlib.sha256(week2.manifest_path.read_bytes()).hexdigest() == (
+        week2.manifest_sha256
+    )
+
+    monkeypatch.setattr(
+        week1_materializer.sys,
+        "argv",
+        ["materialize_shadow_week1_input.py", "--output", "unused.jsonl"],
+    )
+    assert parse_args().window_id == "W1"
+    monkeypatch.setattr(
+        week1_materializer.sys,
+        "argv",
+        [
+            "materialize_shadow_week1_input.py",
+            "--output",
+            "unused.jsonl",
+            "--window-id",
+            "W2",
+        ],
+    )
+    assert parse_args().window_id == "W2"
 
 
 def test_payload_recomputes_best_level_age_and_parses_back() -> None:

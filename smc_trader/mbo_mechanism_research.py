@@ -782,8 +782,12 @@ def load_frozen_phase6_contract(
     *,
     root: str | Path,
     verify_raw_partition_hashes: bool = True,
+    comparison_validation_only: bool = False,
 ) -> FrozenPhase6Contract:
     """Verify all authority and identity bindings before opening market data."""
+
+    if type(comparison_validation_only) is not bool:
+        raise Phase6ResearchError("comparison_validation_only must be boolean")
 
     repository = Path(root).resolve()
     source = Path(manifest_path).resolve()
@@ -811,15 +815,36 @@ def load_frozen_phase6_contract(
             "Phase-6 template is incomplete/unfrozen and cannot be executed"
         )
     authority = payload.get("authority")
-    if authority != {
+    expected_authority = {
         "mbo_development_only": True,
         "mechanism_association_only": True,
         "artifact_fit_allowed": False,
-        "phase7_evidence_allowed_only_if_supported": True,
+        "phase7_evidence_allowed_only_if_supported": (
+            not comparison_validation_only
+        ),
         "trading_authority": False,
         "sealed_holdout_opened": False,
-    }:
+    }
+    if authority != expected_authority:
         raise Phase6ResearchError("Phase-6 authority must fail closed")
+    comparison_contract = payload.get("comparison_contract")
+    if comparison_validation_only:
+        if not isinstance(comparison_contract, Mapping) or dict(
+            comparison_contract
+        ).get("execution_authority") != {
+            "comparison_only": True,
+            "rolling_oof": False,
+            "sealed_oos": False,
+            "model_admission": False,
+            "trading": False,
+        }:
+            raise Phase6ResearchError(
+                "Phase-6 comparison-only authority is absent"
+            )
+    elif comparison_contract is not None:
+        raise Phase6ResearchError(
+            "comparison contract requires the explicit validation-only seam"
+        )
     experiment_id = payload.get("experiment_id")
     frozen_at = pd.Timestamp(payload.get("frozen_at"))
     if not isinstance(experiment_id, str) or not experiment_id or frozen_at.tzinfo is None:

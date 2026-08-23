@@ -25,9 +25,10 @@ from typing import Any, Mapping, Sequence
 import pandas as pd
 
 
-PATH_STATE_SCHEMA_VERSION = 2
+PATH_STATE_SCHEMA_VERSION = 3
 HYPOTHESIS_MANAGER_SCHEMA_VERSION = 1
 PATH_RUNTIME_RESOLUTION_SCHEMA_VERSION = 1
+PATH_TEMPORAL_MODEL_SCHEMA_VERSION = 1
 
 
 class PathBeliefProtocolError(ValueError):
@@ -110,6 +111,163 @@ class PathRuntimeResolutionProtocol:
 
     def expiry_rule(self, path: PathKind) -> str:
         return self._rule(self.expiry_rules, path)
+
+
+@dataclass(frozen=True)
+class PathTemporalModel:
+    """Fitted real-bar survival and evidence-reversion contract.
+
+    Hazards are descriptive competing-risk life-table estimates.  Their sum
+    supplies the probability of leaving one path's at-risk set in an age bin;
+    the deterministic reducer uses the corresponding survival log weight.  A
+    separate, optional ``expiry_bars`` gate is the only mechanism that can
+    terminalize a hypothesis before the shared horizon.  Evidence half-life
+    controls reversion to the frozen prior and never changes factual object
+    lifecycles.
+    """
+
+    artifact_id: str
+    source_dataset_id: str
+    fit_manifest_sha256: str
+    age_bin_upper_bounds: tuple[int, ...]
+    realized_hazards: tuple[tuple[PathKind, tuple[float, ...]], ...]
+    falsified_hazards: tuple[tuple[PathKind, tuple[float, ...]], ...]
+    superseded_hazards: tuple[tuple[PathKind, tuple[float, ...]], ...]
+    evidence_half_life_bars: tuple[tuple[PathKind, float | None], ...]
+    expiry_bars: tuple[tuple[PathKind, int | None], ...]
+    schema_version: int = PATH_TEMPORAL_MODEL_SCHEMA_VERSION
+    status: str = "fitted_admitted_shadow"
+    authority: str = "shadow_only"
+    action_authority: bool = False
+    artifact_fingerprint: str = ""
+
+    def __post_init__(self) -> None:
+        bounds = tuple(self.age_bin_upper_bounds)
+        object.__setattr__(self, "age_bin_upper_bounds", bounds)
+        hazard_collections = (
+            self.realized_hazards,
+            self.falsified_hazards,
+            self.superseded_hazards,
+        )
+        if (
+            self.schema_version != PATH_TEMPORAL_MODEL_SCHEMA_VERSION
+            or not self.artifact_id
+            or not self.source_dataset_id
+            or len(self.fit_manifest_sha256) != 64
+            or any(character not in "0123456789abcdef" for character in self.fit_manifest_sha256)
+            or not bounds
+            or any(type(value) is not int or value <= 0 for value in bounds)
+            or tuple(sorted(set(bounds))) != bounds
+            or self.status != "fitted_admitted_shadow"
+            or self.authority != "shadow_only"
+            or self.action_authority is not False
+        ):
+            raise ValueError("path temporal model identity is invalid")
+        for values in hazard_collections:
+            if tuple(path for path, _ in values) != PATH_KINDS:
+                raise ValueError("path temporal hazards are incomplete")
+            for _, hazards in values:
+                if (
+                    len(hazards) != len(bounds) + 1
+                    or any(
+                        not math.isfinite(float(value))
+                        or not 0.0 <= float(value) < 1.0
+                        for value in hazards
+                    )
+                ):
+                    raise ValueError("path temporal hazard value is invalid")
+        if tuple(path for path, _ in self.evidence_half_life_bars) != PATH_KINDS:
+            raise ValueError("path temporal half lives are incomplete")
+        for _, value in self.evidence_half_life_bars:
+            if value is not None and (
+                not math.isfinite(float(value)) or float(value) <= 0.0
+            ):
+                raise ValueError("path temporal half life is invalid")
+        if tuple(path for path, _ in self.expiry_bars) != PATH_KINDS:
+            raise ValueError("path temporal expiries are incomplete")
+        for _, value in self.expiry_bars:
+            if value is not None and (type(value) is not int or value <= 0):
+                raise ValueError("path temporal expiry is invalid")
+        if self.expiry(PathKind.RESIDUAL_UNKNOWN) is not None:
+            raise ValueError("residual_unknown remains active until the common horizon")
+        for path in PATH_KINDS:
+            for index in range(len(bounds) + 1):
+                total = math.fsum(
+                    collection[PATH_KINDS.index(path)][1][index]
+                    for collection in hazard_collections
+                )
+                if total >= 1.0:
+                    raise ValueError("path competing hazards exhaust a risk interval")
+        semantic = {
+            "schema_version": self.schema_version,
+            "artifact_id": self.artifact_id,
+            "source_dataset_id": self.source_dataset_id,
+            "fit_manifest_sha256": self.fit_manifest_sha256,
+            "age_bin_upper_bounds": list(bounds),
+            "realized_hazards": _temporal_path_payload(self.realized_hazards),
+            "falsified_hazards": _temporal_path_payload(self.falsified_hazards),
+            "superseded_hazards": _temporal_path_payload(self.superseded_hazards),
+            "evidence_half_life_bars": {
+                path.value: value for path, value in self.evidence_half_life_bars
+            },
+            "expiry_bars": {path.value: value for path, value in self.expiry_bars},
+            "status": self.status,
+            "authority": self.authority,
+            "action_authority": self.action_authority,
+        }
+        expected = _canonical_hash(semantic)
+        if self.artifact_fingerprint != expected:
+            raise ValueError("path temporal model fingerprint is stale")
+
+    def _bin_index(self, age_bars: int) -> int:
+        if type(age_bars) is not int or age_bars < 1:
+            raise ValueError("path temporal age must be a positive real-bar count")
+        return next(
+            (
+                index
+                for index, upper in enumerate(self.age_bin_upper_bounds)
+                if age_bars <= upper
+            ),
+            len(self.age_bin_upper_bounds),
+        )
+
+    @staticmethod
+    def _path_value(values: tuple[tuple[PathKind, Any], ...], path: PathKind) -> Any:
+        return values[PATH_KINDS.index(PathKind(path))][1]
+
+    def total_hazard(self, path: PathKind, age_bars: int) -> float:
+        index = self._bin_index(age_bars)
+        return math.fsum(
+            float(self._path_value(values, path)[index])
+            for values in (
+                self.realized_hazards,
+                self.falsified_hazards,
+                self.superseded_hazards,
+            )
+        )
+
+    def survival_log_weight(self, path: PathKind, age_bars: int) -> float:
+        if type(age_bars) is not int or age_bars < 0:
+            raise ValueError("path survival age is invalid")
+        return math.fsum(
+            math.log1p(-self.total_hazard(path, age))
+            for age in range(1, age_bars + 1)
+        )
+
+    def evidence_reversion(self, path: PathKind, age_bars: int) -> float:
+        if type(age_bars) is not int or age_bars < 0:
+            raise ValueError("path evidence age is invalid")
+        half_life = self._path_value(self.evidence_half_life_bars, path)
+        return 1.0 if half_life is None else 2.0 ** (-age_bars / float(half_life))
+
+    def expiry(self, path: PathKind) -> int | None:
+        return self._path_value(self.expiry_bars, path)
+
+
+def _temporal_path_payload(
+    values: tuple[tuple[PathKind, tuple[float, ...]], ...],
+) -> dict[str, list[float]]:
+    return {path.value: [float(value) for value in row] for path, row in values}
 
 
 def _aware_timestamp(value: Any, *, name: str) -> pd.Timestamp:
@@ -422,8 +580,12 @@ class PathOutcomeEvent:
             name="path outcome source_event_ids",
         )
         object.__setattr__(self, "source_event_ids", sources)
-        if (
+        residual_horizon = bool(
             self.winner_path is PathKind.RESIDUAL_UNKNOWN
+            and self.reason == "common_horizon_without_registered_winner"
+        )
+        if (
+            (self.winner_path is PathKind.RESIDUAL_UNKNOWN and not residual_horizon)
             or any(
                 not isinstance(value, str) or not value
                 for value in (
@@ -476,6 +638,7 @@ class PathBeliefProtocol:
     terminal_rules: tuple[tuple[str, PathStatus], ...]
     evidence_rules: tuple[PathEvidenceRule, ...]
     runtime_resolution: PathRuntimeResolutionProtocol
+    temporal_model: PathTemporalModel | None
     fingerprint: str
 
     def __post_init__(self) -> None:
@@ -491,8 +654,14 @@ class PathBeliefProtocol:
             raise ValueError("path decay must be non-negative")
         if any(value != 0.0 for _, value in self.real_completed_bar_decay):
             raise ValueError(
-                "path decay requires a separately admitted temporal artifact"
+                "path decay requires a separately admitted temporal artifact; "
+                "legacy decay fields remain zero"
             )
+        if self.temporal_model is not None and not isinstance(
+            self.temporal_model,
+            PathTemporalModel,
+        ):
+            raise ValueError("path temporal model is invalid")
         if not isinstance(
             self.runtime_resolution,
             PathRuntimeResolutionProtocol,
@@ -547,6 +716,16 @@ class PathBeliefProtocol:
             )
         ):
             raise ValueError("path belief protocol boundary is invalid")
+        if self.temporal_model is not None and (
+            "hypothesis_temporal_expiry" not in {
+                rule_id for rule_id, _ in self.terminal_rules
+            }
+            or self.terminal_status("hypothesis_temporal_expiry")
+            is not PathStatus.EXPIRED
+        ):
+            raise ValueError(
+                "an admitted temporal model requires the registered expiry rule"
+            )
         terminal_ids = tuple(rule_id for rule_id, _ in self.terminal_rules)
         if (
             not terminal_ids
@@ -615,6 +794,10 @@ class PathBeliefProtocol:
 
     def decay(self, path: PathKind) -> float:
         return _value_for(self.real_completed_bar_decay, path)
+
+    @property
+    def has_temporal_model(self) -> bool:
+        return self.temporal_model is not None
 
     def evidence_rule(self, rule_id: str) -> PathEvidenceRule:
         rule = next(
@@ -1007,6 +1190,100 @@ def load_path_belief_protocol(
                 conditional_likelihoods=conditional_values,
             )
         )
+    raw_temporal = payload.get("temporal_model")
+    temporal_model: PathTemporalModel | None = None
+    if raw_temporal is not None:
+        temporal_fields = {
+            "schema_version",
+            "artifact_id",
+            "source_dataset_id",
+            "fit_manifest_sha256",
+            "age_bin_upper_bounds",
+            "realized_hazards",
+            "falsified_hazards",
+            "superseded_hazards",
+            "evidence_half_life_bars",
+            "expiry_bars",
+            "status",
+            "authority",
+            "action_authority",
+            "artifact_fingerprint",
+        }
+        if not isinstance(raw_temporal, Mapping) or set(raw_temporal) != temporal_fields:
+            raise PathBeliefProtocolError(
+                "path temporal model fields are not frozen exactly"
+            )
+
+        def hazard_values(name: str) -> tuple[tuple[PathKind, tuple[float, ...]], ...]:
+            raw = raw_temporal[name]
+            if not isinstance(raw, Mapping) or set(raw) != {
+                path.value for path in PATH_KINDS
+            }:
+                raise PathBeliefProtocolError(f"temporal_model.{name} is incomplete")
+            output: list[tuple[PathKind, tuple[float, ...]]] = []
+            for path in PATH_KINDS:
+                row = raw[path.value]
+                if not isinstance(row, list):
+                    raise PathBeliefProtocolError(
+                        f"temporal_model.{name}.{path.value} must be an array"
+                    )
+                try:
+                    output.append((path, tuple(float(value) for value in row)))
+                except (TypeError, ValueError) as error:
+                    raise PathBeliefProtocolError(
+                        f"temporal_model.{name}.{path.value} is invalid"
+                    ) from error
+            return tuple(output)
+
+        half_lives_raw = raw_temporal["evidence_half_life_bars"]
+        expiries_raw = raw_temporal["expiry_bars"]
+        expected_paths = {path.value for path in PATH_KINDS}
+        if (
+            not isinstance(half_lives_raw, Mapping)
+            or set(half_lives_raw) != expected_paths
+            or not isinstance(expiries_raw, Mapping)
+            or set(expiries_raw) != expected_paths
+        ):
+            raise PathBeliefProtocolError(
+                "path temporal half-life or expiry fields are incomplete"
+            )
+        try:
+            temporal_model = PathTemporalModel(
+                schema_version=raw_temporal["schema_version"],
+                artifact_id=str(raw_temporal["artifact_id"]).strip(),
+                source_dataset_id=str(raw_temporal["source_dataset_id"]).strip(),
+                fit_manifest_sha256=str(raw_temporal["fit_manifest_sha256"]).strip(),
+                age_bin_upper_bounds=tuple(raw_temporal["age_bin_upper_bounds"]),
+                realized_hazards=hazard_values("realized_hazards"),
+                falsified_hazards=hazard_values("falsified_hazards"),
+                superseded_hazards=hazard_values("superseded_hazards"),
+                evidence_half_life_bars=tuple(
+                    (
+                        path,
+                        None
+                        if half_lives_raw[path.value] is None
+                        else float(half_lives_raw[path.value]),
+                    )
+                    for path in PATH_KINDS
+                ),
+                expiry_bars=tuple(
+                    (
+                        path,
+                        None
+                        if expiries_raw[path.value] is None
+                        else expiries_raw[path.value],
+                    )
+                    for path in PATH_KINDS
+                ),
+                status=str(raw_temporal["status"]).strip(),
+                authority=str(raw_temporal["authority"]).strip(),
+                action_authority=raw_temporal["action_authority"],
+                artifact_fingerprint=str(
+                    raw_temporal["artifact_fingerprint"]
+                ).strip(),
+            )
+        except (TypeError, ValueError) as error:
+            raise PathBeliefProtocolError(str(error)) from error
     try:
         protocol = PathBeliefProtocol(
             schema_version=schema_version,
@@ -1092,6 +1369,7 @@ def load_path_belief_protocol(
                     name="runtime_resolution.expiry_rules",
                 ),
             ),
+            temporal_model=temporal_model,
             fingerprint=hashlib.sha256(raw_bytes).hexdigest(),
         )
     except ValueError as error:
@@ -1194,6 +1472,7 @@ class PathCompetitionSetState:
     applied_contribution_ids: tuple[str, ...] = ()
     applied_terminal_event_ids: tuple[str, ...] = ()
     evidence_ledger: tuple[PathEvidenceContribution, ...] = ()
+    evidence_real_completed_bar_ordinals: tuple[tuple[str, int], ...] = ()
     terminal_event_ledger: tuple[PathTerminalEvent, ...] = ()
     winner_path: PathKind | None = None
     outcome_event_id: str | None = None
@@ -1240,6 +1519,12 @@ class PathCompetitionSetState:
         object.__setattr__(self, "applied_terminal_event_ids", terminals)
         ledger = tuple(self.evidence_ledger)
         ledger_ids = tuple(item.contribution_id for item in ledger)
+        evidence_ordinals = tuple(self.evidence_real_completed_bar_ordinals)
+        object.__setattr__(
+            self,
+            "evidence_real_completed_bar_ordinals",
+            evidence_ordinals,
+        )
         ledger_correlation_instances = tuple(
             (item.evidence_family, item.correlation_key) for item in ledger
         )
@@ -1307,6 +1592,15 @@ class PathCompetitionSetState:
                 for item in ledger
             )
             or tuple(sorted(ledger_ids)) != contributions
+            or len(evidence_ordinals)
+            != len({identity for identity, _ in evidence_ordinals})
+            or any(
+                identity not in set(ledger_ids)
+                or type(ordinal) is not int
+                or ordinal < 0
+                or ordinal > max(0, self.real_completed_bar_count - 1)
+                for identity, ordinal in evidence_ordinals
+            )
             or ledger
             != tuple(
                 sorted(
@@ -1397,11 +1691,17 @@ class PathCompetitionSetState:
             )
             invalid = invalid or bool(
                 self.winner_path is None
-                or self.winner_path is PathKind.RESIDUAL_UNKNOWN
                 or not self.outcome_event_id
                 or self.realized_at is None
                 or self.realized_at > self.asof
-                or self.realized_at >= self.common_expires_at
+                or (
+                    self.winner_path is PathKind.RESIDUAL_UNKNOWN
+                    and self.realized_at != self.common_expires_at
+                )
+                or (
+                    self.winner_path is not PathKind.RESIDUAL_UNKNOWN
+                    and self.realized_at >= self.common_expires_at
+                )
                 or not outcome_sources
                 or len(realized_members) != 1
                 or realized_members[0].path is not self.winner_path
@@ -1533,6 +1833,10 @@ class PathCompetitionSetState:
             "applied_terminal_event_ids": list(self.applied_terminal_event_ids),
             "evidence_ledger": [
                 _contribution_payload(item) for item in self.evidence_ledger
+            ],
+            "evidence_real_completed_bar_ordinals": [
+                [identity, ordinal]
+                for identity, ordinal in self.evidence_real_completed_bar_ordinals
             ],
             "terminal_event_ledger": [
                 _terminal_payload(item) for item in self.terminal_event_ledger
@@ -2029,6 +2333,9 @@ def initialize_path_competition_set(
             sorted(item.contribution_id for item in applied)
         ),
         evidence_ledger=tuple(applied),
+        evidence_real_completed_bar_ordinals=tuple(
+            (item.contribution_id, 0) for item in applied
+        ),
         last_real_completed_at=(
             state.formed_at if initial_real_completed_bar else None
         ),
@@ -2107,6 +2414,12 @@ def _validate_protocol_binding(
         or state.authority != protocol.authority
     ):
         raise ValueError("path state model or protocol binding is stale")
+    if protocol.temporal_model is not None and {
+        identity for identity, _ in state.evidence_real_completed_bar_ordinals
+    } != {item.contribution_id for item in state.evidence_ledger}:
+        raise ValueError(
+            "temporal path state lacks exact evidence real-bar ordinals"
+        )
 
 
 def reduce_path_competition_set(
@@ -2118,6 +2431,7 @@ def reduce_path_competition_set(
     terminal_events: Sequence[PathTerminalEvent] = (),
     outcome_events: Sequence[PathOutcomeEvent] = (),
     real_completed_bar: bool,
+    clock_source_event_ids: Sequence[str] = (),
 ) -> tuple[PathCompetitionSetState, PathBeliefUpdateRecord]:
     """Apply one clock of evidence to an existing competition set.
 
@@ -2128,6 +2442,13 @@ def reduce_path_competition_set(
 
     if type(real_completed_bar) is not bool:
         raise TypeError("real_completed_bar must be boolean")
+    raw_clock_sources = tuple(clock_source_event_ids)
+    if (
+        len(raw_clock_sources) != len(set(raw_clock_sources))
+        or any(not isinstance(value, str) or not value for value in raw_clock_sources)
+    ):
+        raise ValueError("path update clock sources are invalid")
+    clock_sources = tuple(sorted(raw_clock_sources))
     _validate_protocol_binding(protocol, state)
     clock = _aware_timestamp(asof, name="path update asof")
     if state.status is not PathStatus.ACTIVE:
@@ -2150,6 +2471,11 @@ def reduce_path_competition_set(
         for item in state.evidence_ledger
     }
     seen_contributions: dict[str, PathEvidenceContribution] = {}
+    evidence_ordinals = dict(state.evidence_real_completed_bar_ordinals)
+    next_real_completed_count = (
+        state.real_completed_bar_count + int(real_completed_bar)
+    )
+    current_real_completed_ordinal = max(0, next_real_completed_count - 1)
     _validate_cross_family_dependency_clusters(
         (*state.evidence_ledger, *contributions)
     )
@@ -2215,6 +2541,9 @@ def reduce_path_competition_set(
             continue
         applied_correlation_instances.add(correlation_instance)
         new_contributions.append(contribution)
+        evidence_ordinals[contribution.contribution_id] = (
+            current_real_completed_ordinal
+        )
 
     new_terminals: list[PathTerminalEvent] = []
     duplicate_terminals: set[str] = set()
@@ -2272,6 +2601,50 @@ def reduce_path_competition_set(
             raise ValueError("a terminal path cannot receive a different terminal event")
         new_terminals.append(terminal)
 
+    temporal = protocol.temporal_model
+    temporal_age = current_real_completed_ordinal
+    if (
+        temporal is not None
+        and real_completed_bar
+        and clock < state.common_expires_at
+    ):
+        for member in members:
+            expiry = temporal.expiry(member.path)
+            if (
+                member.status is PathStatus.ACTIVE
+                and expiry is not None
+                and temporal_age >= expiry
+            ):
+                if not clock_sources:
+                    raise ValueError(
+                        "path temporal expiry requires the exact real-bar source"
+                    )
+                reason = f"temporal_survival_expiry:{temporal_age}"
+                terminal = PathTerminalEvent(
+                    terminal_event_id=_terminal_event_id(
+                        competition_set_id=state.competition_set_id,
+                        path=member.path,
+                        status=PathStatus.EXPIRED,
+                        rule_id="hypothesis_temporal_expiry",
+                        reason=reason,
+                        model_version=protocol.model_version,
+                        protocol_fingerprint=protocol.fingerprint,
+                        source_event_ids=clock_sources,
+                        known_at=clock,
+                    ),
+                    competition_set_id=state.competition_set_id,
+                    path=member.path,
+                    status=PathStatus.EXPIRED,
+                    rule_id="hypothesis_temporal_expiry",
+                    reason=reason,
+                    model_version=protocol.model_version,
+                    protocol_fingerprint=protocol.fingerprint,
+                    source_event_ids=clock_sources,
+                    known_at=clock,
+                )
+                if terminal.terminal_event_id not in applied_terminal_ids:
+                    new_terminals.append(terminal)
+
     outcomes = tuple(sorted(
         outcome_events,
         key=lambda value: (value.known_at, value.outcome_event_id),
@@ -2307,15 +2680,28 @@ def reduce_path_competition_set(
             raise ValueError("path outcome identity is not deterministic")
         if outcome.known_at != clock:
             raise ValueError("path outcome must use the exact reducer clock")
-        if outcome.known_at >= state.common_expires_at:
-            raise ValueError("path outcome is not known before the common horizon")
+        if (
+            outcome.known_at > state.common_expires_at
+            or (
+                outcome.known_at == state.common_expires_at
+                and (
+                    outcome.winner_path is not PathKind.RESIDUAL_UNKNOWN
+                    or outcome.reason
+                    != "common_horizon_without_registered_winner"
+                )
+            )
+        ):
+            raise ValueError("path outcome exceeds its registered horizon")
 
     decay_applied = bool(
         real_completed_bar
         and clock < state.common_expires_at
-        and any(protocol.decay(path) > 0.0 for path in PATH_KINDS)
+        and (
+            temporal is not None
+            or any(protocol.decay(path) > 0.0 for path in PATH_KINDS)
+        )
     )
-    if decay_applied:
+    if decay_applied and temporal is None:
         for index, member in enumerate(members):
             if member.status is PathStatus.ACTIVE:
                 members[index] = replace(
@@ -2364,6 +2750,69 @@ def reduce_path_competition_set(
                     ),
                 )
         applied_contribution_ids.add(contribution.contribution_id)
+
+    if temporal is not None and clock < state.common_expires_at:
+        full_ledger = (*state.evidence_ledger, *new_contributions)
+        for index, member in enumerate(members):
+            if member.status is not PathStatus.ACTIVE:
+                continue
+            evidence_weight = math.fsum(
+                contribution.increment(member.path)
+                * temporal.evidence_reversion(
+                    member.path,
+                    max(
+                        0,
+                        current_real_completed_ordinal
+                        - evidence_ordinals[contribution.contribution_id],
+                    ),
+                )
+                for contribution in full_ledger
+            )
+            members[index] = replace(
+                member,
+                log_weight=(
+                    protocol.prior(member.path)
+                    + temporal.survival_log_weight(
+                        member.path,
+                        temporal_age,
+                    )
+                    + evidence_weight
+                ),
+            )
+
+    residual_at_horizon = bool(
+        outcome is None
+        and clock == state.common_expires_at
+        and protocol.runtime_resolution.winner_rule(PathKind.RESIDUAL_UNKNOWN)
+        == (
+            "clean_common_horizon_without_registered_winner_"
+            "realizes_residual_unknown"
+        )
+    )
+    if residual_at_horizon:
+        if not clock_sources:
+            raise ValueError(
+                "residual horizon outcome requires the exact horizon source"
+            )
+        reason = "common_horizon_without_registered_winner"
+        outcome = PathOutcomeEvent(
+            outcome_event_id=_outcome_event_id(
+                competition_set_id=state.competition_set_id,
+                winner_path=PathKind.RESIDUAL_UNKNOWN,
+                reason=reason,
+                model_version=protocol.model_version,
+                protocol_fingerprint=protocol.fingerprint,
+                source_event_ids=clock_sources,
+                known_at=clock,
+            ),
+            competition_set_id=state.competition_set_id,
+            winner_path=PathKind.RESIDUAL_UNKNOWN,
+            reason=reason,
+            model_version=protocol.model_version,
+            protocol_fingerprint=protocol.fingerprint,
+            source_event_ids=clock_sources,
+            known_at=clock,
+        )
 
     common_horizon_expired = bool(
         outcome is None and clock >= state.common_expires_at
@@ -2439,6 +2888,10 @@ def reduce_path_competition_set(
         applied_contribution_ids=tuple(sorted(applied_contribution_ids)),
         applied_terminal_event_ids=tuple(sorted(applied_terminal_ids)),
         evidence_ledger=tuple((*state.evidence_ledger, *new_contributions)),
+        evidence_real_completed_bar_ordinals=tuple(
+            (item.contribution_id, evidence_ordinals[item.contribution_id])
+            for item in (*state.evidence_ledger, *new_contributions)
+        ),
         terminal_event_ledger=tuple(
             (*state.terminal_event_ledger, *new_terminals)
         ),
@@ -2636,6 +3089,14 @@ def restore_path_competition_set(
             payload.get("applied_terminal_event_ids", ())
         ),
         evidence_ledger=evidence_ledger,
+        evidence_real_completed_bar_ordinals=tuple(
+            (str(item[0]), int(item[1]))
+            for item in payload.get(
+                "evidence_real_completed_bar_ordinals",
+                (),
+            )
+            if isinstance(item, (list, tuple)) and len(item) == 2
+        ),
         terminal_event_ledger=terminal_ledger,
         winner_path=(
             None
@@ -2665,18 +3126,45 @@ def restore_path_competition_set(
             for member in state.members
             if member.status is PathStatus.ACTIVE
         )
-        expected_logs = {
-            member.path: (
-                protocol.prior(member.path)
-                - protocol.decay(member.path)
-                * state.real_completed_bar_count
-                + math.fsum(
-                    contribution.increment(member.path)
-                    for contribution in state.evidence_ledger
+        if protocol.temporal_model is None:
+            expected_logs = {
+                member.path: (
+                    protocol.prior(member.path)
+                    - protocol.decay(member.path)
+                    * state.real_completed_bar_count
+                    + math.fsum(
+                        contribution.increment(member.path)
+                        for contribution in state.evidence_ledger
+                    )
                 )
-            )
-            for member in active_members
-        }
+                for member in active_members
+            }
+        else:
+            temporal = protocol.temporal_model
+            ordinals = dict(state.evidence_real_completed_bar_ordinals)
+            current_ordinal = max(0, state.real_completed_bar_count - 1)
+            expected_logs = {
+                member.path: (
+                    protocol.prior(member.path)
+                    + temporal.survival_log_weight(
+                        member.path,
+                        current_ordinal,
+                    )
+                    + math.fsum(
+                        contribution.increment(member.path)
+                        * temporal.evidence_reversion(
+                            member.path,
+                            max(
+                                0,
+                                current_ordinal
+                                - ordinals[contribution.contribution_id],
+                            ),
+                        )
+                        for contribution in state.evidence_ledger
+                    )
+                )
+                for member in active_members
+            }
         maximum = max(expected_logs.values())
         normalizer = maximum + math.log(
             math.fsum(
@@ -2770,6 +3258,7 @@ class BayesianBeliefUpdater:
         terminal_events: Sequence[PathTerminalEvent] = (),
         outcome_events: Sequence[PathOutcomeEvent] = (),
         real_completed_bar: bool,
+        clock_source_event_ids: Sequence[str] = (),
     ) -> tuple[PathCompetitionSetState, PathBeliefUpdateRecord]:
         self._validate_admitted(contributions)
         return reduce_path_competition_set(
@@ -2780,6 +3269,7 @@ class BayesianBeliefUpdater:
             terminal_events=terminal_events,
             outcome_events=outcome_events,
             real_completed_bar=real_completed_bar,
+            clock_source_event_ids=clock_source_event_ids,
         )
 
 
@@ -2868,6 +3358,7 @@ class HypothesisManager:
         terminal_events: Sequence[PathTerminalEvent] = (),
         outcome_events: Sequence[PathOutcomeEvent] = (),
         real_completed_bar: bool,
+        clock_source_event_ids: Sequence[str] = (),
     ) -> tuple[PathCompetitionSetState, PathBeliefUpdateRecord]:
         if self.state is None:
             raise ValueError("hypothesis manager has no competition set")
@@ -2878,6 +3369,7 @@ class HypothesisManager:
             terminal_events=terminal_events,
             outcome_events=outcome_events,
             real_completed_bar=real_completed_bar,
+            clock_source_event_ids=clock_source_event_ids,
         )
         self.state = state
         self.update_ledger = (*self.update_ledger, record)
@@ -2944,8 +3436,13 @@ class HypothesisManager:
             raise ValueError(
                 "evidence-posterior replay requires an active unterminated set"
             )
-        if any(self.protocol.decay(path) != 0.0 for path in PATH_KINDS):
-            raise ValueError("evidence-only replay requires zero time decay")
+        if (
+            self.protocol.temporal_model is not None
+            or any(self.protocol.decay(path) != 0.0 for path in PATH_KINDS)
+        ):
+            raise ValueError(
+                "evidence-only replay excludes fitted temporal dynamics"
+            )
         replay = create_path_competition_set(
             self.protocol,
             instrument_id=current.instrument_id,
@@ -2993,6 +3490,7 @@ __all__ = [
     "PATH_KINDS",
     "PATH_RUNTIME_RESOLUTION_SCHEMA_VERSION",
     "PATH_STATE_SCHEMA_VERSION",
+    "PATH_TEMPORAL_MODEL_SCHEMA_VERSION",
     "PathBeliefProtocol",
     "PathBeliefProtocolError",
     "PathBeliefUpdateRecord",
@@ -3003,6 +3501,7 @@ __all__ = [
     "PathKind",
     "PathOutcomeEvent",
     "PathRuntimeResolutionProtocol",
+    "PathTemporalModel",
     "PathStatus",
     "PathTerminalEvent",
     "create_path_competition_set",

@@ -17,7 +17,7 @@ import math
 from pathlib import Path
 import shutil
 import sys
-from typing import Any, Mapping, Sequence
+from typing import Any, Iterator, Mapping, Sequence
 
 import pandas as pd
 import psutil
@@ -258,37 +258,47 @@ def _jsonl(values: Sequence[Mapping[str, Any]]) -> bytes:
     return b"".join(_canonical_json(value) + b"\n" for value in values)
 
 
-def _read_clock_file(path: Path) -> tuple[ShadowClockInput, ...]:
+def iter_shadow_clock_file(path: Path) -> Iterator[ShadowClockInput]:
+    """Stream validated JSONL inputs without retaining the entire file."""
+
     if path.is_symlink() or not path.is_file():
         raise ShadowFilePilotError(
             f"shadow input must be a trusted regular file: {path}"
         )
+    seen = False
     try:
-        text = path.read_text(encoding="utf-8")
+        with path.open("r", encoding="utf-8") as handle:
+            for line_number, line in enumerate(handle, start=1):
+                seen = True
+                if not line.strip():
+                    raise ShadowFilePilotError(
+                        f"shadow input contains a blank JSONL row: {line_number}"
+                    )
+                try:
+                    payload = json.loads(
+                        line,
+                        object_pairs_hook=_reject_duplicate_keys,
+                    )
+                except (json.JSONDecodeError, TypeError) as exc:
+                    raise ShadowFilePilotError(
+                        f"shadow input row {line_number} is invalid JSON"
+                    ) from exc
+                try:
+                    yield shadow_clock_input_from_payload(payload)
+                except (ShadowFilePilotError, ShadowLiveError) as exc:
+                    raise ShadowFilePilotError(
+                        f"shadow input row {line_number} is invalid: {exc}"
+                    ) from exc
     except (OSError, UnicodeDecodeError) as exc:
         raise ShadowFilePilotError("shadow input is not readable UTF-8") from exc
-    lines = text.splitlines()
-    if not lines:
+    if not seen:
         raise ShadowFilePilotError("shadow input must contain at least one clock")
-    values: list[ShadowClockInput] = []
-    for line_number, line in enumerate(lines, start=1):
-        if not line.strip():
-            raise ShadowFilePilotError(
-                f"shadow input contains a blank JSONL row: {line_number}"
-            )
-        try:
-            payload = json.loads(line, object_pairs_hook=_reject_duplicate_keys)
-        except (json.JSONDecodeError, TypeError) as exc:
-            raise ShadowFilePilotError(
-                f"shadow input row {line_number} is invalid JSON"
-            ) from exc
-        try:
-            values.append(shadow_clock_input_from_payload(payload))
-        except (ShadowFilePilotError, ShadowLiveError) as exc:
-            raise ShadowFilePilotError(
-                f"shadow input row {line_number} is invalid: {exc}"
-            ) from exc
-    return tuple(values)
+
+
+def _read_clock_file(path: Path) -> tuple[ShadowClockInput, ...]:
+    """Retain the v2 compatibility API while v3 consumes the iterator."""
+
+    return tuple(iter_shadow_clock_file(path))
 
 
 def _engine() -> ContinuousSMCEngine:

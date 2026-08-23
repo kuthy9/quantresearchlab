@@ -1,0 +1,83 @@
+{
+  "schema_version": "phase8_execution_research_run_manifest_v1",
+  "status": "template_incomplete_not_authorized_to_run",
+  "authority": {
+    "research_only": true,
+    "order_submission": false,
+    "production_engine_integration": false,
+    "sealed_oos_reveal": false
+  },
+  "experiment_id": null,
+  "frozen_at": null,
+  "frozen_before_run": false,
+  "window_ids": [
+    "2024-06-week-1",
+    "2024-06-week-2"
+  ],
+  "runtime_bindings": {
+    "runner_config": {
+      "path": "configs/execution_research_runner_v1.json",
+      "sha256": "245fc3ea15111df3856467a56fde7dddb072a76c8e99dd489e949e0540724344"
+    },
+    "execution_v1_config": {
+      "path": "configs/execution_research_v1.json",
+      "sha256": "8212939f9dc00b11c285063a78d56f8ddbc5257a728b02829017a6d60e0d08b7"
+    },
+    "execution_v2_config": {
+      "path": "configs/execution_research_v2.json",
+      "sha256": "9c3b86f5ed4cbbcfad56c1af537be2878a078679197f12eb30e66b5eea4214e5"
+    },
+    "risk_config": {
+      "path": "configs/risk_admission_v1.json",
+      "sha256": "9eae13b583d1918c9b1f12e787b5ecf158d5ed4808cdfe89c97e1b5c504947b2"
+    },
+    "execution_v1_runtime": {
+      "path": "smc_trader/execution_research.py",
+      "sha256": "1b2f338c8196ff0f963a65df66f41d48805b1eee1caaee1bf9f615d5e3341e17"
+    },
+    "execution_v2_runtime": {
+      "path": "smc_trader/execution_research_v2.py",
+      "sha256": "59a667fd4eb889ff82ba68256eb63680a32fa42da52c4b5d1610870f94f15567"
+    },
+    "runner_runtime": {
+      "path": "smc_trader/execution_research_runner.py",
+      "sha256": "10d461f96f0ae522b1cfeee1a90cc8b9f65d96fad6632cd7125b617085fadcd2"
+    },
+    "runner_cli": {
+      "path": "scripts/run_execution_research_v2.py",
+      "sha256": "56907f69fc017172df10676849d4635867e3852fd9dbe1bb93fd63614454ed42"
+    },
+    "instrument_mapping_registry": {
+      "path": "configs/shadow_live_v1.json",
+      "sha256": "d8e543f54bc6e81bb820be51e02382b5477f8a3e8e676063aa685f0d599e7961"
+    }
+  },
+  "input_bindings": {
+    "intent_research_case_ledger": {
+      "path": null,
+      "sha256": null
+    },
+    "source_mode": null,
+    "minute_execution_artifact": {
+      "path": null,
+      "sha256": null
+    },
+    "minute_execution_manifest": {
+      "path": null,
+      "sha256": null
+    }
+  },
+  "outputs": {
+    "paired_rows": null,
+    "summary": null,
+    "output_manifest": null
+  },
+  "readiness_blockers": [
+    "intent_research_case_ledger_not_bound",
+    "minute_source_mode_not_bound",
+    "outputs_not_registered",
+    "experiment_identity_missing",
+    "frozen_clock_missing",
+    "manifest_not_frozen"
+  ]
+}

@@ -1,0 +1,60 @@
+{
+  "schema_version": "phase8_runner_manifest_v2",
+  "status": "preregistered_infrastructure_only_not_authorized_to_run",
+  "authority": {
+    "research_only": true,
+    "order_submission": false,
+    "execution_authorized": false,
+    "sealed_oos_reveal_authorized": false
+  },
+  "frozen_before_run": false,
+  "experiment_id": null,
+  "sealed_oos": {
+    "opened": false,
+    "path": null,
+    "sha256": null
+  },
+  "protocol_bindings": {
+    "execution_research_v2": {
+      "path": "configs/execution_research_v2.json",
+      "sha256": "9c3b86f5ed4cbbcfad56c1af537be2878a078679197f12eb30e66b5eea4214e5"
+    },
+    "risk_admission_v1": {
+      "path": "configs/risk_admission_v1.json",
+      "sha256": "9eae13b583d1918c9b1f12e787b5ecf158d5ed4808cdfe89c97e1b5c504947b2"
+    }
+  },
+  "dataset_bindings": {
+    "fit_cohort": null,
+    "validation_cohort": null,
+    "intent_research_case_ledger": null,
+    "minute_execution_input_ledger": null,
+    "ohlcv_artifact": null,
+    "phase6_mbo_artifact": null,
+    "instrument_mapping_registry": null
+  },
+  "runner_contract": {
+    "mode": "validate_contract_only",
+    "read_dataset_bindings": false,
+    "write_artifacts": false,
+    "v1_1_outcome_engine_compatibility": true
+  },
+  "readiness_blockers": [
+    "manifest_not_frozen",
+    "experiment_identity_missing",
+    "fit_validation_cohorts_not_bound",
+    "intent_research_case_ledger_not_bound",
+    "minute_execution_input_ledger_not_bound",
+    "ohlcv_artifact_not_bound",
+    "phase6_mbo_artifact_not_bound",
+    "instrument_mapping_registry_not_bound",
+    "formal_runner_not_implemented",
+    "outputs_not_registered"
+  ],
+  "outputs": {
+    "intent_research_case_ledger": null,
+    "per_method_outcomes": null,
+    "paired_variant_results": null,
+    "summary": null
+  }
+}

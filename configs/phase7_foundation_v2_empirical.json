@@ -1,0 +1,191 @@
+{
+  "schema_version": 1,
+  "protocol_version": "phase7_foundation_v2_empirical_preregistration_v1.0",
+  "status": "preregistered_implementation_complete_inputs_not_materialized_models_not_fitted",
+  "authority": {
+    "research_only": true,
+    "shadow_only": true,
+    "artifact_fit_allowed_by_this_file": false,
+    "action_authority": false,
+    "sealed_oos_opened": false
+  },
+  "semantic_bindings": {
+    "foundation_registry": "semantics/foundation_v2_0.yaml",
+    "foundation_registry_sha256": "dfc4cb29f98fc5015628927e97c725eb491b99f244f154e51552e5950daf927c",
+    "foundation_identity": "ac04636919931d774309a0c306764fdf8eb53aee41df0f31d4d94e5b9125732b",
+    "input_path_protocol": "configs/path_hypotheses.json",
+    "input_path_protocol_sha256": "d897635cb91fc1cb84647f41eb4c5a6b8a06d05d2e44a1b3471e8e9ff67b0482",
+    "input_path_protocol_fingerprint": "d897635cb91fc1cb84647f41eb4c5a6b8a06d05d2e44a1b3471e8e9ff67b0482",
+    "input_dol_protocol": "configs/dol_probability.json",
+    "input_dol_protocol_sha256": "b46b1e8b7d30ba826093373590aab5c21a9fc6b79f8f65378ebaf310b0a0532d",
+    "input_dol_protocol_fingerprint": "a7f588d35c380d4d9b38a2d5c3aa90ee5e30c49c241696f0d2847fb90b7ad7fe",
+    "input_dol_ranking_protocol_fingerprint": "be9177601fbdac6e36072dbf7dd8bde46c793e7197d0a9e3662f835ceebbb4be",
+    "output_runtime_fingerprints": null
+  },
+  "runtime_resolution_contract": {
+    "protocol_version": "path_runtime_resolution_phase7_foundation_v2_empirical_v1.0",
+    "residual_unknown_winner_rule": "clean_common_horizon_without_registered_winner_realizes_residual_unknown",
+    "residual_unknown_factual_outcome_reason": "common_horizon_without_registered_winner",
+    "same_clock_precedence": "registered_factual_winner_or_falsification_precedes_model_expiry_then_evidence_update",
+    "expiry_rules": {
+      "continuation": "registered_factual_terminal_precedes_admitted_hypothesis_specific_expiry_capped_by_shared_common_horizon",
+      "deeper_retracement": "registered_factual_terminal_precedes_admitted_hypothesis_specific_expiry_capped_by_shared_common_horizon",
+      "reversal": "registered_factual_terminal_precedes_admitted_hypothesis_specific_expiry_capped_by_shared_common_horizon",
+      "balance": "registered_factual_terminal_precedes_admitted_hypothesis_specific_expiry_capped_by_shared_common_horizon",
+      "failed_breakout": "registered_factual_terminal_precedes_admitted_hypothesis_specific_expiry_capped_by_shared_common_horizon",
+      "residual_unknown": "shared_common_horizon_only"
+    },
+    "model_expiry_shadow_policy": "hypothesis_specific_survival_lte_0_10_never_later_than_shared_common_horizon",
+    "model_expiry_action_authority": false
+  },
+  "data_authority": {
+    "split_registry": "configs/data_splits.json",
+    "split_registry_sha256": "aee2d14f40eb9ebbfc050e9779c5604e06f4811f9e1e929179e25c04fc5f84c8",
+    "ohlcv_source": "data/processed/nq_1m_previous_session_front_v2_3_2017_2026.parquet",
+    "ohlcv_source_sha256": "84c9ed4d1de379382bdc41e0fe02e3611373ba182cfeebe09e3832d29cbafd7b",
+    "mbo_june_execution_source": "data/processed/mbo_execution_dev_202406_v2_3_clockfix.parquet",
+    "mbo_june_execution_source_sha256": "8dc1df19e4b3bcf3c829a2b07c69552a583e667224d89305f78aaae21b73b1ed",
+    "mbo_predictor_policy": "forbidden_for_path_or_dol_future_direction_model_mbo_is_mechanism_and_execution_reality_only",
+    "june_2024_role": "previously_opened_reused_development_not_oof",
+    "june_2024_rolling_oof_contribution_allowed": false,
+    "joint_ohlcv_mbo_sealed_window_available": false
+  },
+  "cohort_contract": {
+    "competition_unit": "one_path_competition_generation",
+    "append_only_archive_required": true,
+    "scope_replacement_must_terminalize_or_censor": true,
+    "clean_horizon_residual_required": true,
+    "risk_clock": "real_completed_M1_bar_only_synthetic_clock_has_zero_exposure",
+    "prediction_clocks": [
+      "competition_formation",
+      "registered_evidence_history_transition",
+      "registered_hazard_age_bin_boundary"
+    ],
+    "repeated_unchanged_snapshots_are_not_independent_samples": true,
+    "dol_candidate_set_is_atomic": true,
+    "dol_first_hit_source": "first_strictly_future_canonical_touch_of_frozen_eligible_candidate",
+    "dol_same_bar_multiple_hits": "censor_ambiguous_same_bar",
+    "dol_no_target": "no_target_before_common_horizon_only_after_complete_uncensored_horizon",
+    "historical_first_retest_proxy_allowed": false
+  },
+  "conditional_likelihood_model": {
+    "model_version": "phase7_history_likelihood_v1",
+    "evidence_rules": [
+      "acceptance_continuation",
+      "displacement_impact"
+    ],
+    "history_states": [
+      "none",
+      "acceptance_only",
+      "displacement_only",
+      "same_clock_joint",
+      "acceptance_then_displacement",
+      "displacement_then_acceptance"
+    ],
+    "first_occurrence_only": true,
+    "repeated_family_occurrence_multiplied": false,
+    "smoothing": "dirichlet_jeffreys",
+    "smoothing_alpha": 0.5,
+    "market_state_usage_v1": "record_and_validate_strata_do_not_fit_interaction_below_30_units_per_cell"
+  },
+  "hypothesis_specific_temporal_model": {
+    "model_version": "phase7_path_competing_risk_v1",
+    "clock": "real_completed_M1_bar",
+    "age_bin_ends": [1, 5, 15, 30, 60, 120, 240, "session_end"],
+    "causes": [
+      "expired",
+      "falsified",
+      "realized",
+      "scope_superseded"
+    ],
+    "smoothing": "dirichlet_jeffreys",
+    "smoothing_alpha": 0.5,
+    "contract_change_data_gap_observation_end": "censor"
+  },
+  "prior_reversion_model": {
+    "model_version": "phase7_evidence_prior_reversion_v1",
+    "formula": "log_prior_h_plus_sum_two_to_negative_age_over_half_life_h_times_log_likelihood_contribution_ih",
+    "candidate_half_lives_real_M1_bars": [5, 15, 30, 60, 120, 240, "infinity"],
+    "selection": "deterministic_inner_rolling_coordinate_grid",
+    "insufficient_support_fallback": "pooled_or_infinity_frozen_before_validation",
+    "constant_log_weight_subtraction_allowed": false
+  },
+  "path_calibration_model": {
+    "model_version": "phase7_path_temperature_bias_v1",
+    "input_predictions": "cross_fitted_only",
+    "temperature_positive": true,
+    "bias_gauge": "residual_unknown_bias_equals_0",
+    "objective": "competition_unit_weighted_multiclass_log_loss",
+    "l2": 0.0001
+  },
+  "dol_model": {
+    "model_version": "phase7_dol_conditional_softmax_v1",
+    "candidate_logit_scale_nonnegative": true,
+    "candidate_path_log_weight_adjustment": "fixed_zero_identifiability_gauge",
+    "no_target_log_weight": "fit_separately_by_path",
+    "explicit_no_target_in_denominator": true,
+    "objective": "competition_unit_weighted_choice_set_log_loss",
+    "l2": 0.0001
+  },
+  "rolling_oof": {
+    "group_keys": [
+      "market_epoch_id",
+      "competition_set_id"
+    ],
+    "whole_session_assignment_required": true,
+    "purge_calendar_days": 14,
+    "embargo_completed_trading_sessions": 5,
+    "fit_must_precede_validation": true,
+    "june_2024_excluded_as_previously_opened": true
+  },
+  "admission_thresholds": {
+    "minimum_resolved_units": 200,
+    "minimum_units_per_required_support": 30,
+    "minimum_prediction_coverage": 0.95,
+    "maximum_top_label_ece": 0.05,
+    "log_loss_bootstrap_ci_high_must_be_below_baseline": 0.0,
+    "brier_must_not_exceed_baseline": true,
+    "minimum_improving_fold_fraction": 0.7,
+    "maximum_single_fold_log_loss_degradation": 0.05,
+    "bootstrap_cluster": "market_session",
+    "bootstrap_confidence": 0.95,
+    "bootstrap_replicates": 2000,
+    "bootstrap_seed": 731,
+    "probability_sum_tolerance": 1e-12,
+    "admission_authority": "shadow_only"
+  },
+  "required_support_labels": {
+    "path_probability": [
+      "continuation",
+      "deeper_retracement",
+      "reversal",
+      "balance",
+      "failed_breakout",
+      "residual_unknown"
+    ],
+    "dol_probability": [
+      "first_hit_candidate",
+      "no_target_before_common_horizon"
+    ]
+  },
+  "artifact_slots": {
+    "cohort_manifest": null,
+    "conditional_likelihood_artifact": null,
+    "temporal_artifact": null,
+    "prior_reversion_artifact": null,
+    "path_calibration_artifact": null,
+    "dol_model_artifact": null,
+    "path_admission_receipt": null,
+    "dol_admission_receipt": null
+  },
+  "prohibitions": [
+    "no_sealed_source_read_or_fit",
+    "no_phase6_post_event_mbo_response_as_live_feature",
+    "no_row_random_split",
+    "no_candidate_row_independence",
+    "no_future_retirement_rearm_touch_or_outcome_in_prediction_features",
+    "no_historical_first_retest_proxy",
+    "no_overwrite_of_manifest_cohort_model_or_receipt",
+    "no_action_authority"
+  ]
+}

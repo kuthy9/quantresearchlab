@@ -17,6 +17,7 @@ import hashlib
 import math
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
+import weakref
 
 import pandas as pd
 
@@ -129,6 +130,56 @@ class FoundationDOLInventoryView(LiquidityInventoryItem):
             raise ValueError("foundation DOL inventory view is invalid")
 
 
+_IDENTITY_CACHE_MISS = object()
+_FOUNDATION_DOL_INVENTORY_CACHE: dict[
+    int,
+    tuple[
+        weakref.ReferenceType[MarketObservation],
+        tuple[FoundationDOLInventoryView, ...],
+    ],
+] = {}
+_CURRENT_DOL_INVENTORY_CACHE: dict[
+    int,
+    tuple[
+        weakref.ReferenceType[MarketObservation],
+        tuple[object, ...],
+    ],
+] = {}
+
+
+def _identity_cache_get(
+    cache: Mapping[int, tuple[weakref.ReferenceType[MarketObservation], object]],
+    observation: MarketObservation,
+) -> object:
+    entry = cache.get(id(observation))
+    if entry is None or entry[0]() is not observation:
+        return _IDENTITY_CACHE_MISS
+    return entry[1]
+
+
+def _identity_cache_set(
+    cache: dict[int, tuple[weakref.ReferenceType[MarketObservation], Any]],
+    observation: MarketObservation,
+    value: Any,
+) -> Any:
+    key = id(observation)
+
+    def discard(reference: weakref.ReferenceType[MarketObservation]) -> None:
+        incumbent = cache.get(key)
+        if incumbent is not None and incumbent[0] is reference:
+            cache.pop(key, None)
+
+    try:
+        reference = weakref.ref(observation, discard)
+    except TypeError:
+        # Compatibility observations used by adapters and research fixtures
+        # may be immutable in practice without supporting weak references.
+        # Bypass the optimization instead of retaining them strongly.
+        return value
+    cache[key] = (reference, value)
+    return value
+
+
 def foundation_dol_inventory(
     observation: MarketObservation,
 ) -> tuple[FoundationDOLInventoryView, ...]:
@@ -140,10 +191,20 @@ def foundation_dol_inventory(
     never standalone rematerializations after that source disappears.
     """
 
+    cached = _identity_cache_get(
+        _FOUNDATION_DOL_INVENTORY_CACHE,
+        observation,
+    )
+    if cached is not _IDENTITY_CACHE_MISS:
+        return cached
     snapshot = getattr(observation, "market_snapshot", None)
     projection = None if snapshot is None else snapshot.foundation
     if projection is None:
-        return ()
+        return _identity_cache_set(
+            _FOUNDATION_DOL_INVENTORY_CACHE,
+            observation,
+            (),
+        )
     from .semantic_foundation import (
         FoundationObjectType,
         FoundationRecordStatus,
@@ -219,13 +280,12 @@ def foundation_dol_inventory(
             != level_record.object_id
         ):
             raise ValueError("foundation DOL generation join is incomplete")
-        history = projection.records_for(
+        creation_record = projection.first_record_for(
             FoundationObjectType.LIQUIDITY_LEVEL,
             level_record.object_id,
         )
-        if not history:
+        if creation_record is None:
             raise ValueError("foundation DOL level lacks creation history")
-        creation_record = history[0]
         inventory_kind = _FOUNDATION_SOURCE_TO_INVENTORY_KIND.get(source_kind)
         if source_kind in {"formed_liquidity_pool", "formed_pool"}:
             inventory_kind = (
@@ -316,7 +376,7 @@ def foundation_dol_inventory(
                 lifecycle=LiquidityInventoryLifecycle.VISIBLE,
             )
         )
-    return tuple(
+    result = tuple(
         sorted(
             output,
             key=lambda item: (
@@ -326,6 +386,11 @@ def foundation_dol_inventory(
             ),
         )
     )
+    return _identity_cache_set(
+        _FOUNDATION_DOL_INVENTORY_CACHE,
+        observation,
+        result,
+    )
 
 
 def current_dol_inventory(
@@ -333,14 +398,25 @@ def current_dol_inventory(
 ) -> tuple[object, ...]:
     """Return the single exact DOL/target-map inventory consumer view."""
 
+    cached = _identity_cache_get(
+        _CURRENT_DOL_INVENTORY_CACHE,
+        observation,
+    )
+    if cached is not _IDENTITY_CACHE_MISS:
+        return cached
     snapshot = getattr(observation, "market_snapshot", None)
     projection = None if snapshot is None else snapshot.foundation
     if projection is None:
-        return tuple(
+        result = tuple(
             item
             for item in observation.liquidity_inventory
             if item.lifecycle is LiquidityInventoryLifecycle.VISIBLE
             and item.confirmed_at <= observation.asof
+        )
+        return _identity_cache_set(
+            _CURRENT_DOL_INVENTORY_CACHE,
+            observation,
+            result,
         )
     from .semantic_foundation import FoundationObjectType
 
@@ -356,7 +432,12 @@ def current_dol_inventory(
         and item.confirmed_at <= observation.asof
         and item.item_id not in managed_source_ids
     )
-    return (*legacy, *foundation_dol_inventory(observation))
+    result = (*legacy, *foundation_dol_inventory(observation))
+    return _identity_cache_set(
+        _CURRENT_DOL_INVENTORY_CACHE,
+        observation,
+        result,
+    )
 
 
 def dol_level_terminal_sources(

@@ -21,7 +21,7 @@ from pathlib import Path
 import statistics
 import sys
 import time
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Callable, Iterable, Mapping, Sequence
 
 import pandas as pd
 
@@ -427,6 +427,9 @@ def _build_eye(
             materialize_event_view=False,
             group4_projection_only=False,
             eye_authority_mode=True,
+            canonical_foundation_enabled=bool(
+                raw.get("canonical_foundation_enabled", False)
+            ),
         )
     )
     return CausalMarketReader(scale_specs=specs), observer
@@ -2734,6 +2737,33 @@ def _assert_full_input_census(
                 f"full input census mismatch for {name}: "
                 f"expected={expected_clock.isoformat()} actual={actual_clock}"
             )
+    if "expected_first_diagnostic_asof" in expected:
+        expected_clock = pd.Timestamp(expected["expected_first_diagnostic_asof"])
+        actual_clock = actual.get("first_diagnostic_asof")
+        if actual_clock is None or pd.Timestamp(actual_clock) != expected_clock:
+            raise ResearchContractError(
+                "full input census mismatch for first_diagnostic_asof: "
+                f"expected={expected_clock.isoformat()} actual={actual_clock}"
+            )
+    if "expected_synthetic_clocks" in expected:
+        expected_clocks = [
+            pd.Timestamp(value) for value in expected["expected_synthetic_clocks"]
+        ]
+        actual_clocks = [
+            pd.Timestamp(value) for value in actual.get("synthetic_clocks", ())
+        ]
+        if actual_clocks != expected_clocks:
+            raise ResearchContractError(
+                "full input census mismatch for synthetic_clocks: "
+                f"expected={expected_clocks} actual={actual_clocks}"
+            )
+    if "expected_contracts" in expected:
+        if actual.get("contracts") != expected["expected_contracts"]:
+            raise ResearchContractError(
+                "full input census mismatch for contracts: "
+                f"expected={expected['expected_contracts']} "
+                f"actual={actual.get('contracts')}"
+            )
 
 
 def _validate_registry_atomic_population(registry: SemanticRegistry) -> None:
@@ -2755,6 +2785,9 @@ def _validate_registry_atomic_population(registry: SemanticRegistry) -> None:
 
 def _load_contract_and_registry(
     manifest_path: Path,
+    *,
+    contract_loader: Callable[..., Any] = load_frozen_research_contract,
+    split_validator: Callable[[Any, Any], None] = validate_split_authority,
 ) -> tuple[
     Any,
     SemanticRegistry,
@@ -2782,7 +2815,7 @@ def _load_contract_and_registry(
         required_version=manifest_semantic_version,
     )
     _validate_registry_atomic_population(registry)
-    contract = load_frozen_research_contract(
+    contract = contract_loader(
         manifest_path,
         root=ROOT,
         actual_semantic_registry_identity=registry.identity,
@@ -2793,7 +2826,7 @@ def _load_contract_and_registry(
     ):
         raise ResearchContractError("semantic registry version or identity changed")
     validation = load_validation_protocol(contract.split_registry_path)
-    validate_split_authority(contract, validation)
+    split_validator(contract, validation)
 
     fixed_bindings = {
         "runner": Path(__file__).resolve(),
@@ -2910,10 +2943,23 @@ def _preflight_output_bundle(
 
 
 def _report_v3(result: Mapping[str, Any]) -> str:
+    comparison_mode = (
+        result.get("validation_state") == "fixed_historical_comparison_unvalidated"
+    )
+    title = (
+        f"# {result['semantic_version']} — Fixed Phase-4/5 comparison"
+        if comparison_mode
+        else f"# {result['semantic_version']} — Signal Research protocol v3"
+    )
+    scope_note = (
+        "> Fixed historical comparison only: unvalidated and without model-action authority."
+        if comparison_mode
+        else "> Development diagnostic only: unvalidated, not OOS, not a model, and not trading authority."
+    )
     lines = [
-        f"# {result['semantic_version']} — Signal Research protocol v3",
+        title,
         "",
-        "> Development diagnostic only: unvalidated, not OOS, not a model, and not trading authority.",
+        scope_note,
         "",
         f"- Status: `{result['status']}`",
         f"- Complete registered window: `{result['artifact_classification']['complete_registered_window']}`",
@@ -3403,12 +3449,34 @@ def _run_v3_analysis(
         }
 
     status = _artifact_status(str(manifest["status"]), max_bars)
-    result = {
-        "schema_version": 3,
-        "research_protocol_version": RESEARCH_PROTOCOL_V3,
-        "status": status,
-        "validation_state": "development_diagnostic_unvalidated",
-        "artifact_classification": {
+    comparison_contract = manifest.get("comparison_contract")
+    comparison_mode = isinstance(comparison_contract, Mapping)
+    if comparison_mode:
+        artifact_classification = {
+            "complete_registered_window": max_bars is None,
+            "max_bars_smoke_limit": max_bars,
+            "truncated_by_max_bars": truncated_by_max_bars,
+            "inference_allowed": False,
+            "parameter_change_allowed": False,
+            "model_action_allowed": False,
+            "max_bars_artifact_is_permanently_incomplete": max_bars is not None,
+        }
+        split_authority = {
+            "comparison_role": contract.split_role,
+            "window_id": comparison_contract.get("window_id"),
+        }
+        limitations = [
+            "fixed historical comparison only; not independently validated",
+            "strict ancestry populations may remain sparse and are not retuned",
+            "shared-constituent-BAR composition is not a causal effect or semantic-event ancestry claim",
+            "cross-pair outcome windows may overlap; exact McNemar/Holm p-values are descriptive and unvalidated",
+            "OHLCV price geometry only; order-book mechanism is not evaluated",
+            "no execution, fills, costs, stops, P&L, or model-action authority",
+            *manifest.get("limitations", ()),
+        ]
+        validation_state = "fixed_historical_comparison_unvalidated"
+    else:
+        artifact_classification = {
             "complete_registered_window": max_bars is None,
             "max_bars_smoke_limit": max_bars,
             "truncated_by_max_bars": truncated_by_max_bars,
@@ -3418,7 +3486,27 @@ def _run_v3_analysis(
             "trading_authority": False,
             "out_of_sample_opened": False,
             "max_bars_artifact_is_permanently_incomplete": max_bars is not None,
-        },
+        }
+        split_authority = {
+            "role": contract.split_role,
+            "out_of_sample_opened": False,
+        }
+        limitations = [
+            "development diagnostic only; not OOS and not validated",
+            "strict ancestry populations may remain sparse and are not retuned",
+            "shared-constituent-BAR composition is not a causal effect or semantic-event ancestry claim",
+            "cross-pair outcome windows may overlap; exact McNemar/Holm p-values are descriptive and unvalidated",
+            "OHLCV price geometry only; MBO mechanism not evaluated",
+            "no execution, fills, costs, stops, P&L, or trading authority",
+            *manifest.get("limitations", ()),
+        ]
+        validation_state = "development_diagnostic_unvalidated"
+    result = {
+        "schema_version": 3,
+        "research_protocol_version": RESEARCH_PROTOCOL_V3,
+        "status": status,
+        "validation_state": validation_state,
+        "artifact_classification": artifact_classification,
         "authority": manifest["authority"],
         "experiment_id": manifest["experiment_id"],
         "semantic_version": registry.semantic_version,
@@ -3426,10 +3514,7 @@ def _run_v3_analysis(
         "manifest_path": _display_path(contract.manifest_path),
         "manifest_sha256": contract.manifest_sha256,
         "dataset": manifest["dataset_version"],
-        "split_authority": {
-            "role": contract.split_role,
-            "out_of_sample_opened": False,
-        },
+        "split_authority": split_authority,
         "coverage": {
             **actual_input_census,
             "diagnostic_real_rows": len(enriched_rows),
@@ -3467,15 +3552,7 @@ def _run_v3_analysis(
             "holm_fixed_family": to_primitive(holm),
         },
         "ledgers": ledger_metadata,
-        "limitations": [
-            "development diagnostic only; not OOS and not validated",
-            "strict ancestry populations may remain sparse and are not retuned",
-            "shared-constituent-BAR composition is not a causal effect or semantic-event ancestry claim",
-            "cross-pair outcome windows may overlap; exact McNemar/Holm p-values are descriptive and unvalidated",
-            "OHLCV price geometry only; MBO mechanism not evaluated",
-            "no execution, fills, costs, stops, P&L, or trading authority",
-            *manifest.get("limitations", ()),
-        ],
+        "limitations": limitations,
     }
     result["result_identity"] = canonical_result_identity(result)
     _write_json(output, result)
@@ -3491,6 +3568,8 @@ def run(
     max_bars: int | None = None,
     manifest_path: Path = MANIFEST_PATH,
     force: bool = False,
+    contract_loader: Callable[..., Any] = load_frozen_research_contract,
+    split_validator: Callable[[Any, Any], None] = validate_split_authority,
 ) -> dict[str, Any]:
     output = output.resolve()
     if any(
@@ -3510,9 +3589,24 @@ def run(
     }
     if output in historical or output.with_suffix(".md") in historical:
         raise ResearchContractError("historical schema-1 evidence is immutable")
-    contract, registry, chain_edges, non_nested_links = _load_contract_and_registry(
-        manifest_path.resolve()
-    )
+    if (
+        contract_loader is load_frozen_research_contract
+        and split_validator is validate_split_authority
+    ):
+        # Preserve the original one-argument seam used by historical runner
+        # tests and callers; the additive comparison wrapper is the only path
+        # that supplies alternate validators.
+        contract, registry, chain_edges, non_nested_links = (
+            _load_contract_and_registry(manifest_path.resolve())
+        )
+    else:
+        contract, registry, chain_edges, non_nested_links = (
+            _load_contract_and_registry(
+                manifest_path.resolve(),
+                contract_loader=contract_loader,
+                split_validator=split_validator,
+            )
+        )
     manifest = contract.payload
     _preflight_output_bundle(
         output,
@@ -3539,6 +3633,7 @@ def run(
     emitted = 0
     truncated_by_max_bars = False
     last_observation_asof: pd.Timestamp | None = None
+    first_diagnostic_asof: pd.Timestamp | None = None
     last_diagnostic_asof: pd.Timestamp | None = None
     diagnostic_completed_bars = 0
     diagnostic_real_rows = 0
@@ -3546,6 +3641,8 @@ def run(
     warmup_data_gap_resets = 0
     diagnostic_data_gap_resets = 0
     contract_changes = 0
+    contracts_seen: set[tuple[str, int]] = set()
+    synthetic_clocks: list[pd.Timestamp] = []
     for bar in iter_completed_bars(
         loaded.frame,
         allow_data_gap_reset=True,
@@ -3565,6 +3662,7 @@ def run(
                 "Phase5 requires atomic_event_reducer snapshot authority: "
                 f"{observation.asof.isoformat()}={snapshot.authority.value}"
             )
+        contracts_seen.add((str(snapshot.symbol), int(snapshot.instrument_id)))
         in_diagnostic = start <= observation.asof < end
         if "contract_change_history_reset" in update.anomalies:
             contract_changes += 1
@@ -3578,6 +3676,8 @@ def run(
                 warmup_data_gap_resets += 1
         if not in_diagnostic:
             continue
+        if first_diagnostic_asof is None:
+            first_diagnostic_asof = observation.asof
         last_diagnostic_asof = observation.asof
         diagnostic_completed_bars += 1
         completed = update.completed_1m
@@ -3585,6 +3685,7 @@ def run(
             diagnostic_real_rows += 1
         else:
             diagnostic_synthetic_bars += 1
+            synthetic_clocks.append(observation.asof)
         if completed.real_completed and observation.asof not in completed_index:
             completed_index[observation.asof] = len(completed_index)
         canonical_atomic = tuple(
@@ -3771,8 +3872,14 @@ def run(
         "warmup_data_gap_resets": warmup_data_gap_resets,
         "diagnostic_data_gap_resets": diagnostic_data_gap_resets,
         "contract_changes": contract_changes,
+        "first_diagnostic_asof": first_diagnostic_asof,
         "last_processed_asof": last_observation_asof,
         "last_diagnostic_asof": last_diagnostic_asof,
+        "synthetic_clocks": synthetic_clocks,
+        "contracts": [
+            {"symbol": symbol, "instrument_id": instrument_id}
+            for symbol, instrument_id in sorted(contracts_seen)
+        ],
     }
     if max_bars is None:
         _assert_full_input_census(manifest["input_census"], actual_input_census)
