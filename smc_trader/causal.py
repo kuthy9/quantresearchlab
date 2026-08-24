@@ -8,10 +8,9 @@ from typing import Mapping, Sequence
 import pandas as pd
 
 from .market_clock import (
-    MARKET_TIMEZONE,
     expected_trading_minutes,
+    registered_native_bar_bounds,
     scheduled_gap_kind,
-    special_session_close,
 )
 from .model import Bar, Candle, Timeframe, ticks_to_price
 from .scene_graph import ScaleSpec, scale_registry_id
@@ -53,37 +52,6 @@ class _TimeframeAggregator:
         self._bucket_start = None
         self._bucket_end = None
         self._bars.clear()
-
-    def _bounds(
-        self,
-        *,
-        naive: pd.Timestamp,
-        minute_of_day: int,
-        special_close: pd.Timestamp | None,
-    ) -> tuple[pd.Timestamp, pd.Timestamp]:
-        remainder = (minute_of_day - self.anchor_minute) % self.minutes
-        start_naive = naive - pd.Timedelta(minutes=remainder)
-        end_naive = start_naive + pd.Timedelta(minutes=self.minutes)
-        # CME equity-index futures have a scheduled 17:00-18:00 ET maintenance
-        # closure. The final nominal 4H bucket is therefore a complete
-        # session-aware 14:00-17:00 candle, not a defective 180/240-minute bar.
-        if (
-            self.timeframe is Timeframe.H4
-            and start_naive.hour == 14
-            and start_naive.minute == 0
-        ):
-            end_naive = start_naive.replace(hour=17)
-        if special_close is not None:
-            special_close_naive = special_close.tz_localize(None)
-            if start_naive < special_close_naive < end_naive:
-                end_naive = special_close_naive
-        start = start_naive.tz_localize(
-            MARKET_TIMEZONE, ambiguous=True, nonexistent="shift_forward"
-        )
-        end = end_naive.tz_localize(
-            MARKET_TIMEZONE, ambiguous=True, nonexistent="shift_forward"
-        )
-        return start, end
 
     def _build(self) -> Candle:
         if self._bucket_start is None or self._bucket_end is None or not self._bars:
@@ -145,15 +113,11 @@ class _TimeframeAggregator:
     def append(
         self,
         bar: Bar,
-        *,
-        naive: pd.Timestamp,
-        minute_of_day: int,
-        special_close: pd.Timestamp | None,
     ) -> tuple[Candle, ...]:
-        start, end = self._bounds(
-            naive=naive,
-            minute_of_day=minute_of_day,
-            special_close=special_close,
+        start, end = registered_native_bar_bounds(
+            bar.start,
+            timeframe_minutes=self.minutes,
+            anchor_minute=self.anchor_minute,
         )
         output: list[Candle] = []
         if self._bucket_start is None:
@@ -313,21 +277,12 @@ class CausalMarketReader:
 
         minute = self._one_minute_candle(bar)
         self._history[Timeframe.M1].append(minute)
-        local = bar.start.tz_convert(MARKET_TIMEZONE)
-        naive = local.tz_localize(None).floor("min")
-        minute_of_day = naive.hour * 60 + naive.minute
-        special_close = special_session_close(local)
         emitted: dict[Timeframe, tuple[Candle, ...]] = {
             timeframe: () for timeframe in self.active_timeframes
         }
         emitted[Timeframe.M1] = (minute,)
         for timeframe, aggregator in self._aggregators.items():
-            candles = aggregator.append(
-                bar,
-                naive=naive,
-                minute_of_day=minute_of_day,
-                special_close=special_close,
-            )
+            candles = aggregator.append(bar)
             emitted[timeframe] = candles
             for candle in candles:
                 if candle.end > bar.end:

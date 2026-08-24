@@ -567,6 +567,67 @@ def test_first_retest_rejects_a_missing_native_bar_before_later_contact() -> Non
         )
 
 
+def test_first_retest_advances_across_registered_memorial_closure() -> None:
+    memorial_close = pd.Timestamp("2024-05-27 13:00", tz="America/New_York")
+    prior_completion = memorial_close - pd.Timedelta(5, unit="min")
+    spec = replace(
+        _retest_spec(),
+        object_created_at=prior_completion - pd.Timedelta(5, unit="min"),
+        object_known_at=prior_completion,
+        departure_confirmed_at=prior_completion,
+    )
+    at_close = replace(
+        _zone_bar(5),
+        bar_event_id="memorial-close-m5",
+        known_at=memorial_close,
+    )
+    first_reopen = replace(
+        _zone_bar(10),
+        bar_event_id="memorial-reopen-m5",
+        known_at=pd.Timestamp(
+            "2024-05-27 18:05",
+            tz="America/New_York",
+        ),
+    )
+
+    tracker = ZoneFirstReinteractionTracker(spec).on_completed_bar(at_close)
+    advanced = tracker.on_completed_bar(first_reopen)
+
+    assert advanced.observed_native_bars == 2
+    assert advanced.last_observed_at == first_reopen.known_at
+    assert advanced.first_retest is None
+
+
+def test_first_retest_rejects_skipping_first_memorial_reopen_bucket() -> None:
+    memorial_close = pd.Timestamp("2024-05-27 13:00", tz="America/New_York")
+    prior_completion = memorial_close - pd.Timedelta(5, unit="min")
+    spec = replace(
+        _retest_spec(),
+        object_created_at=prior_completion - pd.Timedelta(5, unit="min"),
+        object_known_at=prior_completion,
+        departure_confirmed_at=prior_completion,
+    )
+    tracker = ZoneFirstReinteractionTracker(spec).on_completed_bar(
+        replace(
+            _zone_bar(5),
+            bar_event_id="memorial-close-m5",
+            known_at=memorial_close,
+        )
+    )
+
+    with pytest.raises(ValueError, match="not contiguous"):
+        tracker.on_completed_bar(
+            replace(
+                _zone_bar(15),
+                bar_event_id="memorial-skipped-reopen-m5",
+                known_at=pd.Timestamp(
+                    "2024-05-27 18:10",
+                    tz="America/New_York",
+                ),
+            )
+        )
+
+
 @pytest.mark.parametrize(
     ("cause", "availability"),
     (

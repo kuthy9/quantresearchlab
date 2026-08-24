@@ -41,6 +41,7 @@ from smc_trader.model import (
 )
 from smc_trader.observation import CausalObserver, ObserverConfig
 from smc_trader.semantic_foundation import (
+    FoundationProjection,
     FoundationProjectionReducer,
     FoundationRecord,
 )
@@ -892,6 +893,144 @@ def test_atomic_foundation_replay_recomputes_first_retest_metrics(
                 forged_transport,
             ),
             semantic_registry_identity="definition-test",
+        )
+
+
+def _first_retest_registered_clock_fixture(
+    *,
+    target_known_at: pd.Timestamp,
+    interaction_known_at: pd.Timestamp,
+) -> tuple[FoundationRecord, dict[str, MarketEvent], FoundationProjection]:
+    active = FVGStructuralLifecycle(
+        fvg_id="registered-clock-fvg",
+        source_creation_event_id="registered-clock-fvg-created",
+        symbol="NQH5",
+        instrument_id=1,
+        timeframe=Timeframe.M5,
+        created_at=target_known_at,
+        known_at=target_known_at,
+    )
+    projection = FoundationProjectionReducer.reduce(
+        FoundationProjectionReducer.initial_projection(),
+        FoundationRecord.from_dto(active),
+    )
+    creation = replace(
+        _event(
+            EventKind.FVG_CREATED,
+            0,
+            Timeframe.M5,
+            event_id=active.source_creation_event_id,
+            side="above",
+            price=100.75,
+            direction=Direction.LONG,
+            evidence={"fvg_id": active.fvg_id},
+            zone=(100.25, 100.75),
+            origin=EventOrigin.SEMANTIC_ATOMIC,
+        ),
+        observed_at=target_known_at,
+        event_time=target_known_at,
+        known_at=target_known_at,
+    )
+    departure = replace(
+        _foundation_m5_bar(
+            0,
+            event_id="registered-clock-departure",
+            open_=100.75,
+            high=101.25,
+            low=100.5,
+            close=101.0,
+        ),
+        observed_at=target_known_at,
+        event_time=target_known_at,
+        known_at=target_known_at,
+    )
+    interaction = replace(
+        _foundation_m5_bar(
+            5,
+            event_id="registered-clock-interaction",
+            open_=101.0,
+            high=101.25,
+            low=100.5,
+            close=101.0,
+        ),
+        observed_at=interaction_known_at,
+        event_time=interaction_known_at,
+        known_at=interaction_known_at,
+    )
+    retest = ZoneFirstRetest(
+        object_kind=ZoneObjectKind.FVG,
+        object_id=active.fvg_id,
+        creation_event_id=creation.event_id,
+        departure_source_event_id=departure.event_id,
+        source_bar_event_id=interaction.event_id,
+        symbol="NQH5",
+        instrument_id=1,
+        timeframe=Timeframe.M5,
+        direction=Direction.LONG,
+        known_at=interaction_known_at,
+        entry_side=ZoneEntrySide.FROM_ABOVE,
+        fill_fraction=0.5,
+        age_bars=1,
+        age_seconds=int(
+            (interaction_known_at - target_known_at).total_seconds()
+        ),
+        session="new_york",
+        context_event_ids=(),
+    )
+    authority = {
+        creation.event_id: creation,
+        departure.event_id: departure,
+        interaction.event_id: interaction,
+    }
+    return FoundationRecord.from_dto(retest), authority, projection
+
+
+def test_foundation_first_retest_replay_accepts_registered_memorial_reopen() -> None:
+    record, authority, projection = _first_retest_registered_clock_fixture(
+        target_known_at=pd.Timestamp(
+            "2024-05-27 13:00",
+            tz="America/New_York",
+        ),
+        interaction_known_at=pd.Timestamp(
+            "2024-05-27 18:05",
+            tz="America/New_York",
+        ),
+    )
+
+    _validate_foundation_authoritative_sources(
+        record,
+        authority,
+        projection,
+    )
+
+
+@pytest.mark.parametrize(
+    ("target_known_at", "interaction_known_at"),
+    (
+        (
+            pd.Timestamp("2024-05-27 13:00", tz="America/New_York"),
+            pd.Timestamp("2024-05-27 18:10", tz="America/New_York"),
+        ),
+        (
+            pd.Timestamp("2024-06-03 10:00", tz="America/New_York"),
+            pd.Timestamp("2024-06-03 10:10", tz="America/New_York"),
+        ),
+    ),
+)
+def test_foundation_first_retest_replay_rejects_skipped_registered_bucket(
+    target_known_at: pd.Timestamp,
+    interaction_known_at: pd.Timestamp,
+) -> None:
+    record, authority, projection = _first_retest_registered_clock_fixture(
+        target_known_at=target_known_at,
+        interaction_known_at=interaction_known_at,
+    )
+
+    with pytest.raises(ValueError, match="first-retest causal metrics"):
+        _validate_foundation_authoritative_sources(
+            record,
+            authority,
+            projection,
         )
 
 

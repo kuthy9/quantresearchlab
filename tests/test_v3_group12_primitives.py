@@ -2988,40 +2988,146 @@ def test_reference_sr_rejects_late_or_rewritten_source() -> None:
         )
 
 
-def test_reference_sr_source_identity_enters_event_memory_without_proxy() -> None:
+def _reference_sr_binding_fixture(
+    *,
+    family: str = "previous_week",
+    zone_side: str = "resistance",
+    publish: bool = True,
+) -> tuple[
+    CausalObserver,
+    Candle,
+    LiquidityInventoryItem,
+    SupportResistanceState,
+    MarketEvent | None,
+]:
     observer = CausalObserver(
         ObserverConfig(scale_specs=CORE_TEST_SCALE_SPECS)
     )
-    candle = _candle(
+    extreme = _candle(
         0,
         open_=99.0,
         high=99.5,
         low=98.5,
         close=99.0,
     )
-    observer.memory.observe_minute(candle)
-    source_id = "reference_source:week:2025-W01:high:NQH5:1"
-    zone = SupportResistanceState(
-        zone_id="reference-zone:event-memory",
+    admission = _candle(
+        1,
+        open_=99.0,
+        high=99.25,
+        low=98.75,
+        close=99.0,
+    )
+    observer.memory.observe_minute(extreme)
+    extreme_bar = observer._append_completed_bar_event(
+        extreme,
+        atr=1.0,
+        data_complete=True,
+    )
+    observer.memory.observe_minute(admission)
+    admission_bar = observer._append_completed_bar_event(
+        admission,
+        atr=1.0,
+        data_complete=True,
+    )
+    suffix = "low" if zone_side == "support" else "high"
+    item_side = "below" if zone_side == "support" else "above"
+    price = extreme.low if zone_side == "support" else extreme.high
+    identity_family = family.removeprefix("previous_")
+    source_id = (
+        f"reference_source:{identity_family}:fixture:{suffix}:NQH5:1"
+    )
+    item = LiquidityInventoryItem(
+        item_id=f"reference:{identity_family}:fixture:{suffix}:NQH5:1",
         timeframe=Timeframe.M1,
-        side="resistance",
-        lower_bound=99.75,
-        upper_bound=100.25,
-        anchor_price=100.0,
-        formed_at=candle.start,
-        confirmed_at=candle.end,
+        side=item_side,
+        kind=f"{family}_{suffix}",
+        price=price,
+        lower_bound=price,
+        upper_bound=price,
+        formed_at=extreme.start,
+        confirmed_at=extreme.end,
+        lifecycle=LiquidityInventoryLifecycle.VISIBLE,
+        source_ids=(source_id,),
+        age_bars=0,
+        strength=0.75,
+        structural_rank="external",
+        visibility_strength=0.75,
+    )
+    observer._reference_inventory[item.item_id] = item
+    candidate = None
+    if publish:
+        candidate = observer._append_semantic_atomic(
+            EventKind.LIQUIDITY_LEVEL_CREATED,
+            admission.end,
+            Timeframe.M1,
+            item.side,
+            item.price,
+            item.strength,
+            (extreme_bar.event_id, admission_bar.event_id),
+            {
+                "level_id": item.item_id,
+                "candidate_only": True,
+                "source_kind": item.kind,
+                "source_ids": item.source_ids,
+                "source_confirmed_at": extreme.end.isoformat(),
+                "reference_period_started_at": extreme.start.isoformat(),
+                "reference_period_last_completed_at": extreme.end.isoformat(),
+                "reference_extreme_at": extreme.end.isoformat(),
+                "reference_admitted_at": admission.end.isoformat(),
+                "reference_extreme_tie_rule": (
+                    "first_completed_m1_at_extreme"
+                ),
+            },
+            event_time=extreme.end,
+            zone=(item.price, item.price),
+            source_entity_ids=(item.item_id, *item.source_ids),
+        )
+        observer._candidate_level_event_ids[item.item_id] = candidate.event_id
+    zone = SupportResistanceState(
+        zone_id=f"reference-zone:{family}:{suffix}",
+        timeframe=Timeframe.M1,
+        side=zone_side,
+        lower_bound=price - 0.25,
+        upper_bound=price + 0.25,
+        anchor_price=price,
+        formed_at=extreme.start,
+        confirmed_at=admission.end,
         lifecycle=SupportResistanceLifecycle.ACTIVE,
         member_swing_ids=(),
-        touch_times=(candle.end,),
+        touch_times=(admission.end,),
         reaction_magnitudes_atr=(0.0,),
         age_bars=0,
         strength=0.2,
         total_touch_count=1,
-        source_kind="previous_week",
+        source_kind=family,
         structural_rank="external",
         visibility_strength=1.0,
         source_ids=(source_id,),
     )
+    return observer, admission, item, zone, candidate
+
+
+@pytest.mark.parametrize(
+    ("family", "zone_side"),
+    tuple(
+        (family, side)
+        for family in (
+            "previous_session",
+            "previous_day",
+            "previous_week",
+        )
+        for side in ("resistance", "support")
+    ),
+)
+def test_reference_sr_level_binds_exact_published_reference_candidate(
+    family: str,
+    zone_side: str,
+) -> None:
+    observer, candle, _, zone, candidate = _reference_sr_binding_fixture(
+        family=family,
+        zone_side=zone_side,
+    )
+    assert candidate is not None
     observer._record_frame_events(
         FrameObservation(
             timeframe=Timeframe.M1,
@@ -3034,14 +3140,103 @@ def test_reference_sr_source_identity_enters_event_memory_without_proxy() -> Non
         event_clock=candle.end,
     )
 
-    event = next(
+    state_event = next(
         item
         for item in observer.memory.recent()
         if item.kind is EventKind.SUPPORT_RESISTANCE_STATE
     )
-    assert event.entity_id == zone.zone_id
-    assert event.source_ids == (source_id,)
-    assert event.details["source_kind"] == "previous_week"
+    created = observer.memory.audit_event_including_pending(
+        observer._candidate_level_event_ids[zone.zone_id]
+    )
+    assert created is not None
+    assert state_event.entity_id == zone.zone_id
+    assert state_event.source_ids == zone.source_ids
+    assert state_event.details["source_kind"] == family
+    assert created.source_event_ids == (candidate.event_id,)
+    observer.memory.flush_audit()
+    assert observer.audit_store.get(created.event_id) == created
+
+
+@pytest.mark.parametrize(
+    "mismatch",
+    ("missing", "source_ids", "family", "side", "anchor"),
+)
+def test_reference_sr_level_rejects_zero_exact_inventory_sources(
+    mismatch: str,
+) -> None:
+    observer, candle, item, zone, _ = _reference_sr_binding_fixture()
+    if mismatch == "missing":
+        observer._reference_inventory.clear()
+    elif mismatch == "source_ids":
+        zone = replace(zone, source_ids=("reference_source:different",))
+    elif mismatch == "family":
+        zone = replace(zone, source_kind="previous_day")
+    elif mismatch == "side":
+        zone = replace(
+            zone,
+            side="support",
+            lower_bound=zone.anchor_price - 0.25,
+            upper_bound=zone.anchor_price + 0.25,
+        )
+    else:
+        zone = replace(
+            zone,
+            lower_bound=zone.lower_bound + 0.25,
+            anchor_price=zone.anchor_price + 0.25,
+            upper_bound=zone.upper_bound + 0.25,
+        )
+    assert item.item_id in observer._reference_inventory or mismatch == "missing"
+    with pytest.raises(ValueError, match="exactly one exact inventory source"):
+        observer._reference_zone_source_event_ids(
+            zone,
+            observed_at=candle.end,
+        )
+
+
+def test_reference_sr_level_rejects_ambiguous_inventory_sources() -> None:
+    observer, candle, item, zone, _ = _reference_sr_binding_fixture()
+    duplicate = replace(item, item_id=f"{item.item_id}:duplicate")
+    observer._reference_inventory[duplicate.item_id] = duplicate
+    duplicate_candidate = observer._append_semantic_atomic(
+        EventKind.LIQUIDITY_LEVEL_CREATED,
+        candle.end,
+        Timeframe.M1,
+        duplicate.side,
+        duplicate.price,
+        duplicate.strength,
+        (),
+        {
+            "level_id": duplicate.item_id,
+            "candidate_only": True,
+            "source_kind": duplicate.kind,
+            "source_ids": duplicate.source_ids,
+        },
+        event_time=candle.end,
+        zone=(duplicate.price, duplicate.price),
+        source_entity_ids=(duplicate.item_id, *duplicate.source_ids),
+    )
+    observer._candidate_level_event_ids[duplicate.item_id] = (
+        duplicate_candidate.event_id
+    )
+
+    with pytest.raises(ValueError, match="exactly one exact inventory source"):
+        observer._reference_zone_source_event_ids(
+            zone,
+            observed_at=candle.end,
+        )
+
+
+def test_reference_sr_level_rejects_unpublished_exact_source() -> None:
+    observer, candle, _, zone, candidate = _reference_sr_binding_fixture(
+        publish=False
+    )
+    assert candidate is None
+
+    with pytest.raises(ValueError, match="source level is not published"):
+        observer._reference_zone_source_event_ids(
+            zone,
+            observed_at=candle.end,
+        )
 
 
 def test_partial_cold_start_period_never_becomes_previous_session() -> None:

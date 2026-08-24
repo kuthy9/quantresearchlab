@@ -85,7 +85,7 @@
     },
     "runtime_foundation_adapter": {
       "path": "smc_trader/foundation_adapter.py",
-      "sha256": "2b14da9e5f12ba85a7d13ab055cf0fc352fb0c37bb7ac69066a547fa81d11471"
+      "sha256": "11cb4be213d018b86242241117b74120c1ef1d3026f1527bcbbc512f83909d4e"
     },
     "runtime_foundation_registry": {
       "path": "smc_trader/foundation_registry.py",
@@ -97,7 +97,7 @@
     },
     "runtime_semantic_lifecycle": {
       "path": "smc_trader/semantic_lifecycle.py",
-      "sha256": "9823039fee5686f54d0cc35791615d2e1770d7918234494709f8c196656d0ac1"
+      "sha256": "23c7fc47a618f0c5dd140b22b6906e37b71755c8c77ce49a5286d2589b6e221d"
     },
     "runtime_structural_outcome": {
       "path": "smc_trader/structural_outcome.py",
@@ -290,7 +290,7 @@
     },
     "runtime_causal": {
       "path": "smc_trader/causal.py",
-      "sha256": "adb0a0ac31d4d7aec34d856d4b680324ef5c64e15eaa584c9d43d1cacdff5114"
+      "sha256": "fa5b6488db0c8b78b7098271f304b9eae4e2fc0f7e6be4150b2046a9e9597595"
     },
     "runtime_displacement": {
       "path": "smc_trader/displacement.py",
@@ -302,7 +302,7 @@
     },
     "runtime_event_store": {
       "path": "smc_trader/event_store.py",
-      "sha256": "c8993fb1069a993c2262e3d4a749ba3a8945d2a988f46de907f7d5cb5aff2192"
+      "sha256": "166662787def0085f428b1921871f139099e8b43267ddc98d8b6cf02f1e267ec"
     },
     "runtime_feature": {
       "path": "smc_trader/mbo_mechanism.py",
@@ -330,11 +330,11 @@
     },
     "runtime_market_clock": {
       "path": "smc_trader/market_clock.py",
-      "sha256": "5e43fe3be976ea8c6586f13bf21e5a1de86ec252a8590299d03aa8432f3561a1"
+      "sha256": "bca4afdc813631e9ca3e32206430a16d1d2654bab3113c03e5d529f5a69aa819"
     },
     "runtime_market_state": {
       "path": "smc_trader/market_state.py",
-      "sha256": "4bbca5406a2415e32028b215b6bf5fd17c05705a4874c310f13d22969dca1741"
+      "sha256": "31ff8f8004408f11b743913412d735a3983fcd1961b81afa56b54f76718ace7e"
     },
     "runtime_mbo": {
       "path": "smc_trader/mbo.py",
@@ -346,7 +346,7 @@
     },
     "runtime_observation": {
       "path": "smc_trader/observation.py",
-      "sha256": "ccb4812e0e782be163ece6eb39cd2c5cce8463f34d71cf2d0153d38af549cce2"
+      "sha256": "9cd8a92207ec263fc6f78974aa32c26e30740671359146f2c05d8036baac4115"
     },
     "runtime_package_init": {
       "path": "smc_trader/__init__.py",

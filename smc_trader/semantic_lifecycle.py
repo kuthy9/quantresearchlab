@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Any, Iterable, Mapping, Sequence
 import pandas as pd
 
 from .foundation_registry import FOUNDATION_VERSION
+from .market_clock import next_registered_native_completion
 from .model import (
     Direction,
     EventKind,
@@ -197,6 +198,13 @@ _TIMEFRAME_INTERVAL = {
     Timeframe.M15: pd.Timedelta(15, unit="min"),
     Timeframe.H1: pd.Timedelta(1, unit="h"),
     Timeframe.H4: pd.Timedelta(4, unit="h"),
+}
+_TIMEFRAME_ANCHOR_MINUTE = {
+    Timeframe.M1: 0,
+    Timeframe.M5: 0,
+    Timeframe.M15: 0,
+    Timeframe.H1: 0,
+    Timeframe.H4: 18 * 60,
 }
 
 # Exact aliases frozen by foundation_v2_0.yaml.  This is deliberately not a
@@ -2133,13 +2141,20 @@ class SemanticLifecycleReducer:
             (item for item in state.real_bar_clocks if item.timeframe is timeframe),
             None,
         )
-        if prior is not None and transition.known_at != (
-            prior.last_completed_at + _TIMEFRAME_INTERVAL[timeframe]
-        ):
-            raise ValueError(
-                "real completed BAR clocks must be exactly contiguous within "
-                "an epoch"
+        if prior is not None:
+            expected_completion = next_registered_native_completion(
+                prior.last_completed_at,
+                timeframe_minutes=int(
+                    _TIMEFRAME_INTERVAL[timeframe]
+                    / pd.Timedelta(1, unit="min")
+                ),
+                anchor_minute=_TIMEFRAME_ANCHOR_MINUTE[timeframe],
             )
+            if transition.known_at != expected_completion:
+                raise ValueError(
+                    "real completed BAR clocks must be exactly contiguous "
+                    "on the registered native clock within an epoch"
+                )
         updated = RealBarClock(
             timeframe=timeframe,
             count=1 if prior is None else prior.count + 1,
@@ -3522,11 +3537,22 @@ class SemanticLifecycleReducer:
 
         transitions: list[StructureTransition] = []
         for candidate in state.structure_transitions:
+            exact_forming_challenger_rollover = (
+                reason == "scope_rollover"
+                and generation.scope is StructureScope.INTERNAL
+                and generation.lifecycle is StructureGenerationLifecycle.FORMING
+                and candidate.protected_acceptance_event_id is not None
+                and candidate.timeframe is generation.timeframe
+                and candidate.challenger_direction is generation.direction
+                and candidate.started_at == generation.started_at
+                and candidate.mss_event_ids == generation.mss_event_ids
+            )
             should_censor = (
                 candidate.lifecycle is StructureTransitionLifecycle.STARTED
                 and (
                     candidate.incumbent_structure_generation_id == generation_id
                     or candidate.opposite_structure_generation_id == generation_id
+                    or exact_forming_challenger_rollover
                 )
                 and reason != "protected_break_accepted"
             )

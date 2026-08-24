@@ -23,6 +23,11 @@ from .foundation_registry import (
     FOUNDATION_CANONICAL_IDENTITY,
     FOUNDATION_VERSION,
 )
+from .market_clock import (
+    expected_trading_minutes,
+    next_registered_native_completion,
+    registered_native_bar_bounds,
+)
 from .model import (
     BOSLifecycle,
     BOSScope,
@@ -2499,6 +2504,14 @@ _NATIVE_TIMEFRAME_MINUTES: Mapping[Timeframe, int] = {
     Timeframe.H4: 240,
 }
 
+_NATIVE_TIMEFRAME_ANCHOR_MINUTES: Mapping[Timeframe, int] = {
+    Timeframe.M1: 0,
+    Timeframe.M5: 0,
+    Timeframe.M15: 0,
+    Timeframe.H1: 0,
+    Timeframe.H4: 18 * 60,
+}
+
 
 def _require_contiguous_native_candles(
     candles: Sequence[Candle],
@@ -2509,20 +2522,49 @@ def _require_contiguous_native_candles(
     """Fail closed when a v2 definitional path skips a native BAR."""
 
     expected_minutes = _NATIVE_TIMEFRAME_MINUTES[Timeframe(timeframe)]
-    expected_duration = pd.Timedelta(minutes=expected_minutes)
-    if not candles or any(
-        candle.timeframe is not timeframe
-        or not candle.real_completed
-        or candle.expected_minutes != expected_minutes
-        or candle.observed_minutes != expected_minutes
-        or candle.end - candle.start != expected_duration
-        for candle in candles
-    ):
+    if not candles:
         raise ValueError(f"{object_name} lacks native-duration real BARs")
-    if any(
-        left.end != right.start
-        for left, right in zip(candles, candles[1:])
-    ):
+    for candle in candles:
+        try:
+            registered_start, registered_end = registered_native_bar_bounds(
+                candle.start,
+                timeframe_minutes=expected_minutes,
+                anchor_minute=_NATIVE_TIMEFRAME_ANCHOR_MINUTES[timeframe],
+            )
+        except ValueError as error:
+            raise ValueError(
+                f"{object_name} lacks native-duration real BARs"
+            ) from error
+        registered_minutes = expected_trading_minutes(
+            registered_start,
+            registered_end,
+        )
+        if (
+            candle.timeframe is not timeframe
+            or not candle.real_completed
+            or candle.synthetic_minutes != 0
+            or candle.start != registered_start
+            or candle.end != registered_end
+            or candle.expected_minutes != registered_minutes
+            or candle.observed_minutes != registered_minutes
+            or candle.real_minutes != registered_minutes
+        ):
+            raise ValueError(f"{object_name} lacks native-duration real BARs")
+    try:
+        contiguous = all(
+            next_registered_native_completion(
+                left.end,
+                timeframe_minutes=expected_minutes,
+                anchor_minute=_NATIVE_TIMEFRAME_ANCHOR_MINUTES[timeframe],
+            )
+            == right.end
+            for left, right in zip(candles, candles[1:])
+        )
+    except ValueError as error:
+        raise ValueError(
+            f"{object_name} native BAR path is not contiguous"
+        ) from error
+    if not contiguous:
         raise ValueError(f"{object_name} native BAR path is not contiguous")
 
 
@@ -5524,13 +5566,24 @@ def _validate_foundation_authoritative_sources(
                 key=lambda event: (event.known_at, event.event_id),
             )
         )
-        native_interval = pd.Timedelta(
-            minutes=_NATIVE_TIMEFRAME_MINUTES[Timeframe(payload.get("timeframe"))]
-        )
-        expected_native_clocks = tuple(
-            target_known_at + native_interval * index
-            for index in range(1, len(native_bars) + 1)
-        )
+        native_timeframe = Timeframe(payload.get("timeframe"))
+        expected_native_clocks_list: list[pd.Timestamp] = []
+        prior_native_clock = target_known_at
+        try:
+            for _ in native_bars:
+                prior_native_clock = next_registered_native_completion(
+                    prior_native_clock,
+                    timeframe_minutes=_NATIVE_TIMEFRAME_MINUTES[native_timeframe],
+                    anchor_minute=_NATIVE_TIMEFRAME_ANCHOR_MINUTES[
+                        native_timeframe
+                    ],
+                )
+                expected_native_clocks_list.append(prior_native_clock)
+        except ValueError as error:
+            raise ValueError(
+                "foundation first-retest causal metrics are incompatible"
+            ) from error
+        expected_native_clocks = tuple(expected_native_clocks_list)
         if (
             not native_bars
             or tuple(event.known_at for event in native_bars)

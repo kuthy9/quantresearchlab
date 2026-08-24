@@ -20,6 +20,8 @@ from smc_trader.execution import TopOfBook, TopOfBookExecutionProvider
 from smc_trader.io import DataContinuityError, iter_completed_bars
 from smc_trader.market_clock import (
     is_registered_trading_minute,
+    next_registered_native_completion,
+    registered_native_bar_bounds,
     scheduled_gap_kind,
     special_session_close,
 )
@@ -517,6 +519,49 @@ def test_registered_calendar_handles_holiday_and_good_friday_sessions() -> None:
     second_fallback_hour = pd.Timestamp("2017-11-05 06:30", tz="UTC")
     assert not is_registered_trading_minute(first_fallback_hour)
     assert not is_registered_trading_minute(second_fallback_hour)
+
+
+@pytest.mark.parametrize(
+    ("prior", "timeframe_minutes", "anchor_minute", "expected"),
+    (
+        ("2024-06-03 10:00", 240, 1080, "2024-06-03 14:00"),
+        ("2024-05-27 10:00", 240, 1080, "2024-05-27 13:00"),
+        ("2024-05-27 13:00", 240, 1080, "2024-05-27 22:00"),
+        ("2024-05-27 13:00", 1, 0, "2024-05-27 18:01"),
+        ("2024-11-29 10:00", 240, 1080, "2024-11-29 13:15"),
+        ("2024-11-29 13:15", 240, 1080, "2024-12-01 22:00"),
+    ),
+)
+def test_next_registered_native_completion_is_unique_across_closures(
+    prior: str,
+    timeframe_minutes: int,
+    anchor_minute: int,
+    expected: str,
+) -> None:
+    assert next_registered_native_completion(
+        pd.Timestamp(prior, tz=TZ),
+        timeframe_minutes=timeframe_minutes,
+        anchor_minute=anchor_minute,
+    ) == pd.Timestamp(expected, tz=TZ)
+
+
+def test_registered_native_bounds_freeze_special_close_shortened_h4() -> None:
+    assert registered_native_bar_bounds(
+        pd.Timestamp("2024-05-27 10:00", tz=TZ),
+        timeframe_minutes=240,
+        anchor_minute=1080,
+    ) == (
+        pd.Timestamp("2024-05-27 10:00", tz=TZ),
+        pd.Timestamp("2024-05-27 13:00", tz=TZ),
+    )
+    assert registered_native_bar_bounds(
+        pd.Timestamp("2024-11-29 10:00", tz=TZ),
+        timeframe_minutes=240,
+        anchor_minute=1080,
+    ) == (
+        pd.Timestamp("2024-11-29 10:00", tz=TZ),
+        pd.Timestamp("2024-11-29 13:15", tz=TZ),
+    )
 
 
 def _minute_frame(starts: list[str]) -> pd.DataFrame:

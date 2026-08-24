@@ -196,6 +196,13 @@ _CANDIDATE_REFERENCE_PARENT_SOURCE_KINDS = frozenset(
     }
 )
 
+# Source-free reference-zone candidates exist in persisted v1.2 journals.
+# Keep that replay seam pinned to the exact historical semantic version;
+# current sourceful candidates take the stricter point-parent branch below.
+_LEGACY_SOURCE_FREE_REFERENCE_ZONE_SEMANTIC_VERSIONS = frozenset(
+    {"smc_semantics_v1.2"}
+)
+
 _DISPLACEMENT_LIFECYCLES = frozenset(
     {"started", "active", "exhausted", "censored"}
 )
@@ -2232,9 +2239,8 @@ class ImmutableEventStore:
                 for event_id in event.context_event_ids
             )
             context = contexts[0] if len(contexts) == 1 else None
-            if (
-                source_parents
-                or event.timeframe is not Timeframe.M1
+            compatibility_invalid = (
+                event.timeframe is not Timeframe.M1
                 or len(source_ids) != 1
                 or not isinstance(source_ids[0], str)
                 or not source_ids[0].startswith(
@@ -2253,10 +2259,59 @@ class ImmutableEventStore:
                 or context.known_at != event.known_at
                 or context.evidence.get("source_kind") != source_kind
                 or tuple(context.evidence.get("source_ids", ())) != source_ids
+            )
+            if not source_parents:
+                if (
+                    event.semantic_version
+                    not in _LEGACY_SOURCE_FREE_REFERENCE_ZONE_SEMANTIC_VERSIONS
+                    or compatibility_invalid
+                ):
+                    raise ValueError(
+                        "authoritative legacy reference-zone candidate must "
+                        "bind its exact source-free compatibility state "
+                        "projection"
+                    )
+                return
+            point = source_parents[0] if len(source_parents) == 1 else None
+            point_level_id = (
+                None if point is None else point.evidence.get("level_id")
+            )
+            expected_point_kind = (
+                f"{source_kind}_"
+                f"{'high' if event.side == 'above' else 'low'}"
+            )
+            expected_point_level_id = (
+                None
+                if len(source_ids) != 1 or not isinstance(source_ids[0], str)
+                else source_ids[0].replace(
+                    "reference_source:",
+                    "reference:",
+                    1,
+                )
+            )
+            if (
+                compatibility_invalid
+                or point is None
+                or point.kind is not EventKind.LIQUIDITY_LEVEL_CREATED
+                or point.origin is not EventOrigin.SEMANTIC_ATOMIC
+                or point.timeframe is not Timeframe.M1
+                or point.side != event.side
+                or point.price is None
+                or float(point.price) != float(event.price)
+                or point.zone != (float(event.price), float(event.price))
+                or point.known_at > event.known_at
+                or point.evidence.get("candidate_only") is not True
+                or point.evidence.get("source_kind") != expected_point_kind
+                or tuple(point.evidence.get("source_ids", ())) != source_ids
+                or not isinstance(point_level_id, str)
+                or point_level_id != expected_point_level_id
+                or point.source_entity_ids
+                != (point_level_id, source_ids[0])
             ):
                 raise ValueError(
-                    "authoritative legacy reference-zone candidate must bind "
-                    "its exact source-free compatibility state projection"
+                    "authoritative reference-zone candidate must bind its "
+                    "exact completed-period point parent and compatibility "
+                    "state projection"
                 )
         elif source_kind == "mature_range_boundary":
             if parent_kinds != (EventKind.DEALING_RANGE_ACTIVATED,):

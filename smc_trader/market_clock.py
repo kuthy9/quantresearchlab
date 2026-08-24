@@ -130,6 +130,68 @@ def special_session_close(timestamp: pd.Timestamp) -> pd.Timestamp | None:
     return _special_session_close_for_date(local.date())
 
 
+def registered_native_bar_bounds(
+    minute_start: pd.Timestamp,
+    *,
+    timeframe_minutes: int,
+    anchor_minute: int = 0,
+) -> tuple[pd.Timestamp, pd.Timestamp]:
+    """Return the frozen session-aware bucket containing one minute start.
+
+    The causal reader and downstream lifecycle clocks must share these exact
+    bounds.  In particular, the final 4H bucket ends at the ordinary 17:00
+    maintenance close, and every timeframe is shortened at a registered
+    special-session close rather than inventing closed-market minutes.
+    """
+
+    clock = pd.Timestamp(minute_start)
+    if clock.tzinfo is None:
+        raise ValueError("native bar minute start must be timezone aware")
+    utc_clock = clock.tz_convert("UTC")
+    if utc_clock != utc_clock.floor("min"):
+        raise ValueError("native bar minute start must be minute aligned")
+    if (
+        type(timeframe_minutes) is not int
+        or timeframe_minutes <= 0
+        or type(anchor_minute) is not int
+        or not 0 <= anchor_minute < 24 * 60
+    ):
+        raise ValueError("native bar timeframe or anchor is invalid")
+
+    local = utc_clock.tz_convert(MARKET_TIMEZONE)
+    naive = local.tz_localize(None)
+    minute_of_day = naive.hour * 60 + naive.minute
+    remainder = (minute_of_day - anchor_minute) % timeframe_minutes
+    start_naive = naive - pd.Timedelta(remainder, unit="min")
+    end_naive = start_naive + pd.Timedelta(timeframe_minutes, unit="min")
+    # CME equity-index futures have a scheduled 17:00-18:00 ET maintenance
+    # closure. The final nominal 4H bucket is therefore a complete
+    # session-aware 14:00-17:00 candle, not a defective 180/240-minute bar.
+    if (
+        timeframe_minutes == 4 * 60
+        and anchor_minute == 18 * 60
+        and start_naive.hour == 14
+        and start_naive.minute == 0
+    ):
+        end_naive = start_naive.replace(hour=17)
+    special_close = special_session_close(local)
+    if special_close is not None:
+        special_close_naive = special_close.tz_localize(None)
+        if start_naive < special_close_naive < end_naive:
+            end_naive = special_close_naive
+    start = start_naive.tz_localize(
+        MARKET_TIMEZONE,
+        ambiguous=True,
+        nonexistent="shift_forward",
+    )
+    end = end_naive.tz_localize(
+        MARKET_TIMEZONE,
+        ambiguous=True,
+        nonexistent="shift_forward",
+    )
+    return start, end
+
+
 @lru_cache(maxsize=4096)
 def _session_bounds(label: date) -> tuple[pd.Timestamp, pd.Timestamp] | None:
     explicit = EQUITY_INDEX_CLOSE_OVERRIDES.get(label)
@@ -169,8 +231,8 @@ def _session_bounds(label: date) -> tuple[pd.Timestamp, pd.Timestamp] | None:
         )
         opened = (
             pd.Timestamp(label)
-            - pd.Timedelta(days=1)
-            + pd.Timedelta(hours=18)
+            - pd.Timedelta(1, unit="day")
+            + pd.Timedelta(18, unit="h")
         ).tz_localize(MARKET_TIMEZONE)
         return opened, close
     return None
@@ -190,7 +252,7 @@ def is_registered_trading_minute(timestamp: pd.Timestamp) -> bool:
         .tz_convert(MARKET_TIMEZONE)
     )
     label = (
-        (pd.Timestamp(local.date()) + pd.Timedelta(days=1)).date()
+        (pd.Timestamp(local.date()) + pd.Timedelta(1, unit="day")).date()
         if (local.hour, local.minute) >= (18, 0)
         else local.date()
     )
@@ -207,6 +269,52 @@ def is_registered_trading_minute(timestamp: pd.Timestamp) -> bool:
     ):
         return False
     return True
+
+
+def next_registered_native_completion(
+    prior_completed_at: pd.Timestamp,
+    *,
+    timeframe_minutes: int,
+    anchor_minute: int = 0,
+) -> pd.Timestamp:
+    """Return the unique next completed native-bar clock on the frozen calendar.
+
+    Search advances on the UTC timeline so daylight-saving folds cannot make
+    the scan ambiguous.  Registered closures contribute no bars: the first
+    later trading minute starts the next native bucket.  Failure to find that
+    minute inside the frozen calendar is terminal rather than an invitation to
+    accept an arbitrary later completion.
+    """
+
+    prior = pd.Timestamp(prior_completed_at)
+    if prior.tzinfo is None:
+        raise ValueError("prior native completion must be timezone aware")
+    cursor = prior.tz_convert("UTC")
+    if cursor != cursor.floor("min"):
+        raise ValueError("prior native completion must be minute aligned")
+    # CLOCK_END is the final inclusive session label admitted by the frozen
+    # exchange schedule.  The following local midnight is only a scan bound;
+    # it cannot itself become a trading minute without a registered session.
+    frozen_end = (CLOCK_END + pd.Timedelta(1, unit="day")).tz_localize(
+        MARKET_TIMEZONE
+    ).tz_convert("UTC")
+    if cursor >= frozen_end:
+        raise ValueError("prior native completion exceeds the frozen calendar")
+    while cursor < frozen_end:
+        local = cursor.tz_convert(MARKET_TIMEZONE)
+        if is_registered_trading_minute(local):
+            _, completion = registered_native_bar_bounds(
+                local,
+                timeframe_minutes=timeframe_minutes,
+                anchor_minute=anchor_minute,
+            )
+            if completion <= prior:
+                raise ValueError(
+                    "registered native completion did not advance the clock"
+                )
+            return completion
+        cursor += pd.Timedelta(1, unit="min")
+    raise ValueError("next native completion is outside the frozen calendar")
 
 
 def scheduled_gap_kind(
@@ -227,16 +335,18 @@ def scheduled_gap_kind(
         and right.minute == 0
     ):
         elapsed = right - left
-        if elapsed == pd.Timedelta(hours=1):
+        if elapsed == pd.Timedelta(1, unit="h"):
             return "scheduled_market_closure"
         if (
             left.weekday() == 4
             and right.weekday() == 6
-            and elapsed == pd.Timedelta(hours=49)
+            and elapsed == pd.Timedelta(49, unit="h")
         ):
             return "scheduled_weekend_closure"
         left_label = pd.Timestamp(left.date())
-        right_label = pd.Timestamp((right + pd.Timedelta(days=1)).date())
+        right_label = pd.Timestamp(
+            (right + pd.Timedelta(1, unit="day")).date()
+        )
         if _consecutive_registered_sessions(left_label, right_label):
             return "registered_full_session_closure"
 
@@ -250,7 +360,9 @@ def scheduled_gap_kind(
         if left.date() in ABBREVIATED_GOOD_FRIDAY_CLOSES and right.weekday() == 6:
             return "registered_abbreviated_good_friday_closure"
         left_label = pd.Timestamp(left.date())
-        right_label = pd.Timestamp((right + pd.Timedelta(days=1)).date())
+        right_label = pd.Timestamp(
+            (right + pd.Timedelta(1, unit="day")).date()
+        )
         if _consecutive_registered_sessions(left_label, right_label):
             return "registered_special_session_closure"
 
@@ -272,7 +384,7 @@ def scheduled_gap_kind(
     while cursor < right:
         if is_registered_trading_minute(cursor):
             return None
-        cursor += pd.Timedelta(minutes=1)
+        cursor += pd.Timedelta(1, unit="min")
     return "registered_exchange_closure"
 
 
@@ -291,8 +403,8 @@ def expected_trading_minutes(
         if day >= SETTLEMENT_PAUSE_END_EXCLUSIVE:
             continue
         base = pd.Timestamp(day)
-        pause_start = base + pd.Timedelta(hours=16, minutes=15)
-        pause_end = base + pd.Timedelta(hours=16, minutes=30)
+        pause_start = base + pd.Timedelta(975, unit="min")
+        pause_end = base + pd.Timedelta(990, unit="min")
         if start_naive <= pause_start and pause_end <= end_naive:
             expected -= 15
     if expected <= 0:
@@ -309,6 +421,8 @@ __all__ = [
     "SETTLEMENT_PAUSE_END_EXCLUSIVE",
     "expected_trading_minutes",
     "is_registered_trading_minute",
+    "next_registered_native_completion",
+    "registered_native_bar_bounds",
     "scheduled_gap_kind",
     "special_session_close",
 ]

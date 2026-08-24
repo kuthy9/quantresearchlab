@@ -19,6 +19,7 @@ from typing import Any, Iterable, Mapping, Sequence
 import pandas as pd
 
 from .foundation_registry import FOUNDATION_VERSION
+from .market_clock import next_registered_native_completion
 from .market_state import DeliveryPhase, RelationState
 from .model import (
     Direction,
@@ -1166,8 +1167,17 @@ class CanonicalFoundationAdapter:
             or bars[0].known_at != crossed_at
             or bars[-1].known_at != resolved_at
             or any(
-                right.known_at - left.known_at
-                != _TIMEFRAME_INTERVAL[interaction_tf]
+                right.known_at
+                != next_registered_native_completion(
+                    left.known_at,
+                    timeframe_minutes=int(
+                        _TIMEFRAME_INTERVAL[interaction_tf]
+                        / pd.Timedelta(1, unit="min")
+                    ),
+                    anchor_minute=(
+                        18 * 60 if interaction_tf is Timeframe.H4 else 0
+                    ),
+                )
                 for left, right in zip(bars, bars[1:])
             )
         ):
@@ -1804,7 +1814,15 @@ class CanonicalFoundationAdapter:
                         ),
                     )
                 )
-            elif event.direction is transition.incumbent_direction:
+            elif (
+                event.direction is transition.incumbent_direction
+                and transition.protected_acceptance_event_id is None
+            ):
+                # Before Acceptance, exact original-direction evidence fails
+                # the challenger.  After Acceptance the old incumbent is
+                # already terminal: rolling over the exact FORMING internal
+                # challenger censors that transition, while this fact starts
+                # a distinct external generation instead of rewriting FAILED.
                 transitions.append(
                     self._transition(
                         event,
@@ -1826,6 +1844,143 @@ class CanonicalFoundationAdapter:
             ),
         )
 
+    def _is_exact_unbound_transition_evidence(
+        self,
+        event: MarketEvent,
+        *,
+        evidence_kind: str,
+        structure_identity: str,
+        external: object | None,
+    ) -> bool:
+        """Recognize one sourceful v1.2 tracker-only continuation seam.
+
+        This predicate deliberately carries no new checkpointed tracker state.
+        It can therefore accept only the immediately sourced Q-BOS/assignment
+        pair while the exact canonical MSS transition is still current.
+        ImmutableEventStore validates the cited parent event kinds before the
+        adapter sees production input; the adapter rechecks every state,
+        timing, origin, ordering, and entity condition available locally.
+        """
+
+        if (
+            external is not None
+            or event.direction not in {Direction.LONG, Direction.SHORT}
+            or event.context_event_ids
+        ):
+            return False
+        internal = self._active_internal(event.timeframe)
+        transition = self._started_transition(event.timeframe)
+        if (
+            internal is None
+            or transition is None
+            or internal.scope is not StructureScope.INTERNAL
+            or internal.lifecycle is not StructureGenerationLifecycle.FORMING
+            or internal.timeframe is not event.timeframe
+            or internal.direction is not event.direction
+            or transition.scope is not StructureScope.EXTERNAL
+            or transition.timeframe is not event.timeframe
+            or transition.challenger_direction is not event.direction
+            or transition.incumbent_direction is event.direction
+            or transition.started_at != internal.started_at
+            or internal.updated_at != internal.started_at
+            or not internal.origin_event_id
+            or internal.mss_event_ids != (internal.origin_event_id,)
+            or transition.mss_event_ids != internal.mss_event_ids
+            or transition.protected_acceptance_event_id is None
+        ):
+            return False
+
+        incumbent = self.lifecycle.structure(
+            transition.incumbent_structure_generation_id
+        )
+        acceptance_id = transition.protected_acceptance_event_id
+        acceptance_metadata = self._seen_event_metadata.get(acceptance_id)
+        if (
+            incumbent.scope is not StructureScope.EXTERNAL
+            or incumbent.timeframe is not event.timeframe
+            or incumbent.direction is not transition.incumbent_direction
+            or incumbent.lifecycle is not StructureGenerationLifecycle.TERMINATED
+            or incumbent.termination_reason != "protected_break_accepted"
+            or incumbent.protected_acceptance_event_id != acceptance_id
+            or incumbent.terminated_at is None
+            or incumbent.terminated_at != transition.updated_at
+            or acceptance_metadata
+            != (incumbent.terminated_at, EventOrigin.SEMANTIC_ATOMIC)
+            or not (
+                internal.started_at
+                < incumbent.terminated_at
+                < event.known_at
+            )
+        ):
+            return False
+
+        sources = tuple(event.source_event_ids)
+        if (
+            self._last_order is None
+            or self._last_order[0] != event.known_at
+            or self._last_order[1] >= event.sequence_no
+            or not sources
+            or len(sources) != len(set(sources))
+            or self._last_order[2] != sources[0]
+        ):
+            return False
+
+        if evidence_kind == "bos":
+            bos_id = event.evidence.get("bos_id")
+            if (
+                event.kind is not EventKind.QUALIFIED_BOS
+                or not isinstance(bos_id, str)
+                or not bos_id
+                or event.evidence.get("scope") != "continuation"
+                or event.evidence.get("qualification")
+                != "aligned_with_confirmed_structure"
+                or tuple(event.source_entity_ids)
+                != (bos_id, structure_identity)
+                or len(sources) != 2
+                or self._seen_event_metadata.get(sources[0])
+                != (event.known_at, EventOrigin.SEMANTIC_ATOMIC)
+                or self._seen_event_metadata.get(sources[1])
+                != (internal.started_at, EventOrigin.SEMANTIC_ATOMIC)
+            ):
+                return False
+            return True
+
+        if evidence_kind == "protected_swing_assignment":
+            bos_id = event.evidence.get("bos_id")
+            origin_leg_id = event.evidence.get("origin_leg_id")
+            protected_swing_id = event.evidence.get("protected_swing_id")
+            if (
+                event.kind is not EventKind.PROTECTED_SWING_ASSIGNED
+                or not all(
+                    isinstance(value, str) and bool(value)
+                    for value in (bos_id, origin_leg_id, protected_swing_id)
+                )
+                or event.evidence.get("structure_id") != structure_identity
+                or event.evidence.get("break_standard")
+                != "later_acceptance_beyond"
+                or tuple(event.source_entity_ids)
+                != (
+                    bos_id,
+                    structure_identity,
+                    origin_leg_id,
+                    protected_swing_id,
+                )
+                or len(sources) != 3
+                or self._seen_event_metadata.get(sources[0])
+                != (event.known_at, EventOrigin.SEMANTIC_ATOMIC)
+                or any(
+                    self._seen_event_metadata.get(source_id) is None
+                    or self._seen_event_metadata[source_id][0] > event.known_at
+                    or self._seen_event_metadata[source_id][1]
+                    is not EventOrigin.SEMANTIC_ATOMIC
+                    for source_id in sources[1:]
+                )
+            ):
+                return False
+            return True
+
+        return False
+
     def _consume_structure_evidence(
         self,
         event: MarketEvent,
@@ -1835,6 +1990,21 @@ class CanonicalFoundationAdapter:
         structure_identity = self._structure_evidence_identity(event)
         generation_id = self._structure_bindings.get(structure_identity)
         external = self._active_external(event.timeframe)
+        if generation_id is None and self._is_exact_unbound_transition_evidence(
+            event,
+            evidence_kind=evidence_kind,
+            structure_identity=structure_identity,
+            external=external,
+        ):
+            # A v1.2 StructureDirection can remain tracker-only while an
+            # independently sourced MSS starts the canonical challenger.  If
+            # protected Acceptance has since released that exact incumbent,
+            # the tracker's strictly later continuation/Q-BOS chain still has
+            # no canonical Structure identity to mutate.  The event-store
+            # parent contracts establish the RAW/Q-BOS/leg/Swing kinds; the
+            # checks below additionally require their exact current ordering,
+            # entity cross-links, and the unchanged canonical transition.
+            return ()
         if generation_id is None and (
             external is not None
             and external.lifecycle is StructureGenerationLifecycle.CONFIRMED
@@ -1939,8 +2109,58 @@ class CanonicalFoundationAdapter:
             # An MSS against a tracker-only opposite Structure does not oppose
             # the canonical incumbent and cannot confirm its resumption.
             return ()
+        if source_generation_id is None and incumbent is None:
+            terminated_external = tuple(
+                generation
+                for generation in self.lifecycle.structure_generations
+                if generation.timeframe is event.timeframe
+                and generation.scope is StructureScope.EXTERNAL
+                and generation.lifecycle
+                is StructureGenerationLifecycle.TERMINATED
+                and generation.terminated_at is not None
+            )
+            if terminated_external:
+                latest_terminal_at = max(
+                    generation.terminated_at
+                    for generation in terminated_external
+                    if generation.terminated_at is not None
+                )
+                latest = tuple(
+                    generation
+                    for generation in terminated_external
+                    if generation.terminated_at == latest_terminal_at
+                )
+                if (
+                    len(latest) == 1
+                    and latest[0].termination_reason
+                    == "protected_break_accepted"
+                    and event.direction in {Direction.LONG, Direction.SHORT}
+                    and event.direction is latest[0].direction
+                    and event.known_at > latest_terminal_at
+                ):
+                    # The exact source Structure remained tracker-only while
+                    # this incumbent was live.  Once protected Acceptance has
+                    # terminalized the latest canonical regime, its later
+                    # same-direction MSS still has no generation authority.
+                    return ()
         if source_generation_id is not None:
             source_generation = self.lifecycle.structure(source_generation_id)
+            if (
+                source_generation.scope is StructureScope.EXTERNAL
+                and source_generation.lifecycle
+                is StructureGenerationLifecycle.TERMINATED
+                and source_generation.termination_reason
+                == "protected_break_accepted"
+                and source_generation.terminated_at is not None
+                and event.known_at > source_generation.terminated_at
+                and event.direction in {Direction.LONG, Direction.SHORT}
+                and event.direction is not source_generation.direction
+            ):
+                # A tracker can publish the MSS derived from an exact opposed
+                # boundary after Acceptance has already terminalized that
+                # protected EXTERNAL generation.  The late atomic fact cannot
+                # retroactively start a transition before its Acceptance.
+                return ()
             if (
                 source_generation.scope is StructureScope.INTERNAL
                 and source_generation.lifecycle

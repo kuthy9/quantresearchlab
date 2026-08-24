@@ -4182,6 +4182,72 @@ class CausalObserver:
                 "close_beyond_frozen_zone",
             )
 
+    def _reference_zone_source_event_ids(
+        self,
+        zone: SupportResistanceState,
+        *,
+        observed_at: pd.Timestamp,
+    ) -> tuple[str, ...]:
+        """Bind one reference reaction band to its exact published level."""
+
+        if zone.source_kind not in {
+            "previous_session",
+            "previous_day",
+            "previous_week",
+        }:
+            raise ValueError(
+                "reference-zone binding requires a registered reference family"
+            )
+        expected_side = "below" if zone.side == "support" else "above"
+        expected_kind = (
+            f"{zone.source_kind}_"
+            f"{'low' if zone.side == 'support' else 'high'}"
+        )
+        matches = tuple(
+            item
+            for item in self._reference_inventory.values()
+            if (
+                item.source_ids == zone.source_ids
+                and item.kind == expected_kind
+                and item.side == expected_side
+                and item.timeframe is zone.timeframe
+                and float(item.price) == float(zone.anchor_price)
+            )
+        )
+        if len(matches) != 1:
+            raise ValueError(
+                "reference support/resistance requires exactly one exact "
+                "inventory source"
+            )
+        item = matches[0]
+        event_id = self._candidate_level_event_ids.get(item.item_id)
+        if event_id is None:
+            raise ValueError(
+                "reference support/resistance source level is not published"
+            )
+        event = self.memory.audit_event_including_pending(event_id)
+        if (
+            event is None
+            or event.kind is not EventKind.LIQUIDITY_LEVEL_CREATED
+            or event.origin is not EventOrigin.SEMANTIC_ATOMIC
+            or event.timeframe is not item.timeframe
+            or event.side != item.side
+            or event.price is None
+            or float(event.price) != float(item.price)
+            or event.evidence.get("level_id") != item.item_id
+            or event.evidence.get("candidate_only") is not True
+            or event.evidence.get("source_kind") != item.kind
+            or event.evidence.get("source_ids") != item.source_ids
+            or event.source_entity_ids
+            != (item.item_id, *item.source_ids)
+            or event.known_at > pd.Timestamp(observed_at)
+        ):
+            raise ValueError(
+                "reference support/resistance source level is not its exact "
+                "published candidate"
+            )
+        return (event.event_id,)
+
     def _record_frame_events(
         self,
         frame: FrameObservation,
@@ -4866,14 +4932,26 @@ class CausalObserver:
                 )
             self.memory.append(zone_state_event)
             if zone.zone_id not in self._candidate_level_event_ids:
-                source_swing_events = tuple(
-                    event_id
-                    for source_id in zone.causal_source_ids
-                    if (
-                        event_id
-                        := self._confirmed_swing_event_ids.get(source_id)
+                if zone.source_kind in {
+                    "previous_session",
+                    "previous_day",
+                    "previous_week",
+                }:
+                    source_level_events = (
+                        self._reference_zone_source_event_ids(
+                            zone,
+                            observed_at=observed_at,
+                        )
                     )
-                )
+                else:
+                    source_level_events = tuple(
+                        event_id
+                        for source_id in zone.causal_source_ids
+                        if (
+                            event_id
+                            := self._confirmed_swing_event_ids.get(source_id)
+                        )
+                    )
                 created = self._append_semantic_atomic(
                     EventKind.LIQUIDITY_LEVEL_CREATED,
                     observed_at,
@@ -4881,7 +4959,7 @@ class CausalObserver:
                     "below" if zone.side == "support" else "above",
                     zone.anchor_price,
                     zone.strength,
-                    source_swing_events,
+                    source_level_events,
                     {
                         "level_id": zone.zone_id,
                         "candidate_only": True,
@@ -6575,6 +6653,48 @@ class CausalObserver:
             )
         )
 
+    def _foundation_zero_width_structural_origin(
+        self,
+        origin: MarketEvent,
+    ) -> bool:
+        """Return whether exact opposite source Swings occupy one tick."""
+
+        if origin.kind is not EventKind.STRUCTURE_DIRECTION_CONFIRMED:
+            raise ValueError("structural range owner lacks its exact origin fact")
+        source_ids = {
+            "low": origin.evidence.get("source_low_id"),
+            "high": origin.evidence.get("source_high_id"),
+        }
+        if any(
+            not isinstance(swing_id, str) or not swing_id
+            for swing_id in source_ids.values()
+        ):
+            raise ValueError("structure generation lacks causal range Swings")
+        source_ticks: dict[str, int] = {}
+        for side, swing_id in source_ids.items():
+            event_id = self._confirmed_swing_event_ids.get(swing_id)
+            if event_id is None or event_id not in origin.source_event_ids:
+                raise ValueError(
+                    "structural range origin lacks its exact confirmed Swing fact"
+                )
+            source = self._foundation_exact_event(event_id)
+            if (
+                source.kind is not EventKind.SWING_CONFIRMED
+                or source.timeframe is not origin.timeframe
+                or source.evidence.get("source_entity_id") != swing_id
+                or source.evidence.get("side") != side
+                or source.price is None
+            ):
+                raise ValueError(
+                    "structural range origin Swing provenance is incompatible"
+                )
+            source_ticks[side] = price_to_ticks(
+                source.price,
+                self.config.tick_size,
+                name=f"structural range {side} Swing",
+            )
+        return source_ticks["low"] == source_ticks["high"]
+
     def _foundation_update_structural_ranges(
         self,
         *,
@@ -6708,13 +6828,14 @@ class CausalObserver:
                 == generation.generation_id
             ):
                 continue
+            origin = self._foundation_exact_event(generation.origin_event_id)
+            zero_width = self._foundation_zero_width_structural_origin(origin)
             if generation.confirmed_at != known_at:
-                if incumbent is None:
+                if incumbent is None and not zero_width:
                     raise ValueError(
                         "structural range missed its generation confirmation clock"
                     )
                 continue
-            origin = self._foundation_exact_event(generation.origin_event_id)
             low_id = origin.evidence.get("source_low_id")
             high_id = origin.evidence.get("source_high_id")
             if not isinstance(low_id, str) or not isinstance(high_id, str):
@@ -6726,6 +6847,16 @@ class CausalObserver:
                 raise ValueError(
                     "structural range source Swing is absent from the frame"
                 ) from error
+            if (low.price_ticks == high.price_ticks) is not zero_width:
+                raise ValueError(
+                    "structural range frame and atomic Swing prices conflict"
+                )
+            if zero_width:
+                # Opposite equal-price pivots are balance geometry, not a
+                # positive-width Structural Range.  Preserve the generation
+                # and both SwingGeometry facts, but publish no range or
+                # Premium/Discount coordinate for this immutable origin.
+                continue
             cause_event_id = generation.confirmation_event_id
             if cause_event_id is None:
                 raise ValueError("confirmed generation lacks its exact fact")

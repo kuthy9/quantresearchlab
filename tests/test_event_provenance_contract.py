@@ -2441,8 +2441,8 @@ def test_completed_period_candidate_rejects_forged_reference_contract(
         ImmutableEventStore.from_events((extreme, admission, candidate))
 
 
-def test_legacy_reference_zone_candidate_requires_its_exact_context_only(
-) -> None:
+def _reference_zone_candidate_with_point_parent() -> tuple[MarketEvent, ...]:
+    extreme, admission, point = _completed_day_high_candidate()
     level_id = "reference-zone:day-high"
     source_id = "reference_source:day:2025-01-06:high:NQH5:750"
     context = replace(
@@ -2465,6 +2465,7 @@ def test_legacy_reference_zone_candidate_requires_its_exact_context_only(
         entity_id=level_id,
         lifecycle="active",
         formed_at=_clock(0),
+        sequence_no=1,
     )
     candidate = _event(
         "reference-zone-candidate",
@@ -2476,7 +2477,8 @@ def test_legacy_reference_zone_candidate_requires_its_exact_context_only(
         price=110.0,
         zone=(109.75, 110.25),
         event_time_minutes=0,
-        sequence_no=1,
+        sequence_no=2,
+        source_event_ids=(point.event_id,),
         source_entity_ids=(level_id, source_id),
         context_event_ids=(context.event_id,),
         details={
@@ -2486,26 +2488,146 @@ def test_legacy_reference_zone_candidate_requires_its_exact_context_only(
             "source_ids": (source_id,),
         },
     )
-    unrelated = _normalized_bar(
-        "unrelated-reference-bar",
-        2,
-        timeframe=Timeframe.M1,
-        high=9_100.0,
-        low=8_900.0,
-        close=9_000.0,
+    return extreme, admission, point, context, candidate
+
+
+def test_reference_zone_candidate_binds_exact_completed_period_point_parent(
+) -> None:
+    events = _reference_zone_candidate_with_point_parent()
+
+    assert ImmutableEventStore.from_events(events).events() == events
+
+
+def test_legacy_v1_2_source_free_reference_zone_candidate_remains_replayable(
+) -> None:
+    *_, context, candidate = _reference_zone_candidate_with_point_parent()
+    legacy = replace(
+        candidate,
+        source_ids=(),
+        source_event_ids=(),
     )
 
-    assert ImmutableEventStore.from_events((context, candidate)).events() == (
+    assert ImmutableEventStore.from_events((context, legacy)).events() == (
         context,
-        candidate,
+        legacy,
+    )
+
+    future_version = "smc_semantics_v1.3"
+    future_context = replace(context, semantic_version=future_version)
+    future_legacy = replace(legacy, semantic_version=future_version)
+    with pytest.raises(ValueError, match="source-free compatibility"):
+        ImmutableEventStore.from_events(
+            (future_context, future_legacy),
+            semantic_version=future_version,
+        )
+
+
+@pytest.mark.parametrize(
+    "case",
+    (
+        "wrong_family",
+        "wrong_suffix_side",
+        "wrong_price",
+        "wrong_point_zone",
+        "wrong_source_id",
+        "wrong_point_level_id",
+        "wrong_child_level_id",
+        "nonpoint_parent",
+        "multiple_parents",
+    ),
+)
+def test_sourceful_reference_zone_candidate_rejects_parent_tampering(
+    case: str,
+) -> None:
+    extreme, admission, point, context, candidate = (
+        _reference_zone_candidate_with_point_parent()
+    )
+    if case == "wrong_family":
+        context = _with_evidence(context, source_kind="previous_session")
+        candidate = _with_evidence(candidate, source_kind="previous_session")
+    elif case == "wrong_suffix_side":
+        context = replace(context, side="below")
+        candidate = replace(candidate, side="below")
+    elif case == "wrong_price":
+        context = replace(
+            context,
+            price=109.75,
+            zone=(109.5, 110.0),
+        )
+        candidate = replace(
+            candidate,
+            price=109.75,
+            zone=(109.5, 110.0),
+        )
+    elif case == "wrong_point_zone":
+        point = replace(point, zone=(109.75, 110.25))
+    elif case == "wrong_source_id":
+        forged_source_id = (
+            "reference_source:day:2025-01-05:high:NQH5:750"
+        )
+        context = replace(
+            _with_evidence(context, source_ids=(forged_source_id,)),
+            source_ids=(forged_source_id,),
+            source_event_ids=(forged_source_id,),
+        )
+        candidate = replace(
+            _with_evidence(candidate, source_ids=(forged_source_id,)),
+            source_entity_ids=(
+                candidate.evidence["level_id"],
+                forged_source_id,
+            ),
+        )
+    elif case == "wrong_point_level_id":
+        forged_level_id = "reference:day:forged:high:NQH5:750"
+        point = replace(
+            _with_evidence(point, level_id=forged_level_id),
+            source_entity_ids=(
+                forged_level_id,
+                point.evidence["source_ids"][0],
+            ),
+        )
+    elif case == "wrong_child_level_id":
+        candidate = _with_evidence(
+            candidate,
+            level_id="reference-zone:forged",
+        )
+    elif case == "nonpoint_parent":
+        candidate = replace(
+            candidate,
+            source_ids=(admission.event_id,),
+            source_event_ids=(admission.event_id,),
+        )
+    else:
+        candidate = replace(
+            candidate,
+            source_ids=(point.event_id, admission.event_id),
+            source_event_ids=(point.event_id, admission.event_id),
+        )
+
+    with pytest.raises(ValueError):
+        ImmutableEventStore.from_events(
+            (extreme, admission, point, context, candidate)
+        )
+
+
+def test_sourceful_reference_zone_candidate_cannot_fall_back_to_legacy_seam(
+) -> None:
+    extreme, admission, point, context, candidate = (
+        _reference_zone_candidate_with_point_parent()
     )
     forged = replace(
         candidate,
-        source_ids=(unrelated.event_id,),
-        source_event_ids=(unrelated.event_id,),
+        source_ids=(admission.event_id,),
+        source_event_ids=(admission.event_id,),
     )
-    with pytest.raises(ValueError, match="source-free compatibility"):
-        ImmutableEventStore.from_events((unrelated, context, forged))
+
+    with pytest.raises(
+        ValueError,
+        match="exact completed-period point parent",
+    ):
+        ImmutableEventStore.from_events(
+            (extreme, admission, point, context, forged)
+        )
 
 
 def test_range_boundary_candidate_requires_exact_compatibility_or_bar_source(
@@ -2781,6 +2903,8 @@ def test_legacy_unresolved_forward_reference_still_detects_cycle() -> None:
         "qualified_direction_drift",
         "qualified_definition_drift",
         "protected_entity_drift",
+        "protected_bos_parent_drift",
+        "protected_structure_parent_drift",
         "protected_definition_drift",
         "mss_prior_direction_drift",
         "mss_definition_drift",
@@ -2877,6 +3001,29 @@ def test_authority_cross_links_fail_closed(case: str) -> None:
         )
         events[index] = _with_evidence(
             events[index], protected_swing_id="forged-swing"
+        )
+    elif case in {
+        "protected_bos_parent_drift",
+        "protected_structure_parent_drift",
+    }:
+        index = next(
+            i
+            for i, event in enumerate(events)
+            if event.kind is EventKind.PROTECTED_SWING_ASSIGNED
+        )
+        protected = events[index]
+        entities = list(protected.source_entity_ids)
+        field = (
+            "bos_id"
+            if case == "protected_bos_parent_drift"
+            else "structure_id"
+        )
+        entity_index = 0 if field == "bos_id" else 1
+        forged_identity = f"forged-{field}"
+        entities[entity_index] = forged_identity
+        events[index] = replace(
+            _with_evidence(protected, **{field: forged_identity}),
+            source_entity_ids=tuple(entities),
         )
     elif case == "protected_definition_drift":
         index = next(

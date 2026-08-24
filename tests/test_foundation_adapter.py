@@ -713,6 +713,38 @@ def test_real_bar_gap_blocks_rearm_until_an_explicit_epoch_reset() -> None:
     assert reset_adapter.lifecycle.real_bar_clocks[-1].count == 3
 
 
+def test_registered_short_h4_and_reopen_are_contiguous_without_epoch_reset() -> None:
+    def bar_at(label: str, clock: str) -> MarketEvent:
+        known_at = pd.Timestamp(clock, tz=TZ)
+        return replace(
+            _bar(
+                0,
+                timeframe=Timeframe.H4,
+                event_id=f"registered-h4:{label}",
+            ),
+            observed_at=known_at,
+            event_time=known_at,
+            known_at=known_at,
+        )
+
+    adapter = CanonicalFoundationAdapter(tick_size=TICK)
+    for label, clock in (
+        ("memorial-prior", "2024-05-27 10:00"),
+        ("memorial-short-close", "2024-05-27 13:00"),
+        ("memorial-reopen", "2024-05-27 22:00"),
+    ):
+        adapter.consume(bar_at(label, clock))
+    assert adapter.lifecycle.epoch == 0
+    assert adapter.lifecycle.real_bar_clocks[-1].count == 3
+
+    skipped = CanonicalFoundationAdapter(tick_size=TICK)
+    skipped.consume(bar_at("skip-prior", "2024-05-27 10:00"))
+    frozen = skipped.checkpoint()
+    with pytest.raises(ValueError, match="registered native clock"):
+        skipped.consume(bar_at("skip-short-close", "2024-05-27 22:00"))
+    assert skipped.checkpoint() == frozen
+
+
 def test_same_bar_terminal_uses_actual_event_id_and_competing_terminal_is_atomic() -> None:
     adapter = CanonicalFoundationAdapter(tick_size=TICK)
     _, level = _seed_level(adapter)
@@ -910,6 +942,220 @@ def test_multibar_ancestry_is_contiguous_complete_and_excludes_post_terminal_bar
     assert adapter.lifecycle.interactions[-1] == interaction
     assert "bar:1m:5" not in formation_ids
     assert interaction.require_response_clock(_clock(5)) == _clock(5)
+
+
+def _maintenance_closure_terminal_chain(
+    terminal_kind: EventKind,
+) -> tuple[CanonicalFoundationAdapter, tuple[MarketEvent, ...]]:
+    adapter = CanonicalFoundationAdapter(tick_size=TICK)
+    suffix = terminal_kind.value
+
+    def at_clock(event: MarketEvent, value: str) -> MarketEvent:
+        clock = pd.Timestamp(value, tz=TZ)
+        return replace(
+            event,
+            observed_at=clock,
+            event_time=clock,
+            known_at=clock,
+        )
+
+    seed_bar = at_clock(
+        _bar(0, event_id=f"bar:maintenance-seed:{suffix}"),
+        "2024-05-28 16:59",
+    )
+    source = at_clock(
+        _atomic(
+            f"source:maintenance:{suffix}",
+            EventKind.SWING_CONFIRMED,
+            0,
+            1,
+            timeframe=Timeframe.H1,
+            source_event_ids=(seed_bar.event_id,),
+            evidence={"source_entity_id": f"swing-entity:maintenance:{suffix}"},
+            side="above",
+            price=100.0,
+            direction=Direction.LONG,
+        ),
+        "2024-05-28 16:59",
+    )
+    level_id = f"maintenance-level:{suffix}"
+    level = at_clock(
+        _atomic(
+            f"level-created:maintenance:{suffix}",
+            EventKind.LIQUIDITY_LEVEL_CREATED,
+            0,
+            2,
+            timeframe=Timeframe.H1,
+            source_event_ids=(source.event_id,),
+            evidence={
+                "level_id": level_id,
+                "source_kind": "confirmed_swing",
+            },
+            side="above",
+            price=100.0,
+        ),
+        "2024-05-28 16:59",
+    )
+    crossing_close = (
+        99.75
+        if terminal_kind is EventKind.ACCEPTANCE_CONFIRMED
+        else 100.5
+    )
+    crossing_bar = at_clock(
+        _bar(
+            0,
+            high=101.0,
+            low=99.0,
+            close=crossing_close,
+            event_id=f"bar:maintenance-crossing:{suffix}",
+        ),
+        "2024-05-28 17:00",
+    )
+    touch = at_clock(
+        _atomic(
+            f"touch:maintenance:{suffix}",
+            EventKind.LEVEL_TOUCHED,
+            0,
+            1,
+            source_event_ids=(level.event_id, crossing_bar.event_id),
+            evidence={
+                "level_id": level_id,
+                "source_kind": "confirmed_swing",
+            },
+            side="above",
+            price=100.0,
+        ),
+        "2024-05-28 17:00",
+    )
+    penetration = at_clock(
+        _atomic(
+            f"penetration:maintenance:{suffix}",
+            EventKind.LEVEL_PENETRATED,
+            0,
+            2,
+            source_event_ids=(level.event_id, touch.event_id, crossing_bar.event_id),
+            evidence={
+                "level_id": level_id,
+                "crossed_at": pd.Timestamp(
+                    "2024-05-28 17:00", tz=TZ
+                ).isoformat(),
+            },
+            side="above",
+            price=101.0,
+            direction=Direction.LONG,
+        ),
+        "2024-05-28 17:00",
+    )
+    reopen_close = 100.5 if terminal_kind is EventKind.ACCEPTANCE_CONFIRMED else 99.75
+    reopen_bar = at_clock(
+        _bar(
+            0,
+            high=101.0,
+            low=99.0,
+            close=reopen_close,
+            event_id=f"bar:maintenance-reopen:{suffix}",
+        ),
+        "2024-05-28 18:01",
+    )
+    resolution_bar = at_clock(
+        _bar(
+            0,
+            high=101.0,
+            low=99.0,
+            close=reopen_close,
+            event_id=f"bar:maintenance-resolution:{suffix}",
+        ),
+        "2024-05-28 18:02",
+    )
+    terminal = at_clock(
+        _atomic(
+            f"terminal:maintenance:{suffix}",
+            terminal_kind,
+            0,
+            1,
+            source_event_ids=(penetration.event_id, resolution_bar.event_id),
+            evidence={
+                "level_id": level_id,
+                "crossed_at": pd.Timestamp(
+                    "2024-05-28 17:00", tz=TZ
+                ).isoformat(),
+                "resolved_at": pd.Timestamp(
+                    "2024-05-28 18:02", tz=TZ
+                ).isoformat(),
+            },
+            side="above",
+            price=101.0,
+            direction=(
+                Direction.LONG
+                if terminal_kind is EventKind.ACCEPTANCE_CONFIRMED
+                else Direction.SHORT
+            ),
+        ),
+        "2024-05-28 18:02",
+    )
+    events = (
+        seed_bar,
+        source,
+        level,
+        crossing_bar,
+        touch,
+        penetration,
+        reopen_bar,
+        resolution_bar,
+        terminal,
+    )
+    _consume(adapter, events)
+    return adapter, events
+
+
+@pytest.mark.parametrize(
+    "terminal_kind",
+    (EventKind.ACCEPTANCE_CONFIRMED, EventKind.SWEEP_CONFIRMED),
+)
+def test_terminal_formation_uses_registered_successor_across_maintenance(
+    terminal_kind: EventKind,
+) -> None:
+    adapter, events = _maintenance_closure_terminal_chain(terminal_kind)
+    interaction = adapter.lifecycle.interactions[-1]
+    assert interaction.lifecycle is LiquidityInteractionLifecycle.TERMINAL
+    assert interaction.terminal_state is (
+        LiquidityInteractionTerminal.ACCEPTANCE
+        if terminal_kind is EventKind.ACCEPTANCE_CONFIRMED
+        else LiquidityInteractionTerminal.SWEEP
+    )
+    assert set(interaction.constituent_bar_ids) == {
+        f"bar:maintenance-crossing:{terminal_kind.value}",
+        f"bar:maintenance-reopen:{terminal_kind.value}",
+        f"bar:maintenance-resolution:{terminal_kind.value}",
+    }
+    replayed = CanonicalFoundationAdapter.replay(events, tick_size=TICK)
+    assert replayed.lifecycle == adapter.lifecycle
+    assert replayed.projection == adapter.projection
+
+
+def test_terminal_formation_rejects_skipped_registered_or_ordinary_bar() -> None:
+    maintenance, _ = _maintenance_closure_terminal_chain(
+        EventKind.SWEEP_CONFIRMED
+    )
+    maintenance._real_bars = [
+        item
+        for item in maintenance._real_bars
+        if item.known_at != pd.Timestamp("2024-05-28 18:01", tz=TZ)
+    ]
+    with pytest.raises(ValueError, match="continuous real M1 BAR ancestry"):
+        maintenance._formation_bars(
+            pd.Timestamp("2024-05-28 17:00", tz=TZ),
+            pd.Timestamp("2024-05-28 18:02", tz=TZ),
+            Timeframe.M1,
+        )
+
+    ordinary = CanonicalFoundationAdapter(tick_size=TICK)
+    _consume(ordinary, (_bar(0), _bar(1), _bar(2)))
+    ordinary._real_bars = [
+        item for item in ordinary._real_bars if item.known_at != _clock(1)
+    ]
+    with pytest.raises(ValueError, match="continuous real M1 BAR ancestry"):
+        ordinary._formation_bars(_clock(0), _clock(2), Timeframe.M1)
 
 
 def test_pool_sweep_preserves_inside_outside_inside_formation_path() -> None:
@@ -2389,6 +2635,1025 @@ def test_exact_protected_acceptance_then_opposite_generation_confirms_transition
         adapter.lifecycle.structure(confirmed.opposite_structure_generation_id).direction
         is Direction.SHORT
     )
+
+
+def _unbound_tracker_transition_after_acceptance() -> tuple[
+    CanonicalFoundationAdapter,
+    tuple[MarketEvent, ...],
+    dict[str, MarketEvent],
+]:
+    adapter = CanonicalFoundationAdapter(tick_size=TICK)
+    structure_events, facts = _seed_structure(adapter)
+    incumbent = adapter.lifecycle.structure_generations[-1]
+    level = _atomic(
+        "level-created:tracker-transition-protected-low",
+        EventKind.LIQUIDITY_LEVEL_CREATED,
+        0,
+        4,
+        timeframe=Timeframe.H1,
+        source_event_ids=(facts["low"].event_id,),
+        evidence={
+            "level_id": "swing:low:parent",
+            "source_kind": "confirmed_swing",
+        },
+        side="above",
+        price=100.0,
+    )
+    protected_bar = _bar(1)
+    incumbent_protected = _atomic(
+        "protected:tracker-transition-incumbent",
+        EventKind.PROTECTED_SWING_ASSIGNED,
+        1,
+        1,
+        timeframe=Timeframe.H1,
+        source_event_ids=(facts["structure"].event_id, facts["low"].event_id),
+        evidence={
+            "protected_swing_id": "low:parent",
+            "structure_id": "structure-source:parent",
+        },
+        price=100.0,
+        direction=Direction.LONG,
+    )
+    leg = _atomic(
+        "leg:tracker-only-short",
+        EventKind.STRUCTURAL_LEG_CREATED,
+        1,
+        2,
+        timeframe=Timeframe.H1,
+        source_event_ids=(facts["high"].event_id, facts["low"].event_id),
+        source_entity_ids=(
+            "leg-entity:tracker-only-short",
+            "high:parent",
+            "low:parent",
+        ),
+        evidence={
+            "leg_id": "leg-entity:tracker-only-short",
+            "start_swing_id": "high:parent",
+            "end_swing_id": "low:parent",
+        },
+        direction=Direction.SHORT,
+    )
+    mss_bar = _bar(2)
+    tracker_only = _atomic(
+        "structure:tracker-only-transition-short",
+        EventKind.STRUCTURE_DIRECTION_CONFIRMED,
+        2,
+        1,
+        timeframe=Timeframe.H1,
+        source_event_ids=(facts["high"].event_id, facts["low"].event_id),
+        source_entity_ids=(
+            "structure-source:tracker-only-transition-short",
+            "high:parent",
+            "low:parent",
+        ),
+        evidence={
+            "structure_id": "structure-source:tracker-only-transition-short",
+            "source_high_id": "high:parent",
+            "source_low_id": "low:parent",
+            "candidate_protected_swing_id": "high:parent",
+        },
+        direction=Direction.SHORT,
+    )
+    raw_mss = _atomic(
+        "raw:independent-transition-short",
+        EventKind.RAW_BOUNDARY_BREAK,
+        2,
+        2,
+        timeframe=Timeframe.H1,
+        source_event_ids=(mss_bar.event_id,),
+        direction=Direction.SHORT,
+    )
+    mss = _atomic(
+        "mss:independent-transition-short",
+        EventKind.MSS_CORE_CONFIRMED,
+        2,
+        3,
+        timeframe=Timeframe.H1,
+        source_event_ids=(raw_mss.event_id, facts["structure"].event_id),
+        source_entity_ids=(
+            "bos:independent-transition-short",
+            "structure-source:parent",
+        ),
+        evidence={"bos_id": "bos:independent-transition-short"},
+        direction=Direction.SHORT,
+    )
+    crossing_bar = _bar(3, high=101.0, low=99.0, close=100.5)
+    touch = _atomic(
+        "touch:tracker-transition-protected-low",
+        EventKind.LEVEL_TOUCHED,
+        3,
+        1,
+        source_event_ids=(level.event_id, crossing_bar.event_id),
+        evidence={"level_id": "swing:low:parent"},
+        side="above",
+        price=100.0,
+    )
+    penetration = _atomic(
+        "penetration:tracker-transition-protected-low",
+        EventKind.LEVEL_PENETRATED,
+        3,
+        2,
+        source_event_ids=(level.event_id, touch.event_id, crossing_bar.event_id),
+        evidence={
+            "level_id": "swing:low:parent",
+            "crossed_at": _clock(3).isoformat(),
+        },
+        side="above",
+        price=101.0,
+        direction=Direction.LONG,
+    )
+    acceptance_bar = _bar(4, high=101.0, low=99.0, close=100.5)
+    acceptance = _atomic(
+        "acceptance:tracker-transition-protected-low",
+        EventKind.ACCEPTANCE_CONFIRMED,
+        4,
+        1,
+        source_event_ids=(penetration.event_id, acceptance_bar.event_id),
+        context_event_ids=(incumbent_protected.event_id,),
+        evidence={
+            "level_id": "swing:low:parent",
+            "crossed_at": _clock(3).isoformat(),
+            "resolved_at": _clock(4).isoformat(),
+            "protected_swing_id": "low:parent",
+            "protected_swing_event_id": incumbent_protected.event_id,
+            "source_timeframe": Timeframe.H1.value,
+        },
+        side="above",
+        price=101.0,
+        direction=Direction.SHORT,
+    )
+    suffix = (
+        level,
+        protected_bar,
+        incumbent_protected,
+        leg,
+        mss_bar,
+        tracker_only,
+        raw_mss,
+        mss,
+        crossing_bar,
+        touch,
+        penetration,
+        acceptance_bar,
+        acceptance,
+    )
+    _consume(adapter, suffix)
+    transition = adapter.lifecycle.structure_transitions[-1]
+    internal = adapter.lifecycle.structure_generations[-1]
+    assert adapter.lifecycle.structure(incumbent.generation_id).termination_reason == (
+        "protected_break_accepted"
+    )
+    assert transition.lifecycle is StructureTransitionLifecycle.STARTED
+    assert transition.protected_acceptance_event_id == acceptance.event_id
+    assert internal.scope is StructureScope.INTERNAL
+    assert internal.lifecycle is StructureGenerationLifecycle.FORMING
+    assert internal.origin_event_id == mss.event_id
+    assert (
+        "structure-source:tracker-only-transition-short"
+        not in adapter._structure_bindings
+    )
+    facts.update(
+        {
+            "level": level,
+            "incumbent_protected": incumbent_protected,
+            "leg": leg,
+            "tracker_only": tracker_only,
+            "mss": mss,
+            "acceptance_bar": acceptance_bar,
+            "acceptance": acceptance,
+        }
+    )
+    return adapter, (*structure_events, *suffix), facts
+
+
+def test_original_direction_after_acceptance_censors_exact_forming_challenger() -> None:
+    adapter, prefix, facts = _unbound_tracker_transition_after_acceptance()
+    transition = adapter.lifecycle.structure_transitions[-1]
+    internal = adapter._active_internal(Timeframe.H1)
+    assert internal is not None
+    checkpoint = pickle.loads(pickle.dumps(adapter.checkpoint()))
+    restored = CanonicalFoundationAdapter.restore(checkpoint)
+    bar = _bar(5)
+    original_direction = _atomic(
+        "structure:post-acceptance-original-direction",
+        EventKind.STRUCTURE_DIRECTION_CONFIRMED,
+        5,
+        1,
+        timeframe=Timeframe.H1,
+        source_event_ids=(facts["high"].event_id, facts["low"].event_id),
+        evidence={
+            "structure_id": "structure-source:post-acceptance-original-direction",
+            "source_high_id": "high:parent",
+            "source_low_id": "low:parent",
+            "candidate_protected_swing_id": "low:parent",
+        },
+        direction=Direction.LONG,
+    )
+
+    _consume(adapter, (bar, original_direction))
+    _consume(restored, (bar, original_direction))
+
+    censored = adapter.lifecycle.transition(transition.structure_transition_id)
+    assert censored.lifecycle is StructureTransitionLifecycle.CENSORED
+    assert censored.terminal_reason == "scope_rollover"
+    assert (
+        censored.protected_acceptance_event_id
+        == transition.protected_acceptance_event_id
+    )
+    assert censored.resumption_event_id is None
+    assert original_direction.event_id in censored.source_event_ids
+    rolled = adapter.lifecycle.structure(internal.generation_id)
+    assert rolled.lifecycle is StructureGenerationLifecycle.TERMINATED
+    assert rolled.termination_reason == "scope_rollover"
+    current = adapter._active_external(Timeframe.H1)
+    assert current is not None
+    assert current.direction is Direction.LONG
+    assert current.lifecycle is StructureGenerationLifecycle.CONFIRMED
+    assert (
+        adapter._structure_bindings[
+            "structure-source:post-acceptance-original-direction"
+        ]
+        == current.generation_id
+    )
+    assert restored.lifecycle == adapter.lifecycle
+    assert restored.projection == adapter.projection
+    replayed = CanonicalFoundationAdapter.replay(
+        (*prefix, bar, original_direction),
+        tick_size=TICK,
+    )
+    assert replayed.lifecycle == adapter.lifecycle
+    assert replayed.projection == adapter.projection
+
+
+def _unbound_tracker_continuation(
+    facts: dict[str, MarketEvent],
+    *,
+    minute: int = 5,
+    raw_sequence: int = 1,
+) -> tuple[MarketEvent, MarketEvent, MarketEvent, MarketEvent]:
+    bar = _bar(minute)
+    raw = _atomic(
+        "raw:tracker-only-transition-continuation",
+        EventKind.RAW_BOUNDARY_BREAK,
+        minute,
+        raw_sequence,
+        timeframe=Timeframe.H1,
+        source_event_ids=(bar.event_id,),
+        direction=Direction.SHORT,
+    )
+    qualified = _atomic(
+        "qualified:tracker-only-transition-continuation",
+        EventKind.QUALIFIED_BOS,
+        minute,
+        raw_sequence + 1,
+        timeframe=Timeframe.H1,
+        source_event_ids=(raw.event_id, facts["tracker_only"].event_id),
+        source_entity_ids=(
+            "bos:tracker-only-transition-continuation",
+            "structure-source:tracker-only-transition-short",
+        ),
+        evidence={
+            "bos_id": "bos:tracker-only-transition-continuation",
+            "scope": "continuation",
+            "qualification": "aligned_with_confirmed_structure",
+        },
+        direction=Direction.SHORT,
+    )
+    assignment = _atomic(
+        "protected:tracker-only-transition-continuation",
+        EventKind.PROTECTED_SWING_ASSIGNED,
+        minute,
+        raw_sequence + 2,
+        timeframe=Timeframe.H1,
+        source_event_ids=(
+            qualified.event_id,
+            facts["leg"].event_id,
+            facts["high"].event_id,
+        ),
+        source_entity_ids=(
+            "bos:tracker-only-transition-continuation",
+            "structure-source:tracker-only-transition-short",
+            "leg-entity:tracker-only-short",
+            "high:parent",
+        ),
+        evidence={
+            "bos_id": "bos:tracker-only-transition-continuation",
+            "structure_id": "structure-source:tracker-only-transition-short",
+            "origin_leg_id": "leg-entity:tracker-only-short",
+            "protected_swing_id": "high:parent",
+            "break_standard": "later_acceptance_beyond",
+        },
+        direction=Direction.SHORT,
+    )
+    return bar, raw, qualified, assignment
+
+
+def test_strictly_later_unbound_qbos_and_immediate_assignment_stay_noncanonical() -> None:
+    adapter, prefix, facts = _unbound_tracker_transition_after_acceptance()
+    bar, raw, qualified, assignment = _unbound_tracker_continuation(facts)
+    _consume(adapter, (bar, raw))
+    frozen_lifecycle = adapter.lifecycle
+    frozen_projection = adapter.projection
+    frozen_bindings = dict(adapter._structure_bindings)
+
+    assert adapter.consume(qualified).ignored is True
+    assert adapter.consume(assignment).ignored is True
+
+    assert adapter.lifecycle == frozen_lifecycle
+    assert adapter.projection == frozen_projection
+    assert adapter._structure_bindings == frozen_bindings
+    assert qualified.event_id in adapter.known_input_event_ids
+    assert assignment.event_id in adapter.known_input_event_ids
+    replayed = CanonicalFoundationAdapter.replay(
+        (*prefix, bar, raw, qualified, assignment),
+        tick_size=TICK,
+    )
+    assert replayed.lifecycle == adapter.lifecycle
+    assert replayed.projection == adapter.projection
+    assert replayed._structure_bindings == adapter._structure_bindings
+
+
+@pytest.mark.parametrize(
+    "case",
+    (
+        "scope",
+        "qualification",
+        "direction",
+        "entities",
+        "structure_source_clock",
+        "context",
+    ),
+)
+def test_unbound_transition_qbos_requires_every_exact_condition(case: str) -> None:
+    adapter, _, facts = _unbound_tracker_transition_after_acceptance()
+    bar, raw, qualified, _ = _unbound_tracker_continuation(facts)
+    _consume(adapter, (bar, raw))
+    if case in {"scope", "qualification"}:
+        evidence = dict(qualified.evidence)
+        evidence[case] = "opposed" if case == "scope" else "score_gate"
+        qualified = replace(qualified, details=evidence, evidence=evidence)
+    elif case == "direction":
+        qualified = replace(qualified, direction=Direction.LONG)
+    elif case == "entities":
+        qualified = replace(
+            qualified,
+            source_entity_ids=tuple(reversed(qualified.source_entity_ids)),
+        )
+    elif case == "structure_source_clock":
+        sources = (raw.event_id, facts["high"].event_id)
+        qualified = replace(
+            qualified,
+            source_ids=sources,
+            source_event_ids=sources,
+        )
+    elif case == "context":
+        qualified = replace(
+            qualified,
+            context_event_ids=(facts["acceptance"].event_id,),
+        )
+    else:  # pragma: no cover - parametrization is closed above.
+        raise AssertionError(case)
+    frozen = adapter.checkpoint()
+
+    with pytest.raises(ValueError, match="does not bind a canonical Structure"):
+        adapter.consume(qualified)
+
+    assert adapter.checkpoint() == frozen
+
+
+def test_unbound_transition_qbos_requires_immediate_raw_and_strictly_later_clock() -> None:
+    adapter, _, facts = _unbound_tracker_transition_after_acceptance()
+    bar, raw, qualified, _ = _unbound_tracker_continuation(facts)
+    interposed = _atomic(
+        "interposed:after-tracker-only-raw",
+        EventKind.SWING_CONFIRMED,
+        5,
+        2,
+        timeframe=Timeframe.H1,
+        source_event_ids=(bar.event_id,),
+        evidence={"source_entity_id": "interposed:after-tracker-only-raw"},
+    )
+    qualified = replace(qualified, sequence_no=3)
+    _consume(adapter, (bar, raw, interposed))
+    frozen = adapter.checkpoint()
+    with pytest.raises(ValueError, match="does not bind a canonical Structure"):
+        adapter.consume(qualified)
+    assert adapter.checkpoint() == frozen
+
+    same_clock, _, same_facts = _unbound_tracker_transition_after_acceptance()
+    raw_same_clock = _atomic(
+        "raw:tracker-only-same-acceptance-clock",
+        EventKind.RAW_BOUNDARY_BREAK,
+        4,
+        2,
+        timeframe=Timeframe.H1,
+        source_event_ids=(same_facts["acceptance_bar"].event_id,),
+        direction=Direction.SHORT,
+    )
+    qualified_same_clock = _atomic(
+        "qualified:tracker-only-same-acceptance-clock",
+        EventKind.QUALIFIED_BOS,
+        4,
+        3,
+        timeframe=Timeframe.H1,
+        source_event_ids=(
+            raw_same_clock.event_id,
+            same_facts["tracker_only"].event_id,
+        ),
+        source_entity_ids=(
+            "bos:tracker-only-same-acceptance-clock",
+            "structure-source:tracker-only-transition-short",
+        ),
+        evidence={
+            "bos_id": "bos:tracker-only-same-acceptance-clock",
+            "scope": "continuation",
+            "qualification": "aligned_with_confirmed_structure",
+        },
+        direction=Direction.SHORT,
+    )
+    same_clock.consume(raw_same_clock)
+    frozen = same_clock.checkpoint()
+    with pytest.raises(ValueError, match="does not bind a canonical Structure"):
+        same_clock.consume(qualified_same_clock)
+    assert same_clock.checkpoint() == frozen
+
+
+def test_unbound_transition_qbos_requires_current_forming_transition_state() -> None:
+    reset_adapter, _, reset_facts = _unbound_tracker_transition_after_acceptance()
+    reset = _atomic(
+        "reset:tracker-only-transition",
+        EventKind.MARKET_EPOCH_RESET,
+        5,
+        0,
+        evidence={"reason": "semantic_reset"},
+    )
+    reset_adapter.consume(reset)
+    bar, raw, qualified, _ = _unbound_tracker_continuation(
+        reset_facts,
+        minute=6,
+    )
+    _consume(reset_adapter, (bar, raw))
+    frozen = reset_adapter.checkpoint()
+    with pytest.raises(ValueError, match="does not bind a canonical Structure"):
+        reset_adapter.consume(qualified)
+    assert reset_adapter.checkpoint() == frozen
+
+    confirmed_adapter, _, confirmed_facts = (
+        _unbound_tracker_transition_after_acceptance()
+    )
+    confirming_bar = _bar(5)
+    confirmation = _atomic(
+        "structure:independent-short-confirmation",
+        EventKind.STRUCTURE_DIRECTION_CONFIRMED,
+        5,
+        1,
+        timeframe=Timeframe.H1,
+        source_event_ids=(
+            confirmed_facts["high"].event_id,
+            confirmed_facts["low"].event_id,
+        ),
+        evidence={
+            "structure_id": "structure-source:independent-short-confirmation",
+            "source_high_id": "high:parent",
+            "source_low_id": "low:parent",
+            "candidate_protected_swing_id": "high:parent",
+        },
+        direction=Direction.SHORT,
+    )
+    _consume(confirmed_adapter, (confirming_bar, confirmation))
+    assert confirmed_adapter._started_transition(Timeframe.H1) is None
+    assert confirmed_adapter._active_internal(Timeframe.H1) is None
+    bar, raw, qualified, _ = _unbound_tracker_continuation(
+        confirmed_facts,
+        minute=6,
+    )
+    _consume(confirmed_adapter, (bar, raw))
+    frozen = confirmed_adapter.checkpoint()
+    with pytest.raises(ValueError, match="does not bind a canonical Structure"):
+        confirmed_adapter.consume(qualified)
+    assert confirmed_adapter.checkpoint() == frozen
+
+
+@pytest.mark.parametrize(
+    "case",
+    ("direction", "entities", "sources", "break_standard", "context"),
+)
+def test_unbound_transition_assignment_requires_exact_immediate_qbos_chain(
+    case: str,
+) -> None:
+    adapter, _, facts = _unbound_tracker_transition_after_acceptance()
+    bar, raw, qualified, assignment = _unbound_tracker_continuation(facts)
+    _consume(adapter, (bar, raw, qualified))
+    if case == "direction":
+        assignment = replace(assignment, direction=Direction.LONG)
+    elif case == "entities":
+        assignment = replace(
+            assignment,
+            source_entity_ids=assignment.source_entity_ids[:-1],
+        )
+    elif case == "sources":
+        sources = assignment.source_event_ids[:-1]
+        assignment = replace(
+            assignment,
+            source_ids=sources,
+            source_event_ids=sources,
+        )
+    elif case == "break_standard":
+        evidence = {**dict(assignment.evidence), "break_standard": "raw_wick"}
+        assignment = replace(assignment, details=evidence, evidence=evidence)
+    elif case == "context":
+        assignment = replace(
+            assignment,
+            context_event_ids=(facts["acceptance"].event_id,),
+        )
+    else:  # pragma: no cover - parametrization is closed above.
+        raise AssertionError(case)
+    frozen = adapter.checkpoint()
+
+    with pytest.raises(ValueError, match="does not bind a canonical Structure"):
+        adapter.consume(assignment)
+
+    assert adapter.checkpoint() == frozen
+
+
+def test_unbound_transition_assignment_rejects_an_interposed_atomic_fact() -> None:
+    adapter, _, facts = _unbound_tracker_transition_after_acceptance()
+    bar, raw, qualified, assignment = _unbound_tracker_continuation(facts)
+    interposed = _atomic(
+        "interposed:after-tracker-only-qbos",
+        EventKind.SWING_CONFIRMED,
+        5,
+        3,
+        timeframe=Timeframe.H1,
+        source_event_ids=(bar.event_id,),
+        evidence={"source_entity_id": "interposed:after-tracker-only-qbos"},
+    )
+    assignment = replace(assignment, sequence_no=4)
+    _consume(adapter, (bar, raw, qualified, interposed))
+    frozen = adapter.checkpoint()
+
+    with pytest.raises(ValueError, match="does not bind a canonical Structure"):
+        adapter.consume(assignment)
+
+    assert adapter.checkpoint() == frozen
+
+
+def _accepted_protected_external_before_mss() -> tuple[
+    CanonicalFoundationAdapter,
+    tuple[MarketEvent, ...],
+    dict[str, MarketEvent],
+    str,
+]:
+    adapter = CanonicalFoundationAdapter(tick_size=TICK)
+    structure_events, facts = _seed_structure(adapter)
+    incumbent_id = adapter.lifecycle.structure_generations[-1].generation_id
+    level = _atomic(
+        "level-created:pre-mss-protected-low",
+        EventKind.LIQUIDITY_LEVEL_CREATED,
+        0,
+        4,
+        timeframe=Timeframe.H1,
+        source_event_ids=(facts["low"].event_id,),
+        evidence={
+            "level_id": "swing:low:parent",
+            "source_kind": "confirmed_swing",
+        },
+        side="above",
+        price=100.0,
+    )
+    protected_bar = _bar(1)
+    protected = _atomic(
+        "protected-before-mss",
+        EventKind.PROTECTED_SWING_ASSIGNED,
+        1,
+        1,
+        timeframe=Timeframe.H1,
+        source_event_ids=(facts["structure"].event_id, facts["low"].event_id),
+        evidence={
+            "protected_swing_id": "low:parent",
+            "structure_id": "structure-source:parent",
+        },
+        price=100.0,
+        direction=Direction.LONG,
+    )
+    tracker_only = _atomic(
+        "tracker-only-opposite-before-acceptance",
+        EventKind.STRUCTURE_DIRECTION_CONFIRMED,
+        1,
+        2,
+        timeframe=Timeframe.H1,
+        source_event_ids=(facts["high"].event_id, facts["low"].event_id),
+        evidence={
+            "structure_id": "structure-source:tracker-only-before-acceptance",
+            "source_high_id": "high:parent",
+            "source_low_id": "low:parent",
+            "candidate_protected_swing_id": "high:parent",
+        },
+        direction=Direction.SHORT,
+    )
+    crossing_bar = _bar(2, high=101.0, low=99.0, close=100.5)
+    touch = _atomic(
+        "touch-before-mss",
+        EventKind.LEVEL_TOUCHED,
+        2,
+        1,
+        source_event_ids=(level.event_id, crossing_bar.event_id),
+        evidence={"level_id": "swing:low:parent"},
+        side="above",
+        price=100.0,
+    )
+    penetration = _atomic(
+        "penetration-before-mss",
+        EventKind.LEVEL_PENETRATED,
+        2,
+        2,
+        source_event_ids=(level.event_id, touch.event_id, crossing_bar.event_id),
+        evidence={
+            "level_id": "swing:low:parent",
+            "crossed_at": _clock(2).isoformat(),
+        },
+        side="above",
+        price=101.0,
+        direction=Direction.LONG,
+    )
+    acceptance_bar = _bar(3, high=101.0, low=99.0, close=100.5)
+    acceptance = _atomic(
+        "protected-acceptance-before-mss",
+        EventKind.ACCEPTANCE_CONFIRMED,
+        3,
+        1,
+        source_event_ids=(penetration.event_id, acceptance_bar.event_id),
+        context_event_ids=(protected.event_id,),
+        evidence={
+            "level_id": "swing:low:parent",
+            "crossed_at": _clock(2).isoformat(),
+            "resolved_at": _clock(3).isoformat(),
+            "protected_swing_id": "low:parent",
+            "protected_swing_event_id": protected.event_id,
+            "source_timeframe": Timeframe.H1.value,
+        },
+        side="above",
+        price=101.0,
+        direction=Direction.SHORT,
+    )
+    events = (
+        *structure_events,
+        level,
+        protected_bar,
+        protected,
+        tracker_only,
+        crossing_bar,
+        touch,
+        penetration,
+        acceptance_bar,
+        acceptance,
+    )
+    _consume(
+        adapter,
+        (
+            level,
+            protected_bar,
+            protected,
+            tracker_only,
+            crossing_bar,
+            touch,
+            penetration,
+            acceptance_bar,
+            acceptance,
+        ),
+    )
+    incumbent = adapter.lifecycle.structure(incumbent_id)
+    assert incumbent.lifecycle is StructureGenerationLifecycle.TERMINATED
+    assert incumbent.termination_reason == "protected_break_accepted"
+    assert (
+        "structure-source:tracker-only-before-acceptance"
+        not in adapter._structure_bindings
+    )
+    facts["tracker_only"] = tracker_only
+    return adapter, events, facts, incumbent_id
+
+
+def test_strictly_late_opposite_mss_against_exact_protected_terminal_is_ignored() -> None:
+    adapter, events, facts, incumbent_id = _accepted_protected_external_before_mss()
+    bar = _bar(4)
+    raw = _atomic(
+        "raw-late-mss-after-acceptance",
+        EventKind.RAW_BOUNDARY_BREAK,
+        4,
+        1,
+        timeframe=Timeframe.H1,
+        source_event_ids=(bar.event_id,),
+        direction=Direction.SHORT,
+    )
+    mss = _atomic(
+        "late-mss-after-acceptance",
+        EventKind.MSS_CORE_CONFIRMED,
+        4,
+        2,
+        timeframe=Timeframe.H1,
+        source_event_ids=(raw.event_id, facts["structure"].event_id),
+        source_entity_ids=(
+            "late-mss-after-acceptance",
+            "structure-source:parent",
+        ),
+        evidence={"bos_id": "late-mss-after-acceptance"},
+        direction=Direction.SHORT,
+    )
+    _consume(adapter, (bar, raw))
+    frozen_lifecycle = adapter.lifecycle
+    frozen_projection = adapter.projection
+
+    update = adapter.consume(mss)
+
+    assert update.ignored is True
+    assert adapter.lifecycle == frozen_lifecycle
+    assert adapter.projection == frozen_projection
+    assert mss.event_id in adapter.known_input_event_ids
+    assert adapter.lifecycle.structure(incumbent_id).mss_event_ids == ()
+    replayed = CanonicalFoundationAdapter.replay(
+        (*events, bar, raw, mss),
+        tick_size=TICK,
+    )
+    assert replayed.lifecycle == adapter.lifecycle
+    assert replayed.projection == adapter.projection
+
+
+def test_unbound_tracker_mss_matching_latest_protected_terminal_is_ignored() -> None:
+    adapter, events, facts, incumbent_id = _accepted_protected_external_before_mss()
+    bar = _bar(4)
+    raw = _atomic(
+        "raw-unbound-tracker-mss-after-acceptance",
+        EventKind.RAW_BOUNDARY_BREAK,
+        4,
+        1,
+        timeframe=Timeframe.H1,
+        source_event_ids=(bar.event_id,),
+        direction=Direction.LONG,
+    )
+    mss = _atomic(
+        "unbound-tracker-mss-after-acceptance",
+        EventKind.MSS_CORE_CONFIRMED,
+        4,
+        2,
+        timeframe=Timeframe.H1,
+        source_event_ids=(raw.event_id, facts["tracker_only"].event_id),
+        source_entity_ids=(
+            "unbound-tracker-mss-after-acceptance",
+            "structure-source:tracker-only-before-acceptance",
+        ),
+        evidence={"bos_id": "unbound-tracker-mss-after-acceptance"},
+        direction=Direction.LONG,
+    )
+    _consume(adapter, (bar, raw))
+    frozen_lifecycle = adapter.lifecycle
+    frozen_projection = adapter.projection
+
+    update = adapter.consume(mss)
+
+    assert update.ignored is True
+    assert adapter.lifecycle == frozen_lifecycle
+    assert adapter.projection == frozen_projection
+    assert mss.event_id in adapter.known_input_event_ids
+    assert adapter.lifecycle.structure(incumbent_id).mss_event_ids == ()
+    replayed = CanonicalFoundationAdapter.replay(
+        (*events, bar, raw, mss),
+        tick_size=TICK,
+    )
+    assert replayed.lifecycle == adapter.lifecycle
+    assert replayed.projection == adapter.projection
+
+
+@pytest.mark.parametrize(
+    ("minute", "direction", "label"),
+    (
+        (3, Direction.SHORT, "same-clock"),
+        (4, Direction.LONG, "same-direction"),
+    ),
+)
+def test_nonqualifying_mss_after_protected_terminal_still_fails_closed(
+    minute: int,
+    direction: Direction,
+    label: str,
+) -> None:
+    adapter, _, facts, _ = _accepted_protected_external_before_mss()
+    raw_sequence = 2 if minute == 3 else 1
+    mss_sequence = raw_sequence + 1
+    if minute == 4:
+        adapter.consume(_bar(minute))
+    raw = _atomic(
+        f"raw-{label}-mss-after-acceptance",
+        EventKind.RAW_BOUNDARY_BREAK,
+        minute,
+        raw_sequence,
+        timeframe=Timeframe.H1,
+        source_event_ids=(_bar(minute).event_id,),
+        direction=direction,
+    )
+    mss = _atomic(
+        f"{label}-mss-after-acceptance",
+        EventKind.MSS_CORE_CONFIRMED,
+        minute,
+        mss_sequence,
+        timeframe=Timeframe.H1,
+        source_event_ids=(raw.event_id, facts["structure"].event_id),
+        source_entity_ids=(
+            f"{label}-mss-after-acceptance",
+            "structure-source:parent",
+        ),
+        evidence={"bos_id": f"{label}-mss-after-acceptance"},
+        direction=direction,
+    )
+    adapter.consume(raw)
+    frozen = adapter.checkpoint()
+
+    with pytest.raises(
+        ValueError,
+        match="MSS does not oppose one confirmed external generation",
+    ):
+        adapter.consume(mss)
+
+    assert adapter.checkpoint() == frozen
+
+
+@pytest.mark.parametrize(
+    ("minute", "direction", "raw_sequence", "label"),
+    (
+        (3, Direction.LONG, 2, "same-clock"),
+        (4, Direction.SHORT, 1, "opposite-latest-direction"),
+    ),
+)
+def test_unbound_mss_outside_latest_protected_terminal_rule_fails_closed(
+    minute: int,
+    direction: Direction,
+    raw_sequence: int,
+    label: str,
+) -> None:
+    adapter, _, facts, _ = _accepted_protected_external_before_mss()
+    if minute == 4:
+        adapter.consume(_bar(minute))
+    raw = _atomic(
+        f"raw-unbound-{label}",
+        EventKind.RAW_BOUNDARY_BREAK,
+        minute,
+        raw_sequence,
+        timeframe=Timeframe.H1,
+        source_event_ids=(_bar(minute).event_id,),
+        direction=direction,
+    )
+    mss = _atomic(
+        f"unbound-{label}",
+        EventKind.MSS_CORE_CONFIRMED,
+        minute,
+        raw_sequence + 1,
+        timeframe=Timeframe.H1,
+        source_event_ids=(raw.event_id, facts["tracker_only"].event_id),
+        source_entity_ids=(
+            f"unbound-{label}",
+            "structure-source:tracker-only-before-acceptance",
+        ),
+        evidence={"bos_id": f"unbound-{label}"},
+        direction=direction,
+    )
+    adapter.consume(raw)
+    frozen = adapter.checkpoint()
+
+    with pytest.raises(
+        ValueError,
+        match="MSS does not oppose one confirmed external generation",
+    ):
+        adapter.consume(mss)
+
+    assert adapter.checkpoint() == frozen
+
+
+def test_unbound_mss_with_live_external_still_fails_closed() -> None:
+    adapter = CanonicalFoundationAdapter(tick_size=TICK)
+    _, facts = _seed_structure(adapter)
+    tracker_only = _atomic(
+        "tracker-only-opposite-live-incumbent",
+        EventKind.STRUCTURE_DIRECTION_CONFIRMED,
+        1,
+        1,
+        timeframe=Timeframe.H1,
+        source_event_ids=(facts["high"].event_id, facts["low"].event_id),
+        evidence={
+            "structure_id": "structure-source:tracker-only-live-incumbent",
+            "source_high_id": "high:parent",
+            "source_low_id": "low:parent",
+            "candidate_protected_swing_id": "high:parent",
+        },
+        direction=Direction.SHORT,
+    )
+    assert adapter.consume(_bar(1)).ignored is False
+    assert adapter.consume(tracker_only).ignored is True
+    raw = _atomic(
+        "raw-unbound-live-incumbent",
+        EventKind.RAW_BOUNDARY_BREAK,
+        2,
+        1,
+        timeframe=Timeframe.H1,
+        source_event_ids=(_bar(2).event_id,),
+        direction=Direction.SHORT,
+    )
+    mss = _atomic(
+        "unbound-live-incumbent",
+        EventKind.MSS_CORE_CONFIRMED,
+        2,
+        2,
+        timeframe=Timeframe.H1,
+        source_event_ids=(raw.event_id, tracker_only.event_id),
+        source_entity_ids=(
+            "unbound-live-incumbent",
+            "structure-source:tracker-only-live-incumbent",
+        ),
+        evidence={"bos_id": "unbound-live-incumbent"},
+        direction=Direction.SHORT,
+    )
+    _consume(adapter, (_bar(2), raw))
+    frozen = adapter.checkpoint()
+
+    with pytest.raises(
+        ValueError,
+        match="MSS does not oppose one confirmed external generation",
+    ):
+        adapter.consume(mss)
+
+    assert adapter.checkpoint() == frozen
+
+
+@pytest.mark.parametrize(
+    ("direction", "label"),
+    (
+        (Direction.LONG, "matches-nonlatest-protected"),
+        (Direction.SHORT, "matches-latest-reset"),
+    ),
+)
+def test_unbound_mss_cannot_borrow_nonlatest_or_nonacceptance_terminal(
+    direction: Direction,
+    label: str,
+) -> None:
+    adapter, _, facts, _ = _accepted_protected_external_before_mss()
+    new_bar = _bar(4)
+    new_external = _atomic(
+        "new-external-before-reset",
+        EventKind.STRUCTURE_DIRECTION_CONFIRMED,
+        4,
+        1,
+        timeframe=Timeframe.H1,
+        source_event_ids=(facts["high"].event_id, facts["low"].event_id),
+        evidence={
+            "structure_id": "structure-source:new-external-before-reset",
+            "source_high_id": "high:parent",
+            "source_low_id": "low:parent",
+            "candidate_protected_swing_id": "high:parent",
+        },
+        direction=Direction.SHORT,
+    )
+    reset = _atomic(
+        "reset-newest-external",
+        EventKind.MARKET_EPOCH_RESET,
+        5,
+        0,
+        evidence={"reason": "semantic_reset"},
+    )
+    _consume(adapter, (new_bar, new_external, reset))
+    latest = adapter.lifecycle.structure_generations[-1]
+    assert latest.direction is Direction.SHORT
+    assert latest.termination_reason == "semantic_reset"
+    bar = _bar(6)
+    raw = _atomic(
+        f"raw-unbound-{label}",
+        EventKind.RAW_BOUNDARY_BREAK,
+        6,
+        1,
+        timeframe=Timeframe.H1,
+        source_event_ids=(bar.event_id,),
+        direction=direction,
+    )
+    mss = _atomic(
+        f"unbound-{label}",
+        EventKind.MSS_CORE_CONFIRMED,
+        6,
+        2,
+        timeframe=Timeframe.H1,
+        source_event_ids=(raw.event_id, facts["tracker_only"].event_id),
+        source_entity_ids=(
+            f"unbound-{label}",
+            "structure-source:tracker-only-before-acceptance",
+        ),
+        evidence={"bos_id": f"unbound-{label}"},
+        direction=direction,
+    )
+    _consume(adapter, (bar, raw))
+    frozen = adapter.checkpoint()
+
+    with pytest.raises(
+        ValueError,
+        match="MSS does not oppose one confirmed external generation",
+    ):
+        adapter.consume(mss)
+
+    assert adapter.checkpoint() == frozen
 
 
 def test_reset_replay_checkpoint_pickle_and_explicit_boundary_attack() -> None:

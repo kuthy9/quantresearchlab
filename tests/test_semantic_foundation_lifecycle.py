@@ -97,6 +97,115 @@ def _real_bar(state, minutes: int, timeframe: Timeframe = Timeframe.H1):
     return SemanticLifecycleReducer.reduce(state, fact), bar_id
 
 
+def _real_bar_at(state, clock: str, timeframe: Timeframe, label: str):
+    known_at = pd.Timestamp(clock, tz=TZ)
+    bar_id = f"bar:{label}"
+    fact = NormalizedLifecycleTransition(
+        fact_id=f"real-bar:{label}",
+        kind=NormalizedTransitionKind.REAL_BAR_COMPLETED,
+        known_at=known_at,
+        timeframe=timeframe,
+        source_event_ids=(bar_id,),
+        payload={"bar_event_id": bar_id, "real_completed": True},
+    )
+    return SemanticLifecycleReducer.reduce(state, fact), bar_id
+
+
+@pytest.mark.parametrize(
+    ("prior", "current", "timeframe"),
+    (
+        ("2024-05-27 13:00", "2024-05-27 18:01", Timeframe.M1),
+        ("2024-06-03 10:00", "2024-06-03 14:00", Timeframe.H4),
+        ("2024-11-29 10:00", "2024-11-29 13:15", Timeframe.H4),
+    ),
+)
+def test_real_bar_lifecycle_uses_the_unique_registered_successor(
+    prior: str,
+    current: str,
+    timeframe: Timeframe,
+) -> None:
+    state, _ = _real_bar_at(
+        SemanticLifecycleReducer.initial_state(),
+        prior,
+        timeframe,
+        "registered-prior",
+    )
+    state, _ = _real_bar_at(
+        state,
+        current,
+        timeframe,
+        "registered-current",
+    )
+    assert state.real_bar_clocks[-1].count == 2
+
+
+@pytest.mark.parametrize(
+    ("prior", "current", "timeframe"),
+    (
+        # Skips the Memorial-Day 10:00-13:00 shortened H4 bucket.
+        ("2024-05-27 10:00", "2024-05-27 22:00", Timeframe.H4),
+        # Skips the first H4 bucket after the registered closure.
+        ("2024-05-27 13:00", "2024-05-28 02:00", Timeframe.H4),
+        # Invents a short H4 completion during an ordinary open session.
+        ("2024-06-03 10:00", "2024-06-03 13:00", Timeframe.H4),
+        # Skips one ordinary real M1 native clock.
+        ("2024-06-03 10:00", "2024-06-03 10:02", Timeframe.M1),
+        # Overlaps/reverses the already accepted clock.
+        ("2024-05-27 13:00", "2024-05-27 12:59", Timeframe.M1),
+    ),
+)
+def test_real_bar_lifecycle_rejects_non_successor_clocks_without_mutation(
+    prior: str,
+    current: str,
+    timeframe: Timeframe,
+) -> None:
+    state, _ = _real_bar_at(
+        SemanticLifecycleReducer.initial_state(),
+        prior,
+        timeframe,
+        "invalid-prior",
+    )
+    frozen = state
+    with pytest.raises(ValueError):
+        _real_bar_at(state, current, timeframe, "invalid-current")
+    assert state == frozen
+
+
+def test_special_close_and_reopen_advance_ordinal_without_resetting_state() -> None:
+    created = replace(
+        _fact(
+            NormalizedTransitionKind.LIQUIDITY_LEVEL_CREATED,
+            0,
+            timeframe=Timeframe.H4,
+            payload={
+                "source_kind": "confirmed_swing",
+                "source_identity": "holiday-persistent-level",
+                "side": "above",
+                "price_ticks": 400,
+                "tick_size": 0.25,
+                "interaction_timeframe": Timeframe.H4.value,
+            },
+            source_event_ids=("holiday-level-source",),
+            fact_id="holiday-level-created",
+        ),
+        known_at=pd.Timestamp("2024-05-27 09:59", tz=TZ),
+    )
+    state = SemanticLifecycleReducer.reduce(
+        SemanticLifecycleReducer.initial_state(),
+        created,
+    )
+    level = state.levels[0]
+    for label, clock in (
+        ("memorial-10", "2024-05-27 10:00"),
+        ("memorial-13", "2024-05-27 13:00"),
+        ("memorial-reopen-22", "2024-05-27 22:00"),
+    ):
+        state, _ = _real_bar_at(state, clock, Timeframe.H4, label)
+    assert state.epoch == 0
+    assert state.levels == (level,)
+    assert state.real_bar_clocks[-1].count == 3
+
+
 def _touch_penetrate_terminal(
     state,
     level_id: str,
@@ -796,6 +905,145 @@ def test_mss_starts_transition_but_only_resumption_can_fail_it() -> None:
     failed = state.transition(candidate.structure_transition_id)
     assert failed.lifecycle is StructureTransitionLifecycle.FAILED
     assert failed.terminal_reason == "original_direction_resumed"
+
+
+def test_exact_forming_challenger_rollover_after_acceptance_censors_transition() -> None:
+    state, incumbent = _start_structure(
+        SemanticLifecycleReducer.initial_state(),
+        minutes=0,
+        timeframe=Timeframe.H1,
+        scope="external",
+        direction=Direction.LONG,
+        label="accepted-then-original-direction",
+    )
+    mss_id = "mss:accepted-then-original-direction"
+    state = SemanticLifecycleReducer.reduce(
+        state,
+        _fact(
+            NormalizedTransitionKind.STRUCTURE_GENERATION_STARTED,
+            2,
+            payload={
+                "scope": "internal",
+                "direction": Direction.SHORT.value,
+                "origin_event_id": mss_id,
+                "origin_swing_id": "swing:accepted-then-original-direction",
+            },
+            source_event_ids=(mss_id,),
+            fact_id="start:accepted-forming-challenger",
+        ),
+    )
+    internal = state.structure_generations[-1]
+    state = SemanticLifecycleReducer.reduce(
+        state,
+        _fact(
+            NormalizedTransitionKind.STRUCTURE_GENERATION_EVIDENCE,
+            2,
+            payload={
+                "structure_generation_id": internal.generation_id,
+                "evidence_kind": "mss",
+                "evidence_event_id": mss_id,
+            },
+            source_event_ids=(mss_id,),
+            fact_id="evidence:accepted-forming-challenger",
+        ),
+    )
+    state = SemanticLifecycleReducer.reduce(
+        state,
+        _fact(
+            NormalizedTransitionKind.MSS_TRANSITION_STARTED,
+            2,
+            payload={
+                "incumbent_structure_generation_id": incumbent.generation_id,
+                "challenger_direction": Direction.SHORT.value,
+                "mss_event_id": mss_id,
+            },
+            source_event_ids=(mss_id,),
+            fact_id="transition:accepted-forming-challenger",
+        ),
+    )
+    candidate = state.structure_transitions[-1]
+    acceptance_id = "acceptance:accepted-forming-challenger"
+    state = SemanticLifecycleReducer.reduce(
+        state,
+        _fact(
+            NormalizedTransitionKind.STRUCTURE_GENERATION_TERMINATED,
+            3,
+            payload={
+                "structure_generation_id": incumbent.generation_id,
+                "reason": "protected_break_accepted",
+                "protected_acceptance_event_id": acceptance_id,
+            },
+            source_event_ids=(acceptance_id,),
+            fact_id="terminate:accepted-incumbent",
+        ),
+    )
+    state = SemanticLifecycleReducer.reduce(
+        state,
+        _fact(
+            NormalizedTransitionKind.STRUCTURE_TRANSITION_EVIDENCE,
+            3,
+            payload={
+                "structure_transition_id": candidate.structure_transition_id,
+                "protected_acceptance_event_id": acceptance_id,
+            },
+            source_event_ids=(acceptance_id,),
+            fact_id="acceptance:accepted-forming-challenger",
+        ),
+    )
+    before_rollover = state
+    rollover_event_id = "structure:later-original-direction"
+    state = SemanticLifecycleReducer.reduce(
+        state,
+        _fact(
+            NormalizedTransitionKind.STRUCTURE_GENERATION_TERMINATED,
+            4,
+            payload={
+                "structure_generation_id": internal.generation_id,
+                "reason": "scope_rollover",
+            },
+            source_event_ids=(rollover_event_id,),
+            fact_id="terminate:accepted-forming-challenger",
+        ),
+    )
+    censored = state.transition(candidate.structure_transition_id)
+    assert censored.lifecycle is StructureTransitionLifecycle.CENSORED
+    assert censored.terminal_reason == "scope_rollover"
+    assert censored.protected_acceptance_event_id == acceptance_id
+    assert censored.resumption_event_id is None
+    assert rollover_event_id in censored.source_event_ids
+    FoundationRecord.from_dto(censored)
+
+    mismatched = SemanticLifecycleReducer.reduce(
+        before_rollover,
+        _fact(
+            NormalizedTransitionKind.STRUCTURE_GENERATION_EVIDENCE,
+            4,
+            payload={
+                "structure_generation_id": internal.generation_id,
+                "evidence_kind": "mss",
+                "evidence_event_id": "mss:not-shared-with-transition",
+            },
+            source_event_ids=("mss:not-shared-with-transition",),
+            fact_id="evidence:unshared-challenger-mss",
+        ),
+    )
+    mismatched = SemanticLifecycleReducer.reduce(
+        mismatched,
+        _fact(
+            NormalizedTransitionKind.STRUCTURE_GENERATION_TERMINATED,
+            5,
+            payload={
+                "structure_generation_id": internal.generation_id,
+                "reason": "scope_rollover",
+            },
+            source_event_ids=("structure:mismatched-rollover",),
+            fact_id="terminate:mismatched-forming-challenger",
+        ),
+    )
+    assert (
+        mismatched.transition(candidate.structure_transition_id).lifecycle
+        is StructureTransitionLifecycle.STARTED
+    )
 
 
 def test_structure_dtos_and_records_reject_partial_or_invented_provenance() -> None:

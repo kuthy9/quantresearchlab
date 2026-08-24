@@ -21,6 +21,7 @@ from smc_trader.market_state import (
     terminate_structural_range,
     update_liquidity_clusters,
     update_swing_geometry_assignments,
+    _require_contiguous_native_candles,
 )
 from smc_trader.model import (
     Candle,
@@ -459,6 +460,156 @@ def test_swing_geometry_rejects_a_gapped_definitional_window() -> None:
     )
 
     with pytest.raises(ValueError, match="not contiguous"):
+        build_swing_geometry_nodes((swing,), candles, tick_size=0.25)
+
+
+def test_swing_geometry_accepts_each_registered_bar_across_memorial_closure(
+) -> None:
+    starts = tuple(
+        pd.Timestamp(value, tz=TZ)
+        for value in (
+            "2024-05-27 12:59",
+            "2024-05-27 18:00",
+            "2024-05-27 18:01",
+        )
+    )
+    candles = tuple(
+        replace(
+            _candle(index, timeframe=Timeframe.M1, high=105.0),
+            start=start,
+            end=start + pd.Timedelta(1, unit="min"),
+        )
+        for index, start in enumerate(starts)
+    )
+    swing = _swing(
+        "memorial-reopen-geometry",
+        SwingSide.HIGH,
+        105.0,
+        candles[1].start,
+        candles[-1].end,
+        timeframe=Timeframe.M1,
+    )
+
+    node = build_swing_geometry_nodes(
+        (swing,),
+        candles,
+        tick_size=0.25,
+    )[0]
+
+    assert node.window_start == candles[0].start
+    assert node.window_end == candles[-1].end
+    assert node.source_candle_ids == tuple(
+        candle_identity(candle, tick_size=0.25) for candle in candles
+    )
+
+
+def test_swing_geometry_accepts_registered_shortened_memorial_h4_bucket() -> None:
+    bounds = (
+        ("2024-05-27 02:00", "2024-05-27 06:00", 240),
+        ("2024-05-27 06:00", "2024-05-27 10:00", 240),
+        ("2024-05-27 10:00", "2024-05-27 13:00", 180),
+        ("2024-05-27 18:00", "2024-05-27 22:00", 240),
+        ("2024-05-27 22:00", "2024-05-28 02:00", 240),
+    )
+    candles = tuple(
+        replace(
+            _candle(index, timeframe=Timeframe.H4, high=105.0),
+            start=pd.Timestamp(start, tz=TZ),
+            end=pd.Timestamp(end, tz=TZ),
+            expected_minutes=minutes,
+            observed_minutes=minutes,
+            real_minutes=minutes,
+        )
+        for index, (start, end, minutes) in enumerate(bounds)
+    )
+    swing = replace(
+        _swing(
+            "memorial-shortened-h4-geometry",
+            SwingSide.HIGH,
+            105.0,
+            candles[2].start,
+            candles[-1].end,
+            timeframe=Timeframe.H4,
+            confirmation_delay_bars=2,
+        ),
+        pivot_end=candles[2].end,
+    )
+
+    node = build_swing_geometry_nodes((swing,), candles, tick_size=0.25)[0]
+
+    assert node.window_start == candles[0].start
+    assert node.window_end == candles[-1].end
+    assert node.source_candle_ids == tuple(
+        candle_identity(candle, tick_size=0.25) for candle in candles
+    )
+
+
+@pytest.mark.parametrize(
+    ("start", "end", "coverage_minutes"),
+    (
+        ("2024-05-27 10:00", "2024-05-27 13:00", 240),
+        ("2024-06-03 10:00", "2024-06-03 13:00", 180),
+        ("2024-06-03 10:00", "2024-06-03 15:00", 300),
+    ),
+)
+def test_swing_geometry_rejects_registered_coverage_or_wall_clock_tamper(
+    start: str,
+    end: str,
+    coverage_minutes: int,
+) -> None:
+    candle = replace(
+        _candle(0, timeframe=Timeframe.H4, high=105.0),
+        start=pd.Timestamp(start, tz=TZ),
+        end=pd.Timestamp(end, tz=TZ),
+        expected_minutes=coverage_minutes,
+        observed_minutes=coverage_minutes,
+        real_minutes=coverage_minutes,
+    )
+
+    with pytest.raises(ValueError, match="lacks native-duration"):
+        _require_contiguous_native_candles(
+            (candle,),
+            timeframe=Timeframe.H4,
+            object_name="swing geometry",
+        )
+
+
+@pytest.mark.parametrize(
+    "starts",
+    (
+        (
+            "2024-05-27 12:59:00",
+            "2024-05-27 18:01:00",
+            "2024-05-27 18:02:00",
+        ),
+        (
+            "2024-06-03 08:00:00",
+            "2024-06-03 08:00:30",
+            "2024-06-03 08:01:30",
+        ),
+    ),
+)
+def test_swing_geometry_rejects_skipped_reopen_bar_or_overlap(
+    starts: tuple[str, str, str],
+) -> None:
+    candles = tuple(
+        replace(
+            _candle(index, timeframe=Timeframe.M1, high=105.0),
+            start=pd.Timestamp(start, tz=TZ),
+            end=pd.Timestamp(start, tz=TZ) + pd.Timedelta(1, unit="min"),
+        )
+        for index, start in enumerate(starts)
+    )
+    swing = _swing(
+        "invalid-registered-geometry",
+        SwingSide.HIGH,
+        105.0,
+        candles[1].start,
+        candles[-1].end,
+        timeframe=Timeframe.M1,
+    )
+
+    with pytest.raises(ValueError, match="not contiguous|lacks native-duration"):
         build_swing_geometry_nodes((swing,), candles, tick_size=0.25)
 
 

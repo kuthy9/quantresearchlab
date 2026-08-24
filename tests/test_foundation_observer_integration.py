@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import Counter
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 import pandas as pd
 import pytest
 
@@ -10,6 +11,8 @@ import smc_trader.observation as observation_module
 from smc_trader.causal import CausalMarketReader
 from smc_trader.foundation_adapter import CanonicalFoundationAdapter
 from smc_trader.market_state import (
+    SwingGeometryNode,
+    dual_range_location,
     foundation_record_from_projection_event,
     foundation_record_projection_event,
     replay_atomic_market_snapshot,
@@ -20,6 +23,7 @@ from smc_trader.model import (
     Direction,
     EventKind,
     EventOrigin,
+    SwingSide,
     Timeframe,
 )
 from smc_trader.observation import CausalObserver
@@ -43,6 +47,7 @@ from .test_foundation_adapter import _clock as _adapter_clock
 from .test_foundation_adapter import _cross_level
 from .test_foundation_adapter import _seed_level
 from .test_observer import _all_typed_observer_config, _tick_aligned_bars
+from .test_semantic_foundation_geometry import _balance_range, _swing
 
 
 def _eye() -> tuple[CausalMarketReader, CausalObserver]:
@@ -668,6 +673,249 @@ def test_foundation_publication_failure_does_not_commit_staged_adapter(
     assert failed_update is not None
     with pytest.raises(RuntimeError, match="discard this observer"):
         observer.observe(failed_update)
+
+
+def test_equal_tick_structure_has_no_range_but_balance_and_later_range_survive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, observer = _eye()
+    observer._active_timeframes = (Timeframe.H1,)
+    adapter = CanonicalFoundationAdapter(tick_size=0.25)
+    exact_events = {}
+    monkeypatch.setattr(
+        observer,
+        "_foundation_exact_event",
+        lambda event_id: exact_events[event_id],
+    )
+
+    def publish_structure(
+        minute: int,
+        label: str,
+        *,
+        low_price: float,
+        high_price: float,
+    ):
+        clock = _adapter_clock(minute)
+        bar = _adapter_bar(minute, event_id=f"bar:{label}")
+        high_event = _adapter_atomic(
+            f"swing-high:{label}",
+            EventKind.SWING_CONFIRMED,
+            minute,
+            1,
+            timeframe=Timeframe.H1,
+            source_event_ids=(bar.event_id,),
+            evidence={"source_entity_id": f"high:{label}", "side": "high"},
+            side="above",
+            price=high_price,
+            direction=Direction.LONG,
+        )
+        low_event = _adapter_atomic(
+            f"swing-low:{label}",
+            EventKind.SWING_CONFIRMED,
+            minute,
+            2,
+            timeframe=Timeframe.H1,
+            source_event_ids=(bar.event_id,),
+            evidence={"source_entity_id": f"low:{label}", "side": "low"},
+            side="below",
+            price=low_price,
+            direction=Direction.SHORT,
+        )
+        origin = _adapter_atomic(
+            f"structure:{label}",
+            EventKind.STRUCTURE_DIRECTION_CONFIRMED,
+            minute,
+            3,
+            timeframe=Timeframe.H1,
+            source_event_ids=(high_event.event_id, low_event.event_id),
+            evidence={
+                "structure_id": f"structure-source:{label}",
+                "source_high_id": f"high:{label}",
+                "source_low_id": f"low:{label}",
+                "candidate_protected_swing_id": f"low:{label}",
+            },
+            direction=Direction.LONG,
+        )
+        events = (bar, high_event, low_event, origin)
+        adapter.consume_batch(events)
+        exact_events.update({event.event_id: event for event in events})
+        observer._confirmed_swing_event_ids.update(
+            {
+                f"high:{label}": high_event.event_id,
+                f"low:{label}": low_event.event_id,
+            }
+        )
+        high = _swing(
+            f"high:{label}",
+            SwingSide.HIGH,
+            high_price,
+            clock - pd.Timedelta(121, unit="m"),
+            clock,
+            timeframe=Timeframe.H1,
+        )
+        low = _swing(
+            f"low:{label}",
+            SwingSide.LOW,
+            low_price,
+            clock - pd.Timedelta(61, unit="m"),
+            clock,
+            timeframe=Timeframe.H1,
+        )
+        for swing, source in ((high, high_event), (low, low_event)):
+            adapter.append_dto(
+                SwingGeometryNode(
+                    swing_id=swing.swing_id,
+                    timeframe=Timeframe.H1,
+                    symbol=swing.symbol,
+                    instrument_id=swing.instrument_id,
+                    window_start=swing.pivot_start,
+                    window_end=clock,
+                    lower_bound=swing.price - 0.5,
+                    upper_bound=swing.price + 0.5,
+                    known_at=clock,
+                    source_candle_ids=(f"candle:{swing.swing_id}",),
+                ),
+                source_event_ids=(source.event_id,),
+            )
+        return SimpleNamespace(swings=(low, high)), events
+
+    revisions = {}
+    equal_frame, equal_events = publish_structure(
+        180,
+        "equal",
+        low_price=100.0,
+        high_price=100.0,
+    )
+    ranges, terminated = observer._foundation_update_structural_ranges(
+        adapter=adapter,
+        ranges={},
+        frames={Timeframe.H1: equal_frame},
+        known_at=_adapter_clock(180),
+        clock_events=equal_events,
+        revisions=revisions,
+    )
+    assert ranges == {}
+    assert terminated == ()
+    assert len(
+        tuple(
+            record
+            for record in adapter.projection.latest_records
+            if record.object_type
+            is FoundationObjectType.SWING_GEOMETRY_NODE
+        )
+    ) == 2
+    assert not any(
+        record.object_type is FoundationObjectType.STRUCTURAL_RANGE
+        for record in adapter.projection.records
+    )
+
+    # The immutable equal-tick origin remains explicitly range-ineligible on
+    # later clocks; it must not trip the missed-confirmation guard.
+    ranges, terminated = observer._foundation_update_structural_ranges(
+        adapter=adapter,
+        ranges=ranges,
+        frames={Timeframe.H1: equal_frame},
+        known_at=_adapter_clock(181),
+        clock_events=(),
+        revisions=revisions,
+    )
+    assert ranges == {}
+    assert terminated == ()
+    balance = _balance_range()
+    balance_only = dual_range_location(
+        100.0,
+        structural_range=None,
+        balance_range=balance,
+    )
+    assert balance_only.structural_range_id is None
+    assert balance_only.balance_range_id == balance.range_id
+    assert balance_only.x_balance_range is not None
+
+    reset = _adapter_atomic(
+        "reset-after-equal-range",
+        EventKind.MARKET_EPOCH_RESET,
+        182,
+        0,
+        evidence={"reason": "semantic_reset"},
+    )
+    adapter.consume(reset)
+    ranges, _ = observer._foundation_update_structural_ranges(
+        adapter=adapter,
+        ranges=ranges,
+        frames={Timeframe.H1: equal_frame},
+        known_at=_adapter_clock(182),
+        clock_events=(reset,),
+        revisions=revisions,
+    )
+
+    valid_frame, valid_events = publish_structure(
+        183,
+        "valid-after-equal",
+        low_price=90.0,
+        high_price=110.0,
+    )
+    ranges, terminated = observer._foundation_update_structural_ranges(
+        adapter=adapter,
+        ranges=ranges,
+        frames={Timeframe.H1: valid_frame},
+        known_at=_adapter_clock(183),
+        clock_events=valid_events,
+        revisions=revisions,
+    )
+    active_range = ranges[Timeframe.H1]
+    assert active_range.terminated_at is None
+    assert (active_range.lower_bound, active_range.upper_bound) == (90.0, 110.0)
+    assert terminated == ()
+    coexisting = dual_range_location(
+        100.0,
+        structural_range=active_range,
+        balance_range=balance,
+    )
+    assert coexisting.structural_range_id == active_range.range_id
+    assert coexisting.balance_range_id == balance.range_id
+
+    final_reset = _adapter_atomic(
+        "reset-after-valid-range",
+        EventKind.MARKET_EPOCH_RESET,
+        184,
+        0,
+        evidence={"reason": "semantic_reset"},
+    )
+    adapter.consume(final_reset)
+    ranges, terminated = observer._foundation_update_structural_ranges(
+        adapter=adapter,
+        ranges=ranges,
+        frames={Timeframe.H1: valid_frame},
+        known_at=_adapter_clock(184),
+        clock_events=(final_reset,),
+        revisions=revisions,
+    )
+    terminal_range = ranges[Timeframe.H1]
+    assert terminal_range.termination_reason == "semantic_reset"
+    assert terminated == ((active_range.range_id, final_reset.event_id),)
+    after_terminal = dual_range_location(
+        100.0,
+        structural_range=terminal_range,
+        balance_range=balance,
+    )
+    assert after_terminal.structural_range_id is None
+    assert after_terminal.balance_range_id == balance.range_id
+
+    inverted_frame, inverted_events = publish_structure(
+        185,
+        "inverted-after-equal",
+        low_price=110.0,
+        high_price=100.0,
+    )
+    with pytest.raises(ValueError, match="structural range source Swings are invalid"):
+        observer._foundation_update_structural_ranges(
+            adapter=adapter,
+            ranges=ranges,
+            frames={Timeframe.H1: inverted_frame},
+            known_at=_adapter_clock(185),
+            clock_events=inverted_events,
+            revisions=revisions,
+        )
 
 
 def test_structural_range_location_and_delivery_use_independent_native_clocks() -> None:

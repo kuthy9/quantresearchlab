@@ -18,6 +18,7 @@ from typing import Any, Mapping, Sequence
 import pandas as pd
 
 from .foundation_registry import FOUNDATION_VERSION
+from .market_clock import next_registered_native_completion
 from .model import (
     Direction,
     Timeframe,
@@ -33,6 +34,19 @@ _NATIVE_TIMEFRAME_INTERVAL = {
     Timeframe.M15: pd.Timedelta(15, unit="min"),
     Timeframe.H1: pd.Timedelta(1, unit="h"),
     Timeframe.H4: pd.Timedelta(4, unit="h"),
+}
+
+_NATIVE_TIMEFRAME_MINUTES = {
+    timeframe: int(interval / pd.Timedelta(1, unit="min"))
+    for timeframe, interval in _NATIVE_TIMEFRAME_INTERVAL.items()
+}
+
+_NATIVE_TIMEFRAME_ANCHOR_MINUTES = {
+    Timeframe.M1: 0,
+    Timeframe.M5: 0,
+    Timeframe.M15: 0,
+    Timeframe.H1: 0,
+    Timeframe.H4: 18 * 60,
 }
 
 
@@ -685,7 +699,17 @@ class ZoneFirstReinteractionTracker:
             if self.last_observed_at is None
             else self.last_observed_at
         )
-        if bar.known_at - prior_clock != _NATIVE_TIMEFRAME_INTERVAL[spec.timeframe]:
+        try:
+            expected_completion = next_registered_native_completion(
+                prior_clock,
+                timeframe_minutes=_NATIVE_TIMEFRAME_MINUTES[spec.timeframe],
+                anchor_minute=_NATIVE_TIMEFRAME_ANCHOR_MINUTES[spec.timeframe],
+            )
+        except ValueError as error:
+            raise ValueError(
+                "first-reinteraction BAR path is not contiguous at the native timeframe"
+            ) from error
+        if bar.known_at != expected_completion:
             raise ValueError(
                 "first-reinteraction BAR path is not contiguous at the native timeframe"
             )
