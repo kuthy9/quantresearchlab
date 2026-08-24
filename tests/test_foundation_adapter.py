@@ -231,6 +231,22 @@ def test_stage_batch_forks_only_mutable_transaction_containers() -> None:
     assert candidate.projection is not prior_projection
 
 
+def test_staged_candidate_rejects_nested_batch_without_destroying_state() -> None:
+    adapter = CanonicalFoundationAdapter(tick_size=TICK)
+    candidate, updates = adapter.stage_batch(())
+    assert updates == ()
+    before = candidate.checkpoint()
+
+    with pytest.raises(ValueError, match="nested foundation batch"):
+        candidate.consume_batch(())
+    with pytest.raises(ValueError, match="nested foundation batch"):
+        candidate.consume_batch((_bar(0),))
+
+    assert candidate.checkpoint() == before
+    assert candidate._staged_transaction_open is True
+    assert adapter.known_input_event_ids == frozenset()
+
+
 def _seed_level(
     adapter: CanonicalFoundationAdapter,
     *,

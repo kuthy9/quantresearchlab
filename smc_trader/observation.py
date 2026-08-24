@@ -7585,10 +7585,9 @@ class CausalObserver:
             if generation.lifecycle
             is StructureGenerationLifecycle.TERMINATED
         }
-        staged_record_ids = {
-            record.record_id
-            for record in self._foundation_adapter.projection.records
-        }
+        prior_record_count = len(
+            self._foundation_adapter.projection.records
+        )
         latest_group3 = group3_update
         contextual_fvg_transitions: list[object] = []
         for clock in clocks:
@@ -7631,12 +7630,13 @@ class CausalObserver:
                     value,
                     source_event_ids=source_ids,
                 )
-                if record.record_id not in staged_record_ids:
+                if not candidate.contains_projection_record_id(
+                    record.record_id
+                ):
                     candidate.append_dto(
                         value,
                         source_event_ids=source_ids,
                     )
-                    staged_record_ids.add(record.record_id)
             ranges, range_terminations = (
                 self._foundation_update_structural_ranges(
                     adapter=candidate,
@@ -7672,20 +7672,22 @@ class CausalObserver:
                     record = FoundationProjectionReducer.record_from_dto(
                         lifecycle
                     )
-                    if record.record_id not in staged_record_ids:
+                    if not candidate.contains_projection_record_id(
+                        record.record_id
+                    ):
                         candidate.append_dto(lifecycle)
-                        staged_record_ids.add(record.record_id)
                 else:
                     record = FoundationProjectionReducer.record_from_dto(
                         value,
                         source_event_ids=source_ids,
                     )
-                    if record.record_id not in staged_record_ids:
+                    if not candidate.contains_projection_record_id(
+                        record.record_id
+                    ):
                         candidate.append_dto(
                             value,
                             source_event_ids=source_ids,
                         )
-                        staged_record_ids.add(record.record_id)
             expired = self._foundation_expire_group3(
                 adapter=candidate,
                 known_at=clock,
@@ -7779,20 +7781,13 @@ class CausalObserver:
                 ),
             )
             self._validate_group3_foundation_projection(latest_group3)
-        prior_record_ids = {
-            record.record_id
-            for record in self._foundation_adapter.projection.records
-        }
-        new_records = tuple(
-            record
-            for record in candidate.projection.records
-            if record.record_id not in prior_record_ids
-        )
+        new_records = candidate.projection.records[prior_record_count:]
         if any(
             record.record_id in self._foundation_published_record_ids
             for record in new_records
         ):
             raise ValueError("foundation transport would republish a record")
+        candidate.seal_staged_candidate()
         return (
             candidate,
             nodes,
@@ -11623,6 +11618,7 @@ class CausalObserver:
                 ),
             )
             if foundation_stage is not None:
+                foundation_stage[0].commit_staged_candidate()
                 (
                     self._foundation_adapter,
                     self._foundation_geometry_nodes,

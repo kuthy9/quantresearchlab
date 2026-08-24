@@ -12,12 +12,15 @@ does not authorize orders, and does not turn shadow probabilities into action.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field, fields
+from collections.abc import Mapping
+from dataclasses import dataclass, field, fields, is_dataclass
+from enum import Enum
 import hashlib
 import json
 import math
 from pathlib import Path
-from typing import Any, Callable, Iterable, Mapping, Sequence
+import pickle
+from typing import Any, Callable, Iterable, Sequence
 
 import pandas as pd
 
@@ -34,7 +37,11 @@ from .model import (
     AccountState,
     Bar,
     EngineSnapshot,
+    EventKind,
+    EventOrigin,
     SMC_SEMANTIC_VERSION,
+    content_hash,
+    price_to_ticks,
     to_primitive,
 )
 from .observation import ExecutionRealityInput
@@ -92,7 +99,10 @@ _LEGACY_SHADOW_RUNTIME_BINDING_KEYS = tuple(
     for key in SHADOW_RUNTIME_BINDING_KEYS
     if key != "shadow_component_digest_version"
 )
-SHADOW_COMPACT_RUNTIME_CHECKPOINT_SCHEMA = "shadow_compact_runtime_v2"
+SHADOW_COMPACT_RUNTIME_CHECKPOINT_SCHEMA = "shadow_compact_runtime_v3"
+_PREVIOUS_SHADOW_COMPACT_RUNTIME_CHECKPOINT_SCHEMA = (
+    "shadow_compact_runtime_v2"
+)
 _LEGACY_SHADOW_COMPACT_RUNTIME_CHECKPOINT_SCHEMA = (
     "shadow_compact_runtime_v1"
 )
@@ -168,6 +178,50 @@ def _digest_primitive(value: Any) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def _canonical_contract_default(value: Any) -> Any:
+    """Expose canonical DTO fields directly to the C JSON encoder.
+
+    Current component parity previously materialized a second complete
+    primitive object graph before handing it to ``json.dumps``.  Canonical
+    component DTOs use string (including string-enum) mapping keys, so the
+    encoder can traverse their immutable graph directly while producing the
+    exact same sorted JSON bytes.  The generic ``to_primitive`` path remains
+    the authority outside this bounded parity hot path.
+    """
+
+    if isinstance(value, Enum):
+        return value.value
+    if isinstance(value, pd.Timestamp):
+        return value.isoformat()
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, Mapping):
+        return {
+            str(key.value if isinstance(key, Enum) else key): item
+            for key, item in value.items()
+        }
+    if is_dataclass(value):
+        return {
+            item.name: getattr(value, item.name)
+            for item in fields(value)
+        }
+    raise TypeError(
+        f"object of type {type(value).__name__} is not canonical JSON"
+    )
+
+
+def _digest_canonical_contract(value: Any) -> str:
+    encoded = json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+        default=_canonical_contract_default,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
 def _component_digest(
     role: str,
     payload: Mapping[str, Any],
@@ -175,6 +229,21 @@ def _component_digest(
     version: str,
 ) -> str:
     return _digest_primitive(
+        {
+            "component_digest_version": version,
+            "role": role,
+            "payload": payload,
+        }
+    )
+
+
+def _canonical_contract_component_digest(
+    role: str,
+    payload: Mapping[str, Any],
+    *,
+    version: str,
+) -> str:
+    return _digest_canonical_contract(
         {
             "component_digest_version": version,
             "role": role,
@@ -329,19 +398,16 @@ def _current_shadow_component_digest_bundle(
         relation_fingerprint = _digest_primitive(None)
         session_fingerprint = _digest_primitive(None)
     else:
-        timeframe_primitive = to_primitive(market.timeframe_states)
-        relation_primitive = to_primitive(market.relations)
-        session_primitive = to_primitive(market.session)
-        events_primitive = to_primitive(market.events_this_update)
-        range_locations_primitive = to_primitive(
-            market.foundation_range_locations
+        timeframe_fingerprint = _digest_canonical_contract(
+            market.timeframe_states
         )
-        timeframe_fingerprint = _digest_primitive(timeframe_primitive)
-        relation_fingerprint = _digest_primitive(relation_primitive)
-        session_fingerprint = _digest_primitive(session_primitive)
-        events_fingerprint = _digest_primitive(events_primitive)
-        range_locations_fingerprint = _digest_primitive(
-            range_locations_primitive
+        relation_fingerprint = _digest_canonical_contract(market.relations)
+        session_fingerprint = _digest_canonical_contract(market.session)
+        events_fingerprint = _digest_canonical_contract(
+            market.events_this_update
+        )
+        range_locations_fingerprint = _digest_canonical_contract(
+            market.foundation_range_locations
         )
         foundation = market.foundation
         foundation_component = (
@@ -349,15 +415,15 @@ def _current_shadow_component_digest_bundle(
             if foundation is None
             else {
                 "component_fingerprint": foundation.component_fingerprint,
-                "asof": to_primitive(foundation.asof),
+                "asof": foundation.asof,
                 "foundation_version": foundation.foundation_version,
                 "registry_identity": foundation.registry_identity,
             }
         )
-        market_snapshot_fingerprint = _component_digest(
+        market_snapshot_fingerprint = _canonical_contract_component_digest(
             "market_snapshot",
             {
-                "asof": to_primitive(market.asof),
+                "asof": market.asof,
                 "symbol": market.symbol,
                 "instrument_id": market.instrument_id,
                 "price": market.price,
@@ -369,8 +435,8 @@ def _current_shadow_component_digest_bundle(
                 "relations_fingerprint": relation_fingerprint,
                 "session_fingerprint": session_fingerprint,
                 "events_this_update_fingerprint": events_fingerprint,
-                "labels": to_primitive(market.labels),
-                "authority": to_primitive(market.authority),
+                "labels": market.labels,
+                "authority": market.authority,
                 "foundation": foundation_component,
                 "foundation_range_locations_fingerprint": (
                     range_locations_fingerprint
@@ -378,13 +444,13 @@ def _current_shadow_component_digest_bundle(
             },
             version=SHADOW_COMPONENT_DIGEST_VERSION,
         )
-        market_state_fingerprint = _component_digest(
+        market_state_fingerprint = _canonical_contract_component_digest(
             "market_replay_state",
             {
                 "timeframes_fingerprint": timeframe_fingerprint,
                 "relations_fingerprint": relation_fingerprint,
                 "session_fingerprint": session_fingerprint,
-                "authority": to_primitive(market.authority),
+                "authority": market.authority,
                 "foundation": foundation_component,
                 "foundation_range_locations_fingerprint": (
                     range_locations_fingerprint
@@ -393,45 +459,44 @@ def _current_shadow_component_digest_bundle(
             version=SHADOW_COMPONENT_DIGEST_VERSION,
         )
 
-    observation_primitive = {
+    observation_payload = {
         item.name: (
             {
                 "component_digest_version": SHADOW_COMPONENT_DIGEST_VERSION,
                 "fingerprint": market_snapshot_fingerprint,
             }
             if item.name == "market_snapshot"
-            else to_primitive(getattr(observation, item.name))
+            else getattr(observation, item.name)
         )
         for item in fields(observation)
     }
-    observation_fingerprint = _component_digest(
+    observation_fingerprint = _canonical_contract_component_digest(
         "market_observation",
-        observation_primitive,
+        observation_payload,
         version=SHADOW_COMPONENT_DIGEST_VERSION,
     )
 
-    belief_primitive = to_primitive(belief)
-    belief_fingerprint = _digest_primitive(belief_primitive)
-    path_state_fingerprint = _digest_primitive(
-        belief_primitive["path_competition_state"]
+    belief_fingerprint = _digest_canonical_contract(belief)
+    path_state_fingerprint = _digest_canonical_contract(
+        belief.path_competition_state
     )
-    path_update_fingerprint = _digest_primitive(
-        belief_primitive["path_update_records_this_clock"]
+    path_update_fingerprint = _digest_canonical_contract(
+        belief.path_update_records_this_clock
     )
-    dol_probability_fingerprint = _digest_primitive(
-        belief_primitive["dol_probabilities"]
+    dol_probability_fingerprint = _digest_canonical_contract(
+        belief.dol_probabilities
     )
-    signal_assessment_fingerprint = _digest_primitive(
-        belief_primitive["signal_assessments"]
+    signal_assessment_fingerprint = _digest_canonical_contract(
+        belief.signal_assessments
     )
-    trade_intent_fingerprint = _digest_primitive(
-        belief_primitive["trade_intents"]
+    trade_intent_fingerprint = _digest_canonical_contract(
+        belief.trade_intents
     )
-    neutral_market_state_fingerprint = _digest_primitive(
-        to_primitive(snapshot.neutral_market_state)
+    neutral_market_state_fingerprint = _digest_canonical_contract(
+        snapshot.neutral_market_state
     )
-    decision_fingerprint = _digest_primitive(to_primitive(snapshot.decision))
-    risk_fingerprint = _digest_primitive(to_primitive(snapshot.risk))
+    decision_fingerprint = _digest_canonical_contract(snapshot.decision)
+    risk_fingerprint = _digest_canonical_contract(snapshot.risk)
     engine_snapshot_fingerprint = _component_digest(
         "engine_snapshot",
         {
@@ -476,14 +541,14 @@ def _current_shadow_component_digest_bundle(
         "runtime_bindings_fingerprint": (
             runner._runtime_bindings_fingerprint
         ),
-        "execution_approval_fingerprint": _digest_primitive(
-            to_primitive(runner._approval_digests)
+        "execution_approval_fingerprint": _digest_canonical_contract(
+            runner._approval_digests
         ),
-        "execution_event_fingerprint": _digest_primitive(
-            to_primitive(execution_event_map)
+        "execution_event_fingerprint": _digest_canonical_contract(
+            execution_event_map
         ),
-        "execution_state_fingerprint": _digest_primitive(
-            to_primitive(execution_state_map)
+        "execution_state_fingerprint": _digest_canonical_contract(
+            execution_state_map
         ),
     }
     return ShadowComponentDigestBundle(
@@ -1096,6 +1161,22 @@ class ShadowInputJournal:
     def require_consistent(self) -> None:
         """Rebuild every mutable index from immutable accepted events."""
 
+        for value in (*self._attempts, *self._events):
+            if not isinstance(value, ShadowClockInput):
+                raise ShadowLiveError(
+                    "shadow journal history changed input type"
+                )
+            rebuilt = ShadowClockInput(
+                **{
+                    item.name: getattr(value, item.name)
+                    for item in fields(ShadowClockInput)
+                    if item.init
+                }
+            )
+            if rebuilt != value or rebuilt.input_digest != value.input_digest:
+                raise ShadowLiveError(
+                    "shadow input content does not bind input_digest"
+                )
         clone = ShadowInputJournal()
         for value in self._events:
             clone.append(value)
@@ -1574,6 +1655,22 @@ class ShadowLiveRunner:
     def _require_internal_consistency(self, *, deep: bool = True) -> None:
         if deep:
             self.journal.require_consistent()
+            for record in self._records:
+                if not isinstance(record, ShadowParityRecord):
+                    raise ShadowLiveError(
+                        "shadow parity record history changed type"
+                    )
+                rebuilt = ShadowParityRecord(
+                    **{
+                        item.name: getattr(record, item.name)
+                        for item in fields(ShadowParityRecord)
+                        if item.init
+                    }
+                )
+                if rebuilt != record or rebuilt.record_id != record.record_id:
+                    raise ShadowLiveError(
+                        "shadow parity record content does not bind record_id"
+                    )
         else:
             self.journal.require_incremental_consistent()
         expected_records = (
@@ -1630,6 +1727,833 @@ class ShadowLiveRunner:
         ):
             raise ShadowLiveError("shadow runner indexes or approvals drifted")
 
+    def _require_terminal_snapshot_exact(self) -> None:
+        """Bind restored runtime bytes to the last immutable parity record.
+
+        Checkpoint restore is deliberately stricter than the hot clock path:
+        every retained ``MarketEvent`` occurrence must be the exact event
+        committed under the same ID in the audit store, and every terminal
+        component is recomputed from the restored Engine snapshot.  This
+        prevents an internally valid but mutated snapshot from borrowing the
+        original journal/record identities.
+        """
+
+        if not self._records:
+            return
+        snapshot = self.engine.last_snapshot
+        if not isinstance(snapshot, EngineSnapshot):
+            raise ShadowLiveError(
+                "shadow checkpoint terminal state drifted: "
+                "Engine snapshot is missing"
+            )
+        observation = snapshot.observation
+        event_sequences: list[Iterable[Any]] = [
+            observation.recent_events,
+            observation.semantic_events_this_update,
+            *observation.retained_entity_timelines.values(),
+        ]
+        market = snapshot.market_snapshot
+        if market is not None:
+            event_sequences.append(market.events_this_update)
+        store = self.engine.observer.audit_store
+        try:
+            for sequence in event_sequences:
+                for event in sequence:
+                    if (
+                        store.event_digest(event.event_id)
+                        != store.recompute_event_digest(event)
+                    ):
+                        raise ShadowLiveError(
+                            "observation event bytes differ from exact audit history"
+                        )
+        except (AttributeError, KeyError, TypeError, ValueError) as error:
+            if isinstance(error, ShadowLiveError):
+                raise
+            raise ShadowLiveError(
+                "observation event bytes differ from exact audit history"
+            ) from error
+
+        terminal_values = self._component_digest_bundle(
+            snapshot
+        ).as_record_fields()
+        final_record = self._records[-1]
+        mismatches = tuple(
+            name
+            for name, value in terminal_values.items()
+            if getattr(final_record, name) != value
+        )
+        if mismatches:
+            raise ShadowLiveError(
+                "shadow checkpoint terminal parity components differ: "
+                + ",".join(mismatches)
+            )
+
+    def _foundation_authority_digest(
+        self,
+        *,
+        validate_audit_registry: bool,
+    ) -> str:
+        """Validate the mutable foundation authority behind its snapshot."""
+
+        observer = self.engine.observer
+        adapter = getattr(observer, "_foundation_adapter", None)
+        published_market = getattr(observer, "last_market_snapshot", None)
+        snapshot = self.engine.last_snapshot
+        snapshot_market = (
+            snapshot.market_snapshot
+            if isinstance(snapshot, EngineSnapshot)
+            else None
+        )
+        if published_market != snapshot_market:
+            raise ShadowLiveError(
+                "checkpoint foundation authority differs from Engine snapshot"
+            )
+        published_projection = (
+            None if published_market is None else published_market.foundation
+        )
+        if adapter is None:
+            if published_projection is not None:
+                raise ShadowLiveError(
+                    "checkpoint foundation authority is missing"
+                )
+            return _digest_primitive(None)
+        authoritative_tick_size = float(observer.config.tick_size)
+        protocol_tick_size = float(
+            dict(self.protocol.instrument_mapping)["tick_size"]
+        )
+        if (
+            float(adapter.tick_size) != authoritative_tick_size
+            or protocol_tick_size != authoritative_tick_size
+        ):
+            raise ShadowLiveError(
+                "checkpoint foundation tick size differs from runtime authority"
+            )
+        if getattr(adapter, "_staged_transaction_open", None) is not False:
+            raise ShadowLiveError(
+                "checkpoint foundation transaction is not committed"
+            )
+        try:
+            rebuilt_lifecycle = type(adapter.lifecycle)(
+                **{
+                    item.name: getattr(adapter.lifecycle, item.name)
+                    for item in fields(adapter.lifecycle)
+                    if item.init
+                }
+            )
+        except Exception as error:
+            raise ShadowLiveError(
+                "checkpoint foundation lifecycle is not canonical"
+            ) from error
+        if rebuilt_lifecycle != adapter.lifecycle:
+            raise ShadowLiveError(
+                "checkpoint foundation lifecycle is not canonical"
+            )
+        expected_projection = (
+            adapter.projection if adapter.projection.records else None
+        )
+        if expected_projection != published_projection:
+            raise ShadowLiveError(
+                "checkpoint foundation authority differs from published projection"
+            )
+        try:
+            checkpoint = adapter.checkpoint()
+        except Exception as error:
+            raise ShadowLiveError(
+                "checkpoint foundation authority is invalid"
+            ) from error
+
+        if validate_audit_registry:
+            audit_events = observer.audit_store.events()
+            authoritative_events = tuple(
+                sorted(
+                    (
+                        event
+                        for event in audit_events
+                        if event.origin
+                        in {
+                            EventOrigin.NORMALIZED_DATA,
+                            EventOrigin.SEMANTIC_ATOMIC,
+                        }
+                    ),
+                    key=lambda event: (
+                        event.known_at,
+                        event.sequence_no,
+                        event.event_id,
+                    ),
+                )
+            )
+            expected_fingerprints = {
+                event.event_id: content_hash(event)
+                for event in authoritative_events
+            }
+            expected_metadata = {
+                event.event_id: (event.known_at, event.origin)
+                for event in authoritative_events
+            }
+            expected_last_order = (
+                None
+                if not authoritative_events
+                else (
+                    authoritative_events[-1].known_at,
+                    authoritative_events[-1].sequence_no,
+                    authoritative_events[-1].event_id,
+                )
+            )
+            if (
+                type(adapter._seen_event_fingerprints) is not dict
+                or type(adapter._seen_event_metadata) is not dict
+                or adapter._seen_event_fingerprints
+                != expected_fingerprints
+                or adapter._seen_event_metadata != expected_metadata
+                or adapter._last_order != expected_last_order
+            ):
+                raise ShadowLiveError(
+                    "checkpoint foundation source registry differs from audit history"
+                )
+            try:
+                from .foundation_adapter import CanonicalFoundationAdapter
+                from .market_state import foundation_record_from_projection_event
+                from .semantic_foundation import (
+                    FoundationObjectType,
+                    FoundationProjectionReducer,
+                )
+                from .semantic_lifecycle import (
+                    AppliedTransition,
+                    BoundaryAttackFact,
+                    NormalizedLifecycleTransition,
+                    NormalizedTransitionKind,
+                    canonical_semantic_id,
+                )
+
+                replayed = CanonicalFoundationAdapter(
+                    tick_size=authoritative_tick_size
+                )
+                replayed.consume_batch(authoritative_events)
+                foundation_records = tuple(
+                    foundation_record_from_projection_event(event)
+                    for event in audit_events
+                    if event.kind is EventKind.FOUNDATION_STATE_CHANGED
+                )
+                replayed_projection = FoundationProjectionReducer.replay(
+                    foundation_records
+                )
+            except Exception as error:
+                raise ShadowLiveError(
+                    "checkpoint foundation audit replay failed"
+                ) from error
+            if adapter.projection != replayed_projection:
+                raise ShadowLiveError(
+                    "checkpoint foundation projection differs from audit replay"
+                )
+            replayed_applied = {
+                item.fact_id: item
+                for item in replayed.lifecycle.applied_transitions
+            }
+            actual_applied = {
+                item.fact_id: item
+                for item in adapter.lifecycle.applied_transitions
+            }
+            manual_applied: dict[str, Any] = {}
+            try:
+                real_bars: dict[tuple[str, pd.Timestamp], Any] = {}
+                relation_states: dict[tuple[str, pd.Timestamp], Mapping[str, Any]] = {}
+                for event in audit_events:
+                    if (
+                        event.kind is EventKind.BAR_COMPLETED
+                        and event.origin is EventOrigin.NORMALIZED_DATA
+                        and event.evidence.get("real_completed") is True
+                        and event.evidence.get("clock_only") is False
+                    ):
+                        key = (event.timeframe.value, event.known_at)
+                        if key in real_bars:
+                            raise ValueError(
+                                "foundation audit repeats one real native BAR"
+                            )
+                        real_bars[key] = event
+                    elif (
+                        event.kind is EventKind.RELATION_STATE_CHANGED
+                        and event.origin is EventOrigin.STATE_PROJECTION
+                    ):
+                        primitive = event.evidence.get("projection_state")
+                        relation_id = event.evidence.get("state_id")
+                        if (
+                            not isinstance(primitive, Mapping)
+                            or not isinstance(relation_id, str)
+                            or primitive.get("relation_id") != relation_id
+                            or pd.Timestamp(primitive.get("known_at"))
+                            != event.known_at
+                        ):
+                            raise ValueError(
+                                "foundation relation projection is invalid"
+                            )
+                        key = (relation_id, event.known_at)
+                        if key in relation_states:
+                            raise ValueError(
+                                "foundation audit repeats one relation projection"
+                            )
+                        relation_states[key] = primitive
+
+                def exact_bar(timeframe: object, clock: object) -> Any:
+                    key = (str(getattr(timeframe, "value", timeframe)), pd.Timestamp(clock))
+                    try:
+                        return real_bars[key]
+                    except KeyError as error:
+                        raise ValueError(
+                            "foundation manual transition lacks its exact BAR"
+                        ) from error
+
+                def register_manual(
+                    transition: NormalizedLifecycleTransition,
+                ) -> None:
+                    value = AppliedTransition(
+                        fact_id=transition.fact_id,
+                        fingerprint=content_hash(transition),
+                        known_at=transition.known_at,
+                    )
+                    previous = manual_applied.get(value.fact_id)
+                    if previous is not None and previous != value:
+                        raise ValueError(
+                            "foundation manual transition identity conflicts"
+                        )
+                    manual_applied[value.fact_id] = value
+
+                records_by_clock: dict[pd.Timestamp, list[Any]] = {}
+                structures: dict[str, Mapping[str, Any]] = {}
+                raw_record_ids = {
+                    record.record_id
+                    for record in replayed.projection.records
+                }
+                for record in replayed_projection.records:
+                    records_by_clock.setdefault(record.known_at, []).append(record)
+                    if (
+                        record.object_type
+                        is FoundationObjectType.STRUCTURE_GENERATION
+                    ):
+                        structures[record.object_id] = record.payload
+
+                active_relations: dict[
+                    tuple[str, str], Mapping[str, Any]
+                ] = {}
+                latest_records: dict[tuple[Any, str], Any] = {}
+                reset_clocks = {
+                    event.known_at
+                    for event in authoritative_events
+                    if event.kind is EventKind.MARKET_EPOCH_RESET
+                }
+                manual_retirement_reasons = {
+                    "reference_rollover",
+                    "supersession",
+                    "source_retired",
+                    "source_range_terminated",
+                    "structure_generation_terminated",
+                }
+                for clock, clock_records in records_by_clock.items():
+                    relation_active_before = (
+                        {}
+                        if clock in reset_clocks
+                        else dict(active_relations)
+                    )
+                    active_relation_pairs = {
+                        (
+                            str(record.payload["parent_tf"]),
+                            str(record.payload["child_tf"]),
+                        )
+                        for record in clock_records
+                        if record.object_type
+                        is FoundationObjectType.RELATION_GENERATION
+                        and record.payload.get("lifecycle") == "active"
+                    }
+                    for record in clock_records:
+                        payload = record.payload
+                        record_key = (record.object_type, record.object_id)
+                        previous_record = latest_records.get(record_key)
+                        if record.record_id in raw_record_ids:
+                            latest_records[record_key] = record
+                            continue
+
+                        if (
+                            record.object_type
+                            is FoundationObjectType.RELATION_GENERATION
+                        ):
+                            pair = (
+                                str(payload["parent_tf"]),
+                                str(payload["child_tf"]),
+                            )
+                            lifecycle = payload.get("lifecycle")
+                            if lifecycle == "active":
+                                relation_id = str(payload["source_relation_id"])
+                                relation = relation_states[(relation_id, clock)]
+                                parent_id = str(
+                                    payload["parent_structure_generation_id"]
+                                )
+                                child_id = str(
+                                    payload["child_structure_generation_id"]
+                                )
+                                parent = structures[parent_id]
+                                child = structures[child_id]
+                                source_ids: list[str] = [
+                                    str(parent["confirmation_event_id"]),
+                                    str(child["confirmation_event_id"]),
+                                ]
+                                prior = relation_active_before.get(pair)
+                                prior_clock = (
+                                    None
+                                    if prior is None
+                                    else pd.Timestamp(prior["last_updated_at"])
+                                )
+                                for timeframe_key, cutoff_key in (
+                                    ("parent_tf", "parent_source_cutoff"),
+                                    ("child_tf", "child_source_cutoff"),
+                                ):
+                                    cutoff = relation.get(cutoff_key)
+                                    if cutoff is None:
+                                        continue
+                                    cutoff_clock = pd.Timestamp(cutoff)
+                                    if (
+                                        prior_clock is None
+                                        or cutoff_clock > prior_clock
+                                    ):
+                                        source_ids.append(
+                                            exact_bar(
+                                                relation[timeframe_key],
+                                                cutoff_clock,
+                                            ).event_id
+                                        )
+                                source_ids.append(
+                                    exact_bar("1m", clock).event_id
+                                )
+                                sources = tuple(dict.fromkeys(source_ids))
+                                if any(
+                                    identity not in record.source_event_ids
+                                    for identity in sources
+                                ):
+                                    raise ValueError(
+                                        "relation observation ancestry differs"
+                                    )
+                                # The technical relation event is emitted
+                                # before Foundation DOL identities are mapped
+                                # into the public snapshot.  The exact final
+                                # RelationState digest is therefore carried by
+                                # this audit-bound FoundationRecord revision;
+                                # its identity/directions/cutoffs still come
+                                # from the same-clock technical projection.
+                                relation_digest = str(
+                                    payload["latest_relation_digest"]
+                                )
+                                transition = NormalizedLifecycleTransition(
+                                    fact_id=canonical_semantic_id(
+                                        "relation-observation",
+                                        relation_id,
+                                        clock,
+                                        parent_id,
+                                        child_id,
+                                        payload["role"],
+                                    ),
+                                    kind=(
+                                        NormalizedTransitionKind.RELATION_OBSERVED
+                                    ),
+                                    known_at=clock,
+                                    timeframe=payload["child_tf"],
+                                    source_event_ids=sources,
+                                    payload={
+                                        "source_relation_id": relation_id,
+                                        "parent_tf": payload["parent_tf"],
+                                        "child_tf": payload["child_tf"],
+                                        "parent_structure_generation_id": parent_id,
+                                        "child_structure_generation_id": child_id,
+                                        "role": payload["role"],
+                                        "parent_direction": relation.get(
+                                            "parent_direction"
+                                        ),
+                                        "child_direction": relation.get(
+                                            "child_direction"
+                                        ),
+                                        "relation_digest": relation_digest,
+                                    },
+                                )
+                                register_manual(transition)
+                            elif (
+                                lifecycle == "terminated"
+                                and pair not in active_relation_pairs
+                                and payload.get("termination_reason")
+                                in {"parent_invalidated", "child_realigned"}
+                            ):
+                                source = exact_bar("1m", clock).event_id
+                                reason = str(payload["termination_reason"])
+                                prior_sources = (
+                                    set()
+                                    if previous_record is None
+                                    else set(previous_record.source_event_ids)
+                                )
+                                new_sources = tuple(
+                                    identity
+                                    for identity in record.source_event_ids
+                                    if identity not in prior_sources
+                                )
+                                if new_sources == (source,):
+                                    register_manual(
+                                        NormalizedLifecycleTransition(
+                                            fact_id=canonical_semantic_id(
+                                                "foundation-adapter-relation-terminal",
+                                                record.object_id,
+                                                reason,
+                                                clock,
+                                                source,
+                                            ),
+                                            kind=(
+                                                NormalizedTransitionKind.RELATION_TERMINATED
+                                            ),
+                                            known_at=clock,
+                                            timeframe=payload["child_tf"],
+                                            source_event_ids=(source,),
+                                            payload={
+                                                "relation_generation_id": (
+                                                    record.object_id
+                                                ),
+                                                "reason": reason,
+                                            },
+                                        )
+                                    )
+
+                        elif (
+                            record.object_type
+                            is FoundationObjectType.DELIVERY_PHASE_GENERATION
+                        ):
+                            lifecycle = payload.get("lifecycle")
+                            if lifecycle == "active":
+                                parent_id = str(
+                                    payload["parent_structure_generation_id"]
+                                )
+                                parent = structures[parent_id]
+                                native_bar = exact_bar(
+                                    payload["timeframe"], clock
+                                )
+                                sources = tuple(
+                                    dict.fromkeys(
+                                        (
+                                            str(parent["confirmation_event_id"]),
+                                            str(payload["origin_event_id"]),
+                                            native_bar.event_id,
+                                        )
+                                    )
+                                )
+                                if any(
+                                    identity not in record.source_event_ids
+                                    for identity in sources
+                                ):
+                                    raise ValueError(
+                                        "delivery observation ancestry differs"
+                                    )
+                                register_manual(
+                                    NormalizedLifecycleTransition(
+                                        fact_id=canonical_semantic_id(
+                                            "delivery-observation",
+                                            payload["timeframe"],
+                                            clock,
+                                            parent_id,
+                                            payload["phase"],
+                                            payload["origin_event_id"],
+                                        ),
+                                        kind=(
+                                            NormalizedTransitionKind.DELIVERY_PHASE_OBSERVED
+                                        ),
+                                        known_at=clock,
+                                        timeframe=payload["timeframe"],
+                                        source_event_ids=sources,
+                                        payload={
+                                            "phase": payload["phase"],
+                                            "parent_structure_generation_id": parent_id,
+                                            "origin_event_id": payload[
+                                                "origin_event_id"
+                                            ],
+                                            "current_price_ticks": payload[
+                                                "current_price_ticks"
+                                            ],
+                                            "extension_ticks": None,
+                                            "retracement_ticks": None,
+                                        },
+                                    )
+                                )
+                            elif (
+                                lifecycle == "terminated"
+                                and payload.get("termination_reason")
+                                == "parent_structure_terminated"
+                            ):
+                                source = exact_bar(
+                                    payload["timeframe"], clock
+                                ).event_id
+                                reason = str(payload["termination_reason"])
+                                prior_sources = (
+                                    set()
+                                    if previous_record is None
+                                    else set(previous_record.source_event_ids)
+                                )
+                                new_sources = tuple(
+                                    identity
+                                    for identity in record.source_event_ids
+                                    if identity not in prior_sources
+                                )
+                                if new_sources == (source,):
+                                    register_manual(
+                                        NormalizedLifecycleTransition(
+                                            fact_id=canonical_semantic_id(
+                                                "foundation-adapter-delivery-terminal",
+                                                record.object_id,
+                                                reason,
+                                                clock,
+                                                source,
+                                            ),
+                                            kind=(
+                                                NormalizedTransitionKind.DELIVERY_PHASE_TERMINATED
+                                            ),
+                                            known_at=clock,
+                                            timeframe=payload["timeframe"],
+                                            source_event_ids=(source,),
+                                            payload={
+                                                "delivery_generation_id": (
+                                                    record.object_id
+                                                ),
+                                                "reason": reason,
+                                            },
+                                        )
+                                    )
+
+                        elif (
+                            record.object_type
+                            is FoundationObjectType.LIQUIDITY_LEVEL
+                            and payload.get("lifecycle") == "retired"
+                            and payload.get("retirement_reason")
+                            in manual_retirement_reasons
+                            and previous_record is not None
+                            and previous_record.payload.get("lifecycle")
+                            not in {"retired", "archived"}
+                        ):
+                            previous_sources = set(
+                                previous_record.source_event_ids
+                            )
+                            sources = tuple(
+                                identity
+                                for identity in record.source_event_ids
+                                if identity not in previous_sources
+                            )
+                            if not sources:
+                                raise ValueError(
+                                    "liquidity retirement lacks a new cause"
+                                )
+                            reason = str(payload["retirement_reason"])
+                            level_id = str(payload["level_id"])
+                            register_manual(
+                                NormalizedLifecycleTransition(
+                                    fact_id=canonical_semantic_id(
+                                        "foundation-adapter-level-retirement",
+                                        level_id,
+                                        reason,
+                                        clock,
+                                        *sources,
+                                    ),
+                                    kind=(
+                                        NormalizedTransitionKind.LIQUIDITY_LEVEL_RETIRED
+                                    ),
+                                    known_at=clock,
+                                    timeframe=payload["source_timeframe"],
+                                    source_event_ids=sources,
+                                    payload={
+                                        "level_id": level_id,
+                                        "reason": reason,
+                                    },
+                                )
+                            )
+
+                        if (
+                            record.object_type
+                            is FoundationObjectType.BOUNDARY_ATTACK
+                        ):
+                            boundary = BoundaryAttackFact(**dict(record.payload))
+                            bar = observer.audit_store.get(
+                                boundary.bar_event_id
+                            )
+                            if (
+                                bar is None
+                                or bar.kind is not EventKind.BAR_COMPLETED
+                                or bar.origin is not EventOrigin.NORMALIZED_DATA
+                            ):
+                                raise ValueError(
+                                    "boundary attack BAR is absent from audit history"
+                                )
+                            register_manual(
+                                NormalizedLifecycleTransition(
+                                    fact_id=canonical_semantic_id(
+                                        "observer-boundary-attack",
+                                        boundary.bos_generation_id,
+                                        boundary.bar_event_id,
+                                    ),
+                                    kind=(
+                                        NormalizedTransitionKind.BOUNDARY_ATTACK_OBSERVED
+                                    ),
+                                    known_at=boundary.known_at,
+                                    timeframe=boundary.timeframe,
+                                    source_event_ids=boundary.source_event_ids,
+                                    payload={
+                                        "bos_generation_id": (
+                                            boundary.bos_generation_id
+                                        ),
+                                        "direction": boundary.direction.value,
+                                        "target_swing_event_id": (
+                                            boundary.target_swing_event_id
+                                        ),
+                                        "bar_event_id": boundary.bar_event_id,
+                                        "boundary_ticks": (
+                                            boundary.boundary_ticks
+                                        ),
+                                        "high_ticks": price_to_ticks(
+                                            bar.evidence["high"],
+                                            authoritative_tick_size,
+                                            name="boundary attack high",
+                                        ),
+                                        "low_ticks": price_to_ticks(
+                                            bar.evidence["low"],
+                                            authoritative_tick_size,
+                                            name="boundary attack low",
+                                        ),
+                                        "close_ticks": price_to_ticks(
+                                            bar.evidence["close"],
+                                            authoritative_tick_size,
+                                            name="boundary attack close",
+                                        ),
+                                    },
+                                )
+                            )
+
+                        latest_records[record_key] = record
+
+                    for record in clock_records:
+                        if (
+                            record.object_type
+                            is not FoundationObjectType.RELATION_GENERATION
+                        ):
+                            continue
+                        payload = record.payload
+                        pair = (
+                            str(payload["parent_tf"]),
+                            str(payload["child_tf"]),
+                        )
+                        if payload.get("lifecycle") == "active":
+                            active_relations[pair] = payload
+                        elif (
+                            active_relations.get(pair, {}).get(
+                                "relation_generation_id"
+                            )
+                            == record.object_id
+                        ):
+                            active_relations.pop(pair, None)
+            except Exception as error:
+                raise ShadowLiveError(
+                    "checkpoint foundation manual transition replay failed"
+                ) from error
+            expected_applied = {**replayed_applied, **manual_applied}
+            expected_lifecycle_asof = (
+                None
+                if not expected_applied
+                else max(item.known_at for item in expected_applied.values())
+            )
+            if actual_applied != expected_applied:
+                actual_only = tuple(
+                    sorted(set(actual_applied) - set(expected_applied))
+                )
+                expected_only = tuple(
+                    sorted(set(expected_applied) - set(actual_applied))
+                )
+                changed = tuple(
+                    sorted(
+                        identity
+                        for identity in set(actual_applied) & set(expected_applied)
+                        if actual_applied[identity]
+                        != expected_applied[identity]
+                    )
+                )
+                raise ShadowLiveError(
+                    "checkpoint foundation applied transition journal differs "
+                    f"(actual_only={actual_only[:3]}, "
+                    f"expected_only={expected_only[:3]}, "
+                    f"changed={changed[:3]})"
+                )
+            if (
+                adapter._real_bars != replayed._real_bars
+                or adapter._crossings != replayed._crossings
+                or adapter._structure_bindings
+                != replayed._structure_bindings
+                or adapter.lifecycle.real_bar_clocks
+                != replayed.lifecycle.real_bar_clocks
+                or adapter.lifecycle.epoch != replayed.lifecycle.epoch
+                or adapter.lifecycle.semantic_version
+                != replayed.lifecycle.semantic_version
+                or adapter.lifecycle.asof != expected_lifecycle_asof
+            ):
+                raise ShadowLiveError(
+                    "checkpoint foundation authority differs from audit replay"
+                )
+            lifecycle_record_types = {
+                "levels": (
+                    FoundationObjectType.LIQUIDITY_LEVEL,
+                    "level_id",
+                ),
+                "interactions": (
+                    FoundationObjectType.LIQUIDITY_INTERACTION_GENERATION,
+                    "generation_id",
+                ),
+                "structure_transitions": (
+                    FoundationObjectType.STRUCTURE_TRANSITION,
+                    "structure_transition_id",
+                ),
+                "structure_generations": (
+                    FoundationObjectType.STRUCTURE_GENERATION,
+                    "structure_generation_id",
+                ),
+                "relation_generations": (
+                    FoundationObjectType.RELATION_GENERATION,
+                    "relation_generation_id",
+                ),
+                "delivery_generations": (
+                    FoundationObjectType.DELIVERY_PHASE_GENERATION,
+                    "delivery_generation_id",
+                ),
+                "boundary_attacks": (
+                    FoundationObjectType.BOUNDARY_ATTACK,
+                    "boundary_attack_id",
+                ),
+            }
+            for (
+                collection_name,
+                (object_type, identity_attribute),
+            ) in lifecycle_record_types.items():
+                published: list[tuple[str, str]] = []
+                published_indexes: dict[str, int] = {}
+                for record in replayed_projection.records:
+                    if record.object_type is not object_type:
+                        continue
+                    value = (
+                        record.object_id,
+                        content_hash(record.payload),
+                    )
+                    index = published_indexes.get(record.object_id)
+                    if index is None:
+                        published_indexes[record.object_id] = len(published)
+                        published.append(value)
+                    else:
+                        published[index] = value
+                actual = tuple(
+                    (
+                        getattr(item, identity_attribute),
+                        content_hash(to_primitive(item)),
+                    )
+                    for item in getattr(adapter.lifecycle, collection_name)
+                )
+                if actual != tuple(published):
+                    raise ShadowLiveError(
+                        "checkpoint foundation lifecycle differs from audit replay"
+                    )
+        return checkpoint.checkpoint_digest
+
     def __getstate__(self) -> dict[str, Any]:
         state = dict(self.__dict__)
         state.pop("_record_sequence_digest", None)
@@ -1648,6 +2572,8 @@ class ShadowLiveRunner:
         self._rebuild_component_digest_caches()
         self._require_internal_consistency()
         self._require_runtime_bindings()
+        self._require_terminal_snapshot_exact()
+        self._foundation_authority_digest(validate_audit_registry=True)
         audit = audit_shadow_parity(self, self)
         if any(
             value != "non_independent_runner_alias"
@@ -1679,11 +2605,14 @@ class ShadowLiveRunner:
         self._require_runtime_bindings()
         if self._failure is not None or self.gateway.submission_attempts != 0:
             raise ShadowLiveError("only a healthy no-order runner can checkpoint")
-        return {
+        current_schema = (
+            self._component_digest_version
+            == SHADOW_COMPONENT_DIGEST_VERSION
+        )
+        checkpoint = {
             "schema_version": (
                 SHADOW_COMPACT_RUNTIME_CHECKPOINT_SCHEMA
-                if self._component_digest_version
-                == SHADOW_COMPONENT_DIGEST_VERSION
+                if current_schema
                 else _LEGACY_SHADOW_COMPACT_RUNTIME_CHECKPOINT_SCHEMA
             ),
             "engine": self.engine,
@@ -1702,6 +2631,13 @@ class ShadowLiveRunner:
             ),
             "external_submission_attempts": 0,
         }
+        if current_schema:
+            checkpoint["foundation_authority_digest"] = (
+                self._foundation_authority_digest(
+                    validate_audit_registry=False
+                )
+            )
+        return checkpoint
 
     @classmethod
     def from_compact_runtime_checkpoint(
@@ -1713,7 +2649,7 @@ class ShadowLiveRunner:
     ) -> "ShadowLiveRunner":
         """Restore compact runtime state against exact WAL-backed histories."""
 
-        expected_fields = {
+        common_fields = {
             "schema_version",
             "engine",
             "protocol",
@@ -1729,12 +2665,19 @@ class ShadowLiveRunner:
             "last_record_id",
             "external_submission_attempts",
         }
+        schema_version = state.get("schema_version")
+        expected_fields = common_fields | (
+            {"foundation_authority_digest"}
+            if schema_version == SHADOW_COMPACT_RUNTIME_CHECKPOINT_SCHEMA
+            else set()
+        )
         if (
             not isinstance(state, Mapping)
             or set(state) != expected_fields
             or state.get("schema_version")
             not in {
                 SHADOW_COMPACT_RUNTIME_CHECKPOINT_SCHEMA,
+                _PREVIOUS_SHADOW_COMPACT_RUNTIME_CHECKPOINT_SCHEMA,
                 _LEGACY_SHADOW_COMPACT_RUNTIME_CHECKPOINT_SCHEMA,
             }
             or state.get("external_submission_attempts") != 0
@@ -1743,8 +2686,24 @@ class ShadowLiveRunner:
             or len(journal_events) != len(records)
         ):
             raise ShadowLiveError("compact shadow runtime checkpoint changed")
+        # ``state`` is a public mapping API and callers may pass a live object
+        # graph rather than bytes just decoded by pickle.  Normalize the
+        # Engine through its canonical pickle boundary so every nested owner
+        # (EventStore, FoundationProjection, FoundationAdapter, and Engine)
+        # drops/rebuilds derived indexes before any fingerprint is trusted.
+        try:
+            restored_engine = pickle.loads(
+                pickle.dumps(
+                    state["engine"],
+                    protocol=pickle.HIGHEST_PROTOCOL,
+                )
+            )
+        except Exception as error:
+            raise ShadowLiveError(
+                "compact checkpoint Engine state cannot be revalidated"
+            ) from error
         runner = cls.__new__(cls)
-        runner.engine = state["engine"]
+        runner.engine = restored_engine
         runner.protocol = state["protocol"]
         runner.runtime_bindings = tuple(state["runtime_bindings"])
         runner.model_config_path = Path(state["model_config_path"])
@@ -1764,20 +2723,36 @@ class ShadowLiveRunner:
         runner._by_feed_id = {record.feed_event_id: record for record in records}
         runner._failure = None
         runner._rebuild_component_digest_caches()
-        expected_checkpoint_schema = (
-            SHADOW_COMPACT_RUNTIME_CHECKPOINT_SCHEMA
+        expected_checkpoint_schemas = (
+            {
+                SHADOW_COMPACT_RUNTIME_CHECKPOINT_SCHEMA,
+                _PREVIOUS_SHADOW_COMPACT_RUNTIME_CHECKPOINT_SCHEMA,
+            }
             if runner._component_digest_version
             == SHADOW_COMPONENT_DIGEST_VERSION
-            else _LEGACY_SHADOW_COMPACT_RUNTIME_CHECKPOINT_SCHEMA
+            else {_LEGACY_SHADOW_COMPACT_RUNTIME_CHECKPOINT_SCHEMA}
         )
         if any(
             record.feed_event_id != value.feed_event_id
             or record.input_digest != value.input_digest
             for record, value in zip(records, journal_events, strict=True)
-        ) or state.get("schema_version") != expected_checkpoint_schema:
+        ) or state.get("schema_version") not in expected_checkpoint_schemas:
             raise ShadowLiveError("compact checkpoint histories do not align")
         runner._require_internal_consistency()
         runner._require_runtime_bindings()
+        restored_foundation_digest = runner._foundation_authority_digest(
+            validate_audit_registry=True
+        )
+        if (
+            state.get("schema_version")
+            == SHADOW_COMPACT_RUNTIME_CHECKPOINT_SCHEMA
+            and restored_foundation_digest
+            != state.get("foundation_authority_digest")
+        ):
+            raise ShadowLiveError(
+                "compact checkpoint foundation authority differs"
+            )
+        runner._require_terminal_snapshot_exact()
         if (
             runner.journal.fingerprint != state["journal_fingerprint"]
             or runner.journal.attempt_fingerprint

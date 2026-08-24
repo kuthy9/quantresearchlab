@@ -277,6 +277,60 @@ def test_structural_leg_freezes_complete_path_and_strict_prior_atr() -> None:
     assert with_future == leg
 
 
+def test_structural_leg_atr_excludes_a_future_ending_warmup_candle() -> None:
+    ordinary_warmup = tuple(_candle(index) for index in range(15))
+    path = (
+        _candle(15, low=99.0, close=100.0),
+        _candle(16, high=103.0, close=102.0),
+    )
+    future_ending = replace(
+        ordinary_warmup[5],
+        end=path[-1].end + pd.Timedelta(5, unit="min"),
+        high=150.0,
+        low=50.0,
+        normalized_ohlc_ticks=None,
+    )
+    warmup = (
+        *ordinary_warmup[:5],
+        future_ending,
+        *ordinary_warmup[6:],
+    )
+    low = _swing(
+        "future-end-low",
+        SwingSide.LOW,
+        99.0,
+        path[0].start,
+        path[0].end + pd.Timedelta(5, unit="min"),
+    )
+    high = _swing(
+        "future-end-high",
+        SwingSide.HIGH,
+        103.0,
+        path[-1].start,
+        path[-1].end + pd.Timedelta(5, unit="min"),
+    )
+
+    leg = build_structural_legs(
+        Timeframe.M5,
+        (low, high),
+        (*warmup, *path),
+        tick_size=0.25,
+    )[0]
+    expected_sources = (
+        *ordinary_warmup[:5],
+        *ordinary_warmup[6:],
+    )
+
+    assert leg.atr_at_leg_start == pytest.approx(2.0)
+    assert leg.atr_source_candle_ids == tuple(
+        candle_identity(candle, tick_size=0.25)
+        for candle in expected_sources
+    )
+    assert candle_identity(future_ending, tick_size=0.25) not in (
+        leg.atr_source_candle_ids
+    )
+
+
 def test_structural_leg_cold_prefix_fails_closed_or_uses_frozen_start_atr() -> None:
     path = (
         _candle(14, open_=100.0, high=101.0, low=99.0, close=100.0),

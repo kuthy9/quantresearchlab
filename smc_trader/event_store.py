@@ -472,6 +472,22 @@ class ImmutableEventStore:
             Timeframe, str
         ] = {}
         self._unresolved_forward_reference_ids: set[str] = set()
+        self._rebuild_fingerprint_cache()
+
+    def _rebuild_fingerprint_cache(self) -> None:
+        """Rebuild the exact full-prefix SHA-256 from canonical event digests."""
+
+        digest = hashlib.sha256()
+        if self.semantic_definition_identity is None:
+            digest.update(self.semantic_version.encode("utf-8"))
+        else:
+            digest.update(b"smc-event-store-definition-bound-v1\0")
+            digest.update(self.semantic_version.encode("utf-8"))
+            digest.update(b"\0")
+            digest.update(self.semantic_definition_identity.encode("ascii"))
+        for event in self._events:
+            digest.update(self._digests[event.event_id].encode("ascii"))
+        self._full_prefix_fingerprint_hasher = digest
 
     @property
     def definition_identity(self) -> SemanticDefinitionIdentity | None:
@@ -513,6 +529,18 @@ class ImmutableEventStore:
             == other.semantic_definition_identity
             and self._events == other._events
         )
+
+    def __getstate__(self) -> dict[str, Any]:
+        # Carry canonical evidence exactly once.  All maps and the prefix
+        # hasher are derived and are rebuilt/revalidated by ``__setstate__``.
+        return {
+            "semantic_version": self.semantic_version,
+            "_definition_identity": self._definition_identity,
+            "_definition_identity_digest": (
+                self._definition_identity_digest
+            ),
+            "_events": self._events,
+        }
 
     def __setstate__(self, state: Mapping[str, Any]) -> None:
         """Revalidate serialized history and rebuild every derived authority."""
@@ -577,6 +605,7 @@ class ImmutableEventStore:
         self._events.append(event)
         self._by_id[event.event_id] = event
         self._digests[event.event_id] = digest
+        self._full_prefix_fingerprint_hasher.update(digest.encode("ascii"))
         if bar_reservation is not None:
             key, event_id = bar_reservation
             self._normalized_bar_event_ids[key] = event_id
@@ -727,6 +756,9 @@ class ImmutableEventStore:
             self._events.append(event)
             self._by_id[event.event_id] = event
             self._digests[event.event_id] = digest
+            self._full_prefix_fingerprint_hasher.update(
+                digest.encode("ascii")
+            )
         self._terminal_crossing_event_ids.update(staged_terminal_event_ids)
         self._normalized_bar_event_ids.update(staged_bar_event_ids)
         self._latest_protected_assignment_event_ids.update(
@@ -3720,6 +3752,23 @@ class ImmutableEventStore:
     def get(self, event_id: str) -> MarketEvent | None:
         return self._by_id.get(event_id)
 
+    def event_digest(self, event_id: str) -> str:
+        """Return the exact immutable digest for one committed event."""
+
+        try:
+            return self._digests[event_id]
+        except KeyError as error:
+            raise KeyError(f"event store has no event: {event_id}") from error
+
+    def recompute_event_digest(self, event: MarketEvent) -> str:
+        """Digest supplied bytes for comparison with the same audit identity."""
+
+        if not isinstance(event, MarketEvent):
+            raise TypeError("event digest requires a MarketEvent")
+        if event.semantic_version != self.semantic_version:
+            raise ValueError("event digest semantic version differs")
+        return _event_digest(event)
+
     def events(
         self,
         *,
@@ -3731,6 +3780,8 @@ class ImmutableEventStore:
         return tuple(event for event in self._events if event.known_at <= cutoff)
 
     def fingerprint(self, *, known_at: pd.Timestamp | None = None) -> str:
+        if known_at is None:
+            return self._full_prefix_fingerprint_hasher.copy().hexdigest()
         return _fingerprint_from_digests(
             semantic_version=self.semantic_version,
             definition_identity=self.semantic_definition_identity,

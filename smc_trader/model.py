@@ -1,6 +1,7 @@
 """Shared immutable contracts for the continuous SMC engine."""
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field, fields, is_dataclass, replace
 from decimal import Decimal, InvalidOperation
 from enum import Enum
@@ -8,7 +9,7 @@ import hashlib
 import json
 import math
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Mapping
+from typing import TYPE_CHECKING, Any
 
 import pandas as pd
 
@@ -41,6 +42,66 @@ def _deep_freeze(value: Any) -> Any:
             )
         )
     return value
+
+
+def _strict_payload_equal(
+    left: Any,
+    right: Any,
+) -> bool:
+    """Compare evidence without Python's cross-type equality coercions.
+
+    ``dict.__eq__`` considers values such as ``True`` and ``1`` equal.  That
+    is not a safe basis for aliasing two canonical payloads because replacing
+    one with the other changes its primitive type and therefore its evidence
+    bytes.  Only recursively type-identical, supported primitive structures
+    may share one frozen mapping; unfamiliar objects conservatively remain
+    separate.
+    """
+
+    if left is right:
+        return True
+    if type(left) is not type(right):
+        return False
+    if isinstance(left, Mapping):
+        if len(left) != len(right):
+            return False
+        if all(type(key) is str for key in left) and all(
+            type(key) is str for key in right
+        ):
+            if set(left) != set(right):
+                return False
+            return all(
+                _strict_payload_equal(left[key], right[key])
+                for key in left
+            )
+        unmatched = list(right.items())
+        for left_key, left_value in left.items():
+            for index, (right_key, right_value) in enumerate(unmatched):
+                if not _strict_payload_equal(left_key, right_key):
+                    continue
+                if not _strict_payload_equal(left_value, right_value):
+                    return False
+                unmatched.pop(index)
+                break
+            else:
+                return False
+        return not unmatched
+    if isinstance(left, (tuple, list)):
+        return len(left) == len(right) and all(
+            _strict_payload_equal(left_item, right_item)
+            for left_item, right_item in zip(left, right, strict=True)
+        )
+    if isinstance(left, Enum):
+        return _strict_payload_equal(left.value, right.value)
+    if isinstance(left, pd.Timestamp):
+        return left.isoformat() == right.isoformat()
+    if isinstance(left, Path):
+        return str(left) == str(right)
+    if isinstance(left, float):
+        return left.hex() == right.hex()
+    if isinstance(left, (str, bytes, int, bool, type(None))):
+        return left == right
+    return False
 
 
 class FrozenDict(dict):
@@ -4888,8 +4949,22 @@ class MarketEvent:
         except (TypeError, ValueError) as error:
             raise ValueError("event origin is invalid") from error
         object.__setattr__(self, "origin", origin)
-        details = FrozenDict(self.details)
-        evidence = details if not self.evidence else FrozenDict(self.evidence)
+        raw_details = self.details
+        raw_evidence = self.evidence
+        details = FrozenDict(raw_details)
+        # ``details`` is the legacy name of the canonical evidence mapping.
+        # Producers commonly supply both aliases with exactly the same
+        # immutable payload.  Share that one frozen value instead of retaining
+        # and serializing two complete copies on every historical event.
+        evidence = (
+            details
+            if (
+                not raw_evidence
+                or raw_evidence is raw_details
+                or _strict_payload_equal(raw_evidence, raw_details)
+            )
+            else FrozenDict(raw_evidence)
+        )
         object.__setattr__(self, "details", details)
         object.__setattr__(self, "evidence", evidence)
         source_namespaces: dict[str, tuple[str, ...]] = {}
@@ -10317,6 +10392,52 @@ class NeutralEngineSnapshot:
 
 
 def to_primitive(value: Any) -> Any:
+    # The component parity walk reaches this function millions of times per
+    # clock prefix.  Most leaves and containers are exact built-in types, so
+    # dispatch those without repeatedly invoking ABC/subclass machinery.  The
+    # fallback below intentionally preserves the original ``isinstance``
+    # ordering for subclasses such as IntEnum and custom Mapping objects.
+    value_type = type(value)
+    if (
+        value_type is str
+        or value_type is bytes
+        or value_type is int
+        or value_type is bool
+        or value is None
+    ):
+        return value
+    if value_type is float:
+        if not math.isfinite(value):
+            raise ValueError("cannot serialize a non-finite value")
+        return value
+    if value_type is pd.Timestamp:
+        return value.isoformat()
+    if value_type is dict or value_type is FrozenDict:
+        return {
+            str(key.value if isinstance(key, Enum) else key): to_primitive(item)
+            for key, item in value.items()
+        }
+    if value_type is tuple or value_type is list:
+        return [to_primitive(item) for item in value]
+    if isinstance(value, Enum):
+        return value.value
+    if isinstance(value, pd.Timestamp):
+        return value.isoformat()
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError("cannot serialize a non-finite value")
+        return value
+    if isinstance(value, (str, bytes, int, bool, type(None))):
+        return value
+    if isinstance(value, Mapping):
+        return {
+            str(key.value if isinstance(key, Enum) else key): to_primitive(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, (tuple, list)):
+        return [to_primitive(item) for item in value]
     if is_dataclass(value):
         # ``asdict`` recursively deep-copies the entire object graph before
         # this function recursively normalizes it a second time. Market
@@ -10326,20 +10447,6 @@ def to_primitive(value: Any) -> Any:
             item.name: to_primitive(getattr(value, item.name))
             for item in fields(value)
         }
-    if isinstance(value, Enum):
-        return value.value
-    if isinstance(value, pd.Timestamp):
-        return value.isoformat()
-    if isinstance(value, Path):
-        return str(value)
-    if isinstance(value, Mapping):
-        return {str(key.value if isinstance(key, Enum) else key): to_primitive(item) for key, item in value.items()}
-    if isinstance(value, (tuple, list)):
-        return [to_primitive(item) for item in value]
-    if isinstance(value, float):
-        if not math.isfinite(value):
-            raise ValueError("cannot serialize a non-finite value")
-        return value
     return value
 
 

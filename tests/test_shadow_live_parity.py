@@ -1,14 +1,20 @@
 from __future__ import annotations
 
+import copy
+from collections.abc import Mapping
 from dataclasses import replace
+import math
 import pickle
 from pathlib import Path
 
 import pandas as pd
 import pytest
+import smc_trader.event_store as event_store_module
 import smc_trader.shadow_live as shadow_live_module
 
 from smc_trader.engine import ContinuousSMCEngine
+from smc_trader.event_store import ImmutableEventStore
+from smc_trader.foundation_adapter import CanonicalFoundationAdapter
 from smc_trader.execution_fsm import (
     ExecutionFact,
     ExecutionFactKind,
@@ -21,7 +27,14 @@ from smc_trader.execution_fsm import (
     make_execution_event,
     risk_approve_trade_intent,
 )
-from smc_trader.model import AccountState, Bar
+from smc_trader.model import (
+    AccountState,
+    Bar,
+    EventKind,
+    EventOrigin,
+    MarketEvent,
+    Timeframe,
+)
 from smc_trader.foundation_registry import (
     FOUNDATION_CANONICAL_IDENTITY,
     FOUNDATION_VERSION,
@@ -429,7 +442,7 @@ def test_real_engine_shadow_stream_cold_replay_and_restart_are_exact() -> None:
     assert mismatch.terminal_fields == ("runner_terminal_state_unavailable",)
 
 
-def test_component_digest_version_is_explicit_and_legacy_v12_replays() -> None:
+def test_component_digest_versions_are_explicit_and_old_checkpoints_replay() -> None:
     protocol = load_shadow_live_protocol(PROTOCOL_PATH)
     value = _input(0)
     current = ShadowLiveRunner(
@@ -463,18 +476,91 @@ def test_component_digest_version_is_explicit_and_legacy_v12_replays() -> None:
         != legacy_record.market_snapshot_fingerprint
     )
     assert current.engine.last_snapshot == legacy.engine.last_snapshot
-    assert (
-        current.engine.observer.audit_store.fingerprint()
-        == legacy.engine.observer.audit_store.fingerprint()
+    assert current.engine.observer.audit_store.fingerprint() == (
+        legacy.engine.observer.audit_store.fingerprint()
     )
     assert legacy_record.observation_fingerprint == shadow_live_module._digest(
         legacy.engine.last_snapshot.observation
     )
-    assert legacy.compact_runtime_checkpoint()["schema_version"] == (
+    legacy_checkpoint = legacy.compact_runtime_checkpoint()
+    assert legacy_checkpoint["schema_version"] == (
         "shadow_compact_runtime_v1"
     )
-    assert current.compact_runtime_checkpoint()["schema_version"] == (
-        "shadow_compact_runtime_v2"
+    assert "foundation_authority_digest" not in legacy_checkpoint
+    restored_legacy_checkpoint = (
+        ShadowLiveRunner.from_compact_runtime_checkpoint(
+            pickle.loads(pickle.dumps(legacy_checkpoint)),
+            journal_events=legacy.journal.events,
+            records=legacy.records,
+        )
+    )
+    technical_kinds = {
+        EventKind.TIMEFRAME_STATE_CHANGED,
+        EventKind.RELATION_STATE_CHANGED,
+        EventKind.SESSION_STATE_CHANGED,
+    }
+    current_events = current.engine.observer.audit_store.events()
+    technical_events = tuple(
+        event for event in current_events if event.kind in technical_kinds
+    )
+    assert technical_events
+    # Technical projections remain the complete canonical replay payload.
+    # No plain or compact store can opt into a lossy commitment substitute.
+    assert all(
+        isinstance(event.details["projection_state"], Mapping)
+        and "projection_sha256" not in event.details["projection_state"]
+        for event in technical_events
+    )
+    assert all(event.details is event.evidence for event in current_events)
+    assert not hasattr(event_store_module, "RebuildableProjectionCommitment")
+    assert not hasattr(
+        event_store_module,
+        "REBUILDABLE_PROJECTION_COMMITMENT_VERSION",
+    )
+    with pytest.raises(TypeError):
+        ImmutableEventStore(rebuildable_projection_compaction=False)
+    assert ImmutableEventStore() == ImmutableEventStore()
+
+    state = dict(current.engine.observer.audit_store.__getstate__())
+    assert set(state) == {
+        "semantic_version",
+        "_definition_identity",
+        "_definition_identity_digest",
+        "_events",
+    }
+    # Previous checkpoints serialized these rebuildable indexes alongside the
+    # same canonical event sequence.  Current restore ignores and recomputes
+    # them, so the protocol remains backward compatible.
+    legacy_state = {
+        **state,
+        "_by_id": dict(current.engine.observer.audit_store._by_id),
+        "_digests": dict(current.engine.observer.audit_store._digests),
+        "_terminal_crossing_event_ids": dict(
+            current.engine.observer.audit_store._terminal_crossing_event_ids
+        ),
+    }
+    legacy_rebuilt = object.__new__(ImmutableEventStore)
+    legacy_rebuilt.__setstate__(legacy_state)
+    assert legacy_rebuilt.events() == tuple(current_events)
+    assert legacy_rebuilt.fingerprint() == (
+        current.engine.observer.audit_store.fingerprint()
+    )
+
+    current_checkpoint = current.compact_runtime_checkpoint()
+    assert current_checkpoint["schema_version"] == (
+        "shadow_compact_runtime_v3"
+    )
+    previous_checkpoint = copy.deepcopy(current_checkpoint)
+    previous_checkpoint["schema_version"] = "shadow_compact_runtime_v2"
+    previous_checkpoint.pop("foundation_authority_digest")
+    restored = ShadowLiveRunner.from_compact_runtime_checkpoint(
+        pickle.loads(pickle.dumps(previous_checkpoint)),
+        journal_events=current.journal.events,
+        records=current.records,
+    )
+    assert restored.process(_input(1)) == current.process(_input(1))
+    assert restored_legacy_checkpoint.process(_input(1)) == legacy.process(
+        _input(1)
     )
 
     restored_legacy = pickle.loads(pickle.dumps(legacy))
@@ -483,6 +569,493 @@ def test_component_digest_version_is_explicit_and_legacy_v12_replays() -> None:
         restored_legacy._component_digest_version  # noqa: SLF001
         == SHADOW_LEGACY_COMPONENT_DIGEST_VERSION
     )
+
+
+def test_component_digest_recomputes_mutable_hypotheses_without_a_cache() -> None:
+    runner = ShadowLiveRunner(
+        engine=_engine(),
+        protocol=load_shadow_live_protocol(PROTOCOL_PATH),
+        runtime_bindings=_bindings(),
+    )
+    runner.process(_input(0))
+    belief = runner.engine.last_snapshot.belief
+    assert belief.hypotheses
+    before = runner._component_digest_bundle(  # noqa: SLF001
+        runner.engine.last_snapshot
+    ).as_record_fields()
+
+    belief.hypotheses.pop(next(iter(belief.hypotheses)))
+    after = runner._component_digest_bundle(  # noqa: SLF001
+        runner.engine.last_snapshot
+    ).as_record_fields()
+
+    assert after["belief_fingerprint"] != before["belief_fingerprint"]
+    assert (
+        after["engine_snapshot_fingerprint"]
+        != before["engine_snapshot_fingerprint"]
+    )
+
+
+def test_observation_event_bytes_must_match_the_same_audit_identity() -> None:
+    runner = ShadowLiveRunner(
+        engine=_engine(),
+        protocol=load_shadow_live_protocol(PROTOCOL_PATH),
+        runtime_bindings=_bindings(),
+    )
+    runner.process(_input(0))
+    runner.process(_input(1))
+    snapshot = runner.engine.last_snapshot
+    recent = snapshot.observation.recent_events
+    assert recent
+    target = recent[-1]
+    tampered_event = replace(
+        target,
+        strength=1.0 if target.strength != 1.0 else 0.0,
+    )
+    assert tampered_event.event_id == target.event_id
+    assert tampered_event.sequence_no == target.sequence_no
+    assert tampered_event.strength != target.strength
+    tampered_observation = replace(
+        snapshot.observation,
+        recent_events=(*recent[:-1], tampered_event),
+    )
+    tampered_snapshot = replace(
+        snapshot,
+        observation=tampered_observation,
+    )
+
+    original_fields = runner._component_digest_bundle(  # noqa: SLF001
+        snapshot
+    ).as_record_fields()
+    tampered_fields = runner._component_digest_bundle(  # noqa: SLF001
+        tampered_snapshot
+    ).as_record_fields()
+    assert tampered_fields["observation_fingerprint"] != (
+        original_fields["observation_fingerprint"]
+    )
+    assert tampered_fields["engine_snapshot_fingerprint"] != (
+        original_fields["engine_snapshot_fingerprint"]
+    )
+
+    runner.engine._last_snapshot = tampered_snapshot
+    with pytest.raises(
+        ShadowLiveError,
+        match="event bytes differ from exact audit history",
+    ):
+        pickle.loads(pickle.dumps(runner))
+
+
+def test_market_event_evidence_alias_requires_strict_primitive_equality() -> None:
+    common = {
+        "kind": EventKind.SWING_STATE,
+        "observed_at": T0,
+        "timeframe": Timeframe.M1,
+        "side": None,
+        "price": None,
+        "strength": 0.0,
+    }
+    equal = MarketEvent(
+        event_id="strict-evidence-equal",
+        details={"flag": True, "nested": ("x", 1)},
+        evidence={"flag": True, "nested": ("x", 1)},
+        **common,
+    )
+    coercible_but_distinct = MarketEvent(
+        event_id="strict-evidence-bool-int",
+        details={"value": True},
+        evidence={"value": 1},
+        **common,
+    )
+
+    assert equal.details is equal.evidence
+    assert coercible_but_distinct.details is not coercible_but_distinct.evidence
+    assert type(coercible_but_distinct.details["value"]) is bool
+    assert type(coercible_but_distinct.evidence["value"]) is int
+
+
+def test_compact_checkpoint_recomputes_terminal_engine_components() -> None:
+    runner = ShadowLiveRunner(
+        engine=_engine(),
+        protocol=load_shadow_live_protocol(PROTOCOL_PATH),
+        runtime_bindings=_bindings(),
+    )
+    runner.process(_input(0))
+    checkpoint = copy.deepcopy(runner.compact_runtime_checkpoint())
+    belief = checkpoint["engine"].last_snapshot.belief
+    assert belief.hypotheses
+    belief.hypotheses.pop(next(iter(belief.hypotheses)))
+
+    with pytest.raises(
+        ShadowLiveError,
+        match="terminal parity components differ",
+    ):
+        ShadowLiveRunner.from_compact_runtime_checkpoint(
+            checkpoint,
+            journal_events=runner.journal.events,
+            records=runner.records,
+        )
+
+
+def test_restore_recomputes_every_historical_parity_record_id() -> None:
+    runner = ShadowLiveRunner(
+        engine=_engine(),
+        protocol=load_shadow_live_protocol(PROTOCOL_PATH),
+        runtime_bindings=_bindings(),
+    )
+    for index in range(3):
+        runner.process(_input(index))
+    checkpoint = runner.compact_runtime_checkpoint()
+    tampered_records = list(copy.deepcopy(runner.records))
+    object.__setattr__(tampered_records[0], "risk_fingerprint", "0" * 64)
+    with pytest.raises(
+        ShadowLiveError,
+        match="record content does not bind record_id",
+    ):
+        ShadowLiveRunner.from_compact_runtime_checkpoint(
+            checkpoint,
+            journal_events=runner.journal.events,
+            records=tampered_records,
+        )
+
+    whole = pickle.loads(pickle.dumps(runner))
+    first = whole._records[0]
+    object.__setattr__(first, "risk_fingerprint", "0" * 64)
+    whole._by_feed_id[first.feed_event_id] = first
+    with pytest.raises(
+        ShadowLiveError,
+        match="record content does not bind record_id",
+    ):
+        pickle.loads(pickle.dumps(whole))
+
+
+def test_restore_recomputes_every_historical_shadow_input_digest() -> None:
+    runner = ShadowLiveRunner(
+        engine=_engine(),
+        protocol=load_shadow_live_protocol(PROTOCOL_PATH),
+        runtime_bindings=_bindings(),
+    )
+    for index in range(3):
+        runner.process(_input(index))
+    checkpoint = runner.compact_runtime_checkpoint()
+    tampered_journal = list(copy.deepcopy(runner.journal.events))
+    first = tampered_journal[0]
+    object.__setattr__(
+        first,
+        "bar",
+        replace(first.bar, volume=first.bar.volume + 999.0),
+    )
+    with pytest.raises(
+        ShadowLiveError,
+        match="input content does not bind input_digest",
+    ):
+        ShadowLiveRunner.from_compact_runtime_checkpoint(
+            checkpoint,
+            journal_events=tampered_journal,
+            records=runner.records,
+        )
+
+    whole = pickle.loads(pickle.dumps(runner))
+    first = whole.journal._events[0]
+    object.__setattr__(
+        first,
+        "bar",
+        replace(first.bar, volume=first.bar.volume + 999.0),
+    )
+    whole.journal._attempts[0] = first
+    whole.journal._by_feed_id[first.feed_event_id] = first
+    with pytest.raises(
+        ShadowLiveError,
+        match="input content does not bind input_digest",
+    ):
+        pickle.loads(pickle.dumps(whole))
+
+
+def test_compact_restore_rehydrates_all_engine_derived_indexes() -> None:
+    runner = ShadowLiveRunner(
+        engine=_engine(),
+        protocol=load_shadow_live_protocol(PROTOCOL_PATH),
+        runtime_bindings=_bindings(),
+    )
+    for index in range(36):
+        runner.process(_input(index))
+    checkpoint = runner.compact_runtime_checkpoint()
+    checkpoint_journal = runner.journal.events
+    checkpoint_records = runner.records
+
+    event_tamper = copy.deepcopy(checkpoint)
+    snapshot = event_tamper["engine"].last_snapshot
+    retained_ids = {
+        event.event_id
+        for sequence in (
+            snapshot.observation.recent_events,
+            snapshot.observation.semantic_events_this_update,
+            *snapshot.observation.retained_entity_timelines.values(),
+            snapshot.market_snapshot.events_this_update,
+        )
+        for event in sequence
+    }
+    store = event_tamper["engine"].observer.audit_store
+    target_index, target = next(
+        (index, event)
+        for index, event in enumerate(store._events)  # noqa: SLF001
+        if event.event_id not in retained_ids
+    )
+    store._events[target_index] = replace(  # noqa: SLF001
+        target,
+        strength=1.0 if target.strength != 1.0 else 0.0,
+    )
+    with pytest.raises(
+        ShadowLiveError,
+        match="foundation source registry differs from audit history",
+    ):
+        ShadowLiveRunner.from_compact_runtime_checkpoint(
+            event_tamper,
+            journal_events=checkpoint_journal,
+            records=checkpoint_records,
+        )
+
+    derived_tamper = copy.deepcopy(checkpoint)
+    adapter = derived_tamper["engine"].observer._foundation_adapter
+    assert adapter._real_bars  # noqa: SLF001
+    adapter._real_bar_by_id.clear()  # noqa: SLF001
+    adapter._lifecycle_indexes.clear()  # noqa: SLF001
+    restored = ShadowLiveRunner.from_compact_runtime_checkpoint(
+        derived_tamper,
+        journal_events=checkpoint_journal,
+        records=checkpoint_records,
+    )
+    restored_adapter = restored.engine.observer._foundation_adapter
+    assert len(restored_adapter._real_bar_by_id) == len(  # noqa: SLF001
+        restored_adapter._real_bars  # noqa: SLF001
+    )
+    assert restored_adapter._lifecycle_indexes  # noqa: SLF001
+    assert restored.process(_input(36)) == runner.process(_input(36))
+
+    empty_authority = copy.deepcopy(checkpoint)
+    old_adapter = empty_authority["engine"].observer._foundation_adapter
+    empty_authority["engine"].observer._foundation_adapter = type(old_adapter)(
+        tick_size=old_adapter.tick_size
+    )
+    with pytest.raises(
+        ShadowLiveError,
+        match="foundation authority differs from published projection",
+    ):
+        ShadowLiveRunner.from_compact_runtime_checkpoint(
+            empty_authority,
+            journal_events=checkpoint_journal,
+            records=checkpoint_records,
+        )
+
+    canonical_bar_tamper = copy.deepcopy(checkpoint)
+    bar_adapter = canonical_bar_tamper["engine"].observer._foundation_adapter
+    assert bar_adapter._real_bars  # noqa: SLF001
+    bar_adapter._real_bars.clear()  # noqa: SLF001
+    bar_adapter._real_bar_by_id.clear()  # noqa: SLF001
+    canonical_bar_tamper["foundation_authority_digest"] = (
+        bar_adapter.checkpoint().checkpoint_digest
+    )
+    with pytest.raises(
+        ShadowLiveError,
+        match="foundation .* differs",
+    ):
+        ShadowLiveRunner.from_compact_runtime_checkpoint(
+            canonical_bar_tamper,
+            journal_events=checkpoint_journal,
+            records=checkpoint_records,
+        )
+
+    whole_runner_tamper = pickle.loads(pickle.dumps(runner))
+    whole_adapter = whole_runner_tamper.engine.observer._foundation_adapter
+    whole_adapter.lifecycle = type(whole_adapter.lifecycle)()
+    with pytest.raises(
+        ShadowLiveError,
+        match="foundation .* differs",
+    ):
+        pickle.loads(pickle.dumps(whole_runner_tamper))
+
+
+def test_foundation_restore_rejects_self_consistent_runtime_authority_tamper() -> None:
+    runner = ShadowLiveRunner(
+        engine=_engine(),
+        protocol=load_shadow_live_protocol(PROTOCOL_PATH),
+        runtime_bindings=_bindings(),
+    )
+    previous_close = 18_500.0
+    for index in range(120):
+        value = _input(index)
+        close = round(
+            (18_500.0 + 20.0 * math.sin(index * 0.45)) * 4.0
+        ) / 4.0
+        bar = Bar(
+            start=value.bar.start,
+            open=previous_close,
+            high=max(previous_close, close) + 2.0,
+            low=min(previous_close, close) - 2.0,
+            close=close,
+            volume=100.0 + index,
+            symbol="NQM4",
+            instrument_id=13_743,
+        )
+        runner.process(
+            replace(value, bar=bar, execution=_execution(bar))
+        )
+        previous_close = close
+    checkpoint = runner.compact_runtime_checkpoint()
+    journal = runner.journal.events
+    records = runner.records
+
+    applied_tamper = copy.deepcopy(checkpoint)
+    adapter = applied_tamper["engine"].observer._foundation_adapter
+    manual = next(
+        item
+        for item in adapter.lifecycle.applied_transitions
+        if item.fact_id.startswith("observer-boundary-attack:")
+    )
+    adapter.lifecycle = replace(
+        adapter.lifecycle,
+        applied_transitions=tuple(
+            item
+            for item in adapter.lifecycle.applied_transitions
+            if item.fact_id != manual.fact_id
+        ),
+    )
+    applied_tamper["foundation_authority_digest"] = (
+        adapter.checkpoint().checkpoint_digest
+    )
+    with pytest.raises(
+        ShadowLiveError,
+        match="foundation .* differs",
+    ):
+        ShadowLiveRunner.from_compact_runtime_checkpoint(
+            applied_tamper,
+            journal_events=journal,
+            records=records,
+        )
+
+    asof_tamper = copy.deepcopy(checkpoint)
+    adapter = asof_tamper["engine"].observer._foundation_adapter
+    adapter.lifecycle = replace(
+        adapter.lifecycle,
+        asof=pd.Timestamp("2099-01-01T00:00:00Z"),
+    )
+    asof_tamper["foundation_authority_digest"] = (
+        adapter.checkpoint().checkpoint_digest
+    )
+    with pytest.raises(
+        ShadowLiveError,
+        match="foundation authority differs from audit replay",
+    ):
+        ShadowLiveRunner.from_compact_runtime_checkpoint(
+            asof_tamper,
+            journal_events=journal,
+            records=records,
+        )
+
+    tick_tamper = copy.deepcopy(checkpoint)
+    observer = tick_tamper["engine"].observer
+    adapter = observer._foundation_adapter
+    adapter.tick_size = 0.125
+    authoritative = tuple(
+        sorted(
+            (
+                event
+                for event in observer.audit_store.events()
+                if event.origin
+                in {
+                    EventOrigin.NORMALIZED_DATA,
+                    EventOrigin.SEMANTIC_ATOMIC,
+                }
+            ),
+            key=lambda event: (
+                event.known_at,
+                event.sequence_no,
+                event.event_id,
+            ),
+        )
+    )
+    false_replay = CanonicalFoundationAdapter(tick_size=0.125)
+    false_replay.consume_batch(authoritative)
+    adapter._real_bars = false_replay._real_bars
+    adapter._real_bar_by_id = false_replay._real_bar_by_id
+    adapter._crossings = false_replay._crossings
+    adapter._structure_bindings = false_replay._structure_bindings
+    tick_tamper["foundation_authority_digest"] = (
+        adapter.checkpoint().checkpoint_digest
+    )
+    with pytest.raises(
+        ShadowLiveError,
+        match="tick size differs from runtime authority",
+    ):
+        ShadowLiveRunner.from_compact_runtime_checkpoint(
+            tick_tamper,
+            journal_events=journal,
+            records=records,
+        )
+
+    whole_tick_tamper = pickle.loads(pickle.dumps(runner))
+    whole_tick_tamper.engine.observer._foundation_adapter.tick_size = 0.125
+    with pytest.raises(
+        ShadowLiveError,
+        match="tick size differs from runtime authority",
+    ):
+        pickle.loads(pickle.dumps(whole_tick_tamper))
+
+    duplicate_tamper = copy.deepcopy(checkpoint)
+    adapter = duplicate_tamper["engine"].observer._foundation_adapter
+    assert adapter.lifecycle.levels
+    object.__setattr__(
+        adapter.lifecycle,
+        "levels",
+        (*adapter.lifecycle.levels, adapter.lifecycle.levels[-1]),
+    )
+    adapter._rebuild_derived_indexes()
+    duplicate_tamper["foundation_authority_digest"] = (
+        adapter.checkpoint().checkpoint_digest
+    )
+    with pytest.raises(
+        ShadowLiveError,
+        match="foundation lifecycle is not canonical",
+    ):
+        ShadowLiveRunner.from_compact_runtime_checkpoint(
+            duplicate_tamper,
+            journal_events=journal,
+            records=records,
+        )
+
+    order_tamper = copy.deepcopy(checkpoint)
+    adapter = order_tamper["engine"].observer._foundation_adapter
+    assert len(adapter.lifecycle.levels) > 1
+    adapter.lifecycle = replace(
+        adapter.lifecycle,
+        levels=tuple(reversed(adapter.lifecycle.levels)),
+    )
+    adapter._rebuild_derived_indexes()
+    order_tamper["foundation_authority_digest"] = (
+        adapter.checkpoint().checkpoint_digest
+    )
+    with pytest.raises(
+        ShadowLiveError,
+        match="foundation lifecycle differs from audit replay",
+    ):
+        ShadowLiveRunner.from_compact_runtime_checkpoint(
+            order_tamper,
+            journal_events=journal,
+            records=records,
+        )
+
+    whole_duplicate_tamper = pickle.loads(pickle.dumps(runner))
+    adapter = whole_duplicate_tamper.engine.observer._foundation_adapter
+    object.__setattr__(
+        adapter.lifecycle,
+        "levels",
+        (*adapter.lifecycle.levels, adapter.lifecycle.levels[-1]),
+    )
+    adapter._rebuild_derived_indexes()
+    with pytest.raises(
+        ShadowLiveError,
+        match="foundation lifecycle is not canonical",
+    ):
+        pickle.loads(pickle.dumps(whole_duplicate_tamper))
 
 
 def test_component_digest_final_audit_replays_full_market_payload() -> None:
@@ -508,6 +1081,73 @@ def test_component_digest_final_audit_replays_full_market_payload() -> None:
         value.endswith("market_full_replay_payload")
         for value in audit.terminal_fields
     )
+
+
+def test_real_w1_manual_foundation_transitions_restore_and_continue_exactly() -> None:
+    from itertools import islice
+
+    from scripts.run_shadow_file_pilot import iter_shadow_clock_file
+
+    values = tuple(
+        islice(
+            iter_shadow_clock_file(
+                ROOT / "inputs/phase9_w1_foundation_v3_603ebf2.jsonl"
+            ),
+            101,
+        )
+    )
+    runner = ShadowLiveRunner(
+        engine=_engine(),
+        protocol=load_shadow_live_protocol(PROTOCOL_PATH),
+        runtime_bindings=_bindings(),
+    )
+    for value in values[:100]:
+        runner.process(value)
+
+    whole = pickle.loads(pickle.dumps(runner))
+    assert whole.engine.last_snapshot == runner.engine.last_snapshot
+    journal = runner.journal.events
+    records = runner.records
+    checkpoint = runner.compact_runtime_checkpoint()
+    restored = ShadowLiveRunner.from_compact_runtime_checkpoint(
+        pickle.loads(pickle.dumps(checkpoint)),
+        journal_events=journal,
+        records=records,
+    )
+    assert restored.process(values[100]) == runner.process(values[100])
+    assert restored.record_fingerprint == runner.record_fingerprint
+    assert restored.journal.fingerprint == runner.journal.fingerprint
+    assert restored.gateway.submission_attempts == 0
+
+    for prefix in ("relation-observation:", "delivery-observation:"):
+        tampered = copy.deepcopy(checkpoint)
+        adapter = tampered["engine"].observer._foundation_adapter
+        target = next(
+            item
+            for item in adapter.lifecycle.applied_transitions
+            if item.fact_id.startswith(prefix)
+        )
+        adapter.lifecycle = replace(
+            adapter.lifecycle,
+            applied_transitions=tuple(
+                item
+                for item in adapter.lifecycle.applied_transitions
+                if item.fact_id != target.fact_id
+            ),
+        )
+        adapter._rebuild_derived_indexes()
+        tampered["foundation_authority_digest"] = (
+            adapter.checkpoint().checkpoint_digest
+        )
+        with pytest.raises(
+            ShadowLiveError,
+            match="foundation .* differs",
+        ):
+            ShadowLiveRunner.from_compact_runtime_checkpoint(
+                tampered,
+                journal_events=journal,
+                records=records,
+            )
 
 
 def test_execution_fsm_events_are_part_of_the_same_clock_parity_record() -> None:

@@ -8,6 +8,7 @@ immutable DTO revisions through :mod:`semantic_foundation`.
 
 from __future__ import annotations
 
+from collections.abc import MutableMapping
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 from fractions import Fraction
@@ -356,8 +357,57 @@ class FoundationAdapterCheckpoint:
         )
 
 
+class _AppendOnlyOverlay(MutableMapping[str, Any]):
+    """Small transactional write overlay over one committed dictionary."""
+
+    def __init__(self, base: dict[str, Any]) -> None:
+        if not isinstance(base, dict):
+            raise TypeError("foundation overlay base must be committed")
+        self._base = base
+        self._writes: dict[str, Any] = {}
+
+    def __getitem__(self, key: str) -> Any:
+        if key in self._writes:
+            return self._writes[key]
+        return self._base[key]
+
+    def __setitem__(self, key: str, value: Any) -> None:
+        current = self.get(key)
+        if current is not None and current != value:
+            raise ValueError("foundation append-only index conflicts")
+        self._writes[key] = value
+
+    def __delitem__(self, key: str) -> None:
+        raise TypeError("foundation append-only index cannot delete")
+
+    def __iter__(self):
+        yield from self._base
+        yield from (
+            key for key in self._writes if key not in self._base
+        )
+
+    def __len__(self) -> int:
+        return len(self._base) + sum(
+            key not in self._base for key in self._writes
+        )
+
+    def commit(self) -> dict[str, Any]:
+        self._base.update(self._writes)
+        return self._base
+
+
 class CanonicalFoundationAdapter:
     """Incrementally normalize v1.2 facts into the frozen v2 projection."""
+
+    _LIFECYCLE_COLLECTION_ORDER = (
+        "structure_generations",
+        "interactions",
+        "levels",
+        "structure_transitions",
+        "relation_generations",
+        "delivery_generations",
+        "boundary_attacks",
+    )
 
     def __init__(self, *, tick_size: float) -> None:
         if (
@@ -377,6 +427,36 @@ class CanonicalFoundationAdapter:
         self._real_bars: list[_RealBarFact] = []
         self._crossings: dict[tuple[str, pd.Timestamp], _CrossingBinding] = {}
         self._structure_bindings: dict[str, str] = {}
+        self._staged_transaction_open = False
+        self._rebuild_derived_indexes()
+
+    def _rebuild_derived_indexes(self) -> None:
+        """Rebuild non-authoritative lookup/delta indexes from frozen state."""
+
+        self._lifecycle_indexes = {
+            name: {
+                self._object_key(item): item
+                for item in getattr(self.lifecycle, name)
+            }
+            for name in self._LIFECYCLE_COLLECTION_ORDER
+        }
+        self._real_bar_by_id = {
+            item.event_id: item for item in self._real_bars
+        }
+        if len(self._real_bar_by_id) != len(self._real_bars):
+            raise ValueError("foundation real BAR identities are duplicated")
+
+    def __getstate__(self) -> dict[str, Any]:
+        state = dict(self.__dict__)
+        state.pop("_lifecycle_indexes", None)
+        state.pop("_real_bar_by_id", None)
+        state.pop("_staged_transaction_open", None)
+        return state
+
+    def __setstate__(self, state: Mapping[str, Any]) -> None:
+        self.__dict__.update(state)
+        self._staged_transaction_open = False
+        self._rebuild_derived_indexes()
 
     def _transaction_candidate(self) -> "CanonicalFoundationAdapter":
         """Fork the mutable adapter shell while sharing immutable state.
@@ -394,18 +474,73 @@ class CanonicalFoundationAdapter:
         candidate.lifecycle = self.lifecycle
         candidate.projection = self.projection
         candidate._last_order = self._last_order
-        candidate._seen_event_fingerprints = dict(self._seen_event_fingerprints)
-        candidate._seen_event_metadata = dict(self._seen_event_metadata)
+        candidate._seen_event_fingerprints = _AppendOnlyOverlay(
+            self._seen_event_fingerprints
+        )
+        candidate._seen_event_metadata = _AppendOnlyOverlay(
+            self._seen_event_metadata
+        )
         candidate._real_bars = list(self._real_bars)
         candidate._crossings = dict(self._crossings)
         candidate._structure_bindings = dict(self._structure_bindings)
+        # Inner lifecycle indexes are immutable snapshots.  A changed reducer
+        # collection installs a fresh index, so an outer-only copy preserves
+        # transaction rollback without rescanning/copying every collection.
+        candidate._lifecycle_indexes = dict(self._lifecycle_indexes)
+        candidate._real_bar_by_id = dict(self._real_bar_by_id)
+        candidate._staged_transaction_open = False
         return candidate
+
+    def _mutation_candidate(
+        self,
+    ) -> tuple["CanonicalFoundationAdapter", bool]:
+        if self._staged_transaction_open:
+            return self, False
+        return self._transaction_candidate(), True
+
+    def seal_staged_candidate(self) -> None:
+        """Close an Observer-owned transaction before it becomes current."""
+
+        if not self._staged_transaction_open:
+            raise ValueError("foundation staged transaction is not open")
+        FoundationProjectionReducer.validate_complete(self.projection)
+        self._staged_transaction_open = False
 
     def _commit_candidate(self, candidate: "CanonicalFoundationAdapter") -> None:
         if not isinstance(candidate, type(self)):
             raise TypeError("foundation transaction candidate type mismatch")
+        if candidate is self:
+            raise ValueError("foundation transaction cannot commit itself")
+        candidate._commit_append_only_overlays()
         self.__dict__.clear()
         self.__dict__.update(candidate.__dict__)
+
+    def _commit_append_only_overlays(self) -> None:
+        if isinstance(self._seen_event_fingerprints, _AppendOnlyOverlay):
+            self._seen_event_fingerprints = (
+                self._seen_event_fingerprints.commit()
+            )
+        if isinstance(self._seen_event_metadata, _AppendOnlyOverlay):
+            self._seen_event_metadata = self._seen_event_metadata.commit()
+
+    def commit_staged_candidate(self) -> None:
+        """Publish append-only index writes after the wider audit commits."""
+
+        if self._staged_transaction_open:
+            raise ValueError("foundation staged transaction is still open")
+        if not isinstance(
+            self._seen_event_fingerprints,
+            _AppendOnlyOverlay,
+        ) or not isinstance(self._seen_event_metadata, _AppendOnlyOverlay):
+            raise ValueError("foundation staged transaction is already committed")
+        self._commit_append_only_overlays()
+
+    def contains_projection_record_id(self, record_id: str) -> bool:
+        """Query the projection's derived immutable identity index."""
+
+        if not isinstance(record_id, str) or not record_id:
+            raise ValueError("foundation record identity must be non-empty")
+        return record_id in self.projection._record_ids_cache
 
     @staticmethod
     def _event_order(event: MarketEvent) -> tuple[pd.Timestamp, int, str]:
@@ -582,27 +717,53 @@ class CanonicalFoundationAdapter:
         state_collections = (
             # Structure owners precede same-clock Relation/Delivery/level
             # revisions, including confirmation-time level ownership.
-            (before.structure_generations, after.structure_generations),
+            (
+                "structure_generations",
+                before.structure_generations,
+                after.structure_generations,
+            ),
             # A level revision points at its live interaction generation.
             # Publish the same-clock owner first so incremental replay never
             # needs to borrow a future record from the batch.
-            (before.interactions, after.interactions),
-            (before.levels, after.levels),
-            (before.structure_transitions, after.structure_transitions),
-            (before.relation_generations, after.relation_generations),
-            (before.delivery_generations, after.delivery_generations),
-            (before.boundary_attacks, after.boundary_attacks),
+            ("interactions", before.interactions, after.interactions),
+            ("levels", before.levels, after.levels),
+            (
+                "structure_transitions",
+                before.structure_transitions,
+                after.structure_transitions,
+            ),
+            (
+                "relation_generations",
+                before.relation_generations,
+                after.relation_generations,
+            ),
+            (
+                "delivery_generations",
+                before.delivery_generations,
+                after.delivery_generations,
+            ),
+            (
+                "boundary_attacks",
+                before.boundary_attacks,
+                after.boundary_attacks,
+            ),
         )
-        for old_items, new_items in state_collections:
-            if old_items is new_items or old_items == new_items:
+        for name, old_items, new_items in state_collections:
+            if old_items is new_items:
                 continue
-            old = {self._object_key(item): item for item in old_items}
+            old = self._lifecycle_indexes[name]
+            new = {self._object_key(item): item for item in new_items}
             changed.extend(
                 item
-                for item in new_items
-                if old.get(self._object_key(item)) != item
+                for key, item in new.items()
+                if old.get(key) != item
             )
-        allowed = self._known_input_ids(*additional_known_ids)
+            self._lifecycle_indexes[name] = new
+        # Do not materialize the complete accepted-event key set for every
+        # lifecycle transition.  The two exact authorities are already
+        # immutable for this projection step: the adapter's accepted-event
+        # index plus the small same-batch allowance.
+        additional_allowed = frozenset(additional_known_ids)
         projection = self.projection
         records: list[FoundationRecord] = []
         for item in changed:
@@ -610,7 +771,8 @@ class CanonicalFoundationAdapter:
             missing = tuple(
                 identity
                 for identity in record.source_event_ids
-                if identity not in allowed
+                if identity not in self._seen_event_fingerprints
+                and identity not in additional_allowed
             )
             if missing:
                 raise ValueError(
@@ -633,7 +795,8 @@ class CanonicalFoundationAdapter:
             if updated is not projection:
                 records.append(record)
                 projection = updated
-        FoundationProjectionReducer.validate_complete(projection)
+        if not self._staged_transaction_open:
+            FoundationProjectionReducer.validate_complete(projection)
         self.projection = projection
         return tuple(records)
 
@@ -656,10 +819,7 @@ class CanonicalFoundationAdapter:
         return records
 
     def _bar_by_id(self, event_id: str) -> _RealBarFact | None:
-        return next(
-            (item for item in reversed(self._real_bars) if item.event_id == event_id),
-            None,
-        )
+        return self._real_bar_by_id.get(event_id)
 
     def _source_bar(self, event: MarketEvent) -> _RealBarFact:
         candidates = tuple(
@@ -759,6 +919,7 @@ class CanonicalFoundationAdapter:
             self._apply((transition,), additional_known_ids=(event.event_id,))
         )
         self._real_bars.append(bar)
+        self._real_bar_by_id[bar.event_id] = bar
         # Same-source registered levels rearm from the first strictly later real
         # interaction-TF BAR whose completed close has departed at least one
         # tick in the registered direction.  This is a pure lifecycle rule:
@@ -809,6 +970,7 @@ class CanonicalFoundationAdapter:
         )
         records = self._apply((transition,), additional_known_ids=(event.event_id,))
         self._real_bars.clear()
+        self._real_bar_by_id.clear()
         self._crossings.clear()
         return records
 
@@ -1932,9 +2094,10 @@ class CanonicalFoundationAdapter:
     def consume(self, event: MarketEvent) -> FoundationAdapterUpdate:
         """Atomically consume one knowledge-ordered v1.2 fact."""
 
-        candidate = self._transaction_candidate()
+        candidate, owned = self._mutation_candidate()
         update = candidate._consume_inplace(event)
-        self._commit_candidate(candidate)
+        if owned:
+            self._commit_candidate(candidate)
         return update
 
     def stage_batch(
@@ -1955,7 +2118,13 @@ class CanonicalFoundationAdapter:
         if isinstance(events, (str, bytes)):
             raise TypeError("foundation adapter batch requires MarketEvent inputs")
         batch = tuple(events)
+        if self._staged_transaction_open:
+            updates = tuple(
+                self._consume_inplace(event) for event in batch
+            )
+            return self, updates
         candidate = self._transaction_candidate()
+        candidate._staged_transaction_open = True
         updates = tuple(candidate._consume_inplace(event) for event in batch)
         return candidate, updates
 
@@ -1970,7 +2139,10 @@ class CanonicalFoundationAdapter:
         rejected fact discards all earlier candidate updates in the batch.
         """
 
+        if self._staged_transaction_open:
+            raise ValueError("nested foundation batch transaction is invalid")
         candidate, updates = self.stage_batch(events)
+        candidate.seal_staged_candidate()
         self._commit_candidate(candidate)
         return updates
 
@@ -2080,13 +2252,14 @@ class CanonicalFoundationAdapter:
     ) -> FoundationAdapterUpdate:
         """Apply the sole explicit same-source rearm fact."""
 
-        candidate = self._transaction_candidate()
+        candidate, owned = self._mutation_candidate()
         update = candidate._observe_rearm_inplace(
             source_level_id=source_level_id,
             departure_bar_event_id=departure_bar_event_id,
             departure_price=departure_price,
         )
-        self._commit_candidate(candidate)
+        if owned:
+            self._commit_candidate(candidate)
         return update
 
     def _retire_level_inplace(
@@ -2156,7 +2329,7 @@ class CanonicalFoundationAdapter:
     ) -> FoundationAdapterUpdate:
         """Retire a level from exact normalized/atomic causal ancestry."""
 
-        candidate = self._transaction_candidate()
+        candidate, owned = self._mutation_candidate()
         update = candidate._retire_level_inplace(
             source_level_id=source_level_id,
             reason=reason,
@@ -2164,7 +2337,8 @@ class CanonicalFoundationAdapter:
             known_at=known_at,
             timeframe=timeframe,
         )
-        self._commit_candidate(candidate)
+        if owned:
+            self._commit_candidate(candidate)
         return update
 
     def _observe_boundary_inplace(
@@ -2194,9 +2368,10 @@ class CanonicalFoundationAdapter:
     ) -> FoundationAdapterUpdate:
         """Append one pre-normalized wick-only structural attack fact."""
 
-        candidate = self._transaction_candidate()
+        candidate, owned = self._mutation_candidate()
         update = candidate._observe_boundary_inplace(fact)
-        self._commit_candidate(candidate)
+        if owned:
+            self._commit_candidate(candidate)
         return update
 
     def _append_dto_inplace(
@@ -2217,7 +2392,8 @@ class CanonicalFoundationAdapter:
         )
         projection = FoundationProjectionReducer.reduce(self.projection, record)
         ignored = projection is self.projection
-        FoundationProjectionReducer.validate_complete(projection)
+        if not self._staged_transaction_open:
+            FoundationProjectionReducer.validate_complete(projection)
         self.projection = projection
         return FoundationAdapterUpdate(
             record.record_id,
@@ -2235,12 +2411,13 @@ class CanonicalFoundationAdapter:
     ) -> FoundationAdapterUpdate:
         """Atomically append one supported DTO with exact seen-event ancestry."""
 
-        candidate = self._transaction_candidate()
+        candidate, owned = self._mutation_candidate()
         update = candidate._append_dto_inplace(
             dto,
             source_event_ids=source_event_ids,
         )
-        self._commit_candidate(candidate)
+        if owned:
+            self._commit_candidate(candidate)
         return update
 
     def _observe_relation_inplace(
@@ -2285,14 +2462,15 @@ class CanonicalFoundationAdapter:
     ) -> FoundationAdapterUpdate:
         """Project one authoritative cross-timeframe relation observation."""
 
-        candidate = self._transaction_candidate()
+        candidate, owned = self._mutation_candidate()
         update = candidate._observe_relation_inplace(
             relation,
             parent_structure_generation_id=parent_structure_generation_id,
             child_structure_generation_id=child_structure_generation_id,
             source_event_ids=source_event_ids,
         )
-        self._commit_candidate(candidate)
+        if owned:
+            self._commit_candidate(candidate)
         return update
 
     def _observe_delivery_phase_inplace(
@@ -2353,7 +2531,7 @@ class CanonicalFoundationAdapter:
     ) -> FoundationAdapterUpdate:
         """Project one explicit delivery-phase observation."""
 
-        candidate = self._transaction_candidate()
+        candidate, owned = self._mutation_candidate()
         update = candidate._observe_delivery_phase_inplace(
             phase,
             timeframe=timeframe,
@@ -2365,7 +2543,8 @@ class CanonicalFoundationAdapter:
             extension_ticks=extension_ticks,
             retracement_ticks=retracement_ticks,
         )
-        self._commit_candidate(candidate)
+        if owned:
+            self._commit_candidate(candidate)
         return update
 
     def _terminate_relation_inplace(
@@ -2424,14 +2603,15 @@ class CanonicalFoundationAdapter:
     ) -> FoundationAdapterUpdate:
         """Explicitly terminate one relation generation for a frozen reason."""
 
-        candidate = self._transaction_candidate()
+        candidate, owned = self._mutation_candidate()
         update = candidate._terminate_relation_inplace(
             relation_generation_id=relation_generation_id,
             known_at=known_at,
             reason=reason,
             source_event_ids=source_event_ids,
         )
-        self._commit_candidate(candidate)
+        if owned:
+            self._commit_candidate(candidate)
         return update
 
     def _terminate_delivery_inplace(
@@ -2490,14 +2670,15 @@ class CanonicalFoundationAdapter:
     ) -> FoundationAdapterUpdate:
         """Explicitly terminate one delivery generation for a frozen reason."""
 
-        candidate = self._transaction_candidate()
+        candidate, owned = self._mutation_candidate()
         update = candidate._terminate_delivery_inplace(
             delivery_generation_id=delivery_generation_id,
             known_at=known_at,
             reason=reason,
             source_event_ids=source_event_ids,
         )
-        self._commit_candidate(candidate)
+        if owned:
+            self._commit_candidate(candidate)
         return update
 
     def checkpoint(self) -> FoundationAdapterCheckpoint:
@@ -2565,6 +2746,7 @@ class CanonicalFoundationAdapter:
             for item in checkpoint.crossings
         }
         adapter._structure_bindings = dict(checkpoint.structure_bindings)
+        adapter._rebuild_derived_indexes()
         return adapter
 
     @classmethod

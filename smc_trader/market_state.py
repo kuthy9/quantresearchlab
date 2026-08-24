@@ -7,6 +7,7 @@ events.
 """
 from __future__ import annotations
 
+from bisect import bisect_left, bisect_right
 from collections import deque
 from dataclasses import dataclass, field, replace
 from enum import Enum
@@ -3360,6 +3361,14 @@ def build_structural_legs(
     candle_by_start = {candle.start: candle for candle in native_candles}
     if len(candle_by_start) != len(native_candles):
         raise ValueError("structural leg history repeats a native bar start")
+    native_starts = tuple(candle.start for candle in native_candles)
+    # ATR ancestry is ordered by completion, not start.  A malformed or
+    # warm-up candle may have an unusually long duration, so ``end`` is not
+    # guaranteed monotone in the start-ordered path array.
+    native_by_end = tuple(
+        sorted(native_candles, key=lambda candle: (candle.end, candle.start))
+    )
+    native_ends = tuple(candle.end for candle in native_by_end)
     del protected_swing_ids, structural_swing_ids
     frozen_atr = dict(frozen_start_atr_by_swing_id or {})
     frozen_atr_sources = {
@@ -3377,13 +3386,9 @@ def build_structural_legs(
         if current.pivot_start <= anchor.pivot_start:
             anchor = current
             continue
-        path = tuple(
-            candle
-            for candle in native_candles
-            if candle.symbol == anchor.symbol == current.symbol
-            and candle.instrument_id == anchor.instrument_id == current.instrument_id
-            and anchor.pivot_start <= candle.start <= current.pivot_start
-        )
+        path_start = bisect_left(native_starts, anchor.pivot_start)
+        path_end = bisect_right(native_starts, current.pivot_start)
+        path = native_candles[path_start:path_end]
         if (
             len(path) < 2
             or anchor.pivot_start not in candle_by_start
@@ -3446,11 +3451,37 @@ def build_structural_legs(
             if direction is Direction.LONG
             else max(0.0, max(float(item.high) for item in path) - float(anchor.price))
         )
-        atr_result = _strict_prior_leg_atr(
-            native_candles,
-            start=anchor.pivot_start,
-            period=atr_period,
+        prior_count = bisect_right(native_ends, anchor.pivot_start)
+        prior_candles = tuple(
+            candle
+            for candle in native_by_end[:prior_count]
+            if candle.end <= anchor.pivot_start
         )
+        if len(prior_candles) < atr_period:
+            atr_result = None
+        else:
+            source_start = len(prior_candles) - atr_period
+            atr_source_candles = prior_candles[source_start:]
+            true_ranges: list[float] = []
+            for index, candle in enumerate(
+                atr_source_candles,
+                start=source_start,
+            ):
+                value = float(candle.high - candle.low)
+                if index:
+                    prior_close = float(prior_candles[index - 1].close)
+                    value = max(
+                        value,
+                        abs(float(candle.high) - prior_close),
+                        abs(float(candle.low) - prior_close),
+                    )
+                true_ranges.append(max(0.0, value))
+            atr_value = sum(true_ranges) / atr_period
+            atr_result = (
+                (atr_value, atr_source_candles)
+                if math.isfinite(atr_value) and atr_value > 0.0
+                else None
+            )
         grid = _leg_tick_size(path, anchor, current, tick_size)
         foundation_atr_sources: tuple[str, ...] = ()
         foundation_metrics = atr_result is not None
