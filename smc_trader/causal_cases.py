@@ -18,7 +18,6 @@ import pandas as pd
 
 from .artifact_stream import (
     bound_regular_file,
-    canonical_json,
     canonical_record_sha256,
     publish_canonical_manifest,
     read_json_object,

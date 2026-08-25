@@ -12,7 +12,7 @@ import json
 from pathlib import Path
 import stat
 import sys
-from typing import Any, Iterable, Mapping
+from typing import Any, Iterable, Mapping, Sequence
 
 import pandas as pd
 

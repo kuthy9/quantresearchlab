@@ -1824,12 +1824,12 @@ def _validate_record_cross_links(
         )
         if range_known_at < owner_confirmed_at:
             raise ValueError("StructuralRange predates its confirmed owner")
-        for field in ("lower_swing_id", "upper_swing_id"):
+        for field_name in ("lower_swing_id", "upper_swing_id"):
             node = _required_prior_record(
                 prior,
                 FoundationObjectType.SWING_GEOMETRY_NODE,
-                payload.get(field),
-                role=f"StructuralRange {field}",
+                payload.get(field_name),
+                role=f"StructuralRange {field_name}",
             )
             if (
                 node.payload.get("timeframe") != payload.get("timeframe")
