@@ -396,8 +396,11 @@ def replace_market_observation(
         raise ValueError(
             "replace one observation identity through either snapshot or aliases"
         )
+    snapshot_replacement = changes.get("market_snapshot", ...)
     snapshot = observation.market_snapshot
-    if snapshot is None:
+    if snapshot_replacement is not ... and snapshot_replacement is not None:
+        changes["_snapshot_free_identity"] = None
+    elif snapshot is None:
         current = {
             "asof": observation.asof,
             "symbol": observation.symbol,

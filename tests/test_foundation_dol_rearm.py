@@ -42,7 +42,7 @@ from smc_trader.scene_graph import (
 from smc_trader.semantic_foundation import FoundationProjectionReducer
 from smc_trader.semantic_lifecycle import LiquidityLevelLifecycle
 
-from .helpers import market_observation
+from .helpers import market_observation, replace_market_observation
 from .test_foundation_adapter import (
     TICK,
     _bar,
@@ -194,13 +194,10 @@ def _observation(
         labels=(),
         foundation=projection,
     )
-    return replace(
+    return replace_market_observation(
         base,
-        asof=asof,
-        price=price,
         frames=frames,
         recent_events=(),
-        semantic_events_this_update=(),
         liquidity_inventory=inventory,
         liquidity_pool_states=(
             () if pool_state is None else (pool_state,)
@@ -262,6 +259,8 @@ def test_dol_inventory_is_materialized_once_per_immutable_observation() -> None:
         source_identity="above-level",
         source_item=_source_item(base),
     )
+    assert observation.market_snapshot is not None
+    assert observation._snapshot_free_identity is None
 
     foundation_first = foundation_dol_inventory(observation)
     current_first = current_dol_inventory(observation)

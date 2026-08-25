@@ -120,6 +120,7 @@ def _artifact(
             item["revision_id"] = market_cases._expected_revision_id(item)
         rows.append(item)
     config = trainer.ROOT / "configs/model.json"
+    model_config = json.loads(config.read_text(encoding="utf-8"))
     registry = json.loads((trainer.ROOT / "configs/data_splits.json").read_text())
     profile_name = "market_episode_input_smoke_2024_01_08"
     profile = registry["market_case_input_profiles"][profile_name]
@@ -144,9 +145,9 @@ def _artifact(
         "model_config": {
             "path": str(config.resolve()),
             "sha256": sha256_file(config),
-            "schema_version": 1,
-            "tick_size": 0.25,
-            "timezone": "America/New_York",
+            "schema_version": model_config["schema_version"],
+            "tick_size": model_config["tick_size"],
+            "timezone": model_config["timezone"],
         },
         "market_case_input_identity": market_cases.expected_market_case_run_identity(),
         "window": {
