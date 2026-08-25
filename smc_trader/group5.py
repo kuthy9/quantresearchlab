@@ -22,7 +22,7 @@ from .model import (
     MicroBOSReference,
     PathSequenceState,
     PathSequenceStep,
-    QualifiedReacceptanceState,
+    ReacceptanceState,
 )
 
 
@@ -34,11 +34,11 @@ class Group5Update:
     """Historical interpreted shape; never embedded in new observations."""
 
     entry_locations: tuple[EntryLocationState, ...]
-    qualified_reacceptances: tuple[QualifiedReacceptanceState, ...]
+    qualified_reacceptances: tuple[ReacceptanceState, ...]
     micro_bos_references: tuple[MicroBOSReference, ...]
     path_sequences: tuple[PathSequenceState, ...]
     path_transitions: tuple[PathSequenceState, ...] = ()
-    reacceptance_transitions: tuple[QualifiedReacceptanceState, ...] = ()
+    reacceptance_transitions: tuple[ReacceptanceState, ...] = ()
     step_transitions: tuple[tuple[str, PathSequenceStep], ...] = ()
     cold_source_ids: tuple[str, ...] = ()
     boundary_reason: str | None = None

@@ -313,13 +313,13 @@ def test_input_only_schema_has_one_stable_revision_and_no_legacy_dependencies() 
     }
     assert MARKET_CASE_PROTOCOL["input_only"] is True
     assert MARKET_CASE_PROTOCOL["protocol_version"] == (
-        "market-episode-input-only-1.3.0"
+        "market-episode-input-only-1.4.0"
     )
     assert MARKET_CASE_PROTOCOL["neutral_runtime_schema_version"] == 2
     assert MARKET_CASE_PROTOCOL["runtime_source"] == (
         "NeutralEngineSnapshot.neutral_market_state"
     )
-    assert MARKET_CASE_PROTOCOL["interaction_update_schema_version"] == 1
+    assert MARKET_CASE_PROTOCOL["interaction_update_schema_version"] == 2
     assert MARKET_CASE_PROTOCOL["interaction_authority"] == (
         "raw_eye_physical_facts_only_no_brain_interpretation"
     )

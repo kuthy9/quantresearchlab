@@ -228,6 +228,7 @@ def _physical_paths(
             )
         transition_reason = path.transition_reason
         interpreted_reason = transition_reason in {
+            "qualified_reacceptance_held",
             "micro_bos_aligned",
             "micro_bos_opposed",
             "micro_bos_ambiguous_same_clock",
@@ -243,7 +244,7 @@ def _physical_paths(
             transition_reason = {
                 "first_pullback": "context_registered",
                 "wick_rejection": "zone_rejection_observed",
-                "reacceptance_held": "qualified_reacceptance_held",
+                "reacceptance_held": "hold_completed",
             }.get(last_step.kind, "context_registered")
             physical_paths.append(
                 _dataclass_replace(
@@ -922,8 +923,19 @@ def test_dfp_vertical_chain_uses_exact_group5_plan_and_risk_binding() -> None:
         decision,
         orphaned_zone,
     )
-    assert not orphaned_zone_risk.passed
-    assert orphaned_zone_risk.final_action.value == "abstain"
+    assert orphaned_zone_risk.passed
+    assert orphaned_zone_risk.final_action.value == "enter"
+
+    missing_physical_interaction = replace(
+        triggered,
+        interaction_update=None,
+    )
+    missing_physical_risk = StructuralRiskEngine().review(
+        decision,
+        missing_physical_interaction,
+    )
+    assert not missing_physical_risk.passed
+    assert missing_physical_risk.final_action.value == "abstain"
 
     missing_execution = replace(
         triggered,

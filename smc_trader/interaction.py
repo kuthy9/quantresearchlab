@@ -36,8 +36,8 @@ from .model import (
     PathSequenceLifecycle,
     PathSequenceState,
     PathSequenceStep,
-    QualifiedReacceptanceLifecycle,
-    QualifiedReacceptanceState,
+    ReacceptanceLifecycle,
+    ReacceptanceState,
     Timeframe,
     aware_timestamp,
     clamp,
@@ -200,13 +200,13 @@ def interaction_update_from_artifact_collections(
         for value in collections["interaction_zone_interactions"]
     )
 
-    def reacceptance(value: Any) -> QualifiedReacceptanceState:
+    def reacceptance(value: Any) -> ReacceptanceState:
         return _artifact_record(
             value,
-            QualifiedReacceptanceState,
+            ReacceptanceState,
             enums={
                 "direction": Direction,
-                "lifecycle": QualifiedReacceptanceLifecycle,
+                "lifecycle": ReacceptanceLifecycle,
             },
             clocks=(
                 "formed_at",
@@ -279,7 +279,7 @@ def interaction_update_from_artifact_collections(
 
 @dataclass(frozen=True)
 class InteractionProtocol:
-    """Executable mirror of the frozen interaction descriptive contract."""
+    """Executable physical-interaction contract."""
 
     protocol_hash: str
     source_group12_protocol_hash: str
@@ -291,12 +291,6 @@ class InteractionProtocol:
     maximum_contexts: int
     maximum_steps_per_path: int
     protocol_version: str
-    typed_state_available: bool
-    brain_input_allowed: bool
-    dfp_lsr_input_authority_validated: bool
-    favr_natural_authority_validated: bool
-    independent_action_authority: bool
-    favr_enabled: bool
 
     def __post_init__(self) -> None:
         hashes = (
@@ -316,24 +310,6 @@ class InteractionProtocol:
             )
             or not isinstance(self.protocol_version, str)
             or not self.protocol_version.strip()
-            or any(
-                type(value) is not bool
-                for value in (
-                    self.typed_state_available,
-                    self.brain_input_allowed,
-                    self.dfp_lsr_input_authority_validated,
-                    self.favr_natural_authority_validated,
-                    self.independent_action_authority,
-                    self.favr_enabled,
-                )
-            )
-            or not self.typed_state_available
-            or not self.brain_input_allowed
-            or self.independent_action_authority
-            or (
-                self.favr_enabled
-                and not self.favr_natural_authority_validated
-            )
             or isinstance(self.tick_size, bool)
             or not isinstance(self.tick_size, (int, float))
             or not math.isfinite(float(self.tick_size))
@@ -348,7 +324,7 @@ class InteractionProtocol:
                 )
             )
         ):
-            raise ValueError("Group 5 protocol is invalid")
+            raise ValueError("interaction protocol is invalid")
 
     @classmethod
     def from_file(cls, path: str | Path) -> "InteractionProtocol":
@@ -358,7 +334,6 @@ class InteractionProtocol:
         raw = source.read_bytes()
         payload = json.loads(raw)
         parameters = payload["engineering_parameters"]
-        authority = payload["authority"]
         return cls(
             protocol_hash=hashlib.sha256(raw).hexdigest(),
             source_group12_protocol_hash=payload["upstream"][
@@ -372,28 +347,15 @@ class InteractionProtocol:
             ],
             tick_size=payload["tick_size"],
             m1_atr_period=parameters["m1_atr_period"],
-            later_hold_bars=parameters[
-                "qualified_reacceptance_later_hold_bars"
-            ],
+            later_hold_bars=parameters.get(
+                "later_hold_bars",
+                parameters.get("qualified_reacceptance_later_hold_bars"),
+            ),
             maximum_contexts=parameters["maximum_context_states"],
             maximum_steps_per_path=parameters[
                 "maximum_steps_per_path"
             ],
             protocol_version=payload["protocol_version"],
-            typed_state_available=authority[
-                "typed_state_available"
-            ],
-            brain_input_allowed=authority["brain_input_allowed"],
-            dfp_lsr_input_authority_validated=authority[
-                "dfp_lsr_input_authority_validated"
-            ],
-            favr_natural_authority_validated=authority[
-                "favr_natural_authority_validated"
-            ],
-            independent_action_authority=authority[
-                "independent_action_authority"
-            ],
-            favr_enabled=authority["favr_enabled"],
         )
 
 @dataclass(frozen=True)
@@ -459,7 +421,7 @@ class InteractionSemantics:
         self._locations: dict[str, EntryLocationState] = {}
         self._reacceptances: dict[
             str,
-            QualifiedReacceptanceState,
+            ReacceptanceState,
         ] = {}
         self._micro_break_facts: dict[str, MicroBreakFact] = {}
         self._paths: dict[str, PathSequenceState] = {}
@@ -506,12 +468,12 @@ class InteractionSemantics:
 
     @staticmethod
     def _reacceptance_terminal(
-        state: QualifiedReacceptanceState,
+        state: ReacceptanceState,
     ) -> bool:
         return state.lifecycle in {
-            QualifiedReacceptanceLifecycle.HELD,
-            QualifiedReacceptanceLifecycle.FAILED,
-            QualifiedReacceptanceLifecycle.CENSORED,
+            ReacceptanceLifecycle.HELD,
+            ReacceptanceLifecycle.FAILED,
+            ReacceptanceLifecycle.CENSORED,
         }
 
     def _snapshot(self) -> InteractionUpdate:
@@ -1184,7 +1146,7 @@ class InteractionSemantics:
         atr: float,
         path_id: str,
         step_transitions: list[tuple[str, PathSequenceStep]],
-    ) -> QualifiedReacceptanceState:
+    ) -> ReacceptanceState:
         identity = self._reacceptance_id(
             context_kind=context_kind,
             context_id=context_id,
@@ -1194,7 +1156,7 @@ class InteractionSemantics:
         margin = clamp(
             abs(float(candle.close) - reference_price) / atr
         )
-        state = QualifiedReacceptanceState(
+        state = ReacceptanceState(
             reacceptance_id=identity,
             protocol_hash=self.protocol.protocol_hash,
             symbol=symbol,
@@ -1205,7 +1167,7 @@ class InteractionSemantics:
             direction=direction,
             reference_price=reference_price,
             failure_boundary=failure_boundary,
-            lifecycle=QualifiedReacceptanceLifecycle.LEFT,
+            lifecycle=ReacceptanceLifecycle.LEFT,
             formed_at=candle.end,
             state_started_at=candle.end,
             last_updated_at=candle.end,
@@ -1233,10 +1195,10 @@ class InteractionSemantics:
         self,
         context_kind: str,
         context_id: str,
-    ) -> tuple[str, QualifiedReacceptanceState] | None:
+    ) -> tuple[str, ReacceptanceState] | None:
         if context_kind != "zone_return":
             raise ValueError(
-                "qualified reacceptance is only defined for entry zones"
+                "zone reacceptance is only defined for entry zones"
             )
         matches = tuple(
             (key, state)
@@ -1259,13 +1221,13 @@ class InteractionSemantics:
         reason: str,
         path_id: str,
         step_transitions: list[tuple[str, PathSequenceStep]],
-    ) -> QualifiedReacceptanceState:
+    ) -> ReacceptanceState:
         state = self._reacceptances[key]
         if self._reacceptance_terminal(state):
             return state
         failed = replace(
             state,
-            lifecycle=QualifiedReacceptanceLifecycle.FAILED,
+            lifecycle=ReacceptanceLifecycle.FAILED,
             state_started_at=candle.end,
             last_updated_at=candle.end,
             state_duration_real_1m_bars=0,
@@ -1299,7 +1261,7 @@ class InteractionSemantics:
         *,
         path_id: str,
         step_transitions: list[tuple[str, PathSequenceStep]],
-    ) -> QualifiedReacceptanceState:
+    ) -> ReacceptanceState:
         state = self._reacceptances[key]
         if self._reacceptance_terminal(state):
             return state
@@ -1324,7 +1286,7 @@ class InteractionSemantics:
                 path_id,
                 step_transitions,
             )
-        if state.lifecycle is QualifiedReacceptanceLifecycle.LEFT:
+        if state.lifecycle is ReacceptanceLifecycle.LEFT:
             if (
                 candle.end > state.left_at
                 and self._delivery_side(
@@ -1340,7 +1302,7 @@ class InteractionSemantics:
                 reclaimed = replace(
                     aged,
                     lifecycle=(
-                        QualifiedReacceptanceLifecycle.RECLAIMED
+                        ReacceptanceLifecycle.RECLAIMED
                     ),
                     state_started_at=candle.end,
                     state_duration_real_1m_bars=0,
@@ -1389,7 +1351,7 @@ class InteractionSemantics:
                 )
                 held = replace(
                     aged,
-                    lifecycle=QualifiedReacceptanceLifecycle.HELD,
+                    lifecycle=ReacceptanceLifecycle.HELD,
                     state_started_at=candle.end,
                     state_duration_real_1m_bars=0,
                     hold_real_1m_bars=hold_count,
@@ -1789,7 +1751,7 @@ class InteractionSemantics:
             _, reacceptance_state = reacceptance
             if (
                 reacceptance_state.lifecycle
-                is QualifiedReacceptanceLifecycle.HELD
+                is ReacceptanceLifecycle.HELD
             ):
                 rejected = replace(
                     aged,
@@ -1798,7 +1760,7 @@ class InteractionSemantics:
                     state_duration_real_1m_bars=0,
                     rejected_at=candle.end,
                     reaction_atr=reacceptance_state.strength,
-                    transition_reason="qualified_reacceptance_held",
+                    transition_reason="hold_completed",
                 )
                 self._locations[location_id] = rejected
             return
@@ -2459,7 +2421,7 @@ class InteractionSemantics:
                 elif (
                     reacceptance is not None
                     and reacceptance[1].lifecycle
-                    is QualifiedReacceptanceLifecycle.FAILED
+                    is ReacceptanceLifecycle.FAILED
                 ):
                     reason = "reacceptance_failed"
                 elif strict_micro_break_observed:
@@ -2473,7 +2435,7 @@ class InteractionSemantics:
                     self._mark_active_path_milestone(
                         path_id,
                         milestone.observed_at,
-                        "qualified_reacceptance_held",
+                        "hold_completed",
                     )
                     continue
                 elif "wick_rejection" in kinds:
@@ -2577,7 +2539,7 @@ class InteractionSemantics:
             milestone_transitions=tuple(step_transitions),
             cold_source_ids=tuple(sorted(set(cold_source_ids))),
         )
-        # Only terminal contexts from a prior successful output are eligible
+        # Only terminal contexts from a prior completed output are eligible
         # for next-bar compaction.
         self._exposed_terminal_path_ids.update(
             path_id
@@ -2714,7 +2676,7 @@ class InteractionSemantics:
         candidate = self._transaction_clone()
         transitions: list[PathSequenceState] = []
         reacceptance_transitions: list[
-            QualifiedReacceptanceState
+            ReacceptanceState
         ] = []
         for state in candidate._reacceptances.values():
             if candidate._reacceptance_terminal(state):
@@ -2759,7 +2721,7 @@ class InteractionSemantics:
                 continue
             censored = replace(
                 state,
-                lifecycle=QualifiedReacceptanceLifecycle.CENSORED,
+                lifecycle=ReacceptanceLifecycle.CENSORED,
                 state_started_at=clock,
                 last_updated_at=clock,
                 state_duration_real_1m_bars=0,

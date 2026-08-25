@@ -274,7 +274,8 @@ from the `smc_semantics_v1.2` semantic identity):
 - [`configs/primitives_displacement.json`](configs/primitives_displacement.json): incremental displacement episodes;
 - [`configs/primitives_zones.json`](configs/primitives_zones.json): FVG and order-block zones;
 - [`configs/primitives_range.json`](configs/primitives_range.json): accumulation, dealing range and manipulation;
-- [`configs/primitives_entry.json`](configs/primitives_entry.json): entry location, first pullback, reacceptance, micro BOS and path sequence.
+- [`configs/primitives_interaction.json`](configs/primitives_interaction.json): current hot physical zone interaction, reclaim/hold, raw micro-break and ordered-milestone contract;
+- [`configs/primitives_entry.json`](configs/primitives_entry.json): frozen historical Group5 composite identity for cold artifacts and registered research runners, not current runtime wiring.
 
 Current primitive protocol status:
 
@@ -284,7 +285,8 @@ Current primitive protocol status:
 | Displacement | `3.2.0-displacement-episode.3` | finite real replay and stratified review passed |
 | FVG/order block | `3.2.0-group3.4` | FVG finite replay passed; OB failure coverage sparse |
 | Range/manipulation | `3.2.0-group4.1` | The legacy v1.2 atomic protocol detects Mature Balance Range only; additive foundation v2 publishes Structural Range separately |
-| Entry/path | `3.2.0-group5.4` | LSR reversal context freezes root/displacement independently of each FVG/OB entry zone; DFP/LSR input authority enabled; FAVR authority disabled and parked |
+| Interaction facts | `3.2.0-interaction.1` | current hot Eye output is physical only; Brain owns path completeness, alignment, setup qualification and trade construction |
+| Legacy composite entry/path | `3.2.0-group5.4` | frozen cold/research identity; it is not accepted as the current runtime Interaction binding |
 
 “Implementation complete” means the typed incremental contract and its
 synthetic/boundary tests exist. It is not a profitability or natural-market

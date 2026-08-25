@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from pathlib import Path
 import pickle
 
 import pandas as pd
@@ -22,21 +23,64 @@ from smc_trader.interaction import (
 )
 from smc_trader.model import (
     Direction,
+    INTERACTION_UPDATE_SCHEMA_VERSION,
     InteractionUpdate,
     MARKET_OBSERVATION_SCHEMA_VERSION,
     MicroBreakFact,
     PathSequenceLifecycle,
+    QualifiedReacceptanceLifecycle,
+    QualifiedReacceptanceState,
+    ReacceptanceLifecycle,
+    ReacceptanceState,
     to_primitive,
 )
 from smc_trader.scene_graph import TemporalMarketSceneGraph
 
 from .helpers import market_observation, replace_market_observation
 from .test_v3_group5_primitives import (
-    PROTOCOL_PATH,
+    PROTOCOL_PATH as LEGACY_PROTOCOL_PATH,
     _bos,
     _m1,
     _zone_formation,
 )
+
+
+PROTOCOL_PATH = "configs/primitives_interaction.json"
+
+
+def test_hot_interaction_protocol_has_distinct_physical_identity() -> None:
+    current_path = Path(PROTOCOL_PATH)
+    legacy_path = Path(LEGACY_PROTOCOL_PATH)
+    current_raw = current_path.read_text(encoding="utf-8")
+    current = InteractionProtocol.from_file(current_path)
+    legacy = InteractionProtocol.from_file(legacy_path)
+
+    assert current.protocol_hash != legacy.protocol_hash
+    assert current.later_hold_bars == legacy.later_hold_bars
+    assert all(
+        token not in current_raw
+        for token in (
+            "QualifiedReacceptance",
+            "qualified_reacceptance",
+            "micro_bos_aligned",
+            "micro_bos_opposed",
+            "micro_bos_confirmed",
+            "typed_state_available",
+            "brain_input_allowed",
+            "dfp_lsr_input_authority_validated",
+            "favr_natural_authority_validated",
+            "favr_enabled",
+            "independent_action_authority",
+        )
+    )
+    assert {
+        "typed_state_available",
+        "brain_input_allowed",
+        "dfp_lsr_input_authority_validated",
+        "favr_natural_authority_validated",
+        "favr_enabled",
+        "independent_action_authority",
+    }.isdisjoint(InteractionProtocol.__dataclass_fields__)
 
 
 def _strict_interaction(*directions: Direction):
@@ -102,7 +146,7 @@ def _reacceptance_interactions():
     return left, boundary
 
 
-def _held_boundary_interaction() -> InteractionUpdate:
+def _held_interaction() -> tuple[InteractionSemantics, InteractionUpdate]:
     semantics = InteractionSemantics(
         InteractionProtocol.from_file(PROTOCOL_PATH)
     )
@@ -129,7 +173,7 @@ def _held_boundary_interaction() -> InteractionUpdate:
         fair_value_gaps=(fvg,),
         m1_atr=1.0,
     )
-    semantics.on_completed_1m(
+    held = semantics.on_completed_1m(
         _m1(
             3,
             open_=100.25,
@@ -140,6 +184,11 @@ def _held_boundary_interaction() -> InteractionUpdate:
         fair_value_gaps=(fvg,),
         m1_atr=1.0,
     )
+    return semantics, held
+
+
+def _held_boundary_interaction() -> InteractionUpdate:
+    semantics, _ = _held_interaction()
     return semantics.on_boundary(
         "data_gap_reset",
         _m1(4).end,
@@ -193,6 +242,68 @@ def test_eye_publishes_raw_break_and_brain_owns_qualification() -> None:
     assert reference.qualified
     assert interpreted_path.steps[-1].kind == "micro_bos_confirmed"
     assert interpreted_path.transition_reason == "micro_bos_aligned"
+
+
+def test_reacceptance_is_physical_and_only_brain_names_qualification() -> None:
+    _, update = _held_interaction()
+    physical = update.reacceptance_interactions[0]
+    path = update.interaction_paths[0]
+
+    assert INTERACTION_UPDATE_SCHEMA_VERSION == 2
+    assert type(physical) is ReacceptanceState
+    assert physical.lifecycle is ReacceptanceLifecycle.HELD
+    assert ReacceptanceState.__name__ == "ReacceptanceState"
+    assert ReacceptanceLifecycle.__name__ == "ReacceptanceLifecycle"
+    assert QualifiedReacceptanceState is ReacceptanceState
+    assert QualifiedReacceptanceLifecycle is ReacceptanceLifecycle
+    assert pickle.loads(
+        b"csmc_trader.model\nQualifiedReacceptanceState\n."
+    ) is ReacceptanceState
+    assert pickle.loads(
+        b"csmc_trader.model\nQualifiedReacceptanceLifecycle\n."
+    ) is ReacceptanceLifecycle
+    legacy_pickle = (
+        pickle.dumps(physical, protocol=0)
+        .replace(
+            b"ReacceptanceState",
+            b"QualifiedReacceptanceState",
+        )
+        .replace(
+            b"ReacceptanceLifecycle",
+            b"QualifiedReacceptanceLifecycle",
+        )
+    )
+    restored_legacy = pickle.loads(legacy_pickle)
+    assert type(restored_legacy) is ReacceptanceState
+    assert restored_legacy == physical
+    assert {
+        "QualifiedReacceptanceState",
+        "QualifiedReacceptanceLifecycle",
+    }.isdisjoint(smc_trader.__all__)
+    assert update.zone_interactions[0].transition_reason == "hold_completed"
+    assert path.transition_reason == "hold_completed"
+    physical_vocabulary = (
+        path.transition_reason,
+        *(step.kind for step in path.steps),
+        *(step.reason for step in path.steps),
+    )
+    assert all(
+        token not in value
+        for value in physical_vocabulary
+        for token in ("qualified", "aligned", "opposed", "successful")
+    )
+
+    interpreted = interpret_interaction_update(update)
+    assert interpreted.path_sequences[0].transition_reason == (
+        "qualified_reacceptance_held"
+    )
+
+    collections = to_primitive(dict(interaction_artifact_collections(update)))
+    collections["interaction_reacceptance_interactions"][0][
+        "qualified"
+    ] = True
+    with pytest.raises(ValueError, match="interaction artifact"):
+        interaction_update_from_artifact_collections(collections)
 
 
 @pytest.mark.parametrize(
@@ -681,7 +792,7 @@ def test_raw_interaction_reasons_and_milestones_are_canonical() -> None:
 
 def test_legacy_boundary_adapter_rebuilds_censored_micro_step() -> None:
     reducer = legacy_group5.CausalGroup5Reducer(
-        InteractionProtocol.from_file(PROTOCOL_PATH)
+        InteractionProtocol.from_file(LEGACY_PROTOCOL_PATH)
     )
     _, fvg, _ = _zone_formation(reducer)
     pullback = _m1(
@@ -722,7 +833,7 @@ def test_legacy_reducer_pickle_rejects_baseline_state_without_semantics(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     reducer = legacy_group5.CausalGroup5Reducer(
-        InteractionProtocol.from_file(PROTOCOL_PATH)
+        InteractionProtocol.from_file(LEGACY_PROTOCOL_PATH)
     )
     current = pickle.loads(pickle.dumps(reducer))
     assert current.snapshot() == reducer.snapshot()

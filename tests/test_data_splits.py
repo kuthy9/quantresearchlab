@@ -133,7 +133,7 @@ def test_market_case_registry_versions_without_rewriting_frozen_splits() -> None
         assert current_profile == {
             **historical_profile,
             "recorder_schema_version": 2,
-            "protocol_version": "market-episode-input-only-1.3.0",
+            "protocol_version": "market-episode-input-only-1.4.0",
         }
 
 

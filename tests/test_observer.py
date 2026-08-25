@@ -52,7 +52,7 @@ STRUCTURE_PROTOCOL = "configs/primitives_structure_liquidity.json"
 DISPLACEMENT_PROTOCOL = "configs/primitives_displacement.json"
 GROUP3_PROTOCOL = "configs/primitives_zones.json"
 GROUP4_PROTOCOL = "configs/primitives_range.json"
-GROUP5_PROTOCOL = "configs/primitives_entry.json"
+INTERACTION_PROTOCOL = "configs/primitives_interaction.json"
 
 
 def test_market_observation_rejects_duck_typed_published_snapshot() -> None:
@@ -145,7 +145,7 @@ def _all_typed_observer_config(**overrides: object) -> ObserverConfig:
         "displacement_protocol": DISPLACEMENT_PROTOCOL,
         "zone_protocol": GROUP3_PROTOCOL,
         "range_auction_protocol": GROUP4_PROTOCOL,
-        "interaction_protocol": GROUP5_PROTOCOL,
+        "interaction_protocol": INTERACTION_PROTOCOL,
         "scale_specs": MODEL_SCALE_SPECS,
         "project_scene_graph": False,
     }

@@ -57,13 +57,12 @@ def _case(index: int, clock: pd.Timestamp) -> dict[str, object]:
     }
 
 
-def test_case_audit_is_full_view_eye_only() -> None:
-    config = _full_observer_config(_registered_payload())
-
-    assert config.eye_authority_mode is True
-    assert config.materialize_event_view is True
-    assert config.project_scene_graph is True
-    assert config.range_auction_projection_only is False
+def test_frozen_case_audit_rejects_current_interaction_binding_drift() -> None:
+    with pytest.raises(
+        ValueError,
+        match="model and eye profile protocol bindings disagree",
+    ):
+        _full_observer_config(_registered_payload())
 
 
 def test_case_transport_contract_is_clock_and_stratum_specific() -> None:

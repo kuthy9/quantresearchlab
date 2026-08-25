@@ -467,14 +467,6 @@ class ContinuousSMCEngine:
         interaction_protocol = observer.interaction_protocol
         if interaction_protocol is None:
             raise ValueError("current engine requires interaction semantics")
-        favr_parked = "parked" in registry.for_playbook(
-            Playbook.FAILED_AUCTION_VALUE_RETURN
-        ).status
-        if interaction_protocol.favr_enabled == favr_parked:
-            raise ValueError(
-                "interaction favr_enabled must agree with the FAVR "
-                "development restriction"
-            )
         if runtime_mode == "live":
             readiness = payload.get("release_readiness")
             checks = {
@@ -501,9 +493,6 @@ class ContinuousSMCEngine:
                 "live_execution_allowed": bool(
                     isinstance(readiness, Mapping)
                     and readiness.get("live_execution_allowed") is True
-                ),
-                "group5_dfp_lsr_input_authority_validated": (
-                    interaction_protocol.dfp_lsr_input_authority_validated
                 ),
             }
             missing = tuple(
@@ -843,9 +832,9 @@ class ContinuousSMCEngine:
             if belief_position is not None
             else account.position
         )
-        # Construct the Brain adapter once.  Neutral thesis publication and
-        # every downstream Brain/Decision/Risk consumer share this exact
-        # interpreted view for the completed clock.
+        # Construct the Brain interpretation once for Neutral, Brain and
+        # Decision.  Risk receives the raw observation and checks only the
+        # physical custody and arithmetic frozen into the Brain plan.
         brain_observation = brain_observation_view(observation)
         _, neutral_market_state = self._project_neutral(
             observation,
@@ -889,7 +878,7 @@ class ContinuousSMCEngine:
             decision_belief,
             account,
         )
-        risk = self.risk.review(decision, brain_observation, account)
+        risk = self.risk.review(decision, observation, account)
         snapshot = EngineSnapshot(
             observation=observation,
             belief=belief,

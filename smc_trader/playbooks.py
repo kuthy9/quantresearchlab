@@ -82,7 +82,7 @@ from .model import (
     Playbook,
     PlaybookPhase,
     PositionSnapshot,
-    QualifiedReacceptanceLifecycle,
+    ReacceptanceLifecycle,
     SMC_SEMANTIC_VERSION,
     SequenceStepState,
     StructuralLevel,
@@ -2549,7 +2549,7 @@ def _typed_dfp(
                 and state.context_id == location.location_id
                 and state.direction is direction
                 and state.lifecycle
-                is QualifiedReacceptanceLifecycle.HELD
+                is ReacceptanceLifecycle.HELD
                 and state.held_at == held_trigger.observed_at
             )
         ),
@@ -4105,7 +4105,7 @@ def _typed_lsr(
                 and state.context_id == location.location_id
                 and state.direction is direction
                 and state.lifecycle
-                is QualifiedReacceptanceLifecycle.HELD
+                is ReacceptanceLifecycle.HELD
                 and state.held_at == held_trigger.observed_at
             )
         ),

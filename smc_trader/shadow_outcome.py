@@ -28,7 +28,7 @@ from .model import (
     ManipulationLifecycle,
     Playbook,
     PlaybookPhase,
-    QualifiedReacceptanceLifecycle,
+    ReacceptanceLifecycle,
     StructureLifecycle,
     Timeframe,
     aware_timestamp,
@@ -4556,7 +4556,7 @@ class ShadowCandidateOutcomeRecorder:
         for reacceptance in observation.qualified_reacceptances:
             if (
                 reacceptance.lifecycle
-                is QualifiedReacceptanceLifecycle.HELD
+                is ReacceptanceLifecycle.HELD
                 and reacceptance.held_at == asof
             ):
                 location = self._location(

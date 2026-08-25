@@ -20,7 +20,7 @@ from .model import (
     PathSequenceLifecycle,
     PathSequenceState,
     PathSequenceStep,
-    QualifiedReacceptanceState,
+    ReacceptanceState,
 )
 
 
@@ -225,6 +225,8 @@ def interpret_interaction_paths(
                 )
             steps.append(step)
         reason = path.transition_reason
+        if reason == "hold_completed":
+            reason = "qualified_reacceptance_held"
         if reason == "first_strict_micro_break_observed":
             strict = tuple(
                 reference
@@ -281,7 +283,7 @@ def brain_path_terminal_role(path: PathSequenceState) -> str:
 @dataclass(frozen=True)
 class BrainInteractionView:
     zone_interactions: tuple[EntryLocationState, ...]
-    reacceptance_interactions: tuple[QualifiedReacceptanceState, ...]
+    reacceptance_interactions: tuple[ReacceptanceState, ...]
     micro_bos_references: tuple[MicroBOSReference, ...]
     path_sequences: tuple[PathSequenceState, ...]
 
@@ -306,7 +308,7 @@ class BrainObservationView:
     @property
     def qualified_reacceptances(
         self,
-    ) -> tuple[QualifiedReacceptanceState, ...]:
+    ) -> tuple[ReacceptanceState, ...]:
         return self._interaction.reacceptance_interactions
 
     @property

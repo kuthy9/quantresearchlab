@@ -1,0 +1,54 @@
+{
+  "protocol_version": "3.2.0-interaction.1",
+  "status": "physical_interaction_runtime_contract",
+  "role": "causal_descriptive_physical_facts",
+  "tick_size": 0.25,
+  "upstream": {
+    "group12_protocol_sha256": "5a8913907b92b22c5ea67df7056b5464518329adcce883435aadf9008dc7e0e0",
+    "group3_protocol_sha256": "0163d8fc3d41bcd6037bfab05b59e4a44b6558f01d1c73eb95955ea1e0bf8899",
+    "group4_protocol_sha256": "9c5334e52bacd19a896cb326e02c77a3be4f932e9b09579929fdce7d9ccdbdf4"
+  },
+  "engineering_parameters": {
+    "m1_atr_period": 14,
+    "later_hold_bars": 1,
+    "maximum_context_states": 256,
+    "maximum_steps_per_path": 16
+  },
+  "physical_output": {
+    "reacceptance_state": "ReacceptanceState",
+    "micro_break_state": "MicroBreakFact",
+    "path_state": "PathSequenceState",
+    "path_step_kinds": [
+      "zone_visible",
+      "departure_confirmed",
+      "first_pullback",
+      "wick_rejection",
+      "reference_left",
+      "reference_reclaimed",
+      "reacceptance_held",
+      "reacceptance_failed",
+      "micro_break_observed",
+      "location_left",
+      "pool_swept",
+      "opposite_displacement",
+      "opposite_displacement_ambiguous",
+      "accepted_outside"
+    ],
+    "path_transition_reasons": [
+      "context_registered",
+      "hold_completed",
+      "zone_rejection_observed",
+      "location_left",
+      "reacceptance_failed",
+      "first_strict_micro_break_observed",
+      "accepted_outside",
+      "opposite_displacement_ambiguous_same_clock",
+      "manipulation_resolution_deadline",
+      "data_gap_reset",
+      "contract_change_reset",
+      "data_anomaly",
+      "tick_size_mismatch"
+    ],
+    "consumer_boundary": "direction relation, path completion, setup admission and trade construction belong to Brain"
+  }
+}

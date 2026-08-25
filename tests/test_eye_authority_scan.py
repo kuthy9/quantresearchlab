@@ -3,6 +3,7 @@ from __future__ import annotations
 from copy import deepcopy
 import hashlib
 import json
+from types import SimpleNamespace
 
 import pandas as pd
 import pytest
@@ -75,6 +76,33 @@ def _fake_identity() -> dict[str, object]:
     }
 
 
+def _enable_frozen_group5_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    load_json = scan._json
+    model_path = (scan.ROOT / "configs/model.json").resolve()
+
+    def load_with_frozen_interaction(path):
+        payload = load_json(path)
+        if path.resolve() == model_path:
+            payload = deepcopy(payload)
+            payload["observer"]["interaction_protocol"] = (
+                scan.EXPECTED_PROTOCOLS["group5"]
+            )
+        return payload
+
+    monkeypatch.setattr(scan, "_json", load_with_frozen_interaction)
+    monkeypatch.setattr(
+        scan,
+        "load_validation_protocol",
+        lambda _path: SimpleNamespace(
+            classify_ohlcv=lambda _start, _end: SimpleNamespace(
+                role="brain_validation"
+            )
+        ),
+    )
+
+
 def test_registered_profile_is_exact_and_fail_closed() -> None:
     payload = scan._registered_payload()
 
@@ -143,20 +171,15 @@ def test_registered_profile_is_exact_and_fail_closed() -> None:
             scan._validate_registered_payload(altered)
 
 
-def test_eye_builder_enables_only_lightweight_typed_observer() -> None:
+def test_frozen_eye_builder_rejects_current_interaction_binding_drift() -> None:
     payload = scan._registered_payload()
     scan._validate_registered_payload(payload)
 
-    _, observer = scan._build_eye(payload)
-
-    assert observer.config.eye_authority_mode is True
-    assert observer.config.project_scene_graph is False
-    assert observer.config.materialize_event_view is False
-    assert observer.config.range_auction_projection_only is False
-    assert observer._displacement_eye is not None
-    assert observer._zone_tracker is not None
-    assert observer._range_auction_tracker is not None
-    assert observer._interaction_semantics is not None
+    with pytest.raises(
+        ValueError,
+        match="model and eye profile protocol bindings disagree",
+    ):
+        scan._build_eye(payload)
 
 
 def test_macos_authority_scan_rejects_rosetta_python(
@@ -173,10 +196,12 @@ def test_macos_authority_scan_rejects_rosetta_python(
     assert runtime["native_arm64_required"] is True
 
 
+@pytest.mark.research_orchestration
 def test_checkpoint_resume_matches_uninterrupted_partial_smoke(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    _enable_frozen_group5_model(monkeypatch)
     loaded = _small_loaded_source()
     monkeypatch.setattr(scan, "load_ohlcv", lambda *args, **kwargs: loaded)
     monkeypatch.setattr(
@@ -257,10 +282,12 @@ def test_checkpoint_resume_matches_uninterrupted_partial_smoke(
     assert not tuple(resumed_output.glob("*.tmp"))
 
 
+@pytest.mark.research_orchestration
 def test_max_bars_limits_only_in_window_observations(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    _enable_frozen_group5_model(monkeypatch)
     loaded = _small_loaded_source_with_warmup()
     monkeypatch.setattr(scan, "load_ohlcv", lambda *args, **kwargs: loaded)
     monkeypatch.setattr(
@@ -285,10 +312,12 @@ def test_max_bars_limits_only_in_window_observations(
     )
 
 
+@pytest.mark.research_orchestration
 def test_max_bars_wins_over_same_bar_simulated_stop(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    _enable_frozen_group5_model(monkeypatch)
     loaded = _small_loaded_source_with_warmup()
     monkeypatch.setattr(scan, "load_ohlcv", lambda *args, **kwargs: loaded)
     monkeypatch.setattr(
@@ -434,10 +463,12 @@ def test_registered_tail_and_integrity_checks_fail_closed() -> None:
     assert checks["selected_case_count_consistent"] is False
 
 
+@pytest.mark.research_orchestration
 def test_full_scan_integrity_failure_is_not_permanent_evidence(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    _enable_frozen_group5_model(monkeypatch)
     loaded = _small_loaded_source()
     monkeypatch.setattr(scan, "load_ohlcv", lambda *args, **kwargs: loaded)
     monkeypatch.setattr(

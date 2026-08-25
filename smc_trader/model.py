@@ -26,7 +26,7 @@ SMC_SEMANTIC_VERSION = "smc_semantics_v1.2"
 MARKET_OBSERVATION_SCHEMA_VERSION = 5
 ENGINE_SNAPSHOT_SCHEMA_VERSION = 4
 NEUTRAL_ENGINE_SNAPSHOT_SCHEMA_VERSION = 4
-INTERACTION_UPDATE_SCHEMA_VERSION = 1
+INTERACTION_UPDATE_SCHEMA_VERSION = 2
 
 
 def _exact_dataclass_pickle_state(
@@ -522,12 +522,17 @@ class EntryLocationLifecycle(str, Enum):
     LEFT = "left"
 
 
-class QualifiedReacceptanceLifecycle(str, Enum):
+class ReacceptanceLifecycle(str, Enum):
     LEFT = "left"
     RECLAIMED = "reclaimed"
     HELD = "held"
     FAILED = "failed"
     CENSORED = "censored"
+
+
+# Cold import/pickle compatibility for pre-rename artifacts.  Runtime owners
+# use ``ReacceptanceLifecycle`` directly; this alias is not re-exported.
+QualifiedReacceptanceLifecycle = ReacceptanceLifecycle
 
 
 class PathSequenceLifecycle(str, Enum):
@@ -630,7 +635,7 @@ if frozenset(_INTERACTION_PHYSICAL_PATH_STEP_REASONS) != (
 _INTERACTION_PHYSICAL_PATH_REASONS = frozenset(
     {
         "context_registered",
-        "qualified_reacceptance_held",
+        "hold_completed",
         "zone_rejection_observed",
         "location_left",
         "reacceptance_failed",
@@ -657,6 +662,7 @@ GROUP5_PATH_STEP_KINDS = (
 )
 _BRAIN_INTERPRETED_PATH_REASONS = frozenset(
     {
+        "qualified_reacceptance_held",
         "micro_bos_aligned",
         "micro_bos_opposed",
         "micro_bos_ambiguous_same_clock",
@@ -4267,7 +4273,7 @@ class EntryLocationState:
 
 
 @dataclass(frozen=True)
-class QualifiedReacceptanceState:
+class ReacceptanceState:
     """A frozen reference leave, later reclaim and later completed hold."""
 
     reacceptance_id: str
@@ -4280,7 +4286,7 @@ class QualifiedReacceptanceState:
     direction: Direction
     reference_price: float
     failure_boundary: float
-    lifecycle: QualifiedReacceptanceLifecycle
+    lifecycle: ReacceptanceLifecycle
     formed_at: pd.Timestamp
     state_started_at: pd.Timestamp
     last_updated_at: pd.Timestamp
@@ -4310,7 +4316,7 @@ class QualifiedReacceptanceState:
             or not isinstance(self.direction, Direction)
             or not isinstance(
                 self.lifecycle,
-                QualifiedReacceptanceLifecycle,
+                ReacceptanceLifecycle,
             )
             or not self.protocol_hash
             or not math.isfinite(float(self.reference_price))
@@ -4327,7 +4333,7 @@ class QualifiedReacceptanceState:
             or not 0 <= self.hold_real_1m_bars
             <= self.required_later_hold_bars
         ):
-            raise ValueError("qualified reacceptance identity is invalid")
+            raise ValueError("reacceptance identity is invalid")
         for name in (
             "formed_at",
             "state_started_at",
@@ -4346,7 +4352,7 @@ class QualifiedReacceptanceState:
                     aware_timestamp(value, name=f"reacceptance.{name}"),
                 )
         same_clock_failure = (
-            self.lifecycle is QualifiedReacceptanceLifecycle.FAILED
+            self.lifecycle is ReacceptanceLifecycle.FAILED
             and self.failed_at == self.left_at
             and self.transition_reason
             in GROUP5_SAME_CLOCK_REACCEPTANCE_FAILURE_REASONS
@@ -4382,15 +4388,15 @@ class QualifiedReacceptanceState:
                 )
             )
         ):
-            raise ValueError("qualified reacceptance clocks are invalid")
+            raise ValueError("reacceptance clocks are invalid")
         for value in (
             self.reclaim_margin_atr,
             self.hold_margin_atr,
             self.strength,
         ):
             if not math.isfinite(float(value)) or not 0.0 <= value <= 1.0:
-                raise ValueError("qualified reacceptance strength is invalid")
-        if self.lifecycle is QualifiedReacceptanceLifecycle.LEFT:
+                raise ValueError("reacceptance strength is invalid")
+        if self.lifecycle is ReacceptanceLifecycle.LEFT:
             if any(
                 value is not None
                 for value in (
@@ -4401,7 +4407,7 @@ class QualifiedReacceptanceState:
                 )
             ):
                 raise ValueError("left reacceptance lifecycle is inconsistent")
-        elif self.lifecycle is QualifiedReacceptanceLifecycle.RECLAIMED:
+        elif self.lifecycle is ReacceptanceLifecycle.RECLAIMED:
             if (
                 self.reclaimed_at is None
                 or self.held_at is not None
@@ -4412,7 +4418,7 @@ class QualifiedReacceptanceState:
                 raise ValueError(
                     "reclaimed reacceptance lifecycle is inconsistent"
                 )
-        elif self.lifecycle is QualifiedReacceptanceLifecycle.HELD:
+        elif self.lifecycle is ReacceptanceLifecycle.HELD:
             if (
                 self.reclaimed_at is None
                 or self.held_at is None
@@ -4423,7 +4429,7 @@ class QualifiedReacceptanceState:
                 != self.required_later_hold_bars
             ):
                 raise ValueError("held reacceptance lifecycle is inconsistent")
-        elif self.lifecycle is QualifiedReacceptanceLifecycle.FAILED:
+        elif self.lifecycle is ReacceptanceLifecycle.FAILED:
             if (
                 self.failed_at is None
                 or self.held_at is not None
@@ -4445,8 +4451,13 @@ class QualifiedReacceptanceState:
             )
         if not self.transition_reason:
             raise ValueError(
-                "qualified reacceptance transition reason is required"
+                "reacceptance transition reason is required"
             )
+
+
+# Cold import/pickle compatibility for pre-rename artifacts.  New pickles use
+# the physical class name because this is an alias, not a wrapper type.
+QualifiedReacceptanceState = ReacceptanceState
 
 
 @dataclass(frozen=True)
@@ -4799,12 +4810,12 @@ class InteractionUpdate:
     """
 
     zone_interactions: tuple[EntryLocationState, ...]
-    reacceptance_interactions: tuple[QualifiedReacceptanceState, ...]
+    reacceptance_interactions: tuple[ReacceptanceState, ...]
     micro_break_facts: tuple[MicroBreakFact, ...]
     interaction_paths: tuple[PathSequenceState, ...]
     interaction_path_transitions: tuple[PathSequenceState, ...] = ()
     reacceptance_interaction_transitions: tuple[
-        QualifiedReacceptanceState,
+        ReacceptanceState,
         ...,
     ] = ()
     milestone_transitions: tuple[tuple[str, PathSequenceStep], ...] = ()
@@ -4872,7 +4883,7 @@ class InteractionUpdate:
             (self.zone_interactions, EntryLocationState, "zone"),
             (
                 self.reacceptance_interactions,
-                QualifiedReacceptanceState,
+                ReacceptanceState,
                 "reacceptance",
             ),
             (self.micro_break_facts, MicroBreakFact, "micro-break"),
@@ -4884,7 +4895,7 @@ class InteractionUpdate:
             ),
             (
                 self.reacceptance_interaction_transitions,
-                QualifiedReacceptanceState,
+                ReacceptanceState,
                 "reacceptance transition",
             ),
         )
@@ -4926,7 +4937,7 @@ class InteractionUpdate:
                 "interaction reacceptance censor requires a hard boundary"
             )
         if any(
-            state.lifecycle is not QualifiedReacceptanceLifecycle.CENSORED
+            state.lifecycle is not ReacceptanceLifecycle.CENSORED
             or state.censored_at is None
             or state.transition_reason != "hard_boundary_censored"
             for state in self.reacceptance_interaction_transitions

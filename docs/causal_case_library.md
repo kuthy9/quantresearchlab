@@ -64,7 +64,7 @@ while still proving its interval complete. If the typed observer cannot prove
 an interval complete, `complete=false`; target builders must mask that interval
 rather than treating the next case stage as a market event.
 
-Recorder schema 8/protocol 1.7 binds `InteractionUpdate` schema 1 and raw Eye
+Recorder schema 8/protocol 1.8 binds `InteractionUpdate` schema 2 and raw Eye
 authority. Each retained `updates[*].collections` object has exactly 15 keys:
 six Group 1-4 deltas and nine Interaction collections. The four current
 Interaction views stay inside their own update; the top-level aggregate has

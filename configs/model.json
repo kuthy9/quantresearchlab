@@ -103,7 +103,7 @@
     "displacement_protocol": "configs/primitives_displacement.json",
     "zone_protocol": "configs/primitives_zones.json",
     "range_auction_protocol": "configs/primitives_range.json",
-    "interaction_protocol": "configs/primitives_entry.json",
+    "interaction_protocol": "configs/primitives_interaction.json",
     "minimum_bars": {
       "4H": 16,
       "1H": 24,

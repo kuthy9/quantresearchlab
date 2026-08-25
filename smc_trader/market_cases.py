@@ -54,7 +54,7 @@ from .scene_graph import (
 
 
 MARKET_CASE_RECORDER_SCHEMA_VERSION = 2
-MARKET_CASE_PROTOCOL_VERSION = "market-episode-input-only-1.3.0"
+MARKET_CASE_PROTOCOL_VERSION = "market-episode-input-only-1.4.0"
 
 # Run-level replay policy, intentionally separate from the recorder protocol:
 # the row grain and validation contract are unchanged, while runner schema 8

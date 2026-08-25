@@ -5,8 +5,8 @@ downstream consumer of the existing continuous replay and never starts or
 advances a second replay loop.
 
 The current fail-closed contract is protocol
-`market-episode-input-only-1.3.0`, recorder schema 2,
-`InteractionUpdate` schema 1, NeutralMarketState schema 2, neutral Engine
+`market-episode-input-only-1.4.0`, recorder schema 2,
+`InteractionUpdate` schema 2, NeutralMarketState schema 2, neutral Engine
 checkpoint schema 7, and market-input runner state schema 8. Older recorder,
 protocol, or runner identities cannot resume or materialize under this
 contract. Runner schema 8 binds the exact current MarketCase profile registry

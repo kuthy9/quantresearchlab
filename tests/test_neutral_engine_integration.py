@@ -258,9 +258,11 @@ def test_engine_shares_one_brain_observation_view_with_neutral_and_brain(
     real_interpreter = brain_entry_module.interpret_micro_break_facts
     real_neutral_builder = engine_module.build_neutral_market_state
     real_brain_update = engine.brain.update
+    real_risk_review = engine.risk.review
     constructed = []
     neutral_inputs = []
     brain_inputs = []
+    risk_inputs = []
     interpretation_calls = 0
 
     def counted_interpreter(facts):
@@ -281,6 +283,10 @@ def test_engine_shares_one_brain_observation_view_with_neutral_and_brain(
         brain_inputs.append(observation)
         return real_brain_update(observation, *args, **kwargs)
 
+    def capture_risk(decision, observation, *args, **kwargs):
+        risk_inputs.append(observation)
+        return real_risk_review(decision, observation, *args, **kwargs)
+
     monkeypatch.setattr(
         engine_module,
         "brain_observation_view",
@@ -297,6 +303,7 @@ def test_engine_shares_one_brain_observation_view_with_neutral_and_brain(
         capture_neutral,
     )
     monkeypatch.setattr(engine.brain, "update", capture_brain)
+    monkeypatch.setattr(engine.risk, "review", capture_risk)
 
     engine.on_bar(_grid_bars(1)[0])
 
@@ -305,6 +312,8 @@ def test_engine_shares_one_brain_observation_view_with_neutral_and_brain(
     assert len(neutral_inputs) == len(brain_inputs) == 1
     assert neutral_inputs[0] is constructed[0]
     assert brain_inputs[0] is constructed[0]
+    assert len(risk_inputs) == 1
+    assert risk_inputs[0] is constructed[0]._observation
 
 
 @pytest.mark.parametrize(

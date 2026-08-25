@@ -573,11 +573,11 @@ def _shadow_payload(
 
 def test_causal_outcome_selection_contract_versions_are_explicit() -> None:
     assert CAUSAL_CASE_RECORDER_SCHEMA_VERSION == 8
-    assert CAUSAL_CASE_PROTOCOL_VERSION == "entry-episode-causal-case-1.7.0"
+    assert CAUSAL_CASE_PROTOCOL_VERSION == "entry-episode-causal-case-1.8.0"
     assert CAUSAL_CASE_PROTOCOL["shadow_outcome_selection"].endswith(
         "never_resolved_at_resolution_or_outcome"
     )
-    assert CAUSAL_CASE_PROTOCOL["interaction_update_schema_version"] == 1
+    assert CAUSAL_CASE_PROTOCOL["interaction_update_schema_version"] == 2
     assert CAUSAL_CASE_PROTOCOL["interaction_authority"] == (
         "raw_eye_physical_facts_only_no_brain_interpretation"
     )

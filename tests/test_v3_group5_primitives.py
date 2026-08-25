@@ -416,15 +416,6 @@ def test_group5_protocol_tracks_current_config_and_upstream_bindings() -> None:
         "independent_action_authority": False,
         "favr_enabled": False,
     }
-    assert (
-        protocol.typed_state_available,
-        protocol.brain_input_allowed,
-        protocol.dfp_lsr_input_authority_validated,
-        protocol.favr_natural_authority_validated,
-        protocol.independent_action_authority,
-        protocol.favr_enabled,
-    ) == (True, True, True, False, False, False)
-
     assert _sha256(PROTOCOL_PATH) == PROTOCOL_SHA
     assert protocol.protocol_hash == PROTOCOL_SHA
     assert protocol.source_group12_protocol_hash == GROUP12_SHA
@@ -707,7 +698,7 @@ def test_same_bar_leave_and_eligible_bos_freeze_failure_before_path_close() -> N
     assert path.ended_at == leave_and_trigger.end
     with pytest.raises(
         ValueError,
-        match="qualified reacceptance clocks are invalid",
+        match="reacceptance clocks are invalid",
     ):
         replace(
             reacceptance,
@@ -790,7 +781,7 @@ def test_reacceptance_requires_leave_reclaim_and_a_later_real_hold() -> None:
     assert final_reacceptance.hold_real_1m_bars == 1
     assert (
         held.entry_locations[0].transition_reason
-        == "qualified_reacceptance_held"
+        == "hold_completed"
     )
     assert held.path_sequences[0].lifecycle is PathSequenceLifecycle.ACTIVE
     assert held.path_sequences[0].transition_reason == (

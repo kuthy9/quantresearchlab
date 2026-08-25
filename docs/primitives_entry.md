@@ -1,11 +1,19 @@
-# Entry-location and path-sequence primitives
+# Legacy composite entry-location and path-sequence protocol
 
-The executable companion is
-`configs/primitives_entry.json`.
+The companion [`configs/primitives_entry.json`](../configs/primitives_entry.json)
+is the frozen Group5 composite identity used by cold artifacts and registered
+research runners. It is not the current hot Interaction contract, and current
+runtime code must fail closed rather than drive physical Interaction semantics
+with this legacy hash.
 
-Current protocol: `3.2.0-group5.4`. Typed state and DFP/LSR input authority are
-available to the Brain. Group5 still has no independent action authority, and
-FAVR natural authority remains disabled and parked.
+The hot Eye contract is
+[`configs/primitives_interaction.json`](../configs/primitives_interaction.json)
+(`3.2.0-interaction.1`). It publishes only physical zone interaction,
+reclaim/hold, raw micro-break and ordered milestone facts. Path completeness,
+directional alignment, setup qualification and trade construction belong only
+to Brain. The remainder of this document describes the frozen
+`3.2.0-group5.4` composite contract for historical interpretation; its
+qualification vocabulary is not current Eye authority.
 
 This file documents the retained v1.2 playbook-facing Group-5 lifecycle. Its
 `first_pullback` is not the additive foundation's canonical geometric First

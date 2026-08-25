@@ -63,7 +63,7 @@ from .model import (
     StructureLifecycle,
     SupportResistanceLifecycle,
     SwingLifecycle,
-    QualifiedReacceptanceLifecycle,
+    ReacceptanceLifecycle,
     ThesisEvidenceState,
     Timeframe,
     aware_timestamp,
@@ -656,7 +656,7 @@ SCENE_NODE_LIFECYCLE_VOCAB = frozenset(
                 DealingRangeLifecycle,
                 ManipulationLifecycle,
                 EntryLocationLifecycle,
-                QualifiedReacceptanceLifecycle,
+                ReacceptanceLifecycle,
                 PathSequenceLifecycle,
                 DisplacementLifecycle,
             )
@@ -6630,13 +6630,9 @@ def _high_salience_episode_ids(
             and node.ambiguity_state
             not in {EvidenceStatus.INVALIDATED, EvidenceStatus.UNKNOWN}
         )
-        successful_terminal_path = _successful_terminal_path_pulse(node)
         typed_path_pulse = (
             node.kind == "path_sequence"
-            and (
-                node.lifecycle == "active"
-                or successful_terminal_path
-            )
+            and node.lifecycle == "active"
             and attributes.get("context_kind")
             in {"pool_reversal", "zone_return"}
             and node.ambiguity_state
@@ -6694,19 +6690,6 @@ def _persistent_explanation_candidate(node: SceneNode) -> bool:
             and node.ambiguity_state
             not in {EvidenceStatus.INVALIDATED, EvidenceStatus.UNKNOWN}
         )
-    )
-
-
-def _successful_terminal_path_pulse(node: SceneNode) -> bool:
-    """Keep a completed trigger path visible for its resolution clock only."""
-
-    return bool(
-        node.kind == "path_sequence"
-        and node.lifecycle == "closed"
-        and node.ambiguity_state
-        not in {EvidenceStatus.INVALIDATED, EvidenceStatus.UNKNOWN}
-        and node.resolution_reason
-        in {"micro_bos_aligned", "pool_reversal_sequence_observed"}
     )
 
 
@@ -6939,27 +6922,6 @@ def _canonical_open_thesis_root_id(
     return location.source_displacement_id
 
 
-def _is_supporting_open_thesis_trigger(node: SceneNode) -> bool:
-    if node.kind == "path_step":
-        return dict(node.semantic_attributes).get("path_step_kind") in {
-            "wick_rejection",
-            "reacceptance_held",
-            "micro_bos_confirmed",
-        }
-    if node.kind == "reacceptance":
-        return node.lifecycle == "held"
-    if node.kind == "micro_bos":
-        # Only an explicit schema-v2 cold-reader interpretation can satisfy
-        # this compatibility path. Raw schema-v3 facts omit both fields and
-        # therefore cannot be silently treated as aligned.
-        attributes = dict(node.semantic_attributes)
-        return bool(
-            attributes.get("outcome") == "aligned"
-            and attributes.get("qualified") == "true"
-        )
-    return False
-
-
 def build_open_market_theses(
     previous: Sequence[OpenMarketThesis],
     observation: MarketObservation,
@@ -7028,10 +6990,6 @@ def build_open_market_theses(
                 and candidate.lifecycle == "reaccepted"
             )
             and root_id not in successful_paths
-            and not (
-                brain_interaction is None
-                and _successful_terminal_path_pulse(candidate)
-            )
         ):
             continue
         canonical_id = _canonical_open_thesis_root_id(
@@ -7113,15 +7071,6 @@ def build_open_market_theses(
             dict.fromkeys(
                 (
                     *(() if prior is None else prior.trigger_event_ids),
-                    *(
-                        identity
-                        for node in closure
-                        if _is_supporting_open_thesis_trigger(node)
-                        for identity in (
-                            _context_identity(node),
-                            *node.source_ids,
-                        )
-                    ),
                     *(
                         reference.reference_id
                         for candidate in candidates

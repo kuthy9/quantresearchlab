@@ -6,33 +6,23 @@ from typing import Any
 
 import pandas as pd
 
-from .brain_entry_sequence import brain_observation_view
 from .model import (
     AccountState,
     Action,
     Bar,
-    BOSLifecycle,
-    BOSScope,
     Decision,
     DealingRangeLifecycle,
     Direction,
-    EntryLocationLifecycle,
-    EntryLocationState,
     EventKind,
-    FairValueGapLifecycle,
-    FVGQualification,
     FrozenLSRContext,
     FrozenThesis,
     LiquidityInventoryLifecycle,
     LiquidityLevel,
     ManipulationLifecycle,
     MarketObservation,
-    MicroBOSReference,
-    OrderBlockLifecycle,
     PathSequenceLifecycle,
     Playbook,
     PositionSnapshot,
-    QualifiedReacceptanceLifecycle,
     RiskAssessment,
     StructuralLevel,
     Timeframe,
@@ -112,128 +102,6 @@ def _same_price(left: float, right: float) -> bool:
     return abs(float(left) - float(right)) <= 1e-9
 
 
-def _entry_location_has_exact_zone_source(
-    location: EntryLocationState,
-    observation: MarketObservation,
-) -> bool:
-    """Prove that Group 5 retained the exact frozen M5 FVG/OB source."""
-
-    frame = observation.frame(Timeframe.M5)
-    if location.source_zone_kind == "fvg":
-        matches = tuple(
-            state
-            for state in frame.fair_value_gaps
-            if state.fvg_id == location.source_zone_id
-        )
-        if len(matches) != 1:
-            return False
-        source = matches[0]
-        source_bos_id = None
-        source_failed = (
-            source.lifecycle is FairValueGapLifecycle.INVALIDATED
-        )
-    elif location.source_zone_kind == "order_block":
-        matches = tuple(
-            state
-            for state in frame.order_blocks
-            if state.order_block_id == location.source_zone_id
-        )
-        if len(matches) != 1:
-            return False
-        source = matches[0]
-        source_bos_id = source.source_bos_id
-        source_failed = source.lifecycle is OrderBlockLifecycle.FAILED
-    else:
-        return False
-    return bool(
-        not source_failed
-        and source.protocol_hash
-        == location.source_zone_detector_protocol_hash
-        == location.source_zone_protocol_hash
-        and source.symbol == observation.symbol == location.symbol
-        and source.instrument_id
-        == observation.instrument_id
-        == location.instrument_id
-        and source.timeframe is Timeframe.M5
-        and source.direction is location.direction
-        and source.source_displacement_id
-        == location.source_displacement_id
-        and source_bos_id == location.source_bos_id
-        and _same_price(source.lower_bound, location.lower_bound)
-        and _same_price(source.upper_bound, location.upper_bound)
-        and _same_price(source.midpoint, location.midpoint)
-        and _same_price(
-            source.invalidation_price,
-            location.failure_boundary,
-        )
-        and source.confirmed_at == location.formed_at
-    )
-
-
-def _exact_entry_zone_source(
-    location: EntryLocationState,
-    observation: MarketObservation,
-):
-    if not _entry_location_has_exact_zone_source(location, observation):
-        return None
-    frame = observation.frame(Timeframe.M5)
-    candidates = (
-        tuple(
-            state
-            for state in frame.fair_value_gaps
-            if state.fvg_id == location.source_zone_id
-        )
-        if location.source_zone_kind == "fvg"
-        else tuple(
-            state
-            for state in frame.order_blocks
-            if state.order_block_id == location.source_zone_id
-        )
-    )
-    return candidates[0] if len(candidates) == 1 else None
-
-
-def _has_opposed_mss(
-    observation: MarketObservation,
-    direction: Direction,
-    displacement_id: str,
-    *,
-    after: pd.Timestamp,
-    before: pd.Timestamp,
-) -> bool:
-    return any(
-        state.timeframe is Timeframe.M5
-        and state.direction is direction
-        and state.lifecycle is BOSLifecycle.CONFIRMED
-        and state.scope is BOSScope.OPPOSED
-        and state.mss_qualified
-        and state.source_displacement_id == displacement_id
-        and state.resolved_at is not None
-        and state.resolved_at > after
-        and state.resolved_at <= before
-        for state in observation.frame(Timeframe.M5).structure_breaks
-    )
-
-
-def _micro_reference_has_exact_source(
-    reference: MicroBOSReference,
-    observation: MarketObservation,
-) -> bool:
-    """Prove that a Group 5 micro reference is the exact upstream M1 BOS."""
-
-    return any(
-        state.bos_id == reference.bos_id
-        and state.timeframe is Timeframe.M1
-        and state.lifecycle is BOSLifecycle.CONFIRMED
-        and state.direction is reference.bos_direction
-        and state.target_swing_id == reference.target_swing_id
-        and state.scope is reference.scope
-        and state.pending_at == reference.pending_at
-        and state.resolved_at == reference.resolved_at
-        for state in observation.frame(Timeframe.M1).structure_breaks
-    )
-
-
 def _canonical_visible_levels(
     observation: MarketObservation,
 ) -> dict[str, LiquidityLevel]:
@@ -292,7 +160,6 @@ class _CausalStopSource:
 def _canonical_stop_sources(
     observation: MarketObservation,
 ) -> dict[str, _CausalStopSource]:
-    observation = brain_observation_view(observation)
     sources: dict[str, _CausalStopSource] = {}
     ambiguous: set[str] = set()
 
@@ -347,7 +214,10 @@ def _canonical_stop_sources(
                     source_kind=event.kind.value,
                 ),
             )
-    for location in observation.entry_locations:
+    interaction = observation.interaction_update
+    for location in (
+        () if interaction is None else interaction.zone_interactions
+    ):
         register(
             location.location_id,
             _CausalStopSource(
@@ -446,9 +316,12 @@ def _materialized_lsr_pool_path_matches(
 ) -> bool:
     """Validate an exact current pool path when it is still materialized."""
 
+    interaction = observation.interaction_update
     matches = tuple(
         item
-        for item in observation.path_sequences
+        for item in (
+            () if interaction is None else interaction.interaction_paths
+        )
         if item.sequence_id == context.pool_path_id
     )
     if not matches:
@@ -488,379 +361,54 @@ def _materialized_lsr_pool_path_matches(
     )
 
 
-def _valid_lsr_trigger_family(
-    path,
-    location: EntryLocationState,
-    first_pullback,
+def _valid_plan_entry_custody(
     plan: TradePlan,
     observation: MarketObservation,
 ) -> bool:
-    """Validate the registered zone-bound LSR trigger OR family."""
+    """Check only the frozen Brain plan's physical interaction custody.
 
-    expected_trigger = {
-        "zone_rejection_observed": "wick_rejection",
-        "qualified_reacceptance_held": "reacceptance_held",
-        "micro_bos_aligned": "micro_bos_confirmed",
-    }.get(path.transition_reason)
-    if expected_trigger is None:
-        return False
-    trigger_steps = tuple(
-        step for step in path.steps if step.kind == expected_trigger
-    )
-    if not trigger_steps:
-        return False
-    trigger = trigger_steps[-1]
-    if expected_trigger == "wick_rejection":
-        return bool(
-            path.lifecycle is PathSequenceLifecycle.ACTIVE
-            and trigger.source_entity_id == location.location_id
-            and trigger.observed_at > first_pullback.observed_at
-            and location.rejected_at == trigger.observed_at
-        )
-    if expected_trigger == "reacceptance_held":
-        return bool(
-            path.lifecycle is PathSequenceLifecycle.ACTIVE
-            and trigger.observed_at > first_pullback.observed_at
-            and any(
-                state.context_kind == "entry_zone"
-                and state.context_id == location.location_id
-                and state.reacceptance_id == trigger.source_entity_id
-                and state.direction is plan.direction
-                and state.lifecycle is QualifiedReacceptanceLifecycle.HELD
-                and state.held_at == trigger.observed_at
-                for state in observation.qualified_reacceptances
-            )
-        )
-    return bool(
-        path.lifecycle is PathSequenceLifecycle.CLOSED
-        and path.ended_at == observation.asof
-        and trigger.observed_at > first_pullback.observed_at
-        and any(
-            reference.context_kind == "zone_return"
-            and reference.context_id == location.location_id
-            and reference.expected_direction is plan.direction
-            and reference.qualified
-            and reference.bos_id == trigger.source_event_id
-            and reference.target_swing_id == trigger.source_entity_id
-            and reference.resolved_at == trigger.observed_at
-            and _micro_reference_has_exact_source(reference, observation)
-            for reference in observation.micro_bos_references
-        )
-    )
+    Setup completeness, trigger family, hold status and micro-break alignment
+    are Brain decisions.  Risk verifies that the IDs and geometry frozen into
+    that decision still name one exact current physical zone/path pair.
+    """
 
-
-def _valid_typed_entry_location(
-    plan: TradePlan,
-    observation: MarketObservation,
-) -> bool:
     typed = (
-        plan.setup_id,
         plan.entry_location_id,
         plan.entry_path_id,
         plan.entry_zone_lower,
         plan.entry_zone_upper,
-        plan.selected_draw_id,
     )
     if any(value is None for value in typed):
         return False
-    location = next(
-        (
-            item
-            for item in observation.entry_locations
-            if item.location_id == plan.entry_location_id
-        ),
-        None,
-    )
-    path = next(
-        (
-            item
-            for item in observation.path_sequences
-            if item.sequence_id == plan.entry_path_id
-        ),
-        None,
-    )
-    origin = None if path is None else path.steps[0]
-    pullback_steps = (
-        ()
-        if path is None
-        else tuple(
-            step for step in path.steps if step.kind == "first_pullback"
-        )
-    )
-    if (
-        location is None
-        or path is None
-        or not _entry_location_has_exact_zone_source(
-            location,
-            observation,
-        )
-        or path.context_kind != "zone_return"
-        or path.context_id != location.location_id
-        or path.direction is not plan.direction
-        or path.protocol_hash != location.protocol_hash
-        or path.symbol != observation.symbol
-        or path.instrument_id != observation.instrument_id
-        or path.formed_at != location.formed_at
-        or location.direction is not plan.direction
-        or location.lifecycle is EntryLocationLifecycle.LEFT
-        or origin is None
-        or origin.kind != "zone_visible"
-        or origin.observed_at != location.formed_at
-        or origin.source_event_id != location.source_zone_id
-        or origin.source_entity_id != location.source_zone_id
-        or len(pullback_steps) != 1
-        or location.first_entered_at is None
-        or pullback_steps[0].observed_at
-        != location.first_entered_at
-        or pullback_steps[0].source_event_id is not None
-        or pullback_steps[0].source_entity_id
-        != location.location_id
-        or not _same_price(
-            location.lower_bound,
-            float(plan.entry_zone_lower),
-        )
-        or not _same_price(
-            location.upper_bound,
-            float(plan.entry_zone_upper),
-        )
-        or not (
-            location.lower_bound
-            <= plan.planned_entry
-            <= location.upper_bound
-        )
-        or plan.selected_draw_id != plan.targets[0].level_id
-    ):
+    interaction = observation.interaction_update
+    if interaction is None:
         return False
-    first_pullback = pullback_steps[0]
-    step_kinds = {step.kind for step in path.steps}
-    if plan.playbook is Playbook.DISPLACEMENT_FIRST_PULLBACK:
-        expected_trigger = {
-            "zone_rejection_observed": "wick_rejection",
-            "qualified_reacceptance_held": "reacceptance_held",
-            "micro_bos_aligned": "micro_bos_confirmed",
-        }.get(path.transition_reason)
-        trigger_steps = [
-            step
-            for step in path.steps
-            if step.kind == expected_trigger
-        ]
-        if (
-            plan.setup_id != plan.entry_path_id
-            or expected_trigger is None
-            or not trigger_steps
-        ):
-            return False
-        trigger_step = trigger_steps[-1]
-        if expected_trigger == "wick_rejection":
-            return bool(
-                path.lifecycle is PathSequenceLifecycle.ACTIVE
-                and trigger_step.source_entity_id == location.location_id
-                and location.rejected_at == trigger_step.observed_at
-            )
-        if expected_trigger == "reacceptance_held":
-            return bool(
-                path.lifecycle is PathSequenceLifecycle.ACTIVE
-                and any(
-                    state.context_kind == "entry_zone"
-                    and state.context_id == location.location_id
-                    and state.reacceptance_id
-                    == trigger_step.source_entity_id
-                    and state.lifecycle
-                    is QualifiedReacceptanceLifecycle.HELD
-                    and state.held_at == trigger_step.observed_at
-                    for state in observation.qualified_reacceptances
-                )
-            )
-        return bool(
-            path.lifecycle is PathSequenceLifecycle.CLOSED
-            and path.ended_at == observation.asof
-            and any(
-                reference.context_kind == "zone_return"
-                and reference.context_id == location.location_id
-                and reference.expected_direction is plan.direction
-                and reference.qualified
-                and reference.bos_id == trigger_step.source_event_id
-                and reference.target_swing_id
-                == trigger_step.source_entity_id
-                and reference.resolved_at == trigger_step.observed_at
-                and _micro_reference_has_exact_source(
-                    reference,
-                    observation,
-                )
-                for reference in observation.micro_bos_references
-            )
-        )
-    if plan.playbook is Playbook.FAILED_AUCTION_VALUE_RETURN:
-        context = plan.range_auction
-        if context is None or plan.setup_id != context.manipulation_id:
-            return False
-        dealing_range = next(
-            (
-                state
-                for state in observation.frame(Timeframe.H1).dealing_ranges
-                if state.range_id == context.range_id
-            ),
-            None,
-        )
-        manipulation = next(
-            (
-                state
-                for state in observation.manipulations
-                if state.manipulation_id == context.manipulation_id
-            ),
-            None,
-        )
-        zone_source = _exact_entry_zone_source(location, observation)
-        if (
-            dealing_range is None
-            or dealing_range.lifecycle is not DealingRangeLifecycle.MATURE
-            or manipulation is None
-            or manipulation.source_kind != "mature_range_boundary"
-            or manipulation.source_id != dealing_range.range_id
-            or manipulation.lifecycle is not ManipulationLifecycle.REACCEPTED
-            or manipulation.reaccepted_at is None
-            or manipulation.reentry_price is None
-            or manipulation.reentry_candidate_at is None
-            or zone_source is None
-            or zone_source.source_displacement_active_at is None
-            or zone_source.source_displacement_active_at
-            <= manipulation.reaccepted_at
-            or not _has_opposed_mss(
-                observation,
-                plan.direction,
-                location.source_displacement_id,
-                after=manipulation.reaccepted_at,
-                before=first_pullback.observed_at,
-            )
-            or dealing_range.mature_at != context.mature_at
-            or not _same_price(
-                dealing_range.lower_bound,
-                context.lower_bound,
-            )
-            or not _same_price(
-                dealing_range.upper_bound,
-                context.upper_bound,
-            )
-            or not _same_price(dealing_range.midpoint, context.midpoint)
-            or not _same_price(
-                dealing_range.value_price,
-                context.value_price,
-            )
-            or manipulation.side != context.manipulation_side
-            or manipulation.swept_at != context.swept_at
-            or manipulation.reaccepted_at != context.reentered_at
-            or manipulation.reentry_candidate_at
-            != context.reentry_candidate_at
-            or not _same_price(
-                manipulation.sweep_extreme,
-                context.manipulation_extreme,
-            )
-            or not _same_price(
-                manipulation.reentry_price,
-                context.reentry_price,
-            )
-            or location.formed_at <= context.reentered_at
-            or location.lower_bound < context.lower_bound
-            or location.upper_bound > context.upper_bound
-            or (
-                plan.direction is Direction.LONG
-                and (
-                    location.midpoint >= context.midpoint
-                    or plan.planned_entry >= context.midpoint
-                )
-            )
-            or (
-                plan.direction is Direction.SHORT
-                and (
-                    location.midpoint <= context.midpoint
-                    or plan.planned_entry <= context.midpoint
-                )
-            )
-        ):
-            return False
-        if path.transition_reason == "qualified_reacceptance_held":
-            held_steps = tuple(
-                step
-                for step in path.steps
-                if step.kind == "reacceptance_held"
-            )
-            return bool(
-                path.lifecycle is PathSequenceLifecycle.ACTIVE
-                and held_steps
-                and any(
-                    state.context_kind == "entry_zone"
-                    and state.context_id == location.location_id
-                    and state.lifecycle
-                    is QualifiedReacceptanceLifecycle.HELD
-                    and any(
-                        step.source_entity_id == state.reacceptance_id
-                        and step.observed_at == state.held_at
-                        for step in held_steps
-                    )
-                    for state in observation.qualified_reacceptances
-                )
-            )
-        if path.transition_reason != "micro_bos_aligned":
-            return False
-        micro_steps = tuple(
-            step
-            for step in path.steps
-            if step.kind == "micro_bos_confirmed"
-        )
-        return bool(
-            path.lifecycle is PathSequenceLifecycle.CLOSED
-            and path.ended_at == observation.asof
-            and any(
-                reference.context_kind == "zone_return"
-                and reference.context_id == location.location_id
-                and reference.expected_direction is plan.direction
-                and reference.qualified
-                and reference.resolved_at > first_pullback.observed_at
-                and any(
-                    step.source_event_id == reference.bos_id
-                    and step.source_entity_id == reference.target_swing_id
-                    and step.observed_at == reference.resolved_at
-                    for step in micro_steps
-                )
-                and _micro_reference_has_exact_source(
-                    reference,
-                    observation,
-                )
-                for reference in observation.micro_bos_references
-            )
-        )
-    if plan.playbook is not Playbook.LIQUIDITY_SWEEP_REVERSAL:
+    locations = tuple(
+        item
+        for item in interaction.zone_interactions
+        if item.location_id == plan.entry_location_id
+    )
+    paths = tuple(
+        item
+        for item in interaction.interaction_paths
+        if item.sequence_id == plan.entry_path_id
+    )
+    if len(locations) != 1 or len(paths) != 1:
         return False
-    context = plan.lsr_context
-    zone_source = _exact_entry_zone_source(location, observation)
-    if (
-        context is None
-        or zone_source is None
-        or plan.setup_id
-        != context.entry_episode_id(location.source_zone_id)
-        or context.direction is not plan.direction
-        or location.source_displacement_id != context.displacement_id
-        or zone_source.source_displacement_id != context.displacement_id
-        or zone_source.source_displacement_active_at
-        != context.displacement_active_at
-        or location.formed_at < context.displacement_observed_at
-        or first_pullback.observed_at < location.formed_at
-        or path.protocol_hash != context.pool_path_protocol_hash
-        or (
-            location.source_zone_kind == "fvg"
-            and zone_source.qualification
-            is not FVGQualification.DISPLACEMENT_LINKED
-        )
-        or not _current_lsr_manipulation_matches(context, observation)
-        or not _materialized_lsr_pool_path_matches(context, observation)
-    ):
-        return False
-    return _valid_lsr_trigger_family(
-        path,
-        location,
-        first_pullback,
-        plan,
-        observation,
+    location = locations[0]
+    path = paths[0]
+    return bool(
+        path.context_kind == "zone_return"
+        and path.context_id == location.location_id
+        and path.direction is plan.direction
+        and location.direction is plan.direction
+        and path.protocol_hash == location.protocol_hash
+        and path.symbol == observation.symbol == location.symbol
+        and path.instrument_id
+        == observation.instrument_id
+        == location.instrument_id
+        and _same_price(location.lower_bound, float(plan.entry_zone_lower))
+        and _same_price(location.upper_bound, float(plan.entry_zone_upper))
     )
 
 
@@ -1296,7 +844,6 @@ class StructuralRiskEngine:
         observation: MarketObservation,
         account: AccountState | None = None,
     ) -> RiskAssessment:
-        observation = brain_observation_view(observation)
         account = account or AccountState(equity=100_000.0)
         forced = self._forced_position_exit(decision, observation, account)
         if forced is not None:
@@ -1453,10 +1000,10 @@ class StructuralRiskEngine:
                     "plan risk, reward or deadline disagrees with frozen "
                     "structural prices and execution time"
                 )
-            if not _valid_typed_entry_location(plan, observation):
+            if not _valid_plan_entry_custody(plan, observation):
                 vetoes.append(VetoCode.NO_PLAN)
                 reasons.append(
-                    "planned entry is not bound to its frozen Group 5 zone"
+                    "planned entry lost its frozen physical zone/path custody"
                 )
             if not _valid_targets(
                 plan,
