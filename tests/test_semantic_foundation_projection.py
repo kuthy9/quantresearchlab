@@ -36,6 +36,7 @@ from smc_trader.semantic_lifecycle import (
     BoundaryAttackFact,
     canonical_semantic_id,
     LiquidityInteractionLifecycle,
+    LiquidityInteractionTerminal,
     LiquidityLevelLifecycle,
     NormalizedLifecycleTransition,
     NormalizedTransitionKind,
@@ -252,6 +253,21 @@ def _structure_owner(
         source_event_ids=(
             (origin_id, confirmation_id) if confirmed else (origin_id,)
         ),
+    )
+
+
+def _terminated_structure(
+    owner: StructureGeneration,
+    *,
+    minute: int,
+) -> StructureGeneration:
+    clock = _clock(minute)
+    return replace(
+        owner,
+        lifecycle=StructureGenerationLifecycle.TERMINATED,
+        updated_at=clock,
+        terminated_at=clock,
+        termination_reason="semantic_reset",
     )
 
 
@@ -1353,6 +1369,96 @@ def test_liquidity_level_owner_binding_is_one_time_and_compatible() -> None:
             projection,
             FoundationRecord.from_dto(rebound),
         )
+
+
+def test_structure_revision_revalidates_reverse_dependents_atomically() -> None:
+    active, _, active_interaction, _ = _level_history()
+    structure = _structure_owner("hot-structure-owner")
+    owned = replace(
+        active,
+        updated_at=structure.updated_at,
+        owner_structure_generation_id=structure.generation_id,
+        source_event_ids=(
+            *active.source_event_ids,
+            structure.confirmation_event_id,
+        ),
+    )
+    projection = FoundationProjectionReducer.replay(
+        (
+            FoundationRecord.from_dto(active_interaction),
+            FoundationRecord.from_dto(structure),
+            FoundationRecord.from_dto(owned),
+        )
+    )
+    owner = FoundationProjectionOwner(projection)
+    before = owner.freeze()
+    terminated_structure = _terminated_structure(structure, minute=4)
+
+    blocked = owner.stage()
+    assert blocked.append(FoundationRecord.from_dto(terminated_structure))
+    with pytest.raises(ValueError, match="confirmed live owner"):
+        blocked.commit()
+    assert owner.generation == 0
+    assert owner.freeze() is before
+
+    retirement_id = "owned-level-retired"
+    retired_interaction = replace(
+        active_interaction,
+        lifecycle=LiquidityInteractionLifecycle.TERMINAL,
+        updated_at=_clock(3),
+        terminal_event_id=retirement_id,
+        terminal_state=LiquidityInteractionTerminal.EXPIRED,
+        terminal_at=_clock(3),
+        terminal_reason="reference_rollover",
+        terminal_real_bar_ordinal=active_interaction.armed_real_bar_ordinal,
+        source_event_ids=(*active_interaction.source_event_ids, retirement_id),
+    )
+    retired_level = replace(
+        owned,
+        lifecycle=LiquidityLevelLifecycle.RETIRED,
+        updated_at=_clock(3),
+        active_generation_id=None,
+        last_terminal_generation_id=active_interaction.generation_id,
+        retired_at=_clock(3),
+        retirement_reason="reference_rollover",
+        source_event_ids=(*owned.source_event_ids, retirement_id),
+    )
+    legal = owner.stage()
+    for dto in (retired_interaction, retired_level, terminated_structure):
+        assert legal.append(FoundationRecord.from_dto(dto))
+    committed = FoundationProjectionReducer.validate_complete(legal.commit())
+    assert committed.current_record_for(
+        FoundationObjectType.LIQUIDITY_LEVEL,
+        active.level_id,
+    ).status is FoundationRecordStatus.TERMINAL
+
+
+def test_structure_revision_revalidates_non_level_reverse_dependent() -> None:
+    structure = _structure_owner(
+        "fvg-structure-owner",
+        timeframe=Timeframe.M5,
+    )
+    fvg = replace(
+        _active_fvg(),
+        parent_structure_generation_id=structure.generation_id,
+        context_source_event_ids=(structure.confirmation_event_id,),
+    )
+    owner = FoundationProjectionOwner(
+        FoundationProjectionReducer.replay(
+            (
+                FoundationRecord.from_dto(structure),
+                FoundationRecord.from_dto(fvg),
+            )
+        )
+    )
+    transaction = owner.stage()
+    assert transaction.append(
+        FoundationRecord.from_dto(
+            _terminated_structure(structure, minute=20)
+        )
+    )
+    with pytest.raises(ValueError, match="confirmed live owner"):
+        transaction.commit()
 
 
 def test_liquidity_interaction_id_must_bind_its_generation_signature() -> None:

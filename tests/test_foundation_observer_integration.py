@@ -1205,15 +1205,22 @@ def test_equal_tick_structure_has_no_range_but_balance_and_later_range_survive(
         0,
         evidence={"reason": "semantic_reset"},
     )
-    adapter.consume(final_reset)
+    before_reset = (adapter.projection, adapter.lifecycle)
+    with pytest.raises(ValueError, match="StructuralRange owner"):
+        adapter.consume(final_reset)
+    assert (adapter.projection, adapter.lifecycle) == before_reset
+    candidate, _ = adapter.stage_batch((final_reset,))
     ranges, terminated = observer._foundation_update_structural_ranges(
-        adapter=adapter,
+        adapter=candidate,
         ranges=ranges,
         frames={Timeframe.H1: valid_frame},
         known_at=_adapter_clock(184),
         clock_events=(final_reset,),
         revisions=revisions,
     )
+    candidate.seal_staged_candidate()
+    candidate.commit_staged_candidate()
+    adapter = candidate
     terminal_range = ranges[Timeframe.H1]
     assert terminal_range.termination_reason == "semantic_reset"
     assert terminated == ((active_range.range_id, final_reset.event_id),)
@@ -1576,19 +1583,34 @@ def test_clusters_follow_canonical_disarm_rearm_and_retirement_lifecycle() -> No
     assert first_cluster.member_source_ids == ("cluster-a", "cluster-b")
 
     observer._foundation_active_clusters = first_clusters
+    adapter_before = (adapter.projection, adapter.lifecycle)
+    with pytest.raises(ValueError, match="active liquidity cluster"):
+        adapter.retire_level(
+            source_level_id="cluster-a",
+            reason="source_retired",
+            source_event_ids=(first_event.event_id,),
+            known_at=_adapter_clock(1),
+            timeframe=Timeframe.H1,
+        )
+    assert (adapter.projection, adapter.lifecycle) == adapter_before
+
+    candidate, _ = adapter.stage_batch(())
     _cross_level(
-        adapter,
+        candidate,
         first_event,
         crossed_minute=2,
         resolved_minute=2,
         terminal_kind=EventKind.SWEEP_CONFIRMED,
     )
     after_sweep = observer._foundation_update_clusters(
-        adapter=adapter,
+        adapter=candidate,
         known_at=_adapter_clock(2),
         authoritative_events=(),
         revisions=revisions,
     )
+    candidate.seal_staged_candidate()
+    candidate.commit_staged_candidate()
+    adapter = candidate
     assert after_sweep == ()
     assert adapter.lifecycle.levels[0].lifecycle is LiquidityLevelLifecycle.DISARMED
 
@@ -1613,8 +1635,8 @@ def test_clusters_follow_canonical_disarm_rearm_and_retirement_lifecycle() -> No
 
     observer._foundation_active_clusters = after_rearm
     retirement_bar = _adapter_bar(4)
-    adapter.consume(retirement_bar)
-    adapter.retire_level(
+    candidate, _ = adapter.stage_batch((retirement_bar,))
+    candidate.retire_level(
         source_level_id="cluster-b",
         reason="source_retired",
         source_event_ids=(retirement_bar.event_id,),
@@ -1622,11 +1644,14 @@ def test_clusters_follow_canonical_disarm_rearm_and_retirement_lifecycle() -> No
         timeframe=Timeframe.H1,
     )
     after_retirement = observer._foundation_update_clusters(
-        adapter=adapter,
+        adapter=candidate,
         known_at=retirement_bar.known_at,
         authoritative_events=(),
         revisions=revisions,
     )
+    candidate.seal_staged_candidate()
+    candidate.commit_staged_candidate()
+    adapter = candidate
     assert after_retirement == ()
     assert levels["cluster-b"].level_id not in {
         member_id

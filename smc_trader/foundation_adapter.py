@@ -3247,7 +3247,12 @@ class CanonicalFoundationAdapter:
         )
 
     def consume(self, event: MarketEvent) -> FoundationAdapterUpdate:
-        """Atomically consume one knowledge-ordered v1.2 fact."""
+        """Atomically consume one knowledge-ordered v1.2 fact.
+
+        A target lifecycle change fails closed when the current projection has
+        Observer-owned derived dependents.  Use :meth:`stage_batch`, append the
+        matching dependent revisions, then seal and commit that wide batch.
+        """
 
         candidate, owned = self._mutation_candidate()
         update = candidate._consume_inplace(event)

@@ -3068,9 +3068,12 @@ class FoundationProjectionTransaction:
     def _validate_completeness(self) -> None:
         latest = self._latest_view()
         affected_level_ids: set[str] = set()
+        changed_structure_ids: set[str] = set()
+        changed_level_ids: set[str] = set()
         for record in self._records:
             if record.object_type is FoundationObjectType.LIQUIDITY_LEVEL:
                 affected_level_ids.add(record.object_id)
+                changed_level_ids.add(record.object_id)
             elif (
                 record.object_type
                 is FoundationObjectType.LIQUIDITY_INTERACTION_GENERATION
@@ -3084,6 +3087,11 @@ class FoundationProjectionTransaction:
                     affected_level_ids.add(
                         str(previous.payload.get("level_id"))
                     )
+            elif (
+                record.object_type
+                is FoundationObjectType.STRUCTURE_GENERATION
+            ):
+                changed_structure_ids.add(record.object_id)
         for level_id in affected_level_ids:
             level = latest.get(
                 (FoundationObjectType.LIQUIDITY_LEVEL, level_id)
@@ -3097,6 +3105,36 @@ class FoundationProjectionTransaction:
                 level,
                 tail_only=True,
             )
+        if changed_structure_ids or changed_level_ids:
+            structure_reference_fields = (
+                "owner_structure_generation_id",
+                "incumbent_structure_generation_id",
+                "opposite_structure_generation_id",
+                "parent_structure_generation_id",
+                "child_structure_generation_id",
+                "structure_generation_id",
+            )
+            for (object_type, _), record in latest.items():
+                payload = record.payload
+                depends_on_changed_structure = (
+                    bool(changed_structure_ids)
+                    and object_type
+                    is not FoundationObjectType.STRUCTURE_GENERATION
+                    and any(
+                        payload.get(field) in changed_structure_ids
+                        for field in structure_reference_fields
+                    )
+                )
+                depends_on_changed_level = (
+                    bool(changed_level_ids)
+                    and object_type
+                    is FoundationObjectType.LIQUIDITY_CLUSTER
+                    and not changed_level_ids.isdisjoint(
+                        payload.get("member_level_ids", ())
+                    )
+                )
+                if depends_on_changed_structure or depends_on_changed_level:
+                    _validate_current_record_cross_links(latest, record)
 
     def preflight_commit(self) -> FoundationProjection:
         """Validate every fallible condition before either authority mutates."""
