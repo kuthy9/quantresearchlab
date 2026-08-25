@@ -32,6 +32,7 @@ from tests.test_market_representation import (
 
 
 def _input_lineage(tmp_path: Path) -> tuple[dict[str, str], dict[str, object]]:
+    tmp_path.mkdir(parents=True, exist_ok=True)
     source_sha, config_sha = "a" * 64, "b" * 64
     protocol = expected_market_case_run_identity()
     runs: dict[str, str] = {}
@@ -80,10 +81,15 @@ def _input_lineage(tmp_path: Path) -> tuple[dict[str, str], dict[str, object]]:
     return runs, dict(trainer._neutral_fit_lineage(collection))
 
 
-def _fit_artifacts(tmp_path: Path) -> tuple[Path, Path]:
+def _fit_artifacts(
+    tmp_path: Path,
+    *,
+    lineage_root: Path | None = None,
+) -> tuple[Path, Path]:
     import torch
 
-    runs, lineage = _input_lineage(tmp_path)
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    runs, lineage = _input_lineage(lineage_root or tmp_path)
     roles_and_dates = [
         *(('train', f"2024-01-{day:02d} 10:00") for day in range(2, 7)),
         ("validation", "2024-02-01 10:00"),
@@ -199,6 +205,101 @@ def test_combined_loader_requires_explicit_record_run_and_verified_input(tmp_pat
     stream.write_bytes(stream.read_bytes() + b"\n")
     with pytest.raises(CaseRetrievalError, match="content lineage differs"):
         evaluator.load_artifact_manifest(embedding_manifest)
+
+
+@pytest.mark.skipif(not TORCH_AVAILABLE, reason="optional PyTorch is not installed")
+def test_combined_loader_accepts_verified_sibling_external_lineage_only(
+    tmp_path: Path,
+) -> None:
+    embedding_manifest, _ = _fit_artifacts(
+        tmp_path / "artifacts",
+        lineage_root=tmp_path / "inputs",
+    )
+    original_manifest = embedding_manifest.read_bytes()
+    payload = json.loads(original_manifest)
+    raw = payload["lineage"]["input_runs"][0]
+    stream = Path(raw["input_manifest_path"])
+    original_stream = stream.read_bytes()
+
+    assert stream.parent == tmp_path / "inputs"
+    assert evaluator.load_artifact_manifest(embedding_manifest)["rows"]
+
+    relative = json.loads(original_manifest)
+    relative["lineage"]["input_runs"][0]["input_manifest_path"] = stream.name
+    atomic_bytes(embedding_manifest, canonical_json(relative))
+    with pytest.raises(CaseRetrievalError, match="must be absolute"):
+        evaluator.load_artifact_manifest(embedding_manifest)
+    atomic_bytes(embedding_manifest, original_manifest)
+
+    link = stream.with_name("linked-stream.json")
+    link.symlink_to(stream)
+    symlinked = json.loads(original_manifest)
+    symlinked["lineage"]["input_runs"][0]["input_manifest_path"] = str(link)
+    atomic_bytes(embedding_manifest, canonical_json(symlinked))
+    with pytest.raises(CaseRetrievalError, match="not a regular file"):
+        evaluator.load_artifact_manifest(embedding_manifest)
+    link.unlink()
+    atomic_bytes(embedding_manifest, original_manifest)
+
+    directory_link = tmp_path / "linked-inputs"
+    directory_link.symlink_to(stream.parent, target_is_directory=True)
+    aliased = json.loads(original_manifest)
+    aliased["lineage"]["input_runs"][0]["input_manifest_path"] = str(
+        directory_link / stream.name
+    )
+    atomic_bytes(embedding_manifest, canonical_json(aliased))
+    with pytest.raises(CaseRetrievalError, match="symlink or alias"):
+        evaluator.load_artifact_manifest(embedding_manifest)
+    directory_link.unlink()
+    atomic_bytes(embedding_manifest, original_manifest)
+
+    stream.write_bytes(original_stream + b"\n")
+    with pytest.raises(CaseRetrievalError, match="content lineage differs"):
+        evaluator.load_artifact_manifest(embedding_manifest)
+    stream.write_bytes(original_stream)
+
+    escaped_artifact = json.loads(original_manifest)
+    escaped_artifact["artifact_path"] = "../inputs/train-stream.json"
+    atomic_bytes(embedding_manifest, canonical_json(escaped_artifact))
+    with pytest.raises(CaseRetrievalError, match="must be relative"):
+        evaluator.load_artifact_manifest(embedding_manifest)
+
+    artifact = embedding_manifest.parent / payload["artifact_path"]
+    artifact_link = artifact.with_name("linked-artifact.jsonl")
+    artifact_link.symlink_to(artifact)
+    symlinked_artifact = json.loads(original_manifest)
+    symlinked_artifact["artifact_path"] = artifact_link.name
+    atomic_bytes(embedding_manifest, canonical_json(symlinked_artifact))
+    with pytest.raises(CaseRetrievalError, match="binding is missing"):
+        evaluator.load_artifact_manifest(embedding_manifest)
+    artifact_link.unlink()
+
+
+def test_evaluator_output_dangling_symlink_is_not_resolved(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    external = tmp_path / "external" / "escaped.json"
+    external.parent.mkdir()
+    output = tmp_path / "evaluation.json"
+    output.symlink_to(external)
+    monkeypatch.setattr(evaluator, "load_artifact_manifest", lambda _path: {})
+    monkeypatch.setattr(
+        evaluator,
+        "evaluate",
+        lambda *_args, **_kwargs: {"status": "complete"},
+    )
+
+    with pytest.raises(SystemExit, match="refused input"):
+        evaluator.main([
+            "--embedding-manifest", str(tmp_path / "embedding.json"),
+            "--head-manifest", str(tmp_path / "heads.json"),
+            "--output", str(output),
+        ])
+
+    assert output.is_symlink()
+    assert not external.exists()
+    assert tuple(tmp_path.glob(".evaluation.json.*.tmp")) == ()
 
 
 @pytest.mark.skipif(not TORCH_AVAILABLE, reason="optional PyTorch is not installed")

@@ -100,16 +100,32 @@ def _object(path: Path, name: str) -> Mapping[str, Any]:
     except (OSError, ValueError) as exc:
         raise CaseRetrievalError(str(exc)) from exc
 
-def _bound(owner: Path, raw: Any, name: str) -> Path:
+def _bound_artifact(owner: Path, raw: Any, name: str) -> Path:
     try:
         return bound_regular_file(
             owner.parent,
             Path(str(raw or "")),
             name=name,
-            allow_absolute_within_root=True,
         )
     except (OSError, ValueError) as exc:
         raise CaseRetrievalError(str(exc)) from exc
+
+def _external_regular_file(raw: Any, name: str) -> Path:
+    """Load an absolute external dependency whose authority is its bound SHA."""
+
+    path = Path(str(raw or ""))
+    if not path.is_absolute():
+        raise CaseRetrievalError(f"{name} external binding must be absolute")
+    if path.is_symlink() or not path.is_file():
+        raise CaseRetrievalError(
+            f"{name} external binding is absent or not a regular file"
+        )
+    resolved = path.resolve()
+    if resolved != path:
+        raise CaseRetrievalError(
+            f"{name} external binding contains a symlink or alias"
+        )
+    return resolved
 
 def _rows(path: Path) -> list[dict[str, Any]]:
     output: list[dict[str, Any]] = []
@@ -136,7 +152,7 @@ def _clock(value: Any, name: str) -> datetime:
         raise CaseRetrievalError(f"{name} is not timezone-aware")
     return parsed
 
-def _lineage(owner: Path, value: Any, feature_schema: Any) -> tuple[dict[str, Any], dict[str, Any]]:
+def _lineage(value: Any, feature_schema: Any) -> tuple[dict[str, Any], dict[str, Any]]:
     if not isinstance(value, Mapping) or set(value) != LINEAGE_FIELDS:
         raise CaseRetrievalError("combined artifact lineage is invalid")
     source, config = value["source_identity"], value["model_config_identity"]
@@ -188,8 +204,11 @@ def _lineage(owner: Path, value: Any, feature_schema: Any) -> tuple[dict[str, An
         if not isinstance(raw, Mapping) or set(raw) != INPUT_RUN_FIELDS:
             raise CaseRetrievalError("input run lineage is invalid")
         role, profile = str(raw["split_role"]), str(raw["profile_name"])
-        stream = _bound(owner, raw["input_manifest_path"], "input manifest")
-        run = _bound(owner, raw["run_manifest_path"], "run manifest")
+        stream = _external_regular_file(
+            raw["input_manifest_path"],
+            "input manifest",
+        )
+        run = _external_regular_file(raw["run_manifest_path"], "run manifest")
         stream_sha = _digest(raw["input_manifest_sha256"], "input manifest SHA")
         run_sha = _digest(raw["run_manifest_sha256"], "run manifest SHA")
         commit = str(raw["repository_commit"])
@@ -253,13 +272,16 @@ def load_artifact_manifest(path: str | Path) -> dict[str, Any]:
         or (schema == EMBEDDING_SCHEMA and len(checkpoints) != 1)
     ):
         raise CaseRetrievalError("combined artifact checkpoint set is invalid")
-    artifact = _bound(owner, manifest["artifact_path"], "artifact")
+    artifact = _bound_artifact(owner, manifest["artifact_path"], "artifact")
     if _sha(artifact) != _digest(manifest["artifact_sha256"], "artifact SHA"):
         raise CaseRetrievalError("combined artifact content hash differs")
     rows = _rows(artifact)
     if manifest["records"] != len(rows) or not rows:
         raise CaseRetrievalError("combined artifact record count is invalid")
-    runs, common = _lineage(owner, manifest["lineage"], manifest["feature_schema_version"])
+    runs, common = _lineage(
+        manifest["lineage"],
+        manifest["feature_schema_version"],
+    )
     dimension: int | None = None
     seen: set[tuple[Any, ...]] = set()
     member_checkpoints: dict[str, str] = {}
@@ -487,7 +509,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             k=args.k,
             thresholds=thresholds,
         )
-        publish_canonical_manifest(args.output.resolve(), report)
+        publish_canonical_manifest(args.output, report)
     except (CaseRetrievalError, FileExistsError, TypeError, ValueError) as exc:
         raise SystemExit(f"neutral retrieval evaluation refused input: {exc}") from exc
     return 0

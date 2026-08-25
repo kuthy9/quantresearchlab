@@ -2272,11 +2272,46 @@ class MarketEpisodeCaseIndex:
             self.artifact_lineages
         ):
             raise CaseRetrievalError("neutral index repeats an artifact run lineage")
+        if len(self.artifact_lineages) > 1 and dataset_contract is None:
+            raise CaseRetrievalError(
+                "multi-artifact neutral index requires a dataset contract"
+            )
         known_runs = {
             value["run_manifest_sha256"] for value in self.artifact_lineages
         }
+        if any(
+            not isinstance(record, MarketEpisodeEmbeddingRecord)
+            for record in records
+        ):
+            raise CaseRetrievalError("neutral index record contract is invalid")
         if any(record.run_manifest_sha256 not in known_runs for record in records):
             raise CaseRetrievalError("neutral record has an unbound run lineage")
+        record_keys = [
+            (
+                record.data_split,
+                record.run_manifest_sha256,
+                record.market_epoch_id,
+                record.market_episode_id,
+                record.material_kind,
+            )
+            for record in records
+        ]
+        if len(record_keys) != len(set(record_keys)):
+            raise CaseRetrievalError(
+                "neutral index repeats a selected MarketEpisode milestone"
+            )
+        episode_splits: dict[tuple[str, str, str], str] = {}
+        for record in records:
+            identity = (
+                record.run_manifest_sha256,
+                record.market_epoch_id,
+                record.market_episode_id,
+            )
+            if (
+                episode_splits.setdefault(identity, record.data_split)
+                != record.data_split
+            ):
+                raise CaseRetrievalError("MarketEpisode is shared across splits")
         self.artifact_lineage = self.artifact_lineages[0]
         self.dataset_contract = (
             None

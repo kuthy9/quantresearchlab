@@ -26,6 +26,7 @@ from smc_trader.case_retrieval import (
     EpisodeEmbeddingQuery,
     MarketEpisodeCaseIndex,
     MarketEpisodeEmbeddingQuery,
+    MarketEpisodeEmbeddingRecord,
     OODThresholds,
     RetrievalPolicy,
 )
@@ -1399,6 +1400,80 @@ def test_market_episode_selector_rejects_unbound_explicit_material_kind() -> Non
         MarketEpisodeCaseIndex.from_mappings(
             [revision],
             artifact_lineage=MARKET_EPISODE_LINEAGE,
+            embedding_dim=DIM,
+        )
+
+
+def test_market_episode_direct_constructor_requires_multi_run_source_contract() -> None:
+    first_lineage = {
+        **MARKET_EPISODE_LINEAGE,
+        "run_manifest_sha256": "1" * 64,
+    }
+    second_lineage = {
+        **MARKET_EPISODE_LINEAGE,
+        "stream_manifest_sha256": "4" * 64,
+        "run_manifest_sha256": "2" * 64,
+    }
+    records = tuple(
+        MarketEpisodeEmbeddingRecord.from_mapping(
+            _market_episode_case(
+                f"direct-{index}",
+                index,
+                [1.0, index * 0.01, 0.0, 0.0],
+                run_manifest_sha256=str(index) * 64,
+            ),
+            material_kind="trigger",
+            embedding_dim=DIM,
+        )
+        for index in (1, 2)
+    )
+
+    with pytest.raises(CaseRetrievalError, match="requires a dataset contract"):
+        MarketEpisodeCaseIndex(
+            records,
+            artifact_lineages=(first_lineage, second_lineage),
+            embedding_dim=DIM,
+        )
+
+
+def test_market_episode_direct_constructor_rejects_duplicate_and_cross_split() -> None:
+    first = MarketEpisodeEmbeddingRecord.from_mapping(
+        _market_episode_case("direct", 1, [1.0, 0.0, 0.0, 0.0]),
+        material_kind="trigger",
+        embedding_dim=DIM,
+    )
+    later = MarketEpisodeEmbeddingRecord.from_mapping(
+        _market_episode_case(
+            "direct",
+            2,
+            [1.0, 0.01, 0.0, 0.0],
+            revision_index=2,
+        ),
+        material_kind="trigger",
+        embedding_dim=DIM,
+    )
+    with pytest.raises(CaseRetrievalError, match="repeats a selected"):
+        MarketEpisodeCaseIndex(
+            (first, later),
+            artifact_lineages=(MARKET_EPISODE_LINEAGE,),
+            embedding_dim=DIM,
+        )
+
+    other_split = MarketEpisodeEmbeddingRecord.from_mapping(
+        _market_episode_case(
+            "direct",
+            2,
+            [1.0, 0.01, 0.0, 0.0],
+            revision_index=2,
+            split="validation",
+        ),
+        material_kind="trigger",
+        embedding_dim=DIM,
+    )
+    with pytest.raises(CaseRetrievalError, match="shared across splits"):
+        MarketEpisodeCaseIndex(
+            (first, other_split),
+            artifact_lineages=(MARKET_EPISODE_LINEAGE,),
             embedding_dim=DIM,
         )
 
