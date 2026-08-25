@@ -452,6 +452,10 @@ def test_cold_ledger_pickle_rejects_tampered_derived_identity_index() -> None:
     adapter._record_ledger._records_by_id["forged-record"] = "0" * 64
 
     with pytest.raises(ValueError, match="identity index differs"):
+        adapter.materialize_foundation_history()
+    with pytest.raises(ValueError, match="identity index differs"):
+        adapter.checkpoint()
+    with pytest.raises(ValueError, match="identity index differs"):
         pickle.dumps(adapter)
 
 
@@ -472,6 +476,202 @@ def test_adapter_publish_boundaries_reject_foundation_record_byte_tamper(
         pickle.dumps(adapter)
 
 
+@pytest.mark.parametrize("case", ("missing", "future"))
+def test_adapter_cold_boundaries_reject_missing_or_future_record_ancestry(
+    case: str,
+) -> None:
+    adapter = CanonicalFoundationAdapter(tick_size=TICK)
+    _seed_level(adapter, label=f"cold-ancestry-{case}")
+    adapter.consume(_bar(1))
+    record = adapter.materialize_foundation_history()[0]
+    source_id = record.source_event_ids[-1]
+    original_metadata = dict(adapter._seen_event_metadata)
+    original_fingerprints = dict(adapter._seen_event_fingerprints)
+    if case == "missing":
+        adapter._seen_event_metadata.pop(source_id)
+        adapter._seen_event_fingerprints.pop(source_id)
+    else:
+        known_at, origin = adapter._seen_event_metadata[source_id]
+        adapter._seen_event_metadata[source_id] = (
+            known_at + pd.Timedelta(30, unit="s"),
+            origin,
+        )
+
+    for boundary in (
+        adapter.materialize_foundation_history,
+        adapter.checkpoint,
+        lambda: pickle.dumps(adapter),
+    ):
+        with pytest.raises(ValueError, match="record ancestry"):
+            boundary()
+
+    if case == "missing":
+        assert source_id not in adapter._seen_event_metadata
+        assert source_id not in adapter._seen_event_fingerprints
+    else:
+        assert adapter._seen_event_fingerprints == original_fingerprints
+        assert adapter._seen_event_metadata != original_metadata
+
+
+def test_checkpoint_restore_revalidates_cold_ancestry_after_digest_rewrite(
+) -> None:
+    adapter = CanonicalFoundationAdapter(tick_size=TICK)
+    _seed_level(adapter, label="restore-future-ancestry")
+    adapter.consume(_bar(1))
+    checkpoint = adapter.checkpoint()
+    record = checkpoint.record_ledger_checkpoint.records[0]
+    source_id = record.source_event_ids[-1]
+    forged = pickle.loads(pickle.dumps(checkpoint))
+    metadata = tuple(
+        (
+            event_id,
+            record.known_at + pd.Timedelta(30, unit="s")
+            if event_id == source_id
+            else known_at,
+            origin,
+        )
+        for event_id, known_at, origin in forged.seen_event_metadata
+    )
+    vars(forged)["seen_event_metadata"] = metadata
+    vars(forged)["checkpoint_digest"] = content_hash(
+        _checkpoint_payload(forged)
+    )
+
+    with pytest.raises(ValueError, match="future record ancestry"):
+        CanonicalFoundationAdapter.restore(forged)
+    with pytest.raises(ValueError, match="future record ancestry"):
+        pickle.dumps(forged)
+
+
+def test_checkpoint_collections_reject_lossy_or_malformed_restore_shapes(
+) -> None:
+    adapter = CanonicalFoundationAdapter(tick_size=TICK)
+    _, level = _seed_level(adapter, label="strict-checkpoint-shape")
+    _cross_level(
+        adapter,
+        level,
+        crossed_minute=1,
+        resolved_minute=1,
+        terminal_kind=EventKind.SWEEP_CONFIRMED,
+    )
+    checkpoint = adapter.checkpoint()
+    first_fingerprint = checkpoint.seen_event_fingerprints[0]
+    first_metadata = checkpoint.seen_event_metadata[0]
+    first_bar = checkpoint.real_bars[0]
+    first_crossing = checkpoint.crossings[0]
+    mutations = (
+        ("last_order", list(checkpoint.last_order)),
+        (
+            "last_order",
+            (
+                checkpoint.last_order[0] + pd.Timedelta(1, unit="s"),
+                checkpoint.last_order[1],
+                checkpoint.last_order[2],
+            ),
+        ),
+        (
+            "seen_event_fingerprints",
+            list(checkpoint.seen_event_fingerprints),
+        ),
+        (
+            "seen_event_fingerprints",
+            (*checkpoint.seen_event_fingerprints, first_fingerprint),
+        ),
+        (
+            "seen_event_fingerprints",
+            (
+                (first_fingerprint[0], "f" * 63),
+                *checkpoint.seen_event_fingerprints[1:],
+            ),
+        ),
+        (
+            "seen_event_fingerprints",
+            (list(first_fingerprint), *checkpoint.seen_event_fingerprints[1:]),
+        ),
+        ("seen_event_metadata", list(checkpoint.seen_event_metadata)),
+        (
+            "seen_event_metadata",
+            (*checkpoint.seen_event_metadata, first_metadata),
+        ),
+        (
+            "seen_event_metadata",
+            (list(first_metadata), *checkpoint.seen_event_metadata[1:]),
+        ),
+        ("real_bars", list(checkpoint.real_bars)),
+        ("real_bars", (*checkpoint.real_bars, first_bar)),
+        (
+            "real_bars",
+            (
+                replace(
+                    first_bar,
+                    known_at=first_bar.known_at + pd.Timedelta(1, unit="s"),
+                ),
+                *checkpoint.real_bars[1:],
+            ),
+        ),
+        ("crossings", list(checkpoint.crossings)),
+        ("crossings", (*checkpoint.crossings, first_crossing)),
+        (
+            "crossings",
+            (
+                replace(
+                    first_crossing,
+                    crossed_at=first_crossing.crossed_at
+                    + pd.Timedelta(1, unit="s"),
+                ),
+            ),
+        ),
+        ("structure_bindings", [("source", "generation")]),
+        ("structure_bindings", (["source", "generation"],)),
+        (
+            "structure_bindings",
+            (("source", "generation-a"), ("source", "generation-b")),
+        ),
+    )
+
+    for field_name, malformed in mutations:
+        with pytest.raises(ValueError):
+            replace(checkpoint, **{field_name: malformed})
+
+        forged = pickle.loads(pickle.dumps(checkpoint))
+        vars(forged)[field_name] = malformed
+        vars(forged)["checkpoint_digest"] = content_hash(
+            _checkpoint_payload(forged)
+        )
+        with pytest.raises(ValueError):
+            CanonicalFoundationAdapter.restore(forged)
+
+
+def test_failed_checkpoint_and_adapter_setstate_are_atomic() -> None:
+    source = CanonicalFoundationAdapter(tick_size=TICK)
+    _seed_level(source, label="atomic-setstate-source")
+    checkpoint = source.checkpoint()
+    checkpoint_target = pickle.loads(pickle.dumps(checkpoint))
+    checkpoint_before = pickle.dumps(checkpoint_target)
+    checkpoint_state = dict(checkpoint_target.__getstate__())
+    checkpoint_state["real_bars"] = (
+        *checkpoint.real_bars,
+        checkpoint.real_bars[0],
+    )
+
+    with pytest.raises(ValueError):
+        checkpoint_target.__setstate__(checkpoint_state)
+    assert pickle.dumps(checkpoint_target) == checkpoint_before
+
+    target = CanonicalFoundationAdapter(tick_size=TICK)
+    _seed_level(target, label="atomic-setstate-target")
+    target_before = target.checkpoint()
+    adapter_state = source.__getstate__()
+    adapter_state["_real_bars"] = [
+        *adapter_state["_real_bars"],
+        adapter_state["_real_bars"][0],
+    ]
+
+    with pytest.raises(ValueError):
+        target.__setstate__(adapter_state)
+    assert target.checkpoint() == target_before
+
+
 def test_projection_owner_pickle_rejects_shrunken_derived_view() -> None:
     adapter = CanonicalFoundationAdapter(tick_size=TICK)
     _seed_level(adapter, label="projection-owner-tamper")
@@ -479,6 +679,8 @@ def test_projection_owner_pickle_rejects_shrunken_derived_view() -> None:
     assert published.current_records
     adapter._projection_owner._latest.clear()
 
+    with pytest.raises(ValueError, match="projection owner internals differ"):
+        adapter.checkpoint()
     with pytest.raises(ValueError, match="projection owner internals differ"):
         pickle.dumps(adapter)
     assert adapter.projection == published
