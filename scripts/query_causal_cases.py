@@ -375,6 +375,12 @@ def _write_or_print(payload: Mapping[str, Any], destination: Path | None) -> Non
 
 
 def _build(args: argparse.Namespace) -> None:
+    if args.report is not None and (
+        args.report.is_symlink() or args.report.exists()
+    ):
+        raise CaseRetrievalError(
+            f"output already exists and will not be replaced: {args.report}"
+        )
     records: list[dict[str, Any]] = []
     if not (
         len(args.cases)
@@ -414,21 +420,30 @@ def _build(args: argparse.Namespace) -> None:
     )
     if checkpoint_ids != {index.embedding_checkpoint_id}:
         raise CaseRetrievalError("embedding artifact checkpoint identity is invalid")
-    checkpoint = index.save_checkpoint(args.output)
-    _write_or_print(
-        {
-            "status": "complete",
-            "checkpoint": str(checkpoint),
-            "indexed_independent_episodes": len(index.records),
-            "ignored_non_decision_revisions": (
-                index.ignored_non_decision_revisions
-            ),
-            "embedding_dim": index.embedding_dim,
-            "outcomes_persisted": False,
-            "action_authority": "none",
-        },
-        args.report,
-    )
+    try:
+        checkpoint = index.save_checkpoint(args.output)
+    except FileExistsError as exc:
+        raise CaseRetrievalError(
+            f"output already exists and will not be replaced: {args.output}"
+        ) from exc
+    try:
+        _write_or_print(
+            {
+                "status": "complete",
+                "checkpoint": str(checkpoint),
+                "indexed_independent_episodes": len(index.records),
+                "ignored_non_decision_revisions": (
+                    index.ignored_non_decision_revisions
+                ),
+                "embedding_dim": index.embedding_dim,
+                "outcomes_persisted": False,
+                "action_authority": "none",
+            },
+            args.report,
+        )
+    except BaseException:
+        checkpoint.unlink(missing_ok=True)
+        raise
 
 
 def _query(args: argparse.Namespace) -> None:

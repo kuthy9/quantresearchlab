@@ -20,6 +20,7 @@ import json
 import math
 import os
 from pathlib import Path
+import tempfile
 from typing import Any, Iterable, Mapping, Sequence
 
 import numpy as np
@@ -2126,11 +2127,11 @@ class EpisodeCaseIndex:
         ]
 
     def save_checkpoint(self, path: str | Path) -> Path:
-        """Atomically save one hash-bound, pickle-free index checkpoint."""
+        """Atomically publish one hash-bound checkpoint without replacement."""
 
         destination = Path(path)
         destination.parent.mkdir(parents=True, exist_ok=True)
-        temporary = destination.with_name(f".{destination.name}.tmp")
+        temporary: Path | None = None
         vectors = np.asarray(self._vector_core.values, dtype="<f4")
         metadata_payload = _canonical_json(
             [record.checkpoint_metadata() for record in self._records]
@@ -2161,17 +2162,26 @@ class EpisodeCaseIndex:
         }
         manifest_payload = _canonical_json(manifest)
         try:
-            with temporary.open("wb") as handle:
+            with tempfile.NamedTemporaryFile(
+                mode="w+b",
+                dir=destination.parent,
+                prefix=f".{destination.name}.",
+                suffix=".tmp",
+                delete=False,
+            ) as handle:
+                temporary = Path(handle.name)
                 np.savez_compressed(
                     handle,
                     vectors=vectors,
                     metadata=np.frombuffer(metadata_payload, dtype=np.uint8),
                     manifest=np.frombuffer(manifest_payload, dtype=np.uint8),
                 )
-            os.replace(temporary, destination)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.link(temporary, destination)
         finally:
-            if temporary.exists():
-                temporary.unlink()
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
         return destination
 
     @classmethod

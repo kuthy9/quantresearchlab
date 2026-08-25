@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from dataclasses import replace
 import hashlib
@@ -7,12 +8,15 @@ import json
 from pathlib import Path
 import subprocess
 import sys
+import threading
+from types import SimpleNamespace
 from typing import Any, Mapping, Sequence
 
 import numpy as np
 import pandas as pd
 import pytest
 
+from scripts import query_causal_cases as query_cases_cli
 from smc_trader.case_retrieval import (
     CASE_RETRIEVAL_PROTOCOL,
     CASE_RETRIEVAL_SCHEMA_VERSION,
@@ -1028,6 +1032,52 @@ def test_checkpoint_is_schema_bound_pickle_free_and_drops_outcomes(
         assert manifest["frozen_outcomes_persisted"] is False
 
 
+def test_checkpoint_publication_is_no_clobber_and_cleans_unique_temp(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "case-index.npz"
+    EpisodeCaseIndex.from_mappings(
+        _close_cases(5),
+        embedding_dim=DIM,
+    ).save_checkpoint(path)
+    original = path.read_bytes()
+
+    with pytest.raises(FileExistsError):
+        EpisodeCaseIndex.from_mappings(
+            _close_cases(6),
+            embedding_dim=DIM,
+        ).save_checkpoint(path)
+
+    assert path.read_bytes() == original
+    assert len(EpisodeCaseIndex.load_checkpoint(path).records) == 5
+    assert tuple(tmp_path.glob(".case-index.npz.*.tmp")) == ()
+
+
+def test_concurrent_checkpoint_publication_has_one_winner_and_no_temp(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "concurrent-index.npz"
+    index = EpisodeCaseIndex.from_mappings(_close_cases(5), embedding_dim=DIM)
+    workers = 8
+    barrier = threading.Barrier(workers)
+
+    def publish() -> str:
+        barrier.wait()
+        try:
+            index.save_checkpoint(path)
+        except FileExistsError:
+            return "collision"
+        return "published"
+
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        results = tuple(executor.map(lambda _index: publish(), range(workers)))
+
+    assert results.count("published") == 1
+    assert results.count("collision") == workers - 1
+    assert len(EpisodeCaseIndex.load_checkpoint(path).records) == 5
+    assert tuple(tmp_path.glob(".concurrent-index.npz.*.tmp")) == ()
+
+
 def test_index_checkpoint_binds_finalized_case_library_lineage(
     tmp_path: Path,
 ) -> None:
@@ -1130,6 +1180,7 @@ def test_output_has_no_trade_recommendation_or_trade_action() -> None:
 
 def test_cli_build_and_query_keep_outcomes_in_separate_artifact(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     cases = tmp_path / "cases.json"
     query_path = tmp_path / "query.json"
@@ -1222,26 +1273,97 @@ def test_cli_build_and_query_keep_outcomes_in_separate_artifact(
     )
     script = Path(__file__).resolve().parents[1] / "scripts/query_causal_cases.py"
 
+    build_command = [
+        sys.executable,
+        str(script),
+        "build",
+        "--cases",
+        str(cases),
+        "--case-manifest",
+        str(cases_manifest),
+        "--case-manifest-sha",
+        cases_manifest_sha,
+        "--output",
+        str(checkpoint),
+        "--embedding-dim",
+        str(DIM),
+    ]
     subprocess.run(
-        [
-            sys.executable,
-            str(script),
-            "build",
-            "--cases",
-            str(cases),
-            "--case-manifest",
-            str(cases_manifest),
-            "--case-manifest-sha",
-            cases_manifest_sha,
-            "--output",
-            str(checkpoint),
-            "--embedding-dim",
-            str(DIM),
-        ],
+        build_command,
         check=True,
         capture_output=True,
         text=True,
     )
+    original_checkpoint = checkpoint.read_bytes()
+    checkpoint_collision = subprocess.run(
+        build_command,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert checkpoint_collision.returncode != 0
+    assert "case retrieval refused input" in checkpoint_collision.stderr
+    assert "Traceback" not in checkpoint_collision.stderr
+    assert checkpoint.read_bytes() == original_checkpoint
+
+    collision_report = tmp_path / "existing-build-report.json"
+    report_sentinel = b'{"owner":"existing"}'
+    collision_report.write_bytes(report_sentinel)
+    collision = subprocess.run(
+        [*build_command, "--report", str(collision_report)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert collision.returncode != 0
+    assert checkpoint.read_bytes() == original_checkpoint
+    assert collision_report.read_bytes() == report_sentinel
+
+    fresh_checkpoint = tmp_path / "fresh-index.npz"
+    fresh_command = list(build_command)
+    fresh_command[fresh_command.index("--output") + 1] = str(fresh_checkpoint)
+    fresh_collision = subprocess.run(
+        [*fresh_command, "--report", str(collision_report)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert fresh_collision.returncode != 0
+    assert not fresh_checkpoint.exists()
+    assert collision_report.read_bytes() == report_sentinel
+    assert tuple(tmp_path.glob(".*index.npz.*.tmp")) == ()
+
+    raced_checkpoint = tmp_path / "raced-index.npz"
+    raced_report = tmp_path / "raced-report.json"
+
+    def collide_after_checkpoint(
+        _payload: Mapping[str, Any],
+        destination: Path | None,
+    ) -> None:
+        assert destination == raced_report
+        raced_report.write_bytes(report_sentinel)
+        raise CaseRetrievalError("simulated concurrent report collision")
+
+    monkeypatch.setattr(
+        query_cases_cli,
+        "_write_or_print",
+        collide_after_checkpoint,
+    )
+    with pytest.raises(CaseRetrievalError, match="concurrent report collision"):
+        query_cases_cli._build(
+            SimpleNamespace(
+                cases=[cases],
+                case_manifests=[cases_manifest],
+                case_manifest_shas=[cases_manifest_sha],
+                embedding_dim=DIM,
+                output=raced_checkpoint,
+                report=raced_report,
+            )
+        )
+    assert not raced_checkpoint.exists()
+    assert raced_report.read_bytes() == report_sentinel
+    assert tuple(tmp_path.glob(".raced-index.npz.*.tmp")) == ()
+
     completed = subprocess.run(
         [
             sys.executable,
