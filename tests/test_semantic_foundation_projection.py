@@ -20,7 +20,7 @@ from smc_trader.market_state import (
     update_swing_geometry_assignments,
 )
 from smc_trader.market_clock import next_registered_native_completion
-from smc_trader.model import FrozenDict, Timeframe, to_primitive
+from smc_trader.model import Direction, FrozenDict, Timeframe, to_primitive
 from smc_trader.semantic_foundation import (
     FoundationObjectType,
     FoundationProjection,
@@ -29,14 +29,21 @@ from smc_trader.semantic_foundation import (
     FoundationProjectionReducer,
     FoundationRecord,
     FoundationRecordLedger,
+    FoundationRecordLedgerCheckpoint,
     FoundationRecordStatus,
 )
 from smc_trader.semantic_lifecycle import (
+    BoundaryAttackFact,
+    canonical_semantic_id,
     LiquidityInteractionLifecycle,
+    LiquidityLevelLifecycle,
     NormalizedLifecycleTransition,
     NormalizedTransitionKind,
     SemanticLifecycleOwner,
     SemanticLifecycleReducer,
+    StructureGeneration,
+    StructureGenerationLifecycle,
+    StructureScope,
 )
 from smc_trader.semantic_zones import FVGStructuralLifecycle
 
@@ -185,6 +192,66 @@ def _active_fvg() -> FVGStructuralLifecycle:
         timeframe=Timeframe.M5,
         created_at=_clock(15),
         known_at=_clock(15),
+    )
+
+
+def _boundary_attack() -> BoundaryAttackFact:
+    bos_id = "boundary-bos-generation"
+    bar_id = "boundary-attack-bar"
+    boundary_ticks = 400
+    return BoundaryAttackFact(
+        boundary_attack_id=canonical_semantic_id(
+            "boundary-attack",
+            Timeframe.M5.value,
+            bos_id,
+            bar_id,
+            Direction.LONG.value,
+            boundary_ticks,
+        ),
+        bos_generation_id=bos_id,
+        timeframe=Timeframe.M5,
+        direction=Direction.LONG,
+        target_swing_event_id="boundary-target-swing",
+        bar_event_id=bar_id,
+        boundary_ticks=boundary_ticks,
+        extreme_ticks=402,
+        close_ticks=400,
+        penetration_ticks=2,
+        attempt_ordinal=1,
+        known_at=_clock(20),
+        source_event_ids=("boundary-target-swing", bar_id),
+    )
+
+
+def _structure_owner(
+    identity: str,
+    *,
+    timeframe: Timeframe = Timeframe.H1,
+    confirmed: bool = True,
+    minute: int = 1,
+) -> StructureGeneration:
+    origin_id = f"{identity}:origin"
+    confirmation_id = f"{identity}:confirmation"
+    return StructureGeneration(
+        structure_generation_id=identity,
+        timeframe=timeframe,
+        scope=StructureScope.EXTERNAL,
+        direction=Direction.LONG,
+        lifecycle=(
+            StructureGenerationLifecycle.CONFIRMED
+            if confirmed
+            else StructureGenerationLifecycle.FORMING
+        ),
+        started_at=_clock(minute),
+        known_at=_clock(minute),
+        updated_at=_clock(minute + int(confirmed)),
+        origin_event_id=origin_id,
+        origin_swing_id=f"{identity}:swing",
+        confirmation_event_id=confirmation_id if confirmed else None,
+        confirmed_at=_clock(minute + 1) if confirmed else None,
+        source_event_ids=(
+            (origin_id, confirmation_id) if confirmed else (origin_id,)
+        ),
     )
 
 
@@ -664,7 +731,6 @@ def test_projection_indexes_are_derived_pickle_safe_and_history_equivalent() -> 
     assert "_swing_assignment_incumbents_cache" not in primitive
     assert "_current_record_ids_cache" not in primitive
     assert "_current_view_hash_cursor_cache" not in primitive
-    assert "_liquidity_interaction_ids_by_level_cache" not in primitive
     with pytest.raises(TypeError):
         incremental._swing_geometry_views_cache["invented"] = object()
     with pytest.raises(TypeError):
@@ -759,9 +825,6 @@ def test_incremental_factory_requires_exact_module_capability() -> None:
             ),
             swing_assignment_incumbents=dict(
                 projection._swing_assignment_incumbents_cache
-            ),
-            liquidity_interaction_ids_by_level=dict(
-                projection._liquidity_interaction_ids_by_level_cache
             ),
             current_view_hash_cursor=(
                 projection._current_view_hash_cursor_cache
@@ -1026,6 +1089,87 @@ def test_cold_boundaries_reject_broken_swing_supersession_chain(
         FoundationProjectionReducer.restore(forged)
 
 
+@pytest.mark.parametrize("mutation", ("identity", "ordinal"))
+def test_cold_boundaries_replay_boundary_attack_group_rules(
+    mutation: str,
+) -> None:
+    attack = _boundary_attack()
+    malformed_attack = (
+        replace(attack, boundary_attack_id="boundary-attack:forged")
+        if mutation == "identity"
+        else replace(attack, attempt_ordinal=2)
+    )
+    record = FoundationRecord.from_dto(malformed_attack)
+    malformed = _raw_current_projection((record,))
+
+    with pytest.raises(ValueError, match="boundary-attack"):
+        FoundationProjectionReducer.replay((record,))
+    with pytest.raises(ValueError, match="boundary-attack"):
+        FoundationProjectionReducer.validate_complete(malformed)
+    with pytest.raises(ValueError, match="boundary-attack"):
+        FoundationProjectionReducer.checkpoint(malformed)
+    with pytest.raises(ValueError, match="boundary-attack"):
+        malformed.transport_payload()
+    forged = object.__new__(FoundationProjectionCheckpoint)
+    object.__setattr__(forged, "projection", malformed)
+    object.__setattr__(
+        forged,
+        "schema_version",
+        foundation_module.FOUNDATION_PROJECTION_CHECKPOINT_SCHEMA_VERSION,
+    )
+    object.__setattr__(forged, "checkpoint_id", "foundation-checkpoint:forged")
+    with pytest.raises(ValueError, match="boundary-attack"):
+        FoundationProjectionReducer.restore(forged)
+
+
+def test_public_ledger_restore_revalidates_identity_and_cold_replay() -> None:
+    valid_record = FoundationRecord.from_dto(_boundary_attack())
+    ledger = FoundationRecordLedger()
+    ledger.append((valid_record,))
+    tampered_identity = ledger.checkpoint()
+    object.__setattr__(
+        tampered_identity,
+        "checkpoint_id",
+        "foundation-record-ledger:forged",
+    )
+    with pytest.raises(ValueError, match="checkpoint integrity"):
+        FoundationRecordLedger.restore(tampered_identity)
+
+    illegal_record = FoundationRecord.from_dto(
+        replace(_boundary_attack(), attempt_ordinal=2)
+    )
+    component_fingerprint = (
+        foundation_module._extend_foundation_component_fingerprint(
+            foundation_module._foundation_component_fingerprint_seed(
+                foundation_version=FOUNDATION_VERSION,
+                registry_identity=FOUNDATION_CANONICAL_IDENTITY,
+            ),
+            illegal_record.record_id,
+        )
+    )
+    schema_version = foundation_module.FOUNDATION_RECORD_LEDGER_SCHEMA_VERSION
+    checkpoint_id = "foundation-record-ledger:" + foundation_module._canonical_digest(
+        {
+            "schema_version": schema_version,
+            "record_count": 1,
+            "component_fingerprint": component_fingerprint,
+            "record_ids": (illegal_record.record_id,),
+        }
+    )
+    forged = object.__new__(FoundationRecordLedgerCheckpoint)
+    for name, value in {
+        "records": (illegal_record,),
+        "record_count": 1,
+        "component_fingerprint": component_fingerprint,
+        "schema_version": schema_version,
+        "checkpoint_id": checkpoint_id,
+    }.items():
+        object.__setattr__(forged, name, value)
+
+    with pytest.raises(ValueError, match="boundary-attack"):
+        FoundationRecordLedger.restore(forged)
+
+
 @pytest.mark.parametrize(
     "updates",
     (
@@ -1131,6 +1275,86 @@ def test_liquidity_level_interaction_history_is_prefix_only() -> None:
         FoundationProjectionReducer.reduce(projection, rewritten)
 
 
+def test_liquidity_level_owner_binding_is_one_time_and_compatible() -> None:
+    active, _, active_interaction, _ = _level_history()
+    base = FoundationProjectionReducer.replay(
+        (
+            FoundationRecord.from_dto(active_interaction),
+            FoundationRecord.from_dto(active),
+        )
+    )
+    compatible = _structure_owner("compatible-owner")
+    projection = FoundationProjectionReducer.reduce(
+        base,
+        FoundationRecord.from_dto(compatible),
+    )
+    owned = replace(
+        active,
+        updated_at=compatible.updated_at,
+        owner_structure_generation_id=compatible.generation_id,
+        source_event_ids=(
+            *active.source_event_ids,
+            compatible.confirmation_event_id,
+        ),
+    )
+    projection = FoundationProjectionReducer.reduce(
+        projection,
+        FoundationRecord.from_dto(owned),
+    )
+    assert (
+        FoundationProjectionReducer.validate_complete(projection)
+        .current_record_for(
+            FoundationObjectType.LIQUIDITY_LEVEL,
+            active.level_id,
+        )
+        .payload["owner_structure_generation_id"]
+        == compatible.generation_id
+    )
+
+    for incompatible in (
+        _structure_owner("foreign-owner", timeframe=Timeframe.M5),
+        _structure_owner("unconfirmed-owner", confirmed=False),
+    ):
+        candidate = FoundationProjectionReducer.reduce(
+            base,
+            FoundationRecord.from_dto(incompatible),
+        )
+        incompatible_level = replace(
+            active,
+            updated_at=incompatible.updated_at,
+            owner_structure_generation_id=incompatible.generation_id,
+            source_event_ids=(
+                *active.source_event_ids,
+                incompatible.source_event_ids[-1],
+            ),
+        )
+        with pytest.raises(ValueError, match="owner|confirmed"):
+            FoundationProjectionReducer.reduce(
+                candidate,
+                FoundationRecord.from_dto(incompatible_level),
+            )
+
+    replacement = _structure_owner("replacement-owner", minute=3)
+    projection = FoundationProjectionReducer.reduce(
+        projection,
+        FoundationRecord.from_dto(replacement),
+    )
+    rebound = replace(
+        owned,
+        updated_at=replacement.updated_at,
+        owner_structure_generation_id=replacement.generation_id,
+        source_event_ids=(
+            *owned.source_event_ids,
+            replacement.confirmation_event_id,
+        ),
+    )
+    with pytest.raises(ValueError, match="ownership is immutable"):
+        FoundationProjectionReducer.reduce(
+            projection,
+            FoundationRecord.from_dto(rebound),
+        )
+
+
 def test_liquidity_interaction_id_must_bind_its_generation_signature() -> None:
     active, _, active_interaction, _ = _level_history()
     forged_generation_id = "liquidity-interaction:forged-generation"
@@ -1160,6 +1384,60 @@ def test_liquidity_interaction_id_must_bind_its_generation_signature() -> None:
 
     with pytest.raises(ValueError, match="generation chain"):
         FoundationProjectionReducer.replay((interaction, level))
+
+
+def test_expired_interaction_cannot_be_forged_into_rearm_generation() -> None:
+    active, retired, active_interaction, expired = _level_history()
+    armed_at = _clock(2)
+    generation_id = canonical_semantic_id(
+        "liquidity-interaction",
+        active.level_id,
+        2,
+        armed_at,
+        expired.generation_id,
+    )
+    departure_id = "forged-expired-departure"
+    forged = replace(
+        active_interaction,
+        generation_id=generation_id,
+        generation_number=2,
+        armed_at=armed_at,
+        known_at=armed_at,
+        updated_at=armed_at,
+        armed_real_bar_ordinal=expired.terminal_real_bar_ordinal + 1,
+        previous_generation_id=expired.generation_id,
+        rearm_fact_id="forged-expired-rearmed-fact",
+        source_event_ids=(active.source_event_ids[0], departure_id),
+    )
+    forged_level = replace(
+        retired,
+        lifecycle=LiquidityLevelLifecycle.REARMED,
+        updated_at=armed_at,
+        active_generation_id=generation_id,
+        interaction_generation_ids=(
+            *retired.interaction_generation_ids,
+            generation_id,
+        ),
+        last_terminal_generation_id=expired.generation_id,
+        rearmable_from_generation_id=expired.generation_id,
+        rearmable_fact_id="forged-expired-rearmable-fact",
+        rearm_departure_bar_event_id=departure_id,
+        rearm_departure_ticks=1,
+        rearmed_from_generation_id=expired.generation_id,
+        rearmable_at=armed_at,
+        retired_at=None,
+        retirement_reason=None,
+        source_event_ids=(*retired.source_event_ids, departure_id),
+    )
+
+    with pytest.raises(ValueError, match="rearm predecessor"):
+        FoundationProjectionReducer.replay(
+            (
+                FoundationRecord.from_dto(expired),
+                FoundationRecord.from_dto(forged),
+                FoundationRecord.from_dto(forged_level),
+            )
+        )
 
 
 def test_liquidity_interaction_path_facts_are_append_only() -> None:

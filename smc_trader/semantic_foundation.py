@@ -2215,6 +2215,19 @@ def _validate_current_swing_graph(
         )
 
 
+def _validate_current_boundary_attack_history(
+    records: Sequence[FoundationRecord],
+) -> None:
+    prior: dict[
+        tuple[FoundationObjectType, str], FoundationRecord
+    ] = {}
+    for record in records:
+        if record.object_type is not FoundationObjectType.BOUNDARY_ATTACK:
+            continue
+        _validate_record_cross_links(prior, record)
+        prior[(record.object_type, record.object_id)] = record
+
+
 def _validate_projection_current_graph(
     projection: "FoundationProjection",
 ) -> None:
@@ -2224,6 +2237,7 @@ def _validate_projection_current_graph(
     _validate_projection_completeness(latest)
     for record in projection.current_records:
         _validate_current_record_cross_links(latest, record)
+    _validate_current_boundary_attack_history(projection.current_records)
     _validate_current_swing_graph(projection)
 
 
@@ -2289,16 +2303,6 @@ class FoundationProjection:
             for record in records
             if record.object_type is FoundationObjectType.SWING_GEOMETRY_NODE
         }
-        interaction_ids_by_level: dict[str, set[str]] = {}
-        for record in records:
-            if (
-                record.object_type
-                is FoundationObjectType.LIQUIDITY_INTERACTION_GENERATION
-            ):
-                level_id = str(record.payload.get("level_id"))
-                interaction_ids_by_level.setdefault(level_id, set()).add(
-                    record.object_id
-                )
         assignment_incumbents = _swing_assignment_chain_heads(records)
         object.__setattr__(self, "_latest_records_by_key_cache", MappingProxyType(latest))
         object.__setattr__(
@@ -2308,17 +2312,6 @@ class FoundationProjection:
         )
         object.__setattr__(self, "_swing_geometry_views_cache", MappingProxyType(geometry_views))
         object.__setattr__(self, "_swing_assignment_incumbents_cache", MappingProxyType(assignment_incumbents))
-        object.__setattr__(
-            self,
-            "_liquidity_interaction_ids_by_level_cache",
-            MappingProxyType(
-                {
-                    level_id: frozenset(interaction_ids)
-                    for level_id, interaction_ids
-                    in interaction_ids_by_level.items()
-                }
-            ),
-        )
         object.__setattr__(
             self,
             "_current_view_hash_cursor_cache",
@@ -2348,7 +2341,6 @@ class FoundationProjection:
         current_record_ids: set[str],
         swing_geometry_views: dict[str, _SwingGeometryView],
         swing_assignment_incumbents: dict[str, FoundationRecord],
-        liquidity_interaction_ids_by_level: dict[str, frozenset[str]],
         current_view_hash_cursor: _FoundationCurrentViewHashCursor,
         foundation_version: str,
         registry_identity: str,
@@ -2378,7 +2370,6 @@ class FoundationProjection:
             or type(current_record_ids) is not set
             or type(swing_geometry_views) is not dict
             or type(swing_assignment_incumbents) is not dict
-            or type(liquidity_interaction_ids_by_level) is not dict
             or type(current_view_hash_cursor)
             is not _FoundationCurrentViewHashCursor
             or current_view_hash_cursor.record_count != len(current_records)
@@ -2430,11 +2421,6 @@ class FoundationProjection:
             projection,
             "_swing_assignment_incumbents_cache",
             MappingProxyType(swing_assignment_incumbents),
-        )
-        object.__setattr__(
-            projection,
-            "_liquidity_interaction_ids_by_level_cache",
-            MappingProxyType(liquidity_interaction_ids_by_level),
         )
         object.__setattr__(
             projection,
@@ -2775,11 +2761,6 @@ class FoundationProjectionOwner:
         self._assignment_incumbents = dict(
             current._swing_assignment_incumbents_cache
         )
-        self._interaction_ids_by_level = {
-            level_id: set(interaction_ids)
-            for level_id, interaction_ids
-            in current._liquidity_interaction_ids_by_level_cache.items()
-        }
         self._projection_cache = current
         self._generation = 0
 
@@ -2825,8 +2806,6 @@ class FoundationProjectionOwner:
             or self._asof != rebuilt._asof
             or self._geometry_views != rebuilt._geometry_views
             or self._assignment_incumbents != rebuilt._assignment_incumbents
-            or self._interaction_ids_by_level
-            != rebuilt._interaction_ids_by_level
         ):
             raise ValueError("foundation projection owner internals differ")
         return canonical
@@ -2921,7 +2900,6 @@ class FoundationProjectionTransaction:
             projection._current_record_ids_cache,
             projection._swing_geometry_views_cache,
             projection._swing_assignment_incumbents_cache,
-            projection._liquidity_interaction_ids_by_level_cache,
             projection._current_view_hash_cursor_cache,
             projection.record_count,
             projection.component_fingerprint,
@@ -2947,9 +2925,9 @@ class FoundationProjectionTransaction:
             or admitted is None
             or any(
                 current[index] is not admitted[index]
-                for index in range(7)
+                for index in range(6)
             )
-            or current[7:] != admitted[7:]
+            or current[6:] != admitted[6:]
         ):
             raise ValueError(
                 "foundation prevalidated projection is not bound to this transaction"
@@ -3015,11 +2993,6 @@ class FoundationProjectionTransaction:
             view_cursor = (
                 self._owner.freeze()._current_view_hash_cursor_cache
             )
-            interaction_ids_by_level = {
-                level_id: set(interaction_ids)
-                for level_id, interaction_ids
-                in self._owner._interaction_ids_by_level.items()
-            }
             for record in self._records:
                 key = (record.object_type, record.object_id)
                 previous = latest.get(key)
@@ -3028,32 +3001,6 @@ class FoundationProjectionTransaction:
                 ) == key
                 latest.pop(key, None)
                 latest[key] = record
-                if (
-                    previous is not None
-                    and previous.object_type
-                    is FoundationObjectType.LIQUIDITY_INTERACTION_GENERATION
-                ):
-                    previous_level_id = str(
-                        previous.payload.get("level_id")
-                    )
-                    previous_ids = interaction_ids_by_level.get(
-                        previous_level_id
-                    )
-                    if previous_ids is not None:
-                        previous_ids.discard(previous.object_id)
-                        if not previous_ids:
-                            interaction_ids_by_level.pop(
-                                previous_level_id,
-                                None,
-                            )
-                if (
-                    record.object_type
-                    is FoundationObjectType.LIQUIDITY_INTERACTION_GENERATION
-                ):
-                    interaction_ids_by_level.setdefault(
-                        str(record.payload.get("level_id")),
-                        set(),
-                    ).add(record.object_id)
                 if previous is None:
                     current_records = (*current_records, record)
                     view_cursor = view_cursor.append(record.record_id)
@@ -3093,11 +3040,6 @@ class FoundationProjectionTransaction:
                 current_record_ids=current_record_ids,
                 swing_geometry_views=geometry_views,
                 swing_assignment_incumbents=assignment_incumbents,
-                liquidity_interaction_ids_by_level={
-                    level_id: frozenset(interaction_ids)
-                    for level_id, interaction_ids
-                    in interaction_ids_by_level.items()
-                },
                 current_view_hash_cursor=view_cursor,
                 foundation_version=self._owner.freeze().foundation_version,
                 registry_identity=self._owner.freeze().registry_identity,
@@ -3197,33 +3139,8 @@ class FoundationProjectionTransaction:
             prior = self._owner._latest.pop(key, None)
             if prior is not None:
                 self._owner._current_record_ids.discard(prior.record_id)
-                if (
-                    prior.object_type
-                    is FoundationObjectType.LIQUIDITY_INTERACTION_GENERATION
-                ):
-                    previous_level_id = str(
-                        prior.payload.get("level_id")
-                    )
-                    previous_ids = self._owner._interaction_ids_by_level.get(
-                        previous_level_id
-                    )
-                    if previous_ids is not None:
-                        previous_ids.discard(prior.object_id)
-                        if not previous_ids:
-                            self._owner._interaction_ids_by_level.pop(
-                                previous_level_id,
-                                None,
-                            )
             self._owner._latest[key] = record
             self._owner._current_record_ids.add(record.record_id)
-            if (
-                record.object_type
-                is FoundationObjectType.LIQUIDITY_INTERACTION_GENERATION
-            ):
-                self._owner._interaction_ids_by_level.setdefault(
-                    str(record.payload.get("level_id")),
-                    set(),
-                ).add(record.object_id)
         self._owner._geometry_views.update(self._geometry_writes)
         self._owner._assignment_incumbents.update(
             self._assignment_writes
@@ -3399,8 +3316,8 @@ class FoundationRecordLedger:
             component_fingerprint=state["component_fingerprint"],
             schema_version=state["schema_version"],
         )
-        restored = type(self).restore(checkpoint)
-        self.__dict__.update(restored.__dict__)
+        self.__init__()
+        self.append(checkpoint.records)
 
     @property
     def record_count(self) -> int:
@@ -3495,11 +3412,19 @@ class FoundationRecordLedger:
     ) -> "FoundationRecordLedger":
         if not isinstance(checkpoint, FoundationRecordLedgerCheckpoint):
             raise TypeError("foundation cold-ledger restore requires its checkpoint")
+        validated = FoundationRecordLedgerCheckpoint(
+            records=checkpoint.records,
+            record_count=checkpoint.record_count,
+            component_fingerprint=checkpoint.component_fingerprint,
+            schema_version=checkpoint.schema_version,
+        )
+        if getattr(checkpoint, "checkpoint_id", None) != validated.checkpoint_id:
+            raise ValueError("foundation cold-ledger checkpoint integrity mismatch")
         ledger = cls()
-        ledger.append(checkpoint.records)
+        ledger.append(validated.records)
         if (
-            ledger.record_count != checkpoint.record_count
-            or ledger.component_fingerprint != checkpoint.component_fingerprint
+            ledger.record_count != validated.record_count
+            or ledger.component_fingerprint != validated.component_fingerprint
         ):
             raise ValueError("foundation cold-ledger checkpoint differs on replay")
         return ledger
