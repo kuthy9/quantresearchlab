@@ -477,6 +477,26 @@ four marked checks still pass while two raw-Eye transport assertions correctly
 fail closed on the changed `smc_trader/causal.py` SHA. The old binding is not
 rewritten to make a current checkout impersonate that historical runtime.
 
+Four June Foundation comparison-v1 manifests are also inert historical
+preregistrations, not runnable current contracts. They were initially committed
+with `frozen_before_run=true`, but their runtime bindings were subsequently
+edited in place before any registered result was produced. The current files
+and SHA-256 identities are:
+
+| Historical manifest | Current file SHA-256 |
+|---|---|
+| `foundation_v2_2024_06_phase45_w1_development_comparison_v1.yaml` | `4d03649ceaea9a337fb8a95ed586c80e8b735f763c57cba8c635c73860d5bbc6` |
+| `foundation_v2_2024_06_phase45_w2_historical_validation_comparison_v1.yaml` | `945f12fa366c982d1430ddc596556e990371a505142dcbaf10618e1efd7317f4` |
+| `foundation_v2_2024_06_phase6_mbo_w1_development_comparison_v1.yaml` | `1b832e72084684735bfe95b827c83282d0285ecdc1a5bdd83643036019b68b98` |
+| `foundation_v2_2024_06_phase6_mbo_w2_historical_validation_comparison_v1.yaml` | `4c6595c19bab5ed1d547edc4306e8c0647413242894ce7ffbf497df44be22584` |
+
+Their validators now fail closed on current-runtime drift, and all four
+registered result JSON files are absent. They carry no completed comparison,
+mechanism, model, Phase-7, causal, profit, or trading authority. A future formal
+comparison must use a new experiment identity, versioned manifest path and
+`frozen_at` value after the runtime is final; these four files must not be
+silently rebound again.
+
 The separately frozen v1.2 protocol-v3 r2 development diagnostic completed.
 Its [manifest](../../experiments/manifests/smc_semantics_v1_2_2024_01_phase5_diagnostic_v3_r2.yaml)
 and [result](../../experiments/results/smc_semantics_v1_2_2024_01_phase5_diagnostic_v3_r2.json)

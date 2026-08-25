@@ -60,6 +60,13 @@ baseline findings and file rows below are intentionally not rewritten. See the
 [current implementation status](current_implementation_status.md) for current
 ownership, schemas, residual debt, and historical-receipt boundaries.
 
+> **Frozen-baseline reading rule:** every finding, count, present-tense
+> disposition, and file row below this notice describes only the `4f180d2`
+> preimage. In particular, later statements that the Neutral-B2 island or the
+> prompt PDF “is” present have been superseded by the retirement paragraph
+> above. They are retained solely to make the original audit reproducible and
+> must not be used as current repository status.
+
 ## Zero-reference result
 
 “Zero-reference” here means no inbound Python AST import and no literal tracked path/name reference in the frozen baseline. It is a triage signal, not proof that a file is dead. The strict detector found 111 roots/leaves: 71 pytest files, 16 human/evidence documents, four CLI entry points, three repository roots and 17 superseded manifests. It found **zero unreferenced `smc_trader/*.py` runtime modules**, zero unreferenced current configs and zero unreferenced semantic authorities.
