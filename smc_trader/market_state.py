@@ -2770,11 +2770,20 @@ def update_swing_geometry_assignments(
     latest: dict[str, SwingGeometryAssignment] = {}
     for assignment in history:
         incumbent = latest.get(assignment.child_swing_id)
-        if incumbent is None or (
-            assignment.assigned_at,
-            assignment.assignment_id,
-        ) > (incumbent.assigned_at, incumbent.assignment_id):
-            latest[assignment.child_swing_id] = assignment
+        if (
+            (incumbent is None)
+            != (assignment.supersedes_assignment_id is None)
+            or (
+                incumbent is not None
+                and (
+                    assignment.supersedes_assignment_id
+                    != incumbent.assignment_id
+                    or assignment.assigned_at < incumbent.assigned_at
+                )
+            )
+        ):
+            raise ValueError("swing assignment history is not append-only")
+        latest[assignment.child_swing_id] = assignment
     appended: list[SwingGeometryAssignment] = []
     for child_id in sorted(by_id):
         parent_id = parent_by_child[child_id]

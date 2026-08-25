@@ -106,6 +106,76 @@ def _swing_node() -> SwingGeometryNode:
     )
 
 
+def _same_clock_swing_graph():
+    child = _swing_node()
+    parent = SwingGeometryNode(
+        swing_id="swing-geometry-parent",
+        timeframe=Timeframe.M15,
+        symbol=child.symbol,
+        instrument_id=child.instrument_id,
+        window_start=_clock(0),
+        window_end=child.window_end,
+        lower_bound=90.0,
+        upper_bound=110.0,
+        known_at=child.known_at,
+        source_candle_ids=("parent-candle-1", "parent-candle-2"),
+    )
+    child_root = SwingGeometryAssignment(
+        assignment_id="zz-child-root",
+        child_swing_id=child.swing_id,
+        parent_swing_id=None,
+        geometric_depth=0,
+        assigned_at=child.known_at,
+    )
+    parent_root = SwingGeometryAssignment(
+        assignment_id="parent-root",
+        child_swing_id=parent.swing_id,
+        parent_swing_id=None,
+        geometric_depth=0,
+        assigned_at=parent.known_at,
+    )
+    child_successor = SwingGeometryAssignment(
+        assignment_id="aa-child-successor",
+        child_swing_id=child.swing_id,
+        parent_swing_id=parent.swing_id,
+        geometric_depth=1,
+        assigned_at=parent.known_at,
+        supersedes_assignment_id=child_root.assignment_id,
+    )
+    return child, parent, child_root, parent_root, child_successor
+
+
+def _raw_current_projection(
+    records: tuple[FoundationRecord, ...],
+) -> FoundationProjection:
+    template = FoundationProjectionReducer.initial_projection()
+    projection = object.__new__(FoundationProjection)
+    values = {
+        "current_records": records,
+        "record_count": len(records),
+        "component_fingerprint": "0" * 64,
+        "current_view_fingerprint": foundation_module._canonical_digest(
+            {
+                "current_view_fingerprint_version": (
+                    foundation_module.FOUNDATION_CURRENT_VIEW_FINGERPRINT_VERSION
+                ),
+                "foundation_version": template.foundation_version,
+                "registry_identity": template.registry_identity,
+                "current_record_ids": tuple(
+                    record.record_id for record in records
+                ),
+            }
+        ),
+        "asof": max(record.known_at for record in records),
+        "foundation_version": template.foundation_version,
+        "registry_identity": template.registry_identity,
+        "schema_version": template.schema_version,
+    }
+    for name, value in values.items():
+        object.__setattr__(projection, name, value)
+    return projection
+
+
 def _active_fvg() -> FVGStructuralLifecycle:
     return FVGStructuralLifecycle(
         fvg_id="fvg-1",
@@ -828,6 +898,131 @@ def test_cold_boundaries_reject_missing_swing_parent_graph() -> None:
     )
     object.__setattr__(forged, "checkpoint_id", "foundation-checkpoint:forged")
     with pytest.raises(ValueError, match="Swing assignment"):
+        FoundationProjectionReducer.restore(forged)
+
+
+def test_same_clock_lower_id_swing_successor_becomes_explicit_head() -> None:
+    child, parent, child_root, parent_root, successor = (
+        _same_clock_swing_graph()
+    )
+    records = (
+        FoundationRecord.from_dto(
+            child,
+            source_event_ids=("child-swing-event",),
+        ),
+        FoundationRecord.from_dto(
+            child_root,
+            source_event_ids=("child-swing-event",),
+        ),
+        FoundationRecord.from_dto(
+            parent,
+            source_event_ids=("parent-swing-event",),
+        ),
+        FoundationRecord.from_dto(
+            parent_root,
+            source_event_ids=("parent-swing-event",),
+        ),
+        FoundationRecord.from_dto(
+            successor,
+            source_event_ids=(
+                "child-swing-event",
+                "parent-swing-event",
+            ),
+        ),
+    )
+
+    projection = FoundationProjectionReducer.replay(records)
+    assert (
+        projection._swing_assignment_incumbents_cache[child.swing_id]
+        .object_id
+        == successor.assignment_id
+    )
+    restored = FoundationProjectionReducer.restore(
+        pickle.loads(
+            pickle.dumps(FoundationProjectionReducer.checkpoint(projection))
+        )
+    )
+    assert restored == projection
+    assert update_swing_geometry_assignments(
+        (child, parent),
+        (child_root, parent_root, successor),
+        known_at=parent.known_at,
+    ) == (child_root, parent_root, successor)
+
+
+@pytest.mark.parametrize("malformation", ("missing", "fork", "cycle"))
+def test_cold_boundaries_reject_broken_swing_supersession_chain(
+    malformation: str,
+) -> None:
+    child, parent, child_root, parent_root, successor = (
+        _same_clock_swing_graph()
+    )
+    if malformation == "missing":
+        assignments = (
+            replace(
+                successor,
+                assignment_id="missing-predecessor-successor",
+                supersedes_assignment_id="absent-assignment",
+            ),
+        )
+    elif malformation == "fork":
+        assignments = (
+            child_root,
+            successor,
+            replace(successor, assignment_id="forked-successor"),
+        )
+    else:
+        assignments = (
+            replace(
+                successor,
+                assignment_id="cycle-a",
+                supersedes_assignment_id="cycle-b",
+            ),
+            replace(
+                successor,
+                assignment_id="cycle-b",
+                supersedes_assignment_id="cycle-a",
+            ),
+        )
+    records = (
+        FoundationRecord.from_dto(
+            child,
+            source_event_ids=("child-swing-event",),
+        ),
+        FoundationRecord.from_dto(
+            parent,
+            source_event_ids=("parent-swing-event",),
+        ),
+        FoundationRecord.from_dto(
+            parent_root,
+            source_event_ids=("parent-swing-event",),
+        ),
+        *(
+            FoundationRecord.from_dto(
+                assignment,
+                source_event_ids=(
+                    "child-swing-event",
+                    "parent-swing-event",
+                ),
+            )
+            for assignment in assignments
+        ),
+    )
+    malformed = _raw_current_projection(records)
+
+    with pytest.raises(ValueError, match="supersession chain"):
+        FoundationProjectionReducer.validate_complete(malformed)
+    with pytest.raises(ValueError, match="supersession chain"):
+        FoundationProjectionReducer.checkpoint(malformed)
+    forged = object.__new__(FoundationProjectionCheckpoint)
+    object.__setattr__(forged, "projection", malformed)
+    object.__setattr__(
+        forged,
+        "schema_version",
+        foundation_module.FOUNDATION_PROJECTION_CHECKPOINT_SCHEMA_VERSION,
+    )
+    object.__setattr__(forged, "checkpoint_id", "foundation-checkpoint:forged")
+    with pytest.raises(ValueError, match="supersession chain"):
         FoundationProjectionReducer.restore(forged)
 
 

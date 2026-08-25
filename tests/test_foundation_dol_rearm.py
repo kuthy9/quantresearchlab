@@ -4,6 +4,7 @@ from dataclasses import replace
 from types import SimpleNamespace
 
 import pandas as pd
+import pytest
 
 from smc_trader.dol_ranking import (
     _feature_values,
@@ -39,8 +40,14 @@ from smc_trader.scene_graph import (
     foundation_dol_inventory,
     update_global_market_context,
 )
-from smc_trader.semantic_foundation import FoundationProjectionReducer
-from smc_trader.semantic_lifecycle import LiquidityLevelLifecycle
+from smc_trader.semantic_foundation import (
+    FoundationProjectionReducer,
+    FoundationRecord,
+)
+from smc_trader.semantic_lifecycle import (
+    canonical_semantic_id,
+    LiquidityLevelLifecycle,
+)
 
 from .helpers import market_observation, replace_market_observation
 from .test_foundation_adapter import (
@@ -238,6 +245,20 @@ def _canonical_nodes(graph, *, level_id: str):
         for node in graph.nodes
         if node.kind == "liquidity" and node.entity_id == level_id
     )
+
+
+def _rearmed_adapter(*, label: str) -> CanonicalFoundationAdapter:
+    adapter = CanonicalFoundationAdapter(tick_size=TICK)
+    _, level_event = _seed_level(adapter, label=label, price=100.0)
+    _cross_level(
+        adapter,
+        level_event,
+        crossed_minute=1,
+        resolved_minute=1,
+        terminal_kind=EventKind.SWEEP_CONFIRMED,
+    )
+    adapter.consume(_bar(2, high=100.0, low=99.0, close=99.75))
+    return adapter
 
 
 def _real_bar_ordinals(adapter: CanonicalFoundationAdapter):
@@ -722,6 +743,183 @@ def test_formed_pool_never_materializes_without_its_visible_source() -> None:
     }
     assert level_id not in context1.external_draw_candidates["above"]
     assert level_id not in {item.level_id for item in _visible_levels(observation1)}
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ("non_strict_clock", "same_real_bar", "different_timeframe"),
+)
+def test_rearmed_generation_requires_strict_sweep_predecessor(
+    mutation: str,
+) -> None:
+    adapter = _rearmed_adapter(label=f"strict-rearm-{mutation}")
+    level = adapter.lifecycle.levels[-1]
+    current = adapter.lifecycle.interaction(level.active_generation_id)
+    previous = adapter.lifecycle.interaction(current.previous_generation_id)
+
+    if mutation == "non_strict_clock":
+        generation_id = canonical_semantic_id(
+            "liquidity-interaction",
+            level.level_id,
+            current.generation_number,
+            previous.terminal_at,
+            previous.generation_id,
+        )
+        current = replace(
+            current,
+            generation_id=generation_id,
+            armed_at=previous.terminal_at,
+            known_at=previous.terminal_at,
+            updated_at=previous.terminal_at,
+        )
+        level = replace(
+            level,
+            active_generation_id=generation_id,
+            interaction_generation_ids=(
+                *level.interaction_generation_ids[:-1],
+                generation_id,
+            ),
+            rearmable_at=previous.terminal_at,
+        )
+    elif mutation == "same_real_bar":
+        current = replace(
+            current,
+            armed_real_bar_ordinal=previous.terminal_real_bar_ordinal,
+        )
+    else:
+        current = replace(current, interaction_timeframe=Timeframe.M5)
+
+    with pytest.raises(ValueError, match="rearm predecessor"):
+        FoundationProjectionReducer.replay(
+            (
+                FoundationRecord.from_dto(previous),
+                FoundationRecord.from_dto(current),
+                FoundationRecord.from_dto(level),
+            )
+        )
+
+
+def test_acceptance_terminal_cannot_be_forged_into_rearm_generation() -> None:
+    accepted = CanonicalFoundationAdapter(tick_size=TICK)
+    _, level_event = _seed_level(
+        accepted,
+        label="acceptance-cannot-rearm",
+        price=100.0,
+    )
+    _cross_level(
+        accepted,
+        level_event,
+        crossed_minute=1,
+        resolved_minute=2,
+        terminal_kind=EventKind.ACCEPTANCE_CONFIRMED,
+        crossing_close=100.5,
+    )
+    accepted_level = accepted.lifecycle.levels[-1]
+    previous = accepted.lifecycle.interaction(
+        accepted_level.last_terminal_generation_id
+    )
+    template_adapter = _rearmed_adapter(label="rearm-template")
+    template_level = template_adapter.lifecycle.levels[-1]
+    template = template_adapter.lifecycle.interaction(
+        template_level.active_generation_id
+    )
+    armed_at = previous.terminal_at + pd.Timedelta(minutes=1)
+    generation_id = canonical_semantic_id(
+        "liquidity-interaction",
+        accepted_level.level_id,
+        2,
+        armed_at,
+        previous.generation_id,
+    )
+    departure_id = "forged-acceptance-departure"
+    forged = replace(
+        template,
+        generation_id=generation_id,
+        level_id=accepted_level.level_id,
+        source_timeframe=accepted_level.source_timeframe,
+        interaction_timeframe=previous.interaction_timeframe,
+        level_side=accepted_level.side,
+        lower_bound_ticks=accepted_level.lower_bound_ticks,
+        upper_bound_ticks=accepted_level.upper_bound_ticks,
+        generation_number=2,
+        armed_at=armed_at,
+        known_at=armed_at,
+        updated_at=armed_at,
+        armed_real_bar_ordinal=previous.terminal_real_bar_ordinal + 1,
+        previous_generation_id=previous.generation_id,
+        rearm_fact_id="forged-acceptance-rearmed-fact",
+        source_event_ids=(
+            accepted_level.source_event_ids[0],
+            departure_id,
+        ),
+    )
+    forged_level = replace(
+        accepted_level,
+        lifecycle=LiquidityLevelLifecycle.REARMED,
+        updated_at=armed_at,
+        active_generation_id=generation_id,
+        interaction_generation_ids=(
+            *accepted_level.interaction_generation_ids,
+            generation_id,
+        ),
+        last_terminal_generation_id=previous.generation_id,
+        rearmable_from_generation_id=previous.generation_id,
+        rearmable_fact_id="forged-acceptance-rearmable-fact",
+        rearm_departure_bar_event_id=departure_id,
+        rearm_departure_ticks=1,
+        rearmed_from_generation_id=previous.generation_id,
+        rearmable_at=armed_at,
+        retired_at=None,
+        retirement_reason=None,
+        source_event_ids=(*accepted_level.source_event_ids, departure_id),
+    )
+
+    with pytest.raises(ValueError, match="rearm predecessor"):
+        FoundationProjectionReducer.replay(
+            (
+                FoundationRecord.from_dto(previous),
+                FoundationRecord.from_dto(forged),
+                FoundationRecord.from_dto(forged_level),
+            )
+        )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ("fact", "departure_bar", "departure_ticks", "rearmable_at"),
+)
+def test_rearmed_level_provenance_cannot_be_rewritten(
+    mutation: str,
+) -> None:
+    adapter = _rearmed_adapter(label=f"frozen-provenance-{mutation}")
+    level = adapter.lifecycle.levels[-1]
+    if mutation == "fact":
+        rewritten = replace(level, rearmable_fact_id="rewritten-fact")
+    elif mutation == "departure_bar":
+        rewritten = replace(
+            level,
+            rearm_departure_bar_event_id="rewritten-departure-bar",
+            source_event_ids=(
+                *level.source_event_ids,
+                "rewritten-departure-bar",
+            ),
+        )
+    elif mutation == "departure_ticks":
+        rewritten = replace(
+            level,
+            rearm_departure_ticks=level.rearm_departure_ticks + 1,
+        )
+    else:
+        rewritten = replace(
+            level,
+            rearmable_at=level.rearmable_at - pd.Timedelta(seconds=30),
+        )
+
+    with pytest.raises(ValueError, match="rearm provenance is immutable"):
+        FoundationProjectionReducer.reduce(
+            adapter.projection,
+            FoundationRecord.from_dto(rewritten),
+        )
 
 
 def test_rearmed_internal_level_is_not_promoted_by_h1_timeframe() -> None:

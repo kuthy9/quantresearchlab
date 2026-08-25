@@ -51,6 +51,7 @@ from .semantic_lifecycle import (
     InteractionConstituent,
     LiquidityInteractionGeneration,
     LiquidityInteractionLifecycle,
+    LiquidityInteractionTerminal,
     LiquidityLevelLifecycle,
     LiquidityLevelState,
     RelationGeneration,
@@ -1029,6 +1030,62 @@ def _canonical_swing_depth(
     return depth
 
 
+def _swing_assignment_chain_heads(
+    records: Sequence[FoundationRecord],
+) -> dict[str, FoundationRecord]:
+    """Resolve append-only assignment heads from explicit supersession."""
+
+    histories: dict[str, dict[str, FoundationRecord]] = {}
+    for record in records:
+        if (
+            record.object_type
+            is FoundationObjectType.SWING_GEOMETRY_ASSIGNMENT
+        ):
+            histories.setdefault(
+                str(record.payload.get("child_swing_id")), {}
+            )[record.object_id] = record
+
+    heads: dict[str, FoundationRecord] = {}
+    for child_id, by_id in histories.items():
+        roots: list[FoundationRecord] = []
+        successors: dict[str, FoundationRecord] = {}
+        for record in by_id.values():
+            predecessor_id = record.payload.get(
+                "supersedes_assignment_id"
+            )
+            if predecessor_id is None:
+                roots.append(record)
+                continue
+            predecessor = by_id.get(str(predecessor_id))
+            if (
+                predecessor is None
+                or predecessor_id in successors
+                or record.known_at < predecessor.known_at
+            ):
+                raise ValueError(
+                    "Swing assignment supersession chain is invalid"
+                )
+            successors[str(predecessor_id)] = record
+        if len(roots) != 1:
+            raise ValueError(
+                "Swing assignment supersession chain requires one root"
+            )
+        cursor = roots[0]
+        visited: set[str] = set()
+        while cursor.object_id not in visited:
+            visited.add(cursor.object_id)
+            successor = successors.get(cursor.object_id)
+            if successor is None:
+                break
+            cursor = successor
+        if len(visited) != len(by_id):
+            raise ValueError(
+                "Swing assignment supersession chain is disconnected"
+            )
+        heads[child_id] = cursor
+    return heads
+
+
 def _permitted_liquidity_archive(
     previous: FoundationRecord,
     current: FoundationRecord,
@@ -1243,6 +1300,35 @@ def _validate_object_revision(
         current_owner = current.payload.get("owner_structure_generation_id")
         if prior_owner is not None and current_owner != prior_owner:
             raise ValueError("liquidity structure ownership is immutable")
+        prior_lifecycle = previous.payload.get("lifecycle")
+        current_lifecycle = current.payload.get("lifecycle")
+        rearm_provenance_fields = (
+            "rearmable_from_generation_id",
+            "rearmable_fact_id",
+            "rearm_departure_bar_event_id",
+            "rearm_departure_ticks",
+            "rearmable_at",
+        )
+        provenance_lifecycles = {
+            LiquidityLevelLifecycle.REARMABLE.value,
+            LiquidityLevelLifecycle.REARMED.value,
+        }
+        if (
+            prior_lifecycle in provenance_lifecycles
+            and current_lifecycle in provenance_lifecycles
+            and any(
+                previous.payload.get(field) != current.payload.get(field)
+                for field in rearm_provenance_fields
+            )
+        ):
+            raise ValueError("liquidity rearm provenance is immutable")
+        if (
+            prior_lifecycle == LiquidityLevelLifecycle.REARMED.value
+            and current_lifecycle == LiquidityLevelLifecycle.REARMED.value
+            and previous.payload.get("rearmed_from_generation_id")
+            != current.payload.get("rearmed_from_generation_id")
+        ):
+            raise ValueError("liquidity rearmed ancestry is immutable")
 
 
 def _required_prior_record(
@@ -1269,6 +1355,40 @@ def _matching_payload_fields(
 ) -> None:
     if any(left.get(field) != right.get(field) for field in fields):
         raise ValueError(f"{role} scope or geometry does not match its owner")
+
+
+def _validate_liquidity_rearm_predecessor(
+    previous: FoundationRecord,
+    current: FoundationRecord,
+) -> None:
+    previous_payload = previous.payload
+    current_payload = current.payload
+    previous_terminal_at = aware_timestamp(
+        previous_payload.get("terminal_at"),
+        name="liquidity_interaction.terminal_at",
+    )
+    current_armed_at = aware_timestamp(
+        current_payload.get("armed_at"),
+        name="liquidity_interaction.armed_at",
+    )
+    previous_terminal_ordinal = previous_payload.get(
+        "terminal_real_bar_ordinal"
+    )
+    current_armed_ordinal = current_payload.get("armed_real_bar_ordinal")
+    if (
+        previous_payload.get("level_id") != current_payload.get("level_id")
+        or previous_payload.get("interaction_timeframe")
+        != current_payload.get("interaction_timeframe")
+        or previous_payload.get("lifecycle")
+        != LiquidityInteractionLifecycle.TERMINAL.value
+        or previous_payload.get("terminal_state")
+        != LiquidityInteractionTerminal.SWEEP.value
+        or current_armed_at <= previous_terminal_at
+        or type(previous_terminal_ordinal) is not int
+        or type(current_armed_ordinal) is not int
+        or current_armed_ordinal < previous_terminal_ordinal + 1
+    ):
+        raise ValueError("liquidity rearm predecessor is incompatible")
 
 
 def _validate_generation_owner(
@@ -1452,14 +1572,13 @@ def _validate_record_cross_links(
             role="rearmed liquidity prior interaction",
         )
         generation_number = payload.get("generation_number")
-        if type(generation_number) is not int or (
-            previous.payload.get("level_id") != payload.get("level_id")
-            or previous.payload.get("lifecycle")
-            != LiquidityInteractionLifecycle.TERMINAL.value
+        if (
+            type(generation_number) is not int
             or previous.payload.get("generation_number")
             != generation_number - 1
         ):
             raise ValueError("rearmed liquidity prior interaction is incompatible")
+        _validate_liquidity_rearm_predecessor(previous, record)
         return
 
     if kind is FoundationObjectType.STRUCTURE_TRANSITION:
@@ -1609,16 +1728,8 @@ def _validate_record_cross_links(
         incumbent = (
             swing_assignment_incumbents.get(child.object_id)
             if swing_assignment_incumbents is not None
-            else max(
-                (
-                    item
-                    for (object_type, _), item in prior.items()
-                    if object_type
-                    is FoundationObjectType.SWING_GEOMETRY_ASSIGNMENT
-                    and item.payload.get("child_swing_id") == child.object_id
-                ),
-                key=lambda item: (item.known_at, item.object_id),
-                default=None,
+            else _swing_assignment_chain_heads(tuple(prior.values())).get(
+                child.object_id
             )
         )
         supersedes = payload.get("supersedes_assignment_id")
@@ -1627,6 +1738,7 @@ def _validate_record_cross_links(
                 raise ValueError("first Swing assignment cannot supersede history")
         elif (
             supersedes != incumbent.object_id
+            or record.known_at < incumbent.known_at
             or (
                 incumbent.payload.get("parent_swing_id") == expected_parent_id
                 and incumbent.payload.get("geometric_depth")
@@ -1867,6 +1979,55 @@ def _validate_liquidity_interaction_registration(
         )
 
 
+def _validate_liquidity_level_rearm_state(
+    level: FoundationRecord,
+    interactions: Sequence[FoundationRecord],
+) -> None:
+    payload = level.payload
+    lifecycle = payload.get("lifecycle")
+    if lifecycle == LiquidityLevelLifecycle.REARMABLE.value:
+        terminal = interactions[-1]
+        rearmable_at = aware_timestamp(
+            payload.get("rearmable_at"),
+            name="liquidity_level.rearmable_at",
+        )
+        terminal_at = aware_timestamp(
+            terminal.payload.get("terminal_at"),
+            name="liquidity_interaction.terminal_at",
+        )
+        if (
+            terminal.payload.get("terminal_state")
+            != LiquidityInteractionTerminal.SWEEP.value
+            or payload.get("last_terminal_generation_id")
+            != terminal.object_id
+            or payload.get("rearmable_from_generation_id")
+            != terminal.object_id
+            or rearmable_at <= terminal_at
+        ):
+            raise ValueError("liquidity level rearmable state is incompatible")
+    elif lifecycle == LiquidityLevelLifecycle.REARMED.value:
+        if len(interactions) < 2:
+            raise ValueError("liquidity level rearmed ancestry is incomplete")
+        previous, current = interactions[-2:]
+        previous_id = previous.object_id
+        current_armed_at = aware_timestamp(
+            current.payload.get("armed_at"),
+            name="liquidity_interaction.armed_at",
+        )
+        if (
+            payload.get("rearmable_from_generation_id") != previous_id
+            or payload.get("rearmed_from_generation_id") != previous_id
+            or payload.get("last_terminal_generation_id") != previous_id
+            or current.payload.get("previous_generation_id") != previous_id
+            or aware_timestamp(
+                payload.get("rearmable_at"),
+                name="liquidity_level.rearmable_at",
+            )
+            != current_armed_at
+        ):
+            raise ValueError("liquidity level rearmed state is incompatible")
+
+
 def _validate_liquidity_level_interaction_graph(
     latest: Mapping[tuple[FoundationObjectType, str], FoundationRecord],
     level: FoundationRecord,
@@ -1915,15 +2076,13 @@ def _validate_liquidity_level_interaction_graph(
             raise ValueError(
                 "liquidity interaction generation chain is incompatible"
             )
-        if previous_id is not None and interactions and (
-            interactions[-1].payload.get("lifecycle")
-            != LiquidityInteractionLifecycle.TERMINAL.value
-        ):
-            raise ValueError(
-                "liquidity interaction generation predecessor is live"
+        if previous_id is not None and interactions:
+            _validate_liquidity_rearm_predecessor(
+                interactions[-1], interaction
             )
         interactions.append(interaction)
 
+    _validate_liquidity_level_rearm_state(level, interactions)
     active_id = payload.get("active_generation_id")
     if tail_only:
         tail = interactions[-1]
@@ -2031,12 +2190,20 @@ def _validate_current_swing_graph(
         histories.setdefault(child_id, []).append(record)
 
     for child_id, history in histories.items():
-        ordered = sorted(
-            history,
-            key=lambda item: (item.known_at, item.object_id),
+        incumbent = projection._swing_assignment_incumbents_cache[
+            child_id
+        ]
+        predecessor_id = incumbent.payload.get(
+            "supersedes_assignment_id"
         )
-        incumbent = ordered[-1]
-        previous = None if len(ordered) == 1 else ordered[-2]
+        previous = next(
+            (
+                item
+                for item in history
+                if item.object_id == predecessor_id
+            ),
+            None,
+        )
         _validate_record_cross_links(
             latest,
             incumbent,
@@ -2122,7 +2289,6 @@ class FoundationProjection:
             for record in records
             if record.object_type is FoundationObjectType.SWING_GEOMETRY_NODE
         }
-        assignment_incumbents: dict[str, FoundationRecord] = {}
         interaction_ids_by_level: dict[str, set[str]] = {}
         for record in records:
             if (
@@ -2133,15 +2299,7 @@ class FoundationProjection:
                 interaction_ids_by_level.setdefault(level_id, set()).add(
                     record.object_id
                 )
-            if record.object_type is not FoundationObjectType.SWING_GEOMETRY_ASSIGNMENT:
-                continue
-            child_id = str(record.payload.get("child_swing_id"))
-            incumbent = assignment_incumbents.get(child_id)
-            if incumbent is None or (record.known_at, record.object_id) > (
-                incumbent.known_at,
-                incumbent.object_id,
-            ):
-                assignment_incumbents[child_id] = record
+        assignment_incumbents = _swing_assignment_chain_heads(records)
         object.__setattr__(self, "_latest_records_by_key_cache", MappingProxyType(latest))
         object.__setattr__(
             self,
@@ -2835,14 +2993,7 @@ class FoundationProjectionTransaction:
             )
         elif record.object_type is FoundationObjectType.SWING_GEOMETRY_ASSIGNMENT:
             child_id = str(record.payload.get("child_swing_id"))
-            incumbent = self._assignment_writes.get(child_id)
-            if incumbent is None:
-                incumbent = self._owner._assignment_incumbents.get(child_id)
-            if incumbent is None or (record.known_at, record.object_id) > (
-                incumbent.known_at,
-                incumbent.object_id,
-            ):
-                self._assignment_writes[child_id] = record
+            self._assignment_writes[child_id] = record
         self._record_count += 1
         self._component_fingerprint = _extend_foundation_component_fingerprint(
             self._component_fingerprint,
