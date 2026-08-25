@@ -44,12 +44,11 @@ normalized BAR + canonical v1.2 atomic facts
                       |
                       v
        CanonicalFoundationAdapter
-                      |
-                      v
- immutable FoundationRecord history
-                      |
-                      v
- FoundationProjection + technical FOUNDATION_STATE_CHANGED transport
+              |                     |
+              v                     v
+ FoundationRecordLedger     compact FoundationProjection
+ (in-memory revisions;      (current view/count/
+ checkpoint materializes)    rolling hashes)
                       |
                       v
  MarketSnapshot.foundation / deterministic replay
@@ -58,8 +57,10 @@ normalized BAR + canonical v1.2 atomic facts
 The adapter is not a detector. It can consume only exact normalized-data or
 semantic-atomic facts already admitted by the immutable event store. Technical
 state projections, legacy transport, entity IDs, and candle IDs cannot be
-silently promoted into definitional ancestry. Foundation transport carries
-`canonical_semantic=false` and has no timeframe-reducer or trading authority.
+silently promoted into definitional ancestry. Production does not emit
+`FOUNDATION_STATE_CHANGED`; its legacy decoder accepts only
+`canonical_semantic=false` transport and grants no timeframe-reducer or trading
+authority.
 
 Reset never clears history out of band. Active generations receive explicit
 terminal or archived revisions before the next epoch. Checkpoint restore and
@@ -73,18 +74,22 @@ atomic version. The Observer's Foundation-enabled boolean is now an internal
 derived compatibility detail, not a second configuration authority. This pair
 does not create `smc_semantics_v2.0` or any composite semantic identity. Engine
 and Shadow retain their existing version/identity receipt fields, and the
-model-config byte hash remains part of runtime identity. Engine checkpoint
-schema v3 remains the first schema that guarantees the production projection;
-earlier checkpoints fail closed.
+model-config byte hash remains part of runtime identity. The current combined
+Engine checkpoint schema is 5; earlier checkpoints fail closed on restore into
+the current Observation, Foundation, and Neutral-state contracts.
 
-The current replay contract still materializes full `FoundationRecord` and
-`AppliedTransition` histories and emits technical
-`FOUNDATION_STATE_CHANGED`. They cannot be removed independently because legacy
-snapshot replay and Shadow checkpoint verification consume them. The planned
-compact hot-state migration must move history to the EventStore/cold ledger,
-publish a current view plus counts and rolling hashes, retain a read-only legacy
-decoder, bump affected schemas, and prove full Reader→Eye cold replay. Until
-then, only semantics-preserving invalidation gates are enabled.
+The compact migration separates history from hot state. `ImmutableEventStore`
+owns atomic events; one append-only, in-memory `FoundationRecordLedger` owns all
+Foundation revisions. Hot `FoundationProjection` publishes only current logical
+records, total count, current-view fingerprint, and append-chain fingerprint.
+Lifecycle hot state keeps current objects, exact fact fingerprints, count, and
+rolling hash instead of full `AppliedTransition` DTOs. Snapshot identity and
+replay transport serialize the compact view. Per-clock adapter mutation uses
+suffix/write overlays and rejects stale sibling commits. Explicit checkpoints
+materialize the full cold ledger and validate that replay reconstructs the hot
+view and exact source lineage. The enum/encoder/decoder for
+`FOUNDATION_STATE_CHANGED` remain only to read historical journals. The cold
+ledger is not yet an external durable store.
 
 ## Frozen vocabulary boundary
 
@@ -423,21 +428,28 @@ new registered foundation version; it cannot silently change v2.0.
 
 ## Replay, test, and empirical boundary
 
-The bounded real-data verification uses the local causal OHLCV source
+The table below is historical engineering evidence from the recorded
+pre-compact source snapshot. Its model, action-policy, Engine-checkpoint, and
+Shadow identities have since changed; neither the table nor its machine receipt
+authorizes or proves parity for the current runtime. Current implementation
+state is maintained in
+[`current_implementation_status.md`](current_implementation_status.md).
+
+That bounded real-data verification used the local causal OHLCV source
 `data/processed/nq_1m_previous_session_front_v2_3_2017_2026.parquet`
 (56,697,133 bytes; SHA-256
 `84c9ed4d1de379382bdc41e0fe02e3611373ba182cfeebe09e3832d29cbafd7b`).
 Rows are source-ordered after the exact America/New_York filter
 `2024-06-01 <= ts < 2024-07-01`; no time resampling or outcome selection is
-performed. The currently checked production model config SHA-256 is
+performed. The production model config SHA-256 recorded for that verification is
 `dbb6662ee748531feeb556ee891745445e4df4f919e402fd1126d939333d84e5`.
-The direct Observer construction/replay checks below do not load that production
-file; the current Engine file-parity row does and binds this exact hash plus the
+The direct Observer construction/replay checks did not load that production
+file; the historical Engine file-parity row did and binds this exact hash plus the
 foundation version and registry identity.
 
 | Verification | Frozen scope | Result |
 |---|---|---|
-| Registry/config admission | Canonical-JSON registry plus checked-in production model | Registry identity matches this document; exactly 24 objects; all four empirical/Brain/action authority flags are false. The production gate is exact boolean `true`; registry path and identity are mandatory and strict-loaded; Engine/Shadow/checkpoint state freezes the admitted foundation version and identity; Engine checkpoint schema is v3. |
+| Registry/config admission | Canonical-JSON registry plus then-checked-in production model | Registry identity matches this document; exactly 24 objects; all four empirical/Brain/action authority flags are false. The production gate is exact boolean `true`; registry path and identity are mandatory and strict-loaded; Engine/Shadow/checkpoint state froze the admitted foundation version and identity; that source snapshot used Engine checkpoint schema v3. |
 | Focused contract tests | Lifecycle/geometry/zones/outcomes/projection/adapter plus source-provenance and Observer integration | 204 foundation-focused tests passed; Observer integration passed 17/17, including a real 2024-06 495-clock stream/replay case; 47 related event-provenance tests and a separate real 60-clock parity check passed. These are named runs, not an overlap-free sum. |
 | Production Engine/Shadow integration | Foundation DOL rearm/Observer/Engine/atomic reducer/typed Brain/Shadow parity/file-pilot suites | 164/164 passed in 113.45 s after the final registry-freeze and DOL fixes; configuration JSON, binding order, Python compilation, and diff checks passed. This named run overlaps other focused suites and is not added to them as a unique-test census. |
 | Independent adversarial/self-review | Represented high-priority source-kind, cross-object, lifecycle, and replay fields | P0 = 0, P1 = 0; nine targeted adversarial tests passed with warnings treated as errors. P2 consists only of the seven explicit replay-seam limits above; none grants future-data access or permits production semantic forgery. All 31 changed Python files parsed as valid ASTs, `git diff --check` passed, and tracked cache artifacts were zero. |
@@ -447,21 +459,21 @@ foundation version and registry identity.
 | Final first-1,000 construction | Contiguous M1 bar starts, 2024-06-02 18:00 through 2024-06-03 10:39 ET; final `asof` 10:40 ET | Green in 320.970 s; 37,429 unique audit events; 13,664 unique Foundation records; 5,180 latest records; event and record IDs 100% unique; exceptions 0 and warning output 0. |
 | First-1,000 Foundation record census | Same final stream | liquidity level 4,218; interaction generation 3,819; delivery generation 1,454; relation generation 951; Swing assignment 1,186; Swing node 433; Structural Leg 306; cluster 549; cluster supersession 259; Structure Generation 168; Structure Transition 58; Boundary Attack 150; FVG lifecycle 54; First Retest 33; Base Origin Core 17; Structural Range 9; Balance Range 0; Qualified OB 0. The two zero cells mean no qualifying object occurred in this bounded prefix, not missing wiring. |
 | Final first-1,000 atomic replay | Same 37,429-event immutable stream | Green in 24.405 s; exact parity for `foundation`, `timeframe_states`, `relations`, `session`, and `foundation_range_locations`; parity mismatches 0. |
-| Current production-Engine file parity | Exact 200-row `phase9_shadow_file_input_v2` prefix, 2024-06-02 18:00 through 21:19 ET; input SHA-256 `731d8069982a7bf35e6b1aabe80800e068c4e39c112a18846f5570fded7f2796`; current model/foundation bindings; `NullExecutionGateway` | `attempted = accepted = parity = 200`; gate, coverage, and live/cold parity all true; live/cold record fingerprint `7ae14df74e591ae32b162e7d741a9481fe8bd2fc6dd9670f1c671ab71d5c945c`; live/cold journal fingerprint `21a6b162b0a62268ff25eb6aaca02001eaf2a9cde884a912f4e64e1a35678e25`; zero approved intents, execution events, or external submissions; no warning or exception output. The portable [machine receipt](../evidence/phase9_foundation_v2_prefix_200_receipt.json) contains the exact bindings without claiming the temporary result bundle is published. |
+| Historical production-Engine file parity | Exact 200-row `phase9_shadow_file_input_v2` prefix, 2024-06-02 18:00 through 21:19 ET; input SHA-256 `731d8069982a7bf35e6b1aabe80800e068c4e39c112a18846f5570fded7f2796`; then-current model/foundation bindings; `NullExecutionGateway` | `attempted = accepted = parity = 200`; gate, coverage, and live/cold parity all true; live/cold record fingerprint `7ae14df74e591ae32b162e7d741a9481fe8bd2fc6dd9670f1c671ab71d5c945c`; live/cold journal fingerprint `21a6b162b0a62268ff25eb6aaca02001eaf2a9cde884a912f4e64e1a35678e25`; zero approved intents, execution events, or external submissions; no warning or exception output. The portable [machine receipt](../evidence/phase9_foundation_v2_prefix_200_receipt.json) freezes those historical bindings without claiming the temporary result bundle is published. |
 
 The A/B figures are one local engineering measurement captured when the
 non-authoritative derived indexes/digest reuse were introduced. The caches are
 excluded from canonical checkpoint state and do not change record identity or
 payload. The final first-1,000 run includes the fail-closed Foundation-record
-hardening; the later production DOL/freeze bindings are covered separately by
-the current Engine row. Neither measurement may be extrapolated into a
+hardening; the later production DOL/freeze bindings were covered separately by
+the historical Engine row. Neither measurement may be extrapolated into a
 6,900-clock capacity claim.
 
 The first-400/1,000 Observer checks read OHLCV only. They do not open new MBO
 outcomes or rerun Phase 6. The pre-existing 6,900-clock Phase-9 JSONL (SHA-256
 `fd9e48850d1657cf369e3e617e3e8b464790e9823f48c79b01f65bfc111a46e4`)
 is a different historical artifact and was not the input to those checks. The
-current Engine row uses its exact retained 200-row prefix with causal
+historical Engine row used its exact retained 200-row prefix with causal
 bar/execution/account fields, but does not complete or rematerialize the
 6,900-clock artifact. The Observer checks are construct/replay evidence and the
 Engine check is bounded file-parity engineering evidence. Neither is an MBO

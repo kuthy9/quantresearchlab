@@ -12,8 +12,10 @@ The current additive object/lifecycle projection is
 human-readable authority is the
 [Canonical Semantic Foundation v2](refactor/canonical_semantic_foundation_v2.md).
 It adds no parallel detector and does not rewrite a v1.2 `MarketEvent` or any
-frozen experiment. `FOUNDATION_STATE_CHANGED` is technical replay transport,
-not a new atomic market fact or trading authority.
+frozen experiment. Production emits no `FOUNDATION_STATE_CHANGED`; the enum and
+strict decoder remain only for legacy technical replay transport and grant no
+atomic-market or trading authority. Foundation revision history lives in its
+separate in-memory ledger, while snapshots carry a compact current projection.
 The checked-in model selects both authorities through one strict
 `semantic_selection`: atomic v1.2 version/path/definition identity and
 Foundation v2.0 version/path/registry identity. Construction loads the pair
@@ -21,8 +23,8 @@ once and requires the Foundation parent to equal the atomic version; missing,
 unknown, extra, or mismatched fields fail closed. The Observer's enable flag is
 derived internally. This does not define a unified `smc_semantics_v2.0`.
 Engine/Shadow/checkpoint state retains and compares the existing identities,
-and pre-v3 Engine checkpoints cannot resume because schema v3 is the first to
-include Foundation state.
+and the current combined Engine checkpoint schema is 5. Earlier schemas cannot
+resume into the current Observation, Foundation, and Neutral-state contracts.
 
 [`semantics/registry.yaml`](../semantics/registry.yaml) and
 [`semantics/parameters.yaml`](../semantics/parameters.yaml) remain the immutable
@@ -110,12 +112,14 @@ invalidation/expiry, signal assessment, and trade/no-trade intent. The current
 Brain includes a normalized six-path Hypothesis Manager, Bayesian-shaped
 Belief Updater, DOL ranking, a fitted-artifact-only DOL probability layer with
 explicit no-target mass, Signal
-Policy, and Trade Intent projection. They are `development_unvalidated` and
-`shadow_only`. Exact production-shape market facts now map to registered path
+Policy, and a standalone Trade Intent projector API. They are
+`development_unvalidated` and `shadow_only`. Exact production-shape market
+facts now map to registered path
 invalidation and realized-winner events; same-clock terminal facts take
 precedence and local EntryEpisode failure is excluded. No fitted/admitted
-path-likelihood, DOL-probability, or outcome artifact exists; production
-therefore emits zero intents. Only exact
+path-likelihood, DOL-probability, or outcome artifact exists. The current
+legacy-compat Engine does not invoke the standalone Trade Intent projector and
+rejects a non-zero prefilled map before Decision/Risk. Only exact
 `MarketEvent` IDs resolvable from the current Observation are admitted as path
 evidence; unresolved context/entity identities fail closed. `MarketBelief`
 carries the current set and this-clock update records, not a complete evidence
@@ -324,14 +328,15 @@ wait/cancel/stop/target variants with explicit evaluable-or-censored rules. Its
 formal runner exists and validates without opening data by default, but the
 current template has no bound non-zero intent ledger or minute source, is not
 frozen, and has no empirical result. The authoritative end-to-end handoff
-remains open. Phase 9 v1.2
-deterministic parity exists behind `NullExecutionGateway`; its 6,900-clock
+remains open. The current Phase 9 harness is `phase9_shadow_live_v1.3` with
+`shadow_compact_runtime_v4` and `phase9_shadow_component_digest_v2`.
+Earlier deterministic parity ran behind `NullExecutionGateway`; its 6,900-clock
 historical cold-start input and exact 200-clock checkpoint/resume/cold-replay
 prefix are retained evidence for the earlier path/model bindings
 `5213b3d6…`/`4214da19…`. The current dependency protocol changed those bindings,
-so that output remains historical. A separate current Foundation-enabled
-Engine run passed the same exact 200-row prefix under the current model/registry
-bindings; its detailed boundary is in the
+so that output remains historical. A separate Foundation-enabled Engine run
+passed the same exact 200-row prefix under later, but now also historical,
+model/registry bindings; its detailed boundary is in the
 [Foundation release table](refactor/canonical_semantic_foundation_v2.md#replay-test-and-empirical-boundary).
 The read-only 6,900-clock capacity preflight still verifies the historical
 `COMPLETED.json` to checkpoint-manifest SHA binding, finds that receipt's

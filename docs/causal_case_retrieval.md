@@ -17,7 +17,8 @@ The neutral handoff is produced by `encode_market_episode_records()` and
 `encode_market_episode_active_head_records()`. It retains the canonical
 MarketEpisode/location/path identities and the complete same-clock material
 kind set, binds the unmasked encoder checkpoint, and contains no outcome
-payload. The current audit-only CLI deliberately never calls these exporters.
+payload. `train_market_representation.py` is the current exporter consumer; the
+retired Neutral-B2 audit island never owned this protocol or an admitted index.
 
 The retrieval layer is a read-only empirical-prior service. `CausalCase` and
 neutral `MarketEpisode` remain separate semantic protocols: the former may

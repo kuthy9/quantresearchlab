@@ -38,7 +38,14 @@ governance artifacts during ordinary development.
   Foundation parent equal to the atomic version. Engine construction
   strict-loads the pair once; Engine/Shadow/checkpoint state freezes and
   compares the existing identities. Missing, unknown, mismatched, or
-  extra-field selections and every pre-v3 Engine checkpoint fail closed.
+  extra-field selections and every Engine checkpoint before current schema 5
+  fail closed.
+- [ ] Atomic history remains exclusively in `ImmutableEventStore`; Foundation
+  revision history remains exclusively in `FoundationRecordLedger`. Hot
+  Foundation/lifecycle state contains current views, required fact/index
+  identities, counts, and rolling hashes—not full revision/transition DTOs.
+- [ ] Production emits no `FOUNDATION_STATE_CHANGED`; legacy decoding cannot
+  promote that transport into atomic ancestry or timeframe state.
 - [ ] Swing role assignments (`micro → internal → structural → external`)
   and foundation-v2 geometric parent assignments are separate append-only
   histories. Geometry uses only exact time/price containment; BOS, protected
@@ -104,8 +111,20 @@ governance artifacts during ordinary development.
   terminalized the incumbent protection.
 - [ ] `TimeframeState`, `RelationState`, and the independent `SessionState`
   replay deterministically into the published `MarketSnapshot`.
+- [ ] Snapshot fingerprint/replay transport uses only the compact current
+  Foundation view and component identities. An explicit checkpoint/cold replay
+  materializes the ledger and reconstructs the identical hot view.
+- [ ] Foundation adapter transactions use isolated suffix/write overlays; stale
+  siblings fail closed and never alias or mutate committed BAR/crossing/binding
+  containers.
+- [ ] `MarketObservation` stores one exact `MarketSnapshot` and derives its
+  as-of/instrument/price/event aliases; pickle restore rejects an incompatible
+  or forged snapshot type.
 - [ ] Scene Graph nodes/edges, focus and unknown/ambiguity match the observation
   actually passed to the Brain.
+- [ ] Neutral projection constructs one canonical `OpenMarketThesis` tuple per
+  clock; full Engine Brain evaluation reuses that tuple, standalone Brain builds
+  it once, and checkpoint restore rejects Brain/Neutral disagreement.
 - [ ] `Belief_t` starts from `Belief_t-1`; unchanged evidence is not assimilated
   repeatedly.
 - [ ] The shadow path competition uses one instrument/epoch/authority/common-
@@ -172,6 +191,9 @@ governance artifacts during ordinary development.
 - [ ] Do not call the standalone FSM the authoritative executor until an exact
   admitted `TradeIntent -> RiskApproval -> FSM` handoff replaces the retained
   development execution path and passes replay parity.
+- [ ] In `legacy_decision_risk_compat`, TradeIntent projection is disabled and
+  any non-zero prefilled intent fails before Decision/Risk; no second action
+  authority runs in parallel.
 - [ ] Execution Research compares only the same frozen intent under the seven
   registered entry methods; every method price is bound to exact semantic
   provenance, and invalid/stale/crossed/reset/synthetic/missing/fractional
@@ -203,6 +225,13 @@ governance artifacts during ordinary development.
 ## Data and replay
 
 - [ ] Source and requested window match `configs/data_splits.json`.
+- [ ] `CausalCase` and input-only `MarketEpisode` retain distinct schemas,
+  estimands, identities, eligibility, and leakage guards even when they share
+  canonical storage/publication and cosine/OOD mechanics. Neutral lookup cannot
+  retrieve the same physical episode from an overlapping replay.
+- [ ] Shared artifact publication validates exact regular-file identities and
+  uses atomic no-clobber writes; symlinks, duplicates, cross-split physical
+  identities, and outcome fields in neutral input fail closed.
 - [ ] A development or calibration-trial event study remains explicitly
   diagnostic and cannot be mislabeled OOS or used to fit a trading artifact.
 - [ ] Every semantic report lists Definition validity separately from empirical,
@@ -277,9 +306,9 @@ governance artifacts during ordinary development.
   before a multi-day run is evaluated.
 - [ ] The runner accepts only the exact `ContinuousSMCEngine` and exact
   `NullExecutionGateway` classes; any external submission attempt fails.
-  Engineering parity on 36 deterministic synthetic clocks and the exact
-  current Foundation-enabled 200-clock June cold-start prefix are not called a
-  completed 6,900-clock or real-time multi-day shadow pilot.
+  Engineering parity on 36 deterministic synthetic clocks and the historical
+  Foundation-enabled 200-clock June prefix are not called current-runtime
+  parity, a completed 6,900-clock run, or a real-time multi-day shadow pilot.
 - [ ] Scene-Graph delta identity sets used in parity, including simultaneously
   revised edge IDs, have canonical ordering across different
   `PYTHONHASHSEED` values and process restarts.
@@ -298,8 +327,8 @@ governance artifacts during ordinary development.
   checkpoint-manifest SHA binding, creates no Engine, replays zero clocks, and
   remains a lower-bound estimate bound to the historical receipt, with that
   receipt's historical/current identity mismatch and
-  `full_6900_replay_authorized=false`. A separate current 200-clock parity run
-  does not upgrade the preflight into full-run authority.
+  `full_6900_replay_authorized=false`. A separate later-but-now-historical
+  200-clock parity run does not upgrade the preflight into full-run authority.
 
 ## Test scope
 

@@ -50,6 +50,16 @@ their exact paths, SHA-256 preimages, and recovery command. The complete tables
 below intentionally remain the `4f180d2` frozen-baseline inventory; their rows
 are historical preimages, not claims that every listed path remains present.
 
+### Post-baseline convergence
+
+After this census, the compact Foundation/lifecycle hot-state and adapter
+write-overlay migration completed; production Foundation transport emission was
+removed, Neutral became the single OpenMarketThesis authority, and the two case
+protocols converged only their storage/publication/cosine infrastructure. The
+baseline findings and file rows below are intentionally not rewritten. See the
+[current implementation status](current_implementation_status.md) for current
+ownership, schemas, residual debt, and historical-receipt boundaries.
+
 ## Zero-reference result
 
 “Zero-reference” here means no inbound Python AST import and no literal tracked path/name reference in the frozen baseline. It is a triage signal, not proof that a file is dead. The strict detector found 111 roots/leaves: 71 pytest files, 16 human/evidence documents, four CLI entry points, three repository roots and 17 superseded manifests. It found **zero unreferenced `smc_trader/*.py` runtime modules**, zero unreferenced current configs and zero unreferenced semantic authorities.
