@@ -150,6 +150,19 @@ checkpoint contract. Removing those histories requires an explicit compact-view
 and cold-replay schema migration; they are not silently discarded as a
 performance tweak.
 
+The simplification audit removed the unconsumed
+`signal_empirical_admission` bridge and its self-contained tests, plus the old
+Phase-8 readiness checker and two superseded templates. The deleted admission
+bridge was a unique but never-integrated research-receipt-to-production-DTO
+converter; no equivalent converter remains. Research-side closed receipts are
+still produced and checked by the Phase-7 pipeline, while production artifact
+validation/loading remains in `signal_policy`. The formal Phase-8 runner is now
+the only run entry. A successful validate-only exit means that the inert
+template is structurally valid, not that its six readiness blockers are
+resolved. Two Week-1 Phase-9 JSONL paths intentionally retain the same bytes
+under different manifest schemas and consumers; consolidate them only through
+a versioned content-addressed artifact contract, not by deleting one path.
+
 The Eye now also publishes an event-sourced hierarchical market contract:
 independent `TimeframeState` objects, cross-timeframe `RelationState` objects,
 a separate `SessionState`, and one `MarketSnapshot` containing the current

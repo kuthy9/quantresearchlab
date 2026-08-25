@@ -58,6 +58,52 @@ lifecycle histories therefore remain in hot state pending a versioned compact-
 view/cold-replay migration; current manifests must be re-frozen after any such
 runtime change.
 
+### Simplification audit and retained migration debt
+
+The removed `signal_empirical_admission` module had no runtime or script
+consumer; its tests exercised only that module. It was nevertheless the sole,
+never-integrated converter from research fit/receipt objects to production-
+shape artifact payloads, so no equivalent converter is claimed to remain.
+Research-side closed admission receipts remain owned by
+`run_phase7_empirical_pipeline.py`, and production artifact validation/loading
+remains owned by `signal_policy.py`. A future rolling-OOF admission must add one
+explicitly governed conversion path rather than silently reviving this module.
+
+The removed Phase-8 readiness checker and two old templates were consumed only
+by their old tests, documentation, and one another; the fail-closed v2 runner
+and sole run template retain the current evaluator/config/loader path. A zero
+exit from `run_execution_research_v2.py` in its default validate-only mode means
+only that the inert template is structurally valid. It does not override
+`template_incomplete_not_authorized_to_run`, bind a non-zero ledger, resolve the
+six blockers, or grant execution readiness.
+
+Six focused admission, runner, and capacity-authority contracts pass after the
+deletions; the default repository suite at the frozen simplification commit had
+2,720 passes, one existing skip, and seven explicit deselections. Independent
+review found no P0/P1 deletion regression. The deleted ignored Phase-9 capacity
+directory had no repository consumer, but because Git never tracked its bytes,
+future evidence-like ignored cleanup must record an inventory, hashes, and
+recoverability before deletion.
+
+The identical Week-1 bytes at `inputs/phase9_week1_flat_v2.jsonl` and
+`inputs/phase9_w1_foundation_v3_7465a04.jsonl` remain deliberately addressable:
+their sidecars bind different manifest schemas and their legacy/v3 consumers
+have not been migrated to one content-addressed identity. This is storage
+duplication, not a duplicate semantic authority; neither path may be removed
+independently yet.
+
+The remaining priority performance debt is schema-level: full
+`FoundationProjection.records`, lifecycle `applied_transitions`, per-clock BAR/
+crossing/index container copies, and full-history snapshot fingerprint/replay
+serialization. `ImmutableEventStore` and the cold ledger must become the sole
+history owners while hot state retains current views, counts, required indexes,
+and rolling hashes. That migration must version checkpoint, adapter, snapshot,
+transport, Shadow, and manifest identities, retain legacy decoding, and prove
+cold replay before removing `FOUNDATION_STATE_CHANGED` or either history. The
+only newly confirmed dead helper is deferred until the current same-runtime
+June formal series ends, because deleting it would change a manifest-bound
+source hash without changing behavior.
+
 The existing `PlaybookBrain` now maintains one shadow-only Hypothesis Manager
 competition set containing six mutually exclusive path hypotheses:
 `continuation`, `deeper_retracement`, `reversal`, `balance`,

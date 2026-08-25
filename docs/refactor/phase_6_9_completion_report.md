@@ -215,7 +215,9 @@ This does not pass the empirical Phase 8 gate. The current
 is `template_incomplete_not_authorized_to_run`: its intent/research-case ledger
 and minute source are unbound, output identities are unset, and it is not
 frozen. No formal paired result exists. The FSM has no broker/network submission
-path.
+path. The formal runner's default validate-only command may therefore exit zero
+for this exact inert template; that exit means schema/identity validation
+passed, not that the template is ready or authorized to execute.
 
 ## Phase 9: parity harness implemented, pilot pending
 
@@ -226,6 +228,17 @@ full registered engine/Brain/FSM state digests, and journal-prefix identity.
 Duplicate identical feed IDs are idempotent; content conflicts, causal-order
 violations, or post-journal failures terminate fail-stop with deterministic
 failure evidence.
+
+The tree also retains the newer externally capacity-authorized historical-file
+v3 harness. It reuses the legacy v2 input parser/runner factory but adds a v3
+bundle sidecar, WAL, compact cursor, operational metrics, and an independently
+issued capacity authorization. No such authorization or completed v3 result is
+repository evidence, so this second harness is a migration surface—not another
+passed Phase-9 gate. Its Week-1 input and the legacy Week-1 input are byte-for-
+byte identical (SHA-256
+`fd9e48850d1657cf369e3e617e3e8b464790e9823f48c79b01f65bfc111a46e4`)
+but carry different manifest schemas and consumers. Both paths remain until a
+versioned content-addressed input contract replaces them.
 
 Cold replay and checkpoint restart compare records, journal, failure, gateway,
 and final state. The runner accepts only the exact `ContinuousSMCEngine` and
