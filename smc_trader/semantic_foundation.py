@@ -81,6 +81,12 @@ FOUNDATION_RECORD_LEDGER_SCHEMA_VERSION = 1
 FOUNDATION_RECORD_DELTA_SCHEMA_VERSION = 2
 FOUNDATION_PROJECTION_OWNER_STATE_SCHEMA_VERSION = 1
 
+# These capabilities are call-local implementation authorities, never schema
+# fields or serialized identities.  They keep trusted hot/cold construction
+# paths distinct from public projection admission.
+_FOUNDATION_INCREMENTAL_CAPABILITY = object()
+_FOUNDATION_COLD_PREFIX_CAPABILITY = object()
+
 
 class FoundationObjectType(str, Enum):
     LIQUIDITY_LEVEL = "liquidity_level"
@@ -300,6 +306,7 @@ class _FoundationCurrentViewHashCursor:
     def __init__(
         self,
         *,
+        _capability: object,
         before_last: Any,
         records: Any,
         record_count: int,
@@ -307,6 +314,8 @@ class _FoundationCurrentViewHashCursor:
         foundation_version: str,
         registry_identity: str,
     ) -> None:
+        if _capability is not _FOUNDATION_INCREMENTAL_CAPABILITY:
+            raise ValueError("foundation hash cursor authority is invalid")
         self.__before_last = before_last.copy()
         self.__records = records.copy()
         self.__record_count = record_count
@@ -319,9 +328,12 @@ class _FoundationCurrentViewHashCursor:
         cls,
         record_ids: Sequence[str],
         *,
+        _capability: object,
         foundation_version: str,
         registry_identity: str,
     ) -> "_FoundationCurrentViewHashCursor":
+        if _capability is not _FOUNDATION_INCREMENTAL_CAPABILITY:
+            raise ValueError("foundation hash cursor authority is invalid")
         state = hashlib.sha256(b'{"current_record_ids":[')
         before_last = state.copy()
         count = 0
@@ -339,6 +351,7 @@ class _FoundationCurrentViewHashCursor:
             )
         )
         return cls(
+            _capability=_FOUNDATION_INCREMENTAL_CAPABILITY,
             before_last=before_last,
             records=state,
             record_count=count,
@@ -378,6 +391,7 @@ class _FoundationCurrentViewHashCursor:
             )
         )
         return type(self)(
+            _capability=_FOUNDATION_INCREMENTAL_CAPABILITY,
             before_last=before_last,
             records=records,
             record_count=record_count,
@@ -970,6 +984,51 @@ def _swing_geometry_view(record: FoundationRecord) -> _SwingGeometryView:
     )
 
 
+def _canonical_swing_parent(
+    node: _SwingGeometryView,
+    views: Mapping[str, _SwingGeometryView],
+) -> _SwingGeometryView | None:
+    best: _SwingGeometryView | None = None
+    best_key: tuple[float, float, str] | None = None
+    for parent in views.values():
+        if (
+            parent.object_id == node.object_id
+            or parent.symbol != node.symbol
+            or parent.instrument_id != node.instrument_id
+            or parent.window_start > node.window_start
+            or parent.window_end < node.window_end
+            or parent.lower_bound > node.lower_bound
+            or parent.upper_bound < node.upper_bound
+            or parent.duration_seconds <= node.duration_seconds
+        ):
+            continue
+        key = (
+            parent.duration_seconds,
+            parent.price_span,
+            parent.object_id,
+        )
+        if best_key is None or key < best_key:
+            best = parent
+            best_key = key
+    return best
+
+
+def _canonical_swing_depth(
+    node: _SwingGeometryView,
+    views: Mapping[str, _SwingGeometryView],
+) -> int:
+    depth = 0
+    cursor = node
+    seen: set[str] = set()
+    while (parent := _canonical_swing_parent(cursor, views)) is not None:
+        if parent.object_id in seen:
+            raise ValueError("Swing geometry contains a parent cycle")
+        seen.add(parent.object_id)
+        depth += 1
+        cursor = parent
+    return depth
+
+
 def _permitted_liquidity_archive(
     previous: FoundationRecord,
     current: FoundationRecord,
@@ -1092,7 +1151,94 @@ def _validate_object_revision(
         != previous.source_event_ids
     ):
         raise ValueError("foundation lifecycle ancestry cannot be rewritten")
+    if (
+        current.object_type
+        is FoundationObjectType.LIQUIDITY_INTERACTION_GENERATION
+    ):
+        immutable_generation_fields = (
+            "level_id",
+            "source_timeframe",
+            "interaction_timeframe",
+            "level_side",
+            "lower_bound_ticks",
+            "upper_bound_ticks",
+            "generation_number",
+            "armed_at",
+            "known_at",
+            "armed_real_bar_ordinal",
+            "previous_generation_id",
+            "rearm_fact_id",
+            "semantic_version",
+        )
+        if any(
+            previous.payload.get(field) != current.payload.get(field)
+            for field in immutable_generation_fields
+        ):
+            raise ValueError(
+                "liquidity interaction generation scope is immutable"
+            )
+        once_set_path_fields = (
+            "first_touch_at",
+            "first_penetration_at",
+            "first_inside_close_at",
+            "first_outside_close_at",
+        )
+        if any(
+            previous.payload.get(field) is not None
+            and previous.payload.get(field) != current.payload.get(field)
+            for field in once_set_path_fields
+        ) or aware_timestamp(
+            current.payload.get("updated_at"),
+            name="liquidity_interaction.updated_at",
+        ) < aware_timestamp(
+            previous.payload.get("updated_at"),
+            name="liquidity_interaction.updated_at",
+        ):
+            raise ValueError(
+                "liquidity interaction path facts are immutable once set"
+            )
+        if (
+            tuple(current.payload.get("touch_bar_ids", ()))
+            [: len(tuple(previous.payload.get("touch_bar_ids", ())))]
+            != tuple(previous.payload.get("touch_bar_ids", ()))
+            or tuple(current.payload.get("constituents", ()))
+            [: len(tuple(previous.payload.get("constituents", ())))]
+            != tuple(previous.payload.get("constituents", ()))
+            or int(current.payload.get("max_penetration_ticks", 0))
+            < int(previous.payload.get("max_penetration_ticks", 0))
+        ):
+            raise ValueError(
+                "liquidity interaction path history cannot be rewritten"
+            )
     if current.object_type is FoundationObjectType.LIQUIDITY_LEVEL:
+        immutable_level_fields = (
+            "source_timeframe",
+            "source_kind",
+            "source_identity",
+            "side",
+            "price_ticks",
+            "lower_bound_ticks",
+            "upper_bound_ticks",
+            "tick_size",
+            "created_at",
+            "price_anchor_rule",
+            "semantic_version",
+        )
+        if any(
+            previous.payload.get(field) != current.payload.get(field)
+            for field in immutable_level_fields
+        ):
+            raise ValueError("liquidity level creation scope is immutable")
+        previous_history = tuple(
+            previous.payload.get("interaction_generation_ids", ())
+        )
+        current_history = tuple(
+            current.payload.get("interaction_generation_ids", ())
+        )
+        if current_history[: len(previous_history)] != previous_history:
+            raise ValueError(
+                "liquidity interaction generation history cannot be rewritten"
+            )
         prior_owner = previous.payload.get("owner_structure_generation_id")
         current_owner = current.payload.get("owner_structure_generation_id")
         if prior_owner is not None and current_owner != prior_owner:
@@ -1149,18 +1295,85 @@ def _validate_generation_owner(
     return owner
 
 
+def _validate_zone_first_retest_cross_link(
+    records: Mapping[tuple[FoundationObjectType, str], FoundationRecord],
+    record: FoundationRecord,
+    *,
+    require_currently_interactable: bool,
+) -> None:
+    payload = record.payload
+    object_kind = ZoneObjectKind(payload.get("object_kind"))
+    target_type = {
+        ZoneObjectKind.FVG: FoundationObjectType.FVG_STRUCTURAL_LIFECYCLE,
+        ZoneObjectKind.QUALIFIED_ORDER_BLOCK: (
+            FoundationObjectType.QUALIFIED_ORDER_BLOCK
+        ),
+        ZoneObjectKind.BASE_ORIGIN_CORE: FoundationObjectType.BASE_ORIGIN_CORE,
+        ZoneObjectKind.STRUCTURAL_RANGE: FoundationObjectType.STRUCTURAL_RANGE,
+        ZoneObjectKind.LIQUIDITY_ZONE: FoundationObjectType.LIQUIDITY_LEVEL,
+    }[object_kind]
+    target = _required_prior_record(
+        records,
+        target_type,
+        payload.get("object_id"),
+        role="first-retest target",
+    )
+    if (
+        require_currently_interactable
+        and target_type
+        in {
+            FoundationObjectType.FVG_STRUCTURAL_LIFECYCLE,
+            FoundationObjectType.STRUCTURAL_RANGE,
+            FoundationObjectType.LIQUIDITY_LEVEL,
+        }
+        and target.status is not FoundationRecordStatus.ACTIVE
+    ):
+        raise ValueError("first retest target is no longer interactable")
+    creation_clock_field = {
+        FoundationObjectType.FVG_STRUCTURAL_LIFECYCLE: "known_at",
+        FoundationObjectType.QUALIFIED_ORDER_BLOCK: "known_at",
+        FoundationObjectType.BASE_ORIGIN_CORE: "known_at",
+        FoundationObjectType.STRUCTURAL_RANGE: "known_at",
+        FoundationObjectType.LIQUIDITY_LEVEL: "created_at",
+    }[target_type]
+    creation_clock = aware_timestamp(
+        target.payload.get(creation_clock_field),
+        name="first_retest.target_creation_clock",
+    )
+    if record.known_at <= creation_clock:
+        raise ValueError("first retest must be strictly later than its target")
+    common_fields = tuple(
+        field
+        for field in ("symbol", "instrument_id", "timeframe", "direction")
+        if field in target.payload
+    )
+    _matching_payload_fields(
+        payload,
+        target.payload,
+        common_fields,
+        role="first retest",
+    )
+    if (
+        object_kind is ZoneObjectKind.FVG
+        and payload.get("creation_event_id")
+        != target.payload.get("source_creation_event_id")
+    ):
+        raise ValueError("FVG first retest creation identity is incompatible")
+
+
 def _validate_record_cross_links(
     prior: Mapping[tuple[FoundationObjectType, str], FoundationRecord],
     record: FoundationRecord,
     *,
     swing_geometry_views: Mapping[str, "_SwingGeometryView"] | None = None,
     swing_assignment_incumbents: Mapping[str, FoundationRecord] | None = None,
+    current_static: bool = False,
 ) -> None:
     """Validate mandatory prior-object links at the append boundary.
 
-    Same-clock references are valid only when the owner record was already
-    appended.  This deliberately forbids replay from borrowing a future
-    object merely because it appears later in the submitted history.
+    Append admission uses a prior-only map.  Cold current-graph admission may
+    pass the complete current map with ``current_static=True``; in that mode
+    only active dependants require a currently live target.
     """
 
     kind = record.object_type
@@ -1266,14 +1479,21 @@ def _validate_record_cross_links(
         acceptance_event_id = payload.get("protected_acceptance_event_id")
         if acceptance_event_id is None:
             if (
-                payload.get("lifecycle")
-                in {
-                    StructureTransitionLifecycle.STARTED.value,
-                    StructureTransitionLifecycle.FAILED.value,
-                }
-                and incumbent.payload.get("lifecycle")
-                != StructureGenerationLifecycle.CONFIRMED.value
-            ):
+                (
+                    not current_static
+                    and payload.get("lifecycle")
+                    in {
+                        StructureTransitionLifecycle.STARTED.value,
+                        StructureTransitionLifecycle.FAILED.value,
+                    }
+                )
+                or (
+                    current_static
+                    and record.status is FoundationRecordStatus.ACTIVE
+                )
+            ) and incumbent.payload.get(
+                "lifecycle"
+            ) != StructureGenerationLifecycle.CONFIRMED.value:
                 raise ValueError(
                     "live or failed transition requires a confirmed incumbent"
                 )
@@ -1295,7 +1515,10 @@ def _validate_record_cross_links(
                 opposite_id,
                 timeframe=payload.get("timeframe"),
                 role="structure-transition opposite generation",
-                require_live_confirmed=True,
+                require_live_confirmed=(
+                    not current_static
+                    or record.status is FoundationRecordStatus.ACTIVE
+                ),
             )
             confirmed_at = aware_timestamp(
                 opposite.payload.get("confirmed_at"),
@@ -1373,51 +1596,11 @@ def _validate_record_cross_links(
         if child_view is None:
             raise ValueError("Swing assignment child geometry is unavailable")
 
-        parent_cache: dict[str, _SwingGeometryView | None] = {}
-
-        def canonical_parent(
-            node: _SwingGeometryView,
-        ) -> _SwingGeometryView | None:
-            if node.object_id in parent_cache:
-                return parent_cache[node.object_id]
-            best: _SwingGeometryView | None = None
-            best_key: tuple[float, float, str] | None = None
-            for parent in views.values():
-                if (
-                    parent.object_id == node.object_id
-                    or parent.symbol != node.symbol
-                    or parent.instrument_id != node.instrument_id
-                    or parent.window_start > node.window_start
-                    or parent.window_end < node.window_end
-                    or parent.lower_bound > node.lower_bound
-                    or parent.upper_bound < node.upper_bound
-                    or parent.duration_seconds <= node.duration_seconds
-                ):
-                    continue
-                key = (
-                    parent.duration_seconds,
-                    parent.price_span,
-                    parent.object_id,
-                )
-                if best_key is None or key < best_key:
-                    best = parent
-                    best_key = key
-            parent_cache[node.object_id] = best
-            return best
-
-        expected_parent = canonical_parent(child_view)
+        expected_parent = _canonical_swing_parent(child_view, views)
         expected_parent_id = (
             None if expected_parent is None else expected_parent.object_id
         )
-        expected_depth = 0
-        cursor = child_view
-        seen: set[str] = set()
-        while (parent := canonical_parent(cursor)) is not None:
-            if parent.object_id in seen:
-                raise ValueError("Swing geometry contains a parent cycle")
-            seen.add(parent.object_id)
-            expected_depth += 1
-            cursor = parent
+        expected_depth = _canonical_swing_depth(child_view, views)
         if (
             payload.get("parent_swing_id") != expected_parent_id
             or payload.get("geometric_depth") != expected_depth
@@ -1635,58 +1818,11 @@ def _validate_record_cross_links(
         return
 
     if kind is FoundationObjectType.ZONE_FIRST_RETEST:
-        object_kind = ZoneObjectKind(payload.get("object_kind"))
-        target_type = {
-            ZoneObjectKind.FVG: FoundationObjectType.FVG_STRUCTURAL_LIFECYCLE,
-            ZoneObjectKind.QUALIFIED_ORDER_BLOCK: (
-                FoundationObjectType.QUALIFIED_ORDER_BLOCK
-            ),
-            ZoneObjectKind.BASE_ORIGIN_CORE: FoundationObjectType.BASE_ORIGIN_CORE,
-            ZoneObjectKind.STRUCTURAL_RANGE: FoundationObjectType.STRUCTURAL_RANGE,
-            ZoneObjectKind.LIQUIDITY_ZONE: FoundationObjectType.LIQUIDITY_LEVEL,
-        }[object_kind]
-        target = _required_prior_record(
+        _validate_zone_first_retest_cross_link(
             prior,
-            target_type,
-            payload.get("object_id"),
-            role="first-retest target",
+            record,
+            require_currently_interactable=not current_static,
         )
-        if target_type in {
-            FoundationObjectType.FVG_STRUCTURAL_LIFECYCLE,
-            FoundationObjectType.STRUCTURAL_RANGE,
-            FoundationObjectType.LIQUIDITY_LEVEL,
-        } and target.status is not FoundationRecordStatus.ACTIVE:
-            raise ValueError("first retest target is no longer interactable")
-        creation_clock_field = {
-            FoundationObjectType.FVG_STRUCTURAL_LIFECYCLE: "known_at",
-            FoundationObjectType.QUALIFIED_ORDER_BLOCK: "known_at",
-            FoundationObjectType.BASE_ORIGIN_CORE: "known_at",
-            FoundationObjectType.STRUCTURAL_RANGE: "known_at",
-            FoundationObjectType.LIQUIDITY_LEVEL: "created_at",
-        }[target_type]
-        creation_clock = aware_timestamp(
-            target.payload.get(creation_clock_field),
-            name="first_retest.target_creation_clock",
-        )
-        if record.known_at <= creation_clock:
-            raise ValueError("first retest must be strictly later than its target")
-        common_fields = tuple(
-            field
-            for field in ("symbol", "instrument_id", "timeframe", "direction")
-            if field in target.payload
-        )
-        _matching_payload_fields(
-            payload,
-            target.payload,
-            common_fields,
-            role="first retest",
-        )
-        if (
-            object_kind is ZoneObjectKind.FVG
-            and payload.get("creation_event_id")
-            != target.payload.get("source_creation_event_id")
-        ):
-            raise ValueError("FVG first retest creation identity is incompatible")
 
 
 def _validate_projection_completeness(
@@ -1694,10 +1830,14 @@ def _validate_projection_completeness(
 ) -> None:
     """Reject a finalized graph with owner-first batch prefixes left orphaned."""
 
-    for (object_type, _), interaction in latest.items():
-        if object_type is not FoundationObjectType.LIQUIDITY_INTERACTION_GENERATION:
-            continue
-        _validate_liquidity_interaction_registration(latest, interaction)
+    for (object_type, _), record in latest.items():
+        if object_type is FoundationObjectType.LIQUIDITY_LEVEL:
+            _validate_liquidity_level_interaction_graph(latest, record)
+        elif (
+            object_type
+            is FoundationObjectType.LIQUIDITY_INTERACTION_GENERATION
+        ):
+            _validate_liquidity_interaction_registration(latest, record)
 
 
 def _validate_liquidity_interaction_registration(
@@ -1716,10 +1856,208 @@ def _validate_liquidity_interaction_registration(
         not in tuple(level.payload.get("interaction_generation_ids", ()))
         or interaction.payload.get("source_timeframe")
         != level.payload.get("source_timeframe")
+        or interaction.payload.get("level_side") != level.payload.get("side")
+        or interaction.payload.get("lower_bound_ticks")
+        != level.payload.get("lower_bound_ticks")
+        or interaction.payload.get("upper_bound_ticks")
+        != level.payload.get("upper_bound_ticks")
     ):
         raise ValueError(
             "finalized liquidity interaction lacks its registered level"
         )
+
+
+def _validate_liquidity_level_interaction_graph(
+    latest: Mapping[tuple[FoundationObjectType, str], FoundationRecord],
+    level: FoundationRecord,
+    *,
+    tail_only: bool = False,
+) -> None:
+    payload = level.payload
+    history_ids = tuple(payload.get("interaction_generation_ids", ()))
+    interactions: list[FoundationRecord] = []
+    created_at = aware_timestamp(
+        payload.get("created_at"),
+        name="liquidity_level.created_at",
+    )
+    start = max(0, len(history_ids) - 2) if tail_only else 0
+    for ordinal, generation_id in enumerate(
+        history_ids[start:],
+        start=start + 1,
+    ):
+        interaction = _required_prior_record(
+            latest,
+            FoundationObjectType.LIQUIDITY_INTERACTION_GENERATION,
+            generation_id,
+            role="liquidity level interaction history",
+        )
+        _validate_liquidity_interaction_registration(latest, interaction)
+        interaction_payload = interaction.payload
+        previous_id = None if ordinal == 1 else history_ids[ordinal - 2]
+        armed_at = aware_timestamp(
+            interaction_payload.get("armed_at"),
+            name="liquidity_interaction.armed_at",
+        )
+        expected_generation_id = canonical_semantic_id(
+            "liquidity-interaction",
+            level.object_id,
+            ordinal,
+            armed_at,
+            previous_id,
+        )
+        if (
+            interaction.object_id != expected_generation_id
+            or interaction_payload.get("generation_number") != ordinal
+            or interaction_payload.get("previous_generation_id")
+            != previous_id
+            or interaction.known_at < created_at
+        ):
+            raise ValueError(
+                "liquidity interaction generation chain is incompatible"
+            )
+        if previous_id is not None and interactions and (
+            interactions[-1].payload.get("lifecycle")
+            != LiquidityInteractionLifecycle.TERMINAL.value
+        ):
+            raise ValueError(
+                "liquidity interaction generation predecessor is live"
+            )
+        interactions.append(interaction)
+
+    active_id = payload.get("active_generation_id")
+    if tail_only:
+        tail = interactions[-1]
+        previous = None if len(interactions) == 1 else interactions[-2]
+        if active_id is None:
+            if (
+                tail.payload.get("lifecycle")
+                != LiquidityInteractionLifecycle.TERMINAL.value
+                or payload.get("last_terminal_generation_id")
+                != tail.object_id
+            ):
+                raise ValueError(
+                    "inactive liquidity level retains a live interaction"
+                )
+        elif (
+            active_id != tail.object_id
+            or tail.payload.get("lifecycle")
+            == LiquidityInteractionLifecycle.TERMINAL.value
+            or level.status is not FoundationRecordStatus.ACTIVE
+            or payload.get("last_terminal_generation_id")
+            != (None if previous is None else previous.object_id)
+        ):
+            raise ValueError(
+                "active liquidity level interaction is not the live chain tail"
+            )
+        return
+
+    live_ids = tuple(
+        interaction.object_id
+        for interaction in interactions
+        if interaction.payload.get("lifecycle")
+        != LiquidityInteractionLifecycle.TERMINAL.value
+    )
+    if active_id is None:
+        if live_ids:
+            raise ValueError(
+                "inactive liquidity level retains a live interaction"
+            )
+    elif (
+        active_id != history_ids[-1]
+        or live_ids != (active_id,)
+        or level.status is not FoundationRecordStatus.ACTIVE
+    ):
+        raise ValueError(
+            "active liquidity level interaction is not the live chain tail"
+        )
+    terminal_ids = tuple(
+        interaction.object_id
+        for interaction in interactions
+        if interaction.payload.get("lifecycle")
+        == LiquidityInteractionLifecycle.TERMINAL.value
+    )
+    expected_terminal_id = terminal_ids[-1] if terminal_ids else None
+    if payload.get("last_terminal_generation_id") != expected_terminal_id:
+        raise ValueError(
+            "liquidity level last terminal interaction is incompatible"
+        )
+
+
+def _validate_current_record_cross_links(
+    latest: Mapping[tuple[FoundationObjectType, str], FoundationRecord],
+    record: FoundationRecord,
+) -> None:
+    """Validate static links against the complete canonical current map."""
+
+    if record.object_type in {
+        FoundationObjectType.BOUNDARY_ATTACK,
+        FoundationObjectType.SWING_GEOMETRY_NODE,
+        FoundationObjectType.SWING_GEOMETRY_ASSIGNMENT,
+    }:
+        return
+    _validate_record_cross_links(
+        latest,
+        record,
+        current_static=True,
+    )
+
+
+def _validate_current_swing_graph(
+    projection: "FoundationProjection",
+) -> None:
+    latest = projection._latest_records_by_key_cache
+    histories: dict[str, list[FoundationRecord]] = {}
+    for record in projection.current_records:
+        if (
+            record.object_type
+            is not FoundationObjectType.SWING_GEOMETRY_ASSIGNMENT
+        ):
+            continue
+        child_id = str(record.payload.get("child_swing_id"))
+        _required_prior_record(
+            latest,
+            FoundationObjectType.SWING_GEOMETRY_NODE,
+            child_id,
+            role="Swing assignment child",
+        )
+        parent_id = record.payload.get("parent_swing_id")
+        if parent_id is not None:
+            _required_prior_record(
+                latest,
+                FoundationObjectType.SWING_GEOMETRY_NODE,
+                parent_id,
+                role="Swing assignment parent",
+            )
+        histories.setdefault(child_id, []).append(record)
+
+    for child_id, history in histories.items():
+        ordered = sorted(
+            history,
+            key=lambda item: (item.known_at, item.object_id),
+        )
+        incumbent = ordered[-1]
+        previous = None if len(ordered) == 1 else ordered[-2]
+        _validate_record_cross_links(
+            latest,
+            incumbent,
+            swing_geometry_views=projection._swing_geometry_views_cache,
+            swing_assignment_incumbents=(
+                {} if previous is None else {child_id: previous}
+            ),
+            current_static=True,
+        )
+
+
+def _validate_projection_current_graph(
+    projection: "FoundationProjection",
+) -> None:
+    """Validate the static current graph, never historical admission state."""
+
+    latest = projection._latest_records_by_key_cache
+    _validate_projection_completeness(latest)
+    for record in projection.current_records:
+        _validate_current_record_cross_links(latest, record)
+    _validate_current_swing_graph(projection)
 
 
 @dataclass(frozen=True)
@@ -1747,6 +2085,7 @@ class FoundationProjection:
             object.__setattr__(self, "component_fingerprint", empty_fingerprint)
         view_cursor = _FoundationCurrentViewHashCursor.rebuild(
             tuple(record.record_id for record in records),
+            _capability=_FOUNDATION_INCREMENTAL_CAPABILITY,
             foundation_version=self.foundation_version,
             registry_identity=self.registry_identity,
         )
@@ -1840,6 +2179,7 @@ class FoundationProjection:
     def _from_incremental_state(
         cls,
         *,
+        _capability: object,
         current_records: tuple[FoundationRecord, ...],
         record_count: int,
         component_fingerprint: str,
@@ -1865,7 +2205,8 @@ class FoundationProjection:
         """
 
         if (
-            type(current_records) is not tuple
+            _capability is not _FOUNDATION_INCREMENTAL_CAPABILITY
+            or type(current_records) is not tuple
             or type(record_count) is not int
             or record_count < len(current_records)
             or foundation_version != FOUNDATION_VERSION
@@ -1875,10 +2216,13 @@ class FoundationProjection:
                 character not in "0123456789abcdef"
                 for character in component_fingerprint
             )
-            or not isinstance(
-                current_view_hash_cursor,
-                _FoundationCurrentViewHashCursor,
-            )
+            or type(latest_records_by_key) is not dict
+            or type(current_record_ids) is not set
+            or type(swing_geometry_views) is not dict
+            or type(swing_assignment_incumbents) is not dict
+            or type(liquidity_interaction_ids_by_level) is not dict
+            or type(current_view_hash_cursor)
+            is not _FoundationCurrentViewHashCursor
             or current_view_hash_cursor.record_count != len(current_records)
             or current_view_hash_cursor.foundation_version
             != foundation_version
@@ -1944,16 +2288,16 @@ class FoundationProjection:
     def __getstate__(self) -> Mapping[str, Any]:
         """Serialize only current view, count, rolling hash, and identities."""
 
-        _require_foundation_record_identity_integrity(self.current_records)
+        canonical = FoundationProjectionReducer.validate_complete(self)
         return {
-            "schema_version": self.schema_version,
-            "current_records": self.current_records,
-            "record_count": self.record_count,
-            "component_fingerprint": self.component_fingerprint,
-            "current_view_fingerprint": self.current_view_fingerprint,
-            "asof": self.asof,
-            "foundation_version": self.foundation_version,
-            "registry_identity": self.registry_identity,
+            "schema_version": canonical.schema_version,
+            "current_records": canonical.current_records,
+            "record_count": canonical.record_count,
+            "component_fingerprint": canonical.component_fingerprint,
+            "current_view_fingerprint": canonical.current_view_fingerprint,
+            "asof": canonical.asof,
+            "foundation_version": canonical.foundation_version,
+            "registry_identity": canonical.registry_identity,
         }
 
     def __setstate__(self, state: Mapping[str, Any]) -> None:
@@ -1976,6 +2320,7 @@ class FoundationProjection:
         for name in expected:
             object.__setattr__(self, name, state[name])
         self.__post_init__()
+        _validate_projection_current_graph(self)
 
     def __deepcopy__(self, memo: dict[int, Any]) -> "FoundationProjection":
         memo[id(self)] = self
@@ -2026,17 +2371,19 @@ class FoundationProjection:
     def transport_payload(self) -> Mapping[str, Any]:
         """Return the compact snapshot/replay transport contract."""
 
-        _require_foundation_record_identity_integrity(self.current_records)
+        canonical = FoundationProjectionReducer.validate_complete(self)
         return FrozenDict(
             {
-                "schema_version": self.schema_version,
-                "current_records": to_primitive(self.current_records),
-                "record_count": self.record_count,
-                "component_fingerprint": self.component_fingerprint,
-                "current_view_fingerprint": self.current_view_fingerprint,
-                "asof": to_primitive(self.asof),
-                "foundation_version": self.foundation_version,
-                "registry_identity": self.registry_identity,
+                "schema_version": canonical.schema_version,
+                "current_records": to_primitive(canonical.current_records),
+                "record_count": canonical.record_count,
+                "component_fingerprint": canonical.component_fingerprint,
+                "current_view_fingerprint": (
+                    canonical.current_view_fingerprint
+                ),
+                "asof": to_primitive(canonical.asof),
+                "foundation_version": canonical.foundation_version,
+                "registry_identity": canonical.registry_identity,
             }
         )
 
@@ -2091,15 +2438,25 @@ class FoundationProjectionCheckpoint:
             or self.schema_version != FOUNDATION_PROJECTION_CHECKPOINT_SCHEMA_VERSION
         ):
             raise TypeError("checkpoint requires a FoundationProjection")
+        canonical = FoundationProjectionReducer.validate_complete(
+            self.projection
+        )
+        object.__setattr__(self, "projection", canonical)
         object.__setattr__(
             self,
             "checkpoint_id",
-            f"foundation-checkpoint:{_projection_digest(self.projection)}",
+            f"foundation-checkpoint:{_projection_digest(canonical)}",
         )
 
     def __getstate__(self) -> Mapping[str, Any]:
+        canonical = FoundationProjectionReducer.validate_complete(
+            self.projection
+        )
+        expected = f"foundation-checkpoint:{_projection_digest(canonical)}"
+        if self.checkpoint_id != expected:
+            raise ValueError("foundation checkpoint integrity mismatch")
         return {
-            "projection": self.projection,
+            "projection": canonical,
             "schema_version": self.schema_version,
         }
 
@@ -2156,15 +2513,19 @@ class FoundationProjectionReducer:
             raise TypeError("projection must be FoundationProjection")
         if not isinstance(record, FoundationRecord):
             raise TypeError("record must be FoundationRecord")
-        owner = FoundationProjectionOwner(projection)
+        owner = FoundationProjectionOwner._from_cold_prefix(
+            projection,
+            _capability=_FOUNDATION_COLD_PREFIX_CAPABILITY,
+        )
         transaction = owner.stage()
         if not transaction.append(record):
             return projection
         frozen = transaction.freeze()
         # Pure replay permits an owner-first batch prefix to be temporarily
         # incomplete.  ``replay`` performs the full completeness check after
-        # the complete suffix has been reduced.
-        return transaction._commit_prevalidated(frozen)
+        # the complete suffix has been reduced.  The owner is private and
+        # temporary, so no public commit authority is needed here.
+        return frozen
 
     @classmethod
     def replay(
@@ -2173,7 +2534,11 @@ class FoundationProjectionReducer:
         *,
         initial: FoundationProjection | None = None,
     ) -> FoundationProjection:
-        projection = initial or cls.initial_projection()
+        projection = (
+            cls.initial_projection()
+            if initial is None
+            else cls.validate_complete(initial)
+        )
         seen: dict[str, FoundationRecord] = {}
         for record in records:
             prior = seen.get(record.record_id)
@@ -2203,18 +2568,13 @@ class FoundationProjectionReducer:
             registry_identity=projection.registry_identity,
             schema_version=projection.schema_version,
         )
-        if canonical != projection:
-            raise ValueError("foundation current projection is invalid")
-        _validate_projection_completeness(
-            canonical._latest_records_by_key_cache
-        )
-        return projection
+        _validate_projection_current_graph(canonical)
+        return canonical
 
     @staticmethod
     def checkpoint(
         projection: FoundationProjection,
     ) -> FoundationProjectionCheckpoint:
-        FoundationProjectionReducer.validate_complete(projection)
         return FoundationProjectionCheckpoint(projection)
 
     @staticmethod
@@ -2225,10 +2585,13 @@ class FoundationProjectionReducer:
             raise TypeError("restore requires FoundationProjectionCheckpoint")
         if checkpoint.schema_version != FOUNDATION_PROJECTION_CHECKPOINT_SCHEMA_VERSION:
             raise ValueError("foundation checkpoint schema changed")
-        expected = f"foundation-checkpoint:{_projection_digest(checkpoint.projection)}"
+        canonical = FoundationProjectionReducer.validate_complete(
+            checkpoint.projection
+        )
+        expected = f"foundation-checkpoint:{_projection_digest(canonical)}"
         if checkpoint.checkpoint_id != expected:
             raise ValueError("foundation checkpoint integrity mismatch")
-        return checkpoint.projection
+        return canonical
 
 
 class FoundationProjectionOwner:
@@ -2238,7 +2601,11 @@ class FoundationProjectionOwner:
         self,
         projection: FoundationProjection | None = None,
     ) -> None:
-        current = projection or FoundationProjectionReducer.initial_projection()
+        admitted = projection or FoundationProjectionReducer.initial_projection()
+        current = FoundationProjectionReducer.validate_complete(admitted)
+        self._initialize(current)
+
+    def _initialize(self, current: FoundationProjection) -> None:
         if not isinstance(current, FoundationProjection):
             raise TypeError("foundation hot owner requires a compact projection")
         self._latest = dict(current._latest_records_by_key_cache)
@@ -2258,30 +2625,38 @@ class FoundationProjectionOwner:
         self._projection_cache = current
         self._generation = 0
 
+    @classmethod
+    def _from_cold_prefix(
+        cls,
+        projection: FoundationProjection,
+        *,
+        _capability: object,
+    ) -> "FoundationProjectionOwner":
+        """Build the private pure-replay owner for an incomplete prefix."""
+
+        if (
+            _capability is not _FOUNDATION_COLD_PREFIX_CAPABILITY
+            or type(projection) is not FoundationProjection
+        ):
+            raise ValueError("foundation cold-prefix authority is invalid")
+        owner = object.__new__(cls)
+        owner._initialize(projection)
+        return owner
+
     @staticmethod
     def _canonical_projection(
         projection: FoundationProjection,
     ) -> FoundationProjection:
         if not isinstance(projection, FoundationProjection):
             raise ValueError("foundation projection owner state is invalid")
-        canonical = FoundationProjection(
-            current_records=projection.current_records,
-            record_count=projection.record_count,
-            component_fingerprint=projection.component_fingerprint,
-            current_view_fingerprint=projection.current_view_fingerprint,
-            asof=projection.asof,
-            foundation_version=projection.foundation_version,
-            registry_identity=projection.registry_identity,
-            schema_version=projection.schema_version,
-        )
-        _validate_projection_completeness(
-            canonical._latest_records_by_key_cache
-        )
-        return canonical
+        return FoundationProjectionReducer.validate_complete(projection)
 
     def _require_internal_integrity(self) -> FoundationProjection:
         canonical = self._canonical_projection(self._projection_cache)
-        rebuilt = type(self)(canonical)
+        rebuilt = type(self)._from_cold_prefix(
+            canonical,
+            _capability=_FOUNDATION_COLD_PREFIX_CAPABILITY,
+        )
         if (
             type(self._generation) is not int
             or self._generation < 0
@@ -2317,7 +2692,7 @@ class FoundationProjectionOwner:
         ):
             raise ValueError("foundation projection owner pickle schema changed")
         canonical = self._canonical_projection(state["projection"])
-        self.__init__(canonical)
+        self._initialize(canonical)
         self._generation = state["generation"]
 
     @property
@@ -2361,6 +2736,8 @@ class FoundationProjectionTransaction:
         self._component_fingerprint = owner.component_fingerprint
         self._asof = owner._asof
         self._projection_cache: FoundationProjection | None = owner.freeze()
+        self._preflight_projection: FoundationProjection | None = None
+        self._preflight_binding: tuple[object, ...] | None = None
         self._closed = False
 
     def _require_fresh(self) -> None:
@@ -2372,6 +2749,53 @@ class FoundationProjectionTransaction:
     def contains(self, record_id: str) -> bool:
         self._require_fresh()
         return record_id in self._pending_ids or self._owner.contains(record_id)
+
+    def _require_write_set_identity(self) -> None:
+        _require_foundation_record_identity_integrity(tuple(self._records))
+
+    @staticmethod
+    def _projection_binding(
+        projection: FoundationProjection,
+    ) -> tuple[object, ...]:
+        return (
+            projection.current_records,
+            projection._latest_records_by_key_cache,
+            projection._current_record_ids_cache,
+            projection._swing_geometry_views_cache,
+            projection._swing_assignment_incumbents_cache,
+            projection._liquidity_interaction_ids_by_level_cache,
+            projection._current_view_hash_cursor_cache,
+            projection.record_count,
+            projection.component_fingerprint,
+            projection.current_view_fingerprint,
+            projection.asof,
+            projection.foundation_version,
+            projection.registry_identity,
+            projection.schema_version,
+        )
+
+    def _bind_preflight(self, projection: FoundationProjection) -> None:
+        self._preflight_projection = projection
+        self._preflight_binding = self._projection_binding(projection)
+
+    def _require_bound_preflight(
+        self,
+        projection: FoundationProjection,
+    ) -> None:
+        current = self._projection_binding(projection)
+        admitted = self._preflight_binding
+        if (
+            projection is not self._preflight_projection
+            or admitted is None
+            or any(
+                current[index] is not admitted[index]
+                for index in range(7)
+            )
+            or current[7:] != admitted[7:]
+        ):
+            raise ValueError(
+                "foundation prevalidated projection is not bound to this transaction"
+            )
 
     def _latest_view(self) -> Mapping[tuple[FoundationObjectType, str], FoundationRecord]:
         return ChainMap(self._latest_writes, self._owner._latest)
@@ -2426,10 +2850,13 @@ class FoundationProjectionTransaction:
         )
         self._asof = record.known_at
         self._projection_cache = None
+        self._preflight_projection = None
+        self._preflight_binding = None
         return True
 
     def freeze(self) -> FoundationProjection:
         self._require_fresh()
+        self._require_write_set_identity()
         if self._projection_cache is None:
             latest = dict(self._owner._latest)
             current_record_ids = set(self._owner._current_record_ids)
@@ -2488,6 +2915,7 @@ class FoundationProjectionTransaction:
                         tuple(
                             item.record_id for item in current_records
                         ),
+                        _capability=_FOUNDATION_INCREMENTAL_CAPABILITY,
                         foundation_version=(
                             self._owner.freeze().foundation_version
                         ),
@@ -2505,6 +2933,7 @@ class FoundationProjectionTransaction:
             )
             assignment_incumbents.update(self._assignment_writes)
             self._projection_cache = FoundationProjection._from_incremental_state(
+                _capability=_FOUNDATION_INCREMENTAL_CAPABILITY,
                 current_records=current_records,
                 record_count=self._record_count,
                 component_fingerprint=self._component_fingerprint,
@@ -2526,6 +2955,9 @@ class FoundationProjectionTransaction:
 
     def delta(self) -> "FoundationRecordDelta":
         self._require_fresh()
+        self._require_write_set_identity()
+        if self._preflight_projection is not None:
+            self._require_bound_preflight(self._preflight_projection)
         start_count = self._owner.record_count
         return FoundationRecordDelta(
             start_count=start_count,
@@ -2537,11 +2969,13 @@ class FoundationProjectionTransaction:
 
     def validate_complete(self) -> None:
         self._require_fresh()
+        self._require_write_set_identity()
+        self._validate_completeness()
+
+    def _validate_completeness(self) -> None:
         latest = self._latest_view()
         affected_level_ids: set[str] = set()
-        staged_interaction_ids: set[str] = set()
         for record in self._records:
-            key = (record.object_type, record.object_id)
             if record.object_type is FoundationObjectType.LIQUIDITY_LEVEL:
                 affected_level_ids.add(record.object_id)
             elif (
@@ -2549,39 +2983,35 @@ class FoundationProjectionTransaction:
                 is FoundationObjectType.LIQUIDITY_INTERACTION_GENERATION
             ):
                 affected_level_ids.add(str(record.payload.get("level_id")))
-                staged_interaction_ids.add(record.object_id)
-                previous = self._owner._latest.get(key)
+                _validate_liquidity_interaction_registration(latest, record)
+                previous = self._owner._latest.get(
+                    (record.object_type, record.object_id)
+                )
                 if previous is not None:
                     affected_level_ids.add(
                         str(previous.payload.get("level_id"))
                     )
         for level_id in affected_level_ids:
-            candidates = set(
-                self._owner._interaction_ids_by_level.get(level_id, ())
+            level = latest.get(
+                (FoundationObjectType.LIQUIDITY_LEVEL, level_id)
             )
-            candidates.update(staged_interaction_ids)
-            for interaction_id in candidates:
-                interaction = latest.get(
-                    (
-                        FoundationObjectType.LIQUIDITY_INTERACTION_GENERATION,
-                        interaction_id,
-                    )
+            if level is None:
+                raise ValueError(
+                    "finalized liquidity interaction lacks its registered level"
                 )
-                if (
-                    interaction is None
-                    or str(interaction.payload.get("level_id")) != level_id
-                ):
-                    continue
-                _validate_liquidity_interaction_registration(
-                    latest,
-                    interaction,
-                )
+            _validate_liquidity_level_interaction_graph(
+                latest,
+                level,
+                tail_only=True,
+            )
 
     def preflight_commit(self) -> FoundationProjection:
         """Validate every fallible condition before either authority mutates."""
 
-        self.validate_complete()
-        return self.freeze()
+        frozen = self.freeze()
+        self._validate_completeness()
+        self._bind_preflight(frozen)
+        return frozen
 
     def commit(
         self,
@@ -2589,9 +3019,12 @@ class FoundationProjectionTransaction:
         prevalidated: FoundationProjection | None = None,
     ) -> FoundationProjection:
         self._require_fresh()
-        frozen = self.preflight_commit() if prevalidated is None else prevalidated
-        if frozen != self.freeze():
-            raise ValueError("foundation prevalidated projection changed")
+        if prevalidated is None:
+            frozen = self.preflight_commit()
+        else:
+            self._require_write_set_identity()
+            frozen = prevalidated
+            self._require_bound_preflight(frozen)
         return self._commit_prevalidated(frozen)
 
     def _commit_prevalidated(
@@ -2604,6 +3037,9 @@ class FoundationProjectionTransaction:
         preflight have all succeeded.  Keeping the mutation tail validation-free
         prevents a one-sided cold-ledger commit.
         """
+
+        self._require_fresh()
+        self._require_bound_preflight(frozen)
 
         for record in self._records:
             key = (record.object_type, record.object_id)

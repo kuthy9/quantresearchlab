@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import copy
-from dataclasses import FrozenInstanceError, dataclass
+from dataclasses import FrozenInstanceError, dataclass, replace
 import json
 import pickle
+from types import MappingProxyType
 
 import pandas as pd
 import pytest
@@ -14,6 +15,7 @@ from smc_trader.foundation_registry import (
     FOUNDATION_VERSION,
 )
 from smc_trader.market_state import (
+    SwingGeometryAssignment,
     SwingGeometryNode,
     update_swing_geometry_assignments,
 )
@@ -22,6 +24,7 @@ from smc_trader.model import FrozenDict, Timeframe, to_primitive
 from smc_trader.semantic_foundation import (
     FoundationObjectType,
     FoundationProjection,
+    FoundationProjectionCheckpoint,
     FoundationProjectionOwner,
     FoundationProjectionReducer,
     FoundationRecord,
@@ -29,6 +32,7 @@ from smc_trader.semantic_foundation import (
     FoundationRecordStatus,
 )
 from smc_trader.semantic_lifecycle import (
+    LiquidityInteractionLifecycle,
     NormalizedLifecycleTransition,
     NormalizedTransitionKind,
     SemanticLifecycleOwner,
@@ -390,7 +394,51 @@ def test_append_only_replay_checkpoint_and_retirement_filter_are_deterministic()
 
 
 def test_same_clock_canonical_revisions_keep_order_but_lifecycle_cannot_rewind() -> None:
-    active, _, active_interaction, _ = _level_history()
+    active, retired, active_interaction, retired_interaction = _level_history()
+    active_interaction_record = FoundationRecord.from_dto(active_interaction)
+    active_record = FoundationRecord.from_dto(active)
+    terminal_interaction_record = FoundationRecord.from_dto(
+        retired_interaction
+    )
+    retired_record = FoundationRecord.from_dto(retired)
+    projection = FoundationProjectionReducer.replay(
+        (
+            active_interaction_record,
+            active_record,
+            terminal_interaction_record,
+            retired_record,
+        )
+    )
+    assert projection.current_records == (
+        terminal_interaction_record,
+        retired_record,
+    )
+    assert terminal_interaction_record.known_at == retired_record.known_at
+    assert projection.record_count == 4
+
+    rewound_payload = dict(active_record.payload)
+    rewound_payload["source_event_ids"] = (
+        *active_record.source_event_ids,
+        "rewind-event",
+    )
+    rewound_payload["updated_at"] = _clock(2).isoformat()
+    rewound = FoundationRecord(
+        object_type=active_record.object_type,
+        object_id=active_record.object_id,
+        status=active_record.status,
+        known_at=_clock(2),
+        payload=rewound_payload,
+        source_event_ids=(
+            *active_record.source_event_ids,
+            "rewind-event",
+        ),
+    )
+    with pytest.raises(ValueError, match="terminal object is immutable"):
+        FoundationProjectionReducer.reduce(projection, rewound)
+
+
+def test_final_graph_rejects_disarmed_level_with_live_interaction() -> None:
+    active, retired, active_interaction, retired_interaction = _level_history()
     active_interaction_record = FoundationRecord.from_dto(active_interaction)
     active_record = FoundationRecord.from_dto(active)
     disarmed_payload = dict(active_record.payload)
@@ -409,33 +457,21 @@ def test_same_clock_canonical_revisions_keep_order_but_lifecycle_cannot_rewind()
         payload=disarmed_payload,
         source_event_ids=active_record.source_event_ids,
     )
-    projection = FoundationProjectionReducer.replay(
-        (active_interaction_record, active_record, disarmed)
-    )
-    assert projection.current_records == (
-        active_interaction_record,
-        disarmed,
-    )
-    assert projection.record_count == 3
 
-    rewound_payload = dict(active_record.payload)
-    rewound_payload["source_event_ids"] = (
-        *active_record.source_event_ids,
-        "rewind-event",
+    with pytest.raises(ValueError, match="retains a live interaction"):
+        FoundationProjectionReducer.replay(
+            (active_interaction_record, active_record, disarmed)
+        )
+
+    canonical = FoundationProjectionReducer.replay(
+        (
+            active_interaction_record,
+            active_record,
+            FoundationRecord.from_dto(retired_interaction),
+            FoundationRecord.from_dto(retired),
+        )
     )
-    rewound = FoundationRecord(
-        object_type=active_record.object_type,
-        object_id=active_record.object_id,
-        status=active_record.status,
-        known_at=active_record.known_at,
-        payload=rewound_payload,
-        source_event_ids=(
-            *active_record.source_event_ids,
-            "rewind-event",
-        ),
-    )
-    with pytest.raises(ValueError, match="not preregistered"):
-        FoundationProjectionReducer.reduce(projection, rewound)
+    assert canonical.terminal_records
 
 
 def test_checkpoint_integrity_and_terminal_history_cannot_be_rewritten() -> None:
@@ -589,6 +625,407 @@ def test_projection_indexes_are_derived_pickle_safe_and_history_equivalent() -> 
         restored_from_tampered_state.__setstate__(tampered_state)
 
 
+@pytest.mark.parametrize("cached_before_tamper", (False, True))
+def test_transaction_rechecks_bounded_write_set_after_record_byte_tamper(
+    cached_before_tamper: bool,
+) -> None:
+    record = FoundationRecord.from_dto(_active_fvg())
+    transaction = FoundationProjectionOwner().stage()
+    assert transaction.append(record)
+    if cached_before_tamper:
+        transaction.freeze()
+    _tamper_record_bytes(record, "payload")
+
+    with pytest.raises(ValueError, match="current record identity"):
+        transaction.freeze()
+    with pytest.raises(ValueError, match="current record identity"):
+        transaction.preflight_commit()
+    with pytest.raises(ValueError, match="current record identity"):
+        transaction.delta()
+
+
+def test_transaction_commit_requires_its_exact_successful_preflight() -> None:
+    transaction = FoundationProjectionOwner().stage()
+    assert transaction.append(FoundationRecord.from_dto(_active_fvg()))
+    admitted = transaction.preflight_commit()
+    equal_but_unbound = FoundationProjection(**dict(admitted.__getstate__()))
+    assert equal_but_unbound == admitted
+    assert equal_but_unbound is not admitted
+
+    with pytest.raises(ValueError, match="not bound to this transaction"):
+        transaction.commit(prevalidated=equal_but_unbound)
+    assert transaction.commit(prevalidated=admitted) is admitted
+
+
+def test_preflight_field_tamper_is_rejected_before_delta_materialization() -> None:
+    transaction = FoundationProjectionOwner().stage()
+    assert transaction.append(FoundationRecord.from_dto(_active_fvg()))
+    admitted = transaction.preflight_commit()
+    object.__setattr__(admitted, "current_view_fingerprint", "0" * 64)
+
+    with pytest.raises(ValueError, match="not bound to this transaction"):
+        transaction.delta()
+    with pytest.raises(ValueError, match="not bound to this transaction"):
+        transaction.commit(prevalidated=admitted)
+
+
+def test_incremental_factory_requires_exact_module_capability() -> None:
+    projection = FoundationProjectionReducer.replay(
+        (FoundationRecord.from_dto(_active_fvg()),)
+    )
+    with pytest.raises(ValueError, match="incremental foundation projection"):
+        FoundationProjection._from_incremental_state(
+            _capability=object(),
+            current_records=projection.current_records,
+            record_count=projection.record_count,
+            component_fingerprint=projection.component_fingerprint,
+            asof=projection.asof,
+            latest_records_by_key=dict(
+                projection._latest_records_by_key_cache
+            ),
+            current_record_ids=set(projection._current_record_ids_cache),
+            swing_geometry_views=dict(
+                projection._swing_geometry_views_cache
+            ),
+            swing_assignment_incumbents=dict(
+                projection._swing_assignment_incumbents_cache
+            ),
+            liquidity_interaction_ids_by_level=dict(
+                projection._liquidity_interaction_ids_by_level_cache
+            ),
+            current_view_hash_cursor=(
+                projection._current_view_hash_cursor_cache
+            ),
+            foundation_version=projection.foundation_version,
+            registry_identity=projection.registry_identity,
+        )
+
+
+def test_public_owner_rejects_incomplete_graph_but_cold_replay_prefix_works() -> None:
+    active, _, active_interaction, _ = _level_history()
+    interaction_record = FoundationRecord.from_dto(active_interaction)
+    level_record = FoundationRecord.from_dto(active)
+    incomplete = FoundationProjection(
+        current_records=(interaction_record,),
+        record_count=1,
+        component_fingerprint="0" * 64,
+    )
+
+    with pytest.raises(ValueError, match="registered level"):
+        FoundationProjectionOwner(incomplete)
+    prefix = FoundationProjectionReducer.reduce(
+        FoundationProjectionReducer.initial_projection(),
+        interaction_record,
+    )
+    assert prefix.current_records == (interaction_record,)
+    complete = FoundationProjectionReducer.reduce(prefix, level_record)
+    canonical = FoundationProjectionReducer.validate_complete(complete)
+    assert FoundationProjectionOwner(canonical).freeze() == canonical
+
+
+def test_cold_boundaries_rebuild_private_caches_and_reject_field_tamper() -> None:
+    projection = FoundationProjectionReducer.replay(
+        (FoundationRecord.from_dto(_active_fvg()),)
+    )
+    object.__setattr__(
+        projection,
+        "_latest_records_by_key_cache",
+        MappingProxyType({}),
+    )
+    canonical = FoundationProjectionReducer.validate_complete(projection)
+    assert canonical is not projection
+    assert canonical.current_record_for(
+        FoundationObjectType.FVG_STRUCTURAL_LIFECYCLE,
+        "fvg-1",
+    ) is projection.current_records[0]
+    admitted = FoundationProjectionOwner(projection).freeze()
+    assert admitted is not projection
+    assert admitted.current_record_for(
+        FoundationObjectType.FVG_STRUCTURAL_LIFECYCLE,
+        "fvg-1",
+    ) is projection.current_records[0]
+    assert FoundationProjectionReducer.checkpoint(projection).projection == canonical
+    assert projection.transport_payload()["current_records"]
+    assert projection.__getstate__()["current_records"] == canonical.current_records
+
+    checkpoint = FoundationProjectionReducer.checkpoint(canonical)
+    object.__setattr__(
+        checkpoint.projection,
+        "_latest_records_by_key_cache",
+        MappingProxyType({}),
+    )
+    restored = FoundationProjectionReducer.restore(checkpoint)
+    assert restored.current_record_for(
+        FoundationObjectType.FVG_STRUCTURAL_LIFECYCLE,
+        "fvg-1",
+    ) is not None
+
+    tampered = FoundationProjection(**dict(canonical.__getstate__()))
+    object.__setattr__(tampered, "current_view_fingerprint", "0" * 64)
+    with pytest.raises(ValueError, match="current projection is invalid"):
+        tampered.__getstate__()
+    with pytest.raises(ValueError, match="current projection is invalid"):
+        tampered.transport_payload()
+    with pytest.raises(ValueError, match="current projection is invalid"):
+        FoundationProjectionReducer.checkpoint(tampered)
+
+
+def test_cold_boundaries_reject_missing_swing_parent_graph() -> None:
+    child = _swing_node()
+    assignment = SwingGeometryAssignment(
+        assignment_id="assignment-with-missing-parent",
+        child_swing_id=child.swing_id,
+        parent_swing_id="missing-parent-swing",
+        geometric_depth=1,
+        assigned_at=child.known_at,
+    )
+    child_record = FoundationRecord.from_dto(
+        child,
+        source_event_ids=("child-swing-event",),
+    )
+    assignment_record = FoundationRecord.from_dto(
+        assignment,
+        source_event_ids=("child-swing-event",),
+    )
+    malformed = FoundationProjection(
+        current_records=(child_record, assignment_record),
+        record_count=2,
+        component_fingerprint="0" * 64,
+    )
+
+    with pytest.raises(ValueError, match="Swing assignment"):
+        FoundationProjectionReducer.validate_complete(malformed)
+    with pytest.raises(ValueError, match="Swing assignment"):
+        FoundationProjectionReducer.checkpoint(malformed)
+    with pytest.raises(ValueError, match="Swing assignment"):
+        FoundationProjectionCheckpoint(malformed)
+    with pytest.raises(ValueError, match="Swing assignment"):
+        FoundationProjectionReducer.replay(
+            (child_record, assignment_record)
+        )
+    restored_projection = object.__new__(FoundationProjection)
+    with pytest.raises(ValueError, match="Swing assignment"):
+        restored_projection.__setstate__(
+            {
+                "schema_version": malformed.schema_version,
+                "current_records": malformed.current_records,
+                "record_count": malformed.record_count,
+                "component_fingerprint": malformed.component_fingerprint,
+                "current_view_fingerprint": (
+                    malformed.current_view_fingerprint
+                ),
+                "asof": malformed.asof,
+                "foundation_version": malformed.foundation_version,
+                "registry_identity": malformed.registry_identity,
+            }
+        )
+    forged = object.__new__(FoundationProjectionCheckpoint)
+    object.__setattr__(forged, "projection", malformed)
+    object.__setattr__(
+        forged,
+        "schema_version",
+        foundation_module.FOUNDATION_PROJECTION_CHECKPOINT_SCHEMA_VERSION,
+    )
+    object.__setattr__(forged, "checkpoint_id", "foundation-checkpoint:forged")
+    with pytest.raises(ValueError, match="Swing assignment"):
+        FoundationProjectionReducer.restore(forged)
+
+
+@pytest.mark.parametrize(
+    "updates",
+    (
+        {"level_id": "different-level"},
+        {"source_timeframe": Timeframe.H4.value},
+        {"interaction_timeframe": Timeframe.M5.value},
+        {"level_side": "below"},
+        {"lower_bound_ticks": 399},
+        {"upper_bound_ticks": 401},
+        {
+            "generation_number": 2,
+            "previous_generation_id": "prior-generation",
+            "rearm_fact_id": "rearm-fact",
+        },
+    ),
+)
+def test_liquidity_interaction_revision_cannot_migrate_generation_scope(
+    updates: dict[str, object],
+) -> None:
+    _, _, interaction, _ = _level_history()
+    original = FoundationRecord.from_dto(interaction)
+    payload = dict(original.payload)
+    payload.update(updates)
+    migrated = FoundationRecord(
+        object_type=original.object_type,
+        object_id=original.object_id,
+        status=original.status,
+        known_at=original.known_at,
+        payload=payload,
+        source_event_ids=original.source_event_ids,
+    )
+    prefix = FoundationProjectionReducer.reduce(
+        FoundationProjectionReducer.initial_projection(),
+        original,
+    )
+    with pytest.raises(ValueError, match="generation scope is immutable"):
+        FoundationProjectionReducer.reduce(prefix, migrated)
+
+
+@pytest.mark.parametrize(
+    "updates",
+    (
+        {"source_timeframe": Timeframe.H4.value},
+        {"source_kind": "different-source-kind"},
+        {"source_identity": "different-source-identity"},
+        {"side": "below"},
+        {"price_ticks": 401, "upper_bound_ticks": 401},
+        {"lower_bound_ticks": 399},
+        {"upper_bound_ticks": 401},
+        {"tick_size": 0.5},
+        {"created_at": _clock(-1).isoformat()},
+        {
+            "price_anchor_rule": (
+                "near_side_tradable_zone_boundary_for_nontradable_midpoint"
+            )
+        },
+    ),
+)
+def test_liquidity_level_revision_cannot_migrate_creation_scope(
+    updates: dict[str, object],
+) -> None:
+    active, _, active_interaction, _ = _level_history()
+    interaction_record = FoundationRecord.from_dto(active_interaction)
+    original = FoundationRecord.from_dto(active)
+    payload = dict(original.payload)
+    payload.update(updates)
+    migrated = FoundationRecord(
+        object_type=original.object_type,
+        object_id=original.object_id,
+        status=original.status,
+        known_at=original.known_at,
+        payload=payload,
+        source_event_ids=original.source_event_ids,
+    )
+    projection = FoundationProjectionReducer.replay(
+        (interaction_record, original)
+    )
+
+    with pytest.raises(ValueError, match="creation scope is immutable"):
+        FoundationProjectionReducer.reduce(projection, migrated)
+
+
+def test_liquidity_level_interaction_history_is_prefix_only() -> None:
+    active, _, active_interaction, _ = _level_history()
+    interaction_record = FoundationRecord.from_dto(active_interaction)
+    original = FoundationRecord.from_dto(active)
+    payload = dict(original.payload)
+    payload["active_generation_id"] = "replacement-generation"
+    payload["interaction_generation_ids"] = ("replacement-generation",)
+    rewritten = FoundationRecord(
+        object_type=original.object_type,
+        object_id=original.object_id,
+        status=original.status,
+        known_at=original.known_at,
+        payload=payload,
+        source_event_ids=original.source_event_ids,
+    )
+    projection = FoundationProjectionReducer.replay(
+        (interaction_record, original)
+    )
+
+    with pytest.raises(ValueError, match="history cannot be rewritten"):
+        FoundationProjectionReducer.reduce(projection, rewritten)
+
+
+def test_liquidity_interaction_id_must_bind_its_generation_signature() -> None:
+    active, _, active_interaction, _ = _level_history()
+    forged_generation_id = "liquidity-interaction:forged-generation"
+    interaction_payload = dict(
+        FoundationRecord.from_dto(active_interaction).payload
+    )
+    interaction_payload["generation_id"] = forged_generation_id
+    interaction = FoundationRecord(
+        object_type=FoundationObjectType.LIQUIDITY_INTERACTION_GENERATION,
+        object_id=forged_generation_id,
+        status=FoundationRecordStatus.ACTIVE,
+        known_at=active_interaction.updated_at,
+        payload=interaction_payload,
+        source_event_ids=active_interaction.source_event_ids,
+    )
+    level_payload = dict(FoundationRecord.from_dto(active).payload)
+    level_payload["active_generation_id"] = forged_generation_id
+    level_payload["interaction_generation_ids"] = (forged_generation_id,)
+    level = FoundationRecord(
+        object_type=FoundationObjectType.LIQUIDITY_LEVEL,
+        object_id=active.level_id,
+        status=FoundationRecordStatus.ACTIVE,
+        known_at=active.updated_at,
+        payload=level_payload,
+        source_event_ids=active.source_event_ids,
+    )
+
+    with pytest.raises(ValueError, match="generation chain"):
+        FoundationProjectionReducer.replay((interaction, level))
+
+
+def test_liquidity_interaction_path_facts_are_append_only() -> None:
+    active, _, active_interaction, _ = _level_history()
+    touched = replace(
+        active_interaction,
+        lifecycle=LiquidityInteractionLifecycle.TOUCHED,
+        updated_at=_clock(1),
+        first_touch_at=_clock(1),
+        touch_bar_ids=("touch-bar-1",),
+        source_event_ids=(
+            *active_interaction.source_event_ids,
+            "touch-bar-1",
+        ),
+    )
+    original = FoundationRecord.from_dto(touched)
+    rewritten_clock = FoundationRecord.from_dto(
+        replace(
+            touched,
+            updated_at=_clock(2),
+            first_touch_at=_clock(2),
+            source_event_ids=(
+                *touched.source_event_ids,
+                "touch-clock-rewrite",
+            ),
+        )
+    )
+    rewritten_bars = FoundationRecord.from_dto(
+        replace(
+            touched,
+            updated_at=_clock(2),
+            touch_bar_ids=("touch-bar-2",),
+            source_event_ids=(
+                *touched.source_event_ids,
+                "touch-bar-2",
+            ),
+        )
+    )
+    rolled_back = FoundationRecord.from_dto(
+        replace(
+            touched,
+            updated_at=_clock(0),
+            first_touch_at=_clock(0),
+        )
+    )
+    projection = FoundationProjectionReducer.replay(
+        (
+            FoundationRecord.from_dto(active_interaction),
+            FoundationRecord.from_dto(active),
+            original,
+        )
+    )
+
+    with pytest.raises(ValueError, match="immutable once set"):
+        FoundationProjectionReducer.reduce(projection, rewritten_clock)
+    with pytest.raises(ValueError, match="history cannot be rewritten"):
+        FoundationProjectionReducer.reduce(projection, rewritten_bars)
+    with pytest.raises(ValueError, match="knowledge order"):
+        FoundationProjectionReducer.reduce(projection, rolled_back)
+
+
 def test_10k_fixed_object_revisions_keep_hot_projection_and_lifecycle_bounded() -> None:
     projection_owner = FoundationProjectionOwner()
     ledger = FoundationRecordLedger()
@@ -719,6 +1156,7 @@ def test_tail_revisions_do_not_rescan_the_complete_current_view(
         cls: type[object],
         record_ids: tuple[str, ...],
         *,
+        _capability: object,
         foundation_version: str,
         registry_identity: str,
     ) -> object:
@@ -727,6 +1165,7 @@ def test_tail_revisions_do_not_rescan_the_complete_current_view(
         return original_rebuild(
             cls,
             identities,
+            _capability=_capability,
             foundation_version=foundation_version,
             registry_identity=registry_identity,
         )
@@ -763,7 +1202,7 @@ def test_tail_revisions_do_not_rescan_the_complete_current_view(
         projection = transaction.commit()
         projection.identity_payload()
 
-    assert integrity_batch_sizes == [1] * 64
+    assert integrity_batch_sizes == [1] * 128
     assert cursor_rebuild_sizes == []
     projection = owner.freeze()
 
@@ -791,7 +1230,7 @@ def test_tail_revisions_do_not_rescan_the_complete_current_view(
             ),
         )
         projection.identity_payload()
-    assert integrity_batch_sizes == [1] * 8
+    assert integrity_batch_sizes == [1] * 16
     assert cursor_rebuild_sizes == []
 
     expected_view_fingerprint = foundation_module._canonical_digest(
