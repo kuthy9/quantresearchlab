@@ -1074,9 +1074,12 @@ class MarketSnapshot:
             or state.get("schema_version") != MARKET_SNAPSHOT_SCHEMA_VERSION
         ):
             raise ValueError("market snapshot pickle schema changed")
+        candidate = object.__new__(type(self))
         for name, value in state.items():
-            object.__setattr__(self, name, value)
-        self.__post_init__()
+            object.__setattr__(candidate, name, value)
+        candidate.__post_init__()
+        self.__dict__.clear()
+        self.__dict__.update(candidate.__dict__)
 
     @property
     def fingerprint(self) -> str:
@@ -5940,6 +5943,22 @@ class MarketSnapshotPublisher:
         (Timeframe.M5, Timeframe.M1),
     )
     _STATE_SCHEMA_VERSION = 3
+    _PICKLE_FIELDS = frozenset(
+        {
+            "semantic_registry_identity",
+            "atomic_authority",
+            "_event_reducer",
+            "_relation_resolver",
+            "_session",
+            "_last_projection_payloads",
+            "_last_projection_event_ids",
+            "_formal_structures",
+            "_last_real_m1_price",
+            "_last_real_m1_event_id",
+            "_boundary_reset_pending",
+            "_publisher_state_schema_version",
+        }
+    )
 
     def __init__(
         self,
@@ -5987,17 +6006,23 @@ class MarketSnapshotPublisher:
     def __getstate__(self) -> dict[str, object]:
         state = dict(self.__dict__)
         state["_publisher_state_schema_version"] = self._STATE_SCHEMA_VERSION
+        if set(state) != self._PICKLE_FIELDS:
+            raise ValueError("market snapshot publisher pickle state is not exact")
         return state
 
     def __setstate__(self, state: Mapping[str, object]) -> None:
         if (
             not isinstance(state, Mapping)
+            or set(state) != self._PICKLE_FIELDS
             or state.get("_publisher_state_schema_version")
             != self._STATE_SCHEMA_VERSION
         ):
             raise ValueError("market snapshot publisher checkpoint schema changed")
-        self.__dict__.update(state)
-        self._require_checkpoint_state()
+        candidate = object.__new__(type(self))
+        candidate.__dict__ = dict(state)
+        candidate._require_checkpoint_state()
+        self.__dict__.clear()
+        self.__dict__.update(candidate.__dict__)
 
     def _require_checkpoint_state(self) -> None:
         """Bind cached session/price state to authoritative M1 roots."""

@@ -22,6 +22,7 @@ from smc_trader.market_state import (
     MarketSnapshotPublisher,
     MarketSnapshotAuthority,
     RelationRole,
+    RelationResolver,
     SessionStateReducer,
     TimeframeEventReducer,
     foundation_record_from_projection_event,
@@ -70,6 +71,9 @@ from smc_trader.semantic_zones import (
 from .helpers import (
     CORE_TEST_SCALE_REGISTRY_ID,
     CORE_TEST_SCALE_SPECS,
+)
+from .test_event_provenance_contract import (
+    _normalized_bar as _canonical_normalized_bar,
 )
 from .test_semantic_foundation_geometry import _balance_range
 
@@ -233,6 +237,57 @@ def _bar_event(
             "source_data_ids": (f"bar:{timeframe.value}:{minutes}",),
         },
         semantic_version=semantic_version,
+    )
+
+
+def _canonical_bar_event(
+    minutes: int,
+    timeframe: Timeframe,
+    *,
+    close: float,
+    atr: float = 2.0,
+    sequence_no: int = 0,
+    event_id: str | None = None,
+    semantic_version: str = SMC_SEMANTIC_VERSION,
+    real_completed: bool = True,
+) -> MarketEvent:
+    """Build a registry-admissible normalized BAR for store-driven tests."""
+
+    event = _canonical_normalized_bar(
+        event_id or f"canonical:{timeframe.value}:{minutes}:{sequence_no}",
+        minutes,
+        timeframe=timeframe,
+        close=close,
+        atr=atr,
+        real_completed=real_completed,
+        instrument_id=1,
+        sequence_no=sequence_no,
+    )
+    evidence = {**dict(event.evidence), "scale_registry_id": "test-scale-registry"}
+    return replace(
+        event,
+        semantic_version=semantic_version,
+        details=evidence,
+        evidence=evidence,
+    )
+
+
+def _atomic_reset_event(
+    minutes: int,
+    *,
+    event_id: str | None = None,
+    sequence_no: int = 0,
+    reason: str = "contract_change_reset",
+) -> MarketEvent:
+    return _event(
+        EventKind.MARKET_EPOCH_RESET,
+        minutes,
+        Timeframe.M1,
+        event_id=event_id,
+        sequence_no=sequence_no,
+        price=None,
+        evidence={"reason": reason},
+        origin=EventOrigin.SEMANTIC_ATOMIC,
     )
 
 
@@ -559,54 +614,16 @@ def test_event_store_rejects_private_owner_fanout_markers(
 
 
 def _relation_events() -> tuple[MarketEvent, ...]:
+    """Minimal canonical roots for projection/relation parity tests.
+
+    Structural semantics have their own complete-parent-chain tests. These
+    tests exercise store/reducer/publisher plumbing and therefore use only
+    normalized roots instead of the retired legacy shorthand facts.
+    """
+
     return (
-        _bar_event(0, Timeframe.H1, close=100.0),
-        _event(
-            EventKind.STRUCTURE_DIRECTION_CONFIRMED,
-            1,
-            Timeframe.H1,
-            direction=Direction.LONG,
-            evidence={"structure_id": "h1-structure"},
-        ),
-        _event(
-            EventKind.QUALIFIED_BOS,
-            2,
-            Timeframe.H1,
-            price=108.0,
-            side="above",
-            direction=Direction.LONG,
-            evidence={"bos_id": "h1-bos"},
-        ),
-        _event(
-            EventKind.PROTECTED_SWING_ASSIGNED,
-            3,
-            Timeframe.H1,
-            price=95.0,
-            side="below",
-            direction=Direction.LONG,
-            evidence={"protected_swing_id": "h1-protected-low"},
-        ),
-        _event(
-            EventKind.LIQUIDITY_LEVEL_CREATED,
-            4,
-            Timeframe.H1,
-            price=110.0,
-            side="above",
-            evidence={
-                "level_id": "h1-bsl",
-                "source_kind": "confirmed_swing",
-            },
-        ),
-        _bar_event(5, Timeframe.M5, close=105.0, atr=1.0),
-        _event(
-            EventKind.MSS_CORE_CONFIRMED,
-            6,
-            Timeframe.M5,
-            price=103.0,
-            side="below",
-            direction=Direction.SHORT,
-            evidence={"bos_id": "m5-opposed-break"},
-        ),
+        _canonical_bar_event(0, Timeframe.H1, close=100.0),
+        _canonical_bar_event(5, Timeframe.M5, close=105.0, atr=1.0),
         _replayable_m1_event(
             10,
             105.0,
@@ -617,6 +634,80 @@ def _relation_events() -> tuple[MarketEvent, ...]:
             ),
         ),
     )
+
+
+def test_relation_resolver_preserves_parent_retracement_state_contract() -> None:
+    """The fixture migration must not weaken physical relation semantics."""
+
+    parent = _reduce(
+        (
+            _bar_event(0, Timeframe.H1, close=100.0),
+            _event(
+                EventKind.STRUCTURE_DIRECTION_CONFIRMED,
+                1,
+                Timeframe.H1,
+                direction=Direction.LONG,
+                evidence={"structure_id": "h1-structure"},
+            ),
+            _event(
+                EventKind.QUALIFIED_BOS,
+                2,
+                Timeframe.H1,
+                price=108.0,
+                side="above",
+                direction=Direction.LONG,
+                evidence={"bos_id": "h1-bos"},
+            ),
+            _event(
+                EventKind.PROTECTED_SWING_ASSIGNED,
+                3,
+                Timeframe.H1,
+                price=95.0,
+                side="below",
+                direction=Direction.LONG,
+                evidence={"protected_swing_id": "h1-protected-low"},
+            ),
+            _event(
+                EventKind.LIQUIDITY_LEVEL_CREATED,
+                4,
+                Timeframe.H1,
+                price=110.0,
+                side="above",
+                evidence={
+                    "level_id": "h1-bsl",
+                    "source_kind": "confirmed_swing",
+                },
+            ),
+        )
+    )
+    child = _reduce(
+        (
+            _bar_event(5, Timeframe.M5, close=105.0, atr=1.0),
+            _event(
+                EventKind.MSS_CORE_CONFIRMED,
+                6,
+                Timeframe.M5,
+                price=103.0,
+                side="below",
+                direction=Direction.SHORT,
+                evidence={"bos_id": "m5-opposed-break"},
+            ),
+        )
+    )
+
+    relation = RelationResolver(
+        edges=((Timeframe.H1, Timeframe.M5),)
+    ).resolve(
+        {Timeframe.H1: parent, Timeframe.M5: child},
+        price=105.0,
+        asof=_clock(10),
+    )["1H__5m"]
+
+    assert relation.role is RelationRole.PARENT_RETRACEMENT
+    assert relation.parent_direction is Direction.LONG
+    assert relation.child_direction is Direction.SHORT
+    assert relation.parent_state_invalidated is False
+    assert relation.child_mss_against_parent is True
 
 
 def _m1_candle(
@@ -2928,9 +3019,9 @@ def test_projection_events_can_be_removed_without_changing_atomic_replay() -> No
     }
 
     relation = snapshot.relations["1H__5m"]
-    assert relation.role is RelationRole.PARENT_RETRACEMENT
-    assert relation.parent_direction is Direction.LONG
-    assert relation.child_direction is Direction.SHORT
+    assert relation.role is RelationRole.PARENT_TRANSITION
+    assert relation.parent_direction is None
+    assert relation.child_direction is None
     assert relation.parent_state_invalidated is False
     assert relation.known_at == _clock(10)
     assert relation.parent_source_cutoff == _clock(0)
@@ -3013,56 +3104,25 @@ def test_projection_event_construction_can_be_disabled_without_state_drift() -> 
 
 def test_atomic_snapshot_replay_rebuilds_session_relations_and_epoch_reset() -> None:
     prior_epoch = (
-        _bar_event(0, Timeframe.H1, close=100.0),
-        _event(
-            EventKind.STRUCTURE_DIRECTION_CONFIRMED,
-            1,
-            Timeframe.H1,
-            direction=Direction.LONG,
-            evidence={"structure_id": "old-structure"},
-        ),
-        _event(
-            EventKind.LIQUIDITY_LEVEL_CREATED,
-            2,
-            Timeframe.H1,
-            side="above",
-            price=120.0,
-            evidence={
-                "level_id": "old-candidate",
-                "source_kind": "confirmed_swing",
-            },
-        ),
+        _canonical_bar_event(0, Timeframe.H1, close=100.0),
         _replayable_m1_event(3, 101.0),
     )
-    reset = _event(
-        EventKind.MARKET_EPOCH_RESET,
-        4,
-        Timeframe.M1,
-        price=None,
+    reset = replace(
+        _atomic_reset_event(4),
         evidence={
+            "reason": "contract_change_reset",
+            "new_symbol": "NQH5",
+            "new_instrument_id": 1,
+        },
+        details={
             "reason": "contract_change_reset",
             "new_symbol": "NQH5",
             "new_instrument_id": 1,
         },
     )
     current_epoch = (
-        _bar_event(5, Timeframe.H1, close=105.0),
-        _event(
-            EventKind.STRUCTURE_DIRECTION_CONFIRMED,
-            6,
-            Timeframe.H1,
-            direction=Direction.SHORT,
-            evidence={"structure_id": "new-structure"},
-        ),
-        _bar_event(7, Timeframe.M5, close=104.0, atr=1.0),
-        _event(
-            EventKind.MSS_CORE_CONFIRMED,
-            8,
-            Timeframe.M5,
-            direction=Direction.LONG,
-            price=106.0,
-            evidence={"bos_id": "new-m5-mss"},
-        ),
+        _canonical_bar_event(5, Timeframe.H1, close=105.0),
+        _canonical_bar_event(7, Timeframe.M5, close=104.0, atr=1.0),
         _replayable_m1_event(9, 104.0),
     )
 
@@ -3075,11 +3135,11 @@ def test_atomic_snapshot_replay_rebuilds_session_relations_and_epoch_reset() -> 
     assert snapshot.session.elapsed_minutes == 1
     assert snapshot.timeframe_states[
         Timeframe.H1
-    ].structure.external_direction is Direction.SHORT
+    ].structure.external_direction is None
     assert snapshot.timeframe_states[
         Timeframe.H1
     ].liquidity.candidates == ()
-    assert snapshot.relations["1H__5m"].role is RelationRole.PARENT_RETRACEMENT
+    assert snapshot.relations["1H__5m"].role is RelationRole.PARENT_TRANSITION
 
 
 def test_reducer_rejects_out_of_order_time_and_same_clock_sequence() -> None:
@@ -3127,10 +3187,10 @@ def test_reducer_rejects_foreign_timeframe_and_cross_tf_version_mix() -> None:
     reducer = _timeframe_reducer(
         semantic_registry_identity="definition-test"
     )
-    reducer.apply(_bar_event(0, Timeframe.H1, close=100.0))
+    reducer.apply(_canonical_bar_event(0, Timeframe.H1, close=100.0))
     with pytest.raises(ValueError, match="semantic versions"):
         reducer.apply(
-            _bar_event(
+            _canonical_bar_event(
                 1,
                 Timeframe.M5,
                 close=100.0,
@@ -3183,7 +3243,7 @@ def test_atomic_authority_rejects_missing_current_root_without_projection_fallba
             inventory=(),
             displacement=None,
             semantic_events=(
-                _bar_event(0, Timeframe.H1, close=100.0),
+                _canonical_bar_event(0, Timeframe.H1, close=100.0),
             ),
             anomalies=(),
         )
@@ -3259,8 +3319,8 @@ def test_atomic_authority_rejects_event_state_outside_frame_registry() -> None:
             inventory=(),
             displacement=None,
             semantic_events=(
-                _bar_event(0, Timeframe.H1, close=100.0),
-                _bar_event(1, Timeframe.M5, close=100.0),
+                _canonical_bar_event(0, Timeframe.H1, close=100.0),
+                _canonical_bar_event(1, Timeframe.M5, close=100.0),
                 _replayable_m1_event(2, 100.0),
             ),
             anomalies=(),
@@ -3513,6 +3573,8 @@ def test_bootstrap_bar_completeness_uses_timeframe_readiness_not_atr_window(
 
 
 def test_atomic_reset_event_restarts_session_and_owner_states() -> None:
+    # Exact external/BOS/MSS current-fact owner closure on reset is covered by
+    # test_current_fact_snapshot; this test retains Publisher/session replay.
     publisher = _snapshot_publisher(
         semantic_registry_identity="definition-test",
         atomic_authority=True,
@@ -3528,14 +3590,7 @@ def test_atomic_reset_event_restarts_session_and_owner_states() -> None:
         for timeframe in (Timeframe.H1, Timeframe.M1)
     }
     first_events = (
-        _bar_event(0, Timeframe.H1, close=100.0),
-        _event(
-            EventKind.STRUCTURE_DIRECTION_CONFIRMED,
-            1,
-            Timeframe.H1,
-            direction=Direction.LONG,
-            evidence={"structure_id": "old-epoch-structure"},
-        ),
+        _canonical_bar_event(0, Timeframe.H1, close=100.0),
         _replayable_m1_event(
             2,
             100.0,
@@ -3554,17 +3609,9 @@ def test_atomic_reset_event_restarts_session_and_owner_states() -> None:
         semantic_events=first_events,
         anomalies=(),
     )
-    assert first.timeframe_states[
-        Timeframe.H1
-    ].structure.external_direction is Direction.LONG
+    assert Timeframe.H1 in first.timeframe_states
 
-    reset = _event(
-        EventKind.MARKET_EPOCH_RESET,
-        3,
-        Timeframe.M1,
-        price=None,
-        evidence={"reason": "contract_change_reset"},
-    )
+    reset = _atomic_reset_event(3)
     second_events = (
         reset,
         _replayable_m1_event(
@@ -3590,6 +3637,12 @@ def test_atomic_reset_event_restarts_session_and_owner_states() -> None:
     assert second.timeframe_states[
         Timeframe.H1
     ].structure.external_direction is None
+    assert second.timeframe_states[
+        Timeframe.H1
+    ].quality.last_event_id == second_events[-1].event_id
+    assert second.timeframe_states[
+        Timeframe.H1
+    ].quality.events_applied == 1
     replayed = replay_atomic_market_snapshot(
         (*first_events, *second_events),
         semantic_registry_identity="definition-test",
@@ -4004,7 +4057,7 @@ def test_private_bar_marker_fails_before_publisher_mutation(
     expected_error = (
         "projection hash"
         if origin is EventOrigin.STATE_PROJECTION
-        else "private owner fanout markers"
+        else "noncanonical origin"
     )
     batch = (
         (current, forged)
@@ -4032,7 +4085,7 @@ def test_private_bar_marker_fails_before_publisher_mutation(
     "case",
     ("missing_flag", "conflicting_flags", "non_boolean_flags"),
 )
-def test_legacy_bar_header_fails_before_publisher_mutation(
+def test_legacy_bar_header_is_rejected_before_publisher_mutation(
     case: str,
 ) -> None:
     active = (Timeframe.H1, Timeframe.M1)
@@ -4071,7 +4124,7 @@ def test_legacy_bar_header_fails_before_publisher_mutation(
         evidence["real_completed"] = 1
     malformed = replace(bar, details=evidence, evidence=evidence)
     before = _publisher_hot_state(publisher)
-    with pytest.raises(ValueError, match="exact complementary"):
+    with pytest.raises(ValueError, match="noncanonical origin"):
         _publish(publisher,
             asof=_clock(0),
             symbol="NQH5",
@@ -4088,7 +4141,7 @@ def test_legacy_bar_header_fails_before_publisher_mutation(
     assert _publisher_hot_state(publisher) == before
 
 
-def test_legacy_bar_without_private_header_fields_remains_valid() -> None:
+def test_legacy_bar_without_private_header_fields_is_rejected() -> None:
     active = (Timeframe.H1, Timeframe.M1)
     frames = {
         timeframe: FrameObservation(
@@ -4117,23 +4170,21 @@ def test_legacy_bar_without_private_header_fields_remains_valid() -> None:
         event_id="valid-legacy-bar-after-current",
     )
 
-    snapshot, _ = _publish(publisher,
-        asof=_clock(0),
-        symbol="NQH5",
-        instrument_id=1,
-        price=100.0,
-        completed_1m=_m1_candle(0, 100.0),
-        frames=frames,
-        inventory=(),
-        displacement=None,
-        semantic_events=(current, legacy),
-        anomalies=(),
-    )
-
-    assert snapshot.price == 100.0
-    assert snapshot.timeframe_states[
-        Timeframe.H1
-    ].quality.source_cutoff == _clock(0)
+    before = _publisher_hot_state(publisher)
+    with pytest.raises(ValueError, match="noncanonical origin"):
+        _publish(publisher,
+            asof=_clock(0),
+            symbol="NQH5",
+            instrument_id=1,
+            price=100.0,
+            completed_1m=_m1_candle(0, 100.0),
+            frames=frames,
+            inventory=(),
+            displacement=None,
+            semantic_events=(current, legacy),
+            anomalies=(),
+        )
+    assert _publisher_hot_state(publisher) == before
 
 
 def test_epoch_reset_clock_only_snapshot_requires_new_epoch_real_anchor() -> None:
@@ -4170,13 +4221,7 @@ def test_epoch_reset_clock_only_snapshot_requires_new_epoch_real_anchor() -> Non
         anomalies=(),
     )
     publisher.on_boundary()
-    reset = _event(
-        EventKind.MARKET_EPOCH_RESET,
-        1,
-        Timeframe.M1,
-        price=None,
-        evidence={"reason": "contract_change_reset"},
-    )
+    reset = _atomic_reset_event(1)
     clock_only = _replayable_m1_event(
         2,
         90.0,
@@ -4245,13 +4290,11 @@ def test_epoch_reset_after_current_m1_fails_before_publisher_mutation() -> None:
         101.0,
         active_timeframes=active,
     )
-    trailing_reset = _event(
-        EventKind.MARKET_EPOCH_RESET,
+    trailing_reset = _atomic_reset_event(
         1,
-        Timeframe.M1,
+        event_id="malordered-contract-change-reset",
         sequence_no=1,
-        price=None,
-        evidence={"reason": "malordered_contract_change_reset"},
+        reason="malordered_contract_change_reset",
     )
     current_frames = {
         timeframe: replace(frame, cutoff=_clock(1))
@@ -4291,7 +4334,7 @@ def test_epoch_reset_after_current_m1_fails_before_publisher_mutation() -> None:
     assert recovered.price == 101.0
 
 
-def test_future_semantic_event_fails_before_publisher_mutation() -> None:
+def test_future_canonical_event_fails_before_publisher_mutation() -> None:
     active = (Timeframe.H1, Timeframe.M1)
     frames = {
         timeframe: FrameObservation(
@@ -4312,12 +4355,11 @@ def test_future_semantic_event_fails_before_publisher_mutation() -> None:
         100.0,
         active_timeframes=active,
     )
-    future = _event(
-        EventKind.STRUCTURE_DIRECTION_CONFIRMED,
+    future = _canonical_bar_event(
         1,
         Timeframe.H1,
-        direction=Direction.LONG,
-        evidence={"structure_id": "future-structure"},
+        close=101.0,
+        event_id="future-h1-bar",
     )
     before = _publisher_hot_state(publisher)
 
@@ -4338,7 +4380,7 @@ def test_future_semantic_event_fails_before_publisher_mutation() -> None:
     assert _publisher_hot_state(publisher) == before
 
 
-def test_same_asof_semantic_event_after_current_m1_remains_valid() -> None:
+def test_same_asof_canonical_event_after_current_m1_remains_valid() -> None:
     active = (Timeframe.H1, Timeframe.M1)
     frames = {
         timeframe: FrameObservation(
@@ -4359,13 +4401,12 @@ def test_same_asof_semantic_event_after_current_m1_remains_valid() -> None:
         100.0,
         active_timeframes=active,
     )
-    same_asof = _event(
-        EventKind.STRUCTURE_DIRECTION_CONFIRMED,
+    same_asof = _canonical_bar_event(
         0,
         Timeframe.H1,
+        close=100.0,
         sequence_no=1,
-        direction=Direction.LONG,
-        evidence={"structure_id": "same-asof-structure"},
+        event_id="same-asof-h1-bar",
     )
 
     snapshot, _ = _publish(publisher,
@@ -4384,7 +4425,7 @@ def test_same_asof_semantic_event_after_current_m1_remains_valid() -> None:
     assert snapshot.price == 100.0
     assert snapshot.timeframe_states[
         Timeframe.H1
-    ].structure.external_direction is Direction.LONG
+    ].quality.source_cutoff == _clock(0)
 
 
 def test_snapshot_publisher_checkpoint_binds_price_and_session_to_replay() -> None:
@@ -4782,14 +4823,10 @@ def test_atomic_replay_rejects_stream_identity_drift_without_reset(
             semantic_registry_identity="definition-test",
         )
 
-    reset = _event(
-        EventKind.MARKET_EPOCH_RESET,
+    reset = _atomic_reset_event(
         1,
-        Timeframe.M1,
         event_id=f"reset-{drift}",
         sequence_no=1,
-        price=None,
-        evidence={"reason": "contract_change_reset"},
     )
     second = replace(second, sequence_no=2)
     replayed = replay_atomic_market_snapshot(
@@ -4837,13 +4874,7 @@ def test_atomic_on_boundary_requires_matching_reset_event() -> None:
         )
 
     publisher = pickle.loads(checkpoint)
-    reset = _event(
-        EventKind.MARKET_EPOCH_RESET,
-        0,
-        Timeframe.M1,
-        price=None,
-        evidence={"reason": "contract_change_reset"},
-    )
+    reset = _atomic_reset_event(0)
     snapshot, _ = _publish(publisher,
         asof=_clock(1),
         symbol="NQH5",

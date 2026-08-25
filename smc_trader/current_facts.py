@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Mapping, MutableMapping
 
-from .event_store import EventStore
+from .event_store import EventStore, _require_exact_market_event
 from .model import (
     BOSScope,
     Direction,
@@ -265,8 +265,8 @@ class CurrentMarketFacts:
         }
         for name, values in groups.items():
             object.__setattr__(self, name, values)
-            if any(type(event) is not MarketEvent for event in values):
-                raise TypeError("current market facts require MarketEvent values")
+            for event in values:
+                _require_exact_market_event(event)
             if any(event.origin is not EventOrigin.SEMANTIC_ATOMIC for event in values):
                 raise ValueError("current market facts require canonical atomic origin")
             keys = tuple((event.known_at, event.sequence_no, event.event_id) for event in values)

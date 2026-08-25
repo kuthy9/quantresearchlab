@@ -72,7 +72,7 @@ _REQUIRED_PRIMITIVE_PROTOCOLS = (
 _LIVE_READINESS_TOKEN = object()
 RUNTIME_ACTION_POLICY_SCHEMA_VERSION = 2
 NEUTRAL_ENGINE_CHECKPOINT_SCHEMA_VERSION = 8
-MODEL_SCHEMA_VERSION = 5
+MODEL_SCHEMA_VERSION = 4
 ACTION_PIPELINE_SCHEMA_VERSION = 1
 LEGACY_ACTION_PIPELINE_MODE = "legacy_decision_risk_compat"
 
@@ -160,6 +160,26 @@ class RuntimeActionBeliefView:
 class ContinuousSMCEngine:
     """Update eyes → brain → decision → risk once per completed 1m bar."""
 
+    _CHECKPOINT_FIELDS = frozenset(
+        {
+            "reader",
+            "observer",
+            "brain",
+            "decision",
+            "risk",
+            "runtime_mode",
+            "_action_pipeline_mode",
+            "action_disabled_playbooks",
+            "_last_snapshot",
+            "_last_belief_position",
+            "_neutral_market_state",
+            "_model_config_sha256",
+            "_foundation_version",
+            "_foundation_registry_identity",
+            "_neutral_checkpoint_schema_version",
+        }
+    )
+
     def __init__(
         self,
         *,
@@ -215,10 +235,15 @@ class ContinuousSMCEngine:
         state["_neutral_checkpoint_schema_version"] = (
             NEUTRAL_ENGINE_CHECKPOINT_SCHEMA_VERSION
         )
+        if set(state) != self._CHECKPOINT_FIELDS:
+            raise ValueError("checkpoint Engine state is not exact")
         return state
 
     def __setstate__(self, state: Mapping[str, Any]) -> None:
-        if not isinstance(state, Mapping):
+        if (
+            not isinstance(state, Mapping)
+            or set(state) != self._CHECKPOINT_FIELDS
+        ):
             raise ValueError(
                 "checkpoint neutral market state schema changed"
             )
@@ -236,6 +261,18 @@ class ContinuousSMCEngine:
                 audit_store = observer.audit_store
                 publisher = observer.market_snapshot_publisher
                 reducer = publisher._event_reducer
+                fact_events = tuple(
+                    event
+                    for name in (
+                        "structure",
+                        "structure_context",
+                        "liquidity",
+                        "displacement",
+                        "zones",
+                        "ranges",
+                    )
+                    for event in getattr(market_snapshot.current_facts, name)
+                )
                 eye_snapshot_bound = bool(
                     market_snapshot is not None
                     and observer.memory._audit_store is audit_store
@@ -247,6 +284,14 @@ class ContinuousSMCEngine:
                     == audit_store.fingerprint()
                     and market_snapshot.current_facts
                     == reducer.current_facts()
+                    and all(
+                        audit_store.get(event.event_id) is event
+                        for event in fact_events
+                    )
+                    and all(
+                        audit_store.get(event.event_id) is event
+                        for event in market_snapshot.events_this_update
+                    )
                 )
             except (AttributeError, TypeError, ValueError):
                 eye_snapshot_bound = False
@@ -298,7 +343,10 @@ class ContinuousSMCEngine:
             raise ValueError(
                 "checkpoint neutral market state schema changed"
             )
-        self.__dict__.update(state)
+        candidate = object.__new__(type(self))
+        candidate.__dict__ = dict(state)
+        self.__dict__.clear()
+        self.__dict__.update(candidate.__dict__)
 
     @classmethod
     def from_config(

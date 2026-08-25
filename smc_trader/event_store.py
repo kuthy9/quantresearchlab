@@ -354,7 +354,21 @@ def _market_event_schema_sha256() -> str:
     ).hexdigest()
 
 
+_MARKET_EVENT_FIELD_NAMES = frozenset(
+    item.name for item in fields(MarketEvent)
+)
+
+
+def _require_exact_market_event(event: MarketEvent) -> None:
+    if (
+        type(event) is not MarketEvent
+        or set(event.__dict__) != _MARKET_EVENT_FIELD_NAMES
+    ):
+        raise ValueError("MarketEvent runtime field-set is not exact")
+
+
 def _event_json(event: MarketEvent) -> str:
+    _require_exact_market_event(event)
     return json.dumps(
         to_primitive(event),
         sort_keys=True,
@@ -539,18 +553,26 @@ class EventStore:
             and self._events == other._events
         )
 
+    def _require_committed_integrity(self) -> None:
+        if (
+            len(self._events) != len(self._digests)
+            or len(self._events) != len(self._by_id)
+        ):
+            raise ValueError("event store contains mutated committed evidence")
+        for event in self._events:
+            _require_exact_market_event(event)
+            if (
+                self._by_id.get(event.event_id) is not event
+                or self._digests.get(event.event_id) != _event_digest(event)
+            ):
+                raise ValueError(
+                    "event store contains mutated committed evidence"
+                )
+
     def __getstate__(self) -> dict[str, Any]:
         # Carry canonical evidence exactly once.  All maps and the prefix
         # hasher are derived and are rebuilt/revalidated by ``__setstate__``.
-        if (
-            len(self._events) != len(self._digests)
-            or any(
-                self._by_id.get(event.event_id) is not event
-                or self._digests.get(event.event_id) != _event_digest(event)
-                for event in self._events
-            )
-        ):
-            raise ValueError("event store contains mutated committed evidence")
+        self._require_committed_integrity()
         return {
             "semantic_version": self.semantic_version,
             "_definition_identity": self._definition_identity,
@@ -586,8 +608,7 @@ class EventStore:
     def append(self, event: MarketEvent) -> bool:
         """Append once, returning false only for an exact idempotent retry."""
 
-        if not isinstance(event, MarketEvent):
-            raise TypeError("event store accepts only MarketEvent values")
+        _require_exact_market_event(event)
         if event.semantic_version != self.semantic_version:
             raise ValueError("event store cannot mix semantic versions")
         digest = _event_digest(event)
@@ -699,8 +720,7 @@ class EventStore:
         )
         appended = 0
         for event in incoming:
-            if not isinstance(event, MarketEvent):
-                raise TypeError("event store accepts only MarketEvent values")
+            _require_exact_market_event(event)
             if event.semantic_version != self.semantic_version:
                 raise ValueError("event store cannot mix semantic versions")
             digest = _event_digest(event)
@@ -3903,6 +3923,7 @@ class EventStore:
     def checkpoint_metadata(self) -> dict[str, Any]:
         """Content-bound metadata for an external replay checkpoint."""
 
+        self._require_committed_integrity()
         last_known_at = self._events[-1].known_at if self._events else None
         return {
             **self.metadata(),
@@ -4047,6 +4068,7 @@ def validate_canonical_event(
 ) -> None:
     """Validate one reducer input against the store's authority contract."""
 
+    _require_exact_market_event(event)
     EventStore._validate_canonical_provenance(
         event,
         available_events=available_events,

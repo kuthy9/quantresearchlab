@@ -66,8 +66,12 @@ def _restore_exact_dataclass_pickle_state(
         or tuple(item[0] for item in serialized) != names
     ):
         raise ValueError(f"{label} pickle schema changed")
+    candidate = object.__new__(type(value))
     for name, item in serialized:
-        object.__setattr__(value, name, item)
+        object.__setattr__(candidate, name, item)
+    candidate.__post_init__()
+    value.__dict__.clear()
+    value.__dict__.update(candidate.__dict__)
 
 
 def _deep_freeze(value: Any) -> Any:
@@ -5303,7 +5307,6 @@ class InteractionUpdate:
             schema_version=INTERACTION_UPDATE_SCHEMA_VERSION,
             label="InteractionUpdate",
         )
-        self.__post_init__()
 
 @dataclass(frozen=True)
 class LiquidityInventoryItem:
@@ -7355,7 +7358,6 @@ class MarketObservation:
             schema_version=MARKET_OBSERVATION_SCHEMA_VERSION,
             label="MarketObservation",
         )
-        self.__post_init__()
 
     def frame(self, timeframe: Timeframe) -> FrameObservation:
         return self.frames[timeframe]
@@ -11084,7 +11086,6 @@ class EngineSnapshot:
             schema_version=ENGINE_SNAPSHOT_SCHEMA_VERSION,
             label="EngineSnapshot",
         )
-        self.__post_init__()
 
 
 @dataclass(frozen=True)
@@ -11125,7 +11126,6 @@ class NeutralEngineSnapshot:
             schema_version=NEUTRAL_ENGINE_SNAPSHOT_SCHEMA_VERSION,
             label="NeutralEngineSnapshot",
         )
-        self.__post_init__()
 
 
 def to_primitive(value: Any) -> Any:

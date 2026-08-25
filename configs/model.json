@@ -1,5 +1,5 @@
 {
-  "schema_version": 5,
+  "schema_version": 4,
   "role": "repeatable_non_pnl_semantic_development",
   "release_readiness": {
     "active_model_natural_authority_validated": false,

@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import copy
 from dataclasses import replace
+import json
+from pathlib import Path
 import pickle
 
 import pandas as pd
@@ -624,6 +627,8 @@ def test_same_epoch_brain_reset_or_replacement_cannot_reseed_neutral_context(
 
 
 def test_engine_neutral_state_is_pickle_checkpoint_ready() -> None:
+    assert engine_module.MODEL_SCHEMA_VERSION == 4
+    assert json.loads(Path("configs/model.json").read_text())["schema_version"] == 4
     bars = _foundation_bars(45)
     engine = ContinuousSMCEngine.from_config(
         "configs/model.json",
@@ -772,6 +777,133 @@ def test_engine_neutral_state_is_pickle_checkpoint_ready() -> None:
             aliased_event_tamper,
             protocol=pickle.HIGHEST_PROTOCOL,
         )
+
+    equal_fact_tamper = pickle.loads(encoded)
+    equal_fact_market = (
+        equal_fact_tamper.last_snapshot.observation.market_snapshot
+    )
+    equal_fact_groups = {
+        name: getattr(equal_fact_market.current_facts, name)
+        for name in (
+            "structure",
+            "structure_context",
+            "liquidity",
+            "displacement",
+            "zones",
+            "ranges",
+        )
+    }
+    equal_fact_name, equal_fact_values = next(
+        (name, values)
+        for name, values in equal_fact_groups.items()
+        if values
+    )
+    equal_but_distinct = copy.deepcopy(equal_fact_values[0])
+    assert equal_but_distinct == equal_fact_values[0]
+    assert equal_but_distinct is not equal_fact_values[0]
+    object.__setattr__(
+        equal_fact_market,
+        "current_facts",
+        replace(
+            equal_fact_market.current_facts,
+            **{
+                equal_fact_name: (
+                    equal_but_distinct,
+                    *equal_fact_values[1:],
+                )
+            },
+        ),
+    )
+    with pytest.raises(
+        ValueError,
+        match="checkpoint neutral market state schema",
+    ):
+        pickle.loads(
+            pickle.dumps(
+                equal_fact_tamper,
+                protocol=pickle.HIGHEST_PROTOCOL,
+            )
+        )
+
+    equal_delta_tamper = pickle.loads(encoded)
+    equal_delta_market = (
+        equal_delta_tamper.last_snapshot.observation.market_snapshot
+    )
+    assert equal_delta_market.events_this_update
+    equal_delta = copy.deepcopy(equal_delta_market.events_this_update[0])
+    assert equal_delta == equal_delta_market.events_this_update[0]
+    assert equal_delta is not equal_delta_market.events_this_update[0]
+    object.__setattr__(
+        equal_delta_market,
+        "events_this_update",
+        (equal_delta, *equal_delta_market.events_this_update[1:]),
+    )
+    with pytest.raises(
+        ValueError,
+        match="checkpoint neutral market state schema",
+    ):
+        pickle.loads(
+            pickle.dumps(
+                equal_delta_tamper,
+                protocol=pickle.HIGHEST_PROTOCOL,
+            )
+        )
+
+    exact_engine = pickle.loads(encoded)
+    exact_engine_before = dict(exact_engine.__dict__)
+    extra_engine_state = dict(exact_engine.__getstate__())
+    extra_engine_state["legacy_history"] = ()
+    with pytest.raises(ValueError, match="schema changed"):
+        exact_engine.__setstate__(extra_engine_state)
+    assert exact_engine.__dict__ == exact_engine_before
+    exact_engine.__dict__["legacy_history"] = ()
+    with pytest.raises(ValueError, match="Engine state is not exact"):
+        pickle.dumps(exact_engine, protocol=pickle.HIGHEST_PROTOCOL)
+
+    def invalid_field_state(value, name: str, replacement):
+        state = dict(value.__getstate__())
+        serialized = list(state["fields"])
+        serialized = [
+            (field_name, replacement if field_name == name else field_value)
+            for field_name, field_value in serialized
+        ]
+        state["fields"] = tuple(serialized)
+        return state
+
+    observation = resumed.last_snapshot.observation
+    observation_before = dict(observation.__dict__)
+    with pytest.raises(TypeError, match="exact MarketSnapshot"):
+        observation.__setstate__(
+            invalid_field_state(observation, "market_snapshot", "forged")
+        )
+    assert observation.__dict__ == observation_before
+
+    engine_snapshot = resumed.last_snapshot
+    engine_snapshot_before = dict(engine_snapshot.__dict__)
+    with pytest.raises(ValueError, match="observation and neutral state differ"):
+        engine_snapshot.__setstate__(
+            invalid_field_state(
+                engine_snapshot,
+                "neutral_market_state",
+                "forged",
+            )
+        )
+    assert engine_snapshot.__dict__ == engine_snapshot_before
+
+    neutral_snapshot = NeutralEngineSnapshot(
+        observation=observation,
+        neutral_market_state=resumed.neutral_market_state,
+    )
+    neutral_snapshot_before = dict(neutral_snapshot.__dict__)
+    with pytest.raises(ValueError, match="observation and state differ"):
+        neutral_snapshot.__setstate__(
+            invalid_field_state(
+                neutral_snapshot,
+                "neutral_market_state",
+                "forged",
+            )
+        )
+    assert neutral_snapshot.__dict__ == neutral_snapshot_before
 
     duplicate = pickle.loads(pickle.dumps(snapshot))
     duplicate.__dict__["market_snapshot"] = "forged-duplicate"

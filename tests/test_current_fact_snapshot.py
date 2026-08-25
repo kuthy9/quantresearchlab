@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from datetime import timedelta
 import pickle
 
 import pytest
 
-from smc_trader.event_store import EventStore
+from smc_trader.event_store import EventStore, _event_json
 from smc_trader.current_facts import (
     CurrentMarketFacts,
     _CURRENT_FACT_FAMILIES,
@@ -277,11 +278,45 @@ def test_current_fact_surface_is_exact_registry_emitted_atomic_contract() -> Non
         pass
 
     derived = DerivedMarketEvent(**canonical.__dict__)
-    with pytest.raises(TypeError, match="MarketEvent values"):
+    with pytest.raises(ValueError, match="field-set is not exact"):
         CurrentMarketFacts(ranges=(derived,))
     facts = CurrentMarketFacts(ranges=(canonical,))
     with pytest.raises(AttributeError):
         object.__setattr__(facts, "legacy_history", (canonical,))
+
+
+def test_event_store_and_current_facts_reject_extra_event_runtime_fields() -> None:
+    current_fact = _canonical_event(
+        "extra-field-range",
+        0,
+        canonical=True,
+        kind=EventKind.DEALING_RANGE_CREATED,
+        zone=(90.0, 110.0),
+        source_entity_ids=("extra-field-range",),
+        details={"range_id": "extra-field-range"},
+    )
+    object.__setattr__(current_fact, "legacy_history", ("forged",))
+    with pytest.raises(ValueError, match="field-set is not exact"):
+        CurrentMarketFacts(ranges=(current_fact,))
+
+    canonical = _canonical_bar(
+        "extra-field-bar",
+        0,
+        timeframe=Timeframe.M1,
+    )
+    pre_admission = replace(canonical, event_id="extra-before-admission")
+    object.__setattr__(pre_admission, "legacy_history", ("forged",))
+    with pytest.raises(ValueError, match="field-set is not exact"):
+        EventStore().append(pre_admission)
+
+    store = EventStore.from_events((canonical,))
+    object.__setattr__(canonical, "legacy_history", ("forged",))
+    with pytest.raises(ValueError, match="field-set is not exact"):
+        pickle.dumps(store, protocol=pickle.HIGHEST_PROTOCOL)
+    with pytest.raises(ValueError, match="field-set is not exact"):
+        store.checkpoint_metadata()
+    with pytest.raises(ValueError, match="field-set is not exact"):
+        _event_json(canonical)
 
 
 def test_reducer_origin_gate_skips_transport_and_rejects_forged_authority() -> None:
@@ -763,6 +798,138 @@ def test_current_fact_categories_and_terminal_eviction_are_exact() -> None:
         assert cold.current_facts() == reducer.current_facts()
 
 
+@pytest.mark.parametrize(
+    ("case", "category", "maximum", "final_event_id"),
+    (
+        ("structure", "structure", 9, "mss-core"),
+        ("liquidity", "liquidity", 1, None),
+        ("displacement", "displacement", 1, "bounded-displacement-next"),
+        ("zone", "zones", 1, "bounded-fvg-partial"),
+    ),
+)
+def test_category_lifecycle_sequences_keep_bounded_current_incumbents(
+    case: str,
+    category: str,
+    maximum: int,
+    final_event_id: str | None,
+) -> None:
+    phase_chain = _authoritative_phase23_chain()
+    if case == "structure":
+        terminal_index = next(
+            index
+            for index, event in enumerate(phase_chain)
+            if event.kind is EventKind.MSS_CORE_CONFIRMED
+        )
+        events = phase_chain[: terminal_index + 1]
+    elif case == "liquidity":
+        events = _crossing_chain(prefix="bounded-liquidity-lifecycle")
+    elif case == "displacement":
+        displacement = next(
+            event
+            for event in phase_chain
+            if event.kind is EventKind.DISPLACEMENT_OBSERVED
+        )
+        parents = tuple(
+            next(event for event in phase_chain if event.event_id == event_id)
+            for event_id in displacement.source_event_ids
+        )
+        payload = {
+            **dict(displacement.evidence),
+            "transition_id": "bounded-displacement-transition-next",
+            "displacement_id": "bounded-displacement-next",
+        }
+        replacement = replace(
+            displacement,
+            event_id="bounded-displacement-next",
+            observed_at=displacement.observed_at + timedelta(minutes=1),
+            event_time=displacement.event_time + timedelta(minutes=1),
+            known_at=displacement.known_at + timedelta(minutes=1),
+            details=payload,
+            evidence=payload,
+            source_entity_ids=("bounded-displacement-next",),
+        )
+        events = (*parents, displacement, replacement)
+    elif case == "zone":
+        bars = (
+            _canonical_bar(
+                "bounded-fvg-left",
+                0,
+                open_=99.0,
+                high=100.0,
+                low=98.0,
+                close=99.0,
+            ),
+            _canonical_bar(
+                "bounded-fvg-middle",
+                1,
+                open_=100.0,
+                high=103.0,
+                low=99.0,
+                close=102.0,
+            ),
+            _canonical_bar(
+                "bounded-fvg-right",
+                2,
+                open_=102.0,
+                high=104.0,
+                low=102.0,
+                close=103.0,
+            ),
+        )
+        fvg = _canonical_event(
+            "bounded-fvg-created",
+            2,
+            canonical=True,
+            kind=EventKind.FVG_CREATED,
+            direction=Direction.LONG,
+            side="below",
+            price=101.0,
+            zone=(100.0, 102.0),
+            sequence_no=1,
+            source_event_ids=tuple(event.event_id for event in bars),
+            source_entity_ids=("bounded-fvg",),
+            details={"fvg_id": "bounded-fvg"},
+        )
+        partial = _canonical_event(
+            "bounded-fvg-partial",
+            3,
+            canonical=True,
+            kind=EventKind.FVG_PARTIALLY_FILLED,
+            direction=Direction.LONG,
+            side="below",
+            price=101.5,
+            zone=(100.0, 102.0),
+            source_event_ids=(fvg.event_id,),
+            source_entity_ids=("bounded-fvg",),
+            details={"fvg_id": "bounded-fvg"},
+        )
+        events = (*bars, fvg, partial)
+    else:  # pragma: no cover - parametrization is closed above.
+        raise AssertionError(case)
+
+    store = EventStore()
+    reducer = _reducer(store)
+    observed_sizes: list[int] = []
+    for event in events:
+        store.append(event)
+        reducer.consume_available()
+        observed_sizes.append(len(getattr(reducer.current_facts(), category)))
+
+    assert max(observed_sizes) <= maximum
+    final_facts = getattr(reducer.current_facts(), category)
+    assert len(final_facts) <= maximum
+    if final_event_id is None:
+        assert final_facts == ()
+    else:
+        assert final_facts[-1].event_id == final_event_id
+
+    cold_store = EventStore.from_events(store.events_since(0))
+    cold = _reducer(cold_store)
+    cold.consume_available()
+    assert cold.current_facts() == reducer.current_facts()
+    assert cold.states == reducer.states
+
+
 def test_bos_resolution_missing_raw_context_is_failure_atomic() -> None:
     prefix, raw, *_ = _phase23_protected_prefix()
     crossing = list(
@@ -921,6 +1088,12 @@ def test_snapshot_carries_bounded_bos_support_across_later_clock(
     old["schema_version"] = 2
     with pytest.raises(ValueError, match="pickle schema changed"):
         MarketSnapshot.__setstate__(object.__new__(MarketSnapshot), old)
+    before_failed_restore = dict(later.__dict__)
+    invalid = dict(later.__getstate__())
+    invalid["event_prefix_fingerprint"] = "X" * 64
+    with pytest.raises(ValueError, match="identity or causal clock"):
+        later.__setstate__(invalid)
+    assert later.__dict__ == before_failed_restore
 
 
 def test_projection_tail_advances_but_physical_tail_fails_atomically() -> None:
@@ -938,6 +1111,18 @@ def test_projection_tail_advances_but_physical_tail_fails_atomically() -> None:
         source_event_ids=(),
     )
     store.append(projection)
+    publisher_state = publisher.__getstate__()
+    invalid_publisher_state = dict(publisher_state)
+    invalid_publisher_state["atomic_authority"] = "yes"
+    publisher_before = dict(publisher.__dict__)
+    with pytest.raises(ValueError, match="checkpoint is invalid"):
+        publisher.__setstate__(invalid_publisher_state)
+    assert publisher.__dict__ == publisher_before
+
+    publisher.__dict__["legacy_history"] = ()
+    with pytest.raises(ValueError, match="pickle state is not exact"):
+        publisher.__getstate__()
+    publisher.__dict__.pop("legacy_history")
     restored = pickle.loads(
         pickle.dumps(publisher, protocol=pickle.HIGHEST_PROTOCOL)
     )
