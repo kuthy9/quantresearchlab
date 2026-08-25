@@ -1335,6 +1335,7 @@ def test_cli_build_and_query_keep_outcomes_in_separate_artifact(
 
     raced_checkpoint = tmp_path / "raced-index.npz"
     raced_report = tmp_path / "raced-report.json"
+    real_write_or_print = query_cases_cli._write_or_print
 
     def collide_after_checkpoint(
         _payload: Mapping[str, Any],
@@ -1342,7 +1343,9 @@ def test_cli_build_and_query_keep_outcomes_in_separate_artifact(
     ) -> None:
         assert destination == raced_report
         raced_report.write_bytes(report_sentinel)
-        raise CaseRetrievalError("simulated concurrent report collision")
+        raise query_cases_cli._OutputNotPublishedError(
+            "simulated concurrent report collision"
+        )
 
     monkeypatch.setattr(
         query_cases_cli,
@@ -1363,6 +1366,93 @@ def test_cli_build_and_query_keep_outcomes_in_separate_artifact(
     assert not raced_checkpoint.exists()
     assert raced_report.read_bytes() == report_sentinel
     assert tuple(tmp_path.glob(".raced-index.npz.*.tmp")) == ()
+
+    replacement_checkpoint = tmp_path / "replacement-index.npz"
+    replacement_report = tmp_path / "replacement-report.json"
+    checkpoint_sentinel = b"concurrent-owner-checkpoint"
+    replace_requested = threading.Event()
+    replacement_complete = threading.Event()
+
+    def replace_checkpoint() -> None:
+        assert replace_requested.wait(timeout=5)
+        replacement_checkpoint.unlink()
+        replacement_checkpoint.write_bytes(checkpoint_sentinel)
+        replacement_complete.set()
+
+    replacement_thread = threading.Thread(target=replace_checkpoint)
+    replacement_thread.start()
+
+    def collide_after_replacement(
+        _payload: Mapping[str, Any],
+        destination: Path | None,
+    ) -> None:
+        assert destination == replacement_report
+        replace_requested.set()
+        assert replacement_complete.wait(timeout=5)
+        replacement_report.write_bytes(report_sentinel)
+        raise query_cases_cli._OutputNotPublishedError(
+            "simulated collision after checkpoint replacement"
+        )
+
+    monkeypatch.setattr(
+        query_cases_cli,
+        "_write_or_print",
+        collide_after_replacement,
+    )
+    try:
+        with pytest.raises(
+            CaseRetrievalError,
+            match="collision after checkpoint replacement",
+        ):
+            query_cases_cli._build(
+                SimpleNamespace(
+                    cases=[cases],
+                    case_manifests=[cases_manifest],
+                    case_manifest_shas=[cases_manifest_sha],
+                    embedding_dim=DIM,
+                    output=replacement_checkpoint,
+                    report=replacement_report,
+                )
+            )
+    finally:
+        replace_requested.set()
+        replacement_thread.join(timeout=5)
+    assert not replacement_thread.is_alive()
+    assert replacement_checkpoint.read_bytes() == checkpoint_sentinel
+    assert replacement_report.read_bytes() == report_sentinel
+
+    interrupted_checkpoint = tmp_path / "interrupted-index.npz"
+    interrupted_report = tmp_path / "interrupted-report.json"
+
+    def interrupt_after_report_commit(
+        payload: Mapping[str, Any],
+        destination: Path | None,
+    ) -> None:
+        real_write_or_print(payload, destination)
+        raise KeyboardInterrupt("simulated post-commit interrupt")
+
+    monkeypatch.setattr(
+        query_cases_cli,
+        "_write_or_print",
+        interrupt_after_report_commit,
+    )
+    with pytest.raises(KeyboardInterrupt, match="post-commit interrupt"):
+        query_cases_cli._build(
+            SimpleNamespace(
+                cases=[cases],
+                case_manifests=[cases_manifest],
+                case_manifest_shas=[cases_manifest_sha],
+                embedding_dim=DIM,
+                output=interrupted_checkpoint,
+                report=interrupted_report,
+            )
+        )
+    assert len(
+        EpisodeCaseIndex.load_checkpoint(interrupted_checkpoint).records
+    ) == 5
+    assert json.loads(interrupted_report.read_text(encoding="utf-8"))["status"] == (
+        "complete"
+    )
 
     completed = subprocess.run(
         [

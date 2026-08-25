@@ -10,6 +10,7 @@ import argparse
 import hashlib
 import json
 from pathlib import Path
+import stat
 import sys
 from typing import Any, Iterable, Mapping
 
@@ -52,6 +53,58 @@ _IDENTITY_FIELDS = (
     "checkpoint_id",
     "member_id",
 )
+
+
+class _OutputNotPublishedError(CaseRetrievalError):
+    """The destination CAS failed before this process published any bytes."""
+
+
+_FileIdentity = tuple[int, int, int, int, int]
+
+
+def _regular_file_identity(path: Path) -> _FileIdentity:
+    """Capture enough identity to guard a later best-effort owned rollback."""
+
+    try:
+        metadata = path.lstat()
+    except OSError as exc:
+        raise CaseRetrievalError(
+            f"published checkpoint identity is unavailable: {path}"
+        ) from exc
+    if not stat.S_ISREG(metadata.st_mode):
+        raise CaseRetrievalError(
+            f"published checkpoint is not a regular file: {path}"
+        )
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_size,
+        metadata.st_mtime_ns,
+        metadata.st_ctime_ns,
+    )
+
+
+def _unlink_owned_regular_file(path: Path, identity: _FileIdentity) -> bool:
+    """Remove only the unchanged regular-file inode published by this build."""
+
+    try:
+        metadata = path.lstat()
+    except OSError:
+        return False
+    current = (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_size,
+        metadata.st_mtime_ns,
+        metadata.st_ctime_ns,
+    )
+    if not stat.S_ISREG(metadata.st_mode) or current != identity:
+        return False
+    try:
+        path.unlink()
+    except OSError:
+        return False
+    return True
 
 
 _JSON_FIELDS = frozenset(
@@ -369,7 +422,7 @@ def _write_or_print(payload: Mapping[str, Any], destination: Path | None) -> Non
         try:
             publish_canonical_manifest(destination, payload)
         except FileExistsError as exc:
-            raise CaseRetrievalError(
+            raise _OutputNotPublishedError(
                 f"output already exists and will not be replaced: {destination}"
             ) from exc
 
@@ -378,7 +431,7 @@ def _build(args: argparse.Namespace) -> None:
     if args.report is not None and (
         args.report.is_symlink() or args.report.exists()
     ):
-        raise CaseRetrievalError(
+        raise _OutputNotPublishedError(
             f"output already exists and will not be replaced: {args.report}"
         )
     records: list[dict[str, Any]] = []
@@ -423,9 +476,10 @@ def _build(args: argparse.Namespace) -> None:
     try:
         checkpoint = index.save_checkpoint(args.output)
     except FileExistsError as exc:
-        raise CaseRetrievalError(
+        raise _OutputNotPublishedError(
             f"output already exists and will not be replaced: {args.output}"
         ) from exc
+    checkpoint_identity = _regular_file_identity(checkpoint)
     try:
         _write_or_print(
             {
@@ -441,8 +495,11 @@ def _build(args: argparse.Namespace) -> None:
             },
             args.report,
         )
-    except BaseException:
-        checkpoint.unlink(missing_ok=True)
+    except _OutputNotPublishedError:
+        # Only this exception proves the report CAS never committed.  Other
+        # exceptions have an unknown commit state (for example an interrupt
+        # immediately after its link) and must preserve the checkpoint.
+        _unlink_owned_regular_file(checkpoint, checkpoint_identity)
         raise
 
 
