@@ -19,7 +19,9 @@ from smc_trader.model import (
     EngineSnapshot,
     EventKind,
     NeutralEngineSnapshot,
+    OpenMarketThesis,
     Playbook,
+    Timeframe,
     to_primitive,
 )
 from smc_trader.observation import ExecutionRealityInput
@@ -56,6 +58,16 @@ def _foundation_bars(count: int):
         )
         for index, bar in enumerate(_grid_bars(count))
     ]
+
+
+def _unsafe_clone(value, **changes):
+    """Build malformed exact-type contracts for fail-closed boundary tests."""
+
+    clone = object.__new__(type(value))
+    clone.__dict__.update(value.__dict__)
+    for name, item in changes.items():
+        object.__setattr__(clone, name, item)
+    return clone
 
 
 def _june_2024_protected_role_and_pool_anchor_bars() -> list[Bar]:
@@ -233,9 +245,17 @@ def test_full_engine_builds_one_authoritative_thesis_tuple_per_clock(
 
 @pytest.mark.parametrize(
     "malformation",
-    ("type", "clock", "revision", "epoch"),
+    (
+        "type",
+        "clock",
+        "revision",
+        "epoch",
+        "context_type",
+        "root",
+        "order",
+    ),
 )
-def test_brain_rejects_malformed_precomputed_neutral_context(
+def test_brain_rejects_malformed_precomputed_neutral_state(
     malformation: str,
 ) -> None:
     engine = ContinuousSMCEngine.from_config(
@@ -248,22 +268,115 @@ def test_brain_rejects_malformed_precomputed_neutral_context(
     if malformation == "type":
         malformed = object()
     elif malformation == "clock":
-        malformed = replace(
-            context,
-            updated_at=context.updated_at + pd.Timedelta(minutes=1),
+        malformed = _unsafe_clone(
+            neutral,
+            asof=neutral.asof + pd.Timedelta(minutes=1),
         )
     elif malformation == "revision":
-        malformed = replace(context, scene_revision_id="scene:forged")
+        malformed = _unsafe_clone(
+            neutral,
+            scene_revision_id="scene:forged",
+        )
+    elif malformation == "epoch":
+        malformed = _unsafe_clone(
+            neutral,
+            market_epoch_id="epoch:forged",
+        )
+    elif malformation == "context_type":
+        malformed = _unsafe_clone(neutral, global_context=object())
     else:
-        malformed = replace(context, market_epoch_id="epoch:forged")
+        thesis_a = OpenMarketThesis(
+            thesis_id="market-thesis:a",
+            root_id="root:a",
+            market_epoch_id=neutral.market_epoch_id,
+            formed_at=neutral.asof,
+            updated_at=neutral.asof,
+            direction=None,
+            source_timeframe=Timeframe.M1,
+            structural_scale="internal",
+            mechanism="test",
+            authority_relation="unknown",
+            mechanism_event_ids=("root:a",),
+        )
+        thesis_b = replace(
+            thesis_a,
+            thesis_id="market-thesis:b",
+            root_id="root:b",
+            mechanism_event_ids=("root:b",),
+        )
+        if malformation == "root":
+            theses = (
+                thesis_a,
+                replace(
+                    thesis_b,
+                    root_id="root:a",
+                    mechanism_event_ids=("root:a",),
+                ),
+            )
+        else:
+            theses = (thesis_b, thesis_a)
+        malformed = _unsafe_clone(
+            neutral,
+            global_context=_unsafe_clone(
+                context,
+                open_market_theses=theses,
+            ),
+        )
 
-    with pytest.raises(ValueError, match="precomputed global context"):
+    with pytest.raises(ValueError, match="precomputed neutral"):
         engine.brain.update(
             observation,
             scene_graph=engine.observer.scene_graph,
             scene_delta=engine.observer.last_scene_delta,
-            precomputed_global_context=malformed,  # type: ignore[arg-type]
+            _precomputed_neutral_state=malformed,  # type: ignore[arg-type]
+            _neutral_authority_capability=(
+                playbooks_module._NEUTRAL_AUTHORITY_CAPABILITY
+            ),
         )
+
+
+@pytest.mark.parametrize("case", ("missing", "orphan", "forged"))
+def test_brain_neutral_capability_is_private_and_failure_atomic(
+    case: str,
+) -> None:
+    engine = ContinuousSMCEngine.from_config(
+        "configs/model.json",
+        runtime_mode="development",
+    )
+    first, second = _grid_bars(2)
+    engine.on_bar(first)
+    observation = engine._observe_bar(second, execution=None)
+    _, neutral = engine._project_neutral(observation)
+    assert neutral is not None
+    before = pickle.dumps(engine.brain, protocol=pickle.HIGHEST_PROTOCOL)
+    before_manager = engine.brain.hypothesis_manager
+    kwargs = {
+        "scene_graph": engine.observer.scene_graph,
+        "scene_delta": engine.observer.last_scene_delta,
+    }
+    if case == "missing":
+        kwargs["_precomputed_neutral_state"] = neutral
+    elif case == "orphan":
+        kwargs["_neutral_authority_capability"] = (
+            playbooks_module._NEUTRAL_AUTHORITY_CAPABILITY
+        )
+    else:
+        kwargs["_precomputed_neutral_state"] = neutral
+        kwargs["_neutral_authority_capability"] = object()
+
+    with pytest.raises(ValueError, match="precomputed neutral"):
+        engine.brain.update(observation, **kwargs)
+
+    assert pickle.dumps(
+        engine.brain,
+        protocol=pickle.HIGHEST_PROTOCOL,
+    ) == before
+    assert engine.brain.hypothesis_manager is before_manager
+    assert "_NEUTRAL_AUTHORITY_CAPABILITY" not in playbooks_module.__all__
+    assert all(
+        value is not playbooks_module._NEUTRAL_AUTHORITY_CAPABILITY
+        for value in engine.brain.__dict__.values()
+    )
 
 
 def test_clock_only_close_cannot_reprice_scene_foundation_or_brain(

@@ -5877,10 +5877,22 @@ class MarketObservation:
                     tuple(identity[4]),
                 ),
             )
-        elif identity is not None:
-            raise ValueError(
-                "published observation cannot duplicate snapshot identity"
-            )
+        else:
+            # Local import preserves the model/market_state module boundary:
+            # ``market_state`` owns the concrete snapshot and imports these
+            # shared contracts in turn.  Published observations must carry
+            # that exact immutable authority object, never a duck-typed shim
+            # whose aliases could disagree or evade snapshot validation.
+            from .market_state import MarketSnapshot
+
+            if type(self.market_snapshot) is not MarketSnapshot:
+                raise TypeError(
+                    "published observation requires an exact MarketSnapshot"
+                )
+            if identity is not None:
+                raise ValueError(
+                    "published observation cannot duplicate snapshot identity"
+                )
         if any(
             not isinstance(event, MarketEvent)
             or event.known_at > self.asof
@@ -6796,6 +6808,13 @@ class MarketObservation:
         return clone
 
     def __getstate__(self) -> Mapping[str, Any]:
+        if self.market_snapshot is not None:
+            from .market_state import MarketSnapshot
+
+            if type(self.market_snapshot) is not MarketSnapshot:
+                raise TypeError(
+                    "published observation requires an exact MarketSnapshot"
+                )
         return _exact_dataclass_pickle_state(
             self,
             schema_version=MARKET_OBSERVATION_SCHEMA_VERSION,

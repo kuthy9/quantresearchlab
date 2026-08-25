@@ -38,7 +38,11 @@ from .observation import (
     ExecutionRealityInput,
     ObserverConfig,
 )
-from .playbooks import BrainConfig, PlaybookBrain
+from .playbooks import (
+    BrainConfig,
+    PlaybookBrain,
+    _NEUTRAL_AUTHORITY_CAPABILITY,
+)
 from .playbook_registry import load_playbook_registry
 from .signal_policy import (
     load_dol_calibration_artifact,
@@ -759,18 +763,21 @@ class ContinuousSMCEngine:
             if belief_position is not None
             else account.position
         )
-        neutral_global_context, neutral_market_state = self._project_neutral(
+        _, neutral_market_state = self._project_neutral(
             observation
         )
         scene_graph = self.observer.scene_graph
         scene_delta = self.observer.last_scene_delta
-        if neutral_global_context is not None:
+        if neutral_market_state is not None:
             belief = self.brain.update(
                 observation,
                 position=resolved_belief_position,
                 scene_graph=scene_graph,
                 scene_delta=scene_delta,
-                precomputed_global_context=neutral_global_context,
+                _precomputed_neutral_state=neutral_market_state,
+                _neutral_authority_capability=(
+                    _NEUTRAL_AUTHORITY_CAPABILITY
+                ),
             )
         else:
             belief = self.brain.update(

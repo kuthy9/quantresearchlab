@@ -67,6 +67,8 @@ from .model import (
     MarketObservation,
     ManipulationLifecycle,
     ManipulationState,
+    NEUTRAL_MARKET_STATE_SCHEMA_VERSION,
+    NeutralMarketState,
     ScaleRelation,
     MicroBOSReference,
     OpenMarketThesis,
@@ -148,6 +150,12 @@ from .scene_graph import (
 _LSR_CONNECTION_MEMO: ContextVar[
     dict[tuple[object, ...], bool] | None
 ] = ContextVar("lsr_connection_memo", default=None)
+
+# One unforgeable, process-local capability distinguishes the Engine's full
+# Neutral -> Brain path from standalone evaluator calls.  It is deliberately
+# private, transient, absent from Brain state/checkpoints, and excluded from
+# public exports and every runtime/configuration fingerprint.
+_NEUTRAL_AUTHORITY_CAPABILITY = object()
 
 
 @dataclass(frozen=True)
@@ -9094,29 +9102,65 @@ def _route_terminal_delta_to_global_context(
     )
 
 
-def _validate_precomputed_global_context(
-    context: GlobalMarketContext,
+def _validate_precomputed_neutral_state(
+    state: NeutralMarketState,
     observation: MarketObservation,
     scene_delta: SceneGraphDelta,
     scene_graph: TemporalMarketSceneGraph,
 ) -> GlobalMarketContext:
     """Fail closed unless Neutral supplied the exact current authority view."""
 
+    if type(state) is not NeutralMarketState:
+        raise ValueError(
+            "precomputed neutral state must be an exact NeutralMarketState"
+        )
+    context = state.global_context
     if type(context) is not GlobalMarketContext:
         raise ValueError(
-            "precomputed global context must be a GlobalMarketContext"
+            "precomputed neutral state must contain an exact GlobalMarketContext"
         )
     theses = context.open_market_theses
+    if type(theses) is not tuple or any(
+        type(thesis) is not OpenMarketThesis for thesis in theses
+    ):
+        raise ValueError(
+            "precomputed neutral state contains invalid thesis types"
+        )
+    if any(
+        type(thesis.thesis_id) is not str
+        or not thesis.thesis_id
+        or type(thesis.root_id) is not str
+        or not thesis.root_id
+        or type(thesis.mechanism_event_ids) is not tuple
+        or thesis.root_id not in thesis.mechanism_event_ids
+        or type(thesis.formed_at) is not pd.Timestamp
+        or type(thesis.updated_at) is not pd.Timestamp
+        or thesis.formed_at > thesis.updated_at
+        or thesis.market_epoch_id != context.market_epoch_id
+        or thesis.updated_at > context.updated_at
+        for thesis in theses
+    ):
+        raise ValueError(
+            "precomputed neutral state contains invalid thesis roots"
+        )
     if (
-        type(scene_delta) is not SceneGraphDelta
-        or not isinstance(scene_graph, TemporalMarketSceneGraph)
+        state.schema_version != NEUTRAL_MARKET_STATE_SCHEMA_VERSION
+        or type(scene_delta) is not SceneGraphDelta
+        or type(scene_graph) is not TemporalMarketSceneGraph
         or scene_delta.asof != observation.asof
         or scene_graph.last_asof != observation.asof
+        or state.asof != observation.asof
+        or observation.scene_revision_id != state.scene_revision_id
+        or state.scene_revision_id != scene_delta.revision_id
+        or state.scene_revision_id != scene_graph.revision_id
+        or state.market_epoch_id != scene_graph._market_epoch_id
         or context.updated_at != observation.asof
+        or context.updated_at != state.asof
         or context.scene_revision_id != scene_delta.revision_id
         or context.scene_revision_id != scene_graph.revision_id
+        or context.scene_revision_id != state.scene_revision_id
         or context.market_epoch_id != scene_graph._market_epoch_id
-        or any(type(thesis) is not OpenMarketThesis for thesis in theses)
+        or context.market_epoch_id != state.market_epoch_id
         or len({thesis.thesis_id for thesis in theses}) != len(theses)
         or len({thesis.root_id for thesis in theses}) != len(theses)
         or theses
@@ -9126,14 +9170,9 @@ def _validate_precomputed_global_context(
                 key=lambda thesis: (thesis.formed_at, thesis.thesis_id),
             )
         )
-        or any(
-            thesis.market_epoch_id != context.market_epoch_id
-            or thesis.updated_at > context.updated_at
-            for thesis in theses
-        )
     ):
         raise ValueError(
-            "precomputed global context is not the current neutral authority"
+            "precomputed neutral state is not the current neutral authority"
         )
     return context
 
@@ -12081,15 +12120,39 @@ class PlaybookBrain:
         position: PositionSnapshot | None = None,
         scene_graph: TemporalMarketSceneGraph | None = None,
         scene_delta: SceneGraphDelta | None = None,
-        precomputed_global_context: GlobalMarketContext | None = None,
+        _precomputed_neutral_state: NeutralMarketState | None = None,
+        _neutral_authority_capability: object | None = None,
     ) -> MarketBelief:
         """Update one completed clock with an update-local graph-query memo.
 
-        Runtime Engine supplies Neutral's complete authoritative context.
+        Runtime Engine supplies Neutral's complete authoritative state.
         Brain reuses its thesis tuple and only derives a transient terminal-
         role view for candidate lifecycle routing.  Direct Brain callers keep
         one fallback build for isolated evaluator and unit-test use.
         """
+
+        has_precomputed_state = _precomputed_neutral_state is not None
+        has_neutral_capability = _neutral_authority_capability is not None
+        if has_precomputed_state != has_neutral_capability:
+            raise ValueError(
+                "precomputed neutral state and capability must be supplied together"
+            )
+        if has_neutral_capability and (
+            _neutral_authority_capability
+            is not _NEUTRAL_AUTHORITY_CAPABILITY
+        ):
+            raise ValueError("precomputed neutral capability is invalid")
+        if has_precomputed_state:
+            if scene_graph is None or scene_delta is None:
+                raise ValueError(
+                    "precomputed neutral state requires its graph and delta"
+                )
+            _validate_precomputed_neutral_state(
+                _precomputed_neutral_state,
+                observation,
+                scene_delta,
+                scene_graph,
+            )
 
         previous_belief = self._belief
         previous_hypothesis_manager = self.hypothesis_manager.fork()
@@ -12111,7 +12174,7 @@ class PlaybookBrain:
                 position=position,
                 scene_graph=scene_graph,
                 scene_delta=scene_delta,
-                precomputed_global_context=precomputed_global_context,
+                _precomputed_neutral_state=_precomputed_neutral_state,
             )
         except Exception:
             # Path/DOL state is an append-only projection of a completed Brain
@@ -12141,7 +12204,7 @@ class PlaybookBrain:
         position: PositionSnapshot | None = None,
         scene_graph: TemporalMarketSceneGraph | None = None,
         scene_delta: SceneGraphDelta | None = None,
-        precomputed_global_context: GlobalMarketContext | None = None,
+        _precomputed_neutral_state: NeutralMarketState | None = None,
     ) -> MarketBelief:
         hypotheses: dict[str, HypothesisBelief] = {}
         thesis_candidates: dict[str, HypothesisBelief] = {}
@@ -12174,14 +12237,8 @@ class PlaybookBrain:
         )
         candidate_epoch_changed = False
         global_context = None
-        if precomputed_global_context is not None and (
-            scene_graph is None or scene_delta is None
-        ):
-            raise ValueError(
-                "precomputed global context requires its graph and delta"
-            )
         if scene_graph is not None and scene_delta is not None:
-            if precomputed_global_context is None:
+            if _precomputed_neutral_state is None:
                 global_context = update_global_market_context(
                     (
                         None
@@ -12214,12 +12271,7 @@ class PlaybookBrain:
                     ),
                 )
             else:
-                global_context = _validate_precomputed_global_context(
-                    precomputed_global_context,
-                    observation,
-                    scene_delta,
-                    scene_graph,
-                )
+                global_context = _precomputed_neutral_state.global_context
                 # Candidate terminal roles are Brain-owned.  This replace may
                 # refine invalidated_source_ids for local lifecycle consumers,
                 # but it preserves Neutral's exact thesis tuple by identity.

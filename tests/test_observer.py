@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import json
 import pickle
+from types import SimpleNamespace
 
 import pandas as pd
 import pytest
@@ -26,6 +28,7 @@ from smc_trader.model import (
     SupportResistanceLifecycle,
     SupportResistanceState,
     Timeframe,
+    to_primitive,
 )
 from smc_trader.observation import (
     CausalObserver,
@@ -37,7 +40,12 @@ from smc_trader.observation import (
     _typed_state_delta_from_cache,
 )
 
-from .helpers import MODEL_SCALE_SPECS, CORE_TEST_SCALE_SPECS, session_bars
+from .helpers import (
+    MODEL_SCALE_SPECS,
+    CORE_TEST_SCALE_SPECS,
+    market_observation,
+    session_bars,
+)
 
 
 STRUCTURE_PROTOCOL = "configs/primitives_structure_liquidity.json"
@@ -45,6 +53,59 @@ DISPLACEMENT_PROTOCOL = "configs/primitives_displacement.json"
 GROUP3_PROTOCOL = "configs/primitives_zones.json"
 GROUP4_PROTOCOL = "configs/primitives_range.json"
 GROUP5_PROTOCOL = "configs/primitives_entry.json"
+
+
+def test_market_observation_rejects_duck_typed_published_snapshot() -> None:
+    observation = market_observation()
+    fake_snapshot = SimpleNamespace(
+        asof=observation.asof,
+        symbol=observation.symbol,
+        instrument_id=observation.instrument_id,
+        price=observation.price,
+        events_this_update=(),
+    )
+
+    with pytest.raises(TypeError, match="exact MarketSnapshot"):
+        replace(
+            observation,
+            market_snapshot=fake_snapshot,
+            _snapshot_free_identity=None,
+        )
+
+    state = observation.__getstate__()
+    serialized = dict(state["fields"])
+    serialized["market_snapshot"] = fake_snapshot
+    serialized["_snapshot_free_identity"] = None
+    forged_state = {
+        "schema_version": state["schema_version"],
+        "fields": tuple(
+            (name, serialized[name]) for name, _ in state["fields"]
+        ),
+    }
+    with pytest.raises(TypeError, match="exact MarketSnapshot"):
+        object.__new__(MarketObservation).__setstate__(forged_state)
+
+    forged_observation = object.__new__(MarketObservation)
+    forged_observation.__dict__.update(observation.__dict__)
+    object.__setattr__(forged_observation, "market_snapshot", fake_snapshot)
+    object.__setattr__(forged_observation, "_snapshot_free_identity", None)
+    with pytest.raises(TypeError, match="exact MarketSnapshot"):
+        pickle.dumps(forged_observation, protocol=pickle.HIGHEST_PROTOCOL)
+
+
+def test_snapshot_free_observation_primitive_hides_transport_identity() -> None:
+    primitive = to_primitive(market_observation())
+
+    assert {
+        "asof",
+        "symbol",
+        "instrument_id",
+        "price",
+        "semantic_events_this_update",
+        "_snapshot_free_identity",
+    }.isdisjoint(primitive)
+    assert primitive["market_snapshot"] is None
+    json.dumps(primitive, sort_keys=True)
 
 
 def _tick_aligned_bars(count: int) -> tuple[Bar, ...]:
