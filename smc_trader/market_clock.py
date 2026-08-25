@@ -1,8 +1,10 @@
 """CME equity-index session clock for the registered 2017-2026 sample."""
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import date
 from functools import lru_cache
+from typing import Any
 
 import pandas as pd
 
@@ -11,6 +13,28 @@ MARKET_TIMEZONE = "America/New_York"
 SETTLEMENT_PAUSE_END_EXCLUSIVE = date(2021, 6, 28)
 CLOCK_START = pd.Timestamp("2016-12-01")
 CLOCK_END = pd.Timestamp("2027-01-31")
+_REGISTERED_NATIVE_TIMEFRAME_SPECS = {
+    "1m": (1, 0),
+    "5m": (5, 0),
+    "15m": (15, 0),
+    "1H": (60, 0),
+    "4H": (240, 18 * 60),
+}
+_NATIVE_BAR_COVERAGE_FIELDS = (
+    "complete",
+    "start",
+    "observed_minutes",
+    "expected_minutes",
+    "real_minutes",
+    "synthetic_minutes",
+)
+_NATIVE_BAR_INTERNAL_OWNER_FIELDS = frozenset(
+    {
+        "owner_price_update_only",
+        "owner_clock_heartbeat_only",
+        "price_source_timeframe",
+    }
+)
 
 # Good Friday is normally absent from the generic CME session calendar.
 # Equity index futures opened for an abbreviated release session on these
@@ -269,6 +293,151 @@ def is_registered_trading_minute(timestamp: pd.Timestamp) -> bool:
     ):
         return False
     return True
+
+
+def validate_registered_native_bar_coverage(
+    *,
+    timeframe: object,
+    start: object,
+    completed_at: object,
+    complete: object,
+    observed_minutes: object,
+    expected_minutes: object,
+    real_minutes: object,
+    synthetic_minutes: object,
+    real_completed: object,
+    clock_only: object,
+) -> None:
+    """Validate one complete native BAR against the frozen CME minute clock."""
+
+    timeframe_value = str(getattr(timeframe, "value", timeframe))
+    try:
+        timeframe_minutes, anchor_minute = (
+            _REGISTERED_NATIVE_TIMEFRAME_SPECS[timeframe_value]
+        )
+    except KeyError as error:
+        raise ValueError("native BAR coverage timeframe is unregistered") from error
+    start_clock = pd.Timestamp(start)
+    completed_clock = pd.Timestamp(completed_at)
+    if start_clock.tzinfo is None or completed_clock.tzinfo is None:
+        raise ValueError("native BAR coverage clocks must be timezone aware")
+    start_utc = start_clock.tz_convert("UTC")
+    completed_utc = completed_clock.tz_convert("UTC")
+    if (
+        start_utc != start_utc.floor("min")
+        or completed_utc != completed_utc.floor("min")
+        or completed_utc <= start_utc
+    ):
+        raise ValueError("native BAR coverage clocks are invalid")
+    registered_start, registered_end = registered_native_bar_bounds(
+        start_utc,
+        timeframe_minutes=timeframe_minutes,
+        anchor_minute=anchor_minute,
+    )
+    if (
+        registered_start.tz_convert("UTC") != start_utc
+        or registered_end.tz_convert("UTC") != completed_utc
+    ):
+        raise ValueError("native BAR coverage does not bind registered bounds")
+
+    registered_minutes = 0
+    cursor = start_utc
+    while cursor < completed_utc:
+        registered_minutes += int(is_registered_trading_minute(cursor))
+        cursor += pd.Timedelta(1, unit="min")
+    values = (
+        observed_minutes,
+        expected_minutes,
+        real_minutes,
+        synthetic_minutes,
+    )
+    if (
+        complete is not True
+        or type(real_completed) is not bool
+        or type(clock_only) is not bool
+        or clock_only is not (not real_completed)
+        or any(type(value) is not int for value in values)
+        or expected_minutes < 1
+        or observed_minutes != expected_minutes
+        or expected_minutes != registered_minutes
+        or real_minutes < 0
+        or synthetic_minutes < 0
+        or real_minutes + synthetic_minutes != observed_minutes
+        or real_completed is not (synthetic_minutes == 0)
+    ):
+        raise ValueError("native BAR coverage is inconsistent")
+
+
+def validate_registered_native_bar_root(
+    *,
+    timeframe: object,
+    event_time: object,
+    known_at: object,
+    evidence: Mapping[str, Any],
+) -> tuple[bool, bool]:
+    """Validate the shared normalized BAR root transport contract."""
+
+    if not isinstance(evidence, Mapping):
+        raise ValueError("normalized BAR root evidence must be a mapping")
+    if pd.Timestamp(event_time) != pd.Timestamp(known_at):
+        raise ValueError(
+            "normalized BAR root event_time and known_at must be exact"
+        )
+    real_completed, clock_only = validate_completed_bar_header(evidence)
+    present = tuple(name in evidence for name in _NATIVE_BAR_COVERAGE_FIELDS)
+    if any(present) and not all(present):
+        raise ValueError(
+            "normalized BAR root coverage fields must be all-or-none"
+        )
+    if not real_completed and not all(present):
+        raise ValueError("clock-only normalized BAR root requires coverage")
+    if all(present):
+        validate_registered_native_bar_coverage(
+            timeframe=timeframe,
+            start=evidence["start"],
+            completed_at=known_at,
+            complete=evidence["complete"],
+            observed_minutes=evidence["observed_minutes"],
+            expected_minutes=evidence["expected_minutes"],
+            real_minutes=evidence["real_minutes"],
+            synthetic_minutes=evidence["synthetic_minutes"],
+            real_completed=real_completed,
+            clock_only=clock_only,
+        )
+    return real_completed, clock_only
+
+
+def require_no_native_bar_owner_markers(
+    evidence: Mapping[str, Any],
+) -> None:
+    """Reject reducer-private fan-out authority in publishable BAR evidence."""
+
+    if _NATIVE_BAR_INTERNAL_OWNER_FIELDS.intersection(evidence):
+        raise ValueError(
+            "completed BAR contains private owner fanout markers"
+        )
+
+
+def validate_completed_bar_header(
+    evidence: Mapping[str, Any],
+) -> tuple[bool, bool]:
+    """Validate authority-neutral completed-BAR transport fields."""
+
+    if not isinstance(evidence, Mapping):
+        raise ValueError("completed BAR evidence must be a mapping")
+    require_no_native_bar_owner_markers(evidence)
+    real_completed = evidence.get("real_completed")
+    clock_only = evidence.get("clock_only")
+    if (
+        type(real_completed) is not bool
+        or type(clock_only) is not bool
+        or clock_only is not (not real_completed)
+    ):
+        raise ValueError(
+            "completed BAR requires exact complementary "
+            "real_completed/clock_only flags"
+        )
+    return real_completed, clock_only
 
 
 def next_registered_native_completion(

@@ -63,6 +63,7 @@ from smc_trader.model import (  # noqa: E402
 )
 from smc_trader.observation import CausalObserver, ObserverConfig  # noqa: E402
 from smc_trader.scene_graph import parse_scale_specs  # noqa: E402
+from smc_trader.semantics import load_semantic_selection  # noqa: E402
 from smc_trader.signal_research import resolve_source_lineage_tokens  # noqa: E402
 
 
@@ -345,6 +346,10 @@ def _scoped_displacement_monotonicity(
 
 def _build_eye(model_path: Path) -> tuple[CausalMarketReader, CausalObserver]:
     model = _json(model_path)
+    selection = load_semantic_selection(
+        model.get("semantic_selection"),
+        root=ROOT,
+    )
     raw = model["observer"]
     specs = parse_scale_specs(model["scales"])
     minimum = raw["minimum_bars"]
@@ -370,15 +375,17 @@ def _build_eye(model_path: Path) -> tuple[CausalMarketReader, CausalObserver]:
             group3_protocol=str(ROOT / raw["group3_protocol"]),
             group4_protocol=str(ROOT / raw["group4_protocol"]),
             group5_protocol=str(ROOT / raw["group5_protocol"]),
-            semantic_registry=str(ROOT / raw["semantic_registry"]),
+            semantic_registry=str(selection.atomic_registry.source_path),
             scale_specs=specs,
             project_scene_graph=False,
             materialize_event_view=False,
             group4_projection_only=False,
             eye_authority_mode=True,
+            canonical_foundation_enabled=True,
             typed_transition_delta_transport=False,
             persist_state_projections=False,
-        )
+        ),
+        semantic_registry=selection.atomic_registry,
     )
     return CausalMarketReader(scale_specs=specs), observer
 
@@ -512,6 +519,7 @@ def _source_only_episode_m5_bars(
             and ancestor.timeframe is Timeframe.M5
             and event.event_time <= ancestor.known_at <= event.known_at
             and ancestor.evidence.get("real_completed") is True
+            and ancestor.evidence.get("clock_only") is False
         ):
             bars.append(
                 (
@@ -727,7 +735,8 @@ def _synthetic_semantic_exception_audit(
         if (
             parent.origin is EventOrigin.NORMALIZED_DATA
             and parent.kind is EventKind.BAR_COMPLETED
-            and parent.evidence.get("real_completed") is not True
+            and parent.evidence.get("real_completed") is False
+            and parent.evidence.get("clock_only") is True
         )
     }
     context_id_set = set(context_ids)
@@ -1210,6 +1219,7 @@ def _collect_eye_inputs(
                 and event.kind is EventKind.BAR_COMPLETED
                 and event.timeframe is Timeframe.M5
                 and event.evidence.get("real_completed") is True
+                and event.evidence.get("clock_only") is False
             )
         }
         semantic_atomic_events = tuple(

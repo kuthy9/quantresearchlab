@@ -144,25 +144,43 @@ def _normalized_bar(
     bar_low = min(bar_open, close) - 1.0 if low is None else low
     detector_id = f"detector:{event_id}"
     data_id = f"data:{event_id}"
+    details = {
+        "detector_candle_id": detector_id,
+        "open": bar_open,
+        "high": bar_high,
+        "low": bar_low,
+        "close": close,
+        "volume": 100.0 if real_completed else 0.0,
+        "atr": atr,
+        "data_complete": True,
+        "real_completed": real_completed,
+        "clock_only": not real_completed,
+        "symbol": symbol,
+        "instrument_id": instrument_id,
+    }
+    if not real_completed:
+        timeframe_minutes = {
+            Timeframe.M1: 1,
+            Timeframe.M5: 5,
+            Timeframe.M15: 15,
+            Timeframe.H1: 60,
+            Timeframe.H4: 240,
+        }[timeframe]
+        details.update(
+            complete=True,
+            start=_clock(minutes)
+            - pd.Timedelta(timeframe_minutes, unit="min"),
+            observed_minutes=timeframe_minutes,
+            expected_minutes=timeframe_minutes,
+            real_minutes=timeframe_minutes - 1,
+            synthetic_minutes=1,
+        )
     return _event(
         event_id,
         minutes,
         kind=EventKind.BAR_COMPLETED,
         timeframe=timeframe,
-        details={
-            "detector_candle_id": detector_id,
-            "open": bar_open,
-            "high": bar_high,
-            "low": bar_low,
-            "close": close,
-            "volume": 100.0 if real_completed else 0.0,
-            "atr": atr,
-            "data_complete": True,
-            "real_completed": real_completed,
-            "clock_only": not real_completed,
-            "symbol": symbol,
-            "instrument_id": instrument_id,
-        },
+        details=details,
         price=close,
         origin=EventOrigin.NORMALIZED_DATA,
         source_data_ids=(data_id,),
@@ -389,6 +407,29 @@ def _with_evidence(
     **changes: object,
 ) -> MarketEvent:
     evidence = {**dict(event.evidence), **changes}
+    if (
+        event.kind is EventKind.BAR_COMPLETED
+        and event.origin is EventOrigin.NORMALIZED_DATA
+        and evidence.get("real_completed") is False
+        and evidence.get("clock_only") is True
+        and "start" not in evidence
+    ):
+        timeframe_minutes = {
+            Timeframe.M1: 1,
+            Timeframe.M5: 5,
+            Timeframe.M15: 15,
+            Timeframe.H1: 60,
+            Timeframe.H4: 240,
+        }[event.timeframe]
+        evidence.update(
+            complete=True,
+            start=event.known_at
+            - pd.Timedelta(timeframe_minutes, unit="min"),
+            observed_minutes=timeframe_minutes,
+            expected_minutes=timeframe_minutes,
+            real_minutes=timeframe_minutes - 1,
+            synthetic_minutes=1,
+        )
     return replace(event, details=evidence, evidence=evidence)
 
 
@@ -2089,6 +2130,7 @@ def test_crossing_requires_real_definitional_bar_roots(
     events = list(
         _crossing_chain(
             prefix=f"synthetic-{bar_role}",
+            timeframe=Timeframe.M1,
             resolved_minutes=3,
         )
     )
@@ -2916,13 +2958,10 @@ def test_authority_cross_links_fail_closed(case: str) -> None:
         index = next(
             i for i, event in enumerate(events) if event.event_id == "bar-left"
         )
-        payload = {
-            **dict(events[index].evidence),
-            "real_completed": False,
-            "clock_only": True,
-        }
-        events[index] = replace(
-            events[index], details=payload, evidence=payload
+        events[index] = _with_evidence(
+            replace(events[index], timeframe=Timeframe.M1),
+            real_completed=False,
+            clock_only=True,
         )
     elif case == "leg_forged_endpoint":
         index = next(
@@ -2947,13 +2986,10 @@ def test_authority_cross_links_fail_closed(case: str) -> None:
         index = next(
             i for i, event in enumerate(events) if event.event_id == "bar-five"
         )
-        payload = {
-            **dict(events[index].evidence),
-            "real_completed": False,
-            "clock_only": True,
-        }
-        events[index] = replace(
-            events[index], details=payload, evidence=payload
+        events[index] = _with_evidence(
+            replace(events[index], timeframe=Timeframe.M1),
+            real_completed=False,
+            clock_only=True,
         )
     elif case == "displacement_missing_metric":
         index = next(
@@ -3476,15 +3512,10 @@ def test_origin_zone_terminal_contract_fails_closed(case: str) -> None:
     elif case == "changed_frozen_zone":
         terminal = replace(terminal, zone=(98.0, 102.0))
     elif case == "synthetic_transition_bar":
-        payload = {
-            **dict(transition_bar.evidence),
-            "real_completed": False,
-            "clock_only": True,
-        }
-        events[-2] = replace(
-            transition_bar,
-            details=payload,
-            evidence=payload,
+        events[-2] = _with_evidence(
+            replace(transition_bar, timeframe=Timeframe.M1),
+            real_completed=False,
+            clock_only=True,
         )
     elif case == "mitigation_with_failed_close":
         payload = {
@@ -3504,7 +3535,10 @@ def test_origin_zone_terminal_contract_fails_closed(case: str) -> None:
 
     with pytest.raises(
         ValueError,
-        match="authoritative (origin-zone terminal|parent) contract",
+        match=(
+            "authoritative (origin-zone terminal|parent) contract|"
+            "authoritative origin_zone_mitigated parent requires an exact real"
+        ),
     ):
         ImmutableEventStore.from_events(events)
 

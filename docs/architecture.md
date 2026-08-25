@@ -32,7 +32,7 @@ treated as predictive validation.
 The attached target-state prompt is therefore only partially satisfied: the
 auditable ownership and fail-closed interfaces are substantially present, but
 the fitted empirical model, Execution Research, operational Shadow Live,
-rolling OOF, and sealed OOS gates are still open.
+rolling OOF, and sealed OOS gates remain unopened and closed.
 
 The existing Brain retains multiple root-specific candidates and raw,
 calibratable scores. Phase 7 adds a six-path Hypothesis Manager,
@@ -100,15 +100,51 @@ Trade Intent → Phase 8 execution evaluator / immutable order FSM v1.5
 exact bar + execution + account evidence → Phase 9 parity journal
 ```
 
-Production construction is explicit and fail closed: the checked-in model
-configuration must contain the boolean
-`observer.canonical_foundation_enabled=true`. This admission is independent of
-scan-only `eye_authority_mode`. The model must also bind the exact foundation
-registry path and canonical identity. Engine construction strict-loads them;
-Engine, Shadow, and checkpoint state freeze and compare the admitted foundation
-version/identity. Engine checkpoint schema v3 is the first schema that carries
-the production foundation projection; earlier schemas are rejected rather than
-restored into an incomplete state.
+### Trading Eye responsibility layers
+
+The requested five layers exist as responsibilities in the reused runtime;
+they are not five duplicate same-named stacks:
+
+| Layer | Current implementation | Contract |
+|---|---|---|
+| Data Normalizer | `CausalMarketReader`, `_TimeframeAggregator`, and normalized-root publication in `CausalObserver` | Accept one completed M1 clock, distinguish real/clock-only/no-trade data, and complete higher frames without future data. |
+| Semantic Event Engine | `CausalObserver` plus `ImmutableEventStore` | Emit preregistered v1.2 atomic facts; Foundation v2 projects admitted facts and is not another detector. |
+| Timeframe State Reducer | pure `reduce_timeframe_state()` and `TimeframeEventReducer` | Reduce ordered normalized/atomic events into independent deterministic timeframe state. |
+| Cross-Timeframe Relation Resolver | `RelationResolver` owned by `MarketSnapshotPublisher` | Compute parent/child relations without allowing child votes to rewrite parent authority. |
+| Market Snapshot Publisher | `MarketSnapshotPublisher` | Publish timeframe, relation, session, event-delta, and Foundation views at one causal clock. |
+
+`CausalObserver` is the event-engine facade; the publisher owns the relation,
+session, and snapshot assembly seam. Creating additional pipelines solely to
+match these labels would split authority rather than simplify it.
+
+Production construction is explicit and fail closed. One root
+`semantic_selection` chooses the atomic `smc_semantics_v1.2` registry and the
+additive `smc_semantic_foundation_v2.0` registry, including both identities.
+The strict loader requires the Foundation registry's parent version to equal
+the selected atomic version. It does not mint a composite or “full-stack v2”
+identity. Engine construction loads this pair once and derives the internal
+Foundation-enabled flag; Engine, Shadow, and checkpoint state freeze and
+compare the existing version/identity fields. Engine checkpoint schema v3 is
+the first schema that carries the production projection; earlier schemas are
+rejected rather than restored into an incomplete state.
+
+### Hot-state boundary
+
+`ImmutableEventStore` remains the sole authoritative atomic history. The
+current Foundation implementation still keeps complete projection records and
+lifecycle transitions in hot state, and `MarketSnapshot` replay identity still
+includes those records. That is a documented migration debt, not a second
+semantic authority. The safe current optimization only skips global geometry
+and cluster scans when no exact Swing or liquidity-level membership input
+changed. Formal Signal and MBO research runners are Eye-only and do not invoke
+Scene, Brain, Decision, Risk, or Execution.
+
+The next schema migration will publish a compact current Foundation view
+(current objects, creation anchors, counts, version, and rolling hashes) while
+the EventStore/cold ledger owns history. It must bump checkpoint, snapshot, and
+transport schemas, retain legacy `FOUNDATION_STATE_CHANGED` decoding, and prove
+full cold replay before production stops emitting that technical event. Hash-
+only state or an aliasing transaction overlay is not an acceptable substitute.
 
 `ContinuousSMCEngine` has one incremental trader path, and its trader replay
 calls that same engine. The frozen Phase 5 diagnostic is deliberately a
@@ -527,13 +563,15 @@ to continue, cancels an unfilled remainder if the target resolves first, and
 does not suppress a complete primary implementation-shortfall pair merely
 because a secondary realized-spread/path metric is censored. Stop/invalidation
 and target prices that are off the frozen tick grid reject the research intent.
-Exact semantic
-provenance for each method price and registered
-wait/cancel/stop/target variants are not yet defined. The manifest remains
-`template_incomplete_not_authorized_to_run`. A read-only readiness checker
-opens no input ledger and writes no artifact; it reports 12 blockers, including
-`formal_runner_not_implemented`. No formal input/result runner or empirical
-result exists, so the Phase 8 gate is not passed.
+The v2 protocol requires exact pre-outcome semantic provenance for every method
+price and registers wait/cancel/stop/target variants. A variant whose required
+future-frozen cancel state or entry-zone boundary is absent is censored by its
+registered evaluability rule; it is never backfilled. The formal runner and
+result serializer exist, but the current run manifest remains
+`template_incomplete_not_authorized_to_run`: no non-zero intent/research-case
+ledger or minute source is bound, output identities are unset, and the manifest
+is not frozen. Therefore no empirical result exists and the Phase 8 gate is not
+passed.
 
 ## Phase 9 shadow-live parity boundary
 

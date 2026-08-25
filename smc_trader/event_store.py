@@ -27,6 +27,7 @@ from .artifact_stream import (
     write_stream_shard,
 )
 from .foundation_registry import FOUNDATION_VERSION
+from .market_clock import validate_registered_native_bar_root
 from .model import (
     Direction,
     EventKind,
@@ -792,10 +793,12 @@ class ImmutableEventStore:
             or event.origin is not EventOrigin.NORMALIZED_DATA
         ):
             return None
-        if event.event_time != event.known_at:
-            raise ValueError(
-                "normalized BAR root event_time and known_at must be exact"
-            )
+        validate_registered_native_bar_root(
+            timeframe=event.timeframe,
+            event_time=event.event_time,
+            known_at=event.known_at,
+            evidence=event.evidence,
+        )
         key = (event.timeframe, event.known_at)
         previous_event_id = bar_event_ids.get(key)
         if previous_event_id is not None and previous_event_id != event.event_id:
@@ -1232,6 +1235,11 @@ class ImmutableEventStore:
                     f"{event.kind.value}: parent {parent.event_id} "
                     f"({parent.kind.value}) must be "
                     f"{expected_origin.value}, got {parent.origin.value}"
+                )
+            if parent.kind is EventKind.BAR_COMPLETED:
+                ImmutableEventStore._require_real_normalized_bar(
+                    parent,
+                    contract=f"{event.kind.value} parent",
                 )
 
     @staticmethod

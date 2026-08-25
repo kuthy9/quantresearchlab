@@ -709,6 +709,51 @@ def _validate_constituent_bar(
             "constituent BAR identity must resolve to the registered normalized "
             f"{timeframe} BAR: {event_id}"
         )
+    evidence_value = _value(event, "evidence", {})
+    evidence = evidence_value if isinstance(evidence_value, Mapping) else {}
+
+    def has_top_level(name: str) -> bool:
+        return name in event if isinstance(event, Mapping) else hasattr(event, name)
+
+    representations: list[tuple[object, object]] = []
+    top_presence = tuple(
+        has_top_level(name) for name in ("real_completed", "clock_only")
+    )
+    if any(top_presence):
+        if not all(top_presence):
+            representations.append((None, None))
+        else:
+            representations.append(
+                (
+                    _value(event, "real_completed"),
+                    _value(event, "clock_only"),
+                )
+            )
+    evidence_presence = tuple(
+        name in evidence for name in ("real_completed", "clock_only")
+    )
+    if any(evidence_presence):
+        if not all(evidence_presence):
+            representations.append((None, None))
+        else:
+            representations.append(
+                (evidence["real_completed"], evidence["clock_only"])
+            )
+    valid_representations = bool(representations) and all(
+        type(real_completed) is bool
+        and type(clock_only) is bool
+        and clock_only is (not real_completed)
+        for real_completed, clock_only in representations
+    )
+    if (
+        not valid_representations
+        or len(set(representations)) != 1
+        or representations[0] != (True, False)
+    ):
+        raise ResearchContractError(
+            "constituent BAR identity must resolve to an exact real "
+            f"normalized BAR: {event_id}"
+        )
     bar_known_at = pd.Timestamp(_value(event, "known_at"))
     if (
         bar_known_at.tzinfo is None

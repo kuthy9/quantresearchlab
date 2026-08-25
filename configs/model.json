@@ -8,6 +8,15 @@
     "mbo_stability_validated": false,
     "live_execution_allowed": false
   },
+  "semantic_selection": {
+    "schema_version": 1,
+    "atomic_semantics_version": "smc_semantics_v1.2",
+    "atomic_registry": "semantics/registry_v1_2.yaml",
+    "atomic_definition_identity": "83f6f7dda806271c9dadfb78cbeb40ac14c2a0fda71463e65bd07a963e3040c7",
+    "foundation_projection_version": "smc_semantic_foundation_v2.0",
+    "foundation_registry": "semantics/foundation_v2_0.yaml",
+    "foundation_registry_identity": "ac04636919931d774309a0c306764fdf8eb53aee41df0f31d4d94e5b9125732b"
+  },
   "playbook_registry": "configs/playbooks.json",
   "path_hypotheses": {
     "protocol": "configs/path_hypotheses.json",
@@ -83,10 +92,6 @@
     }
   ],
   "observer": {
-    "semantic_registry": "semantics/registry_v1_2.yaml",
-    "canonical_foundation_enabled": true,
-    "canonical_foundation_registry": "semantics/foundation_v2_0.yaml",
-    "canonical_foundation_identity": "ac04636919931d774309a0c306764fdf8eb53aee41df0f31d4d94e5b9125732b",
     "atr_period": 14,
     "memory_events": 512,
     "structure_protocol": "configs/primitives_structure_liquidity.json",

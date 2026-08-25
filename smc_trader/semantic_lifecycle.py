@@ -23,7 +23,6 @@ from .foundation_registry import FOUNDATION_VERSION
 from .market_clock import next_registered_native_completion
 from .model import (
     Direction,
-    EventKind,
     FrozenDict,
     MarketEvent,
     Timeframe,
@@ -206,6 +205,7 @@ _TIMEFRAME_ANCHOR_MINUTE = {
     Timeframe.H1: 0,
     Timeframe.H4: 18 * 60,
 }
+LIFECYCLE_CHECKPOINT_SCHEMA_VERSION = 2
 
 # Exact aliases frozen by foundation_v2_0.yaml.  This is deliberately not a
 # prefix/family heuristic: adding an alias requires a versioned registry edit.
@@ -488,6 +488,29 @@ class RealBarClock:
         )
         if self.count < 1 or not self.last_bar_event_id:
             raise ValueError("real-bar clock is invalid")
+
+
+@dataclass(frozen=True)
+class RegisteredBarClock:
+    """Inclusive native-bar transport clock for one timeframe and epoch."""
+
+    timeframe: Timeframe
+    count: int
+    last_completed_at: pd.Timestamp
+    last_bar_event_id: str
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "timeframe", Timeframe(self.timeframe))
+        object.__setattr__(
+            self,
+            "last_completed_at",
+            aware_timestamp(
+                self.last_completed_at,
+                name="registered_bar.last_completed_at",
+            ),
+        )
+        if self.count < 1 or not self.last_bar_event_id:
+            raise ValueError("registered-bar clock is invalid")
 
 
 @dataclass(frozen=True)
@@ -1758,6 +1781,7 @@ class SemanticLifecycleState:
     relation_generations: tuple[RelationGeneration, ...] = ()
     delivery_generations: tuple[DeliveryPhaseGeneration, ...] = ()
     boundary_attacks: tuple[BoundaryAttackFact, ...] = ()
+    registered_bar_clocks: tuple[RegisteredBarClock, ...] = ()
     real_bar_clocks: tuple[RealBarClock, ...] = ()
     applied_transitions: tuple[AppliedTransition, ...] = ()
     asof: pd.Timestamp | None = None
@@ -1773,6 +1797,7 @@ class SemanticLifecycleState:
             "relation_generations",
             "delivery_generations",
             "boundary_attacks",
+            "registered_bar_clocks",
             "real_bar_clocks",
             "applied_transitions",
         ):
@@ -1791,6 +1816,7 @@ class SemanticLifecycleState:
             (self.relation_generations, "relation_generation_id"),
             (self.delivery_generations, "delivery_generation_id"),
             (self.boundary_attacks, "boundary_attack_id"),
+            (self.registered_bar_clocks, "timeframe"),
             (self.real_bar_clocks, "timeframe"),
             (self.applied_transitions, "fact_id"),
         )
@@ -1819,6 +1845,34 @@ class SemanticLifecycleState:
         ]
         if len(active_delivery_tfs) != len(set(active_delivery_tfs)):
             raise ValueError("multiple live delivery generations share one timeframe")
+        registered_by_timeframe = {
+            item.timeframe: item for item in self.registered_bar_clocks
+        }
+        if any(
+            real.timeframe not in registered_by_timeframe
+            or real.count > registered_by_timeframe[real.timeframe].count
+            or real.last_completed_at
+            > registered_by_timeframe[real.timeframe].last_completed_at
+            or (
+                real.last_completed_at
+                == registered_by_timeframe[real.timeframe].last_completed_at
+                and real.last_bar_event_id
+                != registered_by_timeframe[real.timeframe].last_bar_event_id
+            )
+            or (
+                real.count == registered_by_timeframe[real.timeframe].count
+                and (
+                    real.last_completed_at
+                    != registered_by_timeframe[real.timeframe].last_completed_at
+                    or real.last_bar_event_id
+                    != registered_by_timeframe[real.timeframe].last_bar_event_id
+                )
+            )
+            for real in self.real_bar_clocks
+        ):
+            raise ValueError(
+                "real BAR clock conflicts with its registered transport clock"
+            )
 
     def level(self, level_id: str) -> LiquidityLevelState:
         return _find(self.levels, "level_id", level_id)
@@ -1841,11 +1895,16 @@ class SemanticLifecycleState:
 class LifecycleCheckpoint:
     state: SemanticLifecycleState
     state_digest: str
+    schema_version: int = LIFECYCLE_CHECKPOINT_SCHEMA_VERSION
     semantic_version: str = FOUNDATION_VERSION
 
     def __post_init__(self) -> None:
         if (
-            self.semantic_version != FOUNDATION_VERSION
+            "schema_version" not in vars(self)
+            or not isinstance(self.state, SemanticLifecycleState)
+            or "registered_bar_clocks" not in vars(self.state)
+            or self.schema_version != LIFECYCLE_CHECKPOINT_SCHEMA_VERSION
+            or self.semantic_version != FOUNDATION_VERSION
             or self.state.semantic_version != self.semantic_version
             or self.state_digest != content_hash(self.state)
         ):
@@ -2120,7 +2179,13 @@ class SemanticLifecycleReducer:
     def restore(checkpoint: LifecycleCheckpoint) -> SemanticLifecycleState:
         if not isinstance(checkpoint, LifecycleCheckpoint):
             raise TypeError("semantic lifecycle restore requires a checkpoint DTO")
-        if checkpoint.state_digest != content_hash(checkpoint.state):
+        if (
+            "schema_version" not in vars(checkpoint)
+            or not isinstance(checkpoint.state, SemanticLifecycleState)
+            or "registered_bar_clocks" not in vars(checkpoint.state)
+            or checkpoint.schema_version != LIFECYCLE_CHECKPOINT_SCHEMA_VERSION
+            or checkpoint.state_digest != content_hash(checkpoint.state)
+        ):
             raise ValueError("semantic lifecycle checkpoint digest changed")
         return checkpoint.state
 
@@ -2129,44 +2194,98 @@ class SemanticLifecycleReducer:
         state: SemanticLifecycleState,
         transition: NormalizedLifecycleTransition,
     ) -> SemanticLifecycleState:
-        if transition.payload.get("real_completed", True) is not True:
-            raise ValueError("real-bar transition cannot wrap a clock-only bar")
+        real_completed = transition.payload.get("real_completed")
+        clock_only = transition.payload.get("clock_only")
+        if real_completed is True and "clock_only" not in transition.payload:
+            # Preserve the frozen real-transition payload/fingerprint.  The
+            # external BAR event still requires both exact provenance flags.
+            clock_only = False
+        elif (
+            type(real_completed) is not bool
+            or type(clock_only) is not bool
+            or clock_only is not (not real_completed)
+        ):
+            raise ValueError(
+                "completed-BAR transition requires exact complementary "
+                "real_completed/clock_only flags"
+            )
         timeframe = Timeframe(transition.timeframe)
         bar_event_id = (
             _optional_text(transition.payload, "bar_event_id")
             or transition.source_event_ids[0]
         )
-        _require_source(transition, bar_event_id, role="real BAR")
-        prior = next(
-            (item for item in state.real_bar_clocks if item.timeframe is timeframe),
+        _require_source(transition, bar_event_id, role="registered BAR")
+        timeframe_minutes = int(
+            _TIMEFRAME_INTERVAL[timeframe] / pd.Timedelta(1, unit="min")
+        )
+        anchor_minute = _TIMEFRAME_ANCHOR_MINUTE[timeframe]
+        prior_registered = next(
+            (
+                item
+                for item in state.registered_bar_clocks
+                if item.timeframe is timeframe
+            ),
             None,
         )
-        if prior is not None:
+        if prior_registered is not None:
             expected_completion = next_registered_native_completion(
-                prior.last_completed_at,
-                timeframe_minutes=int(
-                    _TIMEFRAME_INTERVAL[timeframe]
-                    / pd.Timedelta(1, unit="min")
-                ),
-                anchor_minute=_TIMEFRAME_ANCHOR_MINUTE[timeframe],
+                prior_registered.last_completed_at,
+                timeframe_minutes=timeframe_minutes,
+                anchor_minute=anchor_minute,
             )
             if transition.known_at != expected_completion:
                 raise ValueError(
-                    "real completed BAR clocks must be exactly contiguous "
+                    "registered completed BAR clocks must be exactly contiguous "
                     "on the registered native clock within an epoch"
                 )
-        updated = RealBarClock(
+        updated_registered = RegisteredBarClock(
             timeframe=timeframe,
-            count=1 if prior is None else prior.count + 1,
+            count=(
+                1 if prior_registered is None else prior_registered.count + 1
+            ),
             last_completed_at=transition.known_at,
             last_bar_event_id=bar_event_id,
         )
-        clocks = (
-            _append_item(state.real_bar_clocks, "timeframe", updated)
-            if prior is None
-            else _replace_item(state.real_bar_clocks, "timeframe", updated)
+        registered_clocks = (
+            _append_item(
+                state.registered_bar_clocks,
+                "timeframe",
+                updated_registered,
+            )
+            if prior_registered is None
+            else _replace_item(
+                state.registered_bar_clocks,
+                "timeframe",
+                updated_registered,
+            )
         )
-        return replace(state, real_bar_clocks=clocks)
+        if not real_completed:
+            return replace(state, registered_bar_clocks=registered_clocks)
+
+        prior_real = next(
+            (item for item in state.real_bar_clocks if item.timeframe is timeframe),
+            None,
+        )
+        updated_real = RealBarClock(
+            timeframe=timeframe,
+            count=1 if prior_real is None else prior_real.count + 1,
+            last_completed_at=transition.known_at,
+            last_bar_event_id=bar_event_id,
+        )
+        real_clocks = (
+            _append_item(state.real_bar_clocks, "timeframe", updated_real)
+            if prior_real is None
+            else _replace_item(
+                state.real_bar_clocks,
+                "timeframe",
+                updated_real,
+            )
+        )
+        return replace(
+            state,
+            registered_bar_clocks=registered_clocks,
+            real_bar_clocks=real_clocks,
+        )
 
     @staticmethod
     def _reset(
@@ -2306,6 +2425,7 @@ class SemanticLifecycleReducer:
             structure_transitions=structure_transitions,
             relation_generations=relations,
             delivery_generations=deliveries,
+            registered_bar_clocks=(),
             real_bar_clocks=(),
             epoch=state.epoch + 1,
         )
@@ -3537,22 +3657,53 @@ class SemanticLifecycleReducer:
 
         transitions: list[StructureTransition] = []
         for candidate in state.structure_transitions:
-            exact_forming_challenger_rollover = (
-                reason == "scope_rollover"
-                and generation.scope is StructureScope.INTERNAL
-                and generation.lifecycle is StructureGenerationLifecycle.FORMING
-                and candidate.protected_acceptance_event_id is not None
+            incumbent = state.structure(
+                candidate.incumbent_structure_generation_id
+            )
+            exact_challenger_lineage = (
+                generation.scope is StructureScope.INTERNAL
+                and generation.lifecycle
+                in {
+                    StructureGenerationLifecycle.FORMING,
+                    StructureGenerationLifecycle.CONFIRMED,
+                }
+                and candidate.lifecycle
+                is StructureTransitionLifecycle.STARTED
                 and candidate.timeframe is generation.timeframe
                 and candidate.challenger_direction is generation.direction
                 and candidate.started_at == generation.started_at
                 and candidate.mss_event_ids == generation.mss_event_ids
+                and incumbent.scope is StructureScope.EXTERNAL
+                and incumbent.timeframe is candidate.timeframe
+                and incumbent.direction is candidate.incumbent_direction
+            )
+            exact_pre_acceptance_rollover = (
+                exact_challenger_lineage
+                and reason == "superseded"
+                and candidate.protected_acceptance_event_id is None
+                and incumbent.lifecycle
+                is StructureGenerationLifecycle.CONFIRMED
+            )
+            exact_post_acceptance_rollover = (
+                exact_challenger_lineage
+                and reason == "scope_rollover"
+                and candidate.protected_acceptance_event_id is not None
+                and incumbent.lifecycle
+                is StructureGenerationLifecycle.TERMINATED
+                and incumbent.termination_reason
+                == "protected_break_accepted"
+                and incumbent.protected_acceptance_event_id
+                == candidate.protected_acceptance_event_id
+                and incumbent.terminated_at is not None
+                and incumbent.terminated_at <= transition.known_at
             )
             should_censor = (
                 candidate.lifecycle is StructureTransitionLifecycle.STARTED
                 and (
                     candidate.incumbent_structure_generation_id == generation_id
                     or candidate.opposite_structure_generation_id == generation_id
-                    or exact_forming_challenger_rollover
+                    or exact_pre_acceptance_rollover
+                    or exact_post_acceptance_rollover
                 )
                 and reason != "protected_break_accepted"
             )

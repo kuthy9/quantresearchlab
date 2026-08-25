@@ -32,6 +32,7 @@ from .signal_research import (
     holm_adjust_fixed_family,
     sha256_file,
 )
+from .semantics import load_semantic_selection
 
 
 PHASE6_PROTOCOL_VERSION = 1
@@ -841,6 +842,13 @@ def load_frozen_phase6_contract(
             raise Phase6ResearchError(
                 "Phase-6 comparison-only authority is absent"
             )
+        if payload.get("synthetic_semantic_exception_policy") != (
+            SYNTHETIC_SEMANTIC_EXCEPTION_POLICY
+        ):
+            raise Phase6ResearchError(
+                "Phase-6 comparison requires the current synthetic semantic "
+                "exception policy"
+            )
     elif comparison_contract is not None:
         raise Phase6ResearchError(
             "comparison contract requires the explicit validation-only seam"
@@ -928,8 +936,23 @@ def load_frozen_phase6_contract(
     observer = model.get("observer") if isinstance(model, Mapping) else None
     if not isinstance(observer, Mapping):
         raise Phase6ResearchError("bound model observer configuration is invalid")
+    try:
+        semantic_selection = load_semantic_selection(
+            model.get("semantic_selection"),
+            root=repository,
+        )
+    except ValueError as error:
+        raise Phase6ResearchError(
+            "bound model semantic_selection is invalid"
+        ) from error
+    if (
+        semantic_selection.atomic_registry.source_path.resolve()
+        != paths["semantic_registry"]
+    ):
+        raise Phase6ResearchError(
+            "model atomic semantic selection disagrees with identity binding"
+        )
     for field, binding in (
-        ("semantic_registry", "semantic_registry"),
         ("structure_protocol", "structure_protocol"),
         ("liquidity_protocol", "liquidity_protocol"),
         ("displacement_protocol", "displacement_protocol"),

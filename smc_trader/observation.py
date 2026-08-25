@@ -7,6 +7,7 @@ from dataclasses import dataclass, field, fields, is_dataclass, replace
 import hashlib
 import json
 import math
+from pathlib import Path
 from typing import Iterable, Mapping, Sequence
 
 import numpy as np
@@ -27,6 +28,7 @@ from .group3 import (
     FVG_BOUNDARY_REASONS,
     Group3BOSSource,
     Group3Protocol,
+    Group3RawOnlyStructureDisposition,
     Group3Update,
 )
 from .group4 import (
@@ -55,11 +57,9 @@ from .model import (
     DealingRangeLifecycle,
     DealingRangeState,
     Direction,
-    EntryLocationState,
     EventKind,
     EventOrigin,
     ExecutionObservation,
-    FairValueGapState,
     FairValueGapLifecycle,
     FrameObservation,
     GROUP4_HARD_BOUNDARY_REASONS,
@@ -71,13 +71,10 @@ from .model import (
     ManipulationState,
     MarketEvent,
     MarketObservation,
-    MicroBOSReference,
-    OrderBlockState,
     OrderBlockLifecycle,
     PathSequenceStep,
     PathSequenceLifecycle,
     PathSequenceState,
-    QualifiedReacceptanceState,
     StructureLifecycle,
     SupportResistanceLifecycle,
     SupportResistanceState,
@@ -92,7 +89,6 @@ from .model import (
     typed_event_entity_key,
 )
 from .market_state import (
-    BalanceRangeState,
     DOLCandidateView,
     LiquidityClusterState,
     MarketSnapshot,
@@ -1928,11 +1924,33 @@ def _typed_progression(
 class CausalObserver:
     """Describes current market state without producing or accepting actions."""
 
-    def __init__(self, config: ObserverConfig) -> None:
+    def __init__(
+        self,
+        config: ObserverConfig,
+        *,
+        semantic_registry: SemanticRegistry | None = None,
+    ) -> None:
         self.config = config
-        self.semantic_registry = SemanticRegistry.from_file(
-            self.config.semantic_registry
-        )
+        if semantic_registry is None:
+            semantic_registry = SemanticRegistry.from_file(
+                self.config.semantic_registry
+            )
+        elif not isinstance(semantic_registry, SemanticRegistry):
+            raise TypeError("observer semantic_registry must be loaded")
+        else:
+            configured_path = Path(self.config.semantic_registry)
+            if not configured_path.is_absolute() and not configured_path.exists():
+                configured_path = (
+                    Path(__file__).resolve().parents[1] / configured_path
+                )
+            if (
+                configured_path.resolve()
+                != semantic_registry.source_path.resolve()
+            ):
+                raise ValueError(
+                    "observer semantic registry path differs from selection"
+                )
+        self.semantic_registry = semantic_registry
         self.audit_store = ImmutableEventStore(
             semantic_version=self.semantic_registry.semantic_version,
             definition_identity=self.semantic_registry.definition_identity,
@@ -2362,6 +2380,10 @@ class CausalObserver:
             str,
         ] = {}
         self._raw_break_event_ids: dict[str, str] = {}
+        self._raw_only_structure_dispositions: dict[
+            str,
+            Group3RawOnlyStructureDisposition,
+        ] = {}
         self._qualified_structure_event_ids: dict[str, str] = {}
         self._displacement_event_ids: dict[str, str] = {}
         self._protected_swing_event_ids: dict[str, str] = {}
@@ -2577,6 +2599,7 @@ class CausalObserver:
         self._known_level_touch_order.clear()
         self._penetration_event_ids.clear()
         self._raw_break_event_ids.clear()
+        self._raw_only_structure_dispositions.clear()
         self._qualified_structure_event_ids.clear()
         self._displacement_event_ids.clear()
         self._protected_swing_event_ids.clear()
@@ -3270,6 +3293,96 @@ class CausalObserver:
             )
         return tuple(assignments)
 
+    def _historical_live_protected_assignment(
+        self,
+        timeframe: Timeframe,
+        *,
+        at_event: MarketEvent,
+    ) -> MarketEvent | None:
+        """Replay protected custody only through one immutable event order."""
+
+        if (
+            at_event.kind is not EventKind.RAW_BOUNDARY_BREAK
+            or not at_event.is_canonical_semantic
+            or at_event.timeframe is not timeframe
+        ):
+            raise ValueError(
+                "raw-only QOB disposition historical custody requires its "
+                "exact raw boundary-break event"
+            )
+        events_by_id = {
+            event.event_id: event for event in self.audit_store.events()
+        }
+        for event in self.memory._audit_pending:
+            prior = events_by_id.get(event.event_id)
+            if prior is not None:
+                committed = self.audit_store.get(event.event_id)
+                if (
+                    committed is None
+                    or self.audit_store.event_digest(event.event_id)
+                    != self.audit_store.recompute_event_digest(event)
+                ):
+                    raise ValueError(
+                        "pending protected-swing history conflicts with audit"
+                    )
+                continue
+            events_by_id[event.event_id] = event
+        cutoff = event_order_key(at_event)
+        live: MarketEvent | None = None
+        for event in sorted(events_by_id.values(), key=event_order_key):
+            if event_order_key(event) > cutoff:
+                break
+            if (
+                event.kind is EventKind.PROTECTED_SWING_ASSIGNED
+                and event.timeframe is timeframe
+            ):
+                protected_swing_id = event.evidence.get(
+                    "protected_swing_id"
+                )
+                if (
+                    not event.is_canonical_semantic
+                    or not isinstance(protected_swing_id, str)
+                    or not protected_swing_id
+                    or protected_swing_id not in event.source_entity_ids
+                    or event.direction
+                    not in {Direction.LONG, Direction.SHORT}
+                    or event.price is None
+                ):
+                    raise ValueError(
+                        "historical protected-swing assignment is invalid"
+                    )
+                live = event
+                continue
+            if (
+                live is None
+                or event.kind is not EventKind.ACCEPTANCE_CONFIRMED
+                or event.evidence.get("protected_swing_event_id")
+                != live.event_id
+            ):
+                continue
+            protected_swing_id = live.evidence.get("protected_swing_id")
+            source_timeframe = event.evidence.get(
+                "source_timeframe", event.timeframe.value
+            )
+            if (
+                not event.is_canonical_semantic
+                or event.evidence.get("protected_swing_id")
+                != protected_swing_id
+                or live.event_id not in event.context_event_ids
+                or source_timeframe != timeframe.value
+                or event.direction
+                is not (
+                    Direction.SHORT
+                    if live.direction is Direction.LONG
+                    else Direction.LONG
+                )
+            ):
+                raise ValueError(
+                    "historical protected-swing terminal is invalid"
+                )
+            live = None
+        return live
+
     def _replace_live_protected_assignment(
         self,
         event: MarketEvent,
@@ -3727,6 +3840,19 @@ class CausalObserver:
             "session_name": session_name,
             "session_phase": session_phase,
         }
+        if not candle.real_completed:
+            # Clock-only roots must expose the exact coverage defect they
+            # transport.  Preserve historical real-root evidence/identities.
+            bar_evidence.update(
+                {
+                    "complete": bool(candle.complete),
+                    "start": candle.start,
+                    "observed_minutes": int(candle.observed_minutes),
+                    "expected_minutes": int(candle.expected_minutes),
+                    "real_minutes": int(candle.real_minutes),
+                    "synthetic_minutes": int(candle.synthetic_minutes),
+                }
+            )
         event = _event(
             EventKind.BAR_COMPLETED,
             candle.end,
@@ -3814,10 +3940,6 @@ class CausalObserver:
                     if (
                         candle.complete
                         and (
-                            candle.real_completed
-                            or candle.timeframe is Timeframe.M1
-                        )
-                        and (
                             coverage_start is None
                             or candle.end >= coverage_start
                         )
@@ -3836,10 +3958,6 @@ class CausalObserver:
                 for candle in histories[timeframe]
                 if (
                     candle.complete
-                    and (
-                        candle.real_completed
-                        or candle.timeframe is Timeframe.M1
-                    )
                     and (
                         coverage_start is None
                         or candle.end >= coverage_start
@@ -5428,6 +5546,48 @@ class CausalObserver:
                             is not item.direction
                         )
                     if (
+                        continuation_opposes_live_protection
+                        and frame.timeframe is Timeframe.M5
+                        and item.source_structure_id is not None
+                        and item.break_bar_id is not None
+                    ):
+                        if len(live_protected_assignments) != 1:
+                            raise ValueError(
+                                "raw-only continuation suppression lacks one "
+                                "exact protected-assignment witness"
+                            )
+                        disposition = Group3RawOnlyStructureDisposition(
+                            bos_id=item.bos_id,
+                            raw_break_event_id=raw_break.event_id,
+                            protected_assignment_event_id=(
+                                live_protected_assignments[0][1]
+                            ),
+                            timeframe=frame.timeframe,
+                            direction=item.direction,
+                            resolved_at=item.resolved_at,
+                            source_structure_id=item.source_structure_id,
+                            target_swing_id=item.target_swing_id,
+                            break_bar_id=item.break_bar_id,
+                            bos_source_displacement_id=(
+                                item.source_displacement_id
+                            ),
+                        )
+                        prior_disposition = (
+                            self._raw_only_structure_dispositions.get(
+                                item.bos_id
+                            )
+                        )
+                        if (
+                            prior_disposition is not None
+                            and prior_disposition != disposition
+                        ):
+                            raise ValueError(
+                                "raw-only continuation disposition drifted"
+                            )
+                        self._raw_only_structure_dispositions[
+                            item.bos_id
+                        ] = disposition
+                    if (
                         item.scope is BOSScope.CONTINUATION
                         and not continuation_opposes_live_protection
                     ):
@@ -5777,9 +5937,13 @@ class CausalObserver:
                 "Group 3 foundation source is absent or has the wrong kind"
             )
         if event.kind is EventKind.BAR_COMPLETED:
-            if event.origin is not EventOrigin.NORMALIZED_DATA:
+            if (
+                event.origin is not EventOrigin.NORMALIZED_DATA
+                or event.evidence.get("real_completed") is not True
+                or event.evidence.get("clock_only") is not False
+            ):
                 raise ValueError(
-                    "Group 3 foundation BAR source is not normalized data"
+                    "Group 3 foundation BAR source is not a real normalized BAR"
                 )
         elif not event.is_canonical_semantic:
             raise ValueError(
@@ -6047,6 +6211,308 @@ class CausalObserver:
                 if self.memory.audit_event_including_pending(event_id) is None:
                     raise ValueError("first retest context event is absent")
 
+    def _group3_raw_only_structure_dispositions(
+        self,
+    ) -> tuple[Group3RawOnlyStructureDisposition, ...]:
+        """Prove provisional QOB sources that intentionally stopped at RAW."""
+
+        if self._group3_tracker is None:
+            return ()
+        raw_only: list[Group3RawOnlyStructureDisposition] = []
+        for completed in self._group3_tracker._pending_foundation_completed:
+            for seed in completed.new_qualified_order_blocks:
+                state = seed.legacy_state
+                bos_id = seed.compatible_structure_entity_id
+                disposition = self._raw_only_structure_dispositions.get(
+                    bos_id
+                )
+                if bos_id in self._qualified_structure_event_ids:
+                    if disposition is not None:
+                        raise ValueError(
+                            "raw-only QOB disposition conflicts with a "
+                            "qualified BOS/MSS binding"
+                        )
+                    continue
+                if disposition is None:
+                    # A generic missing binding is not evidence that the BOS
+                    # was intentionally left raw; finalization remains
+                    # fail-closed for that case.
+                    continue
+                raw_event_id = self._raw_break_event_ids.get(bos_id)
+                if raw_event_id != disposition.raw_break_event_id:
+                    raise ValueError(
+                        "raw-only QOB disposition lost its exact raw-break "
+                        "custody"
+                    )
+                raw = self._group3_foundation_source_event(
+                    disposition.raw_break_event_id,
+                    expected_kinds=frozenset(
+                        {EventKind.RAW_BOUNDARY_BREAK}
+                    ),
+                )
+                relation_events = tuple(
+                    event
+                    for event in (
+                        *self.audit_store.events(),
+                        *self.memory._audit_pending,
+                    )
+                    if event.kind
+                    in {
+                        EventKind.QUALIFIED_BOS,
+                        EventKind.MSS_CORE_CONFIRMED,
+                    }
+                    and event.evidence.get("bos_id") == bos_id
+                )
+                if relation_events:
+                    raise ValueError(
+                        "raw-only QOB disposition has a qualified BOS/MSS "
+                        "audit fact"
+                    )
+                target_event_id = self._confirmed_swing_event_ids.get(
+                    state.source_bos_target_swing_id
+                )
+                break_bar_event_id = self._bar_event_ids_by_candle_id.get(
+                    state.source_bos_break_bar_id
+                )
+                structure_event_id = self._structure_direction_event_ids.get(
+                    state.source_bos_structure_id
+                )
+                active_displacement_event_id = (
+                    self._displacement_event_ids.get(
+                        state.source_active_transition_id
+                    )
+                )
+                bos_source_displacement_event_id = (
+                    None
+                    if disposition.bos_source_displacement_id is None
+                    else (
+                        raw.context_event_ids[1]
+                        if len(raw.context_event_ids) == 2
+                        else None
+                    )
+                )
+                if (
+                    disposition.bos_source_displacement_id is not None
+                    and bos_source_displacement_event_id is None
+                ):
+                    raise ValueError(
+                        "raw-only QOB disposition lacks its exact optional "
+                        "BOS displacement source"
+                    )
+                if any(
+                    event_id is None
+                    for event_id in (
+                        target_event_id,
+                        break_bar_event_id,
+                        structure_event_id,
+                        active_displacement_event_id,
+                    )
+                ):
+                    raise ValueError(
+                        "raw-only QOB disposition lacks its exact canonical "
+                        "source chain"
+                    )
+                expected_raw_context = (
+                    raw.context_event_ids[:1]
+                    + (
+                        ()
+                        if bos_source_displacement_event_id is None
+                        else (bos_source_displacement_event_id,)
+                    )
+                )
+                if (
+                    not raw.context_event_ids
+                    or raw.context_event_ids != expected_raw_context
+                ):
+                    raise ValueError(
+                        "raw-only QOB disposition has an invalid context chain"
+                    )
+                protected_assignment = (
+                    self._historical_live_protected_assignment(
+                        state.timeframe,
+                        at_event=raw,
+                    )
+                )
+                if (
+                    protected_assignment is None
+                    or protected_assignment.event_id
+                    != disposition.protected_assignment_event_id
+                ):
+                    raise ValueError(
+                        "raw-only QOB disposition lost its exact historical "
+                        "protected-assignment witness"
+                    )
+                bos_state = self.memory.audit_event_including_pending(
+                    raw.context_event_ids[0]
+                )
+                active_displacement = (
+                    self.memory.audit_event_including_pending(
+                        active_displacement_event_id
+                    )
+                )
+                bos_source_displacement = (
+                    None
+                    if bos_source_displacement_event_id is None
+                    else self.memory.audit_event_including_pending(
+                        bos_source_displacement_event_id
+                    )
+                )
+                structure = self.memory.audit_event_including_pending(
+                    structure_event_id
+                )
+                if (
+                    bos_state is None
+                    or active_displacement is None
+                    or structure is None
+                    or (
+                        bos_source_displacement_event_id is not None
+                        and bos_source_displacement is None
+                    )
+                ):
+                    raise ValueError(
+                        "raw-only QOB disposition lacks its exact audit "
+                        "source chain"
+                    )
+                expected_source_entities = (
+                    bos_id,
+                    state.source_bos_target_swing_id,
+                    state.source_bos_structure_id,
+                    *(
+                        ()
+                        if disposition.bos_source_displacement_id is None
+                        else (disposition.bos_source_displacement_id,)
+                    ),
+                )
+                expected_bos_sources = (
+                    state.source_bos_target_swing_id,
+                    state.source_bos_structure_id,
+                    *(
+                        ()
+                        if disposition.bos_source_displacement_id is None
+                        else (disposition.bos_source_displacement_id,)
+                    ),
+                    state.source_bos_break_bar_id,
+                )
+                invalid_bos_source_displacement = bool(
+                    bos_source_displacement is not None
+                    and (
+                        bos_source_displacement.kind
+                        is not EventKind.DISPLACEMENT_OBSERVED
+                        or not bos_source_displacement.is_canonical_semantic
+                        or bos_source_displacement.timeframe
+                        is not state.timeframe
+                        or bos_source_displacement.direction
+                        is not state.direction
+                        or bos_source_displacement.evidence.get(
+                            "displacement_id"
+                        )
+                        != disposition.bos_source_displacement_id
+                    )
+                )
+                if (
+                    seed.compatible_structure_kind
+                    is not CompatibleStructureKind.QUALIFIED_BOS
+                    or state.source_bos_id != bos_id
+                    or state.source_bos_scope is not BOSScope.CONTINUATION
+                    or state.source_bos_mss_qualified
+                    or state.timeframe is not Timeframe.M5
+                    or state.source_bos_resolved_at != state.confirmed_at
+                    or state.confirmed_at != completed.candle.end
+                    or state.source_bos_break_bar_id
+                    != completed.candle_id
+                    or disposition.bos_id != bos_id
+                    or disposition.timeframe is not state.timeframe
+                    or disposition.direction is not state.direction
+                    or disposition.resolved_at
+                    != state.source_bos_resolved_at
+                    or disposition.source_structure_id
+                    != state.source_bos_structure_id
+                    or disposition.target_swing_id
+                    != state.source_bos_target_swing_id
+                    or disposition.break_bar_id
+                    != state.source_bos_break_bar_id
+                    or protected_assignment.event_id
+                    != disposition.protected_assignment_event_id
+                    or protected_assignment.timeframe is not state.timeframe
+                    or protected_assignment.direction is state.direction
+                    or protected_assignment.known_at
+                    > state.source_bos_resolved_at
+                    or raw.timeframe is not state.timeframe
+                    or raw.direction is not state.direction
+                    or raw.event_time != state.source_bos_resolved_at
+                    or raw.known_at != state.source_bos_resolved_at
+                    or raw.evidence.get("bos_id") != bos_id
+                    or raw.evidence.get("scope")
+                    != BOSScope.CONTINUATION.value
+                    or raw.evidence.get("target_swing_id")
+                    != state.source_bos_target_swing_id
+                    or raw.evidence.get("break_bar_id")
+                    != state.source_bos_break_bar_id
+                    or raw.evidence.get("source_displacement_id")
+                    != disposition.bos_source_displacement_id
+                    or raw.source_event_ids
+                    != (target_event_id, break_bar_event_id)
+                    or raw.source_data_ids
+                    != (state.source_bos_break_bar_id,)
+                    or raw.source_entity_ids != expected_source_entities
+                    or raw.context_event_ids != expected_raw_context
+                    or bos_state.kind is not EventKind.STRUCTURE_BREAK
+                    or bos_state.entity_id != bos_id
+                    or bos_state.lifecycle != BOSLifecycle.CONFIRMED.value
+                    or bos_state.timeframe is not state.timeframe
+                    or bos_state.direction is not state.direction
+                    or bos_state.formed_at != state.source_bos_pending_at
+                    or bos_state.confirmed_at
+                    != state.source_bos_resolved_at
+                    or bos_state.known_at != state.source_bos_resolved_at
+                    or bos_state.source_ids != expected_bos_sources
+                    or bos_state.evidence.get("bos_id") != bos_id
+                    or bos_state.evidence.get("scope")
+                    != BOSScope.CONTINUATION.value
+                    or bos_state.evidence.get("source_structure_id")
+                    != state.source_bos_structure_id
+                    or bos_state.evidence.get("break_bar_id")
+                    != state.source_bos_break_bar_id
+                    or bos_state.evidence.get("source_displacement_id")
+                    != disposition.bos_source_displacement_id
+                    or structure.kind
+                    is not EventKind.STRUCTURE_DIRECTION_CONFIRMED
+                    or not structure.is_canonical_semantic
+                    or structure.timeframe is not state.timeframe
+                    or structure.direction is not state.direction
+                    or structure.evidence.get("structure_id")
+                    != state.source_bos_structure_id
+                    or not structure.source_entity_ids
+                    or structure.source_entity_ids[0]
+                    != state.source_bos_structure_id
+                    or active_displacement.kind
+                    is not EventKind.DISPLACEMENT_OBSERVED
+                    or not active_displacement.is_canonical_semantic
+                    or active_displacement.timeframe is not state.timeframe
+                    or active_displacement.direction is not state.direction
+                    or active_displacement.known_at
+                    != state.source_displacement_active_at
+                    or active_displacement.event_time
+                    != state.source_displacement_started_at
+                    or active_displacement.evidence.get("transition_id")
+                    != state.source_active_transition_id
+                    or active_displacement.evidence.get("displacement_id")
+                    != state.source_displacement_id
+                    or active_displacement.evidence.get("lifecycle")
+                    != DisplacementLifecycle.ACTIVE.value
+                    or active_displacement.source_entity_ids
+                    != (state.source_displacement_id,)
+                    or invalid_bos_source_displacement
+                ):
+                    raise ValueError(
+                        "raw-only QOB disposition does not match its exact "
+                        "BOS, structure, displacement, or BAR provenance"
+                    )
+                raw_only.append(disposition)
+        if len(raw_only) != len({item.bos_id for item in raw_only}):
+            raise ValueError("raw-only QOB disposition is ambiguous")
+        return tuple(raw_only)
+
     def _finalize_group3_foundation(
         self,
         update: Group3Update,
@@ -6061,6 +6527,9 @@ class CausalObserver:
                 (),
             )
         }
+        raw_only_dispositions = (
+            self._group3_raw_only_structure_dispositions()
+        )
         finalized = self._group3_tracker.finalize_foundation(
             update,
             bar_event_ids_by_candle_id=(
@@ -6082,6 +6551,9 @@ class CausalObserver:
             structure_event_ids_by_entity=(
                 self._qualified_structure_event_ids
             ),
+            raw_only_structure_dispositions=(
+                raw_only_dispositions
+            ),
             fvg_creation_event_ids_by_entity=(
                 self._fvg_created_event_ids
             ),
@@ -6094,6 +6566,16 @@ class CausalObserver:
             sessions_by_clock=sessions,
         )
         self._validate_group3_foundation_projection(finalized)
+        if any(
+            self._raw_only_structure_dispositions.get(disposition.bos_id)
+            != disposition
+            for disposition in raw_only_dispositions
+        ):
+            raise RuntimeError(
+                "raw-only QOB disposition changed during finalization"
+            )
+        for disposition in raw_only_dispositions:
+            del self._raw_only_structure_dispositions[disposition.bos_id]
         return finalized
 
     def _finalize_group3_foundation_boundary(
@@ -6441,6 +6923,32 @@ class CausalObserver:
                 )
             )
         return nodes, assignments, tuple(plans)
+
+    @staticmethod
+    def _foundation_geometry_invalidated(
+        authoritative_events: Sequence[MarketEvent],
+    ) -> bool:
+        """Return whether this clock can introduce swing geometry."""
+
+        return any(
+            event.kind is EventKind.SWING_CONFIRMED
+            for event in authoritative_events
+        )
+
+    @staticmethod
+    def _foundation_cluster_membership_invalidated(
+        new_records: Sequence[FoundationRecord],
+        authoritative_events: Sequence[MarketEvent],
+    ) -> bool:
+        """Return whether canonical cluster membership can have changed."""
+
+        return any(
+            event.kind is EventKind.MARKET_EPOCH_RESET
+            for event in authoritative_events
+        ) or any(
+            record.object_type is FoundationObjectType.LIQUIDITY_LEVEL
+            for record in new_records
+        )
 
     def _foundation_leg_plans(
         self,
@@ -7136,7 +7644,7 @@ class CausalObserver:
                 event_id
                 for member_id in member_ids
                 for event_id in levels_by_id[member_id].source_event_ids
-                if event_id in adapter.known_input_event_ids
+                if adapter.is_known_input_event_id(event_id)
             )
 
         for terminal in update.terminated:
@@ -7326,6 +7834,7 @@ class CausalObserver:
                 or native_bar.timeframe is not timeframe
                 or native_bar.known_at != snapshot.asof
                 or native_bar.evidence.get("real_completed") is not True
+                or native_bar.evidence.get("clock_only") is not False
             ):
                 raise ValueError("delivery update lacks its exact native BAR")
             parent = active_structures.get(timeframe)
@@ -7660,12 +8169,19 @@ class CausalObserver:
                         protected_swing_id=protected_swing_id,
                     )
                 )
-        nodes, assignments, geometry_plans = self._foundation_geometry_plans(
-            frames=frames,
-            histories=histories,
-            known_at=asof,
-            revisions=plan_revisions,
-        )
+        if self._foundation_geometry_invalidated(authoritative):
+            nodes, assignments, geometry_plans = (
+                self._foundation_geometry_plans(
+                    frames=frames,
+                    histories=histories,
+                    known_at=asof,
+                    revisions=plan_revisions,
+                )
+            )
+        else:
+            nodes = self._foundation_geometry_nodes
+            assignments = self._foundation_geometry_assignments
+            geometry_plans = ()
         plans = [
             *geometry_plans,
             *self._foundation_leg_plans(frames, plan_revisions),
@@ -7850,14 +8366,24 @@ class CausalObserver:
             )
         except ValueError:
             current_bar_event_id = None
+        new_precluster_records = candidate.projection.records[
+            prior_record_count:
+        ]
+        clusters_invalidated = (
+            self._foundation_cluster_membership_invalidated(
+                new_precluster_records,
+                authoritative,
+            )
+        )
         clusters = self._foundation_update_clusters(
             adapter=candidate,
             known_at=asof,
             authoritative_events=authoritative,
             revisions=plan_revisions,
-        ) if current_bar_event_id is not None or reset_in_update else tuple(
-            self._foundation_active_clusters
-        )
+        ) if (
+            (current_bar_event_id is not None or reset_in_update)
+            and clusters_invalidated
+        ) else tuple(self._foundation_active_clusters)
         foundation_states = foundation_dol_timeframe_states(
             candidate.projection,
             states=snapshot.timeframe_states,
@@ -12046,7 +12572,7 @@ class CausalObserver:
                 asof=update.asof,
                 symbol=update.completed_1m.symbol,
                 instrument_id=update.completed_1m.instrument_id,
-                price=float(update.completed_1m.close),
+                price=market_snapshot.price,
                 frames=frames,
                 recent_events=recent_events,
                 event_durations_minutes=event_durations_minutes,

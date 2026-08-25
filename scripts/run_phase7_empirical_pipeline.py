@@ -25,6 +25,7 @@ import math
 import os
 from pathlib import Path
 import shutil
+import stat as stat_module
 import subprocess
 import sys
 import tempfile
@@ -48,6 +49,7 @@ from smc_trader.path_belief import (  # noqa: E402
 )
 from smc_trader.probability_admission import (  # noqa: E402
     AdmissionThresholds,
+    PROBABILITY_ADMISSION_SCHEMA_VERSION,
     ProbabilityPrediction,
     dol_support_label,
     evaluate_probability_admission,
@@ -84,6 +86,7 @@ from smc_trader.signal_outcome_fit import (  # noqa: E402
     DOLModelLineage,
     DOLSupportLabel,
     DOLTemperatureObservation,
+    SIGNAL_OUTCOME_ADMISSION_SCHEMA,
     SignalOutcomeAdmissionThresholds,
     SignalOutcomeCohort,
     SignalOutcomeFitError,
@@ -91,6 +94,7 @@ from smc_trader.signal_outcome_fit import (  # noqa: E402
     fit_dol_temperature,
 )
 from smc_trader.shadow_live import ShadowClockInput  # noqa: E402
+from smc_trader.semantics import load_semantic_selection  # noqa: E402
 from smc_trader.structural_outcome import OutcomeBar  # noqa: E402
 from scripts.run_shadow_file_pilot import (  # noqa: E402
     INPUT_SCHEMA_VERSION as SHADOW_INPUT_SCHEMA_VERSION,
@@ -98,9 +102,16 @@ from scripts.run_shadow_file_pilot import (  # noqa: E402
 )
 
 
-PIPELINE_SCHEMA_VERSION = "phase7_empirical_pipeline_v1"
+PIPELINE_SCHEMA_VERSION = "phase7_empirical_pipeline_v2"
 RUN_MANIFEST_SCHEMA_VERSION = "phase7_empirical_run_manifest_v1"
 AUTHORITY = "research_shadow_only"
+_ADMISSION_STRING_SCHEMA_VERSIONS = frozenset(
+    {
+        SIGNAL_OUTCOME_ADMISSION_SCHEMA,
+        "phase7_admission_not_evaluable_v1",
+        "phase7_signal_outcome_not_evaluable_v1",
+    }
+)
 MODEL_CONFIG = ROOT / "configs/model.json"
 PHASE7_PROTOCOL = ROOT / "configs/phase7_foundation_v2_empirical.json"
 PREREGISTRATION = (
@@ -119,6 +130,9 @@ DOL_PROTOCOL_FINGERPRINT = (
 DOL_RANKING_FINGERPRINT = (
     "be9177601fbdac6e36072dbf7dd8bde46c793e7197d0a9e3662f835ceebbb4be"
 )
+# Selected critical runtime-file index for receipt readability.  This is not
+# an import closure; repository_commit plus the clean tracked-tree gate binds
+# the complete tracked runtime closure.
 CODE_BUNDLE_FILES: Mapping[str, Path] = {
     "runner": ROOT / "scripts/run_phase7_empirical_pipeline.py",
     "engine": ROOT / "smc_trader/engine.py",
@@ -170,6 +184,14 @@ class RegisteredWindow:
     purpose: str
     rolling_diagnostic_only: bool
     allowed_contracts: tuple[tuple[str, int], ...]
+
+    @property
+    def first_decision_clock(self) -> pd.Timestamp:
+        return self.start + pd.Timedelta(1, unit="min")
+
+    @property
+    def last_decision_clock(self) -> pd.Timestamp:
+        return self.end_exclusive - pd.Timedelta(1, unit="min")
 
 
 REGISTERED_WINDOWS: Mapping[str, RegisteredWindow] = {
@@ -248,6 +270,49 @@ def _aware(value: Any, *, name: str) -> pd.Timestamp:
 def _resolve(path: str | Path) -> Path:
     source = Path(path)
     return source if source.is_absolute() else ROOT / source
+
+
+def _lexical_absolute(path: Path) -> Path:
+    return Path(os.path.abspath(os.fspath(path)))
+
+
+def _trusted_regular_file(path: Path, *, name: str) -> Path:
+    """Return one direct regular file without following any path indirection."""
+
+    lexical = _lexical_absolute(path)
+    error_message = f"{name} must be a direct regular file"
+    current = Path(lexical.anchor)
+    try:
+        metadata = os.lstat(current)
+        if stat_module.S_ISLNK(metadata.st_mode) or not stat_module.S_ISDIR(
+            metadata.st_mode
+        ):
+            raise Phase7PipelineError(error_message)
+        parts = lexical.parts[1:]
+        for index, part in enumerate(parts):
+            current /= part
+            metadata = os.lstat(current)
+            if stat_module.S_ISLNK(metadata.st_mode):
+                raise Phase7PipelineError(error_message)
+            final = index == len(parts) - 1
+            if final:
+                if not stat_module.S_ISREG(metadata.st_mode):
+                    raise Phase7PipelineError(error_message)
+            elif not stat_module.S_ISDIR(metadata.st_mode):
+                raise Phase7PipelineError(error_message)
+    except OSError as error:
+        raise Phase7PipelineError(error_message) from error
+    if not parts:
+        raise Phase7PipelineError(error_message)
+    return lexical
+
+
+def _assert_opened_jsonl_path(path: Path, *, name: str) -> None:
+    lowered = "/".join(_lexical_absolute(path).parts).lower()
+    if path.suffix != ".jsonl" or any(
+        token in lowered for token in ("sealed", "holdout", "2026-04")
+    ):
+        raise Phase7PipelineError(f"{name} path is not an opened JSONL source")
 
 
 def _repository_identity() -> str:
@@ -397,17 +462,29 @@ def _reject_duplicate_keys(pairs: Sequence[tuple[str, Any]]) -> dict[str, Any]:
     return output
 
 
-def _load_json(path: Path) -> Mapping[str, Any]:
+def _reject_nonfinite_json(value: str) -> Any:
+    raise Phase7PipelineError(f"non-finite JSON constant: {value}")
+
+
+def _load_json_with_sha256(path: Path) -> tuple[Mapping[str, Any], str]:
+    """Parse and hash the same immutable byte snapshot."""
+
     try:
+        raw = path.read_bytes()
         payload = json.loads(
-            path.read_text(encoding="utf-8"),
+            raw.decode("utf-8"),
             object_pairs_hook=_reject_duplicate_keys,
+            parse_constant=_reject_nonfinite_json,
         )
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
         raise Phase7PipelineError(f"JSON is unreadable: {path}") from error
     if not isinstance(payload, Mapping):
         raise Phase7PipelineError(f"JSON root must be an object: {path}")
-    return payload
+    return payload, hashlib.sha256(raw).hexdigest()
+
+
+def _load_json(path: Path) -> Mapping[str, Any]:
+    return _load_json_with_sha256(path)[0]
 
 
 def _exact_mapping(value: Any, fields: Iterable[str], *, name: str) -> dict[str, Any]:
@@ -497,9 +574,12 @@ class RunManifest:
 def load_run_manifest(path: str | Path) -> RunManifest:
     """Load and verify one exact execution manifest and its opened inputs."""
 
-    source = _resolve(path)
+    source = _trusted_regular_file(
+        _resolve(path), name="Phase-7 run manifest"
+    )
+    manifest_payload, manifest_sha256 = _load_json_with_sha256(source)
     payload = _exact_mapping(
-        _load_json(source),
+        manifest_payload,
         {
             "schema_version",
             "run_id",
@@ -550,16 +630,13 @@ def load_run_manifest(path: str | Path) -> RunManifest:
             or not raw["path"].strip()
         ):
             raise Phase7PipelineError(f"inputs[{index}] path is required")
+        window_label = str(raw.get("window_id", f"inputs[{index}]"))
         guarded_path = _resolve(raw["path"])
-        lowered = "/".join(guarded_path.parts).lower()
-        if (
-            guarded_path.suffix != ".jsonl"
-            or any(token in lowered for token in ("sealed", "holdout", "2026-04"))
-        ):
-            window_label = str(raw.get("window_id", f"inputs[{index}]"))
-            raise Phase7PipelineError(
-                f"{window_label} path is not an opened JSONL source"
-            )
+        _assert_opened_jsonl_path(guarded_path, name=window_label)
+        guarded_path = _trusted_regular_file(
+            guarded_path, name=f"{window_label} input"
+        )
+        _assert_opened_jsonl_path(guarded_path, name=window_label)
 
     bindings = _exact_mapping(
         payload["bindings"],
@@ -604,13 +681,24 @@ def load_run_manifest(path: str | Path) -> RunManifest:
         if bindings[key] != expected:
             raise Phase7PipelineError(f"bindings.{key} differs from preregistration")
 
-    model_payload = _load_json(model_path)
-    observer = model_payload.get("observer")
+    model_payload, loaded_model_sha = _load_json_with_sha256(model_path)
+    if loaded_model_sha != model_sha:
+        raise Phase7PipelineError("model config changed while loading")
+    try:
+        semantic_selection = load_semantic_selection(
+            model_payload.get("semantic_selection"),
+            root=ROOT,
+        )
+    except ValueError as error:
+        raise Phase7PipelineError(
+            "model semantic_selection is invalid"
+        ) from error
     paths = model_payload.get("path_hypotheses")
     dol = model_payload.get("dol_probability")
     if (
-        not isinstance(observer, Mapping)
-        or observer.get("canonical_foundation_identity") != FOUNDATION_IDENTITY
+        semantic_selection.foundation_registry_identity != FOUNDATION_IDENTITY
+        or semantic_selection.parent_atomic_semantics_version
+        != semantic_selection.atomic_semantics_version
         or not isinstance(paths, Mapping)
         or paths.get("path_protocol_fingerprint") != PATH_PROTOCOL_FINGERPRINT
         or paths.get("dol_protocol_fingerprint") != DOL_RANKING_FINGERPRINT
@@ -657,16 +745,13 @@ def load_run_manifest(path: str | Path) -> RunManifest:
         if type(item["row_count"]) is not int or item["row_count"] != registered.expected_rows:
             raise Phase7PipelineError(f"{window_id} row census differs")
         input_path = _resolve(item["path"])
-        lowered = "/".join(input_path.parts).lower()
-        if (
-            input_path.suffix != ".jsonl"
-            or any(token in lowered for token in ("sealed", "holdout", "2026-04"))
-        ):
-            raise Phase7PipelineError(f"{window_id} path is not an opened JSONL source")
+        _assert_opened_jsonl_path(input_path, name=window_id)
+        input_path = _trusted_regular_file(input_path, name=f"{window_id} input")
+        _assert_opened_jsonl_path(input_path, name=window_id)
         input_sha = _sha256(item["sha256"], name=f"{window_id} sha256")
         # Only after the sealed/path guard is established may the runner touch
         # the declared source.
-        if not input_path.is_file() or _sha256_file(input_path) != input_sha:
+        if _sha256_file(input_path) != input_sha:
             raise Phase7PipelineError(f"{window_id} input hash differs")
         specs.append(
             InputWindowSpec(
@@ -678,10 +763,15 @@ def load_run_manifest(path: str | Path) -> RunManifest:
             )
         )
     specs.sort(key=lambda item: item.registered.start)
+    if (
+        _trusted_regular_file(source, name="Phase-7 run manifest") != source
+        or _sha256_file(source) != manifest_sha256
+    ):
+        raise Phase7PipelineError("Phase-7 run manifest changed while validating")
     return RunManifest(
         run_id=payload["run_id"].strip(),
         source_path=source,
-        source_sha256=_sha256_file(source),
+        source_sha256=manifest_sha256,
         model_config_path=model_path,
         model_config_sha256=model_sha,
         phase7_protocol_sha256=protocol_sha,
@@ -695,6 +785,13 @@ def load_run_manifest(path: str | Path) -> RunManifest:
     )
 
 
+def _revalidate_run_manifest(manifest: RunManifest) -> None:
+    """Re-open every authority and data binding and require exact equality."""
+
+    if load_run_manifest(manifest.source_path) != manifest:
+        raise Phase7PipelineError("Phase-7 run manifest binding changed")
+
+
 def _validate_input_clocks(
     spec: InputWindowSpec,
     clocks: Sequence[ShadowClockInput],
@@ -704,15 +801,37 @@ def _validate_input_clocks(
     if not clocks:
         raise Phase7PipelineError(f"{spec.window_id} is empty")
     starts = tuple(clock.bar.start for clock in clocks)
+    decisions = tuple(clock.bar.end for clock in clocks)
     if (
         starts[0] != spec.registered.start
-        or clocks[-1].bar.end != spec.registered.end_exclusive
-        or starts != tuple(sorted(starts))
+        or decisions[0] != spec.registered.first_decision_clock
+    ):
+        raise Phase7PipelineError(
+            f"{spec.window_id} first bar-start/decision-clock boundary differs"
+        )
+    if (
+        starts[-1]
+        != spec.registered.last_decision_clock - pd.Timedelta(1, unit="min")
+        or decisions[-1] != spec.registered.last_decision_clock
+    ):
+        raise Phase7PipelineError(
+            f"{spec.window_id} last decision-clock boundary differs"
+        )
+    if (
+        starts != tuple(sorted(starts))
         or len(starts) != len(set(starts))
+        or decisions != tuple(sorted(decisions))
+        or len(decisions) != len(set(decisions))
+        or any(
+            decision != start + pd.Timedelta(1, unit="min")
+            for start, decision in zip(starts, decisions)
+        )
         or len({clock.feed_event_id for clock in clocks}) != len(clocks)
         or len({clock.input_digest for clock in clocks}) != len(clocks)
     ):
-        raise Phase7PipelineError(f"{spec.window_id} clock boundary/order differs")
+        raise Phase7PipelineError(
+            f"{spec.window_id} bar-start/decision-clock order or duration differs"
+        )
     allowed = set(spec.registered.allowed_contracts)
     if any((clock.bar.symbol, clock.bar.instrument_id) not in allowed for clock in clocks):
         raise Phase7PipelineError(f"{spec.window_id} contains an unregistered contract")
@@ -2851,7 +2970,9 @@ def fit_and_validate(
             ),
         }
     )
-    protocol = _load_json(PHASE7_PROTOCOL)
+    protocol, protocol_sha256 = _load_json_with_sha256(PHASE7_PROTOCOL)
+    if protocol_sha256 != manifest.phase7_protocol_sha256:
+        raise Phase7PipelineError("Phase-7 protocol changed before fitting")
     thresholds_raw = protocol["admission_thresholds"]
     thresholds = AdmissionThresholds(
         minimum_resolved_units=int(thresholds_raw["minimum_resolved_units"]),
@@ -3464,6 +3585,60 @@ def _write_staged_file(root: Path, relative: str, data: bytes) -> str:
     return _sha256_file(destination)
 
 
+def _verify_staging_inventory(
+    root: Path,
+    expected_files: Mapping[str, str],
+) -> None:
+    """Require the staging tree to contain exactly the hash-bound payloads."""
+
+    try:
+        root_metadata = os.stat(root, follow_symlinks=False)
+    except OSError as error:
+        raise Phase7PipelineError("Phase-7 staging directory is unavailable") from error
+    if not stat_module.S_ISDIR(root_metadata.st_mode):
+        raise Phase7PipelineError("Phase-7 staging root must be a direct directory")
+    expected: dict[str, str] = {}
+    expected_directories: set[str] = set()
+    for relative, digest in expected_files.items():
+        candidate = Path(relative)
+        if (
+            not relative
+            or candidate.is_absolute()
+            or candidate.as_posix() != relative
+            or any(part in {"", ".", ".."} for part in candidate.parts)
+        ):
+            raise Phase7PipelineError("staging inventory path is not canonical")
+        expected[relative] = _sha256(digest, name=f"{relative} sha256")
+        expected_directories.update(
+            parent.as_posix()
+            for parent in candidate.parents
+            if parent != Path(".")
+        )
+
+    actual_files: dict[str, Path] = {}
+    actual_directories: set[str] = set()
+    for candidate in root.rglob("*"):
+        relative = candidate.relative_to(root).as_posix()
+        try:
+            metadata = os.stat(candidate, follow_symlinks=False)
+        except OSError as error:
+            raise Phase7PipelineError("staging inventory changed while reading") from error
+        if stat_module.S_ISDIR(metadata.st_mode):
+            actual_directories.add(relative)
+        elif stat_module.S_ISREG(metadata.st_mode):
+            actual_files[relative] = candidate
+        else:
+            raise Phase7PipelineError(
+                f"staging inventory contains a non-regular entry: {relative}"
+            )
+
+    if set(actual_files) != set(expected) or actual_directories != expected_directories:
+        raise Phase7PipelineError("staging inventory differs from expected payload set")
+    for relative, candidate in actual_files.items():
+        if _sha256_file(candidate) != expected[relative]:
+            raise Phase7PipelineError(f"staging payload hash differs: {relative}")
+
+
 def _cohort_rows(cohorts: MaterializedCohorts) -> Mapping[str, Sequence[Any]]:
     return {
         "competition_archive": cohorts.archives,
@@ -3490,18 +3665,35 @@ def write_pipeline_outputs(
     """Publish a complete run directory without replacing an existing path."""
 
     target = _resolve(destination)
-    if target.exists():
+    if target.exists() or target.is_symlink():
         raise FileExistsError(f"Phase-7 output already exists: {target}")
+    if mode == "materialize-only":
+        if fitted is not None:
+            raise Phase7PipelineError(
+                "materialize-only publication cannot contain fitted outputs"
+            )
+    elif mode == "fit-and-validate":
+        if fitted is None:
+            raise Phase7PipelineError(
+                "fit-and-validate publication requires fitted outputs"
+            )
+        if not manifest.fit_and_validate_authorized:
+            raise Phase7PipelineError("run manifest does not authorize fitting")
+    else:
+        raise Phase7PipelineError("unsupported Phase-7 pipeline mode")
+    _revalidate_run_manifest(manifest)
     target.parent.mkdir(parents=True, exist_ok=True)
     staging = Path(
         tempfile.mkdtemp(prefix=f".{target.name}.staging.", dir=target.parent)
     )
     try:
+        staged_inventory: dict[str, str] = {}
         cohort_bindings: dict[str, Any] = {}
         rows_by_name = _cohort_rows(cohorts)
         for name, relative in _COHORT_FILES.items():
             rows = tuple(rows_by_name[name])
             digest = _write_staged_file(staging, relative, _jsonl_bytes(rows))
+            staged_inventory[relative] = digest
             cohort_bindings[name] = {
                 "path": relative,
                 "sha256": digest,
@@ -3533,6 +3725,8 @@ def write_pipeline_outputs(
                     "fold_id": spec.fold_id,
                     "rolling_diagnostic_only": spec.registered.rolling_diagnostic_only,
                     "rolling_oof": False,
+                    "first_decision_clock": spec.registered.first_decision_clock,
+                    "last_decision_clock": spec.registered.last_decision_clock,
                 }
                 for spec in manifest.inputs
                 if include_rolling_diagnostics
@@ -3549,7 +3743,9 @@ def write_pipeline_outputs(
             "cohort_manifest.json",
             _canonical_bytes(cohort_manifest),
         )
+        staged_inventory["cohort_manifest.json"] = cohort_manifest_sha
         artifact_bindings: dict[str, Any] = {}
+        admission_bindings: dict[str, Any] = {}
         admissions: Mapping[str, Any] = {}
         artifact_blockers: Mapping[str, Any] = {}
         artifact_statuses: Mapping[str, Any] = {}
@@ -3558,9 +3754,35 @@ def write_pipeline_outputs(
             "reasons": ["MATERIALIZATION_ONLY_NO_EMPIRICAL_ADMISSION"],
         }
         if fitted is not None:
+            expected_source_sha = canonical_sha256(
+                {
+                    "schema_version": PIPELINE_SCHEMA_VERSION,
+                    "inputs": tuple(
+                        (spec.window_id, spec.source_sha256, spec.row_count)
+                        for spec in manifest.inputs
+                        if include_rolling_diagnostics
+                        or not spec.registered.rolling_diagnostic_only
+                    ),
+                }
+            )
+            fitted_source_sha = _sha256(
+                fitted["source_dataset_sha256"],
+                name="fitted source dataset sha256",
+            )
+            if fitted_source_sha != expected_source_sha:
+                raise Phase7PipelineError("fitted source dataset binding differs")
+            admission_gate = fitted["admission_gate"]
+            if (
+                not isinstance(admission_gate, Mapping)
+                or admission_gate.get("state") != "closed"
+            ):
+                raise Phase7PipelineError("Phase-7 admission gate must remain closed")
             for name, payload in fitted["artifacts"].items():
+                if not isinstance(name, str) or not name or Path(name).name != name:
+                    raise Phase7PipelineError("artifact output name is unsafe")
                 relative = f"artifacts/{name}.json"
                 digest = _write_staged_file(staging, relative, _canonical_bytes(payload))
+                staged_inventory[relative] = digest
                 artifact_bindings[name] = {
                     "path": relative,
                     "sha256": digest,
@@ -3568,14 +3790,49 @@ def write_pipeline_outputs(
                 }
             admissions = fitted["admission_receipts"]
             for name, payload in admissions.items():
-                _write_staged_file(
+                if not isinstance(name, str) or not name or Path(name).name != name:
+                    raise Phase7PipelineError("admission output name is unsafe")
+                if not isinstance(payload, Mapping):
+                    raise Phase7PipelineError("admission receipt must be a mapping")
+                receipt_id = payload.get("receipt_id")
+                schema_version = payload.get("schema_version")
+                known_schema = (
+                    type(schema_version) is int
+                    and schema_version == PROBABILITY_ADMISSION_SCHEMA_VERSION
+                ) or (
+                    type(schema_version) is str
+                    and schema_version in _ADMISSION_STRING_SCHEMA_VERSIONS
+                )
+                if (
+                    payload.get("source_dataset_sha256") != fitted_source_sha
+                    or payload.get("manifest_sha256") != manifest.source_sha256
+                    or not known_schema
+                    or (
+                        receipt_id is not None
+                        and (not isinstance(receipt_id, str) or not receipt_id)
+                    )
+                    or type(payload.get("admitted")) is not bool
+                    or payload.get("admitted") is not False
+                    or payload.get("action_authority") is not False
+                ):
+                    raise Phase7PipelineError(
+                        f"admission receipt binding differs or is not closed: {name}"
+                    )
+                relative = f"admission/{name}.json"
+                digest = _write_staged_file(
                     staging,
-                    f"admission/{name}.json",
+                    relative,
                     _canonical_bytes(payload),
                 )
+                staged_inventory[relative] = digest
+                admission_bindings[name] = {
+                    "path": relative,
+                    "sha256": digest,
+                    "schema_version": schema_version,
+                    "receipt_id": receipt_id,
+                }
             artifact_blockers = fitted["artifact_blockers"]
             artifact_statuses = fitted["artifact_statuses"]
-            admission_gate = fitted["admission_gate"]
         result = {
             "schema_version": PIPELINE_SCHEMA_VERSION,
             "status": (
@@ -3592,6 +3849,7 @@ def write_pipeline_outputs(
             "cohort_manifest_sha256": cohort_manifest_sha,
             "cohort_bindings": cohort_bindings,
             "artifact_bindings": artifact_bindings,
+            "admission_bindings": admission_bindings,
             "artifact_blockers": artifact_blockers,
             "artifact_statuses": artifact_statuses,
             "admission_gate": admission_gate,
@@ -3616,6 +3874,7 @@ def write_pipeline_outputs(
         result_sha = _write_staged_file(
             staging, "result.json", _canonical_bytes(result)
         )
+        staged_inventory["result.json"] = result_sha
         receipt = {
             "schema_version": PIPELINE_SCHEMA_VERSION,
             "status": "complete_research_receipt",
@@ -3641,11 +3900,19 @@ def write_pipeline_outputs(
             ),
             "same_month_rolling_diagnostics_are_oof": False,
             "admission_gate": admission_gate,
+            "admission_bindings_sha256": canonical_sha256(admission_bindings),
             "sealed_oos_opened": False,
             "empirical_authority": False,
             "action_authority": False,
         }
-        _write_staged_file(staging, "receipt.json", _canonical_bytes(receipt))
+        receipt_sha = _write_staged_file(
+            staging,
+            "receipt.json",
+            _canonical_bytes(receipt),
+        )
+        staged_inventory["receipt.json"] = receipt_sha
+        _revalidate_run_manifest(manifest)
+        _verify_staging_inventory(staging, staged_inventory)
         # Claim the final path with an exclusive mkdir.  Renaming a directory
         # can replace a concurrently-created empty directory on some systems;
         # this two-step publication never replaces any existing inode.  The
@@ -3684,12 +3951,15 @@ def run_pipeline(
         raise Phase7PipelineError(
             "rolling diagnostics require exact hash-bound W3 and W4 inputs"
         )
+    if mode == "fit-and-validate" and not manifest.fit_and_validate_authorized:
+        raise Phase7PipelineError("run manifest does not authorize fitting")
     cohorts = materialize_cohorts(
         manifest,
         include_rolling_diagnostics=include_rolling_diagnostics,
         engine_factory=engine_factory,
         clock_loader=clock_loader,
     )
+    _revalidate_run_manifest(manifest)
     fitted = (
         None
         if mode == "materialize-only"

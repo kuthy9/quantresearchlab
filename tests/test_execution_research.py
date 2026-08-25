@@ -24,12 +24,8 @@ from smc_trader.execution_research import (
 )
 from smc_trader.mbo_mechanism import MBO_MECHANISM_COLUMNS
 from smc_trader.model import Bar, Direction
-from scripts.check_phase8_execution_readiness import audit_execution_readiness
-
-
 ROOT = Path(__file__).resolve().parents[1]
 CONFIG = ROOT / "configs/execution_research_v1.json"
-TEMPLATE = ROOT / "experiments/manifests/execution_research_phase8_v1_template.yaml"
 CONFIG_SHA256 = "8212939f9dc00b11c285063a78d56f8ddbc5257a728b02829017a6d60e0d08b7"
 MAPPING_ID = "instrument-map:NQ-front-to-NQM4-13743:v1"
 MAPPING_SHA256 = "c" * 64
@@ -178,38 +174,11 @@ def _outcome(study, method: ExecutionMethod):
     return next(item for item in study.outcomes if item.method is method)
 
 
-def test_versioned_config_and_incomplete_template_are_identity_bound() -> None:
+def test_versioned_config_is_identity_bound() -> None:
     config = load_execution_research_config(CONFIG, expected_sha256=CONFIG_SHA256)
     assert config.authority == "research_only_never_submit"
     assert config.config_id == f"execution-research-config:{EXECUTION_RESEARCH_PROTOCOL_SHA256}"
     assert tuple(config.ordered_methods) == tuple(ExecutionMethod)
-
-    template = json.loads(TEMPLATE.read_text(encoding="utf-8"))
-    assert template["status"] == "template_incomplete_not_authorized_to_run"
-    assert template["identity_bindings"]["protocol_config"]["sha256"] == CONFIG_SHA256
-    assert template["preregistration"]["canonical_config_id"] == (
-        config.config_id
-    )
-    assert template["preregistration"]["fixed_contrasts"] == 6
-    assert template["preregistration"]["tuning_allowed"] is False
-    assert template["authority"]["queue_truth_claimed"] is False
-    assert template["frozen_before_run"] is False
-    assert template["experiment_id"] is None
-    assert all(value is None for value in template["outputs"].values())
-    assert template["preregistration"]["cross_intent_independence_claimed"] is False
-    assert template["preregistration"]["confirmatory_claim"] is False
-    assert template["formal_input_schema"]["fixture_rows_authorized_as_evidence"] is False
-    assert all(
-        template["method_price_rules"][method.value] is None
-        for method in LIMIT_EXECUTION_METHODS
-    )
-    assert all(
-        template["variants"][family] == []
-        for family in ("wait_time", "cancel_rule", "stop", "target")
-    )
-    readiness = audit_execution_readiness(TEMPLATE)
-    assert readiness["ready"] is False
-    assert "missing_trade_intent_ledger" in readiness["readiness_blockers"]
 
     changed = json.loads(CONFIG.read_text(encoding="utf-8"))
     changed["tick_size"] = 0.5

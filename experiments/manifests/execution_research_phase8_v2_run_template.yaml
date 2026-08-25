@@ -17,7 +17,7 @@
   "runtime_bindings": {
     "runner_config": {
       "path": "configs/execution_research_runner_v1.json",
-      "sha256": "245fc3ea15111df3856467a56fde7dddb072a76c8e99dd489e949e0540724344"
+      "sha256": "708cf08cf5f99ae0377c71d537778f547b3062c09cd48bb0e97d05bbfd608165"
     },
     "execution_v1_config": {
       "path": "configs/execution_research_v1.json",
@@ -37,11 +37,11 @@
     },
     "execution_v2_runtime": {
       "path": "smc_trader/execution_research_v2.py",
-      "sha256": "59a667fd4eb889ff82ba68256eb63680a32fa42da52c4b5d1610870f94f15567"
+      "sha256": "42e6d9b679e8a7260f77d155bd50aa3fd3e7ff626f60e0df7685d8b84ba01e40"
     },
     "runner_runtime": {
       "path": "smc_trader/execution_research_runner.py",
-      "sha256": "10d461f96f0ae522b1cfeee1a90cc8b9f65d96fad6632cd7125b617085fadcd2"
+      "sha256": "c94250f16db04189516c2005df56dae06b1675116445f9961948e9fe224a6d66"
     },
     "runner_cli": {
       "path": "scripts/run_execution_research_v2.py",

@@ -14,14 +14,15 @@ human-readable authority is the
 It adds no parallel detector and does not rewrite a v1.2 `MarketEvent` or any
 frozen experiment. `FOUNDATION_STATE_CHANGED` is technical replay transport,
 not a new atomic market fact or trading authority.
-The production Engine admits this additive layer only when the checked-in model
-contains the exact boolean `observer.canonical_foundation_enabled=true`.
-It also requires the exact foundation registry path and canonical identity;
-construction strict-loads them, and Engine/Shadow/checkpoint state freezes and
-compares the admitted foundation version and identity. Missing, false,
-non-boolean, absent, or mismatched bindings fail closed, and pre-v3 Engine
-checkpoints cannot resume because checkpoint schema v3 is the first schema that
-includes foundation state.
+The checked-in model selects both authorities through one strict
+`semantic_selection`: atomic v1.2 version/path/definition identity and
+Foundation v2.0 version/path/registry identity. Construction loads the pair
+once and requires the Foundation parent to equal the atomic version; missing,
+unknown, extra, or mismatched fields fail closed. The Observer's enable flag is
+derived internally. This does not define a unified `smc_semantics_v2.0`.
+Engine/Shadow/checkpoint state retains and compares the existing identities,
+and pre-v3 Engine checkpoints cannot resume because schema v3 is the first to
+include Foundation state.
 
 [`semantics/registry.yaml`](../semantics/registry.yaml) and
 [`semantics/parameters.yaml`](../semantics/parameters.yaml) remain the immutable
@@ -318,12 +319,12 @@ Phase 8 standalone order-FSM engineering and seven-entry-method evaluator core
 are complete. Evaluator v1.1 separates entry GTT from analysis end, cancels a
 pending remainder after target-first resolution, and preserves eligible primary
 pairs despite secondary-metric censoring. It rejects off-grid stop/target
-prices. Method-price provenance,
-wait/cancel/stop/target variants, the formal runner, and the authoritative
-handoff remain open. Its read-only
-blocked-template checker reports 12 blockers, including
-`formal_runner_not_implemented`, without opening input ledgers or writing an
-artifact. Phase 9 v1.2
+prices. The v2 research protocol requires method-price provenance and registers
+wait/cancel/stop/target variants with explicit evaluable-or-censored rules. Its
+formal runner exists and validates without opening data by default, but the
+current template has no bound non-zero intent ledger or minute source, is not
+frozen, and has no empirical result. The authoritative end-to-end handoff
+remains open. Phase 9 v1.2
 deterministic parity exists behind `NullExecutionGateway`; its 6,900-clock
 historical cold-start input and exact 200-clock checkpoint/resume/cold-replay
 prefix are retained evidence for the earlier path/model bindings

@@ -68,7 +68,7 @@ SUMMARY_SCHEMA_VERSION = "phase8_execution_variant_summary_v1"
 OUTPUT_MANIFEST_SCHEMA_VERSION = "phase8_execution_research_output_manifest_v1"
 MINUTE_ARTIFACT_MANIFEST_SCHEMA_VERSION = "phase8_minute_execution_artifact_manifest_v1"
 RUNNER_CONFIG_SHA256 = (
-    "245fc3ea15111df3856467a56fde7dddb072a76c8e99dd489e949e0540724344"
+    "708cf08cf5f99ae0377c71d537778f547b3062c09cd48bb0e97d05bbfd608165"
 )
 
 
@@ -378,7 +378,7 @@ def load_execution_research_runner_protocol(
         "v1_config_sha256": "8212939f9dc00b11c285063a78d56f8ddbc5257a728b02829017a6d60e0d08b7",
         "v1_runtime_sha256": "1b2f338c8196ff0f963a65df66f41d48805b1eee1caaee1bf9f615d5e3341e17",
         "v2_config_sha256": EXECUTION_RESEARCH_V2_CONFIG_SHA256,
-        "v2_runtime_sha256": "59a667fd4eb889ff82ba68256eb63680a32fa42da52c4b5d1610870f94f15567",
+        "v2_runtime_sha256": "42e6d9b679e8a7260f77d155bd50aa3fd3e7ff626f60e0df7685d8b84ba01e40",
         "risk_config_sha256": RISK_ADMISSION_PROTOCOL_SHA256,
     }:
         raise Phase8RunnerError("runner execution protocol identities drifted")
@@ -580,7 +580,7 @@ def validate_phase8_run_manifest(
         elif name == "execution_v1_runtime":
             expected_sha = "1b2f338c8196ff0f963a65df66f41d48805b1eee1caaee1bf9f615d5e3341e17"
         elif name == "execution_v2_runtime":
-            expected_sha = "59a667fd4eb889ff82ba68256eb63680a32fa42da52c4b5d1610870f94f15567"
+            expected_sha = "42e6d9b679e8a7260f77d155bd50aa3fd3e7ff626f60e0df7685d8b84ba01e40"
         elif name == "instrument_mapping_registry":
             expected_sha = "d8e543f54bc6e81bb820be51e02382b5477f8a3e8e676063aa685f0d599e7961"
         _require_file_binding(

@@ -483,12 +483,16 @@ def test_cross_timeframe_composition_requires_verified_constituent_bar() -> None
             kind="bar_completed",
             timeframe="1m",
             origin="normalized_data",
+            real_completed=True,
+            clock_only=False,
             known_at=_clock(0),
         ),
         "m1-bar:2": SimpleNamespace(
             kind="bar_completed",
             timeframe="1m",
             origin="normalized_data",
+            real_completed=True,
+            clock_only=False,
             known_at=_clock(0),
         ),
         "sweep:1": SimpleNamespace(
@@ -527,6 +531,43 @@ def test_cross_timeframe_composition_requires_verified_constituent_bar() -> None
     assert link.composition_proven is True
     assert link.shared_event_ids == ("m1-bar:1",)
 
+    real_bar = canonical["m1-bar:1"]
+    canonical["m1-bar:1"] = SimpleNamespace(
+        **{
+            **vars(real_bar),
+            "real_completed": False,
+            "clock_only": True,
+        }
+    )
+    with pytest.raises(ResearchContractError, match="exact real normalized BAR"):
+        find_prior_typed_link(
+            [prior],
+            current,
+            completed_index={_clock(0): 0, _clock(2): 1},
+            spec=spec,
+            event_lookup=canonical.get,
+        )
+    canonical["m1-bar:1"] = real_bar
+
+    canonical["m1-bar:1"] = SimpleNamespace(
+        **{
+            **vars(real_bar),
+            "evidence": {
+                "real_completed": False,
+                "clock_only": True,
+            },
+        }
+    )
+    with pytest.raises(ResearchContractError, match="exact real normalized BAR"):
+        find_prior_typed_link(
+            [prior],
+            current,
+            completed_index={_clock(0): 0, _clock(2): 1},
+            spec=spec,
+            event_lookup=canonical.get,
+        )
+    canonical["m1-bar:1"] = real_bar
+
     unbound = {**current, "lineage_tokens": ()}
     with pytest.raises(ResearchContractError, match="canonical lineage"):
         find_prior_typed_link(
@@ -541,6 +582,8 @@ def test_cross_timeframe_composition_requires_verified_constituent_bar() -> None
         kind="bar_completed",
         timeframe="5m",
         origin="normalized_data",
+        real_completed=True,
+        clock_only=False,
         known_at=_clock(0),
     )
     with pytest.raises(ResearchContractError, match="registered normalized 1m BAR"):
@@ -573,6 +616,8 @@ def test_constituent_bar_composition_rejects_context_only_bar() -> None:
             kind="bar_completed",
             timeframe="1m",
             origin="normalized_data",
+            real_completed=True,
+            clock_only=False,
             known_at=_clock(0),
         ),
         "sweep:1": SimpleNamespace(

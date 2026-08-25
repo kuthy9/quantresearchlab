@@ -1,13 +1,20 @@
 from __future__ import annotations
 
 from dataclasses import FrozenInstanceError, replace
+import pickle
 
 import pandas as pd
 import pytest
 
 from smc_trader.foundation_registry import FOUNDATION_VERSION
 from smc_trader.market_state import DeliveryPhase, RelationRole, RelationState
-from smc_trader.model import Direction, EventKind, MarketEvent, Timeframe
+from smc_trader.model import (
+    Direction,
+    EventKind,
+    MarketEvent,
+    Timeframe,
+    content_hash,
+)
 from smc_trader.semantic_foundation import (
     FoundationRecord,
     FoundationRecordStatus,
@@ -16,6 +23,7 @@ from smc_trader.semantic_lifecycle import (
     BoundaryAttackFact,
     DeliveryPhaseGeneration,
     GenerationLifecycle,
+    LIFECYCLE_CHECKPOINT_SCHEMA_VERSION,
     LiquidityInteractionLifecycle,
     LiquidityInteractionTerminal,
     LiquidityLevelLifecycle,
@@ -91,7 +99,10 @@ def _real_bar(state, minutes: int, timeframe: Timeframe = Timeframe.H1):
         NormalizedTransitionKind.REAL_BAR_COMPLETED,
         minutes,
         timeframe=timeframe,
-        payload={"bar_event_id": bar_id, "real_completed": True},
+        payload={
+            "bar_event_id": bar_id,
+            "real_completed": True,
+        },
         source_event_ids=(bar_id,),
     )
     return SemanticLifecycleReducer.reduce(state, fact), bar_id
@@ -106,7 +117,10 @@ def _real_bar_at(state, clock: str, timeframe: Timeframe, label: str):
         known_at=known_at,
         timeframe=timeframe,
         source_event_ids=(bar_id,),
-        payload={"bar_event_id": bar_id, "real_completed": True},
+        payload={
+            "bar_event_id": bar_id,
+            "real_completed": True,
+        },
     )
     return SemanticLifecycleReducer.reduce(state, fact), bar_id
 
@@ -169,6 +183,31 @@ def test_real_bar_lifecycle_rejects_non_successor_clocks_without_mutation(
     with pytest.raises(ValueError):
         _real_bar_at(state, current, timeframe, "invalid-current")
     assert state == frozen
+
+
+@pytest.mark.parametrize("mutate_clock", (False, True))
+def test_lifecycle_state_rejects_equal_count_registered_real_clock_mismatch(
+    mutate_clock: bool,
+) -> None:
+    state, _ = _real_bar_at(
+        SemanticLifecycleReducer.initial_state(),
+        "2024-06-03 10:00",
+        Timeframe.M1,
+        "invariant-real",
+    )
+    registered = state.registered_bar_clocks[0]
+    forged = replace(
+        registered,
+        last_completed_at=(
+            registered.last_completed_at + pd.Timedelta(1, unit="min")
+            if mutate_clock
+            else registered.last_completed_at
+        ),
+        last_bar_event_id="forged-registered-bar",
+    )
+
+    with pytest.raises(ValueError, match="conflicts with its registered transport"):
+        replace(state, registered_bar_clocks=(forged,))
 
 
 def test_special_close_and_reopen_advance_ordinal_without_resetting_state() -> None:
@@ -907,7 +946,10 @@ def test_mss_starts_transition_but_only_resumption_can_fail_it() -> None:
     assert failed.terminal_reason == "original_direction_resumed"
 
 
-def test_exact_forming_challenger_rollover_after_acceptance_censors_transition() -> None:
+@pytest.mark.parametrize("confirm_internal", (False, True))
+def test_exact_live_challenger_rollover_after_acceptance_censors_transition(
+    confirm_internal: bool,
+) -> None:
     state, incumbent = _start_structure(
         SemanticLifecycleReducer.initial_state(),
         minutes=0,
@@ -961,13 +1003,29 @@ def test_exact_forming_challenger_rollover_after_acceptance_censors_transition()
             fact_id="transition:accepted-forming-challenger",
         ),
     )
+    if confirm_internal:
+        confirmation_id = "structure:confirmed-internal-challenger"
+        state = SemanticLifecycleReducer.reduce(
+            state,
+            _fact(
+                NormalizedTransitionKind.STRUCTURE_GENERATION_CONFIRMED,
+                3,
+                payload={
+                    "structure_generation_id": internal.generation_id,
+                    "confirmation_event_id": confirmation_id,
+                },
+                source_event_ids=(confirmation_id,),
+                fact_id="confirm:accepted-internal-challenger",
+            ),
+        )
     candidate = state.structure_transitions[-1]
     acceptance_id = "acceptance:accepted-forming-challenger"
+    acceptance_minute = 4 if confirm_internal else 3
     state = SemanticLifecycleReducer.reduce(
         state,
         _fact(
             NormalizedTransitionKind.STRUCTURE_GENERATION_TERMINATED,
-            3,
+            acceptance_minute,
             payload={
                 "structure_generation_id": incumbent.generation_id,
                 "reason": "protected_break_accepted",
@@ -981,7 +1039,7 @@ def test_exact_forming_challenger_rollover_after_acceptance_censors_transition()
         state,
         _fact(
             NormalizedTransitionKind.STRUCTURE_TRANSITION_EVIDENCE,
-            3,
+            acceptance_minute,
             payload={
                 "structure_transition_id": candidate.structure_transition_id,
                 "protected_acceptance_event_id": acceptance_id,
@@ -996,7 +1054,7 @@ def test_exact_forming_challenger_rollover_after_acceptance_censors_transition()
         state,
         _fact(
             NormalizedTransitionKind.STRUCTURE_GENERATION_TERMINATED,
-            4,
+            acceptance_minute + 1,
             payload={
                 "structure_generation_id": internal.generation_id,
                 "reason": "scope_rollover",
@@ -1017,7 +1075,7 @@ def test_exact_forming_challenger_rollover_after_acceptance_censors_transition()
         before_rollover,
         _fact(
             NormalizedTransitionKind.STRUCTURE_GENERATION_EVIDENCE,
-            4,
+            acceptance_minute + 1,
             payload={
                 "structure_generation_id": internal.generation_id,
                 "evidence_kind": "mss",
@@ -1031,7 +1089,7 @@ def test_exact_forming_challenger_rollover_after_acceptance_censors_transition()
         mismatched,
         _fact(
             NormalizedTransitionKind.STRUCTURE_GENERATION_TERMINATED,
-            5,
+            acceptance_minute + 2,
             payload={
                 "structure_generation_id": internal.generation_id,
                 "reason": "scope_rollover",
@@ -1571,7 +1629,10 @@ def test_checkpoint_resume_and_duplicate_replay_are_deterministic() -> None:
     bar = _fact(
         NormalizedTransitionKind.REAL_BAR_COMPLETED,
         1,
-        payload={"bar_event_id": "checkpoint-bar", "real_completed": True},
+        payload={
+            "bar_event_id": "checkpoint-bar",
+            "real_completed": True,
+        },
         source_event_ids=("checkpoint-bar",),
     )
     prefix = SemanticLifecycleReducer.replay((create, bar))
@@ -1597,6 +1658,7 @@ def test_checkpoint_resume_and_duplicate_replay_are_deterministic() -> None:
     )
     full = SemanticLifecycleReducer.replay((create, bar, touch, penetration))
     checkpoint = SemanticLifecycleReducer.checkpoint(prefix)
+    assert checkpoint.schema_version == LIFECYCLE_CHECKPOINT_SCHEMA_VERSION
     restored = SemanticLifecycleReducer.restore(checkpoint)
     resumed = SemanticLifecycleReducer.replay(
         (touch, penetration), initial_state=restored
@@ -1605,6 +1667,21 @@ def test_checkpoint_resume_and_duplicate_replay_are_deterministic() -> None:
     assert SemanticLifecycleReducer.reduce(resumed, penetration) == resumed
     with pytest.raises(ValueError, match="checkpoint"):
         replace(checkpoint, state_digest="0" * 64)
+    with pytest.raises(ValueError, match="checkpoint"):
+        replace(checkpoint, schema_version=1)
+
+    missing_schema = pickle.loads(pickle.dumps(checkpoint))
+    vars(missing_schema).pop("schema_version")
+    with pytest.raises(ValueError, match="checkpoint"):
+        SemanticLifecycleReducer.restore(missing_schema)
+
+    missing_registered_ledger = pickle.loads(pickle.dumps(checkpoint))
+    vars(missing_registered_ledger.state).pop("registered_bar_clocks")
+    vars(missing_registered_ledger)["state_digest"] = content_hash(
+        missing_registered_ledger.state
+    )
+    with pytest.raises(ValueError, match="checkpoint"):
+        SemanticLifecycleReducer.restore(missing_registered_ledger)
 
 
 def test_common_generation_aliases_cover_active_and_terminal_dtos() -> None:

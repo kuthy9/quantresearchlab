@@ -70,6 +70,11 @@
     "synthetic_decision_clocks": [
       "2024-06-10T04:14:00Z"
     ],
+    "synthetic_semantic_exception_policy_lineage": {
+      "effective_comparison_policy": "current_full_interval_roots",
+      "historical_source_manifest_mutated": false,
+      "source_manifest_policy": "current_full_interval_roots"
+    },
     "window_id": "2024-06-week-2",
     "window_key": "W2"
   },
@@ -77,7 +82,7 @@
   "comparison_identity_bindings": {
     "comparison_wrapper": {
       "path": "scripts/run_phase6_mbo_foundation_comparison.py",
-      "sha256": "7c5df417dcb7e8726cfd16b002255057a1e2289114057558063a7c3d2a7b5f64"
+      "sha256": "dbadfe06181def3b93c1624d2b03a8fde5e8b6cefd8da23559b200090bcea047"
     },
     "foundation_registry": {
       "path": "semantics/foundation_v2_0.yaml",
@@ -85,7 +90,7 @@
     },
     "runtime_foundation_adapter": {
       "path": "smc_trader/foundation_adapter.py",
-      "sha256": "11cb4be213d018b86242241117b74120c1ef1d3026f1527bcbbc512f83909d4e"
+      "sha256": "f6e931c34fb4250c4cf769b65565be47a0b8dca4cd91b40dc677852f7fc8b737"
     },
     "runtime_foundation_registry": {
       "path": "smc_trader/foundation_registry.py",
@@ -97,7 +102,7 @@
     },
     "runtime_semantic_lifecycle": {
       "path": "smc_trader/semantic_lifecycle.py",
-      "sha256": "23c7fc47a618f0c5dd140b22b6906e37b71755c8c77ce49a5286d2589b6e221d"
+      "sha256": "b5dc7c0759109e86cf53618297cdcd6c6e56da912e947f74684c523ed50ef888"
     },
     "runtime_structural_outcome": {
       "path": "smc_trader/structural_outcome.py",
@@ -271,7 +276,7 @@
     },
     "model_config": {
       "path": "configs/model.json",
-      "sha256": "dbb6662ee748531feeb556ee891745445e4df4f919e402fd1126d939333d84e5"
+      "sha256": "6b794e4154e59c8712c39f4305eb7c5751aabc2e4d675282adfcc4d5ae957eb7"
     },
     "ohlcv_artifact": {
       "path": "data/processed/nq_1m_previous_session_front_v2_3_2017_2026.parquet",
@@ -291,7 +296,7 @@
     },
     "runner": {
       "path": "scripts/run_mbo_mechanism_research.py",
-      "sha256": "5d7bfa4c214cf19249c50ae360b9d7a081f8c85622f21085ba8bf33967018bf0"
+      "sha256": "2a164e378d0098da20fa62140f99404a30660ce9c91de2d3b9a6dac19c681036"
     },
     "runtime_artifact_stream": {
       "path": "smc_trader/artifact_stream.py",
@@ -311,7 +316,7 @@
     },
     "runtime_event_store": {
       "path": "smc_trader/event_store.py",
-      "sha256": "166662787def0085f428b1921871f139099e8b43267ddc98d8b6cf02f1e267ec"
+      "sha256": "a3635d2acf9de6c51782fe30e75ca2ffd783820b701208b67826870e341242e1"
     },
     "runtime_feature": {
       "path": "smc_trader/mbo_mechanism.py",
@@ -319,7 +324,7 @@
     },
     "runtime_group3": {
       "path": "smc_trader/group3.py",
-      "sha256": "2c194847a61459d3a9e6ff64b81fe2c78c2896579f1bb74e749ae4eb225bd10f"
+      "sha256": "395936758b7c2b7db6be41d7db37733ac9f32de7757bdf7c131e25101a48d1a2"
     },
     "runtime_group4": {
       "path": "smc_trader/group4.py",
@@ -339,11 +344,11 @@
     },
     "runtime_market_clock": {
       "path": "smc_trader/market_clock.py",
-      "sha256": "bca4afdc813631e9ca3e32206430a16d1d2654bab3113c03e5d529f5a69aa819"
+      "sha256": "ac9f0c3dc7adc0ca9f869b78dc949e45e5e97cce2daddc75bd055229558f75f2"
     },
     "runtime_market_state": {
       "path": "smc_trader/market_state.py",
-      "sha256": "31ff8f8004408f11b743913412d735a3983fcd1961b81afa56b54f76718ace7e"
+      "sha256": "daf4c67ca926135d371e483b3e8d7c598e4bea1c6fc32ec84c9992d534a18407"
     },
     "runtime_mbo": {
       "path": "smc_trader/mbo.py",
@@ -355,7 +360,7 @@
     },
     "runtime_observation": {
       "path": "smc_trader/observation.py",
-      "sha256": "9cd8a92207ec263fc6f78974aa32c26e30740671359146f2c05d8036baac4115"
+      "sha256": "f6ab32899c92ed8b58ba40206409bcec1864bff81568aa9f158cb230a32d7701"
     },
     "runtime_package_init": {
       "path": "smc_trader/__init__.py",
@@ -363,7 +368,7 @@
     },
     "runtime_research": {
       "path": "smc_trader/mbo_mechanism_research.py",
-      "sha256": "1f4b1b03ea9274809cf9284e4cc282c787d5ea5b8e4825926b7f12131563542e"
+      "sha256": "6df1fee16c136046a7449a6bb14a9b4b7bd1205b07a42ee1834af2741f48bb0e"
     },
     "runtime_scene_graph": {
       "path": "smc_trader/scene_graph.py",
@@ -371,11 +376,11 @@
     },
     "runtime_semantics": {
       "path": "smc_trader/semantics.py",
-      "sha256": "8af34d451e7505eba0c6a7176e9dc048ffa97a178a237f3e2c11bf22cc04aa4c"
+      "sha256": "d1e61dae32eb4dd5ed1df5734da205d759e15c6aaba93f40756ee369caeca0be"
     },
     "runtime_signal_research": {
       "path": "smc_trader/signal_research.py",
-      "sha256": "3515591dd0ebde0b669343625869e60e33eb071b77decbae5936eba89e2feac1"
+      "sha256": "8f4e5b5808c12c58dee198574c6c02e04067476efe64eee8c83e5a57982881de"
     },
     "runtime_structure": {
       "path": "smc_trader/structure.py",

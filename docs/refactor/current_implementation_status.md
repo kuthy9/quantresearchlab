@@ -1,6 +1,6 @@
 # Current SMC Refactor Implementation Status
 
-Status date: 2026-08-23
+Status date: 2026-08-25
 Runtime semantic identity: `smc_semantics_v1.2`
 Canonical foundation identity: `smc_semantic_foundation_v2.0`
 Canonical foundation registry identity: `ac04636919931d774309a0c306764fdf8eb53aee41df0f31d4d94e5b9125732b`
@@ -39,14 +39,24 @@ are not `FoundationRecord` or `MarketSnapshot` state. The implementation
 reuses the existing detectors and event store; it is not a parallel Eye. The
 Eye does not select a unique DOL or make a trade decision.
 
-The checked-in production model explicitly enables the additive projection
-with `observer.canonical_foundation_enabled=true`; `ContinuousSMCEngine`
-rejects a missing, false, or non-boolean value. It also requires the exact
-foundation registry path and canonical identity, strict-loads them, and freezes
-the admitted version/identity into Engine, Shadow, and checkpoint state. Engine
-checkpoint schema v3 is the first schema that includes the production
-foundation state, and older schemas fail closed on restore. These bindings do
-not grant empirical, Brain, Trade Intent, execution, or live authority.
+The checked-in model has one strict `semantic_selection` object. It selects the
+atomic v1.2 registry/identity and the additive Foundation v2.0
+registry/identity, then verifies that Foundation declares v1.2 as its parent.
+There is no `smc_semantics_v2.0` runtime and no synthetic full-stack version.
+`ContinuousSMCEngine` derives the internal projection gate from the validated
+pair and freezes the existing identities into Engine, Shadow, and checkpoint
+state. Engine checkpoint schema v3 is the first schema that includes the
+production Foundation state; older schemas fail closed on restore. These
+bindings grant no empirical, Brain, Trade Intent, execution, or live authority.
+
+Performance work is deliberately split. The merged low-risk change skips
+Swing-geometry and liquidity-cluster global scans on clocks whose authoritative
+inputs cannot change those projections, with event/checkpoint/snapshot parity.
+The proposed transaction-container overlay was rejected because sibling staged
+candidates could alias committed BAR and index containers. Full projection and
+lifecycle histories therefore remain in hot state pending a versioned compact-
+view/cold-replay migration; current manifests must be re-frozen after any such
+runtime change.
 
 The existing `PlaybookBrain` now maintains one shadow-only Hypothesis Manager
 competition set containing six mutually exclusive path hypotheses:
@@ -135,13 +145,14 @@ separate from the later analysis horizon; a target reached before a pending
 remainder fills cancels that remainder; and secondary realized-spread/path
 censoring does not suppress an otherwise complete primary implementation-
 shortfall pair. Off-grid stop/invalidation or target prices fail intent
-admission. It does not yet freeze the exact semantic provenance of
-every method price or compare registered wait, cancel, stop, and target
-variants. Its manifest remains
-`template_incomplete_not_authorized_to_run`. The retained Phase 8 facility is a
-read-only readiness checker that opens no input ledger, writes no artifact, and
-reports 12 blockers including `formal_runner_not_implemented`; no formal runner
-or empirical result exists.
+admission. The v2 protocol requires exact pre-outcome semantic provenance for
+every method price and registers wait, cancel, stop, and target variants with
+explicit evaluable-or-censored rules. A fail-closed formal runner and canonical
+result writer exist. Its run manifest remains
+`template_incomplete_not_authorized_to_run` because no non-zero
+intent/research-case ledger or minute source is bound, outputs and experiment
+identity are unset, and the manifest is not frozen. No formal empirical result
+exists.
 Phase 9 has a `phase9_shadow_live_v1.2` no-submission parity runner with exact
 execution/account evidence, immutable evidence identities, frozen instrument
 mapping, full registered state digests, fail-stop journal/failure/gateway
@@ -198,7 +209,7 @@ validation, model calibration, rolling OOF, or sealed OOS.
 | 7. Independent relation object | **Complete with generation lifecycle** | `RelationState` remains the deterministic classifier; Foundation v2 binds it to persistent parent/child Structure Generations so unchanged snapshots update one generation rather than create independent samples. |
 | 8. Cross-timeframe Session | **Complete** | `SessionState` is reduced from the completed M1 clock and is not embedded in a timeframe. |
 | 9. Competing Brain hypotheses | **Current-scope lifecycle implemented; rollover and fitted model incomplete; shadow-only** | The six-path reducer, exact terminal/winner adapter, global dependency-cluster guard, ledger, common-horizon expiry, precedence rules, and residual mass are tested. Authority/scope rollover retirement is not preregistered, and runtime still uses equal priors and zero increments/decay with no fitted/admitted likelihood artifact. |
-| 10. Signal / Execution Research separation | **Complete as an engineering boundary; execution-study coverage partial** | Signal Policy/Trade Intent, the seven-entry-method evaluator core, the order FSM, and retained simulator are distinct; none turns Eye diagnostics into action authority. A read-only readiness checker preserves the blocked template; exact method-price provenance, wait/cancel/stop/target variants, and the formal runner/study remain open. |
+| 10. Signal / Execution Research separation | **Complete as an engineering boundary; execution study not run** | Signal Policy/Trade Intent, the seven-entry-method evaluator core, formal v2 research runner, order FSM, and retained simulator are distinct; none turns Eye diagnostics into action authority. Provenance and variant evaluability are enforced, but no non-zero ledger is bound and no empirical result exists. |
 | 11. Nested and non-nested comparisons | **Full v1.2 protocol-v3 diagnostic complete** | The frozen r2 run separates source-only ancestry from normalized-M5-bar composition. Episode counts are E1–E6 = 1,124 / 317 / 17 / 1 / 1 / 0; E3–E6 remain underpowered and no semantic/model admission follows. |
 | 12. Matched controls | **Measured; diagnostic coverage remains limited** | Quiet and non-sweep controls matched 372/1,124 (33.1%) and 62/1,124 (5.5%); pseudo and forward-shift matched 0. All four families stay separate, fixed-family Holm is non-significant, and cross-pair outcome overlap keeps inference descriptive/unvalidated. |
 | 13. Structural outcomes before P&L | **Canonical definition complete; empirical programs remain** | One factual `StructuralOutcomeEngine` now owns target/invalidation precedence, same-bar ambiguity, native-bar gaps, horizon censoring, MFE and MAE. Structural Leg v2 freezes its full path, close/extreme efficiency, close/wick MAE, tick amplitude, duration, and strictly-prior `ATR_at_leg_start` ancestry. Protected-Swing survival and matched first-retest effects still require fresh independently frozen studies. |
@@ -221,7 +232,7 @@ validation, model calibration, rolling OOF, or sealed OOS.
 | 5. Signal Research | **Full registered v1.2 protocol-v3 diagnostic complete** | Frozen r2 produced a complete 36,000-clock run, six hash-bound ledgers, E1–E6 and non-nested proofs, four separate controls, adjacent deltas, exact McNemar, and fixed-family Holm. | E3–E6 and two control families remain sparse/empty; preregister an independent development/validation design rather than relaxing thresholds. No OOS window is open. |
 | 6. MBO mechanism | **Complete for the registered two-week development study** | Primary week plus the preregistered underpowered extension passed engineering/data/statistical audit. Phase 7 allowlist: `acceptance_continuation`, `displacement_impact`; no Week 3. | Keep underpowered Sweep/MSS and the unsupported historical FVG first-concrete-lifecycle proxy excluded. A true first-retest estimand requires a new preregistration. This association result is not causal, OOS, model-fit, or trading authority. |
 | 7. Trading Brain | **Current-scope shadow lifecycle/interfaces integrated; fitted model not admitted** | Exact market facts map to per-path falsification and realized winners inside the current authority scope; the reducer, global dependency guard, DOL ranking, fitted-artifact-only no-target projection, Signal Policy, Trade Intent, and artifact loaders run fail closed in the existing Brain. The read-only readiness checker verifies 7,381 Phase 6 ledger rows and reports 13 blockers without fitting or writing artifacts. Equal priors and zero increments/decay remain neutral; no runtime DOL probability is published without its artifact. | Preregister scope-rollover retirement/archive semantics; bind and execute the already-frozen June W4 temporal/branching design without changing it; narrow the final Brain input to `MarketSnapshot + events`; fit, validate, load, and admit path/DOL/outcome artifacts. Pre-horizon per-path expiry/hazard/prior reversion also need separate definitions and fitted temporal evidence. |
-| 8. Execution Research | **Standalone FSM and entry-method core complete; study/vertical gates not passed** | Seven entry methods can be compared under one frozen intent. Evaluator v1.1 separates entry GTT from analysis end, cancels a remainder when the target resolves before its pending fill, keeps primary-pair eligibility independent of secondary censoring, and rejects off-grid stop/target prices. Execution FSM v1.5 passed focused logic review, and a read-only checker confirms the template remains blocked without opening ledgers or writing artifacts. | Resolve all 12 blockers: freeze method-price provenance plus wait/cancel/stop/target variants and estimands, bind a non-zero intent/minute ledger and outputs, implement the formal runner, execute the paired study, then connect exact risk-approved intents to the FSM. |
+| 8. Execution Research | **Standalone FSM, evaluator, and formal runner complete; study/vertical gates not passed** | Seven entry methods can be compared under one frozen intent. Evaluator v1.1 separates entry GTT from analysis end, cancels a remainder when the target resolves before its pending fill, keeps primary-pair eligibility independent of secondary censoring, and rejects off-grid stop/target prices. The v2 runner enforces provenance, variant evaluability/censoring, no-clobber outputs, and validate-only default behavior. | Resolve the six current run-template blockers: produce and bind a non-zero intent/research-case ledger and minute source, register outputs and experiment identity, freeze and execute the paired study, then connect exact risk-approved intents to the FSM. |
 | 9. Shadow Live | **Deterministic parity harness complete; operational gate not passed** | v1.2 binds exact evidence/state identities; the historical Git-ignored 6,900-clock input retains its pre-supplement 100→200 receipt, and a separate current Foundation-enabled 200-row file-parity run binds the current model, registry, and Foundation identity. A read-only full-window capacity preflight still evaluates the historical receipt, finds its historical/current identity mismatch, and grants no run authority. | Rematerialize the complete 6,900-clock rehearsal under the final source snapshot if that rehearsal is pursued; preregister operational metrics for event/relation churn, evidence-belief consistency, signal expiry, and DOL stability; remove the full-week nonlinear capacity residual; then run the real-time multi-day no-order pilot. |
 | Final OOS | **Not opened** | Split and sealed-holdout governance exist. | Open only after the vertical chain is stable and preregistered acceptance conditions are met. |
 
@@ -241,7 +252,7 @@ The complete target state is **not** reached:
 | Eye/event-state foundation | v1.2 producers remain the immutable atomic authority; foundation v2 supplies geometric Swing containment, complete Structural Leg paths, interaction/structure/relation/delivery generations, Origin/OB decomposition, dual ranges, structural FVG expiry, true first reinteraction, and a shared factual outcome engine. Arbitrary TTL and `DEALING_RANGE_EXTENDED` remain deliberately undefined. |
 | Brain | Current-scope lifecycle and admission interfaces are executable, but the final sole-input boundary, scope retirement archive, fitted probabilities, and non-zero intents are absent. |
 | Signal Research | Full registered diagnostic executed; sparse later chains and empty controls prohibit fitting or semantic promotion. |
-| Execution Research | Order FSM and seven-entry-method core exist; the read-only checker reports 12 blockers, while price provenance, wait/cancel/stop/target variants, formal input/result runner, and empirical study are absent. |
+| Execution Research | Order FSM, seven-entry-method core, provenance/variant contracts, and formal v2 runner exist. The current run template has six unresolved bindings and no non-zero ledger or empirical result. |
 | Shadow Live | Current Foundation-enabled deterministic file parity is demonstrated on an exact 200-clock prefix; the read-only 6,900-clock capacity estimate is not run authority, and operational metrics, full-week capacity closure, and a real-time multi-day pilot are absent. |
 | OOF/OOS/live execution | Intentionally unopened and unauthorized until the preceding vertical gates pass. |
 
@@ -287,10 +298,10 @@ therefore empirical validation and promotion:
   `MarketSnapshot`. Narrowing that input and replacing the legacy
   Decision/Risk/simulator path should occur only with the admitted
   TradeIntent-to-FSM vertical migration, not by creating a second Brain.
-- Phase 8 needs frozen semantic provenance for all method prices, explicit
-  wait/cancel/stop/target variant estimands, a real non-zero Trade Intent/method
-  ledger, a formal paired-study runner/result, and then the exact
-  `TradeIntent -> RiskApproval -> FSM` handoff.
+- Phase 8 needs a real non-zero Trade Intent/research-case ledger carrying the
+  already-required method-price provenance, plus the registered minute source
+  and outputs. The existing formal runner must then execute a newly frozen
+  manifest before the exact `TradeIntent -> RiskApproval -> FSM` handoff.
 - Phase 9 still needs a frozen operational acceptance protocol for semantic
   duplication, relation churn, evidence-belief consistency, signal expiry,
   and DOL stability. Its complete historical path also has an avoidable
@@ -365,8 +376,8 @@ four marked checks still pass while two raw-Eye transport assertions correctly
 fail closed on the changed `smc_trader/causal.py` SHA. The old binding is not
 rewritten to make a current checkout impersonate that historical runtime.
 
-The separately frozen v1.2 protocol-v3 r2 development diagnostic is now also
-complete. Its [manifest](../../experiments/manifests/smc_semantics_v1_2_2024_01_phase5_diagnostic_v3_r2.yaml)
+The separately frozen v1.2 protocol-v3 r2 development diagnostic completed.
+Its [manifest](../../experiments/manifests/smc_semantics_v1_2_2024_01_phase5_diagnostic_v3_r2.yaml)
 and [result](../../experiments/results/smc_semantics_v1_2_2024_01_phase5_diagnostic_v3_r2.json)
 bind a complete 36,000-clock run, 30,477 real diagnostic bars, 157,802 atomic
 events, and six audit ledgers. Episode counts are E1–E6 =
@@ -375,6 +386,13 @@ episodes; pseudo and forward-shift controls matched zero. All fixed-family
 Holm-adjusted p-values are 1.0. The result is diagnostic-only, carries no
 inference, fit, OOS, semantic-acceptance, or trading authority, and cannot be
 used to promote Phase 7.
+
+The current checkout does not contain the result-bound 157,802-row
+`event_study` JSONL, and no repository retrieval receipt points to an immutable
+copy. The result summary and the other five declared ledgers remain, but local
+byte-for-byte bundle verification is incomplete until that large ledger is
+restored and its declared SHA-256 is checked. It must not be deleted or
+recreated as disposable output.
 
 Phase 6 is a separate completed MBO mechanism study. The frozen primary week
 triggered and consumed its preregistered second-week extension. The
@@ -416,11 +434,11 @@ and [result](../../experiments/results/smc_semantics_v1_2_2024_06_phase6_mbo_wee
   complete with focused P0/P1=0. Evaluator protocol v1.1 separates entry GTT
   from analysis end, cancels a still-pending remainder if target resolves
   first, does not let secondary censoring remove a valid primary pair, and
-  rejects off-grid stop/target prices. Its focused evaluator/readiness suite is
-  40/40 green. The
-  blocked-template checker is read-only and
-  reports 12 blockers; the formal runner, method provenance/variants, empirical
-  study, and vertical TradeIntent-to-FSM handoff are not complete.
+  rejects off-grid stop/target prices. The v2 protocol and formal runner require
+  exact method provenance, register variant evaluability/censoring, and validate
+  without opening data by default. The current run template still has six
+  blockers; the empirical study and vertical TradeIntent-to-FSM handoff are not
+  complete.
 - Phase 9: v1.2 deterministic parity harness is complete. The historical
   checkpoint/resume/cold-replay receipt and a separate current
   Foundation-enabled 200-clock file-parity run are exact, but operational

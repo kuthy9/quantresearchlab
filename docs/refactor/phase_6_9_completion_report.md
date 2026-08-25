@@ -27,7 +27,7 @@ empirical, operational, rolling-OOF, and sealed-OOS evidence gates.
 |---|---|---|---|
 | 6. MBO mechanism | Complete | Registered two-week development study complete with final reproducibility review | Only Acceptance continuation and Displacement impact enter the Phase 7 evidence allowlist |
 | 7. Brain probability and intent | Reducer, current-scope runtime path lifecycle, artifact loaders, and read-only fit-readiness checker integrated in the existing Brain | Checker inspects 7,381 Phase 6 rows and reports 13 blockers; scope-retirement rule and fitted/admitted path, DOL, and outcome artifacts absent | Shadow-only; neutral updates; zero production Trade Intents; no Decision/Risk authority |
-| 8. Execution | Seven-entry-method evaluator v1.1 core, read-only blocked-template checker, and standalone immutable order FSM v1.5 implemented; evaluator/readiness 40/40 green and FSM-focused review P0/P1=0 | Checker reports 12 blockers; method provenance/variants, formal runner, end-to-end handoff, and empirical result absent | No broker/network submission and no fill-quality claim |
+| 8. Execution | Seven-entry-method evaluator v1.1 core, formal fail-closed v2 research runner, and standalone immutable order FSM v1.5 implemented; focused contracts pass and FSM review reported P0/P1=0 | Current run template has six blockers; non-zero ledger, frozen execution, end-to-end handoff, and empirical result absent | No broker/network submission and no fill-quality claim |
 | 9. Shadow Live | Deterministic parity runner v1.2 and read-only capacity preflight implemented | Pre-supplement 6,900-clock input and historical 200-clock checkpoint/resume/cold receipt retained; a separate current Foundation-enabled 200-row file-parity run binds the current model/registry. Operational metrics, complete 6,900-clock run, and real-time pilot remain absent | `NullExecutionGateway`; capacity estimate and bounded engineering parity only |
 
 The current 200-row run does not overwrite the historical receipt below. Its
@@ -101,6 +101,13 @@ P0/P1 discrepancy; no standalone signed audit artifact is claimed. This
 remains diagnostic-only: sparse later stages, empty control families, and
 cross-pair outcome-window dependence prohibit fitting, semantic acceptance,
 OOS, or trading claims.
+
+The result summary declares a 157,802-row `event_study` ledger with SHA-256
+`1e186a9f3f8019ecf60f4dbb832fcde1acd7ac2035b4c861b7d5ba25caef8a88`,
+but that file is currently absent from this checkout and has no repository
+retrieval receipt. The recorded run is not reinterpreted, but the local bundle
+cannot be called byte-complete until the ledger is restored from immutable
+storage and rehashed.
 
 ## Phase 7: interfaces integrated; target model and promotion closed
 
@@ -178,20 +185,19 @@ secondary realized-spread/path censor does not remove an otherwise valid pair.
 Stop/invalidation and target prices must be on the frozen tick grid or intent
 admission fails closed. The final runtime SHA-256 is
 `1b2f338c8196ff0f963a65df66f41d48805b1eee1caaee1bf9f615d5e3341e17`;
-the blocked template binds that exact identity, and the focused evaluator plus
-readiness suite is 40/40 green.
+the current run template binds that exact identity, and focused evaluator and
+runner tests cover its fail-closed contracts.
 
-This is the registered entry-method core, not the complete Execution Research
-surface in the architecture target. Method prices are currently supplied with
-the research intent rather than derived from and bound to exact FVG/OB/reclaim/
-breakout semantic sources. The protocol has one expiry, one invalidation, and
-one selected target; it does not yet compare frozen wait-time, cancel-rule,
-stop, or target variants. A read-only readiness checker validates only that the
-template remains blocked; it opens no input ledger, writes no artifact, and
-reports 12 blockers, including `formal_runner_not_implemented`. A formal
-TradeIntent/minute-ledger loader and result-running CLI do not exist. Those
-definitions must be frozen before code generates variants; test fixtures must
-not substitute for a real non-zero admitted intent ledger.
+This remains research infrastructure, not an empirical Execution Research
+result. The v2 protocol requires method prices to carry exact pre-outcome
+FVG/OB/reclaim/breakout or causal-BBO provenance, and it registers wait-time,
+cancel-rule, stop, and target variants. Variants needing unavailable frozen
+cancel state or entry-zone boundaries are explicitly censored. The formal
+loader, evaluator, canonical result writer, and
+[`run_execution_research_v2.py`](../../scripts/run_execution_research_v2.py)
+CLI exist; validation-only is the default and development execution is
+explicit. Test fixtures still cannot substitute for a real non-zero admitted
+intent ledger.
 
 Order FSM v1.5 separately implements immutable command/fact custody, order and
 position state, aggregate reservations, partial fills, cancel/replace and OCO
@@ -204,11 +210,12 @@ executor. The development engine still uses its legacy Decision/Risk/simulator
 path; an admitted `TradeIntent -> RiskApproval -> FSM` handoff remains future
 vertical integration.
 
-This does not pass the empirical Phase 8 gate. The
-[research manifest](../../experiments/manifests/execution_research_phase8_v1_template.yaml)
-is `template_incomplete_not_authorized_to_run`, required input bindings remain
-unset, and no formal paired result exists. The FSM has no broker/network
-submission path.
+This does not pass the empirical Phase 8 gate. The current
+[run manifest](../../experiments/manifests/execution_research_phase8_v2_run_template.yaml)
+is `template_incomplete_not_authorized_to_run`: its intent/research-case ledger
+and minute source are unbound, output identities are unset, and it is not
+frozen. No formal paired result exists. The FSM has no broker/network submission
+path.
 
 ## Phase 9: parity harness implemented, pilot pending
 

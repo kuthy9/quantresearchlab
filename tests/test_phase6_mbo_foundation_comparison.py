@@ -5,11 +5,19 @@ import inspect
 import json
 from pathlib import Path
 
+import pandas as pd
 import pytest
 
+from scripts import run_semantic_signal_research as semantic_runner
 from scripts import run_mbo_mechanism_research as phase6_runner
 from scripts import run_phase6_mbo_foundation_comparison as comparison
-from smc_trader.mbo_mechanism_research import Phase6ResearchError
+from smc_trader.mbo_mechanism_research import (
+    LEGACY_SYNTHETIC_SEMANTIC_EXCEPTION_POLICY,
+    SYNTHETIC_SEMANTIC_EXCEPTION_POLICY,
+    Phase6ResearchError,
+)
+from smc_trader.model import Bar, to_primitive
+from smc_trader.scene_graph import scale_registry_id
 
 
 @pytest.mark.parametrize("window_key", ("W1", "W2"))
@@ -76,6 +84,144 @@ def test_validate_only_binds_current_foundation_window_and_data(
     assert comparison_contract["raw_partition_manifest"] == payload[
         "identity_bindings"
     ]["raw_mbo_partition_manifest"]
+    assert payload["synthetic_semantic_exception_policy"] == (
+        SYNTHETIC_SEMANTIC_EXCEPTION_POLICY
+    )
+    assert comparison_contract[
+        "synthetic_semantic_exception_policy_lineage"
+    ]["effective_comparison_policy"] == "current_full_interval_roots"
+    assert comparison_contract[
+        "synthetic_semantic_exception_policy_lineage"
+    ]["historical_source_manifest_mutated"] is False
+
+
+@pytest.mark.parametrize(
+    ("window_key", "source_policy", "source_policy_version"),
+    (
+        (
+            "W1",
+            LEGACY_SYNTHETIC_SEMANTIC_EXCEPTION_POLICY,
+            "legacy_single_clock_root",
+        ),
+        (
+            "W2",
+            SYNTHETIC_SEMANTIC_EXCEPTION_POLICY,
+            "current_full_interval_roots",
+        ),
+    ),
+)
+def test_comparison_uses_current_policy_without_mutating_historical_source(
+    window_key: str,
+    source_policy: object,
+    source_policy_version: str,
+) -> None:
+    source_path = (
+        comparison.ROOT / comparison.WINDOWS[window_key]["source_manifest"]
+    )
+    source = json.loads(source_path.read_text(encoding="utf-8"))
+    effective = comparison.build_manifest(window_key)
+
+    assert source["synthetic_semantic_exception_policy"] == source_policy
+    assert effective["synthetic_semantic_exception_policy"] == (
+        SYNTHETIC_SEMANTIC_EXCEPTION_POLICY
+    )
+    assert effective["comparison_contract"][
+        "synthetic_semantic_exception_policy_lineage"
+    ] == {
+        "source_manifest_policy": source_policy_version,
+        "effective_comparison_policy": "current_full_interval_roots",
+        "historical_source_manifest_mutated": False,
+    }
+
+
+def test_comparison_loader_rejects_legacy_policy_before_identity_reads(
+    tmp_path: Path,
+) -> None:
+    payload = comparison.build_manifest("W1")
+    payload["synthetic_semantic_exception_policy"] = deepcopy(
+        LEGACY_SYNTHETIC_SEMANTIC_EXCEPTION_POLICY
+    )
+    manifest = tmp_path / "comparison.json"
+    manifest.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(
+        Phase6ResearchError,
+        match="comparison requires the current synthetic semantic exception policy",
+    ):
+        comparison.load_frozen_phase6_contract(
+            manifest,
+            root=tmp_path,
+            verify_raw_partition_hashes=False,
+            comparison_validation_only=True,
+        )
+
+
+def test_comparison_builder_rejects_source_policy_drift(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_read_json = comparison._read_json
+
+    def drifted_read_json(path: Path, *, label: str) -> dict[str, object]:
+        payload = original_read_json(path, label=label)
+        if label == "source Phase-6 manifest":
+            payload["synthetic_semantic_exception_policy"] = {"drifted": True}
+        return payload
+
+    monkeypatch.setattr(comparison, "_read_json", drifted_read_json)
+
+    with pytest.raises(
+        Phase6ResearchError,
+        match="source Phase-6 synthetic semantic exception policy changed",
+    ):
+        comparison.build_manifest("W1")
+
+
+def test_phase6_eye_builder_exactly_matches_phase45_foundation_runtime() -> None:
+    model_path = comparison.ROOT / comparison.MODEL_PATH
+    phase45_reader, phase45_observer = semantic_runner._build_eye(model_path)
+    phase6_reader, phase6_observer = phase6_runner._build_eye(model_path)
+
+    assert phase6_observer.config.canonical_foundation_enabled is True
+    assert phase6_observer._foundation_adapter is not None
+    assert phase6_observer.config == phase45_observer.config
+    assert scale_registry_id(phase6_reader.scale_specs) == scale_registry_id(
+        phase45_reader.scale_specs
+    )
+
+    start = pd.Timestamp("2025-01-05 18:00", tz="America/New_York")
+    bars = tuple(
+        Bar(
+            start=start + pd.Timedelta(index, unit="min"),
+            open=20_000.0 + index * 0.25,
+            high=20_000.5 + index * 0.25,
+            low=19_999.5 + index * 0.25,
+            close=20_000.25 + index * 0.25,
+            volume=100.0 + index,
+            symbol="NQH5",
+            instrument_id=1,
+        )
+        for index in range(3)
+    )
+    for bar in bars:
+        phase45_observation = phase45_observer.observe(
+            phase45_reader.on_bar(bar)
+        )
+        phase6_observation = phase6_observer.observe(
+            phase6_reader.on_bar(bar)
+        )
+        assert to_primitive(phase6_observation) == to_primitive(
+            phase45_observation
+        )
+
+    assert len(phase6_observer.audit_store) == len(
+        phase45_observer.audit_store
+    )
+    assert phase6_observer.audit_store.fingerprint() == (
+        phase45_observer.audit_store.fingerprint()
+    )
+    assert phase6_observer._foundation_adapter.checkpoint() == (
+        phase45_observer._foundation_adapter.checkpoint()
+    )
 
 
 def test_w2_prior_result_is_gate_and_warmup_only() -> None:

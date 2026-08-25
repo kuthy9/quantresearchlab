@@ -11,13 +11,30 @@ import hashlib
 import json
 from pathlib import Path, PurePosixPath
 import re
-from typing import Any, Mapping, Sequence
+from typing import TYPE_CHECKING, Any, Mapping, Sequence
 
 from .model import EventKind, FrozenDict, SMC_SEMANTIC_VERSION
+
+if TYPE_CHECKING:
+    from .foundation_registry import FoundationRegistry
 
 
 class SemanticRegistryError(ValueError):
     """Raised when a semantic or parameter registry is incomplete."""
+
+
+SEMANTIC_SELECTION_SCHEMA_VERSION = 1
+_SEMANTIC_SELECTION_KEYS = frozenset(
+    {
+        "schema_version",
+        "atomic_semantics_version",
+        "atomic_registry",
+        "atomic_definition_identity",
+        "foundation_projection_version",
+        "foundation_registry",
+        "foundation_registry_identity",
+    }
+)
 
 
 _CONCEPT_FIELDS = (
@@ -567,6 +584,7 @@ class SemanticRegistry:
 
         return self.definition_identity.identity
 
+
     @property
     def canonical_emitted_event_kinds(self) -> frozenset[EventKind]:
         """Return the exact production-emitted canonical semantic surface."""
@@ -591,12 +609,156 @@ class SemanticRegistry:
         )
 
 
+@dataclass(frozen=True)
+class SemanticSelection:
+    """The selected atomic protocol and its dependent Foundation projection."""
+
+    atomic_registry_path: str
+    foundation_registry_path: str
+    atomic_registry: SemanticRegistry
+    foundation_registry: "FoundationRegistry"
+
+    @property
+    def atomic_semantics_version(self) -> str:
+        return self.atomic_registry.semantic_version
+
+    @property
+    def atomic_definition_identity(self) -> str:
+        return self.atomic_registry.identity
+
+    @property
+    def foundation_projection_version(self) -> str:
+        return self.foundation_registry.foundation_version
+
+    @property
+    def foundation_registry_identity(self) -> str:
+        return self.foundation_registry.identity
+
+    @property
+    def parent_atomic_semantics_version(self) -> str:
+        return self.foundation_registry.parent_atomic_semantic_version
+
+    def to_metadata(self) -> dict[str, Any]:
+        return {
+            "schema_version": SEMANTIC_SELECTION_SCHEMA_VERSION,
+            "atomic_semantics_version": self.atomic_semantics_version,
+            "atomic_registry": self.atomic_registry_path,
+            "atomic_definition_identity": self.atomic_definition_identity,
+            "foundation_projection_version": self.foundation_projection_version,
+            "foundation_registry": self.foundation_registry_path,
+            "foundation_registry_identity": self.foundation_registry_identity,
+            "parent_atomic_semantics_version": (
+                self.parent_atomic_semantics_version
+            ),
+        }
+
+
+def _selection_file(
+    value: Any,
+    *,
+    name: str,
+    root: Path,
+) -> tuple[str, Path]:
+    reference = _registry_reference(value, name=name)
+    candidate = root / reference
+    if candidate.is_symlink():
+        raise SemanticRegistryError(f"{name} must be a direct regular file")
+    path = candidate.resolve(strict=False)
+    try:
+        path.relative_to(root)
+    except ValueError as error:
+        raise SemanticRegistryError(f"{name} escapes the repository") from error
+    if not path.is_file():
+        raise SemanticRegistryError(f"{name} must be a direct regular file")
+    return reference, path
+
+
+def load_semantic_selection(
+    payload: Any,
+    *,
+    root: str | Path | None = None,
+) -> SemanticSelection:
+    """Strict-load one atomic/Foundation pair without inventing a stack version."""
+
+    from .foundation_registry import (
+        FOUNDATION_VERSION,
+        FoundationRegistryError,
+        load_foundation_registry,
+    )
+
+    fields = set(payload) if isinstance(payload, Mapping) else set()
+    if not isinstance(payload, Mapping) or fields != _SEMANTIC_SELECTION_KEYS:
+        raise SemanticRegistryError(
+            "semantic_selection fields differ: "
+            f"missing={sorted(_SEMANTIC_SELECTION_KEYS - fields)}, "
+            f"extra={sorted(fields - _SEMANTIC_SELECTION_KEYS)}"
+        )
+    if payload["schema_version"] != SEMANTIC_SELECTION_SCHEMA_VERSION:
+        raise SemanticRegistryError("semantic_selection schema is unsupported")
+    atomic_version = payload["atomic_semantics_version"]
+    foundation_version = payload["foundation_projection_version"]
+    if atomic_version != SMC_SEMANTIC_VERSION:
+        raise SemanticRegistryError(
+            "runtime does not implement the selected atomic semantics"
+        )
+    if foundation_version != FOUNDATION_VERSION:
+        raise SemanticRegistryError(
+            "runtime does not implement the selected Foundation projection"
+        )
+    repository_root = (
+        Path(__file__).resolve().parents[1] if root is None else Path(root).resolve()
+    )
+    atomic_reference, atomic_path = _selection_file(
+        payload["atomic_registry"], name="atomic_registry", root=repository_root
+    )
+    foundation_reference, foundation_path = _selection_file(
+        payload["foundation_registry"],
+        name="foundation_registry",
+        root=repository_root,
+    )
+    atomic = SemanticRegistry.from_file(
+        atomic_path,
+        required_version=atomic_version,
+        expected_definition_identity=_sha256_identity(
+            payload["atomic_definition_identity"],
+            name="atomic_definition_identity",
+        ),
+    )
+    try:
+        foundation = load_foundation_registry(
+            foundation_path,
+            expected_identity=_sha256_identity(
+                payload["foundation_registry_identity"],
+                name="foundation_registry_identity",
+            ),
+        )
+    except FoundationRegistryError as error:
+        raise SemanticRegistryError(str(error)) from error
+    if foundation.foundation_version != foundation_version:
+        raise SemanticRegistryError(
+            "Foundation registry version differs from semantic_selection"
+        )
+    if foundation.parent_atomic_semantic_version != atomic.semantic_version:
+        raise SemanticRegistryError(
+            "Foundation parent atomic semantics differs from semantic_selection"
+        )
+    return SemanticSelection(
+        atomic_registry_path=atomic_reference,
+        foundation_registry_path=foundation_reference,
+        atomic_registry=atomic,
+        foundation_registry=foundation,
+    )
+
+
 __all__ = [
+    "SEMANTIC_SELECTION_SCHEMA_VERSION",
     "SemanticConcept",
     "SemanticDefinitionIdentity",
     "SemanticEventBinding",
     "SemanticParameterRegistry",
     "SemanticRegistry",
     "SemanticRegistryError",
+    "SemanticSelection",
+    "load_semantic_selection",
     "SEMANTIC_EVENT_BINDING_STATUSES",
 ]

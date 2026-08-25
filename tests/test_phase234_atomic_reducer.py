@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import copy
 import hashlib
 import json
+import math
+import pickle
 
 import pandas as pd
 import pytest
 
 from smc_trader.causal import CausalMarketReader, ReaderUpdate
-from smc_trader.event_store import event_order_key
+from smc_trader.event_store import ImmutableEventStore, event_order_key
 from smc_trader.foundation_registry import (
     FOUNDATION_CANONICAL_IDENTITY,
     FOUNDATION_VERSION,
@@ -18,6 +21,7 @@ from smc_trader.market_state import (
     MarketSnapshotPublisher,
     MarketSnapshotAuthority,
     RelationRole,
+    SessionStateReducer,
     TimeframeEventReducer,
     foundation_record_from_projection_event,
     foundation_record_projection_event,
@@ -40,6 +44,10 @@ from smc_trader.model import (
     to_primitive,
 )
 from smc_trader.observation import CausalObserver, ObserverConfig
+from smc_trader.semantic_lifecycle import (
+    GenerationLifecycle,
+    RelationGeneration,
+)
 from smc_trader.semantic_foundation import (
     FoundationProjection,
     FoundationProjectionReducer,
@@ -132,6 +140,7 @@ def _bar_event(
     sequence_no: int = 0,
     event_id: str | None = None,
     semantic_version: str = SMC_SEMANTIC_VERSION,
+    real_completed: bool = True,
 ) -> MarketEvent:
     return _event(
         EventKind.BAR_COMPLETED,
@@ -144,6 +153,8 @@ def _bar_event(
             "close": close,
             "atr": atr,
             "data_complete": True,
+            "real_completed": real_completed,
+            "clock_only": not real_completed,
             "event_category": "normalized_data",
             "source_data_ids": (f"bar:{timeframe.value}:{minutes}",),
         },
@@ -161,6 +172,316 @@ def _reduce(events: tuple[MarketEvent, ...]):
         )
     assert state is not None
     return state
+
+
+def test_native_htf_clock_only_bar_is_provenance_only_for_timeframe_state() -> None:
+    initial = _reduce(
+        (_bar_event(0, Timeframe.H1, close=100.0, atr=2.0),)
+    )
+    clock_only = _bar_event(
+        1,
+        Timeframe.H1,
+        close=125.0,
+        atr=25.0,
+        real_completed=False,
+    )
+
+    advanced = reduce_timeframe_state(
+        initial,
+        clock_only,
+        semantic_registry_identity="definition-test",
+    )
+
+    assert advanced == initial
+
+
+@pytest.mark.parametrize(
+    ("case", "message"),
+    (
+        ("foreign_timeframe", "foreign event"),
+        ("wrong_semantic_version", "mix semantic versions"),
+        ("out_of_order", "out-of-order knowledge"),
+    ),
+)
+def test_native_htf_clock_only_noop_still_enforces_direct_reducer_contract(
+    case: str,
+    message: str,
+) -> None:
+    initial = _reduce(
+        (_bar_event(0, Timeframe.H1, close=100.0, atr=2.0),)
+    )
+    if case == "foreign_timeframe":
+        invalid = _bar_event(
+            1,
+            Timeframe.M5,
+            close=100.0,
+            atr=2.0,
+            real_completed=False,
+        )
+    elif case == "wrong_semantic_version":
+        invalid = _bar_event(
+            1,
+            Timeframe.H1,
+            close=100.0,
+            atr=2.0,
+            real_completed=False,
+            semantic_version="forged-semantic-version",
+        )
+    elif case == "out_of_order":
+        invalid = _bar_event(
+            -1,
+            Timeframe.H1,
+            close=100.0,
+            atr=2.0,
+            real_completed=False,
+        )
+    else:  # pragma: no cover - parametrization is closed above.
+        raise AssertionError(case)
+
+    with pytest.raises(ValueError, match=message):
+        reduce_timeframe_state(
+            initial,
+            invalid,
+            semantic_registry_identity="definition-test",
+        )
+
+
+def test_m1_clock_only_bar_advances_only_quality_heartbeat() -> None:
+    initial = _reduce(
+        (_bar_event(0, Timeframe.M1, close=100.0, atr=2.0),)
+    )
+    clock_only = _bar_event(
+        1,
+        Timeframe.M1,
+        close=125.0,
+        atr=25.0,
+        real_completed=False,
+    )
+
+    advanced = reduce_timeframe_state(
+        initial,
+        clock_only,
+        semantic_registry_identity="definition-test",
+    )
+
+    assert advanced is not None
+    assert replace(advanced, quality=initial.quality) == initial
+    assert advanced.quality.known_at == clock_only.known_at
+    assert advanced.quality.source_cutoff == initial.quality.source_cutoff
+    assert advanced.quality.atr == initial.quality.atr
+    assert advanced.quality.data_complete == initial.quality.data_complete
+    assert advanced.quality.last_event_id == clock_only.event_id
+    assert advanced.quality.last_sequence_no == clock_only.sequence_no
+    assert advanced.quality.events_applied == initial.quality.events_applied + 1
+
+
+@pytest.mark.parametrize(
+    ("marker", "value", "real_completed"),
+    (
+        ("owner_price_update_only", True, True),
+        ("owner_clock_heartbeat_only", True, False),
+        ("price_source_timeframe", Timeframe.M1.value, False),
+    ),
+)
+def test_direct_reducer_rejects_forged_owner_fanout_markers(
+    marker: str,
+    value: object,
+    real_completed: bool,
+) -> None:
+    initial = _reduce(
+        (_bar_event(0, Timeframe.H1, close=100.0, atr=2.0),)
+    )
+    event = _bar_event(
+        1,
+        Timeframe.H1,
+        close=125.0,
+        atr=25.0,
+        real_completed=real_completed,
+    )
+    evidence = {**dict(event.evidence), marker: value}
+    forged = replace(event, details=evidence, evidence=evidence)
+
+    with pytest.raises(ValueError, match="private owner fanout markers"):
+        reduce_timeframe_state(
+            initial,
+            forged,
+            semantic_registry_identity="definition-test",
+        )
+
+
+def test_private_m1_owner_fanout_preserves_registered_owner_contract() -> None:
+    initial = _reduce(
+        (_bar_event(0, Timeframe.H1, close=100.0, atr=2.0),)
+    )
+    clock = _bar_event(
+        1,
+        Timeframe.H1,
+        close=125.0,
+        atr=25.0,
+        real_completed=False,
+    )
+    heartbeat = reduce_timeframe_state(
+        initial,
+        clock,
+        semantic_registry_identity="definition-test",
+        _m1_owner_fanout=True,
+    )
+    assert heartbeat is not None
+    assert replace(heartbeat, quality=initial.quality) == initial
+    assert heartbeat.quality.known_at == clock.known_at
+
+    real = _bar_event(2, Timeframe.H1, close=130.0, atr=50.0)
+    updated = reduce_timeframe_state(
+        heartbeat,
+        real,
+        semantic_registry_identity="definition-test",
+        _m1_owner_fanout=True,
+    )
+    assert updated is not None
+    assert updated.quality.source_cutoff == initial.quality.source_cutoff
+    assert updated.quality.atr == initial.quality.atr
+
+
+@pytest.mark.parametrize(
+    "child_kind",
+    (
+        EventKind.FVG_CREATED,
+        EventKind.ORIGIN_ZONE_CREATED,
+        EventKind.DEALING_RANGE_INVALIDATED,
+    ),
+)
+def test_authoritative_atomic_parent_rejects_clock_only_bar(
+    child_kind: EventKind,
+) -> None:
+    clock_only = _replayable_m1_event(
+        1,
+        100.0,
+        real_completed=False,
+    )
+    child = _event(
+        child_kind,
+        1,
+        Timeframe.M1,
+        event_id=f"clock-only-parent:{child_kind.value}",
+        source_ids=(clock_only.event_id,),
+        origin=EventOrigin.SEMANTIC_ATOMIC,
+    )
+
+    with pytest.raises(ValueError, match="exact real normalized BAR"):
+        ImmutableEventStore._require_authoritative_parent_origins(
+            child,
+            (clock_only,),
+        )
+
+
+def test_event_store_rejects_clock_only_root_without_coverage_proof() -> None:
+    clock_only = _replayable_m1_event(
+        1,
+        100.0,
+        real_completed=False,
+    )
+    evidence = dict(clock_only.evidence)
+    for name in (
+        "complete",
+        "start",
+        "observed_minutes",
+        "expected_minutes",
+        "real_minutes",
+        "synthetic_minutes",
+    ):
+        evidence.pop(name)
+    forged = replace(clock_only, details=evidence, evidence=evidence)
+
+    with pytest.raises(ValueError, match="requires coverage"):
+        ImmutableEventStore._normalized_bar_identity(
+            forged,
+            bar_event_ids={},
+        )
+
+
+def test_event_store_rejects_clock_only_root_with_forged_registered_bounds() -> None:
+    clock_only = _replayable_m1_event(
+        1,
+        100.0,
+        real_completed=False,
+    )
+    evidence = {
+        **dict(clock_only.evidence),
+        "start": clock_only.evidence["start"]
+        - pd.Timedelta(1, unit="min"),
+    }
+    forged = replace(clock_only, details=evidence, evidence=evidence)
+
+    with pytest.raises(ValueError, match="registered bounds"):
+        ImmutableEventStore._normalized_bar_identity(
+            forged,
+            bar_event_ids={},
+        )
+
+
+@pytest.mark.parametrize(
+    ("case", "message"),
+    (
+        ("clock_only_event_time_drift", "event_time and known_at"),
+        ("partial_real_coverage", "all-or-none"),
+        ("real_with_synthetic_coverage", "coverage is inconsistent"),
+    ),
+)
+def test_event_store_bar_root_contract_rejects_partial_or_conflicting_proof(
+    case: str,
+    message: str,
+) -> None:
+    if case == "clock_only_event_time_drift":
+        invalid = replace(
+            _replayable_m1_event(1, 100.0, real_completed=False),
+            event_time=_clock(0),
+        )
+    else:
+        event = _replayable_m1_event(1, 100.0)
+        evidence = {
+            **dict(event.evidence),
+            "complete": True,
+            "start": _clock(0),
+        }
+        if case == "real_with_synthetic_coverage":
+            evidence.update(
+                observed_minutes=1,
+                expected_minutes=1,
+                real_minutes=0,
+                synthetic_minutes=1,
+            )
+        elif case != "partial_real_coverage":  # pragma: no cover
+            raise AssertionError(case)
+        invalid = replace(event, details=evidence, evidence=evidence)
+
+    with pytest.raises(ValueError, match=message):
+        ImmutableEventStore._normalized_bar_identity(
+            invalid,
+            bar_event_ids={},
+        )
+
+
+@pytest.mark.parametrize(
+    ("marker", "value"),
+    (
+        ("owner_price_update_only", True),
+        ("owner_clock_heartbeat_only", True),
+        ("price_source_timeframe", Timeframe.M1.value),
+    ),
+)
+def test_event_store_rejects_private_owner_fanout_markers(
+    marker: str,
+    value: object,
+) -> None:
+    event = _replayable_m1_event(1, 100.0)
+    evidence = {**dict(event.evidence), marker: value}
+    forged = replace(event, details=evidence, evidence=evidence)
+
+    with pytest.raises(ValueError, match="private owner fanout markers"):
+        ImmutableEventStore._normalized_bar_identity(
+            forged,
+            bar_event_ids={},
+        )
 
 
 def _relation_events() -> tuple[MarketEvent, ...]:
@@ -290,6 +611,18 @@ def _replayable_m1_event(
             "source_data_ids": (f"m1:{minutes}",),
             **(
                 {}
+                if real_completed
+                else {
+                    "complete": True,
+                    "start": candle.start,
+                    "observed_minutes": candle.observed_minutes,
+                    "expected_minutes": candle.expected_minutes,
+                    "real_minutes": candle.real_minutes,
+                    "synthetic_minutes": candle.synthetic_minutes,
+                }
+            ),
+            **(
+                {}
                 if active_timeframes is None
                 else {
                     "active_timeframes": tuple(
@@ -301,6 +634,48 @@ def _replayable_m1_event(
         },
         origin=EventOrigin.NORMALIZED_DATA,
     )
+
+
+def test_session_clock_only_candle_advances_only_clock_fields() -> None:
+    reducer = SessionStateReducer()
+    first = reducer.update(_m1_candle(0, 100.0))
+    synthetic_candle = replace(
+        _m1_candle(1, 50.0, real_completed=False),
+        open=40.0,
+        high=60.0,
+        low=30.0,
+        volume=10_000.0,
+    )
+    synthetic = reducer.update(synthetic_candle)
+
+    assert replace(
+        synthetic,
+        name=first.name,
+        phase=first.phase,
+        elapsed_minutes=first.elapsed_minutes,
+        known_at=first.known_at,
+    ) == first
+
+    resumed = reducer.update(_m1_candle(2, 110.0))
+    assert resumed.relative_volume == pytest.approx(1.0)
+    assert resumed.realized_volatility == pytest.approx(
+        abs(math.log(110.0 / 100.0))
+    )
+
+
+def test_session_rejects_unanchored_or_new_session_clock_only_atomically() -> None:
+    empty = SessionStateReducer()
+    before = copy.deepcopy(empty.__dict__)
+    with pytest.raises(ValueError, match="requires a prior real"):
+        empty.update(_m1_candle(0, 90.0, real_completed=False))
+    assert empty.__dict__ == before
+
+    anchored = SessionStateReducer()
+    anchored.update(_m1_candle(0, 100.0))
+    before = copy.deepcopy(anchored.__dict__)
+    with pytest.raises(ValueError, match="cannot establish a new session"):
+        anchored.update(_m1_candle(481, 90.0, real_completed=False))
+    assert anchored.__dict__ == before
 
 
 def _foundation_record_history() -> tuple[FoundationRecord, FoundationRecord]:
@@ -1002,6 +1377,71 @@ def test_foundation_first_retest_replay_accepts_registered_memorial_reopen() -> 
         authority,
         projection,
     )
+
+
+def test_foundation_relation_source_rejects_clock_only_bar() -> None:
+    clock_only = _replayable_m1_event(
+        0,
+        100.0,
+        real_completed=False,
+    )
+    relation = RelationGeneration(
+        relation_generation_id="clock-only-relation",
+        source_relation_id="H1:M5",
+        parent_tf=Timeframe.H1,
+        child_tf=Timeframe.M5,
+        parent_structure_generation_id="parent-structure",
+        child_structure_generation_id="child-structure",
+        role="parent_retracement",
+        lifecycle=GenerationLifecycle.ACTIVE,
+        entered_at=clock_only.known_at,
+        known_at=clock_only.known_at,
+        last_updated_at=clock_only.known_at,
+        observation_count=1,
+        latest_relation_digest="clock-only-relation-digest",
+        source_event_ids=(clock_only.event_id,),
+    )
+
+    with pytest.raises(ValueError, match="Relation Generation source.*exact real BAR"):
+        _validate_foundation_authoritative_sources(
+            FoundationRecord.from_dto(relation),
+            {clock_only.event_id: clock_only},
+        )
+
+
+def test_foundation_first_retest_rejects_clock_only_interaction_bar() -> None:
+    record, authority, projection = _first_retest_registered_clock_fixture(
+        target_known_at=pd.Timestamp(
+            "2024-06-03 10:00",
+            tz="America/New_York",
+        ),
+        interaction_known_at=pd.Timestamp(
+            "2024-06-03 10:05",
+            tz="America/New_York",
+        ),
+    )
+    interaction_id = record.payload["source_bar_event_id"]
+    interaction = authority[interaction_id]
+    forged_evidence = {
+        **dict(interaction.evidence),
+        "real_completed": False,
+        "clock_only": True,
+    }
+    authority[interaction_id] = replace(
+        interaction,
+        details=forged_evidence,
+        evidence=forged_evidence,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="first-retest interaction BAR.*exact real BAR",
+    ):
+        _validate_foundation_authoritative_sources(
+            record,
+            authority,
+            projection,
+        )
 
 
 @pytest.mark.parametrize(
@@ -3128,6 +3568,714 @@ def test_atomic_snapshot_canonicalizes_input_event_order() -> None:
     assert snapshots[0].events_this_update == snapshots[1].events_this_update
 
 
+def test_clock_only_snapshot_uses_last_real_price_without_relation_drift() -> None:
+    active = (Timeframe.H1, Timeframe.M5, Timeframe.M1)
+    frames = {
+        timeframe: FrameObservation(
+            timeframe=timeframe,
+            cutoff=_clock(10),
+            bars=1,
+            metrics={},
+            ready=True,
+        )
+        for timeframe in active
+    }
+    publisher = MarketSnapshotPublisher(
+        semantic_registry_identity="definition-test",
+        atomic_authority=True,
+    )
+    first_events = _relation_events()
+    first, _ = publisher.publish(
+        asof=_clock(10),
+        symbol="NQH5",
+        instrument_id=1,
+        price=105.0,
+        completed_1m=_m1_candle(10, 105.0),
+        frames=frames,
+        inventory=(),
+        displacement=None,
+        semantic_events=first_events,
+        anomalies=(),
+    )
+    clock_only = _replayable_m1_event(
+        11,
+        90.0,
+        active_timeframes=active,
+        real_completed=False,
+    )
+    second, _ = publisher.publish(
+        asof=_clock(11),
+        symbol="NQH5",
+        instrument_id=1,
+        price=90.0,
+        completed_1m=_m1_candle(11, 90.0, real_completed=False),
+        frames={
+            timeframe: replace(frame, cutoff=_clock(11))
+            for timeframe, frame in frames.items()
+        },
+        inventory=(),
+        displacement=None,
+        semantic_events=(clock_only,),
+        anomalies=(),
+    )
+
+    assert second.price == first.price == 105.0
+    for relation_id, first_relation in first.relations.items():
+        assert replace(
+            second.relations[relation_id],
+            known_at=first_relation.known_at,
+        ) == first_relation
+    assert replace(
+        second.session,
+        name=first.session.name,
+        phase=first.session.phase,
+        elapsed_minutes=first.session.elapsed_minutes,
+        known_at=first.session.known_at,
+    ) == first.session
+
+    replayed = replay_atomic_market_snapshot(
+        (*first_events, clock_only),
+        semantic_registry_identity="definition-test",
+    )
+    assert replayed.price == second.price
+    assert replayed.timeframe_states == second.timeframe_states
+    assert replayed.relations == second.relations
+    assert replayed.session == second.session
+
+
+def test_unanchored_atomic_clock_only_snapshot_fails_before_mutation() -> None:
+    active = (Timeframe.H1, Timeframe.M1)
+    frames = {
+        timeframe: FrameObservation(
+            timeframe=timeframe,
+            cutoff=_clock(0),
+            bars=1,
+            metrics={},
+            ready=True,
+        )
+        for timeframe in active
+    }
+    publisher = MarketSnapshotPublisher(
+        semantic_registry_identity="definition-test",
+        atomic_authority=True,
+    )
+    before_session = copy.deepcopy(publisher._session.__dict__)
+    before_reducer = copy.deepcopy(publisher._event_reducer.__dict__)
+    clock_only = _replayable_m1_event(
+        0,
+        90.0,
+        active_timeframes=active,
+        real_completed=False,
+    )
+    with pytest.raises(RuntimeError, match="requires a prior real"):
+        publisher.publish(
+            asof=_clock(0),
+            symbol="NQH5",
+            instrument_id=1,
+            price=90.0,
+            completed_1m=_m1_candle(0, 90.0, real_completed=False),
+            frames=frames,
+            inventory=(),
+            displacement=None,
+            semantic_events=(clock_only,),
+            anomalies=(),
+        )
+    assert publisher._session.__dict__ == before_session
+    assert publisher._event_reducer.__dict__ == before_reducer
+    assert publisher._last_projection_payloads == {}
+    assert publisher._last_projection_event_ids == {}
+
+    real = _replayable_m1_event(
+        0,
+        100.0,
+        active_timeframes=active,
+    )
+    recovered, _ = publisher.publish(
+        asof=_clock(0),
+        symbol="NQH5",
+        instrument_id=1,
+        price=100.0,
+        completed_1m=_m1_candle(0, 100.0),
+        frames=frames,
+        inventory=(),
+        displacement=None,
+        semantic_events=(real,),
+        anomalies=(),
+    )
+    assert recovered.price == 100.0
+
+
+def test_malformed_clock_root_fails_before_publisher_mutation() -> None:
+    active = (Timeframe.H1, Timeframe.M1)
+    frames = {
+        timeframe: FrameObservation(
+            timeframe=timeframe,
+            cutoff=_clock(1),
+            bars=1,
+            metrics={},
+            ready=True,
+        )
+        for timeframe in active
+    }
+    publisher = MarketSnapshotPublisher(
+        semantic_registry_identity="definition-test",
+        atomic_authority=True,
+    )
+    real = _replayable_m1_event(
+        0,
+        100.0,
+        active_timeframes=active,
+    )
+    clock_only = _replayable_m1_event(
+        1,
+        90.0,
+        active_timeframes=active,
+        real_completed=False,
+    )
+    incomplete_coverage = dict(clock_only.evidence)
+    incomplete_coverage.pop("synthetic_minutes")
+    malformed = replace(
+        clock_only,
+        details=incomplete_coverage,
+        evidence=incomplete_coverage,
+    )
+    before = pickle.dumps(publisher, protocol=pickle.HIGHEST_PROTOCOL)
+
+    with pytest.raises(ValueError, match="all-or-none"):
+        publisher.publish(
+            asof=_clock(1),
+            symbol="NQH5",
+            instrument_id=1,
+            price=90.0,
+            completed_1m=_m1_candle(1, 90.0, real_completed=False),
+            frames=frames,
+            inventory=(),
+            displacement=None,
+            semantic_events=(real, malformed),
+            anomalies=(),
+        )
+
+    assert pickle.dumps(
+        publisher,
+        protocol=pickle.HIGHEST_PROTOCOL,
+    ) == before
+
+
+@pytest.mark.parametrize(
+    ("marker", "value"),
+    (
+        ("owner_price_update_only", True),
+        ("owner_clock_heartbeat_only", True),
+        ("price_source_timeframe", Timeframe.M1.value),
+    ),
+)
+@pytest.mark.parametrize(
+    "origin",
+    (EventOrigin.LEGACY_TRANSPORT, EventOrigin.STATE_PROJECTION),
+)
+@pytest.mark.parametrize("marker_after_current", (False, True))
+def test_private_bar_marker_fails_before_publisher_mutation(
+    marker: str,
+    value: object,
+    origin: EventOrigin,
+    marker_after_current: bool,
+) -> None:
+    active = (Timeframe.H1, Timeframe.M1)
+    frames = {
+        timeframe: FrameObservation(
+            timeframe=timeframe,
+            cutoff=_clock(0),
+            bars=1,
+            metrics={},
+            ready=True,
+        )
+        for timeframe in active
+    }
+    publisher = MarketSnapshotPublisher(
+        semantic_registry_identity="definition-test",
+        atomic_authority=True,
+    )
+    current = replace(
+        _replayable_m1_event(
+            0,
+            100.0,
+            active_timeframes=active,
+        ),
+        event_id=f"current:{origin.value}:{marker}:{marker_after_current}",
+        sequence_no=0 if marker_after_current else 1,
+    )
+    bar = _bar_event(
+        0,
+        Timeframe.H1,
+        close=100.0,
+        sequence_no=1 if marker_after_current else 0,
+        event_id=f"marker:{origin.value}:{marker}:{marker_after_current}",
+    )
+    evidence = {**dict(bar.evidence), marker: value}
+    forged = replace(
+        bar,
+        details=evidence,
+        evidence=evidence,
+        origin=origin,
+    )
+    before = pickle.dumps(publisher, protocol=pickle.HIGHEST_PROTOCOL)
+
+    with pytest.raises(ValueError, match="private owner fanout markers"):
+        publisher.publish(
+            asof=_clock(0),
+            symbol="NQH5",
+            instrument_id=1,
+            price=100.0,
+            completed_1m=_m1_candle(0, 100.0),
+            frames=frames,
+            inventory=(),
+            displacement=None,
+            semantic_events=(forged, current),
+            anomalies=(),
+        )
+
+    assert pickle.dumps(
+        publisher,
+        protocol=pickle.HIGHEST_PROTOCOL,
+    ) == before
+
+
+@pytest.mark.parametrize(
+    "case",
+    ("missing_flag", "conflicting_flags", "non_boolean_flags"),
+)
+def test_legacy_bar_header_fails_before_publisher_mutation(
+    case: str,
+) -> None:
+    active = (Timeframe.H1, Timeframe.M1)
+    frames = {
+        timeframe: FrameObservation(
+            timeframe=timeframe,
+            cutoff=_clock(0),
+            bars=1,
+            metrics={},
+            ready=True,
+        )
+        for timeframe in active
+    }
+    publisher = MarketSnapshotPublisher(
+        semantic_registry_identity="definition-test",
+        atomic_authority=True,
+    )
+    current = _replayable_m1_event(
+        0,
+        100.0,
+        active_timeframes=active,
+    )
+    bar = _bar_event(
+        0,
+        Timeframe.H1,
+        close=100.0,
+        sequence_no=1,
+        event_id=f"malformed-legacy-header:{case}",
+    )
+    evidence = dict(bar.evidence)
+    if case == "missing_flag":
+        evidence.pop("clock_only")
+    elif case == "conflicting_flags":
+        evidence["clock_only"] = True
+    else:
+        evidence["real_completed"] = 1
+    malformed = replace(bar, details=evidence, evidence=evidence)
+    before = pickle.dumps(publisher, protocol=pickle.HIGHEST_PROTOCOL)
+
+    with pytest.raises(ValueError, match="exact complementary"):
+        publisher.publish(
+            asof=_clock(0),
+            symbol="NQH5",
+            instrument_id=1,
+            price=100.0,
+            completed_1m=_m1_candle(0, 100.0),
+            frames=frames,
+            inventory=(),
+            displacement=None,
+            semantic_events=(current, malformed),
+            anomalies=(),
+        )
+
+    assert pickle.dumps(
+        publisher,
+        protocol=pickle.HIGHEST_PROTOCOL,
+    ) == before
+
+
+def test_legacy_bar_without_private_header_fields_remains_valid() -> None:
+    active = (Timeframe.H1, Timeframe.M1)
+    frames = {
+        timeframe: FrameObservation(
+            timeframe=timeframe,
+            cutoff=_clock(0),
+            bars=1,
+            metrics={},
+            ready=True,
+        )
+        for timeframe in active
+    }
+    publisher = MarketSnapshotPublisher(
+        semantic_registry_identity="definition-test",
+        atomic_authority=True,
+    )
+    current = _replayable_m1_event(
+        0,
+        100.0,
+        active_timeframes=active,
+    )
+    legacy = _bar_event(
+        0,
+        Timeframe.H1,
+        close=100.0,
+        sequence_no=1,
+        event_id="valid-legacy-bar-after-current",
+    )
+
+    snapshot, _ = publisher.publish(
+        asof=_clock(0),
+        symbol="NQH5",
+        instrument_id=1,
+        price=100.0,
+        completed_1m=_m1_candle(0, 100.0),
+        frames=frames,
+        inventory=(),
+        displacement=None,
+        semantic_events=(legacy, current),
+        anomalies=(),
+    )
+
+    assert snapshot.price == 100.0
+    assert snapshot.timeframe_states[
+        Timeframe.H1
+    ].quality.source_cutoff == _clock(0)
+
+
+def test_epoch_reset_clock_only_snapshot_requires_new_epoch_real_anchor() -> None:
+    active = (Timeframe.H1, Timeframe.M1)
+    frames = {
+        timeframe: FrameObservation(
+            timeframe=timeframe,
+            cutoff=_clock(0),
+            bars=1,
+            metrics={},
+            ready=True,
+        )
+        for timeframe in active
+    }
+    publisher = MarketSnapshotPublisher(
+        semantic_registry_identity="definition-test",
+        atomic_authority=True,
+    )
+    first = _replayable_m1_event(
+        0,
+        100.0,
+        active_timeframes=active,
+    )
+    publisher.publish(
+        asof=_clock(0),
+        symbol="NQH5",
+        instrument_id=1,
+        price=100.0,
+        completed_1m=_m1_candle(0, 100.0),
+        frames=frames,
+        inventory=(),
+        displacement=None,
+        semantic_events=(first,),
+        anomalies=(),
+    )
+    publisher.on_boundary()
+    reset = _event(
+        EventKind.MARKET_EPOCH_RESET,
+        1,
+        Timeframe.M1,
+        price=None,
+        evidence={"reason": "contract_change_reset"},
+    )
+    clock_only = _replayable_m1_event(
+        2,
+        90.0,
+        active_timeframes=active,
+        real_completed=False,
+    )
+    before_session = copy.deepcopy(publisher._session.__dict__)
+    before_reducer = copy.deepcopy(publisher._event_reducer.__dict__)
+    with pytest.raises(RuntimeError, match="requires a prior real"):
+        publisher.publish(
+            asof=_clock(2),
+            symbol="NQH5",
+            instrument_id=1,
+            price=90.0,
+            completed_1m=_m1_candle(2, 90.0, real_completed=False),
+            frames={
+                timeframe: replace(frame, cutoff=_clock(2))
+                for timeframe, frame in frames.items()
+            },
+            inventory=(),
+            displacement=None,
+            semantic_events=(reset, clock_only),
+            anomalies=("contract_change_history_reset",),
+        )
+    assert publisher._session.__dict__ == before_session
+    assert publisher._event_reducer.__dict__ == before_reducer
+    assert publisher._boundary_reset_pending is True
+
+
+def test_epoch_reset_after_current_m1_fails_before_publisher_mutation() -> None:
+    active = (Timeframe.H1, Timeframe.M1)
+    frames = {
+        timeframe: FrameObservation(
+            timeframe=timeframe,
+            cutoff=_clock(0),
+            bars=1,
+            metrics={},
+            ready=True,
+        )
+        for timeframe in active
+    }
+    publisher = MarketSnapshotPublisher(
+        semantic_registry_identity="definition-test",
+        atomic_authority=True,
+    )
+    first = _replayable_m1_event(
+        0,
+        100.0,
+        active_timeframes=active,
+    )
+    publisher.publish(
+        asof=_clock(0),
+        symbol="NQH5",
+        instrument_id=1,
+        price=100.0,
+        completed_1m=_m1_candle(0, 100.0),
+        frames=frames,
+        inventory=(),
+        displacement=None,
+        semantic_events=(first,),
+        anomalies=(),
+    )
+
+    current = _replayable_m1_event(
+        1,
+        101.0,
+        active_timeframes=active,
+    )
+    trailing_reset = _event(
+        EventKind.MARKET_EPOCH_RESET,
+        1,
+        Timeframe.M1,
+        sequence_no=1,
+        price=None,
+        evidence={"reason": "malordered_contract_change_reset"},
+    )
+    current_frames = {
+        timeframe: replace(frame, cutoff=_clock(1))
+        for timeframe, frame in frames.items()
+    }
+    before = pickle.dumps(publisher, protocol=pickle.HIGHEST_PROTOCOL)
+
+    with pytest.raises(RuntimeError, match="must strictly precede"):
+        publisher.publish(
+            asof=_clock(1),
+            symbol="NQH5",
+            instrument_id=1,
+            price=101.0,
+            completed_1m=_m1_candle(1, 101.0),
+            frames=current_frames,
+            inventory=(),
+            displacement=None,
+            semantic_events=(current, trailing_reset),
+            anomalies=("malordered_contract_change_reset",),
+        )
+
+    assert pickle.dumps(
+        publisher,
+        protocol=pickle.HIGHEST_PROTOCOL,
+    ) == before
+    recovered, _ = publisher.publish(
+        asof=_clock(1),
+        symbol="NQH5",
+        instrument_id=1,
+        price=101.0,
+        completed_1m=_m1_candle(1, 101.0),
+        frames=current_frames,
+        inventory=(),
+        displacement=None,
+        semantic_events=(current,),
+        anomalies=(),
+    )
+    assert recovered.price == 101.0
+
+
+def test_future_semantic_event_fails_before_publisher_mutation() -> None:
+    active = (Timeframe.H1, Timeframe.M1)
+    frames = {
+        timeframe: FrameObservation(
+            timeframe=timeframe,
+            cutoff=_clock(0),
+            bars=1,
+            metrics={},
+            ready=True,
+        )
+        for timeframe in active
+    }
+    publisher = MarketSnapshotPublisher(
+        semantic_registry_identity="definition-test",
+        atomic_authority=True,
+    )
+    current = _replayable_m1_event(
+        0,
+        100.0,
+        active_timeframes=active,
+    )
+    future = _event(
+        EventKind.STRUCTURE_DIRECTION_CONFIRMED,
+        1,
+        Timeframe.H1,
+        direction=Direction.LONG,
+        evidence={"structure_id": "future-structure"},
+    )
+    before = pickle.dumps(publisher, protocol=pickle.HIGHEST_PROTOCOL)
+
+    with pytest.raises(RuntimeError, match="event after snapshot asof"):
+        publisher.publish(
+            asof=_clock(0),
+            symbol="NQH5",
+            instrument_id=1,
+            price=100.0,
+            completed_1m=_m1_candle(0, 100.0),
+            frames=frames,
+            inventory=(),
+            displacement=None,
+            semantic_events=(current, future),
+            anomalies=(),
+        )
+
+    assert pickle.dumps(
+        publisher,
+        protocol=pickle.HIGHEST_PROTOCOL,
+    ) == before
+
+
+def test_same_asof_semantic_event_after_current_m1_remains_valid() -> None:
+    active = (Timeframe.H1, Timeframe.M1)
+    frames = {
+        timeframe: FrameObservation(
+            timeframe=timeframe,
+            cutoff=_clock(0),
+            bars=1,
+            metrics={},
+            ready=True,
+        )
+        for timeframe in active
+    }
+    publisher = MarketSnapshotPublisher(
+        semantic_registry_identity="definition-test",
+        atomic_authority=True,
+    )
+    current = _replayable_m1_event(
+        0,
+        100.0,
+        active_timeframes=active,
+    )
+    same_asof = _event(
+        EventKind.STRUCTURE_DIRECTION_CONFIRMED,
+        0,
+        Timeframe.H1,
+        sequence_no=1,
+        direction=Direction.LONG,
+        evidence={"structure_id": "same-asof-structure"},
+    )
+
+    snapshot, _ = publisher.publish(
+        asof=_clock(0),
+        symbol="NQH5",
+        instrument_id=1,
+        price=100.0,
+        completed_1m=_m1_candle(0, 100.0),
+        frames=frames,
+        inventory=(),
+        displacement=None,
+        semantic_events=(same_asof, current),
+        anomalies=(),
+    )
+
+    assert snapshot.price == 100.0
+    assert snapshot.timeframe_states[
+        Timeframe.H1
+    ].structure.external_direction is Direction.LONG
+
+
+def test_snapshot_publisher_checkpoint_binds_price_and_session_to_replay() -> None:
+    active = (Timeframe.H1, Timeframe.M1)
+    frames = {
+        timeframe: FrameObservation(
+            timeframe=timeframe,
+            cutoff=_clock(1),
+            bars=1,
+            metrics={},
+            ready=True,
+        )
+        for timeframe in active
+    }
+    publisher = MarketSnapshotPublisher(
+        semantic_registry_identity="definition-test",
+        atomic_authority=True,
+    )
+    events = (
+        _replayable_m1_event(0, 100.0, active_timeframes=active),
+        _replayable_m1_event(
+            1,
+            50.0,
+            active_timeframes=active,
+            real_completed=False,
+        ),
+    )
+    publisher.publish(
+        asof=_clock(1),
+        symbol="NQH5",
+        instrument_id=1,
+        price=50.0,
+        completed_1m=_m1_candle(1, 50.0, real_completed=False),
+        frames=frames,
+        inventory=(),
+        displacement=None,
+        semantic_events=events,
+        anomalies=(),
+    )
+    restored = pickle.loads(
+        pickle.dumps(publisher, protocol=pickle.HIGHEST_PROTOCOL)
+    )
+    assert restored._last_real_m1_price == 100.0
+    assert restored._session.__dict__ == publisher._session.__dict__
+
+    price_tamper = copy.deepcopy(restored)
+    price_tamper._last_real_m1_price = 50.0
+    with pytest.raises(ValueError, match="differs from M1 replay"):
+        pickle.loads(
+            pickle.dumps(price_tamper, protocol=pickle.HIGHEST_PROTOCOL)
+        )
+
+    session_tamper = copy.deepcopy(restored)
+    session_tamper._session.__dict__.pop("_last_relative_volume")
+    with pytest.raises(ValueError, match="differs from M1 replay"):
+        pickle.loads(
+            pickle.dumps(session_tamper, protocol=pickle.HIGHEST_PROTOCOL)
+        )
+
+    dual_anchor_tamper = copy.deepcopy(restored)
+    dual_anchor_tamper._last_real_m1_price = 50.0
+    dual_anchor_tamper._session._last_close = 50.0
+    with pytest.raises(RuntimeError, match="real M1 anchors diverged"):
+        dual_anchor_tamper._require_real_m1_anchor_consistency()
+
+    missing_schema = restored.__getstate__()
+    missing_schema.pop("_publisher_state_schema_version")
+    with pytest.raises(ValueError, match="checkpoint schema changed"):
+        object.__new__(MarketSnapshotPublisher).__setstate__(missing_schema)
+
+
 def test_synthetic_no_trade_minute_is_replayable_clock_only_root() -> None:
     reader = CausalMarketReader(scale_specs=CORE_TEST_SCALE_SPECS)
     observer = CausalObserver(
@@ -3138,10 +4286,10 @@ def test_synthetic_no_trade_minute_is_replayable_clock_only_root() -> None:
         reader.on_bar(
             Bar(
                 start=start,
-                open=100.0,
-                high=100.25,
-                low=99.75,
-                close=100.0,
+                open=90.0 if index == 1 else 100.0,
+                high=90.0 if index == 1 else 100.25,
+                low=90.0 if index == 1 else 99.75,
+                close=90.0 if index == 1 else 100.0,
                 volume=0.0 if index == 1 else 10.0,
                 symbol="NQH5",
                 instrument_id=1,
@@ -3151,10 +4299,14 @@ def test_synthetic_no_trade_minute_is_replayable_clock_only_root() -> None:
         for index, start in enumerate(starts)
     )
 
-    first = observer.observe(updates[0]).market_snapshot
+    first_observation = observer.observe(updates[0])
+    first = first_observation.market_snapshot
     synthetic_observation = observer.observe(updates[1])
     synthetic = synthetic_observation.market_snapshot
     assert first is not None and synthetic is not None
+    assert updates[1].completed_1m.close == 90.0
+    assert synthetic.price == synthetic_observation.price == first.price == 100.0
+    assert observer.scene_graph._last_price == first.price
     synthetic_root = next(
         event
         for event in synthetic_observation.semantic_events_this_update
@@ -3166,12 +4318,55 @@ def test_synthetic_no_trade_minute_is_replayable_clock_only_root() -> None:
     assert synthetic_root.evidence["clock_only"] is True
     assert synthetic.session.elapsed_minutes == 2
     assert synthetic.session.known_at == updates[1].asof
+    assert replace(
+        synthetic.session,
+        name=first.session.name,
+        phase=first.session.phase,
+        elapsed_minutes=first.session.elapsed_minutes,
+        known_at=first.session.known_at,
+    ) == first.session
     assert synthetic.timeframe_states[
         Timeframe.M1
     ].quality.source_cutoff == updates[0].asof
-    assert synthetic.timeframe_states[
-        Timeframe.M1
-    ].quality.known_at == updates[1].asof
+    for timeframe, first_state in first.timeframe_states.items():
+        synthetic_state = synthetic.timeframe_states[timeframe]
+        assert replace(synthetic_state, quality=first_state.quality) == first_state
+        changed_quality_fields = {
+            name
+            for name, value in vars(synthetic_state.quality).items()
+            if value != getattr(first_state.quality, name)
+        }
+        assert changed_quality_fields <= {
+            "known_at",
+            "last_event_id",
+            "last_sequence_no",
+            "events_applied",
+        }
+        assert {
+            "known_at",
+            "last_event_id",
+            "events_applied",
+        } <= changed_quality_fields
+        assert synthetic_state.quality.last_sequence_no == synthetic_root.sequence_no
+        assert synthetic_state.quality.known_at == updates[1].asof
+        assert (
+            synthetic_state.quality.source_cutoff
+            == first_state.quality.source_cutoff
+        )
+        assert synthetic_state.quality.atr == first_state.quality.atr
+        assert (
+            synthetic_state.quality.data_complete
+            == first_state.quality.data_complete
+        )
+        assert (
+            synthetic_state.quality.events_applied
+            == first_state.quality.events_applied + 1
+        )
+    for relation_id, first_relation in first.relations.items():
+        assert replace(
+            synthetic.relations[relation_id],
+            known_at=first_relation.known_at,
+        ) == first_relation
     assert not any(
         event.origin is EventOrigin.SEMANTIC_ATOMIC
         for event in synthetic_observation.semantic_events_this_update
@@ -3189,6 +4384,7 @@ def test_synthetic_no_trade_minute_is_replayable_clock_only_root() -> None:
     assert replayed.timeframe_states == synthetic.timeframe_states
     assert replayed.relations == synthetic.relations
     assert replayed.session == synthetic.session
+    assert replayed.price == synthetic.price
 
     resumed = observer.observe(updates[2]).market_snapshot
     assert resumed is not None
@@ -3196,6 +4392,58 @@ def test_synthetic_no_trade_minute_is_replayable_clock_only_root() -> None:
     assert resumed.timeframe_states[
         Timeframe.M1
     ].quality.source_cutoff == updates[2].asof
+
+
+def test_complete_nonreal_higher_timeframe_bar_is_published_as_clock_root() -> None:
+    reader = CausalMarketReader(scale_specs=CORE_TEST_SCALE_SPECS)
+    observer = CausalObserver(
+        ObserverConfig(scale_specs=CORE_TEST_SCALE_SPECS)
+    )
+    final_observation = None
+    prior_snapshot = None
+    for index in range(5):
+        update = reader.on_bar(
+            Bar(
+                start=_clock(index),
+                open=100.0,
+                high=100.25,
+                low=99.75,
+                close=100.0,
+                volume=0.0 if index == 1 else 10.0,
+                symbol="NQH5",
+                instrument_id=1,
+                synthetic_no_trade=index == 1,
+            )
+        )
+        final_observation = observer.observe(update)
+        if index == 3:
+            prior_snapshot = final_observation.market_snapshot
+
+    assert final_observation is not None and prior_snapshot is not None
+    roots = tuple(
+        event
+        for event in final_observation.semantic_events_this_update
+        if event.kind is EventKind.BAR_COMPLETED
+        and event.origin is EventOrigin.NORMALIZED_DATA
+        and event.known_at == _clock(5)
+    )
+    by_timeframe = {event.timeframe: event for event in roots}
+    assert set(by_timeframe) == {Timeframe.M1, Timeframe.M5}
+    m5 = by_timeframe[Timeframe.M5]
+    assert m5.evidence["real_completed"] is False
+    assert m5.evidence["clock_only"] is True
+    assert m5.evidence["complete"] is True
+    assert m5.evidence["start"] == _clock(0)
+    assert m5.evidence["observed_minutes"] == 5
+    assert m5.evidence["expected_minutes"] == 5
+    assert m5.evidence["real_minutes"] == 4
+    assert m5.evidence["synthetic_minutes"] == 1
+    final_snapshot = final_observation.market_snapshot
+    assert final_snapshot is not None
+    prior_m5 = prior_snapshot.timeframe_states[Timeframe.M5]
+    final_m5 = final_snapshot.timeframe_states[Timeframe.M5]
+    assert replace(final_m5, quality=prior_m5.quality) == prior_m5
+    assert final_m5.quality.events_applied == prior_m5.quality.events_applied + 1
 
 
 @pytest.mark.parametrize(

@@ -125,20 +125,30 @@ The additive canonical object/state contract is governed by
 semantic-atomic parents and publishes technical replay records with no action
 authority. Its definitions and before/after audit are documented in
 [`Canonical Semantic Foundation v2`](docs/refactor/canonical_semantic_foundation_v2.md).
-The checked-in production model must explicitly set
-`observer.canonical_foundation_enabled=true`; missing, false, or non-boolean
-values fail closed during `ContinuousSMCEngine` construction. The same model
-must bind `observer.canonical_foundation_registry` and the exact canonical
-registry identity; the Engine strict-loads both, freezes the admitted version/
-identity into checkpoint state, and Shadow Live compares them. Engine
-checkpoint schema v3 is the first schema that includes this projection, so
-older schemas cannot resume into the current runtime.
+The checked-in production model selects both layers once through
+`semantic_selection`: atomic `smc_semantics_v1.2` plus projection
+`smc_semantic_foundation_v2.0`, with both registry paths and identities. The
+strict loader also requires the Foundation registry's declared parent to equal
+the selected atomic version. This is a paired selection, not a third identity
+or a unified “full-stack v2”. The Engine loads the registries once, derives the
+internal Foundation-enabled flag, and Shadow Live checks the same identities.
+Engine checkpoint schema v3 is the first schema that includes this projection,
+so older schemas cannot resume into the current runtime.
 The exact June-2024 bounded construction/replay census, performance A/B, and
 current Foundation-enabled 200-clock Engine file parity are kept in the
 foundation specification's
 [release-verification table](docs/refactor/canonical_semantic_foundation_v2.md#replay-test-and-empirical-boundary);
 they are engineering evidence, not a 6,900-clock or real-time multi-day Phase-9
 pilot or empirical validation.
+
+The June research runners are Eye-only; they do not execute Scene, Brain,
+Decision, Risk, or Execution on zero-intent clocks. The current hot path skips
+global Swing-geometry and liquidity-cluster rebuilds when their exact inputs did
+not change. Full Foundation records, lifecycle transitions, and technical
+`FOUNDATION_STATE_CHANGED` replay transport are still retained for the current
+checkpoint contract. Removing those histories requires an explicit compact-view
+and cold-replay schema migration; they are not silently discarded as a
+performance tweak.
 
 The Eye now also publishes an event-sourced hierarchical market contract:
 independent `TimeframeState` objects, cross-timeframe `RelationState` objects,
@@ -181,7 +191,7 @@ ancestry. Forward shifts must remain in the exact registered stratum. Because
 different matched pairs may still have overlapping outcome windows, all v3
 inference remains descriptive and unvalidated. A separately frozen
 [`v1.2 r2 manifest`](experiments/manifests/smc_semantics_v1_2_2024_01_phase5_diagnostic_v3_r2.yaml)
-and [complete result](experiments/results/smc_semantics_v1_2_2024_01_phase5_diagnostic_v3_r2.json)
+and [result summary](experiments/results/smc_semantics_v1_2_2024_01_phase5_diagnostic_v3_r2.json)
 now record the full January development diagnostic: E1–E6 episode counts are
 1,124 / 317 / 17 / 1 / 1 / 0; quiet and non-sweep controls match 372 and 62,
 while pseudo and forward-shift match zero. No Holm comparison rejects, and the
@@ -189,6 +199,10 @@ result grants no inference, fit, semantic-acceptance, OOS, or trading
 authority. The current plan matrix is in the
 [`implementation status`](docs/refactor/current_implementation_status.md);
 the older completion report remains the historical v1.1 run record.
+The result summary binds a 157,802-row `event_study` ledger, but that large
+ledger is not present in this checkout and has no repository retrieval receipt;
+the local evidence bundle is therefore incomplete until it is restored from an
+immutable artifact store and its SHA-256 is verified.
 
 Phase 6 then completed its preregistered June 2024 primary week and registered
 second-week MBO extension. The final registered
@@ -377,15 +391,19 @@ continue. A target reached before a pending remainder fills cancels that
 remainder, and secondary realized-spread/path censoring does not remove an
 otherwise complete primary implementation-shortfall pair. Stop/invalidation
 and target prices must lie on the frozen tick grid or the research intent fails
-closed. The evaluator has
-not frozen exact method-price provenance or
-wait/cancel/stop/target variants, and still has an incomplete, unauthorized
-manifest with no empirical result. A read-only
-[`check_phase8_execution_readiness.py`](scripts/check_phase8_execution_readiness.py)
-validates that blocked template without opening ledgers or writing artifacts;
-it reports 12 blockers, including `formal_runner_not_implemented`. There is no
-formal Phase 8 study runner. The FSM is an engineering state machine and does
-not submit broker orders. It remains a standalone exact-intent consumer;
+closed. The v2 research protocol and runner require exact pre-outcome
+method-price provenance and register wait/cancel/stop/target variants; variants
+whose required source facts are absent are deterministically censored rather
+than imputed. The fail-closed
+[`run_execution_research_v2.py`](scripts/run_execution_research_v2.py) runner
+validates the inert
+[run template](experiments/manifests/execution_research_phase8_v2_run_template.yaml)
+by default and requires an explicit `--execute-development` for a fully frozen
+development run. The current template still has six blockers: no non-zero
+intent/research-case ledger or minute source is bound, outputs and experiment
+identity are unset, and the manifest is not frozen. No empirical result exists.
+The FSM is an engineering state machine and does not submit broker orders. It
+remains a standalone exact-intent consumer;
 `TradeIntent -> RiskApproval -> FSM` has not replaced the current
 Engine/Decision/Risk/simulator execution path.
 
@@ -482,10 +500,11 @@ configuration identities are recorded once per run, not repeated in every row.
    calibrate, and admit path likelihoods, DOL probabilities, and Signal Policy
    outcomes. Phase 7 cannot emit a production Trade Intent before those
    artifacts pass admission.
-3. Freeze method-price semantic provenance and the wait/cancel/stop/target
-   variant estimands, bind a non-zero intent/minute ledger, complete the Phase 8
-   manifest and formal runner, run the fixed same-intent comparisons, and audit
-   the empirical result. Keep submission disabled.
+3. Use the existing v2 method-price provenance and wait/cancel/stop/target
+   variant contracts to produce a real non-zero intent/research-case ledger,
+   bind the minute source and outputs in a newly frozen Phase 8 manifest, run
+   the existing formal runner, and audit the empirical result. Keep submission
+   disabled.
 4. Freeze the Phase 9 operational metrics, close the historical capacity
    residual if that rehearsal remains useful, then run the real-time multi-day
    no-order pilot and prove live/replay/restart/failure parity.

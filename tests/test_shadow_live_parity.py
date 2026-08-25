@@ -6,6 +6,7 @@ from dataclasses import replace
 import math
 import pickle
 from pathlib import Path
+from types import SimpleNamespace
 
 import pandas as pd
 import pytest
@@ -673,6 +674,39 @@ def test_market_event_evidence_alias_requires_strict_primitive_equality() -> Non
     assert type(coercible_but_distinct.evidence["value"]) is int
 
 
+def test_shadow_boundary_restore_requires_exact_real_bar() -> None:
+    clock = pd.Timestamp("2024-06-03 10:00", tz="America/New_York")
+    boundary = SimpleNamespace(timeframe=Timeframe.M1, known_at=clock)
+    clock_only = MarketEvent(
+        event_id="shadow-boundary-clock-only-bar",
+        kind=EventKind.BAR_COMPLETED,
+        observed_at=clock,
+        timeframe=Timeframe.M1,
+        side=None,
+        price=100.0,
+        strength=0.0,
+        event_time=clock,
+        known_at=clock,
+        evidence={"real_completed": False, "clock_only": True},
+        source_data_ids=("shadow-boundary-clock-only-data",),
+        origin=EventOrigin.NORMALIZED_DATA,
+    )
+
+    with pytest.raises(ValueError, match="boundary attack real BAR"):
+        shadow_live_module._require_shadow_boundary_attack_real_bar(
+            clock_only,
+            boundary,
+        )
+
+    real_evidence = {"real_completed": True, "clock_only": False}
+    real = replace(
+        clock_only,
+        details=real_evidence,
+        evidence=real_evidence,
+    )
+    shadow_live_module._require_shadow_boundary_attack_real_bar(real, boundary)
+
+
 def test_compact_checkpoint_recomputes_terminal_engine_components() -> None:
     runner = ShadowLiveRunner(
         engine=_engine(),
@@ -1083,6 +1117,7 @@ def test_component_digest_final_audit_replays_full_market_payload() -> None:
     )
 
 
+@pytest.mark.historical_frozen
 def test_real_w1_manual_foundation_transitions_restore_and_continue_exactly() -> None:
     from itertools import islice
 
@@ -1091,7 +1126,7 @@ def test_real_w1_manual_foundation_transitions_restore_and_continue_exactly() ->
     values = tuple(
         islice(
             iter_shadow_clock_file(
-                ROOT / "inputs/phase9_w1_foundation_v3_603ebf2.jsonl"
+                ROOT / "inputs/phase9_w1_foundation_v3_7465a04.jsonl"
             ),
             101,
         )

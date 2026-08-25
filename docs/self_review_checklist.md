@@ -32,13 +32,13 @@ governance artifacts during ordinary development.
   cross-object reference resolves to an earlier compatible object and every
   critical serialized source ID resolves to its registered event kind,
   timeframe, entity, and causal clock.
-- [ ] The production model contains the exact boolean
-  `observer.canonical_foundation_enabled=true`, the exact registry path, and the
-  exact canonical registry identity. Engine construction strict-loads the
-  registry; Engine/Shadow/checkpoint state freezes and compares its admitted
-  version/identity. A missing/false/non-boolean gate, absent/mismatched binding,
-  and every pre-v3 Engine checkpoint fail closed rather than publishing a
-  partial foundation.
+- [ ] The production model has one exact `semantic_selection`: atomic
+  `smc_semantics_v1.2` plus Foundation
+  `smc_semantic_foundation_v2.0`, both registry paths and identities, and a
+  Foundation parent equal to the atomic version. Engine construction
+  strict-loads the pair once; Engine/Shadow/checkpoint state freezes and
+  compares the existing identities. Missing, unknown, mismatched, or
+  extra-field selections and every pre-v3 Engine checkpoint fail closed.
 - [ ] Swing role assignments (`micro → internal → structural → external`)
   and foundation-v2 geometric parent assignments are separate append-only
   histories. Geometry uses only exact time/price containment; BOS, protected
@@ -188,11 +188,14 @@ governance artifacts during ordinary development.
   an otherwise eligible primary pair.
 - [ ] Wait-time, cancel-rule, stop, and target variants have separately frozen
   estimands and family membership before they enter Execution Research.
-- [ ] The read-only Phase 8 readiness checker opens no input ledger, writes no
-  artifact, and preserves all 12 blockers including
-  `formal_runner_not_implemented`. A future formal runner must consume a
-  non-zero frozen TradeIntent/method ledger; tests or caller-supplied prices
-  never substitute for evidence.
+- [ ] The Phase 8 formal runner validates without opening input ledgers or
+  writing artifacts by default; development execution requires an explicit
+  flag plus a fully frozen manifest. It consumes a non-zero frozen
+  TradeIntent/research-case ledger; tests or caller-supplied prices never
+  substitute for evidence.
+- [ ] Each Phase 8 method price has exact pre-outcome provenance, and each
+  wait/cancel/stop/target variant is either evaluable from registered inputs or
+  censored by its frozen rule; missing facts are never imputed.
 - [ ] The Phase 8 research manifest is complete and frozen before any formal
   run; the current incomplete template cannot authorize an empirical claim.
 - [ ] Same-bar stop/target ambiguity remains adverse-first.

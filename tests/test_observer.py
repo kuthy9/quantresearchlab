@@ -1144,22 +1144,103 @@ def test_temporal_metrics_cached_clock_matches_each_legacy_event_with_synthetic_
 
 def test_reference_zone_same_admission_prefix_is_causal_and_not_recent() -> None:
     observer = CausalObserver(_all_typed_observer_config())
-    confirmed_at = pd.Timestamp(
-        "2022-12-30 17:00",
+    source_period_end = pd.Timestamp(
+        "2025-01-06 17:00",
         tz="America/New_York",
     )
-    tested_at = pd.Timestamp(
-        "2023-01-02 18:00",
-        tz="America/New_York",
+    source_period_tail = Candle(
+        timeframe=Timeframe.M1,
+        start=source_period_end - pd.Timedelta(minutes=1),
+        end=source_period_end,
+        open=100.0,
+        high=100.25,
+        low=99.75,
+        close=100.0,
+        volume=100.0,
+        symbol="NQH5",
+        instrument_id=1,
+        observed_minutes=1,
+        expected_minutes=1,
+        complete=True,
+        real_minutes=1,
+        synthetic_minutes=0,
     )
+    reference_admission = replace(
+        source_period_tail,
+        start=pd.Timestamp(
+            "2025-01-06 18:00",
+            tz="America/New_York",
+        ),
+        end=pd.Timestamp(
+            "2025-01-06 18:01",
+            tz="America/New_York",
+        ),
+        high=100.0,
+    )
+    observer._reference_coverage_start = observer._reference_period_start(
+        "session",
+        source_period_tail,
+    )
+    for candle in (source_period_tail, reference_admission):
+        observer._advance_reference_periods(
+            candle,
+            append_retirement_events=True,
+        )
+        observer._append_completed_bar_event(
+            candle,
+            atr=1.0,
+            data_complete=True,
+        )
+    observer._publish_reference_candidate_events()
+    reference_level = next(
+        item
+        for item in observer._reference_inventory.values()
+        if item.kind == "previous_session_high"
+    )
+    reference_event = observer.memory.audit_event_including_pending(
+        observer._candidate_level_event_ids[reference_level.item_id]
+    )
+    assert reference_event is not None
+    assert reference_event.known_at == reference_admission.end
+
+    confirmed_at = reference_admission.end + pd.Timedelta(minutes=1)
+    tested_at = confirmed_at + pd.Timedelta(minutes=1)
     broken_at = tested_at + pd.Timedelta(minutes=1)
+    for candle in (
+        replace(
+            source_period_tail,
+            start=confirmed_at - pd.Timedelta(minutes=1),
+            end=confirmed_at,
+        ),
+        replace(
+            source_period_tail,
+            start=tested_at - pd.Timedelta(minutes=1),
+            end=tested_at,
+            high=100.5,
+            close=100.25,
+        ),
+        replace(
+            source_period_tail,
+            start=broken_at - pd.Timedelta(minutes=1),
+            end=broken_at,
+            open=100.25,
+            high=101.0,
+            low=100.0,
+            close=100.75,
+        ),
+    ):
+        observer._append_completed_bar_event(
+            candle,
+            atr=1.0,
+            data_complete=True,
+        )
     zone = SupportResistanceState(
         zone_id="previous-session-high-composite",
         timeframe=Timeframe.M1,
         side="resistance",
-        lower_bound=100.0,
-        upper_bound=100.5,
-        anchor_price=100.25,
+        lower_bound=reference_level.price - 0.25,
+        upper_bound=reference_level.price + 0.25,
+        anchor_price=reference_level.price,
         formed_at=confirmed_at,
         confirmed_at=confirmed_at,
         lifecycle=SupportResistanceLifecycle.BROKEN,
@@ -1180,7 +1261,7 @@ def test_reference_zone_same_admission_prefix_is_causal_and_not_recent() -> None
         freshness=0.7,
         depletion_risk=0.6,
         metadata_observed_at=broken_at,
-        source_ids=("previous-session:2022-12-30:high",),
+        source_ids=reference_level.source_ids,
     )
     observer._record_frame_events(
         FrameObservation(

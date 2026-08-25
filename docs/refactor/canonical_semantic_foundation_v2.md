@@ -1,6 +1,6 @@
 # Canonical Semantic Foundation v2
 
-Status date: 2026-08-23
+Status date: 2026-08-25
 Foundation identity: `smc_semantic_foundation_v2.0`
 Parent atomic identity: `smc_semantics_v1.2`
 Canonical-JSON registry identity SHA-256: `ac04636919931d774309a0c306764fdf8eb53aee41df0f31d4d94e5b9125732b`
@@ -65,28 +65,43 @@ Reset never clears history out of band. Active generations receive explicit
 terminal or archived revisions before the next epoch. Checkpoint restore and
 atomic replay reconstruct the same record identities and current views.
 
-The production model config must explicitly set
-`observer.canonical_foundation_enabled=true` and bind both
-`observer.canonical_foundation_registry=semantics/foundation_v2_0.yaml` and the
-canonical registry identity printed above. `ContinuousSMCEngine` rejects a
-missing, false, or non-boolean gate, a missing binding, or an identity mismatch;
-it strict-loads the registry before mapping the admitted setting to the
-Observer's additive path. Foundation publication is therefore not a
-test-helper-only behavior. This flag remains separate from the scan-only
-`eye_authority_mode`, so normal execution-reality inputs retain their
-established contract. The Engine freezes the admitted foundation version and
-registry identity into its runtime/checkpoint state, and Shadow Live compares
-both bindings on construction, restore, and every clock. The model-config byte
-hash remains part of the runtime/shadow receipt identity. Engine checkpoint
-schema v3 is the first schema that guarantees this production foundation state;
-earlier checkpoint schemas fail closed instead of resuming without the
-projection.
+The production model has one strict `semantic_selection` object containing the
+atomic v1.2 version/path/definition identity and this Foundation v2.0
+version/path/registry identity. `ContinuousSMCEngine` loads the pair once and
+requires this registry's `parent_atomic_semantic_version` to equal the selected
+atomic version. The Observer's Foundation-enabled boolean is now an internal
+derived compatibility detail, not a second configuration authority. This pair
+does not create `smc_semantics_v2.0` or any composite semantic identity. Engine
+and Shadow retain their existing version/identity receipt fields, and the
+model-config byte hash remains part of runtime identity. Engine checkpoint
+schema v3 remains the first schema that guarantees the production projection;
+earlier checkpoints fail closed.
+
+The current replay contract still materializes full `FoundationRecord` and
+`AppliedTransition` histories and emits technical
+`FOUNDATION_STATE_CHANGED`. They cannot be removed independently because legacy
+snapshot replay and Shadow checkpoint verification consume them. The planned
+compact hot-state migration must move history to the EventStore/cold ledger,
+publish a current view plus counts and rolling hashes, retain a read-only legacy
+decoder, bump affected schemas, and prove full Reader→Eye cold replay. Until
+then, only semantics-preserving invalidation gates are enabled.
 
 ## Frozen vocabulary boundary
 
 The registry contains 24 canonical primitives/state objects. Some are atomic
 facts, some are immutable geometric objects, and some are persistent
 generations. They are not forced into one artificial class.
+
+### Registered concepts
+
+| Family | Registered concepts |
+|---|---|
+| Swing and leg | Confirmed Swing; Swing Geometry/Nesting; Swing Role Assignment; Structural Leg |
+| Liquidity | Candidate Liquidity Level; Liquidity Cluster; Liquidity Interaction Generation; Touch; Penetration or Boundary Attack; Sweep or Rejection; Acceptance |
+| Structure | Raw Boundary Break; Qualified BOS; MSS Core; Protected Swing Assignment; Structure Generation; Structure Transition |
+| Delivery and zones | Displacement Episode; Fair Value Gap; Base Origin Core or Qualified Order Block |
+| Ranges | Structural Range; Balance Range |
+| Cross-time state | Delivery Phase Generation; Cross-Timeframe Relation Generation |
 
 HH/HL/LH/LL, Premium/Discount, IRL/ERL, and DOL Candidate remain attributes or
 derived views. Breaker Block, Mitigation Block, OTE, Unicorn, Liquidity Void,
@@ -144,6 +159,75 @@ Published location contains separate `x_structural_range` and
 `x_balance_range`. Canonical Premium/Discount context belongs to Structural
 Range; Balance location remains a separate local auction coordinate. The old
 v1.2 dealing-range field remains compatibility state, not structural authority.
+
+## Mathematical definitions
+
+Completed native bars have OHLC `(O_t,H_t,L_t,C_t)`, tick size `q`, direction
+sign `s` (`+1` long, `-1` short), and `epsilon = 1e-12`.
+
+### Confirmed Swing and prominence
+
+For left/right comparison sets `L_i` and `R_i`,
+
+`SwingHigh(i) <=> H_i > max({H_j : j in L_i union R_i})`,
+
+`SwingLow(i) <=> L_i < min({L_j : j in L_i union R_i})`.
+
+The pivot is known only after the right window completes; ties are rejected.
+Current spans are two bars for H4/H1/M15/M5 and one for M1. High prominence is
+`max(0,min(H_i-min L_left,H_i-min L_right))/max(ATR,q)`; low prominence is the
+symmetric expression using neighboring highs.
+
+### Structural Leg
+
+For ordered real native closes `C_1,...,C_n`,
+`D_C=sum_{t=2..n}|C_t-C_{t-1}|` and
+`eta_C=clip(|C_n-C_1|/max(D_C,epsilon),0,1)`.
+Let `P_start,P_end` be frozen Swing prices and `A=|P_end-P_start|`. The
+directional extreme sequence begins at `E_0=P_start`, then uses `H_t` long or
+`L_t` short. Thus `D_E=sum_{t=1..n}|E_t-E_{t-1}|` and
+`eta_E=clip(A/max(D_E,epsilon),0,1)`. Close/wick MAE is the maximum adverse
+excursion from the first close/Swing price, respectively.
+
+For the 14 strictly-prior ATR bars, `TR_1=H_1-L_1`; for `t=2..14`,
+`TR_t=max(H_t-L_t,|H_t-C_{t-1}|,|L_t-C_{t-1}|)`, and
+`ATR14=(1/14)sum TR_t`. This does not require an unbound fifteenth bar.
+
+### Geometry, clusters, FVG, and ranges
+
+A geometric parent strictly enlarges the time span and contains the child's
+complete time and price envelope. Candidate parents sort by duration, price
+span, then ID. A same-side complete-link cluster requires at least two members
+and `max(price)-min(price)<=q`. Continuous bounds project inward as
+`lower_q=ceil(lower/q)q`, `upper_q=floor(upper/q)q`.
+
+For three consecutive real M5 bars, bullish FVG is `L_3>H_1` with zone
+`[H_1,L_3]`; bearish is `H_3<L_1` with zone `[H_3,L_1]`. Width is at least one
+tick and midpoint is `(lower+upper)/2`. Close-through invalidates; only the
+registered structure/range/rollover/reset causes expire; a data gap censors.
+After observed departure, first reinteraction is the minimum strictly later
+native bar whose `[L_j,H_j]` intersects the zone. Boundary equality and a gap
+open inside count. Structural-range location is
+`x=(price-lower)/(upper-lower)`, with discount `<0.5`, premium `>0.5`, and
+equilibrium `=0.5`.
+
+### Structure, relations, and outcomes
+
+MSS starts a challenger; opposite confirmation requires exact protected-level
+Acceptance followed strictly later by opposite registered structure
+confirmation. A strictly later incumbent Qualified BOS fails the challenger;
+Raw Boundary Break is insufficient. Relation generation identity is
+`(parent_generation_id,child_generation_id,relation_role)`.
+
+For a long factual outcome, target is hit when `H>=target` and invalidation
+when `L<=invalidation`; short is symmetric. Same-bar double touch is
+`ambiguous_same_bar`. Long
+`MFE_ATR=max(0,max H-reference)/ATR` and
+`MAE_ATR=max(0,reference-min L)/ATR`; short is symmetric. Scanning starts
+strictly after source knowledge and the first native-clock gap censors.
+
+Foundation v2 does not redefine the v1.2 Displacement score. Its gate and score
+authority remain `configs/primitives_displacement.json`.
 
 ## Liquidity lifecycle and interaction generations
 

@@ -1,13 +1,23 @@
 from __future__ import annotations
 
 from dataclasses import FrozenInstanceError, replace
+import pickle
 from typing import Any
 
 import pandas as pd
 import pytest
 
 from smc_trader.foundation_registry import FOUNDATION_VERSION
-from smc_trader.model import Direction, EventKind, Timeframe
+from smc_trader.group3 import Group3RawOnlyStructureDisposition
+from smc_trader.model import (
+    BOSLifecycle,
+    BOSScope,
+    Direction,
+    EventKind,
+    EventOrigin,
+    MarketEvent,
+    Timeframe,
+)
 from smc_trader.observation import CausalObserver, ObserverConfig
 from smc_trader.semantic_zones import (
     BaseOriginCore,
@@ -276,6 +286,29 @@ def _pending_foundation_bindings(tracker) -> dict[str, Any]:
         ),
         "sessions_by_clock": sessions,
     }
+
+
+def _pickle_round_trip(value):
+    return pickle.loads(pickle.dumps(value))
+
+
+def _raw_only_disposition(
+    legacy,
+    *,
+    bos_id: str | None = None,
+) -> Group3RawOnlyStructureDisposition:
+    return Group3RawOnlyStructureDisposition(
+        bos_id=bos_id or legacy.source_bos_id,
+        raw_break_event_id="canonical-raw-break",
+        protected_assignment_event_id="canonical-protected-assignment",
+        timeframe=legacy.timeframe,
+        direction=legacy.direction,
+        resolved_at=legacy.source_bos_resolved_at,
+        source_structure_id=legacy.source_bos_structure_id,
+        target_swing_id=legacy.source_bos_target_swing_id,
+        break_bar_id=legacy.source_bos_break_bar_id,
+        bos_source_displacement_id=legacy.source_displacement_id,
+    )
 
 
 def _production_observer() -> CausalObserver:
@@ -989,6 +1022,778 @@ def test_group3_foundation_finalization_is_failure_atomic() -> None:
     assert tracker.group3._failed is True
 
 
+def test_group3_raw_only_bos_retains_legacy_ob_without_qob_companion() -> None:
+    tracker, legacy, _, _, _, _, update = _form_order_block()
+    restored = _pickle_round_trip(tracker.group3)
+    bindings = _pending_foundation_bindings(tracker.group3)
+    bindings["structure_event_ids_by_entity"] = {}
+    raw_only = (_raw_only_disposition(legacy),)
+
+    finalized = tracker.group3.finalize_foundation(
+        update,
+        raw_only_structure_dispositions=raw_only,
+        **bindings,
+    )
+    replayed = restored.finalize_foundation(
+        update,
+        raw_only_structure_dispositions=raw_only,
+        **bindings,
+    )
+    assert finalized == replayed
+    assert legacy in finalized.order_blocks
+    assert len(finalized.base_origin_cores) == 1
+    assert finalized.qualified_order_blocks == ()
+    assert finalized.first_retests == ()
+    assert tracker.group3._qualified_order_blocks == {}
+    assert tracker.group3._zone_reinteraction_trackers == {}
+
+
+def test_group3_raw_only_bos_conflict_and_arbitrary_identity_fail_closed() -> None:
+    tracker, legacy, _, _, _, _, update = _form_order_block()
+    bindings = _pending_foundation_bindings(tracker.group3)
+
+    with pytest.raises(ValueError, match="conflicts"):
+        tracker.group3.finalize_foundation(
+            update,
+            raw_only_structure_dispositions=(
+                _raw_only_disposition(legacy),
+            ),
+            **bindings,
+        )
+
+    tracker, _, _, _, _, _, update = _form_order_block()
+    bindings = _pending_foundation_bindings(tracker.group3)
+    bindings["structure_event_ids_by_entity"] = {}
+    with pytest.raises(ValueError, match="no exact provisional QOB seed"):
+        tracker.group3.finalize_foundation(
+            update,
+            raw_only_structure_dispositions=(
+                _raw_only_disposition(legacy, bos_id="unrelated-bos"),
+            ),
+            **bindings,
+        )
+
+
+def test_group3_raw_only_bos_rejects_nonqualified_seed_disposition() -> None:
+    tracker, legacy, _, _, _, _, update = _form_order_block()
+    completed = tracker.group3._pending_foundation_completed[-1]
+    seed = completed.new_qualified_order_blocks[0]
+    tracker.group3._pending_foundation_completed[-1] = replace(
+        completed,
+        new_qualified_order_blocks=(
+            replace(
+                seed,
+                compatible_structure_kind=(
+                    CompatibleStructureKind.MSS_CORE_CONFIRMED
+                ),
+            ),
+        ),
+    )
+    bindings = _pending_foundation_bindings(tracker.group3)
+    bindings["structure_event_ids_by_entity"] = {}
+
+    with pytest.raises(ValueError, match="does not match"):
+        tracker.group3.finalize_foundation(
+            update,
+            raw_only_structure_dispositions=(
+                _raw_only_disposition(legacy),
+            ),
+            **bindings,
+        )
+
+
+def _install_raw_only_qob_provenance(
+    observer: CausalObserver,
+    tracker,
+    *,
+    include_bos_displacement: bool = False,
+    mutate_raw=None,
+) -> tuple[str, MarketEvent]:
+    observer._group3_tracker = tracker
+    completed = next(
+        completed
+        for completed in reversed(tracker._pending_foundation_completed)
+        if completed.new_qualified_order_blocks
+    )
+    seed = completed.new_qualified_order_blocks[0]
+    state = seed.legacy_state
+    bos_id = state.source_bos_id
+    target_event_id = "canonical-target-swing"
+    break_bar_event_id = "canonical-break-bar"
+    structure_event_id = "canonical-structure-direction"
+    displacement_event_id = "canonical-displacement"
+    bos_state_event_id = "typed-confirmed-bos"
+    protected_assignment_event_id = "canonical-protected-assignment"
+    protected_swing_id = "protected-opposite-swing"
+    bos_source_displacement_id = (
+        state.source_displacement_id if include_bos_displacement else None
+    )
+
+    structure = MarketEvent(
+        event_id=structure_event_id,
+        kind=EventKind.STRUCTURE_DIRECTION_CONFIRMED,
+        observed_at=state.source_bos_pending_at,
+        timeframe=state.timeframe,
+        side=(
+            "above" if state.direction is Direction.LONG else "below"
+        ),
+        price=state.invalidation_price,
+        strength=state.strength,
+        direction=state.direction,
+        evidence={"structure_id": state.source_bos_structure_id},
+        source_entity_ids=(
+            state.source_bos_structure_id,
+            "source-high",
+            "source-low",
+        ),
+        origin=EventOrigin.SEMANTIC_ATOMIC,
+    )
+    displacement = MarketEvent(
+        event_id=displacement_event_id,
+        kind=EventKind.DISPLACEMENT_OBSERVED,
+        observed_at=state.source_displacement_active_at,
+        timeframe=state.timeframe,
+        side=None,
+        price=None,
+        strength=state.strength,
+        direction=state.direction,
+        event_time=state.source_displacement_started_at,
+        evidence={
+            "transition_id": state.source_active_transition_id,
+            "displacement_id": state.source_displacement_id,
+            "lifecycle": "active",
+        },
+        source_entity_ids=(state.source_displacement_id,),
+        origin=EventOrigin.SEMANTIC_ATOMIC,
+    )
+    bos_state = MarketEvent(
+        event_id=bos_state_event_id,
+        kind=EventKind.STRUCTURE_BREAK,
+        observed_at=state.source_bos_resolved_at,
+        timeframe=state.timeframe,
+        side=(
+            "above" if state.direction is Direction.LONG else "below"
+        ),
+        price=state.invalidation_price,
+        strength=state.strength,
+        source_ids=(
+            state.source_bos_target_swing_id,
+            state.source_bos_structure_id,
+            *(
+                ()
+                if bos_source_displacement_id is None
+                else (bos_source_displacement_id,)
+            ),
+            state.source_bos_break_bar_id,
+        ),
+        entity_id=bos_id,
+        lifecycle=BOSLifecycle.CONFIRMED.value,
+        formed_at=state.source_bos_pending_at,
+        confirmed_at=state.source_bos_resolved_at,
+        direction=state.direction,
+        evidence={
+            "bos_id": bos_id,
+            "scope": BOSScope.CONTINUATION.value,
+            "source_structure_id": state.source_bos_structure_id,
+            "break_bar_id": state.source_bos_break_bar_id,
+            "source_displacement_id": bos_source_displacement_id,
+        },
+    )
+    protected_assignment = MarketEvent(
+        event_id=protected_assignment_event_id,
+        kind=EventKind.PROTECTED_SWING_ASSIGNED,
+        observed_at=state.source_bos_pending_at,
+        timeframe=state.timeframe,
+        side=(
+            "below" if state.direction is Direction.LONG else "above"
+        ),
+        price=state.invalidation_price,
+        strength=state.strength,
+        direction=(
+            Direction.SHORT
+            if state.direction is Direction.LONG
+            else Direction.LONG
+        ),
+        evidence={"protected_swing_id": protected_swing_id},
+        source_entity_ids=(protected_swing_id,),
+        origin=EventOrigin.SEMANTIC_ATOMIC,
+    )
+    raw = MarketEvent(
+        event_id="canonical-raw-break",
+        kind=EventKind.RAW_BOUNDARY_BREAK,
+        observed_at=state.source_bos_resolved_at,
+        timeframe=state.timeframe,
+        side=(
+            "above" if state.direction is Direction.LONG else "below"
+        ),
+        price=state.invalidation_price,
+        strength=state.strength,
+        direction=state.direction,
+        evidence={
+            "bos_id": bos_id,
+            "scope": BOSScope.CONTINUATION.value,
+            "target_swing_id": state.source_bos_target_swing_id,
+            "break_bar_id": state.source_bos_break_bar_id,
+            "source_displacement_id": bos_source_displacement_id,
+        },
+        source_event_ids=(target_event_id, break_bar_event_id),
+        source_data_ids=(state.source_bos_break_bar_id,),
+        source_entity_ids=(
+            bos_id,
+            state.source_bos_target_swing_id,
+            state.source_bos_structure_id,
+            *(
+                ()
+                if bos_source_displacement_id is None
+                else (bos_source_displacement_id,)
+            ),
+        ),
+        context_event_ids=(
+            bos_state_event_id,
+            *(
+                ()
+                if bos_source_displacement_id is None
+                else (displacement_event_id,)
+            ),
+        ),
+        origin=EventOrigin.SEMANTIC_ATOMIC,
+    )
+    if mutate_raw is not None:
+        raw = mutate_raw(raw, state)
+    for event in (
+        structure,
+        displacement,
+        bos_state,
+        protected_assignment,
+        raw,
+    ):
+        observer.memory.append(event)
+    observer._confirmed_swing_event_ids[
+        state.source_bos_target_swing_id
+    ] = target_event_id
+    observer._bar_event_ids_by_candle_id[
+        state.source_bos_break_bar_id
+    ] = break_bar_event_id
+    observer._structure_direction_event_ids[
+        state.source_bos_structure_id
+    ] = structure_event_id
+    observer._displacement_event_ids[
+        state.source_active_transition_id
+    ] = displacement_event_id
+    observer._displacement_event_ids[state.source_displacement_id] = (
+        displacement_event_id
+    )
+    observer._raw_break_event_ids[bos_id] = raw.event_id
+    observer._protected_swing_event_ids[protected_swing_id] = (
+        protected_assignment_event_id
+    )
+    observer._raw_only_structure_dispositions[bos_id] = (
+        Group3RawOnlyStructureDisposition(
+            bos_id=bos_id,
+            raw_break_event_id=raw.event_id,
+            protected_assignment_event_id=(
+                protected_assignment_event_id
+            ),
+            timeframe=state.timeframe,
+            direction=state.direction,
+            resolved_at=state.source_bos_resolved_at,
+            source_structure_id=state.source_bos_structure_id,
+            target_swing_id=state.source_bos_target_swing_id,
+            break_bar_id=state.source_bos_break_bar_id,
+            bos_source_displacement_id=bos_source_displacement_id,
+        )
+    )
+    return bos_id, raw
+
+
+def _tamper_raw_only_qob(
+    raw: MarketEvent,
+    state,
+    tamper: str,
+) -> MarketEvent:
+    if tamper == "bos":
+        return replace(raw, evidence={**raw.evidence, "bos_id": "other-bos"})
+    if tamper == "scope":
+        return replace(raw, evidence={**raw.evidence, "scope": "opposed"})
+    if tamper == "timeframe":
+        return replace(raw, timeframe=Timeframe.M15)
+    if tamper == "direction":
+        direction = (
+            Direction.SHORT
+            if state.direction is Direction.LONG
+            else Direction.LONG
+        )
+        return replace(raw, direction=direction)
+    if tamper == "clock":
+        observed_at = raw.known_at + pd.Timedelta(minutes=5)
+        return replace(raw, observed_at=observed_at, known_at=observed_at)
+    if tamper == "structure":
+        return replace(
+            raw,
+            source_entity_ids=(
+                raw.source_entity_ids[0],
+                raw.source_entity_ids[1],
+                "other-structure",
+                *raw.source_entity_ids[3:],
+            ),
+        )
+    if tamper == "target":
+        return replace(
+            raw,
+            evidence={**raw.evidence, "target_swing_id": "other-target"},
+        )
+    if tamper == "break-bar":
+        return replace(raw, source_data_ids=("other-break-bar",))
+    if tamper == "forged-displacement-context":
+        return replace(
+            raw,
+            context_event_ids=(raw.context_event_ids[0], "canonical-displacement"),
+        )
+    raise AssertionError(f"unknown raw-only QOB tamper: {tamper}")
+
+
+def _raw_only_qob_case(
+    *,
+    include_bos_displacement: bool = False,
+    raw_tamper: str | None = None,
+) -> tuple[CausalObserver, Any, Any, str, MarketEvent]:
+    harness, _, _, _, _, _, _ = _form_order_block()
+    observer = _production_observer()
+    mutate_raw = (
+        None
+        if raw_tamper is None
+        else lambda raw, state: _tamper_raw_only_qob(raw, state, raw_tamper)
+    )
+    bos_id, raw = _install_raw_only_qob_provenance(
+        observer,
+        harness.group3,
+        include_bos_displacement=include_bos_displacement,
+        mutate_raw=mutate_raw,
+    )
+    completed = next(
+        completed
+        for completed in reversed(harness.group3._pending_foundation_completed)
+        if completed.new_qualified_order_blocks
+    )
+    state = completed.new_qualified_order_blocks[0].legacy_state
+    return observer, harness.group3, state, bos_id, raw
+
+
+def test_observer_proves_exact_raw_only_qob_disposition() -> None:
+    observer, _, _, bos_id, _ = _raw_only_qob_case()
+
+    dispositions = observer._group3_raw_only_structure_dispositions()
+    assert tuple(item.bos_id for item in dispositions) == (bos_id,)
+    assert dispositions[0].protected_assignment_event_id == (
+        "canonical-protected-assignment"
+    )
+
+    observer._qualified_structure_event_ids[bos_id] = (
+        "canonical-qualified-bos"
+    )
+    with pytest.raises(ValueError, match="conflicts"):
+        observer._group3_raw_only_structure_dispositions()
+
+    observer, _, _, bos_id, _ = _raw_only_qob_case(
+        include_bos_displacement=True,
+    )
+    dispositions = observer._group3_raw_only_structure_dispositions()
+    assert dispositions[0].bos_source_displacement_id is not None
+
+
+@pytest.mark.parametrize(
+    ("stage", "error_type", "error_text"),
+    (
+        ("success", None, None),
+        ("tracker", ValueError, "tracker finalize failed"),
+        ("projection", ValueError, "projection validation failed"),
+        ("changed", RuntimeError, "changed during finalization"),
+    ),
+)
+def test_observer_retires_only_matched_raw_only_receipt_after_full_finalize(
+    monkeypatch,
+    stage: str,
+    error_type,
+    error_text: str | None,
+) -> None:
+    tracker, _, _, _, _, _, update = _form_order_block()
+    observer = _production_observer()
+    bos_id, _ = _install_raw_only_qob_provenance(
+        observer,
+        tracker.group3,
+    )
+    receipt = observer._raw_only_structure_dispositions[bos_id]
+    unrelated = replace(
+        receipt,
+        bos_id="unrelated-raw-only-bos",
+        raw_break_event_id="unrelated-raw-only-break",
+    )
+    observer._raw_only_structure_dispositions[unrelated.bos_id] = unrelated
+    finalized = object()
+
+    def finalize(candidate, **bindings):
+        assert candidate is update
+        assert bindings["raw_only_structure_dispositions"] == (receipt,)
+        if stage == "tracker":
+            raise ValueError("tracker finalize failed")
+        if stage == "changed":
+            observer._raw_only_structure_dispositions[bos_id] = replace(
+                receipt,
+                protected_assignment_event_id="changed-assignment",
+            )
+        return finalized
+
+    monkeypatch.setattr(tracker.group3, "finalize_foundation", finalize)
+
+    def validate(candidate) -> None:
+        assert candidate is finalized
+        if stage == "projection":
+            raise ValueError("projection validation failed")
+
+    monkeypatch.setattr(
+        observer,
+        "_validate_group3_foundation_projection",
+        validate,
+    )
+    before = dict(observer._raw_only_structure_dispositions)
+    if error_type is None:
+        assert observer._finalize_group3_foundation(
+            update,
+            _observer_update(_observer_m5(0).end),
+        ) is finalized
+        assert observer._raw_only_structure_dispositions == {
+            unrelated.bos_id: unrelated,
+        }
+    else:
+        with pytest.raises(error_type, match=error_text):
+            observer._finalize_group3_foundation(
+                update,
+                _observer_update(_observer_m5(0).end),
+            )
+        if stage != "changed":
+            assert observer._raw_only_structure_dispositions == before
+        else:
+            assert bos_id in observer._raw_only_structure_dispositions
+            assert unrelated.bos_id in observer._raw_only_structure_dispositions
+
+
+def test_observer_raw_only_qob_rejects_foreign_bos_displacement() -> None:
+    observer, _, _, bos_id, _ = _raw_only_qob_case()
+    observer._raw_only_structure_dispositions[bos_id] = replace(
+        observer._raw_only_structure_dispositions[bos_id],
+        bos_source_displacement_id="foreign-displacement",
+    )
+
+    with pytest.raises(ValueError, match="optional BOS displacement"):
+        observer._group3_raw_only_structure_dispositions()
+
+
+def test_observer_raw_only_qob_uses_capture_time_witness_and_no_relation_fact() -> None:
+    observer, _, _, bos_id, _ = _raw_only_qob_case()
+    observer._protected_swing_event_ids.clear()
+    assert tuple(
+        item.bos_id
+        for item in observer._group3_raw_only_structure_dispositions()
+    ) == (bos_id,)
+
+    observer, _, _, bos_id, raw = _raw_only_qob_case()
+    observer.memory.append(
+        MarketEvent(
+            event_id="unmapped-qualified-bos",
+            kind=EventKind.QUALIFIED_BOS,
+            observed_at=raw.known_at,
+            timeframe=raw.timeframe,
+            side=raw.side,
+            price=raw.price,
+            strength=raw.strength,
+            direction=raw.direction,
+            evidence={"bos_id": bos_id},
+            origin=EventOrigin.SEMANTIC_ATOMIC,
+        )
+    )
+    with pytest.raises(ValueError, match="audit fact"):
+        observer._group3_raw_only_structure_dispositions()
+
+
+@pytest.mark.parametrize("semantic_drift", (False, True))
+def test_historical_protected_custody_uses_committed_digest_for_cold_retry(
+    monkeypatch,
+    semantic_drift: bool,
+) -> None:
+    observer, _, _, _, raw = _raw_only_qob_case()
+    committed_events = tuple(observer.memory._audit_pending)
+    committed_by_id = {
+        event.event_id: event for event in committed_events
+    }
+    committed_digests = {
+        event_id: observer.audit_store.recompute_event_digest(event)
+        for event_id, event in committed_by_id.items()
+    }
+    monkeypatch.setattr(
+        observer.audit_store,
+        "events",
+        lambda: committed_events,
+    )
+    monkeypatch.setattr(
+        observer.audit_store,
+        "get",
+        committed_by_id.get,
+    )
+    monkeypatch.setattr(
+        observer.audit_store,
+        "event_digest",
+        committed_digests.__getitem__,
+    )
+    assignment = committed_by_id["canonical-protected-assignment"]
+    committed_raw = committed_by_id[raw.event_id]
+    observer.memory = type(observer.memory)(
+        1,
+        audit_store=observer.audit_store,
+    )
+    retry = observer.memory.append(
+        replace(
+            assignment,
+            sequence_no=0,
+            price=(
+                assignment.price + 0.25
+                if semantic_drift
+                else assignment.price
+            ),
+        ),
+        sequence_floor=100,
+    )
+    assert retry.sequence_no != assignment.sequence_no
+    before = (
+        tuple(observer.memory._audit_pending),
+        observer.memory.recent(),
+        dict(observer.memory._entity_timelines),
+        dict(observer.memory._sequence_counts),
+    )
+
+    if semantic_drift:
+        with pytest.raises(
+            ValueError,
+            match="pending protected-swing history conflicts with audit",
+        ):
+            observer._historical_live_protected_assignment(
+                assignment.timeframe,
+                at_event=committed_raw,
+            )
+    else:
+        historical = observer._historical_live_protected_assignment(
+            assignment.timeframe,
+            at_event=committed_raw,
+        )
+        assert historical is assignment
+        assert historical.sequence_no == assignment.sequence_no
+    assert (
+        tuple(observer.memory._audit_pending),
+        observer.memory.recent(),
+        dict(observer.memory._entity_timelines),
+        dict(observer.memory._sequence_counts),
+    ) == before
+
+
+def test_observer_raw_only_qob_capture_witness_survives_later_replacement() -> None:
+    observer, _, _, bos_id, raw = _raw_only_qob_case()
+    original = observer.memory.audit_event_including_pending(
+        "canonical-protected-assignment"
+    )
+    assert original is not None
+    later_clock = raw.known_at + pd.Timedelta(minutes=5)
+    replacement = replace(
+        original,
+        event_id="later-protected-assignment",
+        observed_at=later_clock,
+        known_at=later_clock,
+        event_time=later_clock,
+        evidence={"protected_swing_id": "later-protected-swing"},
+        source_entity_ids=("later-protected-swing",),
+    )
+    replacement = observer.memory.append(
+        replacement,
+        include_in_recent=False,
+    )
+    observer._protected_swing_event_ids.clear()
+    observer._protected_swing_event_ids["later-protected-swing"] = (
+        replacement.event_id
+    )
+
+    assert tuple(
+        item.bos_id
+        for item in observer._group3_raw_only_structure_dispositions()
+    ) == (bos_id,)
+
+
+def test_observer_raw_only_qob_rejects_witness_replaced_before_raw() -> None:
+    observer, _, _, _, raw = _raw_only_qob_case()
+    original = observer.memory.audit_event_including_pending(
+        "canonical-protected-assignment"
+    )
+    assert original is not None
+    replacement_clock = raw.known_at - pd.Timedelta(nanoseconds=1)
+    replacement = replace(
+        original,
+        event_id="prior-protected-assignment",
+        observed_at=replacement_clock,
+        known_at=replacement_clock,
+        event_time=replacement_clock,
+        evidence={"protected_swing_id": "prior-protected-swing"},
+        source_entity_ids=("prior-protected-swing",),
+    )
+    observer.memory.append(replacement, include_in_recent=False)
+
+    with pytest.raises(ValueError, match="historical protected-assignment"):
+        observer._group3_raw_only_structure_dispositions()
+
+
+@pytest.mark.parametrize("terminal_after_raw", (False, True))
+def test_observer_raw_only_qob_replays_protected_acceptance_interval(
+    terminal_after_raw: bool,
+) -> None:
+    observer, _, _, bos_id, raw = _raw_only_qob_case()
+    assignment = observer.memory.audit_event_including_pending(
+        "canonical-protected-assignment"
+    )
+    assert assignment is not None
+    terminal_clock = raw.known_at + pd.Timedelta(
+        nanoseconds=1 if terminal_after_raw else -1
+    )
+    state_timeframe = raw.timeframe
+    acceptance = MarketEvent(
+        event_id=(
+            "later-protected-acceptance"
+            if terminal_after_raw
+            else "prior-protected-acceptance"
+        ),
+        kind=EventKind.ACCEPTANCE_CONFIRMED,
+        observed_at=terminal_clock,
+        timeframe=state_timeframe,
+        side="below",
+        price=assignment.price,
+        strength=assignment.strength,
+        direction=(
+            Direction.SHORT
+            if assignment.direction is Direction.LONG
+            else Direction.LONG
+        ),
+        event_time=terminal_clock,
+        evidence={
+            "protected_swing_id": "protected-opposite-swing",
+            "protected_swing_event_id": assignment.event_id,
+            "source_timeframe": state_timeframe.value,
+        },
+        context_event_ids=(assignment.event_id,),
+        origin=EventOrigin.SEMANTIC_ATOMIC,
+    )
+    observer.memory.append(acceptance, include_in_recent=False)
+    observer._protected_swing_event_ids.clear()
+
+    if terminal_after_raw:
+        assert tuple(
+            item.bos_id
+            for item in observer._group3_raw_only_structure_dispositions()
+        ) == (bos_id,)
+    else:
+        with pytest.raises(
+            ValueError,
+            match="historical protected-assignment",
+        ):
+            observer._group3_raw_only_structure_dispositions()
+
+
+def test_observer_raw_only_qob_uses_active_transition_not_entity_alias() -> None:
+    observer, _, state, bos_id, _ = _raw_only_qob_case(
+        include_bos_displacement=True,
+    )
+    active_id = observer._displacement_event_ids[
+        state.source_active_transition_id
+    ]
+    active = observer.memory.audit_event_including_pending(active_id)
+    assert active is not None
+    terminal_clock = state.confirmed_at + pd.Timedelta(minutes=5)
+    terminal = replace(
+        active,
+        event_id="later-terminal-displacement",
+        observed_at=terminal_clock,
+        known_at=terminal_clock,
+        evidence={
+            **active.evidence,
+            "transition_id": "later-terminal-transition",
+            "lifecycle": "exhausted",
+        },
+    )
+    observer.memory.append(terminal, include_in_recent=False)
+    observer._displacement_event_ids[state.source_displacement_id] = (
+        terminal.event_id
+    )
+
+    assert tuple(
+        item.bos_id
+        for item in observer._group3_raw_only_structure_dispositions()
+    ) == (bos_id,)
+
+
+@pytest.mark.parametrize(
+    "tamper",
+    ("transition_id", "lifecycle", "active_clock"),
+)
+def test_observer_raw_only_qob_rejects_tampered_active_transition(
+    tamper: str,
+) -> None:
+    observer, _, state, _, _ = _raw_only_qob_case()
+    active_event_id = observer._displacement_event_ids[
+        state.source_active_transition_id
+    ]
+    active = observer.memory.audit_event_including_pending(active_event_id)
+    assert active is not None
+    evidence = dict(active.evidence)
+    observed_at = active.known_at
+    if tamper == "transition_id":
+        evidence["transition_id"] = "foreign-active-transition"
+    elif tamper == "lifecycle":
+        evidence["lifecycle"] = "exhausted"
+    else:
+        observed_at += pd.Timedelta(minutes=5)
+    forged = replace(
+        active,
+        event_id=f"tampered-active-displacement:{tamper}",
+        observed_at=observed_at,
+        known_at=observed_at,
+        evidence=evidence,
+    )
+    observer.memory.append(forged, include_in_recent=False)
+    observer._displacement_event_ids[state.source_active_transition_id] = (
+        forged.event_id
+    )
+
+    with pytest.raises(ValueError, match="BOS, structure, displacement"):
+        observer._group3_raw_only_structure_dispositions()
+
+
+@pytest.mark.parametrize(
+    "tamper",
+    (
+        "bos",
+        "scope",
+        "timeframe",
+        "direction",
+        "clock",
+        "structure",
+        "target",
+        "break-bar",
+        "forged-displacement-context",
+    ),
+)
+def test_observer_rejects_tampered_raw_only_qob_disposition(
+    tamper: str,
+) -> None:
+    observer, _, _, _, _ = _raw_only_qob_case(raw_tamper=tamper)
+
+    with pytest.raises(ValueError, match="raw-only QOB disposition"):
+        observer._group3_raw_only_structure_dispositions()
+
+
 def test_group3_fvg_first_retest_is_first_only_and_future_invariant() -> None:
     tracker, state, _, _, update = _form_fvg(Direction.LONG)
     finalized = tracker.group3.finalize_foundation(
@@ -1091,6 +1896,206 @@ def test_group3_structural_fvg_expiry_is_reachable_from_bound_context(
     assert terminal.terminal_event_id == f"event-{cause.value}"
 
 
+@pytest.mark.parametrize("cause", tuple(FVGTerminationCause))
+def test_group3_fvg_terminal_without_retest_removes_only_its_tracker(
+    cause: FVGTerminationCause,
+) -> None:
+    harness, state, _, _, update = _form_fvg(Direction.LONG)
+    harness.group3.finalize_foundation(
+        update,
+        **_pending_foundation_bindings(harness.group3),
+    )
+    related_entity_id = None
+    if cause in {
+        FVGTerminationCause.PARENT_STRUCTURE_TERMINATED,
+        FVGTerminationCause.STRUCTURAL_RANGE_REPLACED,
+    }:
+        harness.group3.bind_fvg_foundation_context(
+            fvg_id=state.fvg_id,
+            parent_structure_generation_id="structure-generation-1",
+            structural_range_id="structural-range-1",
+            source_event_ids=(
+                "event-structure-generation-1",
+                "event-structural-range-1",
+            ),
+        )
+        related_entity_id = (
+            "structure-generation-1"
+            if cause is FVGTerminationCause.PARENT_STRUCTURE_TERMINATED
+            else "structural-range-1"
+        )
+    fvg_key = harness.group3._zone_tracker_key(
+        ZoneObjectKind.FVG,
+        state.fvg_id,
+    )
+    original_tracker = harness.group3._zone_reinteraction_trackers[fvg_key]
+    sibling_id = "sibling-fvg"
+    sibling_key = harness.group3._zone_tracker_key(
+        ZoneObjectKind.FVG,
+        sibling_id,
+    )
+    qob_key = harness.group3._zone_tracker_key(
+        ZoneObjectKind.QUALIFIED_ORDER_BLOCK,
+        "sibling-qob",
+    )
+    harness.group3._fvg_structural_lifecycles[sibling_id] = replace(
+        harness.group3._fvg_structural_lifecycles[state.fvg_id],
+        fvg_id=sibling_id,
+        source_creation_event_id="event-sibling-fvg",
+    )
+    harness.group3._zone_reinteraction_trackers[sibling_key] = (
+        ZoneFirstReinteractionTracker(
+            replace(
+                original_tracker.spec,
+                object_id=sibling_id,
+                creation_event_id="event-sibling-fvg",
+            )
+        )
+    )
+    harness.group3._zone_reinteraction_trackers[qob_key] = (
+        ZoneFirstReinteractionTracker(
+            replace(
+                original_tracker.spec,
+                object_kind=ZoneObjectKind.QUALIFIED_ORDER_BLOCK,
+                object_id="sibling-qob",
+                creation_event_id="event-sibling-qob",
+            )
+        )
+    )
+    restored = _pickle_round_trip(harness.group3)
+    kwargs = {
+        "entity_id": state.fvg_id,
+        "cause": cause,
+        "known_at": state.confirmed_at + pd.Timedelta(minutes=5),
+        "cause_event_id": f"event-{cause.value}",
+        "terminal_event_id": f"event-{cause.value}",
+        "related_entity_id": related_entity_id,
+    }
+
+    terminal = harness.group3._terminate_fvg_foundation(**kwargs)
+    restored_terminal = restored._terminate_fvg_foundation(**kwargs)
+
+    assert terminal == restored_terminal
+    assert terminal is not None
+    assert fvg_key not in harness.group3._zone_reinteraction_trackers
+    assert sibling_key in harness.group3._zone_reinteraction_trackers
+    assert qob_key in harness.group3._zone_reinteraction_trackers
+    assert restored.current_update() == harness.group3.current_update()
+
+
+@pytest.mark.parametrize(
+    ("reason", "drops_unresolved"),
+    (
+        ("data_gap_reset", True),
+        ("synthetic_interruption", True),
+        ("registered_session_reset", False),
+    ),
+)
+def test_group3_boundary_cleans_only_censored_unresolved_qob_tracker(
+    reason: str,
+    drops_unresolved: bool,
+) -> None:
+    harness, legacy, _, _, _, _, update = _form_order_block()
+    finalized = harness.group3.finalize_foundation(
+        update,
+        **_pending_foundation_bindings(harness.group3),
+    )
+    key = harness.group3._zone_tracker_key(
+        ZoneObjectKind.QUALIFIED_ORDER_BLOCK,
+        legacy.order_block_id,
+    )
+    assert key in harness.group3._zone_reinteraction_trackers
+    restored = _pickle_round_trip(harness.group3)
+    boundary_event_id = f"canonical-boundary:{reason}"
+
+    boundary = harness.group3.on_boundary(
+        reason,
+        legacy.confirmed_at + pd.Timedelta(minutes=5),
+        foundation_boundary_event_id=boundary_event_id,
+    )
+    restored_boundary = restored.on_boundary(
+        reason,
+        legacy.confirmed_at + pd.Timedelta(minutes=5),
+        foundation_boundary_event_id=boundary_event_id,
+    )
+
+    assert restored_boundary == boundary
+    assert finalized.qualified_order_blocks[0] in (
+        boundary.qualified_order_blocks
+    )
+    assert (
+        key not in harness.group3._zone_reinteraction_trackers
+    ) is drops_unresolved
+    assert restored.current_update() == harness.group3.current_update()
+
+
+def test_group3_qob_terminal_bar_keeps_retest_but_drops_unresolved_path() -> None:
+    harness, legacy, _, _, _, _, update = _form_order_block()
+    finalized = harness.group3.finalize_foundation(
+        update,
+        **_pending_foundation_bindings(harness.group3),
+    )
+    key = harness.group3._zone_tracker_key(
+        ZoneObjectKind.QUALIFIED_ORDER_BLOCK,
+        legacy.order_block_id,
+    )
+    retained_qob = finalized.qualified_order_blocks[0]
+    failure_values = (
+        legacy.lower_bound - 0.25,
+        legacy.lower_bound - 0.25,
+        legacy.lower_bound - 1.0,
+        legacy.lower_bound - 0.5,
+    )
+    _, _, _, failed = harness.send(failure_values)
+    failed = harness.group3.finalize_foundation(
+        failed,
+        **_pending_foundation_bindings(harness.group3),
+    )
+    assert key not in harness.group3._zone_reinteraction_trackers
+    assert failed.qualified_order_blocks == (retained_qob,)
+
+    replayed, replayed_legacy, _, _, _, _, replayed_update = (
+        _form_order_block()
+    )
+    replayed.group3.finalize_foundation(
+        replayed_update,
+        **_pending_foundation_bindings(replayed.group3),
+    )
+    no_touch = (102.75, 103.5, 102.25, 103.5)
+    _, _, _, no_touch_update = replayed.send(no_touch)
+    replayed.group3.finalize_foundation(
+        no_touch_update,
+        **_pending_foundation_bindings(replayed.group3),
+    )
+    touch = (103.5, 103.75, 101.75, 103.0)
+    _, _, _, touched = replayed.send(touch)
+    touched = replayed.group3.finalize_foundation(
+        touched,
+        **_pending_foundation_bindings(replayed.group3),
+    )
+    replayed_key = replayed.group3._zone_tracker_key(
+        ZoneObjectKind.QUALIFIED_ORDER_BLOCK,
+        replayed_legacy.order_block_id,
+    )
+    assert touched.first_retest_transitions
+    historical = replayed.group3._zone_reinteraction_trackers[
+        replayed_key
+    ].first_retest
+    assert historical is not None
+
+    boundary = replayed.group3.on_boundary(
+        "synthetic_interruption",
+        historical.known_at + pd.Timedelta(minutes=5),
+        foundation_boundary_event_id="canonical-boundary:after-qob-retest",
+    )
+    assert replayed_key in replayed.group3._zone_reinteraction_trackers
+    assert tuple(
+        first_retest
+        for first_retest in boundary.first_retests
+        if first_retest.object_kind is ZoneObjectKind.QUALIFIED_ORDER_BLOCK
+    ) == (historical,)
+
+
 def test_group3_fvg_gap_open_inside_is_geometric_first_retest() -> None:
     tracker, state, _, _, update = _form_fvg(Direction.LONG)
     tracker.group3.finalize_foundation(
@@ -1156,21 +2161,26 @@ def test_group3_fvg_reset_classification_has_no_ttl(
     assert terminal.terminal_source_event_ids[-1] == reset_event_id
 
 
+def _finalize_fvg_damage(harness, state):
+    damage_values = (102.25, 102.5, 99.5, state.lower_bound - 0.25)
+    _, _, _, damaged = harness.send(damage_values)
+    bindings = _pending_foundation_bindings(harness.group3)
+    return (
+        harness.group3.finalize_foundation(damaged, **bindings),
+        bindings,
+    )
+
+
 def test_group3_price_damage_is_invalidated_with_exact_terminal_event() -> None:
     tracker, state, _, _, update = _form_fvg(Direction.LONG)
     tracker.group3.finalize_foundation(
         update,
         **_pending_foundation_bindings(tracker.group3),
     )
-
-    _, _, _, damaged = tracker.send(
-        (102.25, 102.5, 99.5, state.lower_bound - 0.25)
-    )
-    bindings = _pending_foundation_bindings(tracker.group3)
-    damaged = tracker.group3.finalize_foundation(
-        damaged,
-        **bindings,
-    )
+    restored = _pickle_round_trip(tracker)
+    damaged, bindings = _finalize_fvg_damage(tracker, state)
+    restored_damaged, _ = _finalize_fvg_damage(restored, state)
+    assert restored_damaged == damaged
 
     terminal = damaged.fvg_structural_transitions[0]
     assert terminal.availability is FVGAvailability.INVALIDATED
@@ -1185,6 +2195,35 @@ def test_group3_price_damage_is_invalidated_with_exact_terminal_event() -> None:
         event_id in bindings["bar_event_ids_by_candle_id"].values()
         for event_id in terminal.terminal_source_event_ids
     )
+    tracker_key = tracker.group3._zone_tracker_key(
+        ZoneObjectKind.FVG,
+        state.fvg_id,
+    )
+    retained_tracker = tracker.group3._zone_reinteraction_trackers[
+        tracker_key
+    ]
+    assert retained_tracker.first_retest is not None
+    assert retained_tracker.first_retest.known_at == terminal.last_updated_at
+
+    _, _, _, future = tracker.send(
+        (102.5, 110.0, 90.0, 102.5)
+    )
+    future = tracker.group3.finalize_foundation(
+        future,
+        **_pending_foundation_bindings(tracker.group3),
+    )
+    assert future.first_retest_transitions == ()
+    assert future.first_retests == (retained_tracker.first_retest,)
+
+    replayed, replayed_state, _, _, replayed_update = _form_fvg(
+        Direction.LONG
+    )
+    replayed.group3.finalize_foundation(
+        replayed_update,
+        **_pending_foundation_bindings(replayed.group3),
+    )
+    replayed_damage, _ = _finalize_fvg_damage(replayed, replayed_state)
+    assert replayed_damage == damaged
 
 
 def test_observer_publishes_base_core_at_start_and_keeps_history() -> None:

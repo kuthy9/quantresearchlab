@@ -17,9 +17,11 @@ import hashlib
 import json
 import math
 from numbers import Integral
+import os
 from pathlib import Path
 import statistics
 import sys
+import tempfile
 import time
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
@@ -44,7 +46,10 @@ from smc_trader.model import (  # noqa: E402
 )
 from smc_trader.observation import CausalObserver, ObserverConfig  # noqa: E402
 from smc_trader.scene_graph import parse_scale_specs  # noqa: E402
-from smc_trader.semantics import SemanticRegistry  # noqa: E402
+from smc_trader.semantics import (  # noqa: E402
+    SemanticRegistry,
+    load_semantic_selection,
+)
 from smc_trader.signal_research import (  # noqa: E402
     ControlDirectionPolicy,
     MatchResult,
@@ -66,7 +71,6 @@ from smc_trader.signal_research import (  # noqa: E402
     load_frozen_research_contract,
     resolve_lineage_tokens,
     resolve_source_lineage_tokens,
-    sha256_file,
     validate_split_authority,
 )
 from smc_trader.structural_outcome import (  # noqa: E402
@@ -395,6 +399,10 @@ def _build_eye(
     model_path: Path = MODEL_PATH,
 ) -> tuple[CausalMarketReader, CausalObserver]:
     model = _json(model_path)
+    selection = load_semantic_selection(
+        model.get("semantic_selection"),
+        root=ROOT,
+    )
     raw = model["observer"]
     specs = parse_scale_specs(model["scales"])
     minimum = raw["minimum_bars"]
@@ -421,16 +429,15 @@ def _build_eye(
             group4_protocol=str(ROOT / raw["group4_protocol"]),
             group5_protocol=str(ROOT / raw["group5_protocol"]),
             persist_state_projections=False,
-            semantic_registry=str(ROOT / raw["semantic_registry"]),
+            semantic_registry=str(selection.atomic_registry.source_path),
             scale_specs=specs,
             project_scene_graph=False,
             materialize_event_view=False,
             group4_projection_only=False,
             eye_authority_mode=True,
-            canonical_foundation_enabled=bool(
-                raw.get("canonical_foundation_enabled", False)
-            ),
-        )
+            canonical_foundation_enabled=True,
+        ),
+        semantic_registry=selection.atomic_registry,
     )
     return CausalMarketReader(scale_specs=specs), observer
 
@@ -2140,7 +2147,38 @@ def _v3_balance_record(
     }
 
 
-def _write_json(path: Path, value: Any) -> None:
+def _publish_bytes(path: Path, payload: bytes, *, no_clobber: bool) -> None:
+    """Publish small bundle members without weakening legacy replacement."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if not no_clobber:
+        atomic_bytes(path, payload)
+        return
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        dir=path.parent,
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        try:
+            os.link(temporary, path)
+        except FileExistsError as error:
+            raise FileExistsError(f"research output already exists: {_display_path(path)}") from error
+    finally:
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            # The destination hard-link is the publication linearization
+            # point; best-effort temp cleanup must not reverse that outcome.
+            pass
+
+
+def _write_json(path: Path, value: Any, *, no_clobber: bool = False) -> None:
     payload = (
         json.dumps(
             to_primitive(value),
@@ -2151,26 +2189,79 @@ def _write_json(path: Path, value: Any) -> None:
         )
         + "\n"
     ).encode("utf-8")
+    _publish_bytes(path, payload, no_clobber=no_clobber)
+
+
+def _write_jsonl(
+    path: Path,
+    records: Iterable[Mapping[str, Any]],
+    *,
+    no_clobber: bool = False,
+) -> dict[str, int | str]:
+    """Stream canonical JSONL once and atomically publish the completed file."""
+
     path.parent.mkdir(parents=True, exist_ok=True)
-    atomic_bytes(path, payload)
-
-
-def _write_jsonl(path: Path, records: Sequence[Mapping[str, Any]]) -> None:
-    payload = b"".join(
-        (
-            json.dumps(
-                to_primitive(record),
-                ensure_ascii=False,
-                sort_keys=True,
-                separators=(",", ":"),
-                allow_nan=False,
-            )
-            + "\n"
-        ).encode("utf-8")
-        for record in records
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        dir=path.parent,
     )
-    path.parent.mkdir(parents=True, exist_ok=True)
-    atomic_bytes(path, payload)
+    temporary = Path(temporary_name)
+    digest = hashlib.sha256()
+    rows = 0
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            for record in records:
+                line = (
+                    json.dumps(
+                        to_primitive(record),
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                        allow_nan=False,
+                    )
+                    + "\n"
+                ).encode("utf-8")
+                handle.write(line)
+                digest.update(line)
+                rows += 1
+            handle.flush()
+            os.fsync(handle.fileno())
+        if no_clobber:
+            try:
+                os.link(temporary, path)
+            except FileExistsError as error:
+                raise FileExistsError(
+                    f"research output already exists: {_display_path(path)}"
+                ) from error
+        else:
+            os.replace(temporary, path)
+    finally:
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            # os.link/os.replace is authoritative once it succeeds.  A stale
+            # private temp is preferable to reporting a committed file failed.
+            pass
+    return {"sha256": digest.hexdigest(), "rows": rows}
+
+
+def _write_report_then_result(
+    output: Path,
+    result: Mapping[str, Any],
+    report: str,
+    *,
+    no_clobber: bool,
+) -> None:
+    """Publish the result JSON last so it remains the bundle commit marker."""
+
+    report_path = output.with_suffix(".md")
+    _publish_bytes(
+        report_path,
+        (report + "\n").encode("utf-8"),
+        no_clobber=no_clobber,
+    )
+    _write_json(output, result, no_clobber=no_clobber)
 
 
 def _report(result: Mapping[str, Any]) -> str:
@@ -2841,8 +2932,24 @@ def _load_contract_and_registry(
     observer = model.get("observer")
     if not isinstance(observer, Mapping):
         raise ResearchContractError("bound model observer configuration is invalid")
+    try:
+        selection = load_semantic_selection(
+            model.get("semantic_selection"),
+            root=ROOT,
+        )
+    except ValueError as error:
+        raise ResearchContractError(
+            "bound model semantic_selection is invalid"
+        ) from error
+    if (
+        selection.atomic_registry.source_path.resolve()
+        != contract.identity_paths["semantic_registry"]
+        or selection.atomic_definition_identity != registry.identity
+    ):
+        raise ResearchContractError(
+            "model atomic semantic selection disagrees with exact identity binding"
+        )
     model_bindings = {
-        "semantic_registry": "semantic_registry",
         "structure_protocol": "structure_protocol",
         "liquidity_protocol": "liquidity_protocol",
         "displacement_protocol": "displacement_protocol",
@@ -3411,7 +3518,7 @@ def _run_v3_analysis(
     ):
         for event in population:
             stage_membership[str(event["event_id"])].append(stage)
-    event_ledger = [
+    event_ledger = (
         {
             **event,
             "stage_membership": tuple(stage_membership.get(str(event["event_id"]), ())),
@@ -3423,7 +3530,7 @@ def _run_v3_analysis(
             ),
         }
         for event in events
-    ]
+    )
     pseudo_construction_ledger = [
         {"status": "anchor_excluded", **item} for item in pseudo_anchor_exclusions
     ] + pseudo_ledger
@@ -3437,20 +3544,19 @@ def _run_v3_analysis(
     }
     if tuple(ledger_records) != _V3_LEDGER_LABELS:
         raise ResearchContractError("v3 output bundle and ledger writers disagree")
+    comparison_contract = manifest.get("comparison_contract")
+    comparison_mode = isinstance(comparison_contract, Mapping)
     ledger_metadata: dict[str, dict[str, Any]] = {}
     for label, records in ledger_records.items():
         path = _ledger_path(output, label)
-        _write_jsonl(path, records)
+        receipt = _write_jsonl(path, records, no_clobber=comparison_mode)
         ledger_metadata[label] = {
             "path": _display_path(path),
-            "sha256": sha256_file(path),
-            "rows": len(records),
             "format": "canonical_json_lines_v1",
+            **receipt,
         }
 
     status = _artifact_status(str(manifest["status"]), max_bars)
-    comparison_contract = manifest.get("comparison_contract")
-    comparison_mode = isinstance(comparison_contract, Mapping)
     if comparison_mode:
         artifact_classification = {
             "complete_registered_window": max_bars is None,
@@ -3555,10 +3661,12 @@ def _run_v3_analysis(
         "limitations": limitations,
     }
     result["result_identity"] = canonical_result_identity(result)
-    _write_json(output, result)
-    report_path = output.with_suffix(".md")
-    report_path.parent.mkdir(parents=True, exist_ok=True)
-    atomic_bytes(report_path, (_report_v3(result) + "\n").encode("utf-8"))
+    _write_report_then_result(
+        output,
+        result,
+        _report_v3(result),
+        no_clobber=comparison_mode,
+    )
     return result
 
 
@@ -3931,6 +4039,8 @@ def run(
                 and ancestor.origin is EventOrigin.NORMALIZED_DATA
                 and ancestor.kind is EventKind.BAR_COMPLETED
                 and ancestor.timeframe is event_timeframe
+                and ancestor.evidence.get("real_completed") is True
+                and ancestor.evidence.get("clock_only") is False
             )
         )
     if manifest.get("research_protocol_version") == RESEARCH_PROTOCOL_V3:
@@ -4197,14 +4307,14 @@ def run(
     for stage, stage_population in stages.items():
         for stage_record in stage_population:
             stage_membership[str(stage_record["event_id"])].append(stage)
-    event_ledger = [
+    event_ledger = (
         {
             **event,
             "stage_membership": tuple(stage_membership.get(event["event_id"], ())),
             "outcome": structural_outcome(event),
         }
         for event in events
-    ]
+    )
     treatment_by_id = {str(event["event_id"]): event for event in matched_touches}
     control_by_id = {str(event["event_id"]): event for event in controls}
     control_pair_ledger = [
@@ -4229,12 +4339,11 @@ def run(
     ledger_metadata: dict[str, dict[str, Any]] = {}
     for label, records in ledger_records.items():
         path = _ledger_path(output, label)
-        _write_jsonl(path, records)
+        receipt = _write_jsonl(path, records)
         ledger_metadata[label] = {
             "path": _display_path(path),
-            "sha256": sha256_file(path),
-            "rows": len(records),
             "format": "canonical_json_lines_v1",
+            **receipt,
         }
 
     result = {
@@ -4322,10 +4431,12 @@ def run(
         ],
     }
     result["result_identity"] = canonical_result_identity(result)
-    _write_json(output, result)
-    report_path = output.with_suffix(".md")
-    report_path.parent.mkdir(parents=True, exist_ok=True)
-    atomic_bytes(report_path, (_report(result) + "\n").encode("utf-8"))
+    _write_report_then_result(
+        output,
+        result,
+        _report(result),
+        no_clobber=False,
+    )
     return result
 
 

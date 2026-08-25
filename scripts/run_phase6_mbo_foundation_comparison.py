@@ -26,13 +26,16 @@ from smc_trader.foundation_registry import (  # noqa: E402
     load_foundation_registry,
 )
 from smc_trader.mbo_mechanism_research import (  # noqa: E402
+    LEGACY_SYNTHETIC_SEMANTIC_EXCEPTION_POLICY,
     PHASE6_EXECUTABLE_STATUS,
     REQUIRED_PHASE6_IDENTITY_BINDINGS,
+    SYNTHETIC_SEMANTIC_EXCEPTION_POLICY,
     FrozenPhase6Contract,
     Phase6ResearchError,
     load_frozen_phase6_contract,
     sha256_file,
 )
+from smc_trader.semantics import load_semantic_selection  # noqa: E402
 
 
 SCHEMA_VERSION = 1
@@ -65,6 +68,7 @@ WINDOWS: Mapping[str, Mapping[str, Any]] = {
         "start": "2024-06-02T22:00:00Z",
         "end_exclusive": "2024-06-07T21:01:00Z",
         "synthetic_decision_clock": "2024-06-07T03:10:00Z",
+        "source_synthetic_policy": "legacy_single_clock_root",
         "prior_week1_policy": "not_applicable",
     },
     "W2": {
@@ -91,6 +95,7 @@ WINDOWS: Mapping[str, Mapping[str, Any]] = {
         "start": "2024-06-09T22:00:00Z",
         "end_exclusive": "2024-06-14T21:01:00Z",
         "synthetic_decision_clock": "2024-06-10T04:14:00Z",
+        "source_synthetic_policy": "current_full_interval_roots",
         "prior_week1_policy": (
             "gate_and_warmup_audit_only_prior_pairs_excluded_from_inference"
         ),
@@ -166,6 +171,18 @@ def build_manifest(window_key: str) -> dict[str, Any]:
         label="source Phase-6 manifest",
     )
     payload = deepcopy(_read_json(source_path, label="source Phase-6 manifest"))
+    source_synthetic_policy = payload.get("synthetic_semantic_exception_policy")
+    expected_source_policy_version = str(window["source_synthetic_policy"])
+    expected_source_policy = (
+        LEGACY_SYNTHETIC_SEMANTIC_EXCEPTION_POLICY
+        if expected_source_policy_version == "legacy_single_clock_root"
+        else SYNTHETIC_SEMANTIC_EXCEPTION_POLICY
+    )
+    if source_synthetic_policy != expected_source_policy:
+        raise Phase6ResearchError(
+            "source Phase-6 synthetic semantic exception policy changed"
+        )
+    source_synthetic_policy_version = expected_source_policy_version
     bindings = payload.get("identity_bindings")
     if not isinstance(bindings, Mapping) or set(bindings) != set(
         REQUIRED_PHASE6_IDENTITY_BINDINGS
@@ -204,6 +221,9 @@ def build_manifest(window_key: str) -> dict[str, Any]:
             "foundation_version": foundation.foundation_version,
             "foundation_registry": FOUNDATION_REGISTRY_PATH,
             "foundation_registry_identity": foundation.identity,
+            "synthetic_semantic_exception_policy": deepcopy(
+                SYNTHETIC_SEMANTIC_EXCEPTION_POLICY
+            ),
             "comparison_contract_version": SCHEMA_VERSION,
             "comparison_status": COMPARISON_STATUS,
             "comparison_identity_bindings": comparison_bindings,
@@ -237,6 +257,11 @@ def build_manifest(window_key: str) -> dict[str, Any]:
                 ],
                 "prior_week1_policy": window["prior_week1_policy"],
                 "source_artifacts_reused_without_mutation": True,
+                "synthetic_semantic_exception_policy_lineage": {
+                    "source_manifest_policy": source_synthetic_policy_version,
+                    "effective_comparison_policy": "current_full_interval_roots",
+                    "historical_source_manifest_mutated": False,
+                },
                 "historical_manifests_and_results_mutable": False,
                 "execution_authority": {
                     "comparison_only": True,
@@ -317,13 +342,21 @@ def validate_window(
     if foundation.foundation_version != FOUNDATION_VERSION:
         raise Phase6ResearchError("comparison Foundation version changed")
     model = _read_json(_bound_file(MODEL_PATH, label="model_config"), label="model")
-    observer = model.get("observer")
+    try:
+        selection = load_semantic_selection(
+            model.get("semantic_selection"),
+            root=ROOT,
+        )
+    except ValueError as error:
+        raise Phase6ResearchError(
+            "model semantic_selection is invalid"
+        ) from error
     if (
-        not isinstance(observer, Mapping)
-        or observer.get("canonical_foundation_enabled") is not True
-        or observer.get("canonical_foundation_registry")
-        != FOUNDATION_REGISTRY_PATH
-        or observer.get("canonical_foundation_identity") != foundation.identity
+        selection.atomic_semantics_version != payload.get("semantic_version")
+        or selection.foundation_registry_path != FOUNDATION_REGISTRY_PATH
+        or selection.foundation_registry_identity != foundation.identity
+        or selection.parent_atomic_semantics_version
+        != selection.atomic_semantics_version
     ):
         raise Phase6ResearchError("model does not bind canonical Foundation v2")
     contract = load_frozen_phase6_contract(

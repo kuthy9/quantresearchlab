@@ -317,6 +317,7 @@ class _FoundationCompletedSeed:
     new_qualified_order_blocks: tuple[_QualifiedOrderBlockSeed, ...]
     new_fvgs: tuple[FairValueGapState, ...]
     price_invalidated_fvg_ids: tuple[str, ...]
+    terminal_order_block_ids: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -347,6 +348,55 @@ class Group3BOSSource:
             or self.tick_size <= 0
         ):
             raise ValueError("invalid contract-bound BOS source")
+
+
+@dataclass(frozen=True)
+class Group3RawOnlyStructureDisposition:
+    """Producer proof that one continuation BOS intentionally stayed raw."""
+
+    bos_id: str
+    raw_break_event_id: str
+    protected_assignment_event_id: str
+    timeframe: Timeframe
+    direction: Direction
+    resolved_at: pd.Timestamp
+    source_structure_id: str
+    target_swing_id: str
+    break_bar_id: str
+    bos_source_displacement_id: str | None
+
+    def __post_init__(self) -> None:
+        if (
+            any(
+                not isinstance(value, str) or not value
+                for value in (
+                    self.bos_id,
+                    self.raw_break_event_id,
+                    self.protected_assignment_event_id,
+                    self.source_structure_id,
+                    self.target_swing_id,
+                    self.break_bar_id,
+                )
+            )
+            or (
+                self.bos_source_displacement_id is not None
+                and (
+                    not isinstance(self.bos_source_displacement_id, str)
+                    or not self.bos_source_displacement_id
+                )
+            )
+            or self.timeframe is not Timeframe.M5
+            or self.direction not in {Direction.LONG, Direction.SHORT}
+        ):
+            raise ValueError("invalid raw-only Group 3 structure disposition")
+        object.__setattr__(
+            self,
+            "resolved_at",
+            aware_timestamp(
+                self.resolved_at,
+                name="group3.raw_only_structure.resolved_at",
+            ),
+        )
 
 
 def _canonical(value: Any) -> str:
@@ -869,6 +919,18 @@ class CausalGroup3Tracker:
             )
         ] = ZoneFirstReinteractionTracker(spec)
 
+    def _drop_unresolved_order_block_reinteraction(
+        self,
+        entity_id: str,
+    ) -> None:
+        tracker_key = self._zone_tracker_key(
+            ZoneObjectKind.QUALIFIED_ORDER_BLOCK,
+            entity_id,
+        )
+        tracker = self._zone_reinteraction_trackers.get(tracker_key)
+        if tracker is not None and tracker.first_retest is None:
+            self._zone_reinteraction_trackers.pop(tracker_key)
+
     def _advance_first_reinteractions(
         self,
         candle: Candle,
@@ -936,6 +998,13 @@ class CausalGroup3Tracker:
             terminal_source_event_ids=terminal_sources,
         )
         self._fvg_structural_lifecycles[entity_id] = terminal
+        tracker_key = self._zone_tracker_key(
+            ZoneObjectKind.FVG,
+            entity_id,
+        )
+        tracker = self._zone_reinteraction_trackers.get(tracker_key)
+        if tracker is not None and tracker.first_retest is None:
+            self._zone_reinteraction_trackers.pop(tracker_key)
         return terminal
 
     def _advance_fvg_foundation_age(
@@ -1130,11 +1199,6 @@ class CausalGroup3Tracker:
             )
             if terminal is not None:
                 transitions.append(terminal)
-        self._zone_reinteraction_trackers = {
-            key: tracker
-            for key, tracker in self._zone_reinteraction_trackers.items()
-            if tracker.first_retest is not None
-        }
         self._pending_foundation_boundary = None
         return transitions
 
@@ -1182,6 +1246,10 @@ class CausalGroup3Tracker:
                 )
                 self._order_blocks[entity_id] = terminal
                 order_block_transitions.append(terminal)
+                self._drop_unresolved_order_block_reinteraction(entity_id)
+        elif reason == "synthetic_interruption":
+            for entity_id in tuple(self._qualified_order_blocks):
+                self._drop_unresolved_order_block_reinteraction(entity_id)
         self._clear_windows(clear_identity=hard_boundary)
         self._window_epoch_known = True
         self._last_clock = clock
@@ -2164,6 +2232,11 @@ class CausalGroup3Tracker:
                 and state.transition_reason == "close_through_far_edge"
             )
         )
+        terminal_order_block_ids = tuple(
+            state.order_block_id
+            for state in order_block_transitions
+            if self._is_order_block_terminal(state)
+        )
         if (
             new_base_origin_candidate is not None
             or qualified_seed is not None
@@ -2188,6 +2261,9 @@ class CausalGroup3Tracker:
                     ),
                     price_invalidated_fvg_ids=(
                         price_invalidated_fvg_ids
+                    ),
+                    terminal_order_block_ids=(
+                        terminal_order_block_ids
                     ),
                 )
             )
@@ -2293,6 +2369,9 @@ class CausalGroup3Tracker:
             str, pd.Timestamp
         ],
         structure_event_ids_by_entity: Mapping[str, str],
+        raw_only_structure_dispositions: Iterable[
+            Group3RawOnlyStructureDisposition
+        ],
         fvg_creation_event_ids_by_entity: Mapping[str, str],
         fvg_terminal_event_ids_by_entity: Mapping[str, str],
         order_block_creation_event_ids_by_entity: Mapping[str, str],
@@ -2302,6 +2381,93 @@ class CausalGroup3Tracker:
             Sequence[str],
         ],
     ) -> Group3Update:
+        if isinstance(raw_only_structure_dispositions, (str, bytes)):
+            raise ValueError(
+                "raw-only Group 3 structure dispositions must be a sequence"
+            )
+        raw_only_disposition_order = tuple(
+            raw_only_structure_dispositions
+        )
+        if (
+            any(
+                not isinstance(
+                    disposition,
+                    Group3RawOnlyStructureDisposition,
+                )
+                for disposition in raw_only_disposition_order
+            )
+        ):
+            raise ValueError(
+                "raw-only Group 3 structure dispositions are invalid"
+            )
+        raw_only_by_id = {
+            disposition.bos_id: disposition
+            for disposition in raw_only_disposition_order
+        }
+        if len(raw_only_by_id) != len(raw_only_disposition_order):
+            raise ValueError(
+                "raw-only Group 3 structure disposition is ambiguous"
+            )
+        raw_only_ids = frozenset(raw_only_by_id)
+        if raw_only_ids.intersection(structure_event_ids_by_entity):
+            raise ValueError(
+                "raw-only Group 3 structure identity conflicts with a "
+                "qualified structure binding"
+            )
+        pending_raw_only_seeds: dict[
+            str,
+            tuple[_FoundationCompletedSeed, _QualifiedOrderBlockSeed],
+        ] = {}
+        for completed in self._pending_foundation_completed:
+            for seed in completed.new_qualified_order_blocks:
+                identity = seed.compatible_structure_entity_id
+                if identity not in raw_only_ids:
+                    continue
+                if identity in pending_raw_only_seeds:
+                    raise ValueError(
+                        "raw-only Group 3 structure identity is ambiguous"
+                    )
+                state = seed.legacy_state
+                candidate = seed.candidate
+                disposition = raw_only_by_id[identity]
+                if (
+                    seed.compatible_structure_kind
+                    is not CompatibleStructureKind.QUALIFIED_BOS
+                    or state.source_bos_id != identity
+                    or state.source_bos_scope is not BOSScope.CONTINUATION
+                    or state.source_bos_mss_qualified
+                    or state.timeframe is not Timeframe.M5
+                    or state.direction
+                    is not candidate.source_displacement_state.direction
+                    or state.source_displacement_id
+                    != candidate.source_displacement_state.entity_id
+                    or not state.source_bos_structure_id
+                    or not state.source_bos_target_swing_id
+                    or state.source_bos_resolved_at != state.confirmed_at
+                    or state.confirmed_at != completed.candle.end
+                    or state.source_bos_break_bar_id
+                    != completed.candle_id
+                    or disposition.timeframe is not state.timeframe
+                    or disposition.direction is not state.direction
+                    or disposition.resolved_at
+                    != state.source_bos_resolved_at
+                    or disposition.source_structure_id
+                    != state.source_bos_structure_id
+                    or disposition.target_swing_id
+                    != state.source_bos_target_swing_id
+                    or disposition.break_bar_id
+                    != state.source_bos_break_bar_id
+                ):
+                    raise ValueError(
+                        "raw-only Group 3 structure disposition does not "
+                        "match its exact provisional QOB seed"
+                    )
+                pending_raw_only_seeds[identity] = (completed, seed)
+        if set(pending_raw_only_seeds) != set(raw_only_ids):
+            raise ValueError(
+                "raw-only Group 3 structure identity has no exact "
+                "provisional QOB seed"
+            )
         first_retest_transitions: list[ZoneFirstRetest] = list(
             update.first_retest_transitions
         )
@@ -2377,6 +2543,10 @@ class CausalGroup3Tracker:
                 )
                 if terminal is not None:
                     fvg_structural_transitions.append(terminal)
+            for order_block_id in completed.terminal_order_block_ids:
+                self._drop_unresolved_order_block_reinteraction(
+                    order_block_id
+                )
 
             for seed in completed.new_qualified_order_blocks:
                 displacement_id = (
@@ -2397,6 +2567,14 @@ class CausalGroup3Tracker:
                         ),
                     )
                     self._base_origin_cores[displacement_id] = core
+                if seed.compatible_structure_entity_id in raw_only_ids:
+                    # The observer has proven that the exact typed BOS ended
+                    # at RAW_BOUNDARY_BREAK and deliberately did not become a
+                    # canonical QUALIFIED_BOS/MSS_CORE fact.  Keep the legacy
+                    # OB and displacement-backed BaseOriginCore, but do not
+                    # invent a compatible structure source or a QOB/retest
+                    # companion from direction alone.
+                    continue
                 compatible_event_id = self._required_event_id(
                     structure_event_ids_by_entity,
                     seed.compatible_structure_entity_id,
@@ -2477,6 +2655,9 @@ class CausalGroup3Tracker:
             str, pd.Timestamp
         ],
         structure_event_ids_by_entity: Mapping[str, str],
+        raw_only_structure_dispositions: Iterable[
+            Group3RawOnlyStructureDisposition
+        ] = (),
         fvg_creation_event_ids_by_entity: Mapping[str, str],
         fvg_terminal_event_ids_by_entity: Mapping[str, str],
         order_block_creation_event_ids_by_entity: Mapping[str, str],
@@ -2507,6 +2688,9 @@ class CausalGroup3Tracker:
                 ),
                 structure_event_ids_by_entity=(
                     structure_event_ids_by_entity
+                ),
+                raw_only_structure_dispositions=(
+                    raw_only_structure_dispositions
                 ),
                 fvg_creation_event_ids_by_entity=(
                     fvg_creation_event_ids_by_entity

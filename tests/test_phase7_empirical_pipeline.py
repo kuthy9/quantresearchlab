@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import timedelta
 import json
 from pathlib import Path
@@ -10,6 +11,10 @@ import pytest
 
 import scripts.run_phase7_empirical_pipeline as pipeline
 from smc_trader.path_belief import create_path_competition_set, load_path_belief_protocol
+from smc_trader.probability_admission import (
+    AdmissionThresholds,
+    ProbabilityAdmissionReceipt,
+)
 from smc_trader.probability_cohorts import (
     DOLCandidateOutcomeRow,
     EvidenceHistoryTransition,
@@ -44,6 +49,89 @@ def _empty_cohorts(
         dol_groups=dol_groups,
         outcome_bars=(),
         counts_by_window={},
+    )
+
+
+def _output_manifest(
+    tmp_path: Path,
+    *,
+    run_id: str,
+    fit_authorized: bool = False,
+    inputs: tuple[pipeline.InputWindowSpec, ...] = (),
+) -> pipeline.RunManifest:
+    return pipeline.RunManifest(
+        run_id=run_id,
+        source_path=tmp_path / "manifest.json",
+        source_sha256=SHA_A,
+        model_config_path=pipeline.MODEL_CONFIG,
+        model_config_sha256=pipeline._sha256_file(pipeline.MODEL_CONFIG),
+        phase7_protocol_sha256=pipeline._sha256_file(pipeline.PHASE7_PROTOCOL),
+        preregistration_sha256=pipeline._sha256_file(pipeline.PREREGISTRATION),
+        repository_commit=COMMIT,
+        python_major_minor=PYTHON_IDENTITY,
+        code_bundle_identity=SHA_B,
+        materialization_authorized=True,
+        fit_and_validate_authorized=fit_authorized,
+        inputs=inputs,
+    )
+
+
+def _fitted_source_sha(manifest: pipeline.RunManifest) -> str:
+    return pipeline.canonical_sha256(
+        {
+            "schema_version": pipeline.PIPELINE_SCHEMA_VERSION,
+            "inputs": tuple(
+                (spec.window_id, spec.source_sha256, spec.row_count)
+                for spec in manifest.inputs
+                if not spec.registered.rolling_diagnostic_only
+            ),
+        }
+    )
+
+
+def _specs(root: Path, *windows: str) -> tuple[pipeline.InputWindowSpec, ...]:
+    return tuple(
+        pipeline.InputWindowSpec(
+            registered=pipeline.REGISTERED_WINDOWS[window],
+            path=root / f"{window}.jsonl",
+            source_sha256=SHA_A if window == "W1" else SHA_B,
+            row_count=pipeline.REGISTERED_WINDOWS[window].expected_rows,
+            fold_id=window,
+        )
+        for window in windows
+    )
+
+
+def _fitted(
+    manifest: pipeline.RunManifest,
+    admissions: dict[str, object],
+) -> dict[str, object]:
+    return {
+        "source_dataset_sha256": _fitted_source_sha(manifest),
+        "artifacts": {},
+        "admission_receipts": admissions,
+        "artifact_blockers": {},
+        "artifact_statuses": {},
+        "admission_gate": {"state": "closed", "reasons": ["NO_ACTION_AUTHORITY"]},
+    }
+
+
+def _publish(
+    destination: Path,
+    manifest: pipeline.RunManifest,
+    *,
+    mode: str = "materialize-only",
+    fitted: dict[str, object] | None = None,
+) -> dict[str, object]:
+    return dict(
+        pipeline.write_pipeline_outputs(
+            destination,
+            manifest=manifest,
+            cohorts=_empty_cohorts(),
+            mode=mode,
+            include_rolling_diagnostics=False,
+            fitted=fitted,
+        )
     )
 
 
@@ -663,6 +751,85 @@ def _manifest(tmp_path: Path, *, input_path: str) -> Path:
     return path
 
 
+@pytest.mark.parametrize("link_kind", ("final", "parent", "missing", "loop"))
+def test_direct_file_guard_rejects_symlinks_without_resolve_read_or_hash(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    link_kind: str,
+) -> None:
+    opened = tmp_path / "opened"
+    opened.mkdir()
+    source = opened / "w1.jsonl"
+    source.write_text("{}\n")
+    final_link, missing_link, loop_link = (
+        tmp_path / name for name in ("final.jsonl", "missing.jsonl", "loop.jsonl")
+    )
+    final_link.symlink_to(source)
+    missing_link.symlink_to(tmp_path / "absent.jsonl")
+    loop_link.symlink_to(loop_link)
+    parent_link = tmp_path / "opened_alias"
+    parent_link.symlink_to(opened, target_is_directory=True)
+
+    def forbidden(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("symlink target was resolved, read, or hashed")
+
+    monkeypatch.setattr(Path, "resolve", forbidden)
+    monkeypatch.setattr(Path, "read_bytes", forbidden)
+    monkeypatch.setattr(pipeline, "_sha256_file", forbidden)
+    guarded = {
+        "final": final_link,
+        "parent": parent_link / "w1.jsonl",
+        "missing": missing_link,
+        "loop": loop_link,
+    }[link_kind]
+    with pytest.raises(pipeline.Phase7PipelineError) as captured:
+        pipeline._trusted_regular_file(guarded, name="W1 input")
+    assert str(captured.value) == "W1 input must be a direct regular file"
+
+
+def _clock(start: pd.Timestamp, end: pd.Timestamp, ordinal: int) -> SimpleNamespace:
+    return SimpleNamespace(
+        bar=SimpleNamespace(start=start, end=end, symbol="NQM4", instrument_id=13743),
+        feed_event_id=f"feed:{ordinal}",
+        input_digest=f"digest:{ordinal}",
+        approved_intents=(),
+        execution_events=(),
+        account=SimpleNamespace(position=None),
+    )
+
+
+@pytest.mark.parametrize("bad_case", ("first", "last", "duration"))
+def test_input_clock_validation_covers_boundaries_and_one_minute_duration(
+    bad_case: str,
+) -> None:
+    registered = pipeline.REGISTERED_WINDOWS["W1"]
+    w2 = pipeline.REGISTERED_WINDOWS["W2"]
+    assert (registered.first_decision_clock, registered.last_decision_clock) == (
+        pd.Timestamp("2024-06-02T22:01:00Z"),
+        pd.Timestamp("2024-06-07T21:00:00Z"),
+    )
+    assert w2.last_decision_clock == pd.Timestamp("2024-06-14T21:00:00Z")
+    middle = registered.start + timedelta(minutes=2)
+    good = (
+        _clock(registered.start, registered.first_decision_clock, 1),
+        _clock(middle, middle + timedelta(minutes=1), 2),
+        _clock(
+            registered.last_decision_clock - timedelta(minutes=1),
+            registered.last_decision_clock,
+            3,
+        ),
+    )
+    spec = replace(_specs(Path("."), "W1")[0], row_count=len(good))
+    pipeline._validate_input_clocks(spec, good)
+    invalid = {
+        "first": (_clock(registered.start + timedelta(minutes=1), middle, 1), *good[1:]),
+        "last": (*good[:-1], _clock(registered.last_decision_clock, registered.end_exclusive, 3)),
+        "duration": (good[0], _clock(middle, middle + timedelta(minutes=2), 2), good[2]),
+    }
+    with pytest.raises(pipeline.Phase7PipelineError, match=bad_case):
+        pipeline._validate_input_clocks(spec, invalid[bad_case])
+
+
 def test_manifest_rejects_sealed_path_before_attempting_to_hash_it(tmp_path: Path) -> None:
     manifest = _manifest(tmp_path, input_path=str(tmp_path / "sealed_holdout.jsonl"))
     with pytest.raises(pipeline.Phase7PipelineError, match="opened JSONL"):
@@ -690,7 +857,7 @@ def test_manifest_accepts_exact_opened_source_and_current_code_bundle(
     assert loaded.inputs[0].source_sha256 == pipeline._sha256_file(opened)
 
 
-def test_code_bundle_binds_every_runtime_file_and_rejects_hash_drift(
+def test_code_bundle_binds_selected_critical_runtime_files_and_rejects_hash_drift(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     binding = pipeline.current_code_bundle_binding(require_clean_repository=False)
@@ -704,10 +871,20 @@ def test_code_bundle_binds_every_runtime_file_and_rejects_hash_drift(
     assert commit == binding["repository_commit"]
     assert python_identity == PYTHON_IDENTITY
     assert len(identity) == 64
-    assert set(binding["files"]) == set(pipeline.CODE_BUNDLE_FILES)
-    assert binding["files"]["signal_outcome_fit"]["path"] == (
-        "smc_trader/signal_outcome_fit.py"
-    )
+    assert {
+        name: item["path"] for name, item in binding["files"].items()
+    } == {
+        "runner": "scripts/run_phase7_empirical_pipeline.py",
+        "engine": "smc_trader/engine.py",
+        "playbooks": "smc_trader/playbooks.py",
+        "path_belief": "smc_trader/path_belief.py",
+        "probability_cohorts": "smc_trader/probability_cohorts.py",
+        "probability_fit": "smc_trader/probability_fit.py",
+        "probability_admission": "smc_trader/probability_admission.py",
+        "signal_outcome_fit": "smc_trader/signal_outcome_fit.py",
+        "model_config": "configs/model.json",
+        "uv_lock": "uv.lock",
+    }
 
     drifted = json.loads(json.dumps(binding))
     drifted["files"]["engine"]["sha256"] = "0" * 64
@@ -747,6 +924,24 @@ def test_code_bundle_rejects_an_uncommitted_runtime_file(
     )
     with pytest.raises(pipeline.Phase7PipelineError, match="committed at HEAD"):
         pipeline._assert_code_bundle_committed()
+
+
+def test_fit_reads_the_exact_protocol_bytes_bound_by_the_manifest(
+    tmp_path: Path,
+) -> None:
+    manifest = replace(
+        _output_manifest(
+            tmp_path,
+            run_id="protocol-snapshot",
+            fit_authorized=True,
+            inputs=_specs(tmp_path, "W1", "W2"),
+        ),
+        phase7_protocol_sha256="0" * 64,
+    )
+    with pytest.raises(pipeline.Phase7PipelineError, match="protocol changed"):
+        pipeline.fit_and_validate(
+            manifest, _empty_cohorts(), include_rolling_diagnostics=False
+        )
 
 
 def test_zero_support_fit_returns_blockers_and_closed_non_oof_receipts() -> None:
@@ -807,75 +1002,279 @@ def test_zero_support_fit_returns_blockers_and_closed_non_oof_receipts() -> None
     assert result["empirical_authority"] is False
 
 
-def test_output_directory_is_strict_no_clobber(tmp_path: Path) -> None:
-    destination = tmp_path / "existing"
-    destination.mkdir()
-    manifest = pipeline.RunManifest(
-        run_id="no-clobber",
-        source_path=Path("manifest.json"),
-        source_sha256=SHA_A,
-        model_config_path=pipeline.MODEL_CONFIG,
-        model_config_sha256=pipeline._sha256_file(pipeline.MODEL_CONFIG),
-        phase7_protocol_sha256=pipeline._sha256_file(pipeline.PHASE7_PROTOCOL),
-        preregistration_sha256=pipeline._sha256_file(pipeline.PREREGISTRATION),
-        repository_commit=COMMIT,
-        python_major_minor=PYTHON_IDENTITY,
-        code_bundle_identity=SHA_B,
-        materialization_authorized=True,
-        fit_and_validate_authorized=False,
-        inputs=(),
-    )
-    with pytest.raises(FileExistsError):
-        pipeline.write_pipeline_outputs(
-            destination,
-            manifest=manifest,
-            cohorts=_empty_cohorts(),
-            mode="materialize-only",
-            include_rolling_diagnostics=False,
-            fitted=None,
-        )
-
-
-def test_output_publication_moves_receipt_last_and_never_replaces_run(
+def test_staging_inventory_requires_exact_files_directories_and_hashes(
     tmp_path: Path,
 ) -> None:
-    destination = tmp_path / "published"
-    manifest = pipeline.RunManifest(
-        run_id="publish-once",
-        source_path=Path("manifest.json"),
-        source_sha256=SHA_A,
-        model_config_path=pipeline.MODEL_CONFIG,
-        model_config_sha256=pipeline._sha256_file(pipeline.MODEL_CONFIG),
-        phase7_protocol_sha256=pipeline._sha256_file(pipeline.PHASE7_PROTOCOL),
-        preregistration_sha256=pipeline._sha256_file(pipeline.PREREGISTRATION),
-        repository_commit=COMMIT,
-        python_major_minor=PYTHON_IDENTITY,
-        code_bundle_identity=SHA_B,
-        materialization_authorized=True,
-        fit_and_validate_authorized=False,
-        inputs=(),
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    relative = "cohorts/rows.jsonl"
+    digest = pipeline._write_staged_file(staging, relative, b"{}\n")
+    expected = {relative: digest}
+    pipeline._verify_staging_inventory(staging, expected)
+
+    (staging / relative).write_bytes(b'{"changed":true}\n')
+    with pytest.raises(pipeline.Phase7PipelineError, match="payload hash"):
+        pipeline._verify_staging_inventory(staging, expected)
+    (staging / relative).write_bytes(b"{}\n")
+    (staging / "extra.json").write_text("{}", encoding="utf-8")
+    with pytest.raises(pipeline.Phase7PipelineError, match="inventory differs"):
+        pipeline._verify_staging_inventory(staging, expected)
+
+
+@pytest.mark.parametrize("target_kind", ("directory", "dangling"))
+def test_output_directory_is_strict_no_clobber(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    target_kind: str,
+) -> None:
+    destination = tmp_path / "existing"
+    destination.mkdir()
+    dangling = tmp_path / "dangling"
+    dangling.symlink_to(tmp_path / "missing-output", target_is_directory=True)
+    manifest = _output_manifest(tmp_path, run_id="no-clobber")
+    revalidations: list[str] = []
+    monkeypatch.setattr(
+        pipeline,
+        "_revalidate_run_manifest",
+        lambda value: revalidations.append(value.run_id),
     )
-    result = pipeline.write_pipeline_outputs(
-        destination,
-        manifest=manifest,
-        cohorts=_empty_cohorts(),
+    guarded = destination if target_kind == "directory" else dangling
+    with pytest.raises(FileExistsError):
+        _publish(guarded, manifest)
+    assert revalidations == []
+
+
+def test_output_publication_revalidates_inventory_then_commits_result(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    destination = tmp_path / "published"
+    manifest = _output_manifest(tmp_path, run_id="publish-once")
+    events: list[str] = []
+    real_verify = pipeline._verify_staging_inventory
+
+    def verify_staging(root: Path, expected: dict[str, str]) -> None:
+        real_verify(root, expected)
+        events.append("inventory")
+
+    monkeypatch.setattr(pipeline, "_verify_staging_inventory", verify_staging)
+    monkeypatch.setattr(
+        pipeline,
+        "_revalidate_run_manifest",
+        lambda value: events.append(f"revalidate:{value.run_id}"),
+    )
+    result = _publish(destination, manifest)
+    assert result["status"] == "materialized_only"
+    receipt = json.loads((destination / "receipt.json").read_text())
+    assert receipt["status"] == "complete_research_receipt"
+    assert receipt["schema_version"] == "phase7_empirical_pipeline_v2"
+    assert pipeline.RUN_MANIFEST_SCHEMA_VERSION == "phase7_empirical_run_manifest_v1"
+    assert (destination / "result.json").is_file()
+    assert events == [
+        "revalidate:publish-once",
+        "revalidate:publish-once",
+        "inventory",
+    ]
+
+
+def test_final_inventory_detects_tampering_during_revalidation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    destination = tmp_path / "tampered"
+    manifest = _output_manifest(tmp_path, run_id="tampered")
+    revalidations = 0
+
+    def revalidate(_: pipeline.RunManifest) -> None:
+        nonlocal revalidations
+        revalidations += 1
+        if revalidations == 2:
+            staging = next(tmp_path.glob(".tampered.staging.*"))
+            (staging / "cohorts/path_competition_archive.jsonl").write_bytes(
+                b"tampered-after-staging\n"
+            )
+
+    monkeypatch.setattr(pipeline, "_revalidate_run_manifest", revalidate)
+
+    with pytest.raises(pipeline.Phase7PipelineError, match="payload hash differs"):
+        _publish(destination, manifest)
+
+    assert revalidations == 2
+    assert not destination.exists()
+    assert list(tmp_path.glob(".tampered.staging.*")) == []
+
+
+def test_admission_file_is_hash_bound_and_decision_clocks_are_published(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    destination = tmp_path / "admission-bound"
+    manifest = _output_manifest(
+        tmp_path,
+        run_id="admission-bound",
+        fit_authorized=True,
+        inputs=_specs(tmp_path, "W1"),
+    )
+    admission = {
+        "schema_version": "phase7_admission_not_evaluable_v1",
+        "source_dataset_sha256": _fitted_source_sha(manifest),
+        "manifest_sha256": SHA_A,
+        "admitted": False,
+        "status": "CLOSED",
+        "receipt_id": None,
+        "blockers": ["COHORT_NOT_ROLLING_OOF"],
+        "action_authority": False,
+    }
+    monkeypatch.setattr(pipeline, "_revalidate_run_manifest", lambda _: None)
+    result = _publish(
+        destination, manifest,
+        mode="fit-and-validate",
+        fitted=_fitted(manifest, {"path_probability_W2": admission}),
+    )
+    admission_path = destination / "admission/path_probability_W2.json"
+    binding = result["admission_bindings"]["path_probability_W2"]
+    assert binding["sha256"] == pipeline._sha256_file(admission_path)
+    assert set(binding) == {"path", "sha256", "schema_version", "receipt_id"}
+    assert binding["receipt_id"] is None
+    receipt = json.loads((destination / "receipt.json").read_text(encoding="utf-8"))
+    assert receipt["admission_bindings_sha256"] == pipeline.canonical_sha256(
+        result["admission_bindings"]
+    )
+    assert "admission_bindings" not in receipt
+    assert "staged_payload_inventory" not in receipt
+    input_binding = json.loads((destination / "cohort_manifest.json").read_text())[
+        "inputs"
+    ][0]
+    assert input_binding["first_decision_clock"] == "2024-06-02T22:01:00+00:00"
+    assert input_binding["last_decision_clock"] == "2024-06-07T21:00:00+00:00"
+
+
+@pytest.mark.parametrize(
+    ("bad_field", "bad_value"),
+    (("schema_version", 2), ("manifest_sha256", "0" * 64)),
+)
+def test_writer_accepts_canonical_integer_probability_admission_schema(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    bad_field: str,
+    bad_value: object,
+) -> None:
+    destination = tmp_path / "canonical-probability-admission"
+    manifest = _output_manifest(
+        tmp_path, run_id="canonical-probability-admission", fit_authorized=True
+    )
+    admission = ProbabilityAdmissionReceipt(
+        artifact_kind="path_probability",
+        model_artifact_id="artifact:path-probability",
+        source_dataset_sha256=_fitted_source_sha(manifest),
+        manifest_sha256=manifest.source_sha256,
+        cohort_identity_sha256=SHA_B,
+        cohort_role="historical_validation",
+        thresholds=AdmissionThresholds(),
+        metrics=(),
+        support_units=(),
+        blockers=("COHORT_NOT_ROLLING_OOF",),
+        admitted=False,
+        status="rejected_shadow",
+    ).to_dict()
+    monkeypatch.setattr(pipeline, "_revalidate_run_manifest", lambda _: None)
+    result = _publish(
+        destination, manifest,
+        mode="fit-and-validate",
+        fitted=_fitted(manifest, {"path_probability_W2": admission}),
+    )
+    binding = result["admission_bindings"]["path_probability_W2"]
+    persisted = json.loads((destination / binding["path"]).read_text())
+    assert type(binding["schema_version"]) is int
+    assert binding["schema_version"] == pipeline.PROBABILITY_ADMISSION_SCHEMA_VERSION
+    assert persisted["schema_version"] == binding["schema_version"]
+    assert binding["receipt_id"] == admission["receipt_id"]
+    bad_destination = tmp_path / f"bad-{bad_field}"
+    bad = {**admission, bad_field: bad_value}
+    with pytest.raises(pipeline.Phase7PipelineError, match="binding differs"):
+        _publish(
+            bad_destination,
+            manifest,
+            mode="fit-and-validate",
+            fitted=_fitted(manifest, {"path_probability_W2": bad}),
+        )
+    assert not bad_destination.exists()
+
+
+@pytest.mark.parametrize(
+    ("mode", "fitted", "fit_authorized", "message"),
+    (
+        ("materialize-only", {}, False, "cannot contain fitted outputs"),
+        ("fit-and-validate", None, True, "requires fitted outputs"),
+        ("fit-and-validate", {}, False, "does not authorize fitting"),
+    ),
+)
+def test_writer_rejects_mode_fitted_and_authority_mismatch_before_revalidation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+    fitted: dict[str, object] | None,
+    fit_authorized: bool,
+    message: str,
+) -> None:
+    manifest = _output_manifest(
+        tmp_path, run_id=f"mismatch-{mode}-{fit_authorized}", fit_authorized=fit_authorized
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "_revalidate_run_manifest",
+        lambda _: pytest.fail("revalidated before mode/authority validation"),
+    )
+    with pytest.raises(pipeline.Phase7PipelineError, match=message):
+        _publish(tmp_path / "out", manifest, mode=mode, fitted=fitted)
+
+
+def test_run_pipeline_revalidates_immediately_after_materialization(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest = _output_manifest(tmp_path, run_id="revalidate-order")
+    events: list[str] = []
+    monkeypatch.setattr(pipeline, "load_run_manifest", lambda _: manifest)
+    monkeypatch.setattr(
+        pipeline, "materialize_cohorts",
+        lambda *_args, **_kwargs: events.append("materialize") or _empty_cohorts(),
+    )
+    monkeypatch.setattr(
+        pipeline, "_revalidate_run_manifest",
+        lambda _: events.append("revalidate"),
+    )
+    monkeypatch.setattr(
+        pipeline, "write_pipeline_outputs",
+        lambda *_args, **_kwargs: events.append("publish") or {"status": "ok"},
+    )
+    result = pipeline.run_pipeline(
+        tmp_path / "manifest.json",
+        tmp_path / "out",
         mode="materialize-only",
         include_rolling_diagnostics=False,
-        fitted=None,
     )
-    assert result["status"] == "materialized_only"
-    assert json.loads((destination / "receipt.json").read_text())["status"] == (
-        "complete_research_receipt"
+    assert result == {"status": "ok"}
+    assert events == ["materialize", "revalidate", "publish"]
+
+
+def test_run_pipeline_rejects_unauthorized_fit_before_materialization(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest = _output_manifest(tmp_path, run_id="fit-not-authorized")
+    monkeypatch.setattr(pipeline, "load_run_manifest", lambda _: manifest)
+    monkeypatch.setattr(
+        pipeline,
+        "materialize_cohorts",
+        lambda *_args, **_kwargs: pytest.fail("materialized without fit authority"),
     )
-    assert (destination / "result.json").is_file()
-    with pytest.raises(FileExistsError):
-        pipeline.write_pipeline_outputs(
-            destination,
-            manifest=manifest,
-            cohorts=_empty_cohorts(),
-            mode="materialize-only",
+    with pytest.raises(pipeline.Phase7PipelineError, match="does not authorize fitting"):
+        pipeline.run_pipeline(
+            tmp_path / "manifest.json",
+            tmp_path / "out",
+            mode="fit-and-validate",
             include_rolling_diagnostics=False,
-            fitted=None,
         )
 
 

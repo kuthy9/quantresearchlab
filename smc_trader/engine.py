@@ -19,7 +19,6 @@ from .dol_probability import (
 from .foundation_registry import (
     FOUNDATION_CANONICAL_IDENTITY,
     FOUNDATION_VERSION,
-    load_foundation_registry,
 )
 from .model import (
     AccountState,
@@ -55,6 +54,7 @@ from .scene_graph import (
     parse_scale_specs,
     update_global_market_context,
 )
+from .semantics import load_semantic_selection
 
 
 _REQUIRED_PRIMITIVE_PROTOCOLS = (
@@ -272,6 +272,10 @@ class ContinuousSMCEngine:
         payload: dict[str, Any] = json.loads(raw_config)
         if payload.get("schema_version") != 1:
             raise ValueError("model.schema_version must be 1")
+        semantic_selection = load_semantic_selection(
+            payload.get("semantic_selection"),
+            root=Path(__file__).resolve().parents[1],
+        )
         scales_raw = payload.get("scales")
         if not isinstance(scales_raw, list) or not scales_raw:
             raise ValueError("model.scales must register the current causal scale stack")
@@ -295,37 +299,7 @@ class ContinuousSMCEngine:
                 "model.observer must bind typed primitive protocols: "
                 + ", ".join(missing_protocols)
             )
-        if observer_raw.get("canonical_foundation_enabled") is not True:
-            raise ValueError(
-                "model.observer.canonical_foundation_enabled must be true"
-            )
-        foundation_source = observer_raw.get("canonical_foundation_registry")
-        foundation_identity = observer_raw.get("canonical_foundation_identity")
-        if (
-            not isinstance(foundation_source, (str, Path))
-            or not str(foundation_source).strip()
-        ):
-            raise ValueError(
-                "model.observer.canonical_foundation_registry must be bound"
-            )
-        if (
-            not isinstance(foundation_identity, str)
-            or len(foundation_identity) != 64
-            or any(
-                character not in "0123456789abcdef"
-                for character in foundation_identity
-            )
-        ):
-            raise ValueError(
-                "model.observer.canonical_foundation_identity must be SHA-256"
-            )
-        foundation_path = Path(foundation_source)
-        if not foundation_path.is_absolute() and not foundation_path.exists():
-            foundation_path = Path(__file__).resolve().parents[1] / foundation_path
-        foundation_registry = load_foundation_registry(
-            foundation_path,
-            expected_identity=foundation_identity,
-        )
+        foundation_registry = semantic_selection.foundation_registry
         minimum = observer_raw.get("minimum_bars", {})
         observer = CausalObserver(
             ObserverConfig(
@@ -359,14 +333,12 @@ class ContinuousSMCEngine:
                 group4_protocol=observer_raw.get("group4_protocol"),
                 group5_protocol=observer_raw.get("group5_protocol"),
                 semantic_registry=str(
-                    observer_raw.get(
-                        "semantic_registry",
-                        "semantics/registry_v1_2.yaml",
-                    )
+                    semantic_selection.atomic_registry.source_path
                 ),
                 scale_specs=scale_specs,
                 canonical_foundation_enabled=True,
-            )
+            ),
+            semantic_registry=semantic_selection.atomic_registry,
         )
         registry = load_playbook_registry(
             payload.get("playbook_registry", "configs/playbooks.json")

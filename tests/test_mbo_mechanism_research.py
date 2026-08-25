@@ -1540,7 +1540,7 @@ def test_collect_eye_inputs_accepts_cold_start_relative_volume_none(
         kind=EventKind.BAR_COMPLETED,
         timeframe=Timeframe.M5,
         known_at=m5_clock,
-        evidence={"real_completed": True},
+        evidence={"real_completed": True, "clock_only": False},
     )
     updates = (
         SimpleNamespace(
@@ -1869,7 +1869,7 @@ def test_source_only_m5_ancestry_is_clipped_to_closed_episode_interval(
             kind=EventKind.BAR_COMPLETED,
             timeframe=Timeframe.M5,
             known_at=_clock(minute),
-            evidence={"real_completed": True},
+            evidence={"real_completed": True, "clock_only": False},
         )
     observer = SimpleNamespace(
         audit_store=SimpleNamespace(get=lambda identity: ancestors.get(identity))

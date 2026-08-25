@@ -24,6 +24,7 @@ from smc_trader.market_clock import (
     registered_native_bar_bounds,
     scheduled_gap_kind,
     special_session_close,
+    validate_registered_native_bar_coverage,
 )
 from smc_trader.mbo import (
     F_BAD_TS_RECV,
@@ -561,6 +562,32 @@ def test_registered_native_bounds_freeze_special_close_shortened_h4() -> None:
     ) == (
         pd.Timestamp("2024-11-29 10:00", tz=TZ),
         pd.Timestamp("2024-11-29 13:15", tz=TZ),
+    )
+
+
+@pytest.mark.parametrize(
+    ("start", "completed_at", "registered_minutes"),
+    (
+        ("2024-05-27 10:00", "2024-05-27 13:00", 180),
+        ("2024-11-29 10:00", "2024-11-29 13:15", 195),
+    ),
+)
+def test_clock_only_coverage_binds_shortened_registered_h4(
+    start: str,
+    completed_at: str,
+    registered_minutes: int,
+) -> None:
+    validate_registered_native_bar_coverage(
+        timeframe="4H",
+        start=pd.Timestamp(start, tz=TZ),
+        completed_at=pd.Timestamp(completed_at, tz=TZ),
+        complete=True,
+        observed_minutes=registered_minutes,
+        expected_minutes=registered_minutes,
+        real_minutes=registered_minutes - 1,
+        synthetic_minutes=1,
+        real_completed=False,
+        clock_only=True,
     )
 
 

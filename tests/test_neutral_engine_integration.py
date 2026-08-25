@@ -171,6 +171,56 @@ def test_engine_neutral_integration_preserves_old_outputs_each_clock() -> None:
         )
 
 
+def test_clock_only_close_cannot_reprice_scene_foundation_or_brain(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = ContinuousSMCEngine.from_config(
+        "configs/model.json",
+        runtime_mode="development",
+    )
+    first_bar, next_bar = _grid_bars(2)
+    first = engine.on_bar(first_bar)
+    prior_price = first.observation.price
+    raw_synthetic_price = prior_price - 100.0
+    synthetic = replace(
+        next_bar,
+        open=raw_synthetic_price,
+        high=raw_synthetic_price,
+        low=raw_synthetic_price,
+        close=raw_synthetic_price,
+        volume=0.0,
+        synthetic_no_trade=True,
+    )
+    brain_prices: list[float] = []
+    original_update = engine.brain.update
+
+    def capture_brain_price(observation, *args, **kwargs):
+        brain_prices.append(float(observation.price))
+        return original_update(observation, *args, **kwargs)
+
+    monkeypatch.setattr(engine.brain, "update", capture_brain_price)
+    clock_only = engine.on_bar(synthetic)
+
+    assert synthetic.close == raw_synthetic_price != prior_price
+    assert clock_only.observation.price == prior_price
+    assert clock_only.market_snapshot.price == prior_price
+    assert engine.observer.scene_graph._last_price == prior_price
+    assert brain_prices == [prior_price]
+    assert (
+        clock_only.market_snapshot.foundation
+        == first.market_snapshot.foundation
+    )
+    assert (
+        clock_only.market_snapshot.foundation_range_locations
+        == first.market_snapshot.foundation_range_locations
+    )
+    for timeframe, prior_state in first.market_snapshot.timeframe_states.items():
+        assert (
+            clock_only.market_snapshot.timeframe_states[timeframe].liquidity
+            == prior_state.liquidity
+        )
+
+
 def test_engine_calls_global_context_reducer_once_per_clock(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

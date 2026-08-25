@@ -32,7 +32,6 @@ from .execution_fsm import (
     RiskApprovedTradeIntent,
     account_state_fingerprint,
 )
-from .foundation_registry import load_foundation_registry
 from .model import (
     AccountState,
     Bar,
@@ -45,6 +44,7 @@ from .model import (
     to_primitive,
 )
 from .observation import ExecutionRealityInput
+from .semantics import load_semantic_selection
 
 
 SHADOW_LIVE_SCHEMA_VERSION = "phase9_shadow_live_v1.2"
@@ -135,6 +135,26 @@ def _identity(value: Any, *, name: str) -> str:
     if not isinstance(value, str) or not value:
         raise ShadowLiveError(f"{name} must be a non-empty identity")
     return value
+
+
+def _require_shadow_boundary_attack_real_bar(
+    bar: Any,
+    boundary: Any,
+) -> None:
+    """Fail closed on a non-real BAR during boundary checkpoint rebuild."""
+
+    if (
+        bar is None
+        or bar.kind is not EventKind.BAR_COMPLETED
+        or bar.origin is not EventOrigin.NORMALIZED_DATA
+        or bar.evidence.get("real_completed") is not True
+        or bar.evidence.get("clock_only") is not False
+        or bar.timeframe is not boundary.timeframe
+        or bar.known_at != boundary.known_at
+    ):
+        raise ValueError(
+            "boundary attack real BAR is absent from audit history"
+        )
 
 
 def _sha256_text(value: Any, *, name: str) -> str:
@@ -786,26 +806,16 @@ def shadow_runtime_bindings_from_model_config(
     raw = source.read_bytes()
     try:
         payload = json.loads(raw)
-        observer_values = payload["observer"]
-        foundation_source = Path(
-            observer_values["canonical_foundation_registry"]
-        )
-        if not foundation_source.is_absolute() and not foundation_source.exists():
-            foundation_source = (
-                Path(__file__).resolve().parents[1] / foundation_source
-            )
-        foundation_registry = load_foundation_registry(
-            foundation_source,
-            expected_identity=observer_values[
-                "canonical_foundation_identity"
-            ],
+        selection = load_semantic_selection(
+            payload["semantic_selection"],
+            root=Path(__file__).resolve().parents[1],
         )
         path_values = payload["path_hypotheses"]
         dol_values = payload["dol_probability"]
         signal_values = payload["signal_policy"]
         bindings = {
             "model_config_sha256": hashlib.sha256(raw).hexdigest(),
-            "semantic_version": SMC_SEMANTIC_VERSION,
+            "semantic_version": selection.atomic_semantics_version,
             "path_protocol_fingerprint": path_values[
                 "path_protocol_fingerprint"
             ],
@@ -819,8 +829,10 @@ def shadow_runtime_bindings_from_model_config(
                 "protocol_fingerprint"
             ],
             "execution_protocol_fingerprint": EXECUTION_PROTOCOL_FINGERPRINT,
-            "foundation_registry_identity": foundation_registry.identity,
-            "foundation_version": foundation_registry.foundation_version,
+            "foundation_registry_identity": (
+                selection.foundation_registry_identity
+            ),
+            "foundation_version": selection.foundation_projection_version,
             "shadow_component_digest_version": (
                 SHADOW_COMPONENT_DIGEST_VERSION
             ),
@@ -2372,14 +2384,10 @@ class ShadowLiveRunner:
                             bar = observer.audit_store.get(
                                 boundary.bar_event_id
                             )
-                            if (
-                                bar is None
-                                or bar.kind is not EventKind.BAR_COMPLETED
-                                or bar.origin is not EventOrigin.NORMALIZED_DATA
-                            ):
-                                raise ValueError(
-                                    "boundary attack BAR is absent from audit history"
-                                )
+                            _require_shadow_boundary_attack_real_bar(
+                                bar,
+                                boundary,
+                            )
                             register_manual(
                                 NormalizedLifecycleTransition(
                                     fact_id=canonical_semantic_id(
@@ -2482,6 +2490,8 @@ class ShadowLiveRunner:
                 or adapter._crossings != replayed._crossings
                 or adapter._structure_bindings
                 != replayed._structure_bindings
+                or adapter.lifecycle.registered_bar_clocks
+                != replayed.lifecycle.registered_bar_clocks
                 or adapter.lifecycle.real_bar_clocks
                 != replayed.lifecycle.real_bar_clocks
                 or adapter.lifecycle.epoch != replayed.lifecycle.epoch

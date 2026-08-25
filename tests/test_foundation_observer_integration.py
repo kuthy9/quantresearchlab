@@ -72,6 +72,257 @@ def _observe(observer: CausalObserver, reader: CausalMarketReader, bars):
     return observation
 
 
+def test_eye_foundation_clock_survives_real_clock_only_real_sequence() -> None:
+    reader, observer = _eye()
+    start = pd.Timestamp("2024-06-06 23:08", tz="America/New_York")
+    observations = []
+    for index in range(3):
+        observations.append(
+            observer.observe(
+                reader.on_bar(
+                    Bar(
+                        start=start + pd.Timedelta(minutes=index),
+                        open=19_000.0,
+                        high=19_000.25,
+                        low=18_999.75,
+                        close=19_000.0,
+                        volume=0.0 if index == 1 else 10.0,
+                        symbol="NQM4",
+                        instrument_id=13743,
+                        synthetic_no_trade=index == 1,
+                    )
+                )
+            )
+        )
+
+    adapter = observer._foundation_adapter
+    assert adapter is not None
+    registered = next(
+        item
+        for item in adapter.lifecycle.registered_bar_clocks
+        if item.timeframe is Timeframe.M1
+    )
+    real = next(
+        item
+        for item in adapter.lifecycle.real_bar_clocks
+        if item.timeframe is Timeframe.M1
+    )
+    clock_only_roots = tuple(
+        event
+        for event in observations[1].semantic_events_this_update
+        if event.kind is EventKind.BAR_COMPLETED
+        and event.timeframe is Timeframe.M1
+        and event.evidence.get("real_completed") is False
+        and event.evidence.get("clock_only") is True
+    )
+    assert len(clock_only_roots) == 1
+    assert clock_only_roots[0].known_at == pd.Timestamp(
+        "2024-06-06 23:10", tz="America/New_York"
+    )
+    assert not any(
+        event.kind is EventKind.FOUNDATION_STATE_CHANGED
+        for event in observations[1].semantic_events_this_update
+    )
+    assert registered.count == 3
+    assert registered.last_completed_at == pd.Timestamp(
+        "2024-06-06 23:11", tz="America/New_York"
+    )
+    assert real.count == 2
+    assert real.last_completed_at == registered.last_completed_at
+    assert adapter.lifecycle.epoch == 0
+
+
+def test_foundation_noop_clocks_skip_geometry_and_cluster_rebuilds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    optimized_reader, optimized = _eye()
+    eager_reader, eager = _eye()
+    calls = Counter()
+    eager_calls = Counter()
+    optimized_geometry = optimized._foundation_geometry_plans
+    optimized_clusters = optimized._foundation_update_clusters
+    eager_geometry = eager._foundation_geometry_plans
+    eager_clusters = eager._foundation_update_clusters
+
+    def count_optimized_geometry(**kwargs):
+        calls["geometry"] += 1
+        return optimized_geometry(**kwargs)
+
+    def count_optimized_clusters(**kwargs):
+        calls["clusters"] += 1
+        return optimized_clusters(**kwargs)
+
+    def count_eager_geometry(**kwargs):
+        eager_calls["geometry"] += 1
+        return eager_geometry(**kwargs)
+
+    def count_eager_clusters(**kwargs):
+        eager_calls["clusters"] += 1
+        return eager_clusters(**kwargs)
+
+    monkeypatch.setattr(
+        optimized,
+        "_foundation_geometry_plans",
+        count_optimized_geometry,
+    )
+    monkeypatch.setattr(
+        optimized,
+        "_foundation_update_clusters",
+        count_optimized_clusters,
+    )
+    monkeypatch.setattr(eager, "_foundation_geometry_plans", count_eager_geometry)
+    monkeypatch.setattr(eager, "_foundation_update_clusters", count_eager_clusters)
+    monkeypatch.setattr(
+        eager,
+        "_foundation_geometry_invalidated",
+        lambda _events: True,
+    )
+    monkeypatch.setattr(
+        eager,
+        "_foundation_cluster_membership_invalidated",
+        lambda _records, _events: True,
+    )
+
+    optimized_observation = eager_observation = None
+    bars = _tick_aligned_bars(3)
+    for bar in bars:
+        optimized_observation = optimized.observe(
+            optimized_reader.on_bar(bar)
+        )
+        eager_observation = eager.observe(eager_reader.on_bar(bar))
+
+    assert optimized_observation is not None
+    assert eager_observation is not None
+    assert calls == Counter()
+    assert eager_calls == Counter({"geometry": 3, "clusters": 3})
+    assert optimized.audit_store.events() == eager.audit_store.events()
+    assert optimized._foundation_adapter is not None
+    assert eager._foundation_adapter is not None
+    assert (
+        optimized._foundation_adapter.checkpoint()
+        == eager._foundation_adapter.checkpoint()
+    )
+    assert optimized_observation.market_snapshot is not None
+    assert eager_observation.market_snapshot is not None
+    assert (
+        optimized_observation.market_snapshot.fingerprint
+        == eager_observation.market_snapshot.fingerprint
+    )
+
+
+def test_eye_foundation_m5_clock_recovers_after_contaminated_bucket() -> None:
+    reader, observer = _eye()
+    start = pd.Timestamp("2024-06-06 23:00", tz="America/New_York")
+    observations = []
+    for index in range(15):
+        observations.append(
+            observer.observe(
+                reader.on_bar(
+                    Bar(
+                        start=start + pd.Timedelta(index, unit="min"),
+                        open=19_000.0,
+                        high=19_000.25,
+                        low=18_999.75,
+                        close=19_000.0,
+                        volume=0.0 if index == 9 else 10.0,
+                        symbol="NQM4",
+                        instrument_id=13743,
+                        synthetic_no_trade=index == 9,
+                    )
+                )
+            )
+        )
+
+    adapter = observer._foundation_adapter
+    assert adapter is not None
+    registered = next(
+        item
+        for item in adapter.lifecycle.registered_bar_clocks
+        if item.timeframe is Timeframe.M5
+    )
+    real = next(
+        item
+        for item in adapter.lifecycle.real_bar_clocks
+        if item.timeframe is Timeframe.M5
+    )
+    contaminated = tuple(
+        event
+        for event in observations[9].semantic_events_this_update
+        if event.kind is EventKind.BAR_COMPLETED
+        and event.timeframe is Timeframe.M5
+    )
+    assert len(contaminated) == 1
+    assert contaminated[0].evidence["real_completed"] is False
+    assert contaminated[0].evidence["clock_only"] is True
+    assert contaminated[0].evidence["real_minutes"] == 4
+    assert contaminated[0].evidence["synthetic_minutes"] == 1
+    assert registered.count == 3
+    assert registered.last_completed_at == pd.Timestamp(
+        "2024-06-06 23:15", tz="America/New_York"
+    )
+    assert real.count == 2
+    assert real.last_completed_at == registered.last_completed_at
+
+
+def test_eye_publishes_clock_only_roots_for_every_contaminated_timeframe() -> None:
+    reader, observer = _eye()
+    start = pd.Timestamp("2024-06-06 22:00", tz="America/New_York")
+    update = None
+    for index in range(240):
+        update = reader.on_bar(
+            Bar(
+                start=start + pd.Timedelta(index, unit="min"),
+                open=19_000.0,
+                high=19_000.25,
+                low=18_999.75,
+                close=19_000.0,
+                volume=0.0 if index == 69 else 10.0,
+                symbol="NQM4",
+                instrument_id=13743,
+                synthetic_no_trade=index == 69,
+            )
+        )
+    assert update is not None
+
+    observer.observe(update)
+    roots = tuple(
+        event
+        for event in observer.audit_store.events()
+        if event.kind is EventKind.BAR_COMPLETED
+        and event.evidence.get("real_completed") is False
+        and event.evidence.get("clock_only") is True
+    )
+    by_timeframe = {event.timeframe: event for event in roots}
+    assert set(by_timeframe) == {
+        Timeframe.M1,
+        Timeframe.M5,
+        Timeframe.M15,
+        Timeframe.H1,
+        Timeframe.H4,
+    }
+    expected_coverage = {
+        Timeframe.M1: (1, 0, 1),
+        Timeframe.M5: (5, 4, 1),
+        Timeframe.M15: (15, 14, 1),
+        Timeframe.H1: (60, 59, 1),
+        Timeframe.H4: (240, 239, 1),
+    }
+    for timeframe, (expected, real, synthetic) in expected_coverage.items():
+        evidence = by_timeframe[timeframe].evidence
+        assert evidence["complete"] is True
+        assert evidence["observed_minutes"] == expected
+        assert evidence["expected_minutes"] == expected
+        assert evidence["real_minutes"] == real
+        assert evidence["synthetic_minutes"] == synthetic
+
+    clock_only_ids = {event.event_id for event in roots}
+    assert not any(
+        clock_only_ids.intersection(event.source_event_ids)
+        for event in observer.audit_store.events()
+        if event.origin is EventOrigin.SEMANTIC_ATOMIC
+    )
+
+
 def _descending_tail(start: pd.Timestamp, count: int) -> tuple[Bar, ...]:
     return tuple(
         Bar(
@@ -1100,7 +1351,6 @@ def test_relation_keeps_external_owners_while_child_internal_mss_is_evidence() -
     reader, observer = _eye()
     observation = _observe(observer, reader, _m5_parent_m1_child_mss_bars())
     snapshot = observation.market_snapshot
-    projection = snapshot.foundation
     relation = snapshot.relations["5m__1m"]
     assert relation.parent_direction is Direction.LONG
     assert relation.child_direction is Direction.SHORT

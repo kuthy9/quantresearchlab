@@ -12,14 +12,16 @@ from collections.abc import MutableMapping
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 from fractions import Fraction
-import hashlib
 import math
 from typing import Any, Iterable, Mapping, Sequence
 
 import pandas as pd
 
 from .foundation_registry import FOUNDATION_VERSION
-from .market_clock import next_registered_native_completion
+from .market_clock import (
+    next_registered_native_completion,
+    validate_registered_native_bar_root,
+)
 from .market_state import DeliveryPhase, RelationState
 from .model import (
     Direction,
@@ -125,6 +127,8 @@ _TIMEFRAME_INTERVAL = {
     Timeframe.H1: pd.Timedelta(1, unit="h"),
     Timeframe.H4: pd.Timedelta(4, unit="h"),
 }
+FOUNDATION_ADAPTER_CHECKPOINT_SCHEMA_VERSION = 2
+FOUNDATION_ADAPTER_STATE_SCHEMA_VERSION = 2
 
 
 def _unique_ids(values: Iterable[str], *, name: str) -> tuple[str, ...]:
@@ -272,6 +276,7 @@ class FoundationAdapterUpdate:
 
 def _checkpoint_payload(checkpoint: "FoundationAdapterCheckpoint") -> Mapping[str, Any]:
     return {
+        "schema_version": checkpoint.schema_version,
         "tick_size": checkpoint.tick_size,
         "lifecycle_digest": checkpoint.lifecycle_checkpoint.state_digest,
         "projection_checkpoint_id": (
@@ -298,12 +303,16 @@ class FoundationAdapterCheckpoint:
     real_bars: tuple[_RealBarFact, ...]
     crossings: tuple[_CrossingBinding, ...]
     structure_bindings: tuple[tuple[str, str], ...]
+    schema_version: int = FOUNDATION_ADAPTER_CHECKPOINT_SCHEMA_VERSION
     semantic_version: str = FOUNDATION_VERSION
     checkpoint_digest: str = field(init=False)
 
     def __post_init__(self) -> None:
         if (
-            isinstance(self.tick_size, bool)
+            "schema_version" not in vars(self)
+            or self.schema_version
+            != FOUNDATION_ADAPTER_CHECKPOINT_SCHEMA_VERSION
+            or isinstance(self.tick_size, bool)
             or not math.isfinite(float(self.tick_size))
             or self.tick_size <= 0.0
             or not isinstance(self.lifecycle_checkpoint, LifecycleCheckpoint)
@@ -313,6 +322,7 @@ class FoundationAdapterCheckpoint:
             or self.semantic_version != FOUNDATION_VERSION
         ):
             raise ValueError("foundation adapter checkpoint is invalid")
+        SemanticLifecycleReducer.restore(self.lifecycle_checkpoint)
         object.__setattr__(
             self,
             "seen_event_fingerprints",
@@ -428,6 +438,7 @@ class CanonicalFoundationAdapter:
         self._real_bars: list[_RealBarFact] = []
         self._crossings: dict[tuple[str, pd.Timestamp], _CrossingBinding] = {}
         self._structure_bindings: dict[str, str] = {}
+        self._state_schema_version = FOUNDATION_ADAPTER_STATE_SCHEMA_VERSION
         self._staged_transaction_open = False
         self._rebuild_derived_indexes()
 
@@ -449,12 +460,19 @@ class CanonicalFoundationAdapter:
 
     def __getstate__(self) -> dict[str, Any]:
         state = dict(self.__dict__)
+        state["_state_schema_version"] = FOUNDATION_ADAPTER_STATE_SCHEMA_VERSION
         state.pop("_lifecycle_indexes", None)
         state.pop("_real_bar_by_id", None)
         state.pop("_staged_transaction_open", None)
         return state
 
     def __setstate__(self, state: Mapping[str, Any]) -> None:
+        if (
+            not isinstance(state, Mapping)
+            or state.get("_state_schema_version")
+            != FOUNDATION_ADAPTER_STATE_SCHEMA_VERSION
+        ):
+            raise ValueError("foundation adapter pickle state schema changed")
         self.__dict__.update(state)
         self._staged_transaction_open = False
         self._rebuild_derived_indexes()
@@ -484,6 +502,7 @@ class CanonicalFoundationAdapter:
         candidate._real_bars = list(self._real_bars)
         candidate._crossings = dict(self._crossings)
         candidate._structure_bindings = dict(self._structure_bindings)
+        candidate._state_schema_version = FOUNDATION_ADAPTER_STATE_SCHEMA_VERSION
         # Inner lifecycle indexes are immutable snapshots.  A changed reducer
         # collection installs a fresh index, so an outer-only copy preserves
         # transaction rollback without rescanning/copying every collection.
@@ -555,6 +574,13 @@ class CanonicalFoundationAdapter:
         """Return the immutable identities already accepted as v1.2 inputs."""
 
         return frozenset(self._seen_event_fingerprints)
+
+    def is_known_input_event_id(self, event_id: str) -> bool:
+        """Return whether one exact v1.2 input identity was accepted."""
+
+        if not isinstance(event_id, str) or not event_id:
+            raise ValueError("foundation input event identity must be non-empty")
+        return event_id in self._seen_event_fingerprints
 
     def _validated_seen_sources(
         self,
@@ -890,11 +916,29 @@ class CanonicalFoundationAdapter:
         return active[0] if active else None
 
     def _consume_bar(self, event: MarketEvent) -> tuple[FoundationRecord, ...]:
-        real_completed = event.evidence.get("real_completed", True)
-        if type(real_completed) is not bool:
-            raise ValueError("BAR_COMPLETED real_completed must be boolean")
+        real_completed, _ = validate_registered_native_bar_root(
+            timeframe=event.timeframe,
+            event_time=event.event_time,
+            known_at=event.known_at,
+            evidence=event.evidence,
+        )
+        transition_payload = {
+            "bar_event_id": event.event_id,
+            "real_completed": real_completed,
+        }
         if not real_completed:
-            return ()
+            transition_payload["clock_only"] = True
+        transition = self._transition(
+            event,
+            NormalizedTransitionKind.REAL_BAR_COMPLETED,
+            payload=transition_payload,
+            source_event_ids=(event.event_id,),
+        )
+        records = list(
+            self._apply((transition,), additional_known_ids=(event.event_id,))
+        )
+        if not real_completed:
+            return tuple(records)
         high = event.evidence.get("high")
         low = event.evidence.get("low")
         close = event.evidence.get("close", event.price)
@@ -910,15 +954,6 @@ class CanonicalFoundationAdapter:
         )
         if self._bar_by_id(bar.event_id) is not None:
             raise ValueError("real BAR identity repeats with a new input fact")
-        transition = self._transition(
-            event,
-            NormalizedTransitionKind.REAL_BAR_COMPLETED,
-            payload={"bar_event_id": event.event_id, "real_completed": True},
-            source_event_ids=(event.event_id,),
-        )
-        records = list(
-            self._apply((transition,), additional_known_ids=(event.event_id,))
-        )
         self._real_bars.append(bar)
         self._real_bar_by_id[bar.event_id] = bar
         # Same-source registered levels rearm from the first strictly later real
@@ -1361,8 +1396,8 @@ class CanonicalFoundationAdapter:
                 "outside_completed_bars": outside_completed_bars,
                 "outside_run": outside_suffix_bars,
             }
-            for field, expected in expected_counts.items():
-                asserted = event.evidence.get(field)
+            for evidence_field, expected in expected_counts.items():
+                asserted = event.evidence.get(evidence_field)
                 if asserted is not None and (
                     type(asserted) is not int
                     or asserted < 1
@@ -1533,6 +1568,30 @@ class CanonicalFoundationAdapter:
         )
         return _required_text(event.evidence, key)
 
+    def _event_is_strictly_after_seen_clock(
+        self,
+        event: MarketEvent,
+        *,
+        prior_event_id: str,
+        prior_known_at: pd.Timestamp,
+    ) -> bool:
+        """Use monotonic input order for a same-clock causal successor."""
+
+        if (
+            prior_event_id not in self._seen_event_fingerprints
+            or self._seen_event_metadata.get(prior_event_id)
+            != (prior_known_at, EventOrigin.SEMANTIC_ATOMIC)
+        ):
+            return False
+        if event.known_at > prior_known_at:
+            return True
+        return bool(
+            event.known_at == prior_known_at
+            and self._last_order is not None
+            and self._last_order[0] == prior_known_at
+            and event.sequence_no > self._last_order[1]
+        )
+
     def _mss_origin_identity(self, event: MarketEvent) -> str:
         """Resolve the exact swing/structure identity carried by an MSS fact."""
 
@@ -1589,16 +1648,20 @@ class CanonicalFoundationAdapter:
         self,
         event: MarketEvent,
         generation: object,
+        *,
+        reason: str = "scope_rollover",
     ) -> NormalizedLifecycleTransition:
         generation_id = getattr(generation, "generation_id", None)
         if not isinstance(generation_id, str) or not generation_id:
             raise TypeError("internal structure termination requires a generation")
+        if reason not in {"scope_rollover", "superseded"}:
+            raise ValueError("internal structure termination reason is invalid")
         return self._transition(
             event,
             NormalizedTransitionKind.STRUCTURE_GENERATION_TERMINATED,
             payload={
                 "structure_generation_id": generation_id,
-                "reason": "scope_rollover",
+                "reason": reason,
             },
             source_event_ids=(event.event_id,),
             suffix=f"internal:{generation_id}",
@@ -1781,7 +1844,62 @@ class CanonicalFoundationAdapter:
             internal = self.lifecycle.structure(internal.generation_id)
         transitions = []
         if internal is not None:
-            transitions.append(self._terminate_internal_transition(event, internal))
+            accepted_incumbent = (
+                None
+                if transition is None
+                else self.lifecycle.structure(
+                    transition.incumbent_structure_generation_id
+                )
+            )
+            promoted_challenger = (
+                transition is not None
+                and transition.protected_acceptance_event_id is not None
+                and event.direction is transition.challenger_direction
+                and internal.direction is event.direction
+                and internal.scope is StructureScope.INTERNAL
+                and internal.lifecycle is StructureGenerationLifecycle.CONFIRMED
+                and internal.timeframe is event.timeframe
+                and internal.started_at == transition.started_at
+                and internal.mss_event_ids == transition.mss_event_ids
+                and accepted_incumbent is not None
+                and accepted_incumbent.scope is StructureScope.EXTERNAL
+                and accepted_incumbent.timeframe is event.timeframe
+                and accepted_incumbent.direction
+                is transition.incumbent_direction
+                and accepted_incumbent.lifecycle
+                is StructureGenerationLifecycle.TERMINATED
+                and accepted_incumbent.termination_reason
+                == "protected_break_accepted"
+                and accepted_incumbent.protected_acceptance_event_id
+                == transition.protected_acceptance_event_id
+                and accepted_incumbent.terminated_at is not None
+                and transition.updated_at == accepted_incumbent.terminated_at
+                and self._seen_event_metadata.get(
+                    transition.protected_acceptance_event_id
+                )
+                == (
+                    accepted_incumbent.terminated_at,
+                    EventOrigin.SEMANTIC_ATOMIC,
+                )
+                and self._event_is_strictly_after_seen_clock(
+                    event,
+                    prior_event_id=(
+                        transition.protected_acceptance_event_id
+                    ),
+                    prior_known_at=accepted_incumbent.terminated_at,
+                )
+            )
+            transitions.append(
+                self._terminate_internal_transition(
+                    event,
+                    internal,
+                    reason=(
+                        "superseded"
+                        if promoted_challenger
+                        else "scope_rollover"
+                    ),
+                )
+            )
         transitions.extend(self._new_structure_transitions(event))
         provisional = self.lifecycle
         for fact in transitions:
@@ -1790,9 +1908,13 @@ class CanonicalFoundationAdapter:
         self._structure_bindings[structure_id] = new_generation.generation_id
         if transition is not None:
             if event.direction is transition.challenger_direction:
-                if transition.protected_acceptance_event_id is None:
+                if (
+                    transition.protected_acceptance_event_id is None
+                    or not promoted_challenger
+                ):
                     raise ValueError(
-                        "opposite structure confirmation lacks protected Acceptance"
+                        "opposite structure confirmation lacks exact later "
+                        "protected Acceptance promotion"
                     )
                 transitions.append(
                     self._transition(
@@ -2095,11 +2217,91 @@ class CanonicalFoundationAdapter:
             additional_known_ids=(event.event_id,),
         )
 
+    def _is_exact_post_acceptance_internal_counter_mss(
+        self,
+        event: MarketEvent,
+        *,
+        source_generation_id: str,
+    ) -> bool:
+        """Recognize counter-MSS evidence with no remaining external owner."""
+
+        if (
+            event.direction not in {Direction.LONG, Direction.SHORT}
+            or self._active_external(event.timeframe) is not None
+        ):
+            return False
+        internal = self._active_internal(event.timeframe)
+        transition = self._started_transition(event.timeframe)
+        if (
+            internal is None
+            or transition is None
+            or internal.generation_id != source_generation_id
+            or internal.scope is not StructureScope.INTERNAL
+            or internal.lifecycle is not StructureGenerationLifecycle.CONFIRMED
+            or internal.timeframe is not event.timeframe
+            or internal.direction is not transition.challenger_direction
+            or event.direction is not transition.incumbent_direction
+            or event.direction is internal.direction
+            or transition.scope is not StructureScope.EXTERNAL
+            or transition.timeframe is not event.timeframe
+            or transition.started_at != internal.started_at
+            or transition.mss_event_ids != internal.mss_event_ids
+            or internal.origin_event_id not in internal.mss_event_ids
+            or transition.protected_acceptance_event_id is None
+            or internal.confirmed_at is None
+            or internal.confirmation_event_id is None
+        ):
+            return False
+
+        acceptance_id = transition.protected_acceptance_event_id
+        incumbent = self.lifecycle.structure(
+            transition.incumbent_structure_generation_id
+        )
+        sources = tuple(event.source_event_ids)
+        if (
+            incumbent.scope is not StructureScope.EXTERNAL
+            or incumbent.timeframe is not event.timeframe
+            or incumbent.direction is not transition.incumbent_direction
+            or incumbent.lifecycle is not StructureGenerationLifecycle.TERMINATED
+            or incumbent.termination_reason != "protected_break_accepted"
+            or incumbent.protected_acceptance_event_id != acceptance_id
+            or incumbent.terminated_at is None
+            or transition.updated_at != incumbent.terminated_at
+            or self._seen_event_metadata.get(acceptance_id)
+            != (incumbent.terminated_at, EventOrigin.SEMANTIC_ATOMIC)
+            or not (
+                transition.started_at
+                < internal.confirmed_at
+                < incumbent.terminated_at
+                < event.known_at
+            )
+            or len(sources) != 2
+            or sources[1] != internal.confirmation_event_id
+            or self._seen_event_metadata.get(sources[0])
+            != (event.known_at, EventOrigin.SEMANTIC_ATOMIC)
+            or self._seen_event_metadata.get(sources[1])
+            != (internal.confirmed_at, EventOrigin.SEMANTIC_ATOMIC)
+        ):
+            return False
+        return True
+
     def _consume_mss(self, event: MarketEvent) -> tuple[FoundationRecord, ...]:
         self._require_prior_sources(event)
         incumbent = self._active_external(event.timeframe)
         origin_identity = self._mss_origin_identity(event)
         source_generation_id = self._structure_bindings.get(origin_identity)
+        if (
+            source_generation_id is not None
+            and self._is_exact_post_acceptance_internal_counter_mss(
+                event,
+                source_generation_id=source_generation_id,
+            )
+        ):
+            # Acceptance has already terminalized the old external owner, but
+            # this MSS only counters the exact confirmed INTERNAL challenger.
+            # MSS cannot fail, confirm, or replace a regime; retain its atomic
+            # history and await registered Structure/Q-BOS terminal authority.
+            return ()
         if (
             source_generation_id is None
             and incumbent is not None
@@ -2220,7 +2422,11 @@ class CanonicalFoundationAdapter:
             )
         else:
             if internal is not None:
-                terminal = self._terminate_internal_transition(event, internal)
+                terminal = self._terminate_internal_transition(
+                    event,
+                    internal,
+                    reason="superseded",
+                )
                 transitions.append(terminal)
                 working = SemanticLifecycleReducer.reduce(working, terminal)
             transitions.extend(
@@ -2577,6 +2783,21 @@ class CanonicalFoundationAdapter:
         )
         if missing:
             raise ValueError(f"boundary attack cites unseen inputs: {missing}")
+        bar_event_id = fact.payload.get("bar_event_id")
+        bar = (
+            None
+            if not isinstance(bar_event_id, str)
+            else self._bar_by_id(bar_event_id)
+        )
+        if (
+            bar is None
+            or bar_event_id not in fact.source_event_ids
+            or bar.timeframe is not fact.timeframe
+            or bar.known_at != fact.known_at
+        ):
+            raise ValueError(
+                "boundary attack requires its exact same-clock real BAR source"
+            )
         records = self._apply((fact,))
         return FoundationAdapterUpdate(
             fact.fact_id, records, self.lifecycle, self.projection
@@ -2941,8 +3162,12 @@ class CanonicalFoundationAdapter:
     ) -> "CanonicalFoundationAdapter":
         if not isinstance(checkpoint, FoundationAdapterCheckpoint):
             raise TypeError("adapter restore requires FoundationAdapterCheckpoint")
-        if checkpoint.checkpoint_digest != content_hash(
-            _checkpoint_payload(checkpoint)
+        if (
+            "schema_version" not in vars(checkpoint)
+            or checkpoint.schema_version
+            != FOUNDATION_ADAPTER_CHECKPOINT_SCHEMA_VERSION
+            or checkpoint.checkpoint_digest
+            != content_hash(_checkpoint_payload(checkpoint))
         ):
             raise ValueError("foundation adapter checkpoint integrity mismatch")
         adapter = cls(tick_size=checkpoint.tick_size)

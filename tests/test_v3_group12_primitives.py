@@ -15,6 +15,10 @@ from smc_trader.liquidity import (
     LiquidityConfig,
     LiquidityProtocolError,
 )
+from smc_trader.market_clock import (
+    expected_trading_minutes,
+    registered_native_bar_bounds,
+)
 from smc_trader.market_state import replay_atomic_market_snapshot
 from smc_trader.model import (
     BOS_CONFIRMATION_REASON,
@@ -897,7 +901,7 @@ def test_synthetic_minutes_advance_cutoff_without_changing_semantics() -> None:
 
 
 def test_mixed_frame_tail_is_clock_only_and_reuses_semantic_snapshot() -> None:
-    real_m1 = tuple(
+    raw_real_m1 = tuple(
         (
             *_bull_structure_prefix(),
             _candle(
@@ -909,20 +913,42 @@ def test_mixed_frame_tail_is_clock_only_and_reuses_semantic_snapshot() -> None:
             ),
         )
     )
+    registered_start, registered_end = registered_native_bar_bounds(
+        pd.Timestamp("2025-01-06 13:59", tz=TZ),
+        timeframe_minutes=4 * 60,
+        anchor_minute=18 * 60,
+    )
+    clock_shift = registered_end - raw_real_m1[-1].end
+    real_m1 = tuple(
+        replace(
+            candle,
+            start=candle.start + clock_shift,
+            end=candle.end + clock_shift,
+        )
+        for candle in raw_real_m1
+    )
     real_h4 = tuple(
         replace(candle, timeframe=Timeframe.H4)
         for candle in real_m1[:-1]
     )
+    registered_minutes = expected_trading_minutes(
+        registered_start,
+        registered_end,
+    )
     mixed_tail = replace(
         real_m1[-1],
         timeframe=Timeframe.H4,
+        start=registered_start,
+        end=registered_end,
         open=999.0,
         high=1001.0,
         low=998.0,
         close=1000.0,
         volume=0.0,
+        observed_minutes=registered_minutes,
+        expected_minutes=registered_minutes,
         real_minutes=0,
-        synthetic_minutes=1,
+        synthetic_minutes=registered_minutes,
     )
 
     def update(

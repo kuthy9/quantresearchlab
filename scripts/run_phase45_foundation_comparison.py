@@ -26,7 +26,10 @@ from smc_trader.foundation_registry import (  # noqa: E402
     FOUNDATION_VERSION,
     load_foundation_registry,
 )
-from smc_trader.semantics import SemanticRegistry  # noqa: E402
+from smc_trader.semantics import (  # noqa: E402
+    SemanticRegistry,
+    load_semantic_selection,
+)
 from smc_trader.signal_research import (  # noqa: E402
     FrozenResearchContract,
     REQUIRED_IDENTITY_BINDINGS,
@@ -373,14 +376,21 @@ def load_comparison_contract(
     if foundation.foundation_version != FOUNDATION_VERSION:
         raise ResearchContractError("comparison Foundation version changed")
     model = _read_json_object(identity_paths["model_config"], label="model config")
-    observer = model.get("observer")
-    if not isinstance(observer, Mapping):
-        raise ResearchContractError("comparison model observer is invalid")
+    try:
+        selection = load_semantic_selection(
+            model.get("semantic_selection"),
+            root=ROOT,
+        )
+    except ValueError as error:
+        raise ResearchContractError(
+            "comparison model semantic_selection is invalid"
+        ) from error
     if (
-        observer.get("canonical_foundation_enabled") is not True
-        or observer.get("canonical_foundation_registry")
-        != FOUNDATION_REGISTRY_PATH
-        or observer.get("canonical_foundation_identity") != foundation.identity
+        selection.atomic_definition_identity != semantic_registry.identity
+        or selection.foundation_registry_path != FOUNDATION_REGISTRY_PATH
+        or selection.foundation_registry_identity != foundation.identity
+        or selection.parent_atomic_semantics_version
+        != selection.atomic_semantics_version
     ):
         raise ResearchContractError("comparison model does not bind Foundation v2")
 

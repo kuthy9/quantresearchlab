@@ -7,7 +7,11 @@ import pickle
 import pandas as pd
 import pytest
 
-from smc_trader.foundation_adapter import CanonicalFoundationAdapter
+from smc_trader.foundation_adapter import (
+    FOUNDATION_ADAPTER_CHECKPOINT_SCHEMA_VERSION,
+    CanonicalFoundationAdapter,
+    _checkpoint_payload,
+)
 from smc_trader.market_state import (
     DeliveryPhase,
     RelationRole,
@@ -21,6 +25,7 @@ from smc_trader.model import (
     EventOrigin,
     MarketEvent,
     Timeframe,
+    content_hash,
 )
 from smc_trader.semantic_lifecycle import (
     GenerationLifecycle,
@@ -59,9 +64,10 @@ def _bar(
     low: float = 99.0,
     close: float = 100.0,
     event_id: str | None = None,
+    real_completed: bool = True,
 ) -> MarketEvent:
     identity = event_id or f"bar:{timeframe.value}:{minutes}"
-    return MarketEvent(
+    event = MarketEvent(
         event_id=identity,
         kind=EventKind.BAR_COMPLETED,
         observed_at=_clock(minutes),
@@ -76,11 +82,34 @@ def _bar(
             "high": high,
             "low": low,
             "close": close,
-            "real_completed": True,
+            "real_completed": real_completed,
+            "clock_only": not real_completed,
         },
         source_data_ids=(f"data:{identity}",),
         origin=EventOrigin.NORMALIZED_DATA,
     )
+    return event if real_completed else _with_clock_only_coverage(event)
+
+
+def _with_clock_only_coverage(event: MarketEvent) -> MarketEvent:
+    timeframe_minutes = {
+        Timeframe.M1: 1,
+        Timeframe.M5: 5,
+        Timeframe.M15: 15,
+        Timeframe.H1: 60,
+        Timeframe.H4: 240,
+    }[event.timeframe]
+    evidence = {
+        **dict(event.evidence),
+        "complete": True,
+        "start": event.known_at
+        - pd.Timedelta(timeframe_minutes, unit="min"),
+        "observed_minutes": timeframe_minutes,
+        "expected_minutes": timeframe_minutes,
+        "real_minutes": timeframe_minutes - 1,
+        "synthetic_minutes": 1,
+    }
+    return replace(event, details=evidence, evidence=evidence)
 
 
 def _atomic(
@@ -123,6 +152,90 @@ def _atomic(
 def _consume(adapter: CanonicalFoundationAdapter, events) -> None:
     for event in events:
         adapter.consume(event)
+
+
+def _structure_confirmation(
+    facts: dict[str, MarketEvent],
+    *,
+    label: str,
+    minute: int,
+    direction: Direction,
+    candidate_protected_swing_id: str | None = None,
+    sequence: int = 1,
+    event_id: str | None = None,
+    structure_id: str | None = None,
+) -> MarketEvent:
+    high = facts["high"]
+    low = facts["low"]
+    high_id = str(high.evidence["source_entity_id"])
+    low_id = str(low.evidence["source_entity_id"])
+    identity = structure_id or f"structure-source:{label}"
+    evidence: dict[str, object] = {"structure_id": identity}
+    if candidate_protected_swing_id is not None:
+        evidence.update(
+            {
+                "source_high_id": high_id,
+                "source_low_id": low_id,
+                "candidate_protected_swing_id": candidate_protected_swing_id,
+            }
+        )
+    return _atomic(
+        event_id or f"structure:{label}",
+        EventKind.STRUCTURE_DIRECTION_CONFIRMED,
+        minute,
+        sequence,
+        timeframe=Timeframe.H1,
+        source_event_ids=(high.event_id, low.event_id),
+        evidence=evidence,
+        direction=direction,
+    )
+
+
+def _mss_triplet(
+    *,
+    label: str,
+    minute: int,
+    direction: Direction,
+    structure_event: MarketEvent,
+    structure_id: str,
+    bos_id: str | None = None,
+    bar_event_id: str | None = None,
+    raw_event_id: str | None = None,
+    mss_event_id: str | None = None,
+    raw_direction: Direction | None = None,
+) -> tuple[MarketEvent, MarketEvent, MarketEvent]:
+    bar = _bar(minute, event_id=bar_event_id)
+    raw = _atomic(
+        raw_event_id or f"raw:{label}",
+        EventKind.RAW_BOUNDARY_BREAK,
+        minute,
+        1,
+        timeframe=Timeframe.H1,
+        source_event_ids=(bar.event_id,),
+        direction=raw_direction,
+    )
+    resolved_bos_id = bos_id or f"bos-source:{label}"
+    mss = _atomic(
+        mss_event_id or f"mss:{label}",
+        EventKind.MSS_CORE_CONFIRMED,
+        minute,
+        2,
+        timeframe=Timeframe.H1,
+        source_event_ids=(raw.event_id, structure_event.event_id),
+        source_entity_ids=(resolved_bos_id, structure_id),
+        evidence={"bos_id": resolved_bos_id},
+        direction=direction,
+    )
+    return bar, raw, mss
+
+
+def _assert_adapter_replay(
+    events: tuple[MarketEvent, ...],
+    adapter: CanonicalFoundationAdapter,
+) -> None:
+    replayed = CanonicalFoundationAdapter.replay(events, tick_size=TICK)
+    assert replayed.lifecycle == adapter.lifecycle
+    assert replayed.projection == adapter.projection
 
 
 def test_formed_pool_half_tick_midpoint_uses_frozen_near_side_anchor() -> None:
@@ -229,6 +342,18 @@ def test_stage_batch_forks_only_mutable_transaction_containers() -> None:
     assert level.event_id in candidate.known_input_event_ids
     assert candidate.lifecycle is not prior_lifecycle
     assert candidate.projection is not prior_projection
+
+
+def test_single_input_identity_query_matches_public_snapshot() -> None:
+    adapter = CanonicalFoundationAdapter(tick_size=TICK)
+    bar = _bar(0)
+    adapter.consume(bar)
+
+    assert adapter.is_known_input_event_id(bar.event_id) is True
+    assert adapter.is_known_input_event_id("missing:event") is False
+    assert adapter.known_input_event_ids == frozenset({bar.event_id})
+    with pytest.raises(ValueError, match="identity must be non-empty"):
+        adapter.is_known_input_event_id("")
 
 
 def test_staged_candidate_rejects_nested_batch_without_destroying_state() -> None:
@@ -667,6 +792,7 @@ def test_real_bar_gap_blocks_rearm_until_an_explicit_epoch_reset() -> None:
     )
     reset_adapter.consume(reset)
     assert reset_adapter.lifecycle.real_bar_clocks == ()
+    assert reset_adapter.lifecycle.registered_bar_clocks == ()
 
     new_bar = _bar(20)
     new_source = _atomic(
@@ -743,6 +869,227 @@ def test_registered_short_h4_and_reopen_are_contiguous_without_epoch_reset() -> 
     with pytest.raises(ValueError, match="registered native clock"):
         skipped.consume(bar_at("skip-short-close", "2024-05-27 22:00"))
     assert skipped.checkpoint() == frozen
+
+
+def test_clock_only_bar_advances_registered_clock_without_real_semantics() -> None:
+    adapter = CanonicalFoundationAdapter(tick_size=TICK)
+    first = _bar(1)
+    clock_only = _bar(2, real_completed=False)
+    resumed = _bar(3)
+    frozen_real_transition = adapter._transition(
+        first,
+        NormalizedTransitionKind.REAL_BAR_COMPLETED,
+        payload={"bar_event_id": first.event_id, "real_completed": True},
+        source_event_ids=(first.event_id,),
+    )
+
+    adapter.consume(first)
+    assert (
+        adapter.lifecycle.applied_transitions[0].fingerprint
+        == content_hash(frozen_real_transition)
+    )
+    projection_before = adapter.projection
+    update = adapter.consume(clock_only)
+
+    registered = adapter.lifecycle.registered_bar_clocks[0]
+    real = adapter.lifecycle.real_bar_clocks[0]
+    assert update.records == ()
+    assert update.ignored is False
+    assert adapter.projection == projection_before
+    assert registered.timeframe is Timeframe.M1
+    assert registered.count == 2
+    assert registered.last_completed_at == clock_only.known_at
+    assert registered.last_bar_event_id == clock_only.event_id
+    assert real.count == 1
+    assert real.last_completed_at == first.known_at
+    assert len(adapter._real_bars) == 1
+
+    restored = CanonicalFoundationAdapter.restore(
+        pickle.loads(pickle.dumps(adapter.checkpoint()))
+    )
+    assert (
+        adapter.checkpoint().schema_version
+        == FOUNDATION_ADAPTER_CHECKPOINT_SCHEMA_VERSION
+    )
+    adapter.consume(resumed)
+    restored.consume(resumed)
+
+    assert adapter.lifecycle == restored.lifecycle
+    assert adapter.projection == restored.projection
+    assert adapter.lifecycle.registered_bar_clocks[0].count == 3
+    assert adapter.lifecycle.real_bar_clocks[0].count == 2
+    assert adapter.lifecycle.epoch == 0
+
+
+@pytest.mark.parametrize(
+    ("timeframe", "clocks"),
+    (
+        (
+            Timeframe.M1,
+            ("2024-06-06 23:09", "2024-06-06 23:10", "2024-06-06 23:11"),
+        ),
+        (
+            Timeframe.M5,
+            ("2024-06-06 23:05", "2024-06-06 23:10", "2024-06-06 23:15"),
+        ),
+        (
+            Timeframe.M15,
+            ("2024-06-06 23:00", "2024-06-06 23:15", "2024-06-06 23:30"),
+        ),
+        (
+            Timeframe.H1,
+            ("2024-06-06 23:00", "2024-06-07 00:00", "2024-06-07 01:00"),
+        ),
+        (
+            Timeframe.H4,
+            ("2024-06-06 22:00", "2024-06-07 02:00", "2024-06-07 06:00"),
+        ),
+    ),
+)
+def test_registered_clock_recovers_after_clock_only_bar_on_every_timeframe(
+    timeframe: Timeframe,
+    clocks: tuple[str, str, str],
+) -> None:
+    adapter = CanonicalFoundationAdapter(tick_size=TICK)
+    events = []
+    for index, clock in enumerate(clocks):
+        known_at = pd.Timestamp(clock, tz=TZ)
+        event = replace(
+            _bar(
+                0,
+                timeframe=timeframe,
+                event_id=f"clock-recovery:{timeframe.value}:{index}",
+                real_completed=index != 1,
+            ),
+            observed_at=known_at,
+            event_time=known_at,
+            known_at=known_at,
+        )
+        events.append(
+            event
+            if event.evidence["real_completed"] is True
+            else _with_clock_only_coverage(event)
+        )
+
+    _consume(adapter, events)
+
+    assert adapter.lifecycle.registered_bar_clocks[0].count == 3
+    assert (
+        adapter.lifecycle.registered_bar_clocks[0].last_completed_at
+        == events[2].known_at
+    )
+    assert adapter.lifecycle.real_bar_clocks[0].count == 2
+    assert adapter.lifecycle.real_bar_clocks[0].last_completed_at == events[2].known_at
+
+
+def test_completed_bar_flags_are_mandatory_complements_and_atomic() -> None:
+    adapter = CanonicalFoundationAdapter(tick_size=TICK)
+    adapter.consume(_bar(1))
+    before = adapter.checkpoint()
+    invalid = _bar(2)
+    evidence = dict(invalid.evidence)
+    evidence.pop("clock_only")
+    invalid = replace(invalid, details=evidence, evidence=evidence)
+
+    with pytest.raises(ValueError, match="exact complementary"):
+        adapter.consume(invalid)
+
+    assert adapter.checkpoint() == before
+
+
+def test_clock_only_bar_coverage_is_mandatory_and_atomic() -> None:
+    adapter = CanonicalFoundationAdapter(tick_size=TICK)
+    adapter.consume(_bar(1))
+    before = adapter.checkpoint()
+    invalid = _bar(2, real_completed=False)
+    evidence = dict(invalid.evidence)
+    for name in (
+        "complete",
+        "start",
+        "observed_minutes",
+        "expected_minutes",
+        "real_minutes",
+        "synthetic_minutes",
+    ):
+        evidence.pop(name)
+    invalid = replace(invalid, details=evidence, evidence=evidence)
+
+    with pytest.raises(ValueError, match="requires coverage"):
+        adapter.consume(invalid)
+
+    assert adapter.checkpoint() == before
+
+
+@pytest.mark.parametrize(
+    ("case", "message"),
+    (
+        ("clock_only_event_time_drift", "event_time and known_at"),
+        ("partial_real_coverage", "all-or-none"),
+        ("real_with_synthetic_coverage", "coverage is inconsistent"),
+    ),
+)
+def test_direct_bar_root_contract_is_complete_and_atomic(
+    case: str,
+    message: str,
+) -> None:
+    adapter = CanonicalFoundationAdapter(tick_size=TICK)
+    adapter.consume(_bar(1))
+    before = adapter.checkpoint()
+    if case == "clock_only_event_time_drift":
+        invalid = replace(
+            _bar(2, real_completed=False),
+            event_time=_clock(1),
+        )
+    elif case == "partial_real_coverage":
+        event = _bar(2)
+        evidence = {
+            **dict(event.evidence),
+            "complete": True,
+            "start": event.known_at - pd.Timedelta(1, unit="min"),
+        }
+        invalid = replace(event, details=evidence, evidence=evidence)
+    elif case == "real_with_synthetic_coverage":
+        invalid = _with_clock_only_coverage(_bar(2))
+    else:  # pragma: no cover - parametrization is closed above.
+        raise AssertionError(case)
+
+    with pytest.raises(ValueError, match=message):
+        adapter.consume(invalid)
+
+    assert adapter.checkpoint() == before
+
+
+def test_direct_adapter_pickle_rejects_missing_internal_state_schema() -> None:
+    adapter = CanonicalFoundationAdapter(tick_size=TICK)
+    legacy_state = adapter.__getstate__()
+    legacy_state.pop("_state_schema_version")
+    restored = object.__new__(CanonicalFoundationAdapter)
+
+    with pytest.raises(ValueError, match="pickle state schema changed"):
+        restored.__setstate__(legacy_state)
+
+
+def test_adapter_checkpoint_requires_owned_schema_and_registered_ledger() -> None:
+    adapter = CanonicalFoundationAdapter(tick_size=TICK)
+    adapter.consume(_bar(1))
+    checkpoint = adapter.checkpoint()
+
+    missing_schema = pickle.loads(pickle.dumps(checkpoint))
+    vars(missing_schema).pop("schema_version")
+    with pytest.raises(ValueError, match="checkpoint integrity"):
+        CanonicalFoundationAdapter.restore(missing_schema)
+
+    missing_registered_ledger = pickle.loads(pickle.dumps(checkpoint))
+    lifecycle_checkpoint = missing_registered_ledger.lifecycle_checkpoint
+    vars(lifecycle_checkpoint.state).pop("registered_bar_clocks")
+    vars(lifecycle_checkpoint)["state_digest"] = content_hash(
+        lifecycle_checkpoint.state
+    )
+    vars(missing_registered_ledger)["checkpoint_digest"] = content_hash(
+        _checkpoint_payload(missing_registered_ledger)
+    )
+    with pytest.raises(ValueError, match="lifecycle checkpoint"):
+        CanonicalFoundationAdapter.restore(missing_registered_ledger)
 
 
 def test_same_bar_terminal_uses_actual_event_id_and_competing_terminal_is_atomic() -> None:
@@ -1756,13 +2103,185 @@ def test_mss_is_transition_evidence_and_original_direction_resumption_fails_it()
         direction=Direction.LONG,
     )
     _consume(adapter, (bar6, resumed))
-    assert (
-        adapter.lifecycle.structure_transitions[-1].lifecycle
-        is StructureTransitionLifecycle.FAILED
+    failed = adapter.lifecycle.structure_transitions[-1]
+    assert failed.lifecycle is StructureTransitionLifecycle.FAILED
+    assert failed.terminal_reason == "original_direction_resumed"
+    terminated = adapter.lifecycle.structure(first_internal.generation_id)
+    assert terminated.lifecycle is StructureGenerationLifecycle.TERMINATED
+    assert terminated.termination_reason == "scope_rollover"
+
+
+def test_distinct_bound_structure_alias_mss_restarts_exact_transition_lineage(
+) -> None:
+    adapter = CanonicalFoundationAdapter(tick_size=TICK)
+    structure_events, facts = _seed_structure(
+        adapter,
+        direction=Direction.SHORT,
+        label="multi-origin",
     )
+    incumbent = adapter.lifecycle.structure_generations[-1]
+    level_events, protected_level = _seed_level(
+        adapter,
+        label="multi-origin-protected",
+        minute=1,
+        source_timeframe=Timeframe.H1,
+        side="above",
+        price=100.0,
+    )
+    protected = _atomic(
+        "protected:multi-origin",
+        EventKind.PROTECTED_SWING_ASSIGNED,
+        1,
+        3,
+        timeframe=Timeframe.H1,
+        source_event_ids=(
+            facts["structure"].event_id,
+            level_events[1].event_id,
+        ),
+        evidence={
+            "structure_id": "structure-source:multi-origin",
+            "protected_swing_id": "multi-origin-protected",
+        },
+        direction=Direction.SHORT,
+    )
+    alias = _structure_confirmation(
+        facts,
+        label="multi-origin-alias",
+        minute=1,
+        sequence=4,
+        direction=Direction.SHORT,
+        candidate_protected_swing_id="high:multi-origin",
+    )
+    _consume(adapter, (protected, alias))
     assert (
-        adapter.lifecycle.structure(first_internal.generation_id).lifecycle
-        is StructureGenerationLifecycle.TERMINATED
+        adapter._structure_bindings["structure-source:multi-origin-alias"]
+        == incumbent.generation_id
+    )
+
+    first_bar, first_raw, first_mss = _mss_triplet(
+        label="multi-origin:first",
+        minute=2,
+        direction=Direction.LONG,
+        structure_event=facts["structure"],
+        structure_id="structure-source:multi-origin",
+        raw_direction=Direction.LONG,
+    )
+    _consume(adapter, (first_bar, first_raw, first_mss))
+    old_internal = adapter._active_internal(Timeframe.H1)
+    old_transition = adapter._started_transition(Timeframe.H1)
+    assert old_internal is not None
+    assert old_transition is not None
+    assert old_internal.mss_event_ids == (first_mss.event_id,)
+    assert old_transition.mss_event_ids == (first_mss.event_id,)
+
+    second_bar, second_raw, second_mss = _mss_triplet(
+        label="multi-origin:second",
+        minute=3,
+        direction=Direction.LONG,
+        structure_event=alias,
+        structure_id="structure-source:multi-origin-alias",
+        raw_direction=Direction.LONG,
+    )
+    _consume(adapter, (second_bar, second_raw))
+    restored = CanonicalFoundationAdapter.restore(
+        pickle.loads(pickle.dumps(adapter.checkpoint()))
+    )
+    adapter.consume(second_mss)
+    restored.consume(second_mss)
+
+    replaced_internal = adapter.lifecycle.structure(old_internal.generation_id)
+    replaced_transition = adapter.lifecycle.transition(
+        old_transition.structure_transition_id
+    )
+    assert replaced_internal.lifecycle is StructureGenerationLifecycle.TERMINATED
+    assert replaced_internal.termination_reason == "superseded"
+    assert replaced_transition.lifecycle is StructureTransitionLifecycle.CENSORED
+    assert replaced_transition.terminal_reason == "superseded"
+    assert second_mss.event_id in replaced_transition.source_event_ids
+
+    current_internal = adapter._active_internal(Timeframe.H1)
+    current_transition = adapter._started_transition(Timeframe.H1)
+    assert current_internal is not None
+    assert current_transition is not None
+    assert current_internal.generation_id != old_internal.generation_id
+    assert (
+        current_transition.structure_transition_id
+        != old_transition.structure_transition_id
+    )
+    assert current_internal.origin_swing_id == (
+        "structure-source:multi-origin-alias"
+    )
+    assert current_internal.mss_event_ids == (second_mss.event_id,)
+    assert current_transition.mss_event_ids == (second_mss.event_id,)
+    assert current_internal.started_at == current_transition.started_at
+    assert sum(
+        transition.lifecycle is StructureTransitionLifecycle.STARTED
+        for transition in adapter.lifecycle.structure_transitions
+    ) == 1
+    assert restored.lifecycle == adapter.lifecycle
+    assert restored.projection == adapter.projection
+
+    acceptance_events, acceptance = _cross_level(
+        adapter,
+        protected_level,
+        crossed_minute=4,
+        resolved_minute=5,
+        terminal_kind=EventKind.ACCEPTANCE_CONFIRMED,
+        protected_swing_id="multi-origin-protected",
+        protected_assignment_event_id=protected.event_id,
+        source_timeframe=Timeframe.H1,
+    )
+    _consume(restored, acceptance_events)
+    accepted_transition = adapter.lifecycle.transition(
+        current_transition.structure_transition_id
+    )
+    assert accepted_transition.lifecycle is StructureTransitionLifecycle.STARTED
+    assert accepted_transition.protected_acceptance_event_id == acceptance.event_id
+
+    resolution_bar = _bar(6)
+    resolution = _structure_confirmation(
+        facts,
+        label="multi-origin-promoted",
+        minute=6,
+        direction=Direction.LONG,
+        candidate_protected_swing_id="low:multi-origin",
+    )
+    _consume(adapter, (resolution_bar, resolution))
+    _consume(restored, (resolution_bar, resolution))
+
+    promoted = adapter.lifecycle.transition(
+        current_transition.structure_transition_id
+    )
+    assert promoted.lifecycle is StructureTransitionLifecycle.CONFIRMED
+    assert promoted.terminal_reason == (
+        "protected_acceptance_plus_opposite_confirmation"
+    )
+    assert promoted.opposite_confirmation_event_id == resolution.event_id
+    assert (
+        adapter.lifecycle.structure(current_internal.generation_id).termination_reason
+        == "superseded"
+    )
+    external = adapter._active_external(Timeframe.H1)
+    assert external is not None
+    assert external.direction is Direction.LONG
+    assert restored.lifecycle == adapter.lifecycle
+    assert restored.projection == adapter.projection
+
+    prefix = (
+        *structure_events,
+        *level_events,
+        protected,
+        alias,
+        first_bar,
+        first_raw,
+        first_mss,
+        second_bar,
+        second_raw,
+        second_mss,
+    )
+    _assert_adapter_replay(
+        (*prefix, *acceptance_events, resolution_bar, resolution),
+        adapter,
     )
 
 
@@ -1771,28 +2290,15 @@ def test_later_incumbent_qualified_bos_fails_forming_mss_challenger() -> None:
     structure_events, facts = _seed_structure(adapter)
     incumbent = adapter.lifecycle.structure_generations[-1]
 
-    mss_bar = _bar(1)
-    raw_mss = _atomic(
-        "raw-mss-before-continuation",
-        EventKind.RAW_BOUNDARY_BREAK,
-        1,
-        1,
-        timeframe=Timeframe.H1,
-        source_event_ids=(mss_bar.event_id,),
-    )
-    mss = _atomic(
-        "mss-before-continuation",
-        EventKind.MSS_CORE_CONFIRMED,
-        1,
-        2,
-        timeframe=Timeframe.H1,
-        source_event_ids=(raw_mss.event_id, facts["structure"].event_id),
-        source_entity_ids=(
-            "mss-before-continuation",
-            "structure-source:parent",
-        ),
-        evidence={"bos_id": "mss-before-continuation"},
+    mss_bar, raw_mss, mss = _mss_triplet(
+        label="before-continuation",
+        minute=1,
         direction=Direction.SHORT,
+        structure_event=facts["structure"],
+        structure_id="structure-source:parent",
+        bos_id="mss-before-continuation",
+        raw_event_id="raw-mss-before-continuation",
+        mss_event_id="mss-before-continuation",
     )
     _consume(adapter, (mss_bar, raw_mss, mss))
     transition = adapter.lifecycle.structure_transitions[-1]
@@ -1843,11 +2349,11 @@ def test_later_incumbent_qualified_bos_fails_forming_mss_challenger() -> None:
 
     failed = adapter.lifecycle.transition(transition.structure_transition_id)
     assert failed.lifecycle is StructureTransitionLifecycle.FAILED
+    assert failed.terminal_reason == "original_direction_resumed"
     assert failed.resumption_event_id == qualified.event_id
-    assert (
-        adapter.lifecycle.structure(challenger.generation_id).lifecycle
-        is StructureGenerationLifecycle.TERMINATED
-    )
+    terminated = adapter.lifecycle.structure(challenger.generation_id)
+    assert terminated.lifecycle is StructureGenerationLifecycle.TERMINATED
+    assert terminated.termination_reason == "scope_rollover"
     live_incumbent = adapter.lifecycle.structure(incumbent.generation_id)
     assert live_incumbent.lifecycle is StructureGenerationLifecycle.CONFIRMED
     assert live_incumbent.direction is Direction.LONG
@@ -1871,25 +2377,15 @@ def test_later_incumbent_qualified_bos_fails_forming_mss_challenger() -> None:
 def test_same_clock_incumbent_qualified_bos_does_not_fail_mss() -> None:
     adapter = CanonicalFoundationAdapter(tick_size=TICK)
     _, facts = _seed_structure(adapter)
-    bar = _bar(1)
-    raw_mss = _atomic(
-        "same-clock-raw-mss",
-        EventKind.RAW_BOUNDARY_BREAK,
-        1,
-        1,
-        timeframe=Timeframe.H1,
-        source_event_ids=(bar.event_id,),
-    )
-    mss = _atomic(
-        "same-clock-mss",
-        EventKind.MSS_CORE_CONFIRMED,
-        1,
-        2,
-        timeframe=Timeframe.H1,
-        source_event_ids=(raw_mss.event_id, facts["structure"].event_id),
-        source_entity_ids=("same-clock-mss", "structure-source:parent"),
-        evidence={"bos_id": "same-clock-mss"},
+    bar, raw_mss, mss = _mss_triplet(
+        label="same-clock",
+        minute=1,
         direction=Direction.SHORT,
+        structure_event=facts["structure"],
+        structure_id="structure-source:parent",
+        bos_id="same-clock-mss",
+        raw_event_id="same-clock-raw-mss",
+        mss_event_id="same-clock-mss",
     )
     raw_continuation = _atomic(
         "same-clock-raw-continuation",
@@ -1936,20 +2432,12 @@ def test_unbound_opposite_tracker_bos_and_assignment_stay_noncanonical() -> None
 
     opposite_bar = _bar(1)
     adapter.consume(opposite_bar)
-    opposite_structure = _atomic(
-        "structure:unbound-opposite",
-        EventKind.STRUCTURE_DIRECTION_CONFIRMED,
-        1,
-        1,
-        timeframe=Timeframe.H1,
-        source_event_ids=(facts["high"].event_id, facts["low"].event_id),
-        evidence={
-            "structure_id": "structure-source:unbound-opposite",
-            "source_high_id": "high:parent",
-            "source_low_id": "low:parent",
-            "candidate_protected_swing_id": "high:parent",
-        },
+    opposite_structure = _structure_confirmation(
+        facts,
+        label="unbound-opposite",
+        minute=1,
         direction=Direction.SHORT,
+        candidate_protected_swing_id="high:parent",
     )
     structure_update = adapter.consume(opposite_structure)
     assert structure_update.ignored is True
@@ -2185,75 +2673,35 @@ def test_counter_mss_on_internal_challenger_does_not_confirm_resumption() -> Non
     adapter = CanonicalFoundationAdapter(tick_size=TICK)
     _, facts = _seed_structure(adapter)
 
-    mss_bar = _bar(1)
-    raw_mss = _atomic(
-        "raw:internal-challenger",
-        EventKind.RAW_BOUNDARY_BREAK,
-        1,
-        1,
-        timeframe=Timeframe.H1,
-        source_event_ids=(mss_bar.event_id,),
+    mss_bar, raw_mss, mss = _mss_triplet(
+        label="internal-challenger",
+        minute=1,
         direction=Direction.SHORT,
-    )
-    mss = _atomic(
-        "mss:internal-challenger",
-        EventKind.MSS_CORE_CONFIRMED,
-        1,
-        2,
-        timeframe=Timeframe.H1,
-        source_event_ids=(raw_mss.event_id, facts["structure"].event_id),
-        source_entity_ids=(
-            "bos-source:internal-challenger",
-            "structure-source:parent",
-        ),
-        evidence={"bos_id": "bos-source:internal-challenger"},
-        direction=Direction.SHORT,
+        structure_event=facts["structure"],
+        structure_id="structure-source:parent",
+        raw_direction=Direction.SHORT,
     )
     _consume(adapter, (mss_bar, raw_mss, mss))
     transition = adapter.lifecycle.structure_transitions[-1]
     internal = adapter.lifecycle.structure_generations[-1]
 
     confirmation_bar = _bar(2)
-    challenger_confirmation = _atomic(
-        "structure:internal-challenger",
-        EventKind.STRUCTURE_DIRECTION_CONFIRMED,
-        2,
-        1,
-        timeframe=Timeframe.H1,
-        source_event_ids=(facts["high"].event_id, facts["low"].event_id),
-        evidence={
-            "structure_id": "structure-source:internal-challenger",
-            "source_high_id": "high:parent",
-            "source_low_id": "low:parent",
-            "candidate_protected_swing_id": "high:parent",
-        },
+    challenger_confirmation = _structure_confirmation(
+        facts,
+        label="internal-challenger",
+        minute=2,
         direction=Direction.SHORT,
+        candidate_protected_swing_id="high:parent",
     )
     _consume(adapter, (confirmation_bar, challenger_confirmation))
 
-    counter_bar = _bar(3)
-    raw_counter = _atomic(
-        "raw:counter-mss",
-        EventKind.RAW_BOUNDARY_BREAK,
-        3,
-        1,
-        timeframe=Timeframe.H1,
-        source_event_ids=(counter_bar.event_id,),
+    counter_bar, raw_counter, counter = _mss_triplet(
+        label="counter-mss",
+        minute=3,
         direction=Direction.LONG,
-    )
-    counter = _atomic(
-        "mss:counter-mss",
-        EventKind.MSS_CORE_CONFIRMED,
-        3,
-        2,
-        timeframe=Timeframe.H1,
-        source_event_ids=(raw_counter.event_id, challenger_confirmation.event_id),
-        source_entity_ids=(
-            "bos-source:counter-mss",
-            "structure-source:internal-challenger",
-        ),
-        evidence={"bos_id": "bos-source:counter-mss"},
-        direction=Direction.LONG,
+        structure_event=challenger_confirmation,
+        structure_id="structure-source:internal-challenger",
+        raw_direction=Direction.LONG,
     )
     _consume(adapter, (counter_bar, raw_counter))
     update = adapter.consume(counter)
@@ -2319,20 +2767,12 @@ def test_counter_mss_on_internal_challenger_does_not_confirm_resumption() -> Non
     )
 
     resumption_bar = _bar(6)
-    resumption = _atomic(
-        "structure:registered-resumption",
-        EventKind.STRUCTURE_DIRECTION_CONFIRMED,
-        6,
-        1,
-        timeframe=Timeframe.H1,
-        source_event_ids=(facts["high"].event_id, facts["low"].event_id),
-        evidence={
-            "structure_id": "structure-source:registered-resumption",
-            "source_high_id": "high:parent",
-            "source_low_id": "low:parent",
-            "candidate_protected_swing_id": "low:parent",
-        },
+    resumption = _structure_confirmation(
+        facts,
+        label="registered-resumption",
+        minute=6,
         direction=Direction.LONG,
+        candidate_protected_swing_id="low:parent",
     )
     _consume(adapter, (resumption_bar, resumption))
     assert (
@@ -2359,32 +2799,388 @@ def test_counter_mss_on_internal_challenger_does_not_confirm_resumption() -> Non
     )
 
 
+def _accepted_live_internal_challenger(
+    *,
+    confirm_before_acceptance: bool,
+) -> tuple[
+    CanonicalFoundationAdapter,
+    tuple[MarketEvent, ...],
+    dict[str, MarketEvent],
+]:
+    adapter = CanonicalFoundationAdapter(tick_size=TICK)
+    structure_events, facts = _seed_structure(
+        adapter,
+        direction=Direction.SHORT,
+        label="accepted-live-internal",
+    )
+    level_events, protected_level = _seed_level(
+        adapter,
+        label="accepted-live-internal-protected",
+        minute=1,
+        source_timeframe=Timeframe.H1,
+        side="above",
+        price=100.0,
+    )
+    protected_source = level_events[1]
+    protected = _atomic(
+        "protected:accepted-live-internal",
+        EventKind.PROTECTED_SWING_ASSIGNED,
+        1,
+        3,
+        timeframe=Timeframe.H1,
+        source_event_ids=(
+            facts["structure"].event_id,
+            protected_source.event_id,
+        ),
+        evidence={
+            "structure_id": "structure-source:accepted-live-internal",
+            "protected_swing_id": "accepted-live-internal-protected",
+        },
+        direction=Direction.SHORT,
+    )
+    adapter.consume(protected)
+
+    mss_bar, raw_mss, mss = _mss_triplet(
+        label="accepted-live-internal",
+        minute=2,
+        direction=Direction.LONG,
+        structure_event=facts["structure"],
+        structure_id="structure-source:accepted-live-internal",
+        raw_direction=Direction.LONG,
+    )
+    _consume(adapter, (mss_bar, raw_mss, mss))
+
+    confirmation_bar = _bar(3)
+    challenger_confirmation = _structure_confirmation(
+        facts,
+        label="accepted-live-internal-challenger",
+        minute=3,
+        direction=Direction.LONG,
+        candidate_protected_swing_id="low:accepted-live-internal",
+    )
+    if confirm_before_acceptance:
+        _consume(adapter, (confirmation_bar, challenger_confirmation))
+        confirmation_events = (confirmation_bar, challenger_confirmation)
+    else:
+        adapter.consume(confirmation_bar)
+        confirmation_events = (confirmation_bar,)
+
+    acceptance_events, acceptance = _cross_level(
+        adapter,
+        protected_level,
+        crossed_minute=4,
+        resolved_minute=5,
+        terminal_kind=EventKind.ACCEPTANCE_CONFIRMED,
+        protected_swing_id="accepted-live-internal-protected",
+        protected_assignment_event_id=protected.event_id,
+        source_timeframe=Timeframe.H1,
+    )
+    transition = adapter.lifecycle.structure_transitions[-1]
+    internal = adapter._active_internal(Timeframe.H1)
+    assert transition.lifecycle is StructureTransitionLifecycle.STARTED
+    assert transition.protected_acceptance_event_id == acceptance.event_id
+    assert internal is not None
+    assert internal.direction is Direction.LONG
+    assert internal.lifecycle is (
+        StructureGenerationLifecycle.CONFIRMED
+        if confirm_before_acceptance
+        else StructureGenerationLifecycle.FORMING
+    )
+    assert adapter._active_external(Timeframe.H1) is None
+    acceptance_bar = next(
+        event
+        for event in acceptance_events
+        if event.kind is EventKind.BAR_COMPLETED
+        and event.known_at == _clock(5)
+    )
+    facts.update(
+        {
+            "protected": protected,
+            "mss": mss,
+            "challenger_confirmation": challenger_confirmation,
+            "acceptance": acceptance,
+            "acceptance_bar": acceptance_bar,
+        }
+    )
+    prefix = (
+        *structure_events,
+        *level_events,
+        protected,
+        mss_bar,
+        raw_mss,
+        mss,
+        *confirmation_events,
+        *acceptance_events,
+    )
+    return adapter, prefix, facts
+
+
+def _accepted_internal_counter_mss(
+    facts: dict[str, MarketEvent],
+    *,
+    minute: int = 6,
+    direction: Direction = Direction.SHORT,
+) -> tuple[MarketEvent, MarketEvent, MarketEvent]:
+    return _mss_triplet(
+        label=f"accepted-internal-counter:{minute}",
+        minute=minute,
+        direction=direction,
+        structure_event=facts["challenger_confirmation"],
+        structure_id="structure-source:accepted-live-internal-challenger",
+        bar_event_id=f"bar:accepted-internal-counter:{minute}",
+        raw_direction=direction,
+    )
+
+
+def test_post_acceptance_counter_mss_on_confirmed_internal_is_ignored() -> None:
+    adapter, prefix, facts = _accepted_live_internal_challenger(
+        confirm_before_acceptance=True
+    )
+    internal = adapter._active_internal(Timeframe.H1)
+    assert internal is not None
+    counter_events = _accepted_internal_counter_mss(facts)
+    _consume(adapter, counter_events[:2])
+    restored = CanonicalFoundationAdapter.restore(
+        pickle.loads(pickle.dumps(adapter.checkpoint()))
+    )
+    prior_lifecycle = adapter.lifecycle
+    prior_projection = adapter.projection
+    prior_bindings = dict(adapter._structure_bindings)
+    prior_mss_ids = internal.mss_event_ids
+
+    update = adapter.consume(counter_events[2])
+    restored_update = restored.consume(counter_events[2])
+
+    assert update.ignored is True
+    assert restored_update.ignored is True
+    assert adapter.lifecycle == prior_lifecycle
+    assert adapter.projection == prior_projection
+    assert adapter._structure_bindings == prior_bindings
+    assert (
+        adapter.lifecycle.structure(internal.generation_id).mss_event_ids
+        == prior_mss_ids
+    )
+    assert counter_events[2].event_id in adapter.known_input_event_ids
+    assert restored.lifecycle == adapter.lifecycle
+    assert restored.projection == adapter.projection
+    _assert_adapter_replay((*prefix, *counter_events), adapter)
+
+
+@pytest.mark.parametrize(
+    "tamper",
+    ("same_direction", "foreign_confirmation", "same_clock"),
+)
+def test_post_acceptance_counter_mss_requires_exact_source_and_clock(
+    tamper: str,
+) -> None:
+    adapter, _, facts = _accepted_live_internal_challenger(
+        confirm_before_acceptance=True
+    )
+    if tamper == "same_clock":
+        raw = _atomic(
+            "raw:accepted-internal-counter:same-clock",
+            EventKind.RAW_BOUNDARY_BREAK,
+            5,
+            2,
+            timeframe=Timeframe.H1,
+            source_event_ids=(facts["acceptance_bar"].event_id,),
+            direction=Direction.SHORT,
+        )
+        counter = _atomic(
+            "mss:accepted-internal-counter:same-clock",
+            EventKind.MSS_CORE_CONFIRMED,
+            5,
+            3,
+            timeframe=Timeframe.H1,
+            source_event_ids=(
+                raw.event_id,
+                facts["challenger_confirmation"].event_id,
+            ),
+            source_entity_ids=(
+                "bos-source:accepted-internal-counter:same-clock",
+                "structure-source:accepted-live-internal-challenger",
+            ),
+            evidence={
+                "bos_id": "bos-source:accepted-internal-counter:same-clock"
+            },
+            direction=Direction.SHORT,
+        )
+        adapter.consume(raw)
+    else:
+        bar, raw, counter = _accepted_internal_counter_mss(
+            facts,
+            direction=(
+                Direction.LONG
+                if tamper == "same_direction"
+                else Direction.SHORT
+            ),
+        )
+        _consume(adapter, (bar, raw))
+        if tamper == "foreign_confirmation":
+            forged_sources = (raw.event_id, facts["structure"].event_id)
+            counter = replace(
+                counter,
+                source_ids=forged_sources,
+                source_event_ids=forged_sources,
+            )
+    before = adapter.checkpoint()
+    with pytest.raises(
+        ValueError,
+        match="MSS does not oppose one confirmed external generation",
+    ):
+        adapter.consume(counter)
+    assert adapter.checkpoint() == before
+
+
+@pytest.mark.parametrize("confirm_before_acceptance", (False, True))
+@pytest.mark.parametrize(
+    ("direction", "expected_transition", "transition_reason", "internal_reason"),
+    (
+        (
+            Direction.LONG,
+            StructureTransitionLifecycle.CONFIRMED,
+            "protected_acceptance_plus_opposite_confirmation",
+            "superseded",
+        ),
+        (
+            Direction.SHORT,
+            StructureTransitionLifecycle.CENSORED,
+            "scope_rollover",
+            "scope_rollover",
+        ),
+    ),
+)
+def test_post_acceptance_structure_resolves_live_internal_challenger(
+    confirm_before_acceptance: bool,
+    direction: Direction,
+    expected_transition: StructureTransitionLifecycle,
+    transition_reason: str,
+    internal_reason: str,
+) -> None:
+    adapter, prefix, facts = _accepted_live_internal_challenger(
+        confirm_before_acceptance=confirm_before_acceptance
+    )
+    transition = adapter.lifecycle.structure_transitions[-1]
+    internal = adapter._active_internal(Timeframe.H1)
+    assert internal is not None
+    restored = CanonicalFoundationAdapter.restore(
+        pickle.loads(pickle.dumps(adapter.checkpoint()))
+    )
+    bar = _bar(6, event_id=f"bar:accepted-resolution:{direction.value}")
+    structure = _structure_confirmation(
+        facts,
+        label=f"accepted-resolution:{direction.value}",
+        minute=6,
+        direction=direction,
+        candidate_protected_swing_id=(
+            "low:accepted-live-internal"
+            if direction is Direction.LONG
+            else "high:accepted-live-internal"
+        ),
+    )
+
+    _consume(adapter, (bar, structure))
+    _consume(restored, (bar, structure))
+
+    resolved = adapter.lifecycle.transition(transition.structure_transition_id)
+    assert resolved.lifecycle is expected_transition
+    assert resolved.terminal_reason == transition_reason
+    assert structure.event_id in resolved.source_event_ids
+    assert (
+        adapter.lifecycle.structure(internal.generation_id).termination_reason
+        == internal_reason
+    )
+    external = adapter._active_external(Timeframe.H1)
+    assert external is not None
+    assert external.direction is direction
+    if expected_transition is StructureTransitionLifecycle.CONFIRMED:
+        assert resolved.opposite_confirmation_event_id == structure.event_id
+        assert resolved.resumption_event_id is None
+    else:
+        assert resolved.opposite_confirmation_event_id is None
+        assert resolved.resumption_event_id is None
+    assert restored.lifecycle == adapter.lifecycle
+    assert restored.projection == adapter.projection
+    _assert_adapter_replay((*prefix, bar, structure), adapter)
+
+
+@pytest.mark.parametrize("confirm_before_acceptance", (False, True))
+def test_same_clock_later_sequence_promotes_accepted_challenger(
+    confirm_before_acceptance: bool,
+) -> None:
+    adapter, prefix, facts = _accepted_live_internal_challenger(
+        confirm_before_acceptance=confirm_before_acceptance
+    )
+    transition = adapter.lifecycle.structure_transitions[-1]
+    internal = adapter._active_internal(Timeframe.H1)
+    assert internal is not None
+    assert adapter._last_order is not None
+    acceptance = facts["acceptance"]
+    structure = _structure_confirmation(
+        facts,
+        label="accepted-resolution:same-clock-later-sequence",
+        minute=5,
+        sequence=adapter._last_order[1] + 1,
+        direction=Direction.LONG,
+        candidate_protected_swing_id="low:accepted-live-internal",
+    )
+    assert structure.known_at == acceptance.known_at
+    assert structure.sequence_no > acceptance.sequence_no
+    restored = CanonicalFoundationAdapter.restore(
+        pickle.loads(pickle.dumps(adapter.checkpoint()))
+    )
+
+    adapter.consume(structure)
+    restored.consume(structure)
+
+    resolved = adapter.lifecycle.transition(
+        transition.structure_transition_id
+    )
+    assert resolved.lifecycle is StructureTransitionLifecycle.CONFIRMED
+    assert resolved.opposite_confirmation_event_id == structure.event_id
+    assert resolved.resumption_event_id is None
+    assert (
+        adapter.lifecycle.structure(internal.generation_id).termination_reason
+        == "superseded"
+    )
+    assert restored.lifecycle == adapter.lifecycle
+    assert restored.projection == adapter.projection
+    _assert_adapter_replay((*prefix, structure), adapter)
+
+
+def test_same_clock_nonlater_sequence_cannot_promote_accepted_challenger() -> None:
+    adapter, _, facts = _accepted_live_internal_challenger(
+        confirm_before_acceptance=True
+    )
+    assert adapter._last_order is not None
+    structure = _structure_confirmation(
+        facts,
+        label="accepted-resolution:same-clock-not-later",
+        minute=5,
+        sequence=adapter._last_order[1],
+        event_id="zz-structure:accepted-resolution:same-clock-not-later",
+        direction=Direction.LONG,
+        candidate_protected_swing_id="low:accepted-live-internal",
+    )
+    before = adapter.checkpoint()
+    with pytest.raises(ValueError, match="exact later protected Acceptance"):
+        adapter.consume(structure)
+    assert adapter.checkpoint() == before
+
+
 def test_later_incumbent_qualified_bos_fails_confirmed_internal_challenger() -> None:
     adapter = CanonicalFoundationAdapter(tick_size=TICK)
     structure_events, facts = _seed_structure(adapter)
     incumbent = adapter.lifecycle.structure_generations[-1]
-    mss_bar = _bar(1)
-    raw_mss = _atomic(
-        "confirmed-challenger-raw-mss",
-        EventKind.RAW_BOUNDARY_BREAK,
-        1,
-        1,
-        timeframe=Timeframe.H1,
-        source_event_ids=(mss_bar.event_id,),
-    )
-    mss = _atomic(
-        "confirmed-challenger-mss",
-        EventKind.MSS_CORE_CONFIRMED,
-        1,
-        2,
-        timeframe=Timeframe.H1,
-        source_event_ids=(raw_mss.event_id, facts["structure"].event_id),
-        source_entity_ids=(
-            "confirmed-challenger-mss",
-            "structure-source:parent",
-        ),
-        evidence={"bos_id": "confirmed-challenger-mss"},
+    mss_bar, raw_mss, mss = _mss_triplet(
+        label="confirmed-challenger",
+        minute=1,
         direction=Direction.SHORT,
+        structure_event=facts["structure"],
+        structure_id="structure-source:parent",
+        bos_id="confirmed-challenger-mss",
+        raw_event_id="confirmed-challenger-raw-mss",
+        mss_event_id="confirmed-challenger-mss",
     )
     _consume(adapter, (mss_bar, raw_mss, mss))
     transition = adapter.lifecycle.structure_transitions[-1]
@@ -2395,14 +3191,12 @@ def test_later_incumbent_qualified_bos_fails_confirmed_internal_challenger() -> 
     )
 
     confirmation_bar = _bar(2)
-    challenger_confirmation = _atomic(
-        "confirmed-challenger-structure",
-        EventKind.STRUCTURE_DIRECTION_CONFIRMED,
-        2,
-        1,
-        timeframe=Timeframe.H1,
-        source_event_ids=(facts["high"].event_id, facts["low"].event_id),
-        evidence={"structure_id": "confirmed-challenger-structure"},
+    challenger_confirmation = _structure_confirmation(
+        facts,
+        label="confirmed-challenger",
+        minute=2,
+        event_id="confirmed-challenger-structure",
+        structure_id="confirmed-challenger-structure",
         direction=Direction.SHORT,
     )
     _consume(adapter, (confirmation_bar, challenger_confirmation))
@@ -3722,6 +4516,60 @@ def test_reset_replay_checkpoint_pickle_and_explicit_boundary_attack() -> None:
     update = boundary_adapter.observe_boundary_attack(boundary_fact)
     assert len(update.records) == 1
     assert update.lifecycle.boundary_attacks[-1].bar_event_id == h1_bar.event_id
+
+    boundary_record = update.records[0]
+    authoritative = {
+        facts["high"].event_id: facts["high"],
+        h1_bar.event_id: h1_bar,
+    }
+    forged_evidence = {
+        **dict(h1_bar.evidence),
+        "real_completed": False,
+        "clock_only": True,
+    }
+    authoritative[h1_bar.event_id] = replace(
+        h1_bar,
+        details=forged_evidence,
+        evidence=forged_evidence,
+    )
+    with pytest.raises(ValueError, match="Boundary Attack BAR.*exact real BAR"):
+        _validate_foundation_authoritative_sources(
+            boundary_record,
+            authoritative,
+        )
+
+    clock_adapter = CanonicalFoundationAdapter(tick_size=TICK)
+    _, clock_facts = _seed_structure(clock_adapter, label="clock-boundary")
+    clock_bar = _bar(
+        30,
+        timeframe=Timeframe.H1,
+        high=100.5,
+        low=99.75,
+        close=100.0,
+        event_id="clock-only-boundary-h1-bar",
+        real_completed=False,
+    )
+    clock_adapter.consume(clock_bar)
+    clock_generation = clock_adapter.lifecycle.structure_generations[-1]
+    clock_fact = NormalizedLifecycleTransition(
+        fact_id="clock-only-explicit-boundary-attack",
+        kind=NormalizedTransitionKind.BOUNDARY_ATTACK_OBSERVED,
+        known_at=clock_bar.known_at,
+        timeframe=Timeframe.H1,
+        source_event_ids=(clock_facts["high"].event_id, clock_bar.event_id),
+        payload={
+            "bos_generation_id": clock_generation.generation_id,
+            "direction": Direction.LONG.value,
+            "target_swing_event_id": clock_facts["high"].event_id,
+            "bar_event_id": clock_bar.event_id,
+            "boundary_ticks": 400,
+            "high_ticks": 402,
+            "low_ticks": 399,
+            "close_ticks": 400,
+        },
+    )
+    with pytest.raises(ValueError, match="exact same-clock real BAR"):
+        clock_adapter.observe_boundary_attack(clock_fact)
 
 
 def test_unknown_event_is_noop_but_missing_sources_and_out_of_order_fail_closed() -> None:

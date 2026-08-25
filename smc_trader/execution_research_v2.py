@@ -45,7 +45,6 @@ METHOD_PRICE_SET_SCHEMA_VERSION = "phase8_method_price_set_v1"
 EXECUTABLE_INSTRUCTION_SCHEMA_VERSION = "phase8_executable_instruction_v1"
 RISK_ADMISSION_SCHEMA_VERSION = "phase8_risk_admission_v1"
 PHASE8_LEDGER_SCHEMA_VERSION = "phase8_intent_research_case_ledger_v1"
-PHASE8_RUNNER_MANIFEST_SCHEMA_VERSION = "phase8_runner_manifest_v2"
 
 # Exact-byte identities of the preregistered files.  They are intentionally
 # updated only together with their configs and focused contract tests.
@@ -1670,176 +1669,6 @@ class Phase8AppendOnlyLedger:
         return cls(records)
 
 
-@dataclass(frozen=True)
-class Phase8RunnerValidation:
-    manifest_sha256: str
-    execution_protocol_sha256: str
-    risk_protocol_sha256: str
-    ready: bool
-    validate_only: bool
-    opened_dataset_bindings: tuple[str, ...]
-    written_artifacts: tuple[str, ...]
-    blockers: tuple[str, ...]
-
-    def __post_init__(self) -> None:
-        _sha256(self.manifest_sha256, name="runner manifest SHA-256")
-        _sha256(self.execution_protocol_sha256, name="runner execution protocol SHA-256")
-        _sha256(self.risk_protocol_sha256, name="runner risk protocol SHA-256")
-        if (
-            self.ready
-            or not self.validate_only
-            or self.opened_dataset_bindings
-            or self.written_artifacts
-            or not self.blockers
-        ):
-            raise Phase8ContractError("inert runner validation result is invalid")
-
-
-_EXPECTED_RUNNER_BLOCKERS = (
-    "manifest_not_frozen",
-    "experiment_identity_missing",
-    "fit_validation_cohorts_not_bound",
-    "intent_research_case_ledger_not_bound",
-    "minute_execution_input_ledger_not_bound",
-    "ohlcv_artifact_not_bound",
-    "phase6_mbo_artifact_not_bound",
-    "instrument_mapping_registry_not_bound",
-    "formal_runner_not_implemented",
-    "outputs_not_registered",
-)
-
-
-def validate_phase8_runner_manifest(path: str | Path) -> Phase8RunnerValidation:
-    """Validate only the inert template and configs; never open data bindings."""
-
-    source = Path(path)
-    if not source.is_file() or source.is_symlink():
-        raise Phase8ContractError("Phase 8 runner manifest is not a regular file")
-    raw = source.read_bytes()
-    manifest_sha = hashlib.sha256(raw).hexdigest()
-    payload = _json_loads_exact(raw, name="Phase 8 runner manifest")
-    if not isinstance(payload, Mapping):
-        raise Phase8ContractError("Phase 8 runner manifest root must be an object")
-    _require_exact_keys(
-        payload,
-        {
-            "schema_version",
-            "status",
-            "authority",
-            "frozen_before_run",
-            "experiment_id",
-            "sealed_oos",
-            "protocol_bindings",
-            "dataset_bindings",
-            "runner_contract",
-            "readiness_blockers",
-            "outputs",
-        },
-        name="Phase 8 runner manifest",
-    )
-    bindings = payload["protocol_bindings"]
-    dataset_bindings = payload["dataset_bindings"]
-    outputs = payload["outputs"]
-    if not all(
-        isinstance(value, Mapping)
-        for value in (bindings, dataset_bindings, outputs)
-    ):
-        raise Phase8ContractError("runner manifest binding objects are invalid")
-    if (
-        payload["schema_version"] != PHASE8_RUNNER_MANIFEST_SCHEMA_VERSION
-        or payload["status"] != "preregistered_infrastructure_only_not_authorized_to_run"
-        or payload["frozen_before_run"] is not False
-        or payload["experiment_id"] is not None
-        or payload["authority"]
-        != {
-            "research_only": True,
-            "order_submission": False,
-            "execution_authorized": False,
-            "sealed_oos_reveal_authorized": False,
-        }
-        or payload["sealed_oos"] != {"opened": False, "path": None, "sha256": None}
-        or payload["runner_contract"]
-        != {
-            "mode": "validate_contract_only",
-            "read_dataset_bindings": False,
-            "write_artifacts": False,
-            "v1_1_outcome_engine_compatibility": True,
-        }
-        or tuple(payload["readiness_blockers"]) != _EXPECTED_RUNNER_BLOCKERS
-        or any(value is not None for value in dataset_bindings.values())
-        or any(value is not None for value in outputs.values())
-    ):
-        raise Phase8ContractError("runner manifest is not the inert preregistration template")
-
-    _require_exact_keys(
-        bindings,
-        {"execution_research_v2", "risk_admission_v1"},
-        name="runner protocol bindings",
-    )
-    _require_exact_keys(
-        dataset_bindings,
-        {
-            "fit_cohort",
-            "validation_cohort",
-            "intent_research_case_ledger",
-            "minute_execution_input_ledger",
-            "ohlcv_artifact",
-            "phase6_mbo_artifact",
-            "instrument_mapping_registry",
-        },
-        name="runner dataset bindings",
-    )
-    _require_exact_keys(
-        outputs,
-        {
-            "intent_research_case_ledger",
-            "per_method_outcomes",
-            "paired_variant_results",
-            "summary",
-        },
-        name="runner outputs",
-    )
-    repository_root = source.resolve().parents[2]
-    execution_binding = bindings["execution_research_v2"]
-    risk_binding = bindings["risk_admission_v1"]
-    if not isinstance(execution_binding, Mapping) or not isinstance(
-        risk_binding, Mapping
-    ):
-        raise Phase8ContractError("runner protocol binding entries are invalid")
-    _require_exact_keys(
-        execution_binding,
-        {"path", "sha256"},
-        name="runner execution protocol binding",
-    )
-    _require_exact_keys(
-        risk_binding,
-        {"path", "sha256"},
-        name="runner risk protocol binding",
-    )
-    if execution_binding.get("path") != "configs/execution_research_v2.json":
-        raise Phase8ContractError("runner execution protocol path is not preregistered")
-    if risk_binding.get("path") != "configs/risk_admission_v1.json":
-        raise Phase8ContractError("runner risk protocol path is not preregistered")
-    execution_protocol = load_execution_research_v2_config(
-        repository_root / execution_binding["path"],
-        expected_sha256=execution_binding.get("sha256"),
-    )
-    risk_protocol = load_risk_admission_protocol(
-        repository_root / risk_binding["path"],
-        expected_sha256=risk_binding.get("sha256"),
-    )
-    return Phase8RunnerValidation(
-        manifest_sha256=manifest_sha,
-        execution_protocol_sha256=execution_protocol.source_file_sha256,
-        risk_protocol_sha256=risk_protocol.source_file_sha256,
-        ready=False,
-        validate_only=True,
-        opened_dataset_bindings=(),
-        written_artifacts=(),
-        blockers=_EXPECTED_RUNNER_BLOCKERS,
-    )
-
-
 __all__ = [
     "EXECUTABLE_INSTRUCTION_SCHEMA_VERSION",
     "EXECUTION_RESEARCH_V2_CONFIG_SHA256",
@@ -1847,7 +1676,6 @@ __all__ = [
     "METHOD_PRICE_PROVENANCE_SCHEMA_VERSION",
     "METHOD_PRICE_SET_SCHEMA_VERSION",
     "PHASE8_LEDGER_SCHEMA_VERSION",
-    "PHASE8_RUNNER_MANIFEST_SCHEMA_VERSION",
     "RISK_ADMISSION_PROTOCOL_SHA256",
     "RISK_ADMISSION_SCHEMA_VERSION",
     "ExecutableTradeInstruction",
@@ -1860,7 +1688,6 @@ __all__ = [
     "Phase8AppendOnlyLedger",
     "Phase8ContractError",
     "Phase8ExecutionResearchProtocol",
-    "Phase8RunnerValidation",
     "ResearchCaseLedgerRecord",
     "RiskAdmissionDecision",
     "RiskAdmissionProtocol",
@@ -1872,5 +1699,4 @@ __all__ = [
     "load_execution_research_v2_config",
     "load_risk_admission_protocol",
     "risk_admit_executable_trade_instruction",
-    "validate_phase8_runner_manifest",
 ]

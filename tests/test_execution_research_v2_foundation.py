@@ -30,7 +30,6 @@ from smc_trader.execution_research_v2 import (
     load_execution_research_v2_config,
     load_risk_admission_protocol,
     risk_admit_executable_trade_instruction,
-    validate_phase8_runner_manifest,
 )
 from smc_trader.model import (
     AccountState,
@@ -50,7 +49,6 @@ from smc_trader.trade_intent import EntryMethod, TimeInForce, TradeIntent
 ROOT = Path(__file__).resolve().parents[1]
 EXECUTION_CONFIG = ROOT / "configs/execution_research_v2.json"
 RISK_CONFIG = ROOT / "configs/risk_admission_v1.json"
-MANIFEST = ROOT / "experiments/manifests/execution_research_phase8_v2_template.yaml"
 T0 = pd.Timestamp("2024-06-03T13:30:00Z")
 EXPIRY = T0 + pd.Timedelta(hours=1)
 SEMANTIC_SHA = "a" * 64
@@ -412,22 +410,6 @@ def test_append_only_intent_and_research_case_jsonl_round_trip_is_idempotent() -
         )
 
 
-def test_runner_manifest_validation_is_inert_and_v1_1_remains_compatible(
-    tmp_path: Path,
-) -> None:
-    result = validate_phase8_runner_manifest(MANIFEST)
-    assert result.ready is False
-    assert result.validate_only is True
-    assert result.opened_dataset_bindings == ()
-    assert result.written_artifacts == ()
-    assert "formal_runner_not_implemented" in result.blockers
-
-    payload = json.loads(MANIFEST.read_text(encoding="utf-8"))
-    payload["sealed_oos"]["path"] = "/path/that/must/not/be-opened"
-    unsafe = tmp_path / "unsafe-manifest.json"
-    unsafe.write_text(json.dumps(payload), encoding="utf-8")
-    with pytest.raises(Phase8ContractError, match="inert preregistration"):
-        validate_phase8_runner_manifest(unsafe)
-
+def test_v1_1_outcome_engine_remains_compatible() -> None:
     legacy = load_execution_research_config(ROOT / "configs/execution_research_v1.json")
     assert legacy.config_id == f"execution-research-config:{EXECUTION_RESEARCH_PROTOCOL_SHA256}"

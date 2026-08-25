@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from bisect import bisect_left, bisect_right
 from collections import deque
+import copy
 from dataclasses import dataclass, field, replace
 from enum import Enum
 import hashlib
@@ -27,6 +28,8 @@ from .market_clock import (
     expected_trading_minutes,
     next_registered_native_completion,
     registered_native_bar_bounds,
+    validate_completed_bar_header,
+    validate_registered_native_bar_root,
 )
 from .model import (
     BOSLifecycle,
@@ -1495,6 +1498,7 @@ def reduce_timeframe_state(
     event: MarketEvent,
     *,
     semantic_registry_identity: str | None = None,
+    _m1_owner_fanout: bool = False,
 ) -> TimeframeState | None:
     """Purely reduce one timeframe from normalized and semantic events.
 
@@ -1505,6 +1509,23 @@ def reduce_timeframe_state(
 
     if event.kind not in _TIMEFRAME_REDUCER_KINDS:
         return state
+    if type(_m1_owner_fanout) is not bool:
+        raise ValueError("M1 owner fanout authority must be boolean")
+    clock_only_heartbeat = False
+    native_htf_clock_only = False
+    if event.kind is EventKind.BAR_COMPLETED:
+        real_completed, clock_only = validate_completed_bar_header(
+            event.evidence
+        )
+        if not real_completed:
+            clock_only_heartbeat = bool(
+                event.timeframe is Timeframe.M1
+                or _m1_owner_fanout
+            )
+            native_htf_clock_only = not clock_only_heartbeat
+    if native_htf_clock_only and state is None:
+        # A native HTF clock root cannot create semantic owner state.
+        return None
     if state is None:
         state = _empty_timeframe_state(
             event,
@@ -1524,6 +1545,25 @@ def reduce_timeframe_state(
     current_order = (event.known_at, event.sequence_no, event.event_id)
     if current_order <= prior_order:
         raise ValueError("timeframe reducer received out-of-order knowledge")
+    if native_htf_clock_only:
+        # Native HTF clock roots are audit/provenance only, after the direct
+        # reducer's foreign/version/order contracts have been enforced.
+        return state
+    if clock_only_heartbeat:
+        return replace(
+            state,
+            quality=replace(
+                state.quality,
+                known_at=event.known_at,
+                semantic_registry_identity=(
+                    state.quality.semantic_registry_identity
+                    or semantic_registry_identity
+                ),
+                last_event_id=event.event_id,
+                last_sequence_no=event.sequence_no,
+                events_applied=state.quality.events_applied + 1,
+            ),
+        )
 
     structure = state.structure
     live_protected_direction = (
@@ -1543,14 +1583,8 @@ def reduce_timeframe_state(
 
     if event.kind is EventKind.BAR_COMPLETED:
         close = float(event.evidence.get("close", event.price))
-        price_update_only = bool(
-            event.evidence.get("owner_price_update_only", False)
-        )
-        real_completed = event.evidence.get("real_completed", True)
-        if type(real_completed) is not bool:
-            raise ValueError("completed BAR real-data flag must be boolean")
-        clock_only = not real_completed
-        if not price_update_only and not clock_only:
+        price_update_only = _m1_owner_fanout
+        if not price_update_only:
             raw_atr = float(event.evidence.get("atr", 0.0))
             atr = raw_atr if raw_atr > 0.0 else atr
             source_cutoff = event.known_at
@@ -1561,7 +1595,7 @@ def reduce_timeframe_state(
         candidates = tuple(
             replace(
                 item,
-                age_bars=item.age_bars + (0 if clock_only else 1),
+                age_bars=item.age_bars + 1,
                 distance_atr=(
                     None
                     if atr is None or atr <= 0.0
@@ -2002,6 +2036,7 @@ class TimeframeEventReducer:
         self._latest_protected_assignment_event_ids_by_timeframe: dict[
             Timeframe, str
         ] = {}
+        self._latest_real_m1_event_id: str | None = None
         self._unresolved_forward_reference_ids: set[str] = set()
         self._expected_timeframes: tuple[Timeframe, ...] | None = None
         if expected_timeframes is not None:
@@ -2062,6 +2097,7 @@ class TimeframeEventReducer:
         self._terminal_crossing_event_ids.clear()
         self._latest_protected_assignment_event_ids.clear()
         self._latest_protected_assignment_event_ids_by_timeframe.clear()
+        self._latest_real_m1_event_id = None
         self._unresolved_forward_reference_ids.clear()
 
     def __setstate__(self, state: Mapping[str, object]) -> None:
@@ -2075,6 +2111,7 @@ class TimeframeEventReducer:
             "_terminal_crossing_event_ids",
             "_latest_protected_assignment_event_ids",
             "_latest_protected_assignment_event_ids_by_timeframe",
+            "_latest_real_m1_event_id",
             "_unresolved_forward_reference_ids",
         ):
             self.__dict__.pop(name, None)
@@ -2090,6 +2127,7 @@ class TimeframeEventReducer:
                 "_terminal_crossing_event_ids",
                 "_latest_protected_assignment_event_ids",
                 "_latest_protected_assignment_event_ids_by_timeframe",
+                "_latest_real_m1_event_id",
                 "_unresolved_forward_reference_ids",
             )
         ):
@@ -2098,6 +2136,7 @@ class TimeframeEventReducer:
         self._terminal_crossing_event_ids = {}
         self._latest_protected_assignment_event_ids = {}
         self._latest_protected_assignment_event_ids_by_timeframe = {}
+        self._latest_real_m1_event_id = None
         self._unresolved_forward_reference_ids = set()
         available_events: dict[str, MarketEvent] = {}
         for prior in self._events_by_id.values():
@@ -2164,6 +2203,14 @@ class TimeframeEventReducer:
             self._latest_protected_assignment_event_ids_by_timeframe[
                 event.timeframe
             ] = assignment_event_id
+        if (
+            event.kind is EventKind.BAR_COMPLETED
+            and event.timeframe is Timeframe.M1
+            and event.origin is EventOrigin.NORMALIZED_DATA
+            and event.evidence.get("real_completed") is True
+            and event.evidence.get("clock_only") is False
+        ):
+            self._latest_real_m1_event_id = event.event_id
         available = (
             self._events_by_id.keys()
             if available_event_ids is None
@@ -2176,6 +2223,25 @@ class TimeframeEventReducer:
                 self._unresolved_forward_reference_ids
             ),
         )
+
+    @property
+    def latest_real_m1_event(self) -> MarketEvent | None:
+        """Return the current epoch's last exact-real normalized M1 root."""
+
+        self._ensure_provenance_indexes()
+        if self._latest_real_m1_event_id is None:
+            return None
+        event = self._events_by_id.get(self._latest_real_m1_event_id)
+        if (
+            event is None
+            or event.kind is not EventKind.BAR_COMPLETED
+            or event.timeframe is not Timeframe.M1
+            or event.origin is not EventOrigin.NORMALIZED_DATA
+            or event.evidence.get("real_completed") is not True
+            or event.evidence.get("clock_only") is not False
+        ):
+            raise ValueError("timeframe reducer latest real M1 index is invalid")
+        return event
 
     def apply(self, event: MarketEvent) -> TimeframeState | None:
         if event.kind is EventKind.FOUNDATION_STATE_CHANGED:
@@ -2284,6 +2350,7 @@ class TimeframeEventReducer:
             self._terminal_crossing_event_ids.clear()
             self._latest_protected_assignment_event_ids.clear()
             self._latest_protected_assignment_event_ids_by_timeframe.clear()
+            self._latest_real_m1_event_id = None
             self._unresolved_forward_reference_ids.clear()
             self._events_by_id[event.event_id] = event
             self._advance_provenance_indexes(event)
@@ -2300,7 +2367,10 @@ class TimeframeEventReducer:
         )
         if current is not None:
             staged_states[event.timeframe] = current
-        if event.kind is EventKind.BAR_COMPLETED and event.timeframe is Timeframe.M1:
+        if (
+            event.kind is EventKind.BAR_COMPLETED
+            and event.timeframe is Timeframe.M1
+        ):
             owner_timeframes = (
                 tuple(staged_states)
                 if staged_expected_timeframes is None
@@ -2312,11 +2382,6 @@ class TimeframeEventReducer:
                 owner_event = replace(
                     event,
                     timeframe=owner_timeframe,
-                    evidence={
-                        **dict(event.evidence),
-                        "owner_price_update_only": True,
-                        "price_source_timeframe": Timeframe.M1.value,
-                    },
                 )
                 owner_state = reduce_timeframe_state(
                     staged_states.get(owner_timeframe),
@@ -2324,6 +2389,7 @@ class TimeframeEventReducer:
                     semantic_registry_identity=(
                         self.semantic_registry_identity
                     ),
+                    _m1_owner_fanout=True,
                 )
                 if owner_state is None:
                     raise RuntimeError(
@@ -2411,49 +2477,6 @@ def _foundation_identity(*parts: object) -> str:
         separators=(",", ":"),
     )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:24]
-
-
-def _strict_prior_leg_atr(
-    candles: Sequence[Candle],
-    *,
-    start: pd.Timestamp,
-    period: int,
-) -> tuple[float, tuple[Candle, ...]] | None:
-    """Return a full-period ATR using only real bars before ``start``."""
-
-    if type(period) is not int or period < 1:
-        raise ValueError("structural leg ATR period must be positive")
-    prior = tuple(
-        sorted(
-            (
-                candle
-                for candle in candles
-                if candle.real_completed and candle.end <= start
-            ),
-            key=lambda item: (item.end, item.start),
-        )
-    )
-    if len(prior) < period:
-        return None
-    true_ranges: list[float] = []
-    for index, candle in enumerate(prior):
-        value = float(candle.high - candle.low)
-        if index:
-            prior_close = float(prior[index - 1].close)
-            value = max(
-                value,
-                abs(float(candle.high) - prior_close),
-                abs(float(candle.low) - prior_close),
-            )
-        true_ranges.append(max(0.0, value))
-    source_candles = prior[-period:]
-    window = true_ranges[-period:]
-    atr = sum(window) / period
-    return (
-        (atr, source_candles)
-        if math.isfinite(atr) and atr > 0.0
-        else None
-    )
 
 
 def _leg_tick_size(
@@ -3695,6 +3718,7 @@ class SessionStateReducer:
         self._elapsed = 0
         self._sum_squared_log_returns = 0.0
         self._last_close: float | None = None
+        self._last_relative_volume: float | None = None
         self._recent_volume: deque[float] = deque(maxlen=20)
         self._coverage_complete = False
 
@@ -3710,11 +3734,66 @@ class SessionStateReducer:
     def _name_phase(clock: pd.Timestamp) -> tuple[str, str]:
         return session_name_phase(clock)
 
-    def update(self, candle: Candle) -> SessionState:
+    def require_update(self, candle: Candle) -> None:
+        """Validate one session clock without mutating reducer state."""
+
         if candle.timeframe is not Timeframe.M1 or not candle.complete:
             raise ValueError("session reducer requires a completed 1m candle")
+        if candle.real_completed:
+            return
+        if self._last_close is None or self._session_id is None:
+            raise ValueError(
+                "clock-only session candle requires a prior real 1m candle"
+            )
+        if self._key(candle) != self._session_id:
+            raise ValueError(
+                "clock-only session candle cannot establish a new session"
+            )
+
+    def _state(
+        self,
+        *,
+        candle: Candle,
+        name: str,
+        phase: str,
+    ) -> SessionState:
+        if (
+            self._session_id is None
+            or self._open is None
+            or self._high is None
+            or self._low is None
+        ):  # pragma: no cover - guarded by require_update/real initialization
+            raise RuntimeError("session reducer state is not initialized")
+        return SessionState(
+            session_id=self._session_id,
+            name=name,
+            phase=phase,
+            session_open=float(self._open),
+            session_high=float(self._high),
+            session_low=float(self._low),
+            opening_range_high=self._opening_high,
+            opening_range_low=self._opening_low,
+            prior_day_high=self._prior_high,
+            prior_day_low=self._prior_low,
+            overnight_high=self._overnight_high,
+            overnight_low=self._overnight_low,
+            elapsed_minutes=self._elapsed,
+            realized_volatility=math.sqrt(
+                self._sum_squared_log_returns
+            ),
+            relative_volume=self._last_relative_volume,
+            known_at=candle.end,
+            data_complete=self._coverage_complete,
+        )
+
+    def update(self, candle: Candle) -> SessionState:
+        self.require_update(candle)
         local_start = candle.start.tz_convert("America/New_York")
         key = self._key(candle)
+        if not candle.real_completed:
+            self._elapsed += 1
+            name, phase = session_name_phase(local_start)
+            return self._state(candle=candle, name=name, phase=phase)
         if key != self._session_id:
             if self._session_id is not None:
                 self._prior_high = self._high
@@ -3773,27 +3852,10 @@ class SessionStateReducer:
             if baseline is None or baseline <= 0.0
             else float(candle.volume) / baseline
         )
+        self._last_relative_volume = relative_volume
         self._recent_volume.append(float(candle.volume))
         name, phase = session_name_phase(local_start)
-        return SessionState(
-            session_id=key,
-            name=name,
-            phase=phase,
-            session_open=float(self._open),
-            session_high=float(self._high),
-            session_low=float(self._low),
-            opening_range_high=self._opening_high,
-            opening_range_low=self._opening_low,
-            prior_day_high=self._prior_high,
-            prior_day_low=self._prior_low,
-            overnight_high=self._overnight_high,
-            overnight_low=self._overnight_low,
-            elapsed_minutes=self._elapsed,
-            realized_volatility=math.sqrt(self._sum_squared_log_returns),
-            relative_volume=relative_volume,
-            known_at=candle.end,
-            data_complete=self._coverage_complete,
-        )
+        return self._state(candle=candle, name=name, phase=phase)
 
 
 def session_name_phase(clock: pd.Timestamp) -> tuple[str, str]:
@@ -3840,12 +3902,18 @@ def _m1_candle_from_event(event: MarketEvent) -> Candle:
         "instrument_id",
         "data_complete",
         "real_completed",
+        "clock_only",
     }
     if not required.issubset(evidence):
         raise ValueError("normalized 1m event lacks replayable candle fields")
     real_completed = evidence["real_completed"]
-    if type(real_completed) is not bool:
-        raise ValueError("normalized 1m event has an invalid real-data flag")
+    clock_only = evidence["clock_only"]
+    if (
+        type(real_completed) is not bool
+        or type(clock_only) is not bool
+        or clock_only is not (not real_completed)
+    ):
+        raise ValueError("normalized 1m event has invalid complementary flags")
     return Candle(
         timeframe=Timeframe.M1,
         start=event.known_at - pd.Timedelta(1, unit="min"),
@@ -4056,6 +4124,12 @@ def _validate_foundation_authoritative_sources(
             raise ValueError(
                 f"foundation {role} has an incompatible authoritative event kind"
             )
+        if event.kind is EventKind.BAR_COMPLETED and (
+            event.origin is not EventOrigin.NORMALIZED_DATA
+            or event.evidence.get("real_completed") is not True
+            or event.evidence.get("clock_only") is not False
+        ):
+            raise ValueError(f"foundation {role} requires an exact real BAR")
         if timeframe is not None and event.timeframe.value != timeframe:
             raise ValueError(f"foundation {role} crosses timeframe scope")
         if event.known_at > record.known_at:
@@ -4125,7 +4199,7 @@ def _validate_foundation_authoritative_sources(
                 or bar.evidence.get("symbol") != payload.get("symbol")
                 or bar.evidence.get("instrument_id") != payload.get("instrument_id")
                 or bar.evidence.get("real_completed") is not True
-                or bar.evidence.get("clock_only") is True
+                or bar.evidence.get("clock_only") is not False
             ):
                 raise ValueError("foundation Base Origin BAR identity is incompatible")
             anchor_bars.append(bar)
@@ -4835,10 +4909,9 @@ def _validate_foundation_authoritative_sources(
         )
         if (
             origin_index is None
-            or origin.origin
-            not in {EventOrigin.NORMALIZED_DATA, EventOrigin.SEMANTIC_ATOMIC}
+            or origin.origin is not EventOrigin.NORMALIZED_DATA
             or origin.evidence.get("real_completed") is not True
-            or origin.evidence.get("clock_only") is True
+            or origin.evidence.get("clock_only") is not False
         ):
             raise ValueError("foundation Delivery origin is not one real native BAR")
         previous_resets = tuple(
@@ -4875,11 +4948,10 @@ def _validate_foundation_authoritative_sources(
             event
             for event in ordered_events[epoch_start:epoch_stop]
             if event.kind is EventKind.BAR_COMPLETED
-            and event.origin
-            in {EventOrigin.NORMALIZED_DATA, EventOrigin.SEMANTIC_ATOMIC}
+            and event.origin is EventOrigin.NORMALIZED_DATA
             and event.timeframe.value == payload.get("timeframe")
             and event.evidence.get("real_completed") is True
-            and event.evidence.get("clock_only") is not True
+            and event.evidence.get("clock_only") is False
             and event.evidence.get("symbol") == origin_symbol
             and event.evidence.get("instrument_id") == origin_instrument
             and event.known_at
@@ -5052,10 +5124,9 @@ def _validate_foundation_authoritative_sources(
                 record.source_event_ids != (lifecycle_event.event_id, bar.event_id)
                 or bar.timeframe is not Timeframe.M1
                 or bar.known_at != last_updated_at
-                or bar.origin
-                not in {EventOrigin.NORMALIZED_DATA, EventOrigin.SEMANTIC_ATOMIC}
+                or bar.origin is not EventOrigin.NORMALIZED_DATA
                 or bar.evidence.get("real_completed") is not True
-                or bar.evidence.get("clock_only") is True
+                or bar.evidence.get("clock_only") is not False
                 or bar.evidence.get("symbol") != payload.get("symbol")
                 or bar.evidence.get("instrument_id")
                 != payload.get("instrument_id")
@@ -5155,6 +5226,7 @@ def _validate_foundation_authoritative_sources(
                 or bar.origin is not EventOrigin.NORMALIZED_DATA
                 or bar.timeframe is not swing.timeframe
                 or bar.evidence.get("real_completed") is not True
+                or bar.evidence.get("clock_only") is not False
                 or bar.evidence.get("symbol") != symbol
                 or bar.evidence.get("instrument_id") != instrument_id
                 for bar in bars
@@ -5297,10 +5369,9 @@ def _validate_foundation_authoritative_sources(
         if (
             len(creation_bars) != 3
             or any(
-                bar.origin
-                not in {EventOrigin.NORMALIZED_DATA, EventOrigin.SEMANTIC_ATOMIC}
+                bar.origin is not EventOrigin.NORMALIZED_DATA
                 or bar.evidence.get("real_completed") is not True
-                or bar.evidence.get("clock_only") is True
+                or bar.evidence.get("clock_only") is not False
                 or bar.evidence.get("symbol") != payload.get("symbol")
                 or bar.evidence.get("instrument_id")
                 != payload.get("instrument_id")
@@ -5443,9 +5514,9 @@ def _validate_foundation_authoritative_sources(
             target.payload.get(target_known_field),
             name="first_retest.target_known_at",
         )
-        for field in ("symbol", "instrument_id", "timeframe"):
-            target_value = target.payload.get(field)
-            if target_value is not None and target_value != payload.get(field):
+        for scope_field in ("symbol", "instrument_id", "timeframe"):
+            target_value = target.payload.get(scope_field)
+            if target_value is not None and target_value != payload.get(scope_field):
                 raise ValueError("foundation first-retest target scope is incompatible")
         if object_kind == "fvg":
             if creation.evidence.get("fvg_id") != target.object_id:
@@ -5558,6 +5629,7 @@ def _validate_foundation_authoritative_sources(
                     and event.origin is EventOrigin.NORMALIZED_DATA
                     and event.timeframe.value == payload.get("timeframe")
                     and event.evidence.get("real_completed") is True
+                    and event.evidence.get("clock_only") is False
                     and event.evidence.get("symbol") == payload.get("symbol")
                     and event.evidence.get("instrument_id")
                     == payload.get("instrument_id")
@@ -5782,6 +5854,7 @@ class MarketSnapshotPublisher:
         (Timeframe.M15, Timeframe.M5),
         (Timeframe.M5, Timeframe.M1),
     )
+    _STATE_SCHEMA_VERSION = 1
 
     def __init__(
         self,
@@ -5808,7 +5881,89 @@ class MarketSnapshotPublisher:
             Timeframe,
             TimeframeStructureState,
         ] = {}
+        self._last_real_m1_price: float | None = None
+        self._last_real_m1_event_id: str | None = None
         self._boundary_reset_pending = False
+        self._publisher_state_schema_version = self._STATE_SCHEMA_VERSION
+
+    def __getstate__(self) -> dict[str, object]:
+        state = dict(self.__dict__)
+        state["_publisher_state_schema_version"] = self._STATE_SCHEMA_VERSION
+        return state
+
+    def __setstate__(self, state: Mapping[str, object]) -> None:
+        if (
+            not isinstance(state, Mapping)
+            or state.get("_publisher_state_schema_version")
+            != self._STATE_SCHEMA_VERSION
+        ):
+            raise ValueError("market snapshot publisher checkpoint schema changed")
+        self.__dict__.update(state)
+        self._require_checkpoint_state()
+
+    def _require_checkpoint_state(self) -> None:
+        """Bind cached session/price state to authoritative M1 roots."""
+
+        if (
+            not {
+                "semantic_registry_identity",
+                "atomic_authority",
+                "_event_reducer",
+                "_session",
+                "_last_real_m1_price",
+                "_last_real_m1_event_id",
+                "_boundary_reset_pending",
+            }.issubset(self.__dict__)
+            or not isinstance(self._event_reducer, TimeframeEventReducer)
+            or not isinstance(self._session, SessionStateReducer)
+            or self.semantic_registry_identity
+            != self._event_reducer.semantic_registry_identity
+            or type(self.atomic_authority) is not bool
+            or type(self._boundary_reset_pending) is not bool
+            or (
+                self._last_real_m1_event_id is not None
+                and not isinstance(self._last_real_m1_event_id, str)
+            )
+            or (
+                self._last_real_m1_price is not None
+                and (
+                    isinstance(self._last_real_m1_price, bool)
+                    or not isinstance(self._last_real_m1_price, (int, float))
+                    or not math.isfinite(float(self._last_real_m1_price))
+                )
+            )
+        ):
+            raise ValueError("market snapshot publisher checkpoint is invalid")
+        if not self.atomic_authority:
+            return
+        expected_session = SessionStateReducer()
+        if not self._boundary_reset_pending:
+            for event in self._event_reducer._events_by_id.values():
+                if (
+                    event.kind is EventKind.BAR_COMPLETED
+                    and event.timeframe is Timeframe.M1
+                ):
+                    expected_session.update(_m1_candle_from_event(event))
+            latest_real = self._event_reducer.latest_real_m1_event
+            expected_price = (
+                None
+                if latest_real is None
+                else float(_m1_candle_from_event(latest_real).close)
+            )
+            expected_event_id = (
+                None if latest_real is None else latest_real.event_id
+            )
+        else:
+            expected_price = None
+            expected_event_id = None
+        if (
+            self._session.__dict__ != expected_session.__dict__
+            or self._last_real_m1_price != expected_price
+            or self._last_real_m1_event_id != expected_event_id
+        ):
+            raise ValueError(
+                "market snapshot publisher checkpoint differs from M1 replay"
+            )
 
     def on_boundary(self) -> None:
         """Clear projections and require the matching atomic reset event."""
@@ -5826,10 +5981,134 @@ class MarketSnapshotPublisher:
         self._last_projection_payloads.clear()
         self._last_projection_event_ids.clear()
         self._formal_structures.clear()
+        self._last_real_m1_price = None
+        self._last_real_m1_event_id = None
         # Do not clear the authoritative event DAG out of band.  A boundary
         # update may first publish terminal facts for the prior epoch; the
         # immutable MARKET_EPOCH_RESET event then resets the reducer in
         # canonical stream order before any new-epoch bar is consumed.
+
+    def _require_real_m1_anchor_consistency(self) -> None:
+        """Keep the effective price, session close, and root index exact."""
+
+        session_close = self._session._last_close
+        if (
+            (self._last_real_m1_price is None) != (session_close is None)
+            or (
+                self._last_real_m1_price is not None
+                and float(self._last_real_m1_price) != float(session_close)
+            )
+            or (
+                self._last_real_m1_price is None
+                and self._last_real_m1_event_id is not None
+            )
+            or (
+                not self.atomic_authority
+                and self._last_real_m1_event_id is not None
+            )
+        ):
+            raise RuntimeError("market snapshot real M1 anchors diverged")
+        if not self.atomic_authority:
+            return
+        if self._last_real_m1_event_id is None:
+            if (
+                not self._boundary_reset_pending
+                and self._event_reducer.latest_real_m1_event is not None
+            ):
+                raise RuntimeError("market snapshot real M1 anchors diverged")
+            return
+        latest_real = self._event_reducer.latest_real_m1_event
+        if (
+            latest_real is None
+            or latest_real.event_id != self._last_real_m1_event_id
+            or float(_m1_candle_from_event(latest_real).close)
+            != float(self._last_real_m1_price)
+        ):
+            raise RuntimeError("market snapshot real M1 anchors diverged")
+
+    def _preflight_atomic_m1_batch(
+        self,
+        events: Sequence[MarketEvent],
+        *,
+        current_m1_root: MarketEvent,
+        asof: pd.Timestamp,
+    ) -> None:
+        """Reject unanchored clocks before any publisher owner mutates."""
+
+        asof = aware_timestamp(asof, name="market_snapshot.asof")
+        if any(event.known_at > asof for event in events):
+            raise RuntimeError(
+                "atomic batch contains an event after snapshot asof"
+            )
+        for event in events:
+            if event.kind is not EventKind.BAR_COMPLETED:
+                continue
+            validate_completed_bar_header(event.evidence)
+            if event.origin is EventOrigin.NORMALIZED_DATA:
+                validate_registered_native_bar_root(
+                    timeframe=event.timeframe,
+                    event_time=event.event_time,
+                    known_at=event.known_at,
+                    evidence=event.evidence,
+                )
+        current_positions = tuple(
+            index
+            for index, event in enumerate(events)
+            if event.event_id == current_m1_root.event_id
+        )
+        if len(current_positions) != 1:
+            raise RuntimeError(
+                "atomic M1 preflight cannot identify the current root"
+            )
+        reset_positions = tuple(
+            index
+            for index, event in enumerate(events)
+            if event.kind is EventKind.MARKET_EPOCH_RESET
+        )
+        if reset_positions and reset_positions[-1] >= current_positions[0]:
+            raise RuntimeError(
+                "atomic batch MARKET_EPOCH_RESET must strictly precede "
+                "the current normalized M1 BAR"
+            )
+        staged_session = copy.deepcopy(self._session)
+        staged_real_price = self._last_real_m1_price
+        staged_state: SessionState | None = None
+        for event in events:
+            if event.kind is EventKind.MARKET_EPOCH_RESET:
+                staged_session = SessionStateReducer()
+                staged_real_price = None
+                staged_state = None
+                continue
+            if (
+                event.kind is not EventKind.BAR_COMPLETED
+                or event.timeframe is not Timeframe.M1
+            ):
+                continue
+            candle = _m1_candle_from_event(event)
+            if candle.real_completed:
+                staged_real_price = float(candle.close)
+            elif staged_real_price is None:
+                raise RuntimeError(
+                    "atomic clock-only M1 root requires a prior real "
+                    "M1 price in the current epoch"
+                )
+            staged_state = staged_session.update(candle)
+        if staged_real_price is None:
+            raise RuntimeError(
+                "atomic M1 batch lacks a real price anchor in its "
+                "current epoch"
+            )
+        if staged_state is None or staged_state.known_at != asof:
+            raise RuntimeError(
+                "atomic session preflight did not reach snapshot asof"
+            )
+        if (
+            staged_session._last_close is None
+            or float(staged_session._last_close) != float(staged_real_price)
+        ):
+            raise RuntimeError(
+                "atomic M1 preflight price and session anchors diverged"
+            )
 
     @staticmethod
     def _require_current_m1_root(
@@ -6542,6 +6821,7 @@ class MarketSnapshotPublisher:
             raise ValueError(
                 "market snapshot frame registry is empty or mis-keyed"
             )
+        self._require_real_m1_anchor_consistency()
         ordered_events = tuple(
             sorted(
                 semantic_events,
@@ -6562,12 +6842,7 @@ class MarketSnapshotPublisher:
                     "atomic market-state boundary requires a "
                     "MARKET_EPOCH_RESET event"
                 )
-            # This registry is immutable for the lifetime of one publisher.
-            # It lets the first normalized M1 event initialize empty owner
-            # states deterministically while preserving source_cutoff=None
-            # until that owner's first native completed bar arrives.
-            expected_timeframes = self._event_reducer.bind_timeframes(frames)
-            self._require_current_m1_root(
+            current_m1_root = self._require_current_m1_root(
                 asof=asof,
                 symbol=symbol,
                 instrument_id=instrument_id,
@@ -6575,6 +6850,16 @@ class MarketSnapshotPublisher:
                 completed_1m=completed_1m,
                 events=ordered_events,
             )
+            self._preflight_atomic_m1_batch(
+                ordered_events,
+                current_m1_root=current_m1_root,
+                asof=asof,
+            )
+            # This registry is immutable for the lifetime of one publisher.
+            # It lets the first normalized M1 event initialize empty owner
+            # states deterministically while preserving source_cutoff=None
+            # until that owner's first native completed bar arrives.
+            expected_timeframes = self._event_reducer.bind_timeframes(frames)
         elif has_epoch_reset:
             self._clear_epoch_projections()
 
@@ -6588,19 +6873,44 @@ class MarketSnapshotPublisher:
             self._event_reducer.apply(event)
             if (
                 self.atomic_authority
+                and event.kind is EventKind.MARKET_EPOCH_RESET
+            ):
+                self._require_real_m1_anchor_consistency()
+            if (
+                self.atomic_authority
                 and event.kind is EventKind.BAR_COMPLETED
                 and event.timeframe is Timeframe.M1
             ):
-                session = self._session.update(
-                    _m1_candle_from_event(event)
-                )
+                m1_candle = _m1_candle_from_event(event)
+                if m1_candle.real_completed:
+                    self._last_real_m1_price = float(m1_candle.close)
+                    self._last_real_m1_event_id = event.event_id
+                elif self._last_real_m1_price is None:
+                    raise RuntimeError(
+                        "atomic clock-only M1 root requires a prior real "
+                        "M1 price in the current epoch"
+                    )
+                session = self._session.update(m1_candle)
+                self._require_real_m1_anchor_consistency()
         if self.atomic_authority:
             if session is None or session.known_at != asof:
                 raise RuntimeError(
                     "atomic session state did not reach snapshot asof"
                 )
         else:
+            if completed_1m.real_completed:
+                self._last_real_m1_price = float(completed_1m.close)
+                self._last_real_m1_event_id = None
+            elif self._last_real_m1_price is None:
+                raise RuntimeError(
+                    "clock-only M1 candle requires a prior real M1 price "
+                    "in the current epoch"
+                )
             session = self._session.update(completed_1m)
+            self._require_real_m1_anchor_consistency()
+        if self._last_real_m1_price is None:  # pragma: no cover - guarded above
+            raise RuntimeError("market snapshot lacks a real M1 price")
+        effective_price = self._last_real_m1_price
         event_states = dict(self._event_reducer.states)
         if self.atomic_authority:
             missing = tuple(
@@ -6639,7 +6949,7 @@ class MarketSnapshotPublisher:
                 timeframe: self._timeframe_state(
                     frame,
                     asof=asof,
-                    price=price,
+                    price=effective_price,
                     inventory=inventory,
                     displacement=displacement,
                     events=semantic_events,
@@ -6670,7 +6980,7 @@ class MarketSnapshotPublisher:
             authority = MarketSnapshotAuthority.FRAME_PROJECTION
         relations = self._relation_resolver.resolve(
             states,
-            price=price,
+            price=effective_price,
             asof=asof,
         )
         base_ids_by_timeframe = {
@@ -6763,7 +7073,7 @@ class MarketSnapshotPublisher:
             asof=asof,
             symbol=symbol,
             instrument_id=instrument_id,
-            price=price,
+            price=effective_price,
             semantic_version=SMC_SEMANTIC_VERSION,
             semantic_registry_identity=self.semantic_registry_identity,
             timeframe_states=states,
@@ -6804,6 +7114,7 @@ def replay_atomic_market_snapshot(
     session_reducer = SessionStateReducer()
     session: SessionState | None = None
     latest_bar: Candle | None = None
+    latest_real_bar: Candle | None = None
     retained_events: list[MarketEvent] = []
     epoch_scale_registry_id: str | None = None
     epoch_contract: tuple[str, int] | None = None
@@ -6866,11 +7177,9 @@ def replay_atomic_market_snapshot(
             authoritative_events[event.event_id] = event
         if (
             event.kind is EventKind.BAR_COMPLETED
-            and event.origin in {
-                EventOrigin.NORMALIZED_DATA,
-                EventOrigin.SEMANTIC_ATOMIC,
-            }
-            and event.evidence.get("real_completed", True) is True
+            and event.origin is EventOrigin.NORMALIZED_DATA
+            and event.evidence.get("real_completed") is True
+            and event.evidence.get("clock_only") is False
         ):
             foundation_real_bar_ordinals[event.timeframe] = (
                 foundation_real_bar_ordinals.get(event.timeframe, 0) + 1
@@ -6879,6 +7188,7 @@ def replay_atomic_market_snapshot(
             session_reducer = SessionStateReducer()
             session = None
             latest_bar = None
+            latest_real_bar = None
             retained_events.clear()
             epoch_scale_registry_id = None
             epoch_contract = None
@@ -6964,8 +7274,20 @@ def replay_atomic_market_snapshot(
         ):
             continue
         latest_bar = _m1_candle_from_event(event)
+        if latest_bar.real_completed:
+            latest_real_bar = latest_bar
+        elif latest_real_bar is None:
+            raise ValueError(
+                "atomic replay clock-only M1 root requires a prior real "
+                "M1 price in the current epoch"
+            )
         session = session_reducer.update(latest_bar)
-    if session is None or latest_bar is None or not reducer.states:
+    if (
+        session is None
+        or latest_bar is None
+        or latest_real_bar is None
+        or not reducer.states
+    ):
         raise ValueError(
             "atomic replay requires a current epoch with a completed 1m bar"
         )
@@ -6999,7 +7321,7 @@ def replay_atomic_market_snapshot(
     states = foundation_dol_timeframe_states(
         foundation,
         states=FrozenDict(reducer.states),
-        price=float(latest_bar.close),
+        price=float(latest_real_bar.close),
         candidate_templates=foundation_candidate_templates,
         real_bar_ordinals=foundation_real_bar_ordinals,
     )
@@ -7007,7 +7329,7 @@ def replay_atomic_market_snapshot(
         edges=MarketSnapshotPublisher._RELATION_EDGES
     ).resolve(
         states,
-        price=float(latest_bar.close),
+        price=float(latest_real_bar.close),
         asof=session.known_at,
     )
     labels = tuple(state.label for state in states.values()) + tuple(
@@ -7018,7 +7340,7 @@ def replay_atomic_market_snapshot(
         asof=session.known_at,
         symbol=latest_bar.symbol,
         instrument_id=latest_bar.instrument_id,
-        price=float(latest_bar.close),
+        price=float(latest_real_bar.close),
         semantic_version=semantic_version,
         semantic_registry_identity=semantic_registry_identity,
         timeframe_states=states,
@@ -7030,7 +7352,7 @@ def replay_atomic_market_snapshot(
         foundation=foundation,
         foundation_range_locations=foundation_dual_range_locations(
             foundation,
-            price=float(latest_bar.close),
+            price=float(latest_real_bar.close),
             timeframes=states,
         ),
     )
