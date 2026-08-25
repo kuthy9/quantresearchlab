@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pandas as pd
 import pytest
 
+from smc_trader.event_store import EventStore
 from smc_trader.dol_ranking import (
     _feature_values,
     load_dol_ranking_protocol,
@@ -127,6 +128,7 @@ def _observation(
         inventory = (*inventory, source_item)
 
     publisher = MarketSnapshotPublisher(
+        event_store=EventStore(),
         semantic_registry_identity="foundation-dol-test"
     )
     states = {
@@ -199,6 +201,8 @@ def _observation(
         session=session,
         events_this_update=(),
         labels=(),
+        event_count=0,
+        event_prefix_fingerprint=EventStore().fingerprint(),
         foundation=projection,
     )
     return replace_market_observation(

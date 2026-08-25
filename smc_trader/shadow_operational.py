@@ -122,6 +122,7 @@ _REQUIRED_COMMON_SOURCE_BINDINGS = frozenset(
 )
 _RUNTIME_CODE_PATHS = (
     "smc_trader/engine.py",
+    "smc_trader/current_facts.py",
     "smc_trader/market_state.py",
     "smc_trader/observation.py",
     "smc_trader/shadow_live.py",

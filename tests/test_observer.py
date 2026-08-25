@@ -1437,6 +1437,11 @@ def test_eye_authority_observer_pickle_resume_matches_uninterrupted() -> None:
     resumed_reader, resumed = pickle.loads(
         pickle.dumps((resumed_reader, resumed))
     )
+    assert (
+        resumed.audit_store
+        is resumed.memory._audit_store
+        is resumed.market_snapshot_publisher.event_store
+    )
 
     for bar in bars[47:]:
         baseline_observation = baseline.observe(

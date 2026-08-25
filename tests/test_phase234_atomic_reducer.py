@@ -83,6 +83,78 @@ PROJECTION_KINDS = {
 }
 
 
+def _snapshot_publisher(**kwargs: object) -> MarketSnapshotPublisher:
+    return MarketSnapshotPublisher(
+        event_store=EventStore(),
+        **kwargs,
+    )
+
+
+class _StoreDrivenReducer(TimeframeEventReducer):
+    """Test adapter spelling out append -> consume for legacy assertions."""
+
+    def apply(self, event: MarketEvent):
+        self.event_store.append(event)
+        self.consume_available()
+        if (
+            event.origin is EventOrigin.STATE_PROJECTION
+            or event.kind is EventKind.FOUNDATION_STATE_CHANGED
+        ):
+            return None
+        return self.states.get(event.timeframe)
+
+    def replay(self, events: tuple[MarketEvent, ...]):
+        self.event_store.append_batch(events)
+        self.consume_available()
+        return self.states
+
+
+def _timeframe_reducer(**kwargs: object) -> _StoreDrivenReducer:
+    return _StoreDrivenReducer(event_store=EventStore(), **kwargs)
+
+
+def _publish(
+    publisher: MarketSnapshotPublisher,
+    *,
+    semantic_events: tuple[MarketEvent, ...] = (),
+    **kwargs: object,
+) -> tuple[MarketSnapshot, tuple[MarketEvent, ...]]:
+    publisher.event_store.append_batch(semantic_events)
+    return publisher.publish(**kwargs)
+
+
+def _reducer_hot_state(reducer: TimeframeEventReducer) -> bytes:
+    return pickle.dumps(
+        (
+            reducer.states,
+            reducer.cursor,
+            reducer._epoch_cursor,
+            reducer._last_order_key,
+            reducer._current_fact_event_ids,
+            reducer._latest_real_m1_event_id,
+            reducer.expected_timeframes,
+            reducer._store_prefix_fingerprint,
+        ),
+        protocol=pickle.HIGHEST_PROTOCOL,
+    )
+
+
+def _publisher_hot_state(publisher: MarketSnapshotPublisher) -> bytes:
+    return pickle.dumps(
+        (
+            _reducer_hot_state(publisher._event_reducer),
+            publisher._session,
+            publisher._last_projection_payloads,
+            publisher._last_projection_event_ids,
+            publisher._formal_structures,
+            publisher._last_real_m1_price,
+            publisher._last_real_m1_event_id,
+            publisher._boundary_reset_pending,
+        ),
+        protocol=pickle.HIGHEST_PROTOCOL,
+    )
+
+
 def _clock(minutes: int) -> pd.Timestamp:
     return pd.Timestamp("2025-01-06 10:00", tz=TZ) + pd.Timedelta(
         minutes * 60,
@@ -1506,7 +1578,7 @@ def test_foundation_projection_transport_rejects_rehashed_payload_tamper(
 
 def test_timeframe_reducer_does_not_consume_foundation_projection() -> None:
     active_record, _ = _foundation_record_history()
-    reducer = TimeframeEventReducer(
+    reducer = _timeframe_reducer(
         semantic_registry_identity="definition-test",
         expected_timeframes=(Timeframe.M1,),
     )
@@ -1529,7 +1601,8 @@ def test_timeframe_reducer_does_not_consume_foundation_projection() -> None:
 
     assert reducer.apply(projection) is None
     assert reducer.states == before
-    assert projection.event_id not in reducer._event_ids
+    assert reducer.cursor == 2
+    assert reducer.event_store.get(projection.event_id) is projection
 
 
 def test_atomic_replay_rejects_projection_only_foundation_source() -> None:
@@ -2035,7 +2108,7 @@ def test_candidate_replacement_and_dol_rank_strength_match_both_state_paths() ->
     atomic = _reduce((bar, old_candidate, replacement))
     atomic_candidate = atomic.liquidity.candidates[0]
 
-    publisher = MarketSnapshotPublisher(
+    publisher = _snapshot_publisher(
         semantic_registry_identity="definition-test"
     )
     rich = publisher._timeframe_state(
@@ -2306,10 +2379,7 @@ def test_live_protected_regime_ignores_opposite_direction_until_mss() -> None:
 
 def test_live_protected_regime_rejects_opposite_bos_and_assignment_atomically(
 ) -> None:
-    reducer = TimeframeEventReducer(semantic_registry_identity="definition-test")
-    for event in _live_long_protection_events():
-        reducer.apply(event)
-    before = reducer.states[Timeframe.H1]
+    before = _reduce(_live_long_protection_events())
 
     opposite_bos = _event(
         EventKind.QUALIFIED_BOS,
@@ -2322,8 +2392,11 @@ def test_live_protected_regime_rejects_opposite_bos_and_assignment_atomically(
         evidence={"bos_id": "short-bos", "scope": "continuation"},
     )
     with pytest.raises(ValueError, match="opposes the live protected"):
-        reducer.apply(opposite_bos)
-    assert reducer.states[Timeframe.H1] == before
+        reduce_timeframe_state(
+            before,
+            opposite_bos,
+            semantic_registry_identity="definition-test",
+        )
 
     opposite_assignment = _event(
         EventKind.PROTECTED_SWING_ASSIGNED,
@@ -2336,8 +2409,11 @@ def test_live_protected_regime_rejects_opposite_bos_and_assignment_atomically(
         evidence={"protected_swing_id": "short-protected-high"},
     )
     with pytest.raises(ValueError, match="opposes the live protected"):
-        reducer.apply(opposite_assignment)
-    assert reducer.states[Timeframe.H1] == before
+        reduce_timeframe_state(
+            before,
+            opposite_assignment,
+            semantic_registry_identity="definition-test",
+        )
 
     accepted_mss = _event(
         EventKind.MSS_CORE_CONFIRMED,
@@ -2349,7 +2425,11 @@ def test_live_protected_regime_rejects_opposite_bos_and_assignment_atomically(
         side="below",
         evidence={"bos_id": "short-mss"},
     )
-    after_mss = reducer.apply(accepted_mss)
+    after_mss = reduce_timeframe_state(
+        before,
+        accepted_mss,
+        semantic_registry_identity="definition-test",
+    )
     assert after_mss is not None
     assert after_mss.structure.external_direction is Direction.LONG
     assert after_mss.structure.internal_direction is Direction.SHORT
@@ -2623,29 +2703,19 @@ def test_corrupt_live_protection_fails_closed_without_owner_mutation(
     structure_overrides: dict[str, object],
     event: MarketEvent,
 ) -> None:
-    reducer = TimeframeEventReducer(semantic_registry_identity="definition-test")
-    for base_event in _live_long_protection_events():
-        reducer.apply(base_event)
-    valid = reducer.states[Timeframe.H1]
+    valid = _reduce(_live_long_protection_events())
     corrupt = replace(
         valid,
         structure=replace(valid.structure, **structure_overrides),
     )
-    reducer.states[Timeframe.H1] = corrupt
-    owner_before = (
-        dict(reducer.states),
-        reducer._last_order_key,
-        set(reducer._event_ids),
-        dict(reducer._events_by_id),
-    )
 
     with pytest.raises(ValueError, match="intact protected swing"):
-        reducer.apply(event)
-
-    assert dict(reducer.states) == owner_before[0]
-    assert reducer._last_order_key == owner_before[1]
-    assert reducer._event_ids == owner_before[2]
-    assert reducer._events_by_id == owner_before[3]
+        reduce_timeframe_state(
+            corrupt,
+            event,
+            semantic_registry_identity="definition-test",
+        )
+    assert corrupt.structure == replace(valid.structure, **structure_overrides)
 
 
 @pytest.mark.parametrize(
@@ -2663,44 +2733,46 @@ def test_live_protected_reassignment_only_tightens_atomically(
     tighter_price: float,
     looser_price: float,
 ) -> None:
-    reducer = TimeframeEventReducer(semantic_registry_identity="definition-test")
-    reducer.apply(
-        _event(
-            EventKind.STRUCTURE_DIRECTION_CONFIRMED,
-            0,
-            Timeframe.H1,
-            event_id=f"{direction.value}-structure",
-            direction=direction,
-            evidence={"structure_id": f"{direction.value}-structure"},
+    initial = _reduce(
+        (
+            _event(
+                EventKind.STRUCTURE_DIRECTION_CONFIRMED,
+                0,
+                Timeframe.H1,
+                event_id=f"{direction.value}-structure",
+                direction=direction,
+                evidence={"structure_id": f"{direction.value}-structure"},
+            ),
+            _event(
+                EventKind.PROTECTED_SWING_ASSIGNED,
+                1,
+                Timeframe.H1,
+                event_id=f"{direction.value}-initial-assignment",
+                price=initial_price,
+                side=side,
+                direction=direction,
+                evidence={
+                    "protected_swing_id": f"{direction.value}-initial-swing"
+                },
+            ),
         )
     )
-    reducer.apply(
-        _event(
-            EventKind.PROTECTED_SWING_ASSIGNED,
-            1,
-            Timeframe.H1,
-            event_id=f"{direction.value}-initial-assignment",
-            price=initial_price,
-            side=side,
-            direction=direction,
-            evidence={
-                "protected_swing_id": f"{direction.value}-initial-swing"
-            },
-        )
+    tighter_assignment = _event(
+        EventKind.PROTECTED_SWING_ASSIGNED,
+        2,
+        Timeframe.H1,
+        event_id=f"{direction.value}-tighter-assignment",
+        price=tighter_price,
+        side=side,
+        direction=direction,
+        evidence={
+            "protected_swing_id": f"{direction.value}-tighter-swing"
+        },
     )
-    tightened = reducer.apply(
-        _event(
-            EventKind.PROTECTED_SWING_ASSIGNED,
-            2,
-            Timeframe.H1,
-            event_id=f"{direction.value}-tighter-assignment",
-            price=tighter_price,
-            side=side,
-            direction=direction,
-            evidence={
-                "protected_swing_id": f"{direction.value}-tighter-swing"
-            },
-        )
+    tightened = reduce_timeframe_state(
+        initial,
+        tighter_assignment,
+        semantic_registry_identity="definition-test",
     )
     assert tightened is not None
     if direction is Direction.LONG:
@@ -2716,14 +2788,9 @@ def test_live_protected_reassignment_only_tightens_atomically(
             == "short-tighter-assignment"
         )
 
-    owner_before = (
-        dict(reducer.states),
-        reducer._last_order_key,
-        set(reducer._event_ids),
-        dict(reducer._events_by_id),
-    )
     with pytest.raises(ValueError, match="cannot loosen live protection"):
-        reducer.apply(
+        reduce_timeframe_state(
+            tightened,
             _event(
                 EventKind.PROTECTED_SWING_ASSIGNED,
                 3,
@@ -2735,12 +2802,10 @@ def test_live_protected_reassignment_only_tightens_atomically(
                 evidence={
                     "protected_swing_id": f"{direction.value}-looser-swing"
                 },
-            )
+            ),
+            semantic_registry_identity="definition-test",
         )
-    assert dict(reducer.states) == owner_before[0]
-    assert reducer._last_order_key == owner_before[1]
-    assert reducer._event_ids == owner_before[2]
-    assert reducer._events_by_id == owner_before[3]
+    assert tightened is not None
 
 
 def test_atomic_range_and_fvg_lifecycle_keep_unclamped_location_and_clocks() -> None:
@@ -2799,7 +2864,7 @@ def test_atomic_range_and_fvg_lifecycle_keep_unclamped_location_and_clocks() -> 
 
 
 def test_projection_events_can_be_removed_without_changing_atomic_replay() -> None:
-    publisher = MarketSnapshotPublisher(
+    publisher = _snapshot_publisher(
         semantic_registry_identity="definition-test",
         atomic_authority=True,
     )
@@ -2828,7 +2893,7 @@ def test_projection_events_can_be_removed_without_changing_atomic_replay() -> No
     }
     atomic_events = _relation_events()
 
-    snapshot, projection_events = publisher.publish(
+    snapshot, projection_events = _publish(publisher,
         asof=_clock(10),
         symbol="NQH5",
         instrument_id=1,
@@ -2847,10 +2912,10 @@ def test_projection_events_can_be_removed_without_changing_atomic_replay() -> No
         event for event in full_journal if event.kind not in PROJECTION_KINDS
     )
 
-    full_state = TimeframeEventReducer(
+    full_state = _timeframe_reducer(
         semantic_registry_identity="definition-test"
     ).replay(full_journal)
-    atomic_state = TimeframeEventReducer(
+    atomic_state = _timeframe_reducer(
         semantic_registry_identity="definition-test"
     ).replay(projection_free)
 
@@ -2900,10 +2965,12 @@ def test_projection_event_construction_can_be_disabled_without_state_drift() -> 
     }
     atomic_events = _relation_events()
 
-    emitted, projection_events = MarketSnapshotPublisher(
+    emitted_publisher = _snapshot_publisher(
         semantic_registry_identity="definition-test",
         atomic_authority=True,
-    ).publish(
+    )
+    emitted, projection_events = _publish(
+        emitted_publisher,
         asof=_clock(10),
         symbol="NQH5",
         instrument_id=1,
@@ -2915,10 +2982,12 @@ def test_projection_event_construction_can_be_disabled_without_state_drift() -> 
         semantic_events=atomic_events,
         anomalies=(),
     )
-    suppressed, suppressed_projection_events = MarketSnapshotPublisher(
+    suppressed_publisher = _snapshot_publisher(
         semantic_registry_identity="definition-test",
         atomic_authority=True,
-    ).publish(
+    )
+    suppressed, suppressed_projection_events = _publish(
+        suppressed_publisher,
         asof=_clock(10),
         symbol="NQH5",
         instrument_id=1,
@@ -3016,8 +3085,8 @@ def test_atomic_snapshot_replay_rebuilds_session_relations_and_epoch_reset() -> 
 def test_reducer_rejects_out_of_order_time_and_same_clock_sequence() -> None:
     chronological_later = _bar_event(1, Timeframe.H1, close=101.0)
     chronological_earlier = _bar_event(0, Timeframe.M5, close=100.0)
-    with pytest.raises(ValueError, match="canonical order"):
-        TimeframeEventReducer(
+    with pytest.raises(ValueError, match="known_at order"):
+        _timeframe_reducer(
             semantic_registry_identity="definition-test"
         ).replay((chronological_later, chronological_earlier))
 
@@ -3035,8 +3104,8 @@ def test_reducer_rejects_out_of_order_time_and_same_clock_sequence() -> None:
         event_id="same-clock-sequence-1",
         sequence_no=1,
     )
-    with pytest.raises(ValueError, match="canonical order"):
-        TimeframeEventReducer(
+    with pytest.raises(ValueError, match="known_at order"):
+        _timeframe_reducer(
             semantic_registry_identity="definition-test"
         ).replay((sequence_later, sequence_earlier))
 
@@ -3055,7 +3124,7 @@ def test_reducer_rejects_foreign_timeframe_and_cross_tf_version_mix() -> None:
             semantic_registry_identity="definition-test",
         )
 
-    reducer = TimeframeEventReducer(
+    reducer = _timeframe_reducer(
         semantic_registry_identity="definition-test"
     )
     reducer.apply(_bar_event(0, Timeframe.H1, close=100.0))
@@ -3085,7 +3154,7 @@ def test_observer_wires_definition_bound_store_and_atomic_authority() -> None:
 
 
 def test_atomic_authority_rejects_missing_current_root_without_projection_fallback() -> None:
-    publisher = MarketSnapshotPublisher(
+    publisher = _snapshot_publisher(
         semantic_registry_identity="definition-test",
         atomic_authority=True,
     )
@@ -3104,7 +3173,7 @@ def test_atomic_authority_rejects_missing_current_root_without_projection_fallba
         RuntimeError,
         match="requires exactly one current normalized M1 BAR",
     ):
-        publisher.publish(
+        _publish(publisher,
             asof=_clock(1),
             symbol="NQH5",
             instrument_id=1,
@@ -3123,7 +3192,7 @@ def test_atomic_authority_rejects_missing_current_root_without_projection_fallba
 def test_atomic_authority_uses_only_complete_event_reducer_states(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    publisher = MarketSnapshotPublisher(
+    publisher = _snapshot_publisher(
         semantic_registry_identity="definition-test",
         atomic_authority=True,
     )
@@ -3146,7 +3215,7 @@ def test_atomic_authority_uses_only_complete_event_reducer_states(
         "_timeframe_state",
         projection_is_forbidden,
     )
-    snapshot, _ = publisher.publish(
+    snapshot, _ = _publish(publisher,
         asof=_clock(10),
         symbol="NQH5",
         instrument_id=1,
@@ -3164,7 +3233,7 @@ def test_atomic_authority_uses_only_complete_event_reducer_states(
 
 
 def test_atomic_authority_rejects_event_state_outside_frame_registry() -> None:
-    publisher = MarketSnapshotPublisher(
+    publisher = _snapshot_publisher(
         semantic_registry_identity="definition-test",
         atomic_authority=True,
     )
@@ -3180,7 +3249,7 @@ def test_atomic_authority_rejects_event_state_outside_frame_registry() -> None:
     }
 
     with pytest.raises(ValueError, match="outside its bound registry: 5m"):
-        publisher.publish(
+        _publish(publisher,
             asof=_clock(2),
             symbol="NQH5",
             instrument_id=1,
@@ -3199,7 +3268,7 @@ def test_atomic_authority_rejects_event_state_outside_frame_registry() -> None:
 
 
 def test_projection_compatibility_mode_is_explicit() -> None:
-    publisher = MarketSnapshotPublisher(
+    publisher = _snapshot_publisher(
         semantic_registry_identity="definition-test",
         atomic_authority=False,
     )
@@ -3214,7 +3283,7 @@ def test_projection_compatibility_mode_is_explicit() -> None:
         for timeframe in (Timeframe.H1, Timeframe.M5, Timeframe.M1)
     }
 
-    snapshot, _ = publisher.publish(
+    snapshot, _ = _publish(publisher,
         asof=_clock(10),
         symbol="NQH5",
         instrument_id=1,
@@ -3444,7 +3513,7 @@ def test_bootstrap_bar_completeness_uses_timeframe_readiness_not_atr_window(
 
 
 def test_atomic_reset_event_restarts_session_and_owner_states() -> None:
-    publisher = MarketSnapshotPublisher(
+    publisher = _snapshot_publisher(
         semantic_registry_identity="definition-test",
         atomic_authority=True,
     )
@@ -3473,7 +3542,7 @@ def test_atomic_reset_event_restarts_session_and_owner_states() -> None:
             active_timeframes=(Timeframe.H1, Timeframe.M1),
         ),
     )
-    first, _ = publisher.publish(
+    first, _ = _publish(publisher,
         asof=_clock(2),
         symbol="NQH5",
         instrument_id=1,
@@ -3504,7 +3573,7 @@ def test_atomic_reset_event_restarts_session_and_owner_states() -> None:
             active_timeframes=(Timeframe.H1, Timeframe.M1),
         ),
     )
-    second, _ = publisher.publish(
+    second, _ = _publish(publisher,
         asof=_clock(4),
         symbol="NQH5",
         instrument_id=1,
@@ -3531,7 +3600,7 @@ def test_atomic_reset_event_restarts_session_and_owner_states() -> None:
 
 
 def test_atomic_retained_m1_prefix_uses_same_session_reducer_as_replay() -> None:
-    publisher = MarketSnapshotPublisher(
+    publisher = _snapshot_publisher(
         semantic_registry_identity="definition-test",
         atomic_authority=True,
     )
@@ -3555,7 +3624,7 @@ def test_atomic_retained_m1_prefix_uses_same_session_reducer_as_replay() -> None
         for minute, price in ((0, 100.0), (1, 101.0), (2, 99.5))
     )
 
-    live, _ = publisher.publish(
+    live, _ = _publish(publisher,
         asof=_clock(2),
         symbol="NQH5",
         instrument_id=1,
@@ -3579,11 +3648,11 @@ def test_atomic_retained_m1_prefix_uses_same_session_reducer_as_replay() -> None
 
 
 def test_timeframe_registry_permutation_has_one_canonical_order() -> None:
-    left = TimeframeEventReducer(
+    left = _timeframe_reducer(
         semantic_registry_identity="definition-test",
         expected_timeframes=(Timeframe.H1, Timeframe.M5, Timeframe.M1),
     )
-    right = TimeframeEventReducer(
+    right = _timeframe_reducer(
         semantic_registry_identity="definition-test",
         expected_timeframes=(Timeframe.M1, Timeframe.M5, Timeframe.H1),
     )
@@ -3622,11 +3691,11 @@ def test_timeframe_registry_permutation_has_one_canonical_order() -> None:
     )
     snapshots = []
     for frame_registry in (frames, reversed_frames):
-        publisher = MarketSnapshotPublisher(
+        publisher = _snapshot_publisher(
             semantic_registry_identity="definition-test",
             atomic_authority=True,
         )
-        snapshot, _ = publisher.publish(
+        snapshot, _ = _publish(publisher,
             asof=_clock(0),
             symbol="NQH5",
             instrument_id=1,
@@ -3646,7 +3715,7 @@ def test_timeframe_registry_permutation_has_one_canonical_order() -> None:
     assert snapshots[0].fingerprint == snapshots[1].fingerprint
 
 
-def test_atomic_snapshot_canonicalizes_input_event_order() -> None:
+def test_atomic_snapshot_requires_event_store_canonical_input_order() -> None:
     frames = {
         timeframe: FrameObservation(
             timeframe=timeframe,
@@ -3658,13 +3727,13 @@ def test_atomic_snapshot_canonicalizes_input_event_order() -> None:
         for timeframe in (Timeframe.H1, Timeframe.M5, Timeframe.M1)
     }
     events = _relation_events()
-    snapshots = []
-    for stream in (events, tuple(reversed(events))):
-        publisher = MarketSnapshotPublisher(
-            semantic_registry_identity="definition-test",
-            atomic_authority=True,
-        )
-        snapshot, _ = publisher.publish(
+    publisher = _snapshot_publisher(
+        semantic_registry_identity="definition-test",
+        atomic_authority=True,
+    )
+    with pytest.raises(ValueError, match="known_at order"):
+        _publish(
+            publisher,
             asof=_clock(10),
             symbol="NQH5",
             instrument_id=1,
@@ -3673,13 +3742,10 @@ def test_atomic_snapshot_canonicalizes_input_event_order() -> None:
             frames=frames,
             inventory=(),
             displacement=None,
-            semantic_events=stream,
+            semantic_events=tuple(reversed(events)),
             anomalies=(),
         )
-        snapshots.append(snapshot)
-
-    assert snapshots[0].fingerprint == snapshots[1].fingerprint
-    assert snapshots[0].events_this_update == snapshots[1].events_this_update
+    assert len(publisher.event_store) == 0
 
 
 def test_clock_only_snapshot_uses_last_real_price_without_relation_drift() -> None:
@@ -3694,12 +3760,12 @@ def test_clock_only_snapshot_uses_last_real_price_without_relation_drift() -> No
         )
         for timeframe in active
     }
-    publisher = MarketSnapshotPublisher(
+    publisher = _snapshot_publisher(
         semantic_registry_identity="definition-test",
         atomic_authority=True,
     )
     first_events = _relation_events()
-    first, _ = publisher.publish(
+    first, _ = _publish(publisher,
         asof=_clock(10),
         symbol="NQH5",
         instrument_id=1,
@@ -3717,7 +3783,7 @@ def test_clock_only_snapshot_uses_last_real_price_without_relation_drift() -> No
         active_timeframes=active,
         real_completed=False,
     )
-    second, _ = publisher.publish(
+    second, _ = _publish(publisher,
         asof=_clock(11),
         symbol="NQH5",
         instrument_id=1,
@@ -3769,12 +3835,12 @@ def test_unanchored_atomic_clock_only_snapshot_fails_before_mutation() -> None:
         )
         for timeframe in active
     }
-    publisher = MarketSnapshotPublisher(
+    publisher = _snapshot_publisher(
         semantic_registry_identity="definition-test",
         atomic_authority=True,
     )
     before_session = copy.deepcopy(publisher._session.__dict__)
-    before_reducer = copy.deepcopy(publisher._event_reducer.__dict__)
+    before_reducer = _reducer_hot_state(publisher._event_reducer)
     clock_only = _replayable_m1_event(
         0,
         90.0,
@@ -3782,7 +3848,7 @@ def test_unanchored_atomic_clock_only_snapshot_fails_before_mutation() -> None:
         real_completed=False,
     )
     with pytest.raises(RuntimeError, match="requires a prior real"):
-        publisher.publish(
+        _publish(publisher,
             asof=_clock(0),
             symbol="NQH5",
             instrument_id=1,
@@ -3795,16 +3861,20 @@ def test_unanchored_atomic_clock_only_snapshot_fails_before_mutation() -> None:
             anomalies=(),
         )
     assert publisher._session.__dict__ == before_session
-    assert publisher._event_reducer.__dict__ == before_reducer
+    assert _reducer_hot_state(publisher._event_reducer) == before_reducer
     assert publisher._last_projection_payloads == {}
     assert publisher._last_projection_event_ids == {}
 
+    publisher = _snapshot_publisher(
+        semantic_registry_identity="definition-test",
+        atomic_authority=True,
+    )
     real = _replayable_m1_event(
         0,
         100.0,
         active_timeframes=active,
     )
-    recovered, _ = publisher.publish(
+    recovered, _ = _publish(publisher,
         asof=_clock(0),
         symbol="NQH5",
         instrument_id=1,
@@ -3831,7 +3901,7 @@ def test_malformed_clock_root_fails_before_publisher_mutation() -> None:
         )
         for timeframe in active
     }
-    publisher = MarketSnapshotPublisher(
+    publisher = _snapshot_publisher(
         semantic_registry_identity="definition-test",
         atomic_authority=True,
     )
@@ -3853,10 +3923,10 @@ def test_malformed_clock_root_fails_before_publisher_mutation() -> None:
         details=incomplete_coverage,
         evidence=incomplete_coverage,
     )
-    before = pickle.dumps(publisher, protocol=pickle.HIGHEST_PROTOCOL)
+    before = _publisher_hot_state(publisher)
 
     with pytest.raises(ValueError, match="all-or-none"):
-        publisher.publish(
+        _publish(publisher,
             asof=_clock(1),
             symbol="NQH5",
             instrument_id=1,
@@ -3869,10 +3939,7 @@ def test_malformed_clock_root_fails_before_publisher_mutation() -> None:
             anomalies=(),
         )
 
-    assert pickle.dumps(
-        publisher,
-        protocol=pickle.HIGHEST_PROTOCOL,
-    ) == before
+    assert _publisher_hot_state(publisher) == before
 
 
 @pytest.mark.parametrize(
@@ -3905,7 +3972,7 @@ def test_private_bar_marker_fails_before_publisher_mutation(
         )
         for timeframe in active
     }
-    publisher = MarketSnapshotPublisher(
+    publisher = _snapshot_publisher(
         semantic_registry_identity="definition-test",
         atomic_authority=True,
     )
@@ -3932,10 +3999,20 @@ def test_private_bar_marker_fails_before_publisher_mutation(
         evidence=evidence,
         origin=origin,
     )
-    before = pickle.dumps(publisher, protocol=pickle.HIGHEST_PROTOCOL)
+    before = _publisher_hot_state(publisher)
 
-    with pytest.raises(ValueError, match="private owner fanout markers"):
-        publisher.publish(
+    expected_error = (
+        "projection hash"
+        if origin is EventOrigin.STATE_PROJECTION
+        else "private owner fanout markers"
+    )
+    batch = (
+        (current, forged)
+        if marker_after_current
+        else (forged, current)
+    )
+    with pytest.raises(ValueError, match=expected_error):
+        _publish(publisher,
             asof=_clock(0),
             symbol="NQH5",
             instrument_id=1,
@@ -3944,14 +4021,11 @@ def test_private_bar_marker_fails_before_publisher_mutation(
             frames=frames,
             inventory=(),
             displacement=None,
-            semantic_events=(forged, current),
+            semantic_events=batch,
             anomalies=(),
         )
 
-    assert pickle.dumps(
-        publisher,
-        protocol=pickle.HIGHEST_PROTOCOL,
-    ) == before
+    assert _publisher_hot_state(publisher) == before
 
 
 @pytest.mark.parametrize(
@@ -3972,7 +4046,7 @@ def test_legacy_bar_header_fails_before_publisher_mutation(
         )
         for timeframe in active
     }
-    publisher = MarketSnapshotPublisher(
+    publisher = _snapshot_publisher(
         semantic_registry_identity="definition-test",
         atomic_authority=True,
     )
@@ -3996,10 +4070,9 @@ def test_legacy_bar_header_fails_before_publisher_mutation(
     else:
         evidence["real_completed"] = 1
     malformed = replace(bar, details=evidence, evidence=evidence)
-    before = pickle.dumps(publisher, protocol=pickle.HIGHEST_PROTOCOL)
-
+    before = _publisher_hot_state(publisher)
     with pytest.raises(ValueError, match="exact complementary"):
-        publisher.publish(
+        _publish(publisher,
             asof=_clock(0),
             symbol="NQH5",
             instrument_id=1,
@@ -4012,10 +4085,7 @@ def test_legacy_bar_header_fails_before_publisher_mutation(
             anomalies=(),
         )
 
-    assert pickle.dumps(
-        publisher,
-        protocol=pickle.HIGHEST_PROTOCOL,
-    ) == before
+    assert _publisher_hot_state(publisher) == before
 
 
 def test_legacy_bar_without_private_header_fields_remains_valid() -> None:
@@ -4030,7 +4100,7 @@ def test_legacy_bar_without_private_header_fields_remains_valid() -> None:
         )
         for timeframe in active
     }
-    publisher = MarketSnapshotPublisher(
+    publisher = _snapshot_publisher(
         semantic_registry_identity="definition-test",
         atomic_authority=True,
     )
@@ -4047,7 +4117,7 @@ def test_legacy_bar_without_private_header_fields_remains_valid() -> None:
         event_id="valid-legacy-bar-after-current",
     )
 
-    snapshot, _ = publisher.publish(
+    snapshot, _ = _publish(publisher,
         asof=_clock(0),
         symbol="NQH5",
         instrument_id=1,
@@ -4056,7 +4126,7 @@ def test_legacy_bar_without_private_header_fields_remains_valid() -> None:
         frames=frames,
         inventory=(),
         displacement=None,
-        semantic_events=(legacy, current),
+        semantic_events=(current, legacy),
         anomalies=(),
     )
 
@@ -4078,7 +4148,7 @@ def test_epoch_reset_clock_only_snapshot_requires_new_epoch_real_anchor() -> Non
         )
         for timeframe in active
     }
-    publisher = MarketSnapshotPublisher(
+    publisher = _snapshot_publisher(
         semantic_registry_identity="definition-test",
         atomic_authority=True,
     )
@@ -4087,7 +4157,7 @@ def test_epoch_reset_clock_only_snapshot_requires_new_epoch_real_anchor() -> Non
         100.0,
         active_timeframes=active,
     )
-    publisher.publish(
+    _publish(publisher,
         asof=_clock(0),
         symbol="NQH5",
         instrument_id=1,
@@ -4114,9 +4184,9 @@ def test_epoch_reset_clock_only_snapshot_requires_new_epoch_real_anchor() -> Non
         real_completed=False,
     )
     before_session = copy.deepcopy(publisher._session.__dict__)
-    before_reducer = copy.deepcopy(publisher._event_reducer.__dict__)
+    before_reducer = _reducer_hot_state(publisher._event_reducer)
     with pytest.raises(RuntimeError, match="requires a prior real"):
-        publisher.publish(
+        _publish(publisher,
             asof=_clock(2),
             symbol="NQH5",
             instrument_id=1,
@@ -4132,7 +4202,7 @@ def test_epoch_reset_clock_only_snapshot_requires_new_epoch_real_anchor() -> Non
             anomalies=("contract_change_history_reset",),
         )
     assert publisher._session.__dict__ == before_session
-    assert publisher._event_reducer.__dict__ == before_reducer
+    assert _reducer_hot_state(publisher._event_reducer) == before_reducer
     assert publisher._boundary_reset_pending is True
 
 
@@ -4148,7 +4218,7 @@ def test_epoch_reset_after_current_m1_fails_before_publisher_mutation() -> None:
         )
         for timeframe in active
     }
-    publisher = MarketSnapshotPublisher(
+    publisher = _snapshot_publisher(
         semantic_registry_identity="definition-test",
         atomic_authority=True,
     )
@@ -4157,7 +4227,7 @@ def test_epoch_reset_after_current_m1_fails_before_publisher_mutation() -> None:
         100.0,
         active_timeframes=active,
     )
-    publisher.publish(
+    _publish(publisher,
         asof=_clock(0),
         symbol="NQH5",
         instrument_id=1,
@@ -4187,10 +4257,11 @@ def test_epoch_reset_after_current_m1_fails_before_publisher_mutation() -> None:
         timeframe: replace(frame, cutoff=_clock(1))
         for timeframe, frame in frames.items()
     }
-    before = pickle.dumps(publisher, protocol=pickle.HIGHEST_PROTOCOL)
+    before = _publisher_hot_state(publisher)
+    checkpoint = pickle.dumps(publisher, protocol=pickle.HIGHEST_PROTOCOL)
 
     with pytest.raises(RuntimeError, match="must strictly precede"):
-        publisher.publish(
+        _publish(publisher,
             asof=_clock(1),
             symbol="NQH5",
             instrument_id=1,
@@ -4203,11 +4274,9 @@ def test_epoch_reset_after_current_m1_fails_before_publisher_mutation() -> None:
             anomalies=("malordered_contract_change_reset",),
         )
 
-    assert pickle.dumps(
-        publisher,
-        protocol=pickle.HIGHEST_PROTOCOL,
-    ) == before
-    recovered, _ = publisher.publish(
+    assert _publisher_hot_state(publisher) == before
+    publisher = pickle.loads(checkpoint)
+    recovered, _ = _publish(publisher,
         asof=_clock(1),
         symbol="NQH5",
         instrument_id=1,
@@ -4234,7 +4303,7 @@ def test_future_semantic_event_fails_before_publisher_mutation() -> None:
         )
         for timeframe in active
     }
-    publisher = MarketSnapshotPublisher(
+    publisher = _snapshot_publisher(
         semantic_registry_identity="definition-test",
         atomic_authority=True,
     )
@@ -4250,10 +4319,10 @@ def test_future_semantic_event_fails_before_publisher_mutation() -> None:
         direction=Direction.LONG,
         evidence={"structure_id": "future-structure"},
     )
-    before = pickle.dumps(publisher, protocol=pickle.HIGHEST_PROTOCOL)
+    before = _publisher_hot_state(publisher)
 
     with pytest.raises(RuntimeError, match="event after snapshot asof"):
-        publisher.publish(
+        _publish(publisher,
             asof=_clock(0),
             symbol="NQH5",
             instrument_id=1,
@@ -4266,10 +4335,7 @@ def test_future_semantic_event_fails_before_publisher_mutation() -> None:
             anomalies=(),
         )
 
-    assert pickle.dumps(
-        publisher,
-        protocol=pickle.HIGHEST_PROTOCOL,
-    ) == before
+    assert _publisher_hot_state(publisher) == before
 
 
 def test_same_asof_semantic_event_after_current_m1_remains_valid() -> None:
@@ -4284,7 +4350,7 @@ def test_same_asof_semantic_event_after_current_m1_remains_valid() -> None:
         )
         for timeframe in active
     }
-    publisher = MarketSnapshotPublisher(
+    publisher = _snapshot_publisher(
         semantic_registry_identity="definition-test",
         atomic_authority=True,
     )
@@ -4302,7 +4368,7 @@ def test_same_asof_semantic_event_after_current_m1_remains_valid() -> None:
         evidence={"structure_id": "same-asof-structure"},
     )
 
-    snapshot, _ = publisher.publish(
+    snapshot, _ = _publish(publisher,
         asof=_clock(0),
         symbol="NQH5",
         instrument_id=1,
@@ -4311,7 +4377,7 @@ def test_same_asof_semantic_event_after_current_m1_remains_valid() -> None:
         frames=frames,
         inventory=(),
         displacement=None,
-        semantic_events=(same_asof, current),
+        semantic_events=(current, same_asof),
         anomalies=(),
     )
 
@@ -4333,7 +4399,7 @@ def test_snapshot_publisher_checkpoint_binds_price_and_session_to_replay() -> No
         )
         for timeframe in active
     }
-    publisher = MarketSnapshotPublisher(
+    publisher = _snapshot_publisher(
         semantic_registry_identity="definition-test",
         atomic_authority=True,
     )
@@ -4346,7 +4412,7 @@ def test_snapshot_publisher_checkpoint_binds_price_and_session_to_replay() -> No
             real_completed=False,
         ),
     )
-    publisher.publish(
+    _publish(publisher,
         asof=_clock(1),
         symbol="NQH5",
         instrument_id=1,
@@ -4734,7 +4800,7 @@ def test_atomic_replay_rejects_stream_identity_drift_without_reset(
 
 
 def test_atomic_on_boundary_requires_matching_reset_event() -> None:
-    publisher = MarketSnapshotPublisher(
+    publisher = _snapshot_publisher(
         semantic_registry_identity="definition-test",
         atomic_authority=True,
     )
@@ -4755,8 +4821,9 @@ def test_atomic_on_boundary_requires_matching_reset_event() -> None:
         active_timeframes=active,
     )
     publisher.on_boundary()
+    checkpoint = pickle.dumps(publisher, protocol=pickle.HIGHEST_PROTOCOL)
     with pytest.raises(RuntimeError, match="requires a MARKET_EPOCH_RESET"):
-        publisher.publish(
+        _publish(publisher,
             asof=_clock(1),
             symbol="NQH5",
             instrument_id=1,
@@ -4769,6 +4836,7 @@ def test_atomic_on_boundary_requires_matching_reset_event() -> None:
             anomalies=(),
         )
 
+    publisher = pickle.loads(checkpoint)
     reset = _event(
         EventKind.MARKET_EPOCH_RESET,
         0,
@@ -4776,7 +4844,7 @@ def test_atomic_on_boundary_requires_matching_reset_event() -> None:
         price=None,
         evidence={"reason": "contract_change_reset"},
     )
-    snapshot, _ = publisher.publish(
+    snapshot, _ = _publish(publisher,
         asof=_clock(1),
         symbol="NQH5",
         instrument_id=1,

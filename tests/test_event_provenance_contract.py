@@ -2141,7 +2141,7 @@ def test_crossing_terminal_generation_is_global_and_rebuilt() -> None:
         unpickled.append(duplicate)
 
     store._events.append(duplicate)
-    with pytest.raises(ValueError, match="already has an immutable terminal"):
+    with pytest.raises(ValueError, match="mutated committed evidence"):
         pickle.loads(pickle.dumps(store))
 
 
@@ -2404,21 +2404,19 @@ def test_protected_acceptance_must_reference_latest_timeframe_assignment(
 
     # Pickle restore is a validation boundary, not a blind index rebuild.
     store._events.append(stale[-1])
-    with pytest.raises(ValueError, match="latest protected-swing assignment"):
+    with pytest.raises(ValueError, match="mutated committed evidence"):
         pickle.loads(pickle.dumps(store))
 
+    reducer_store = EventStore.from_events(accepted_prefix)
     reducer = TimeframeEventReducer(
+        event_store=reducer_store,
         semantic_registry_identity="protected-owner-timeframe-test"
     )
-    for event in accepted_prefix:
-        reducer.apply(event)
-    reducer_before = pickle.dumps(reducer.__dict__)
+    reducer.consume_available()
+    reducer_before = (dict(reducer.states), reducer.cursor)
     with pytest.raises(ValueError, match="latest protected-swing assignment"):
-        reducer.apply(stale[-1])
-    assert pickle.dumps(reducer.__dict__) == reducer_before
-    reducer._events_by_id[stale[-1].event_id] = stale[-1]
-    with pytest.raises(ValueError, match="latest protected-swing assignment"):
-        pickle.loads(pickle.dumps(reducer))
+        reducer_store.append(stale[-1])
+    assert (dict(reducer.states), reducer.cursor) == reducer_before
 
 
 def _completed_day_high_candidate() -> tuple[MarketEvent, ...]:
@@ -2801,14 +2799,6 @@ def test_normal_canonical_append_does_not_walk_complete_provenance(
 
 
 def test_timeframe_reducer_validation_uses_persistent_indexes() -> None:
-    class NoFullHistoryScan(dict[str, MarketEvent]):
-        def values(self):
-            raise AssertionError("timeframe reducer scanned complete history")
-
-    reducer = TimeframeEventReducer(
-        semantic_registry_identity="indexed-reducer-test"
-    )
-    reducer._events_by_id = NoFullHistoryScan()
     context, candidate = _legacy_range_boundary_candidate(
         prefix="indexed-reducer",
         minutes=0,
@@ -2816,19 +2806,30 @@ def test_timeframe_reducer_validation_uses_persistent_indexes() -> None:
         side="above",
         level_id="indexed-reducer-level",
     )
+    store = EventStore.from_events((context, candidate))
+    reducer = TimeframeEventReducer(
+        event_store=store,
+        semantic_registry_identity="indexed-reducer-test",
+    )
+    store.events = lambda **_kwargs: (_ for _ in ()).throw(
+        AssertionError("timeframe reducer scanned complete history")
+    )
 
-    assert reducer.apply(context) is None
-    assert reducer.apply(candidate) is not None
+    assert reducer.consume_available() == (context, candidate)
+    assert Timeframe.M5 in reducer.states
+    assert "_events_by_id" not in reducer.__dict__
+    assert "_event_ids" not in reducer.__dict__
 
 
 def test_timeframe_reducer_rejects_a_second_crossing_terminal_atomically(
 ) -> None:
     events = _crossing_chain(prefix="reducer-terminal-unique")
+    store = EventStore.from_events(events)
     reducer = TimeframeEventReducer(
+        event_store=store,
         semantic_registry_identity="reducer-terminal-unique-test"
     )
-    for event in events:
-        reducer.apply(event)
+    reducer.consume_available()
 
     penetration = next(
         event for event in events if event.kind is EventKind.LEVEL_PENETRATED
@@ -2840,7 +2841,8 @@ def test_timeframe_reducer_rejects_a_second_crossing_terminal_atomically(
         timeframe=terminal.timeframe,
         close=101.0,
     )
-    reducer.apply(later_bar)
+    store.append(later_bar)
+    reducer.consume_available()
     duplicate = replace(
         _with_evidence(terminal, resolved_at=_clock(4).isoformat()),
         event_id="reducer-terminal-second",
@@ -2850,15 +2852,17 @@ def test_timeframe_reducer_rejects_a_second_crossing_terminal_atomically(
         source_event_ids=(penetration.event_id, later_bar.event_id),
         sequence_no=1,
     )
-    before = pickle.dumps(reducer.__dict__)
+    before = (dict(reducer.states), reducer.cursor)
 
     with pytest.raises(ValueError, match="already has an immutable terminal"):
-        reducer.apply(duplicate)
-    assert pickle.dumps(reducer.__dict__) == before
+        store.append(duplicate)
+    assert (dict(reducer.states), reducer.cursor) == before
 
 
 def test_timeframe_reducer_invalid_owner_metadata_is_failure_atomic() -> None:
+    store = EventStore()
     reducer = TimeframeEventReducer(
+        event_store=store,
         semantic_registry_identity="reducer-failure-atomic-test"
     )
     malformed = _with_evidence(
@@ -2870,46 +2874,40 @@ def test_timeframe_reducer_invalid_owner_metadata_is_failure_atomic() -> None:
         active_timeframes=(Timeframe.M1.value, Timeframe.M5.value),
         source_timeframe="not-a-timeframe",
     )
-    before = pickle.dumps(reducer.__dict__)
+    store.append(malformed)
+    before = (dict(reducer.states), reducer.cursor)
 
     with pytest.raises(ValueError, match="not-a-timeframe"):
-        reducer.apply(malformed)
-    assert pickle.dumps(reducer.__dict__) == before
+        reducer.consume_available()
+    assert (dict(reducer.states), reducer.cursor) == before
 
 
-def test_timeframe_reducer_rebuilds_legacy_pickle_indexes_once() -> None:
+def test_timeframe_reducer_pickle_keeps_only_store_bound_compact_state() -> None:
+    store = EventStore()
     reducer = TimeframeEventReducer(
+        event_store=store,
         semantic_registry_identity="legacy-reducer-index-test"
     )
     bar = _normalized_bar("legacy-reducer-index-bar", 0)
-    assert reducer.apply(bar) is not None
-    before = (
-        dict(reducer.states),
-        reducer._last_order_key,
-        set(reducer._event_ids),
-        dict(reducer._events_by_id),
-        dict(reducer._normalized_bar_event_ids),
-    )
+    store.append(bar)
+    assert reducer.consume_available() == (bar,)
+    before = (dict(reducer.states), reducer.cursor)
     duplicate = replace(
         bar,
         event_id="legacy-reducer-index-bar-conflict",
         sequence_no=1,
     )
     with pytest.raises(ValueError, match="root clock already"):
-        reducer.apply(duplicate)
-    assert dict(reducer.states) == before[0]
-    assert reducer._last_order_key == before[1]
-    assert reducer._event_ids == before[2]
-    assert reducer._events_by_id == before[3]
-    assert reducer._normalized_bar_event_ids == before[4]
-    for name in (
+        store.append(duplicate)
+    assert (dict(reducer.states), reducer.cursor) == before
+    assert not {
+        "_event_ids",
+        "_events_by_id",
         "_normalized_bar_event_ids",
         "_terminal_crossing_event_ids",
         "_latest_protected_assignment_event_ids",
-        "_latest_protected_assignment_event_ids_by_timeframe",
         "_unresolved_forward_reference_ids",
-    ):
-        reducer.__dict__.pop(name)
+    }.intersection(reducer.__dict__)
 
     restored = pickle.loads(pickle.dumps(reducer))
     context, candidate = _legacy_range_boundary_candidate(
@@ -2920,11 +2918,9 @@ def test_timeframe_reducer_rebuilds_legacy_pickle_indexes_once() -> None:
         level_id="legacy-reducer-index-level",
     )
 
-    assert restored.apply(context) is not None
-    assert restored.apply(candidate) is not None
-    assert restored._normalized_bar_event_ids == {
-        (bar.timeframe, bar.known_at): bar.event_id
-    }
+    restored.event_store.append_batch((context, candidate))
+    assert restored.consume_available() == (context, candidate)
+    assert Timeframe.M5 in restored.states
 
 
 def test_legacy_unresolved_forward_reference_still_detects_cycle() -> None:

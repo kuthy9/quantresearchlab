@@ -71,8 +71,8 @@ _REQUIRED_PRIMITIVE_PROTOCOLS = (
 )
 _LIVE_READINESS_TOKEN = object()
 RUNTIME_ACTION_POLICY_SCHEMA_VERSION = 2
-NEUTRAL_ENGINE_CHECKPOINT_SCHEMA_VERSION = 7
-MODEL_SCHEMA_VERSION = 4
+NEUTRAL_ENGINE_CHECKPOINT_SCHEMA_VERSION = 8
+MODEL_SCHEMA_VERSION = 5
 ACTION_PIPELINE_SCHEMA_VERSION = 1
 LEGACY_ACTION_PIPELINE_MODE = "legacy_decision_risk_compat"
 
@@ -227,6 +227,29 @@ class ContinuousSMCEngine:
         foundation_version = state.get("_foundation_version")
         foundation_identity = state.get("_foundation_registry_identity")
         action_pipeline_mode = state.get("_action_pipeline_mode")
+        observer = state.get("observer")
+        eye_snapshot_bound = True
+        if last_snapshot is not None:
+            eye_snapshot_bound = False
+            try:
+                market_snapshot = last_snapshot.observation.market_snapshot
+                audit_store = observer.audit_store
+                publisher = observer.market_snapshot_publisher
+                reducer = publisher._event_reducer
+                eye_snapshot_bound = bool(
+                    market_snapshot is not None
+                    and observer.memory._audit_store is audit_store
+                    and publisher.event_store is audit_store
+                    and reducer.event_store is audit_store
+                    and reducer.cursor == len(audit_store)
+                    and market_snapshot.event_count == len(audit_store)
+                    and market_snapshot.event_prefix_fingerprint
+                    == audit_store.fingerprint()
+                    and market_snapshot.current_facts
+                    == reducer.current_facts()
+                )
+            except (AttributeError, TypeError, ValueError):
+                eye_snapshot_bound = False
         if (
             state.get("_neutral_checkpoint_schema_version")
             != NEUTRAL_ENGINE_CHECKPOINT_SCHEMA_VERSION
@@ -236,6 +259,7 @@ class ContinuousSMCEngine:
             or "_foundation_registry_identity" not in state
             or "_action_pipeline_mode" not in state
             or action_pipeline_mode != LEGACY_ACTION_PIPELINE_MODE
+            or not eye_snapshot_bound
             or (foundation_version is None) != (foundation_identity is None)
             or foundation_version not in {None, FOUNDATION_VERSION}
             or foundation_identity not in {

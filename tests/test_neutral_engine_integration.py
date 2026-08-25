@@ -662,8 +662,8 @@ def test_engine_neutral_state_is_pickle_checkpoint_ready() -> None:
     )
     encoded = pickle.dumps(engine, protocol=pickle.HIGHEST_PROTOCOL)
     resumed = pickle.loads(encoded)
-    assert NEUTRAL_ENGINE_CHECKPOINT_SCHEMA_VERSION == 7
-    assert engine.__getstate__()["_neutral_checkpoint_schema_version"] == 7
+    assert NEUTRAL_ENGINE_CHECKPOINT_SCHEMA_VERSION == 8
+    assert engine.__getstate__()["_neutral_checkpoint_schema_version"] == 8
     assert resumed.neutral_market_state == engine.neutral_market_state
     assert resumed.last_snapshot == engine.last_snapshot
     assert "market_snapshot" not in snapshot.__dict__
@@ -689,6 +689,89 @@ def test_engine_neutral_state_is_pickle_checkpoint_ready() -> None:
     drifted._foundation_registry_identity = "0" * 64
     with pytest.raises(ValueError, match="checkpoint neutral market state schema"):
         pickle.loads(pickle.dumps(drifted, protocol=pickle.HIGHEST_PROTOCOL))
+
+    commitment_tamper = pickle.loads(encoded)
+    committed_market = (
+        commitment_tamper.last_snapshot.observation.market_snapshot
+    )
+    assert committed_market.event_count > 0
+    object.__setattr__(
+        committed_market,
+        "event_count",
+        committed_market.event_count - 1,
+    )
+    with pytest.raises(
+        ValueError,
+        match="checkpoint neutral market state schema",
+    ):
+        pickle.loads(
+            pickle.dumps(
+                commitment_tamper,
+                protocol=pickle.HIGHEST_PROTOCOL,
+            )
+        )
+
+    fact_tamper = pickle.loads(encoded)
+    fact_market = fact_tamper.last_snapshot.observation.market_snapshot
+    fact_groups = {
+        name: getattr(fact_market.current_facts, name)
+        for name in ("structure", "liquidity", "displacement", "zones", "ranges")
+    }
+    fact_name, fact_values = next(
+        (name, values) for name, values in fact_groups.items() if values
+    )
+    changed = replace(
+        fact_values[0],
+        strength=0.0 if fact_values[0].strength != 0.0 else 1.0,
+    )
+    object.__setattr__(
+        fact_market,
+        "current_facts",
+        replace(
+            fact_market.current_facts,
+            **{fact_name: (changed, *fact_values[1:])},
+        ),
+    )
+    with pytest.raises(
+        ValueError,
+        match="checkpoint neutral market state schema",
+    ):
+        pickle.loads(
+            pickle.dumps(fact_tamper, protocol=pickle.HIGHEST_PROTOCOL)
+        )
+
+    aliased_event_tamper = pickle.loads(encoded)
+    aliased_market = (
+        aliased_event_tamper.last_snapshot.observation.market_snapshot
+    )
+    aliased_values = tuple(
+        event
+        for name in (
+            "structure",
+            "structure_context",
+            "liquidity",
+            "displacement",
+            "zones",
+            "ranges",
+        )
+        for event in getattr(aliased_market.current_facts, name)
+    )
+    assert aliased_values
+    aliased_event = aliased_values[0]
+    assert (
+        aliased_event_tamper.observer.audit_store.get(aliased_event.event_id)
+        is aliased_event
+    )
+    object.__setattr__(
+        aliased_event,
+        "strength",
+        0.0 if aliased_event.strength != 0.0 else 1.0,
+    )
+    with pytest.raises(ValueError, match="mutated committed evidence"):
+        pickle.dumps(
+            aliased_event_tamper,
+            protocol=pickle.HIGHEST_PROTOCOL,
+        )
 
     duplicate = pickle.loads(pickle.dumps(snapshot))
     duplicate.__dict__["market_snapshot"] = "forged-duplicate"

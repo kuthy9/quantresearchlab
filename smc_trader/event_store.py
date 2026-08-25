@@ -10,6 +10,7 @@ from __future__ import annotations
 from collections import ChainMap, Counter
 from dataclasses import dataclass, fields, replace
 import hashlib
+from itertools import islice
 import json
 import math
 from pathlib import Path, PurePosixPath
@@ -541,6 +542,15 @@ class EventStore:
     def __getstate__(self) -> dict[str, Any]:
         # Carry canonical evidence exactly once.  All maps and the prefix
         # hasher are derived and are rebuilt/revalidated by ``__setstate__``.
+        if (
+            len(self._events) != len(self._digests)
+            or any(
+                self._by_id.get(event.event_id) is not event
+                or self._digests.get(event.event_id) != _event_digest(event)
+                for event in self._events
+            )
+        ):
+            raise ValueError("event store contains mutated committed evidence")
         return {
             "semantic_version": self.semantic_version,
             "_definition_identity": self._definition_identity,
@@ -3851,6 +3861,28 @@ class EventStore:
             digests=(
                 self._digests[event.event_id]
                 for event in self.events(known_at=known_at)
+            ),
+        )
+
+    def prefix_fingerprint(self, event_count: int) -> str:
+        """Return a checkpoint-only commitment to an exact stored prefix.
+
+        Normal hot consumers use the cached full ``fingerprint`` after they
+        consume the current suffix.  This bounded restore/checkpoint helper
+        exists for the valid case where projection transport was appended
+        after the last physical-state publication.
+        """
+
+        if type(event_count) is not int or not 0 <= event_count <= len(self):
+            raise ValueError("event store prefix count is out of range")
+        if event_count == len(self):
+            return self.fingerprint()
+        return _fingerprint_from_digests(
+            semantic_version=self.semantic_version,
+            definition_identity=self.semantic_definition_identity,
+            digests=(
+                self._digests[event.event_id]
+                for event in islice(self._events, event_count)
             ),
         )
 

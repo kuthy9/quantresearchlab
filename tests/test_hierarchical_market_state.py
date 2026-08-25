@@ -203,6 +203,7 @@ def test_child_break_cannot_formally_invalidate_parent_structure() -> None:
 
 def test_parent_acceptance_persists_formal_invalidation_until_replacement() -> None:
     publisher = MarketSnapshotPublisher(
+        event_store=EventStore(),
         semantic_registry_identity="registry-test"
     )
     prior = _empty_state(
@@ -326,6 +327,7 @@ def test_stale_opposed_mss_does_not_warn_after_child_realigns() -> None:
 
 def test_snapshot_projection_replays_to_same_hierarchical_state() -> None:
     publisher = MarketSnapshotPublisher(
+        event_store=EventStore(),
         semantic_registry_identity="registry-test"
     )
     first_start = _clock("2025-01-06 09:30")
@@ -373,7 +375,6 @@ def test_snapshot_projection_replays_to_same_hierarchical_state() -> None:
         frames=frames,
         inventory=(),
         displacement=None,
-        semantic_events=(),
         anomalies=(),
     )
     second_bar = m1(first_bar.end, 100.25)
@@ -386,7 +387,6 @@ def test_snapshot_projection_replays_to_same_hierarchical_state() -> None:
         frames=frames,
         inventory=(),
         displacement=None,
-        semantic_events=(),
         anomalies=(),
     )
     store = EventStore.from_events(

@@ -539,10 +539,10 @@ def test_component_digest_versions_are_explicit_and_old_checkpoints_replay() -> 
 
     current_checkpoint = current.compact_runtime_checkpoint()
     assert current_checkpoint["schema_version"] == (
-        "shadow_compact_runtime_v4"
+        "shadow_compact_runtime_v5"
     )
     previous_checkpoint = copy.deepcopy(current_checkpoint)
-    previous_checkpoint["schema_version"] = "shadow_compact_runtime_v3"
+    previous_checkpoint["schema_version"] = "shadow_compact_runtime_v4"
     with pytest.raises(ShadowLiveError, match="legacy compact"):
         ShadowLiveRunner.from_compact_runtime_checkpoint(
             pickle.loads(pickle.dumps(previous_checkpoint)),
@@ -830,9 +830,11 @@ def test_compact_restore_rehydrates_all_engine_derived_indexes() -> None:
         target,
         strength=1.0 if target.strength != 1.0 else 0.0,
     )
+    # The store-bound compact reducer now rejects changed immutable bytes
+    # before the later Foundation source-registry revalidation runs.
     with pytest.raises(
         ShadowLiveError,
-        match="foundation source registry differs from audit history",
+        match="compact checkpoint Engine state cannot be revalidated",
     ):
         ShadowLiveRunner.from_compact_runtime_checkpoint(
             event_tamper,

@@ -1957,6 +1957,7 @@ class CausalObserver:
             definition_identity=self.semantic_registry.definition_identity,
         )
         self.market_snapshot_publisher = MarketSnapshotPublisher(
+            event_store=self.audit_store,
             semantic_registry_identity=self.semantic_registry.identity,
             # The normal Trading Eye is event-authoritative.  The explicitly
             # constrained Group-4 authority scanner does not publish atomic
@@ -9718,8 +9719,6 @@ class CausalObserver:
                 )
 
     def _record_interaction_events(self, update: InteractionUpdate) -> None:
-        if update.boundary_reason is not None:
-            return
         path_transitions = update.interaction_path_transitions
         milestone_transitions = update.milestone_transitions
 
@@ -12170,7 +12169,6 @@ class CausalObserver:
                     frames=frames,
                     inventory=liquidity_inventory,
                     displacement=displacement,
-                    semantic_events=semantic_events,
                     anomalies=market_anomalies,
                     emit_projection_events=(
                         self.config.persist_state_projections
@@ -12200,6 +12198,7 @@ class CausalObserver:
                     )
             if self.config.persist_state_projections:
                 self.memory.flush_audit()
+            self.market_snapshot_publisher._consume_committed_projection_tail()
             semantic_events = self.audit_store.events_since(audit_start)
             foundation_projection = (
                 None
@@ -12234,6 +12233,11 @@ class CausalObserver:
                     asof=market_snapshot.asof,
                 ),
                 events_this_update=semantic_events,
+                event_count=self.market_snapshot_publisher._event_reducer.cursor,
+                event_prefix_fingerprint=self.audit_store.fingerprint(),
+                current_facts=(
+                    self.market_snapshot_publisher._event_reducer.current_facts()
+                ),
                 foundation=foundation_projection,
                 foundation_range_locations=(
                     foundation_dual_range_locations(
