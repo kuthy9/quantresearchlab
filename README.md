@@ -534,3 +534,7 @@ See [`docs/architecture.md`](docs/architecture.md),
 [`docs/self_review_checklist.md`](docs/self_review_checklist.md). The exact
 implementation/remaining-work matrix is
 [`docs/refactor/current_implementation_status.md`](docs/refactor/current_implementation_status.md).
+The complete tracked-file responsibility map and consolidation audit is
+[`docs/refactor/repository_file_inventory.md`](docs/refactor/repository_file_inventory.md);
+its `REVIEW` labels mean versioned consolidation or archival review, never
+permission to delete hash-bound evidence or causal contracts directly.

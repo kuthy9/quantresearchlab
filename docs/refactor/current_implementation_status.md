@@ -60,6 +60,14 @@ runtime change.
 
 ### Simplification audit and retained migration debt
 
+The complete 288-file baseline census, static consumer links, exact-byte
+duplicate check, and consolidation priorities are recorded in the
+[repository file inventory](repository_file_inventory.md). It found no
+unreferenced `smc_trader` runtime module, no unreferenced current config or
+semantic authority, and no byte-identical tracked file pair. A zero inbound
+reference is therefore treated only as triage: direct CLIs, tests, design
+documents, and frozen governance artifacts are legitimate roots and leaves.
+
 The removed `signal_empirical_admission` module had no runtime or script
 consumer; its tests exercised only that module. It was nevertheless the sole,
 never-integrated converter from research fit/receipt objects to production-

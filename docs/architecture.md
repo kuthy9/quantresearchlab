@@ -100,6 +100,26 @@ Trade Intent → Phase 8 execution evaluator / immutable order FSM v1.5
 exact bar + execution + account evidence → Phase 9 parity journal
 ```
 
+### Reasoning responsibilities
+
+The model uses a one-way reasoning chain. Each layer answers a different
+question and may consume only already-known outputs from the layer above it:
+
+| Reasoning mode | Components | Question answered | Prohibited authority |
+|---|---|---|---|
+| Data fact admission | `io`, `market_clock`, `CausalMarketReader` | Which completed clocks and prices are legally knowable now? | No structure, probability, or action interpretation. |
+| Atomic observation | `CausalObserver`, Group 1–5 trackers, `ImmutableEventStore` | Which preregistered v1.2 market facts occurred, and from which exact sources? | No rewriting history and no trade decision. |
+| State and relation projection | timeframe/session reducers, `RelationResolver`, Foundation v2, `MarketSnapshotPublisher` | What is the deterministic current state, lifecycle, geometry, and cross-frame relation? | Foundation is an additive v1.2 projection, not a new detector or full-stack v2 authority. |
+| Competing-hypothesis reasoning | Scene Graph, `PlaybookBrain`, path belief, DOL, Signal Policy | Which still-falsifiable path or target is better supported by admitted evidence? | With no fitted/admitted artifacts, outputs remain neutral or shadow-only. |
+| Action constraint and validation | Trade Intent, Decision, Risk, execution FSM, simulator, Phase 7–9 runners | Is an already-described candidate allowed to become an intent, simulated action, or no-order audit fact? | No retroactive semantic change, broker authority, profit claim, or sealed-OOS access. |
+
+The legacy `Decision`/`Risk`/sequential simulator path and the newer
+`TradeIntent`/risk-approval/execution-FSM path are both live development
+contracts but are not yet one vertical production path. Removing either before
+the non-zero-intent migration would break current consumers. The exact owner,
+consumer, disposition, size, and responsibility of every tracked file is in
+the [repository file inventory](refactor/repository_file_inventory.md).
+
 ### Trading Eye responsibility layers
 
 The requested five layers exist as responsibilities in the reused runtime;
