@@ -14,6 +14,8 @@ ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts/check_phase7_probability_readiness.py"
 CONTRACT = ROOT / "configs/phase7_probability_fit_admission.json"
 
+pytestmark = pytest.mark.research_orchestration
+
 
 def _module():
     spec = importlib.util.spec_from_file_location("phase7_readiness", SCRIPT)

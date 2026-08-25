@@ -171,8 +171,13 @@ development Engine retains its existing Scene Graph/Brain composition, while
 runs. This changes no checked-in model bytes, semantic identity, Snapshot
 schema, or current development-Engine output. Phase 7 empirical, Phase 8 runner,
 and Phase 9 file/operational runner tests are registered as the separate
-`research_runner` group; they remain executable and are not deleted, but no
-longer inflate the default semantic/runtime test loop.
+`research_runner` group. The Phase-7 readiness CLI test is registered as
+`research_orchestration`. They remain executable and are not deleted, but no
+longer inflate the default semantic/runtime test loop. The remaining runners
+cannot be directly deleted: Phase 7 is the sole materialize/fit/publish
+implementation, Phase 8 is bound by its runner contract and run template, and
+Phase 9 v2 supplies the shared input codec used by Phase 7, v3, and the Week-1
+materializer while v3 has a distinct WAL/capacity/checkpoint contract.
 
 This is only the safe boundary closure. `MarketSnapshot` already obtains
 `TimeframeState` from canonical events, but compatibility Brain and Scene Graph
