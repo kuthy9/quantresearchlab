@@ -38,7 +38,7 @@ governance artifacts during ordinary development.
   Foundation parent equal to the atomic version. Engine construction
   strict-loads the pair once; Engine/Shadow/checkpoint state freezes and
   compares the existing identities. Missing, unknown, mismatched, or
-  extra-field selections and every Engine checkpoint before current schema 5
+  extra-field selections and every Engine checkpoint before current schema 6
   fail closed.
 - [ ] Atomic history remains exclusively in `EventStore`; Foundation
   revision history remains exclusively in `FoundationRecordLedger`. Hot

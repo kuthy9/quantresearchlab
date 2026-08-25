@@ -1366,7 +1366,7 @@ def _sha(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def test_v2_template_lists_every_runtime_code_binding_exactly() -> None:
+def test_v2_template_preserves_historical_numbered_runtime_paths() -> None:
     expected_runtime = {
         "runtime_package_init": "smc_trader/__init__.py",
         "runtime_artifact_stream": "smc_trader/artifact_stream.py",
@@ -1382,8 +1382,8 @@ def test_v2_template_lists_every_runtime_code_binding_exactly() -> None:
         "runtime_liquidity": "smc_trader/liquidity.py",
         "runtime_displacement": "smc_trader/displacement.py",
         "runtime_displacement_observer": "smc_trader/displacement_observer.py",
-        "runtime_group3": "smc_trader/group3.py",
-        "runtime_group4": "smc_trader/group4.py",
+        "runtime_group3": "smc_trader/zone.py",
+        "runtime_group4": "smc_trader/range_auction.py",
         "runtime_group5": "smc_trader/group5.py",
         "runtime_scene_graph": "smc_trader/scene_graph.py",
         "runtime_signal_research": "smc_trader/signal_research.py",
@@ -1399,7 +1399,11 @@ def test_v2_template_lists_every_runtime_code_binding_exactly() -> None:
     assert dict(REQUIRED_RUNTIME_CODE_BINDINGS) == expected_runtime
     assert set(bindings) == REQUIRED_IDENTITY_BINDINGS
     for name, relative_path in REQUIRED_RUNTIME_CODE_BINDINGS.items():
-        assert bindings[name] == {"path": relative_path, "sha256": None}
+        historical_path = {
+            "runtime_group3": "smc_trader/group3.py",
+            "runtime_group4": "smc_trader/group4.py",
+        }.get(name, relative_path)
+        assert bindings[name] == {"path": historical_path, "sha256": None}
         assert (ROOT / relative_path).is_file()
 
 

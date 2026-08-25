@@ -139,7 +139,7 @@ strict loader also requires the Foundation registry's declared parent to equal
 the selected atomic version. This is a paired selection, not a third identity
 or a unified “full-stack v2”. The Engine loads the registries once, derives the
 internal Foundation-enabled flag, and Shadow Live checks the same identities.
-The current Engine checkpoint schema is 5; earlier schemas cannot resume into
+The current Engine checkpoint schema is 6; earlier schemas cannot resume into
 this combined Observation, Foundation, and Neutral-state contract.
 The exact June-2024 bounded construction/replay census, performance A/B, and
 Foundation-enabled 200-clock Engine file parity from the pre-compact runtime

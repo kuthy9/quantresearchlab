@@ -23,18 +23,18 @@ from .displacement_observer import (
 )
 from .event_store import EventStore, event_order_key
 from .foundation_adapter import CanonicalFoundationAdapter
-from .group3 import (
-    CausalGroup3Tracker,
+from .zone import (
+    CausalZoneTracker,
     FVG_BOUNDARY_REASONS,
-    Group3BOSSource,
-    Group3Protocol,
-    Group3RawOnlyStructureDisposition,
-    Group3Update,
+    ZoneBOSSource,
+    ZoneProtocol,
+    ZoneRawOnlyStructureDisposition,
+    ZoneUpdate,
 )
-from .group4 import (
-    CausalGroup4Tracker,
-    Group4Protocol,
-    Group4Update,
+from .range_auction import (
+    CausalRangeAuctionTracker,
+    RangeAuctionProtocol,
+    RangeAuctionUpdate,
 )
 from .group5 import (
     CausalGroup5Reducer,
@@ -62,7 +62,7 @@ from .model import (
     ExecutionObservation,
     FairValueGapLifecycle,
     FrameObservation,
-    GROUP4_HARD_BOUNDARY_REASONS,
+    RANGE_AUCTION_HARD_BOUNDARY_REASONS,
     LiquidityInventoryItem,
     LiquidityInventoryLifecycle,
     LiquidityPoolLifecycle,
@@ -156,8 +156,8 @@ class ObserverConfig:
     structure_protocol: str | None = None
     liquidity_protocol: str | None = None
     displacement_protocol: str | None = None
-    group3_protocol: str | None = None
-    group4_protocol: str | None = None
+    zone_protocol: str | None = None
+    range_auction_protocol: str | None = None
     group5_protocol: str | None = None
     semantic_registry: str = "semantics/registry_v1_2.yaml"
     scale_specs: tuple[ScaleSpec, ...] = ()
@@ -165,7 +165,7 @@ class ObserverConfig:
     # causal Eye publication path. Full Engine composition opts in explicitly.
     project_scene_graph: bool = False
     materialize_event_view: bool = True
-    group4_projection_only: bool = False
+    range_auction_projection_only: bool = False
     eye_authority_mode: bool = False
     canonical_foundation_enabled: bool = False
     typed_transition_delta_transport: bool = False
@@ -1962,14 +1962,14 @@ class CausalObserver:
             # constrained Group-4 authority scanner does not publish atomic
             # BAR/semantic facts and therefore remains a labelled projection
             # compatibility mode instead of pretending to be atomic.
-            atomic_authority=not self.config.group4_projection_only,
+            atomic_authority=not self.config.range_auction_projection_only,
         )
         self.last_market_snapshot: MarketSnapshot | None = None
         if type(self.config.project_scene_graph) is not bool:
             raise ValueError("scene-graph projection flag must be boolean")
         if type(self.config.materialize_event_view) is not bool:
             raise ValueError("event-view materialization flag must be boolean")
-        if type(self.config.group4_projection_only) is not bool:
+        if type(self.config.range_auction_projection_only) is not bool:
             raise ValueError("Group 4 projection-only flag must be boolean")
         if type(self.config.eye_authority_mode) is not bool:
             raise ValueError("eye-authority mode flag must be boolean")
@@ -1998,12 +1998,12 @@ class CausalObserver:
                 self.config.structure_protocol,
                 self.config.liquidity_protocol,
                 self.config.displacement_protocol,
-                self.config.group3_protocol,
-                self.config.group4_protocol,
+                self.config.zone_protocol,
+                self.config.range_auction_protocol,
                 self.config.group5_protocol,
             )
             if (
-                self.config.group4_projection_only
+                self.config.range_auction_projection_only
                 or any(protocol is None for protocol in typed_protocols)
             ):
                 raise ValueError(
@@ -2015,12 +2015,12 @@ class CausalObserver:
                 self.config.structure_protocol,
                 self.config.liquidity_protocol,
                 self.config.displacement_protocol,
-                self.config.group3_protocol,
-                self.config.group4_protocol,
+                self.config.zone_protocol,
+                self.config.range_auction_protocol,
                 self.config.group5_protocol,
             )
             if (
-                self.config.group4_projection_only
+                self.config.range_auction_projection_only
                 or any(protocol is None for protocol in typed_protocols)
             ):
                 raise ValueError(
@@ -2033,9 +2033,9 @@ class CausalObserver:
             and not self.config.materialize_event_view
             and (
                 self.config.project_scene_graph
-                or self.config.group4_protocol is None
+                or self.config.range_auction_protocol is None
                 or self.config.displacement_protocol is not None
-                or self.config.group3_protocol is not None
+                or self.config.zone_protocol is not None
                 or self.config.group5_protocol is not None
             )
         ):
@@ -2043,12 +2043,12 @@ class CausalObserver:
                 "a lightweight event view is limited to the Group 1-2 + "
                 "Group 4 authority scanner with Scene Graph disabled"
             )
-        if self.config.group4_projection_only and (
+        if self.config.range_auction_projection_only and (
             self.config.materialize_event_view
             or self.config.project_scene_graph
-            or self.config.group4_protocol is None
+            or self.config.range_auction_protocol is None
             or self.config.displacement_protocol is not None
-            or self.config.group3_protocol is not None
+            or self.config.zone_protocol is not None
             or self.config.group5_protocol is not None
         ):
             raise ValueError(
@@ -2109,7 +2109,7 @@ class CausalObserver:
                 "liquidity protocol requires the confirmed-swing tracker"
             )
         if (
-            self.config.group3_protocol is not None
+            self.config.zone_protocol is not None
             and (
                 displacement_protocol is None
                 or structure_config is None
@@ -2118,21 +2118,21 @@ class CausalObserver:
             raise ValueError(
                 "Group 3 requires typed displacement and structure/BOS"
             )
-        group3_protocol = (
-            Group3Protocol.from_file(self.config.group3_protocol)
-            if self.config.group3_protocol is not None
+        zone_protocol = (
+            ZoneProtocol.from_file(self.config.zone_protocol)
+            if self.config.zone_protocol is not None
             else None
         )
-        if group3_protocol is not None and (
+        if zone_protocol is not None and (
             not math.isclose(
-                group3_protocol.tick_size,
+                zone_protocol.tick_size,
                 self.config.tick_size,
                 rel_tol=0.0,
                 abs_tol=0.0,
             )
             or displacement_protocol is None
             or not math.isclose(
-                group3_protocol.tick_size,
+                zone_protocol.tick_size,
                 displacement_protocol.tick_size,
                 rel_tol=0.0,
                 abs_tol=0.0,
@@ -2141,9 +2141,9 @@ class CausalObserver:
             raise ValueError(
                 "Group 3, displacement and observer tick sizes disagree"
             )
-        self._group3_tracker = (
-            CausalGroup3Tracker(
-                group3_protocol,
+        self._zone_tracker = (
+            CausalZoneTracker(
+                zone_protocol,
                 displacement_protocol_hash=(
                     displacement_protocol.protocol_hash
                     if displacement_protocol is not None
@@ -2156,13 +2156,13 @@ class CausalObserver:
                 ),
             )
             if (
-                group3_protocol is not None
+                zone_protocol is not None
                 and self._displacement_downstream_authoritative
             )
             else None
         )
         self._group3_hidden_entity_ids: set[str] = set()
-        self._last_group3_foundation_projection: Group3Update | None = None
+        self._last_zone_foundation_projection: ZoneUpdate | None = None
         self._structure_trackers = (
             {
                 timeframe: StructureTracker(timeframe, structure_config)
@@ -2199,7 +2199,7 @@ class CausalObserver:
             tuple[pd.Timestamp | None, tuple],
         ] = {}
         if (
-            self.config.group4_protocol is not None
+            self.config.range_auction_protocol is not None
             and (
                 structure_config is None
                 or liquidity_config is None
@@ -2211,39 +2211,39 @@ class CausalObserver:
                 "Group 4 requires typed H1 structure, "
                 "support/resistance and pools"
             )
-        group4_protocol = (
-            Group4Protocol.from_file(self.config.group4_protocol)
-            if self.config.group4_protocol is not None
+        range_auction_protocol = (
+            RangeAuctionProtocol.from_file(self.config.range_auction_protocol)
+            if self.config.range_auction_protocol is not None
             else None
         )
-        if group4_protocol is not None and (
+        if range_auction_protocol is not None and (
             not math.isclose(
-                group4_protocol.tick_size,
+                range_auction_protocol.tick_size,
                 self.config.tick_size,
                 rel_tol=0.0,
                 abs_tol=0.0,
             )
             or liquidity_config is None
             or structure_config is None
-            or group4_protocol.source_group12_protocol_hash
+            or range_auction_protocol.source_group12_protocol_hash
             != liquidity_config.protocol_hash
         ):
             raise ValueError(
                 "Group 4 and Group 1-2 protocol bindings disagree"
             )
-        self._group4_tracker = (
-            CausalGroup4Tracker(group4_protocol)
-            if group4_protocol is not None
+        self._range_auction_tracker = (
+            CausalRangeAuctionTracker(range_auction_protocol)
+            if range_auction_protocol is not None
             else None
         )
-        self._group4_boundary_update: Group4Update | None = None
+        self._group4_boundary_update: RangeAuctionUpdate | None = None
         self._group4_bootstrap_range_transitions: list[
             DealingRangeState
         ] = []
         self._group4_cold_pairs_marked = False
         if self.config.group5_protocol is not None and (
-            group3_protocol is None
-            or group4_protocol is None
+            zone_protocol is None
+            or range_auction_protocol is None
             or structure_config is None
             or liquidity_config is None
         ):
@@ -2262,18 +2262,18 @@ class CausalObserver:
                 rel_tol=0.0,
                 abs_tol=0.0,
             )
-            or group3_protocol is None
-            or group4_protocol is None
+            or zone_protocol is None
+            or range_auction_protocol is None
             or structure_config is None
             or liquidity_config is None
             or group5_protocol.source_group12_protocol_hash
             != structure_config.protocol_hash
             or group5_protocol.source_group12_protocol_hash
             != liquidity_config.protocol_hash
-            or group5_protocol.source_group3_protocol_hash
-            != group3_protocol.protocol_hash
-            or group5_protocol.source_group4_protocol_hash
-            != group4_protocol.protocol_hash
+            or group5_protocol.source_zone_protocol_hash
+            != zone_protocol.protocol_hash
+            or group5_protocol.source_range_auction_protocol_hash
+            != range_auction_protocol.protocol_hash
         ):
             raise ValueError(
                 "Group 5 and its Groups 1-4 protocol bindings disagree"
@@ -2382,7 +2382,7 @@ class CausalObserver:
         self._raw_break_event_ids: dict[str, str] = {}
         self._raw_only_structure_dispositions: dict[
             str,
-            Group3RawOnlyStructureDisposition,
+            ZoneRawOnlyStructureDisposition,
         ] = {}
         self._qualified_structure_event_ids: dict[str, str] = {}
         self._displacement_event_ids: dict[str, str] = {}
@@ -2475,10 +2475,10 @@ class CausalObserver:
         )
 
     @property
-    def last_group3_foundation_projection(self) -> Group3Update | None:
+    def last_zone_foundation_projection(self) -> ZoneUpdate | None:
         """Latest committed Group-3 foundation view, outside v1.2 DTOs."""
 
-        return self._last_group3_foundation_projection
+        return self._last_zone_foundation_projection
 
     @staticmethod
     def _remember_bounded(
@@ -2509,7 +2509,7 @@ class CausalObserver:
         # Delta transport is an authority-scan projection, not causal state.
         # A hard epoch boundary must not retain prior-contract signatures.
         self._typed_delta_signatures.clear()
-        self._last_group3_foundation_projection = None
+        self._last_zone_foundation_projection = None
         self._group5_boundary_update = (
             self._group5_reducer.on_boundary(
                 reason,
@@ -2521,8 +2521,8 @@ class CausalObserver:
             else None
         )
         self._group4_boundary_update = (
-            self._group4_tracker.on_boundary(reason, observed_at)
-            if self._group4_tracker is not None
+            self._range_auction_tracker.on_boundary(reason, observed_at)
+            if self._range_auction_tracker is not None
             else None
         )
         self._group4_bootstrap_range_transitions.clear()
@@ -2641,7 +2641,7 @@ class CausalObserver:
         self._reference_last_end = None
         self._reference_coverage_start = None
         for item in (
-            () if self.config.group4_projection_only else failed_bos
+            () if self.config.range_auction_projection_only else failed_bos
         ):
             key = (item.bos_id, item.lifecycle)
             self._remember_bounded(
@@ -2984,7 +2984,7 @@ class CausalObserver:
                         candle,
                         append_retirement_events=(
                             not reference_bootstrap
-                            and not self.config.group4_projection_only
+                            and not self.config.range_auction_projection_only
                         ),
                     )
                     self._reference_last_end = candle.end
@@ -3004,15 +3004,15 @@ class CausalObserver:
                     self._invalidate_liquidity_snapshot(timeframe)
                     if (
                         timeframe is Timeframe.H1
-                        and self._group4_tracker is not None
+                        and self._range_auction_tracker is not None
                         and self._prior is None
                     ):
                         support_resistance, _, _ = (
                             liquidity_tracker.snapshot(
-                                group4_sources_only=True,
+                                range_auction_sources_only=True,
                                 include_support_resistance=True,
                             )
-                            if self.config.group4_projection_only
+                            if self.config.range_auction_projection_only
                             else liquidity_tracker.snapshot()
                         )
                         coverage_start = (
@@ -3026,7 +3026,7 @@ class CausalObserver:
                             within_group4_coverage
                             and not self._group4_cold_pairs_marked
                         ):
-                            self._group4_tracker.mark_existing_source_pairs_ineligible(
+                            self._range_auction_tracker.mark_existing_source_pairs_ineligible(
                                 tuple(
                                     zone
                                     for zone in support_resistance
@@ -3035,8 +3035,8 @@ class CausalObserver:
                                 )
                             )
                             self._group4_cold_pairs_marked = True
-                        group4_update = (
-                            self._group4_tracker.on_completed_h1(
+                        range_auction_update = (
+                            self._range_auction_tracker.on_completed_h1(
                                 candle,
                                 (
                                     support_resistance
@@ -3046,7 +3046,7 @@ class CausalObserver:
                             )
                         )
                         self._group4_bootstrap_range_transitions.extend(
-                            group4_update.range_transitions
+                            range_auction_update.range_transitions
                         )
             except Exception:
                 self._terminal_failure = (
@@ -5563,7 +5563,7 @@ class CausalObserver:
                                 "raw-only continuation suppression lacks one "
                                 "exact protected-assignment witness"
                             )
-                        disposition = Group3RawOnlyStructureDisposition(
+                        disposition = ZoneRawOnlyStructureDisposition(
                             bos_id=item.bos_id,
                             raw_break_event_id=raw_break.event_id,
                             protected_assignment_event_id=(
@@ -5960,7 +5960,7 @@ class CausalObserver:
 
     def _validate_group3_foundation_projection(
         self,
-        update: Group3Update,
+        update: ZoneUpdate,
     ) -> None:
         cores_by_id = {
             core.core_id: core for core in update.base_origin_cores
@@ -6220,13 +6220,13 @@ class CausalObserver:
 
     def _group3_raw_only_structure_dispositions(
         self,
-    ) -> tuple[Group3RawOnlyStructureDisposition, ...]:
+    ) -> tuple[ZoneRawOnlyStructureDisposition, ...]:
         """Prove provisional QOB sources that intentionally stopped at RAW."""
 
-        if self._group3_tracker is None:
+        if self._zone_tracker is None:
             return ()
-        raw_only: list[Group3RawOnlyStructureDisposition] = []
-        for completed in self._group3_tracker._pending_foundation_completed:
+        raw_only: list[ZoneRawOnlyStructureDisposition] = []
+        for completed in self._zone_tracker._pending_foundation_completed:
             for seed in completed.new_qualified_order_blocks:
                 state = seed.legacy_state
                 bos_id = seed.compatible_structure_entity_id
@@ -6522,10 +6522,10 @@ class CausalObserver:
 
     def _finalize_group3_foundation(
         self,
-        update: Group3Update,
+        update: ZoneUpdate,
         reader_update: ReaderUpdate,
-    ) -> Group3Update:
-        if self._group3_tracker is None:
+    ) -> ZoneUpdate:
+        if self._zone_tracker is None:
             return update
         sessions = {
             candle.end: session_name_phase(candle.end)[0]
@@ -6537,7 +6537,7 @@ class CausalObserver:
         raw_only_dispositions = (
             self._group3_raw_only_structure_dispositions()
         )
-        finalized = self._group3_tracker.finalize_foundation(
+        finalized = self._zone_tracker.finalize_foundation(
             update,
             bar_event_ids_by_candle_id=(
                 self._bar_event_ids_by_candle_id
@@ -6587,11 +6587,11 @@ class CausalObserver:
 
     def _finalize_group3_foundation_boundary(
         self,
-        update: Group3Update,
-    ) -> Group3Update:
-        if self._group3_tracker is None:
+        update: ZoneUpdate,
+    ) -> ZoneUpdate:
+        if self._zone_tracker is None:
             return update
-        pending = self._group3_tracker._pending_foundation_boundary
+        pending = self._zone_tracker._pending_foundation_boundary
         if pending is None:
             return update
         reason, clock = pending
@@ -6625,7 +6625,7 @@ class CausalObserver:
                     "boundary event"
                 )
             boundary_event_id = candidates[0].event_id
-        finalized = self._group3_tracker.finalize_foundation_boundary(
+        finalized = self._zone_tracker.finalize_foundation_boundary(
             update,
             boundary_event_id=boundary_event_id,
         )
@@ -6729,7 +6729,7 @@ class CausalObserver:
 
     def _foundation_group3_plans(
         self,
-        update: Group3Update | None,
+        update: ZoneUpdate | None,
         revisions: dict[tuple[object, ...], object],
     ) -> tuple[tuple[pd.Timestamp, int, str, object, tuple[str, ...] | None], ...]:
         if update is None:
@@ -7008,18 +7008,18 @@ class CausalObserver:
 
     def _foundation_balance_plans(
         self,
-        group4_update: Group4Update | None,
+        range_auction_update: RangeAuctionUpdate | None,
         revisions: dict[tuple[object, ...], object],
     ) -> tuple[
         tuple[pd.Timestamp, int, str, object, tuple[str, ...] | None], ...
     ]:
-        if group4_update is None:
+        if range_auction_update is None:
             return ()
         # Persist lifecycle transitions, not the continuously revised current
         # view.  Balance metrics remain live in Group 4; foundation records
         # freeze entry/terminal clocks without one technical heartbeat per M1
         # bar.
-        values = group4_update.range_transitions
+        values = range_auction_update.range_transitions
         plans: list[
             tuple[pd.Timestamp, int, str, object, tuple[str, ...] | None]
         ] = []
@@ -7510,9 +7510,9 @@ class CausalObserver:
                 raise ValueError(
                     "FVG structural context was not bound at creation"
                 )
-            if self._group3_tracker is None:
+            if self._zone_tracker is None:
                 raise ValueError("FVG context requires the canonical Group3 owner")
-            refreshed = self._group3_tracker.bind_fvg_foundation_context(
+            refreshed = self._zone_tracker.bind_fvg_foundation_context(
                 fvg_id=lifecycle.fvg_id,
                 parent_structure_generation_id=parent_id,
                 structural_range_id=range_id,
@@ -8037,10 +8037,10 @@ class CausalObserver:
         clock_events: Sequence[MarketEvent],
         processed_structure_ids: set[str],
         range_terminations: Sequence[tuple[str, str]],
-    ) -> Group3Update | None:
-        if self._group3_tracker is None:
+    ) -> ZoneUpdate | None:
+        if self._zone_tracker is None:
             return None
-        latest: Group3Update | None = None
+        latest: ZoneUpdate | None = None
         reset = next(
             (
                 event
@@ -8074,7 +8074,7 @@ class CausalObserver:
                     )
                 cause_event_id = candidates[0]
             self._foundation_exact_event(cause_event_id)
-            latest = self._group3_tracker.expire_fvg_foundation_context(
+            latest = self._zone_tracker.expire_fvg_foundation_context(
                 cause=FVGTerminationCause.PARENT_STRUCTURE_TERMINATED,
                 related_entity_id=generation.generation_id,
                 known_at=known_at,
@@ -8098,7 +8098,7 @@ class CausalObserver:
                 cause_event_id=cause_event_id,
                 known_at=known_at,
             )
-            latest = self._group3_tracker.expire_fvg_foundation_context(
+            latest = self._zone_tracker.expire_fvg_foundation_context(
                 cause=FVGTerminationCause.STRUCTURAL_RANGE_REPLACED,
                 related_entity_id=range_id,
                 known_at=known_at,
@@ -8116,8 +8116,8 @@ class CausalObserver:
         asof: pd.Timestamp,
         frames: Mapping[Timeframe, FrameObservation],
         histories: Mapping[Timeframe, Sequence[Candle]],
-        group3_update: Group3Update | None,
-        group4_update: Group4Update | None,
+        zone_update: ZoneUpdate | None,
+        range_auction_update: RangeAuctionUpdate | None,
         snapshot: MarketSnapshot,
         semantic_events: Sequence[MarketEvent],
     ):
@@ -8194,11 +8194,11 @@ class CausalObserver:
             *self._foundation_leg_plans(frames, plan_revisions),
             *self._foundation_boundary_plans(frames, plan_revisions),
             *self._foundation_group3_plans(
-                group3_update,
+                zone_update,
                 plan_revisions,
             ),
             *self._foundation_balance_plans(
-                group4_update,
+                range_auction_update,
                 plan_revisions,
             ),
         ]
@@ -8239,7 +8239,7 @@ class CausalObserver:
             if generation.lifecycle
             is StructureGenerationLifecycle.TERMINATED
         }
-        latest_group3 = group3_update
+        latest_group3 = zone_update
         contextual_fvg_transitions: list[object] = []
         for clock in clocks:
             clock_events = tuple(
@@ -8412,8 +8412,8 @@ class CausalObserver:
             snapshot=snapshot,
             current_bar_event_id=current_bar_event_id,
         )
-        if self._group3_tracker is not None and group3_update is not None:
-            current_group3 = self._group3_tracker.current_update()
+        if self._zone_tracker is not None and zone_update is not None:
+            current_group3 = self._zone_tracker.current_update()
             transitions_by_identity = {
                 (
                     item.fvg_id,
@@ -8421,12 +8421,12 @@ class CausalObserver:
                     item.availability.value,
                 ): item
                 for item in (
-                    *group3_update.fvg_structural_transitions,
+                    *zone_update.fvg_structural_transitions,
                     *contextual_fvg_transitions,
                 )
             }
             latest_group3 = replace(
-                group3_update,
+                zone_update,
                 base_origin_cores=current_group3.base_origin_cores,
                 qualified_order_blocks=(
                     current_group3.qualified_order_blocks
@@ -8457,7 +8457,7 @@ class CausalObserver:
 
     def _record_group3_events(
         self,
-        update: Group3Update,
+        update: ZoneUpdate,
     ) -> None:
         for state in update.fvg_transitions:
             midpoint_revision = bool(
@@ -9011,7 +9011,7 @@ class CausalObserver:
 
     def _record_group4_events(
         self,
-        update: Group4Update,
+        update: RangeAuctionUpdate,
         *,
         include_ranges: bool = True,
         include_resolutions: bool = True,
@@ -9843,8 +9843,8 @@ class CausalObserver:
         self,
         update: ReaderUpdate,
         frames: Mapping[Timeframe, FrameObservation],
-    ) -> Group3Update | None:
-        if self._group3_tracker is None:
+    ) -> ZoneUpdate | None:
+        if self._zone_tracker is None:
             return None
         if self._displacement_eye is None:
             raise RuntimeError(
@@ -9852,8 +9852,8 @@ class CausalObserver:
             )
         boundary = self._group3_boundary_reason(update.anomalies)
         if boundary is not None:
-            projected = self._visible_group3_update(
-                self._group3_tracker.on_boundary(
+            projected = self._visible_zone_update(
+                self._zone_tracker.on_boundary(
                     boundary,
                     update.asof,
                     foundation_boundary_event_id=(
@@ -9871,17 +9871,17 @@ class CausalObserver:
             raise RuntimeError(
                 "Group 3 and displacement completed-M5 batches diverged"
             )
-        result = self._group3_tracker.current_update()
+        result = self._zone_tracker.current_update()
         order_block_funnel = []
         fvg_transitions = []
         order_block_transitions = []
         bos_states = frames[Timeframe.M5].structure_breaks
         for candle, displacement_update in batch:
-            result = self._group3_tracker.on_completed_5m(
+            result = self._zone_tracker.on_completed_5m(
                 candle,
                 displacement_update,
                 tuple(
-                    Group3BOSSource(
+                    ZoneBOSSource(
                         state=bos,
                         symbol=candle.symbol,
                         instrument_id=candle.instrument_id,
@@ -9917,12 +9917,12 @@ class CausalObserver:
                 ),
                 order_block_funnel=tuple(order_block_funnel),
             )
-        return self._visible_group3_update(result)
+        return self._visible_zone_update(result)
 
-    def _visible_group3_update(
+    def _visible_zone_update(
         self,
-        update: Group3Update,
-    ) -> Group3Update:
+        update: ZoneUpdate,
+    ) -> ZoneUpdate:
         retained_ids = {
             state.fvg_id
             for state in update.fair_value_gaps
@@ -10090,10 +10090,10 @@ class CausalObserver:
             return cached[1]
         snapshot = (
             tracker.snapshot(
-                group4_sources_only=True,
+                range_auction_sources_only=True,
                 include_support_resistance=(timeframe is Timeframe.H1),
             )
-            if self.config.group4_projection_only
+            if self.config.range_auction_projection_only
             else tracker.snapshot()
         )
         self._liquidity_snapshot_cache[timeframe] = (
@@ -10343,7 +10343,7 @@ class CausalObserver:
         and the first completed M1 bar that made the prior period knowable.
         """
 
-        if self.config.group4_projection_only:
+        if self.config.range_auction_projection_only:
             return
         visible_ids = set(self._reference_inventory)
         self._reference_candidate_sources = {
@@ -10451,7 +10451,7 @@ class CausalObserver:
         atr: float,
         defer_resolution: bool = False,
     ) -> None:
-        if self.config.group4_projection_only:
+        if self.config.range_auction_projection_only:
             return
         semantic_source_kind = (
             "confirmed_swing" if item.kind == "swing" else item.kind
@@ -10673,7 +10673,7 @@ class CausalObserver:
         *,
         atr: float,
     ) -> None:
-        if self.config.group4_projection_only:
+        if self.config.range_auction_projection_only:
             return
         self._append_inventory_crossing_event(
             item,
@@ -10711,7 +10711,7 @@ class CausalObserver:
         *,
         crossed_at: pd.Timestamp | None = None,
     ) -> None:
-        if self.config.group4_projection_only:
+        if self.config.range_auction_projection_only:
             return
         outside = self._pool_close_outside(item, candle)
         resolution_state_event = _event(
@@ -10760,14 +10760,14 @@ class CausalObserver:
                 )
             )
         )
-        if self._group4_tracker is not None:
+        if self._range_auction_tracker is not None:
             # A source admitted by registered Group 4 is resolved solely by
             # that manipulation protocol.  Rejected/unadmitted pool sources
             # still need the generic crossing terminal; otherwise a published
             # penetration would remain permanently unresolved.
             group4_claims_source = any(
                 state.source_inventory_item_id == item.item_id
-                for state in self._group4_tracker.snapshot().manipulations
+                for state in self._range_auction_tracker.snapshot().manipulations
             )
             if group4_claims_source:
                 return
@@ -11427,7 +11427,7 @@ class CausalObserver:
                 try:
                     if (
                         displacement is not None
-                        and not self.config.group4_projection_only
+                        and not self.config.range_auction_projection_only
                     ):
                         # Boundary transitions close the prior displacement
                         # epoch and therefore still reference its normalized
@@ -11688,12 +11688,12 @@ class CausalObserver:
                 ),
             )
         try:
-            group3_update = self._observe_group3(update, frames)
-            if group3_update is not None:
+            zone_update = self._observe_group3(update, frames)
+            if zone_update is not None:
                 frames[Timeframe.M5] = replace(
                     frames[Timeframe.M5],
-                    fair_value_gaps=group3_update.fair_value_gaps,
-                    order_blocks=group3_update.order_blocks,
+                    fair_value_gaps=zone_update.fair_value_gaps,
+                    order_blocks=zone_update.order_blocks,
                 )
         except Exception:
             self._terminal_failure = (
@@ -11702,7 +11702,7 @@ class CausalObserver:
                 "last checkpoint"
             )
             raise
-        if not self.config.group4_projection_only:
+        if not self.config.range_auction_projection_only:
             try:
                 # Normalized data facts are the roots of the semantic DAG.
                 # Publish them before Displacement, Group 3, structure, or
@@ -11729,9 +11729,9 @@ class CausalObserver:
                 )
             _, _, native_inventory = liquidity_snapshots[timeframe]
             base_inventory.extend(native_inventory)
-        if not self.config.group4_projection_only:
+        if not self.config.range_auction_projection_only:
             base_inventory.extend(self._reference_inventory.values())
-        if not self.config.group4_projection_only:
+        if not self.config.range_auction_projection_only:
             retained_liquidity_entities = {
                 item.zone_id
                 for frame in frames.values()
@@ -11761,14 +11761,14 @@ class CausalObserver:
                 ),
             )
         )
-        group4_update: Group4Update | None = None
-        if self._group4_tracker is not None:
+        range_auction_update: RangeAuctionUpdate | None = None
+        if self._range_auction_tracker is not None:
             try:
                 if self._group4_boundary_update is not None:
-                    group4_update = self._group4_boundary_update
+                    range_auction_update = self._group4_boundary_update
                 elif self._prior is None:
-                    group4_update = (
-                        self._group4_tracker
+                    range_auction_update = (
+                        self._range_auction_tracker
                         .bootstrap_completed_1m_prefix(
                             update.histories.get(Timeframe.M1, ()),
                             pool_inventory=base_inventory,
@@ -11783,8 +11783,8 @@ class CausalObserver:
                         raise RuntimeError(
                             "one 1m update emitted multiple H1 candles"
                         )
-                    group4_update = (
-                        self._group4_tracker.on_completed_update(
+                    range_auction_update = (
+                        self._range_auction_tracker.on_completed_update(
                             update.completed_1m,
                             prior_inventory=(
                                 self._prior.liquidity_inventory
@@ -11804,15 +11804,15 @@ class CausalObserver:
                     )
                 frames[Timeframe.H1] = replace(
                     frames[Timeframe.H1],
-                    dealing_ranges=group4_update.dealing_ranges,
+                    dealing_ranges=range_auction_update.dealing_ranges,
                 )
                 # Append each manipulation timeline in lifecycle order now.
                 # New SWEPT events carry a high same-clock sequence floor,
                 # so inventory, HTF sources and ranges still sort before
                 # creation; terminal resolutions keep the earliest sequence.
-                if not self.config.group4_projection_only:
+                if not self.config.range_auction_projection_only:
                     self._record_group4_events(
-                        group4_update,
+                        range_auction_update,
                         include_ranges=False,
                         include_resolutions=True,
                         include_creations=True,
@@ -11825,7 +11825,7 @@ class CausalObserver:
                 )
                 raise
         try:
-            if not self.config.group4_projection_only:
+            if not self.config.range_auction_projection_only:
                 for item, candle, crossed_at in deferred_pool_resolution_events:
                     self._append_projected_pool_resolution_event(
                         item,
@@ -11876,7 +11876,7 @@ class CausalObserver:
                 ),
                 frame.cutoff,
             )
-            if not self.config.group4_projection_only:
+            if not self.config.range_auction_projection_only:
                 try:
                     self._record_frame_events(
                         frame,
@@ -11892,12 +11892,12 @@ class CausalObserver:
                     raise
             self._last_frame_cutoff[timeframe] = frame.cutoff
         if (
-            group3_update is not None
-            and group3_update.boundary_reason
+            zone_update is not None
+            and zone_update.boundary_reason
             not in FVG_BOUNDARY_REASONS
         ):
             try:
-                self._record_group3_events(group3_update)
+                self._record_group3_events(zone_update)
             except Exception:
                 self._terminal_failure = (
                     "Group 3 event projection failed after state may "
@@ -11906,12 +11906,12 @@ class CausalObserver:
                 )
                 raise
         if (
-            group3_update is not None
-            and group3_update.boundary_reason is None
+            zone_update is not None
+            and zone_update.boundary_reason is None
         ):
             try:
-                group3_update = self._finalize_group3_foundation(
-                    group3_update,
+                zone_update = self._finalize_group3_foundation(
+                    zone_update,
                     update,
                 )
             except Exception:
@@ -11921,11 +11921,11 @@ class CausalObserver:
                     "last checkpoint"
                 )
                 raise
-        elif group3_update is not None:
+        elif zone_update is not None:
             try:
-                group3_update = (
+                zone_update = (
                     self._finalize_group3_foundation_boundary(
-                        group3_update
+                        zone_update
                     )
                 )
             except Exception:
@@ -11937,11 +11937,11 @@ class CausalObserver:
                 raise
         if (
             self._group4_bootstrap_range_transitions
-            and not self.config.group4_projection_only
+            and not self.config.range_auction_projection_only
         ):
             try:
                 self._record_group4_events(
-                    Group4Update(
+                    RangeAuctionUpdate(
                         dealing_ranges=(),
                         manipulations=(),
                         range_boundary_inventory=(),
@@ -11960,13 +11960,13 @@ class CausalObserver:
                     "resume from the last checkpoint"
                 )
                 raise
-        elif self.config.group4_projection_only:
+        elif self.config.range_auction_projection_only:
             self._group4_bootstrap_range_transitions.clear()
-        if group4_update is not None:
+        if range_auction_update is not None:
             try:
-                if not self.config.group4_projection_only:
+                if not self.config.range_auction_projection_only:
                     self._record_group4_events(
-                        group4_update,
+                        range_auction_update,
                         include_resolutions=False,
                         include_creations=False,
                     )
@@ -11974,7 +11974,7 @@ class CausalObserver:
                     item.item_id: item
                     for item in (
                         *liquidity_inventory,
-                        *group4_update.range_boundary_inventory,
+                        *range_auction_update.range_boundary_inventory,
                     )
                 }
                 liquidity_inventory = tuple(
@@ -12026,11 +12026,11 @@ class CausalObserver:
                         ),
                         manipulations=(
                             ()
-                            if group4_update is None
+                            if range_auction_update is None
                             else tuple(
                                 state
                                 for state
-                                in group4_update.manipulations
+                                in range_auction_update.manipulations
                                 if state.source_kind
                                 == "formed_liquidity_pool"
                             )
@@ -12060,18 +12060,18 @@ class CausalObserver:
                     "from the last checkpoint"
                 )
                 raise
-        if not self.config.group4_projection_only:
+        if not self.config.range_auction_projection_only:
             try:
                 group4_boundary_range_keys = {
                     f"range:{state.range_id}"
                     for state in (
                         ()
                         if (
-                            group4_update is None
-                            or group4_update.boundary_reason
-                            not in GROUP4_HARD_BOUNDARY_REASONS
+                            range_auction_update is None
+                            or range_auction_update.boundary_reason
+                            not in RANGE_AUCTION_HARD_BOUNDARY_REASONS
                         )
-                        else group4_update.range_transitions
+                        else range_auction_update.range_transitions
                     )
                 }
                 self.memory.sync_retained_entity_timelines(
@@ -12080,8 +12080,8 @@ class CausalObserver:
                         liquidity_pool_states,
                         (
                             ()
-                            if group4_update is None
-                            else group4_update.manipulations
+                            if range_auction_update is None
+                            else range_auction_update.manipulations
                         ),
                         (
                             ()
@@ -12091,20 +12091,20 @@ class CausalObserver:
                         terminal_entity_keys=(
                             ()
                             if (
-                                group3_update is None
-                                or group3_update.boundary_reason
+                                zone_update is None
+                                or zone_update.boundary_reason
                                 not in FVG_BOUNDARY_REASONS
                             )
                             else (
                                 *(
                                     f"fvg:{state.fvg_id}"
-                                    for state in group3_update.fvg_transitions
+                                    for state in zone_update.fvg_transitions
                                 ),
                                 *(
                                     "order_block:"
                                     f"{state.order_block_id}"
                                     for state in (
-                                        group3_update.order_block_transitions
+                                        zone_update.order_block_transitions
                                     )
                                 ),
                             )
@@ -12123,8 +12123,8 @@ class CausalObserver:
 
         anomalies = list(update.anomalies)
         if (
-            group3_update is not None
-            and group3_update.boundary_reason
+            zone_update is not None
+            and zone_update.boundary_reason
             in FVG_BOUNDARY_REASONS
         ):
             anomalies.append(
@@ -12136,16 +12136,16 @@ class CausalObserver:
                     "data_anomaly": "data_anomaly",
                     "tick_size_mismatch": "tick_size_mismatch",
                     "semantic_reset": "semantic_reset",
-                }[group3_update.boundary_reason]
+                }[zone_update.boundary_reason]
             )
         if (
-            group4_update is not None
-            and group4_update.ambiguous_sweep_item_ids
+            range_auction_update is not None
+            and range_auction_update.ambiguous_sweep_item_ids
         ):
             anomalies.append("group4_ambiguous_dual_side_sweep")
         if (
-            group4_update is not None
-            and group4_update.atr_unready_sweep_item_ids
+            range_auction_update is not None
+            and range_auction_update.atr_unready_sweep_item_ids
         ):
             anomalies.append("group4_atr_unready_sweep")
         for timeframe, frame in frames.items():
@@ -12179,8 +12179,8 @@ class CausalObserver:
                     asof=update.asof,
                     frames=frames,
                     histories=histories,
-                    group3_update=group3_update,
-                    group4_update=group4_update,
+                    zone_update=zone_update,
+                    range_auction_update=range_auction_update,
                     snapshot=market_snapshot,
                     semantic_events=semantic_events,
                 )
@@ -12249,7 +12249,7 @@ class CausalObserver:
                     self._foundation_structural_ranges,
                     self._foundation_fvg_contexts,
                     _,
-                    group3_update,
+                    zone_update,
                     self._foundation_plan_revisions,
                     self._foundation_dol_templates,
                 ) = foundation_stage
@@ -12293,8 +12293,8 @@ class CausalObserver:
         current_ranges = frames[Timeframe.H1].dealing_ranges
         current_manipulations = (
             ()
-            if group4_update is None
-            else group4_update.manipulations
+            if range_auction_update is None
+            else range_auction_update.manipulations
         )
         current_entry_locations = (
             ()
@@ -12334,8 +12334,8 @@ class CausalObserver:
         if typed_delta_available:
             baseline = prior_observation is None
             group4_boundary = bool(
-                group4_update is not None
-                and group4_update.boundary_reason is not None
+                range_auction_update is not None
+                and range_auction_update.boundary_reason is not None
             )
             group5_boundary = bool(
                 group5_update is not None
@@ -12394,42 +12394,42 @@ class CausalObserver:
                 current=current_fvgs,
                 transitions=(
                     ()
-                    if group3_update is None
-                    else group3_update.fvg_transitions
+                    if zone_update is None
+                    else zone_update.fvg_transitions
                 ),
                 first_observation=baseline,
                 boundary_reason=(
                     None
-                    if group3_update is None
-                    else group3_update.boundary_reason
+                    if zone_update is None
+                    else zone_update.boundary_reason
                 ),
             )
             group3_order_block_delta = _typed_native_transitions_or_baseline(
                 current=current_order_blocks,
                 transitions=(
                     ()
-                    if group3_update is None
-                    else group3_update.order_block_transitions
+                    if zone_update is None
+                    else zone_update.order_block_transitions
                 ),
                 first_observation=baseline,
                 boundary_reason=(
                     None
-                    if group3_update is None
-                    else group3_update.boundary_reason
+                    if zone_update is None
+                    else zone_update.boundary_reason
                 ),
             )
             group4_range_delta = _typed_native_transitions_or_baseline(
                 current=current_ranges,
                 transitions=(
                     ()
-                    if group4_update is None
-                    else group4_update.range_transitions
+                    if range_auction_update is None
+                    else range_auction_update.range_transitions
                 ),
                 first_observation=baseline,
                 boundary_reason=(
                     None
-                    if group4_update is None
-                    else group4_update.boundary_reason
+                    if range_auction_update is None
+                    else range_auction_update.boundary_reason
                 ),
             )
             live_manipulation = next(
@@ -12456,8 +12456,8 @@ class CausalObserver:
                     else (
                         *(
                             ()
-                            if group4_update is None
-                            else group4_update.manipulation_transitions
+                            if range_auction_update is None
+                            else range_auction_update.manipulation_transitions
                         ),
                         *live_manipulations,
                     )
@@ -12578,70 +12578,70 @@ class CausalObserver:
                 ),
                 group5_step_transitions_this_update=group5_step_delta,
                 group3_boundary_fvg_transitions=(
-                    group3_update.fvg_transitions
+                    zone_update.fvg_transitions
                     if (
-                        group3_update is not None
-                        and group3_update.boundary_reason
+                        zone_update is not None
+                        and zone_update.boundary_reason
                         in FVG_BOUNDARY_REASONS
                     )
                     else ()
                 ),
                 group3_boundary_order_block_transitions=(
-                    group3_update.order_block_transitions
+                    zone_update.order_block_transitions
                     if (
-                        group3_update is not None
-                        and group3_update.boundary_reason
+                        zone_update is not None
+                        and zone_update.boundary_reason
                         in FVG_BOUNDARY_REASONS
                     )
                     else ()
                 ),
                 group3_order_block_funnel=(
                     ()
-                    if group3_update is None
-                    else group3_update.order_block_funnel
+                    if zone_update is None
+                    else zone_update.order_block_funnel
                 ),
                 manipulations=(
                     ()
-                    if group4_update is None
-                    else group4_update.manipulations
+                    if range_auction_update is None
+                    else range_auction_update.manipulations
                 ),
                 group4_boundary_range_transitions=(
-                    group4_update.range_transitions
+                    range_auction_update.range_transitions
                     if (
-                        group4_update is not None
-                        and group4_update.boundary_reason
-                        in GROUP4_HARD_BOUNDARY_REASONS
+                        range_auction_update is not None
+                        and range_auction_update.boundary_reason
+                        in RANGE_AUCTION_HARD_BOUNDARY_REASONS
                     )
                     else ()
                 ),
                 group4_boundary_manipulation_transitions=(
-                    group4_update.manipulation_transitions
+                    range_auction_update.manipulation_transitions
                     if (
-                        group4_update is not None
-                        and group4_update.boundary_reason
-                        in GROUP4_HARD_BOUNDARY_REASONS
+                        range_auction_update is not None
+                        and range_auction_update.boundary_reason
+                        in RANGE_AUCTION_HARD_BOUNDARY_REASONS
                     )
                     else ()
                 ),
                 group4_ambiguous_sweep_item_ids=(
                     ()
-                    if group4_update is None
-                    else group4_update.ambiguous_sweep_item_ids
+                    if range_auction_update is None
+                    else range_auction_update.ambiguous_sweep_item_ids
                 ),
                 group4_atr_unready_sweep_item_ids=(
                     ()
-                    if group4_update is None
-                    else group4_update.atr_unready_sweep_item_ids
+                    if range_auction_update is None
+                    else range_auction_update.atr_unready_sweep_item_ids
                 ),
                 group4_source_dispositions=(
                     ()
-                    if group4_update is None
-                    else group4_update.source_dispositions
+                    if range_auction_update is None
+                    else range_auction_update.source_dispositions
                 ),
                 group4_range_funnel=(
                     ()
-                    if group4_update is None
-                    else group4_update.range_funnel
+                    if range_auction_update is None
+                    else range_auction_update.range_funnel
                 ),
                 group5_typed_available=(
                     self._group5_reducer is not None
@@ -12726,7 +12726,7 @@ class CausalObserver:
         self._boundary_reset_identity = None
         self._group4_boundary_update = None
         self._group5_boundary_update = None
-        self._last_group3_foundation_projection = group3_update
+        self._last_zone_foundation_projection = zone_update
         self._last_market_epoch_reset_event_id = None
         self._prior = observation
         return observation

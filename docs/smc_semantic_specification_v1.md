@@ -23,7 +23,7 @@ once and requires the Foundation parent to equal the atomic version; missing,
 unknown, extra, or mismatched fields fail closed. The Observer's enable flag is
 derived internally. This does not define a unified `smc_semantics_v2.0`.
 Engine/Shadow/checkpoint state retains and compares the existing identities,
-and the current combined Engine checkpoint schema is 5. Earlier schemas cannot
+and the current combined Engine checkpoint schema is 6. Earlier schemas cannot
 resume into the current Observation, Foundation, and Neutral-state contracts.
 
 [`semantics/registry.yaml`](../semantics/registry.yaml) and

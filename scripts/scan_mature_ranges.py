@@ -25,12 +25,12 @@ if str(ROOT) not in sys.path:
 
 from smc_trader.artifact_stream import atomic_bytes  # noqa: E402
 from smc_trader.causal import CausalMarketReader  # noqa: E402
-from smc_trader.group4 import Group4Protocol  # noqa: E402
+from smc_trader.range_auction import RangeAuctionProtocol  # noqa: E402
 from smc_trader.io import iter_completed_bars, load_ohlcv  # noqa: E402
 from smc_trader.model import (  # noqa: E402
     DealingRangeLifecycle,
     DealingRangeState,
-    GROUP4_HARD_BOUNDARY_REASONS,
+    RANGE_AUCTION_HARD_BOUNDARY_REASONS,
     LiquidityInventoryItem,
     LiquidityInventoryLifecycle,
     ManipulationLifecycle,
@@ -317,11 +317,11 @@ def _build_observer(
             point_value=float(model.get("point_value", 20.0)),
             structure_protocol=str(ROOT / str(protocols["group12"])),
             liquidity_protocol=str(ROOT / str(protocols["group12"])),
-            group4_protocol=str(ROOT / str(protocols["group4"])),
+            range_auction_protocol=str(ROOT / str(protocols["group4"])),
             scale_specs=scale_specs,
             project_scene_graph=False,
             materialize_event_view=False,
-            group4_projection_only=True,
+            range_auction_projection_only=True,
         )
     )
     return CausalMarketReader(scale_specs=scale_specs), observer
@@ -329,7 +329,7 @@ def _build_observer(
 
 def maturity_gate_margins(
     state: DealingRangeState,
-    protocol: Group4Protocol,
+    protocol: RangeAuctionProtocol,
 ) -> dict[str, float]:
     """Return signed, dimensionless margins for the frozen maturity gates."""
 
@@ -367,7 +367,7 @@ def maturity_gate_margins(
 
 def unmet_maturity_gates(
     state: DealingRangeState,
-    protocol: Group4Protocol,
+    protocol: RangeAuctionProtocol,
 ) -> tuple[str, ...]:
     margins = maturity_gate_margins(state, protocol)
     return tuple(name for name in GATE_NAMES if margins[name] < 0.0)
@@ -517,7 +517,7 @@ def _compact_selected_cases(
 
 def _range_record(
     state: DealingRangeState,
-    protocol: Group4Protocol,
+    protocol: RangeAuctionProtocol,
     *,
     window_id: str,
     case_class: str,
@@ -586,7 +586,7 @@ class CoverageAccumulator:
     window_id: str
     start: pd.Timestamp
     end_exclusive: pd.Timestamp
-    protocol: Group4Protocol
+    protocol: RangeAuctionProtocol
     coverage_start: pd.Timestamp | None = None
     unique_pairs: set[tuple[str, str]] = field(default_factory=set)
     pair_clock_count: int = 0
@@ -820,7 +820,7 @@ class CoverageAccumulator:
                 outcome = "deadline_censored"
             elif (
                 state.censored_at is not None
-                and state.transition_reason in GROUP4_HARD_BOUNDARY_REASONS
+                and state.transition_reason in RANGE_AUCTION_HARD_BOUNDARY_REASONS
             ):
                 outcome = "hard_boundary_censored"
             else:
@@ -1142,7 +1142,7 @@ def _scan_window(
     source = ROOT / str(payload["source"])
     loaded = load_ohlcv(source, start=warmup_start, end=end)
     group4_path = ROOT / str(payload["protocols"]["group4"])
-    protocol = Group4Protocol.from_file(group4_path)
+    protocol = RangeAuctionProtocol.from_file(group4_path)
     model = _json(ROOT / str(payload["model_config"]))
     reader, observer = _build_observer(model, payload)
     prior_observation = None
@@ -1436,7 +1436,7 @@ def aggregate_results(
             "all_pool_source_timeframes": True,
             "scene_graph_projection_used": False,
             "event_view_materialized": False,
-            "group4_projection_only": True,
+            "range_auction_projection_only": True,
             "complete_group4_eligible_inventory": True,
         },
         "identity": dict(run_identity or {}),

@@ -152,10 +152,10 @@ def test_eye_builder_enables_only_lightweight_typed_observer() -> None:
     assert observer.config.eye_authority_mode is True
     assert observer.config.project_scene_graph is False
     assert observer.config.materialize_event_view is False
-    assert observer.config.group4_projection_only is False
+    assert observer.config.range_auction_projection_only is False
     assert observer._displacement_eye is not None
-    assert observer._group3_tracker is not None
-    assert observer._group4_tracker is not None
+    assert observer._zone_tracker is not None
+    assert observer._range_auction_tracker is not None
     assert observer._group5_reducer is not None
 
 
@@ -318,7 +318,7 @@ def test_formal_identity_requires_clean_git(
     monkeypatch.setattr(
         scan,
         "_git_worktree_status",
-        lambda: " M smc_trader/group4.py",
+        lambda: " M smc_trader/range_auction.py",
     )
 
     with pytest.raises(RuntimeError, match="requires a clean Git worktree"):

@@ -65,14 +65,14 @@ _REQUIRED_PRIMITIVE_PROTOCOLS = (
     "structure_protocol",
     "liquidity_protocol",
     "displacement_protocol",
-    "group3_protocol",
-    "group4_protocol",
+    "zone_protocol",
+    "range_auction_protocol",
     "group5_protocol",
 )
 _LIVE_READINESS_TOKEN = object()
 RUNTIME_ACTION_POLICY_SCHEMA_VERSION = 2
-NEUTRAL_ENGINE_CHECKPOINT_SCHEMA_VERSION = 5
-MODEL_SCHEMA_VERSION = 2
+NEUTRAL_ENGINE_CHECKPOINT_SCHEMA_VERSION = 6
+MODEL_SCHEMA_VERSION = 3
 ACTION_PIPELINE_SCHEMA_VERSION = 1
 LEGACY_ACTION_PIPELINE_MODE = "legacy_decision_risk_compat"
 
@@ -370,8 +370,8 @@ class ContinuousSMCEngine:
                 displacement_protocol=observer_raw.get(
                     "displacement_protocol"
                 ),
-                group3_protocol=observer_raw.get("group3_protocol"),
-                group4_protocol=observer_raw.get("group4_protocol"),
+                zone_protocol=observer_raw.get("zone_protocol"),
+                range_auction_protocol=observer_raw.get("range_auction_protocol"),
                 group5_protocol=observer_raw.get("group5_protocol"),
                 semantic_registry=str(
                     semantic_selection.atomic_registry.source_path

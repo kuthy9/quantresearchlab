@@ -147,7 +147,7 @@ def _entry_location_has_exact_zone_source(
     return bool(
         not source_failed
         and source.protocol_hash
-        == location.source_group3_protocol_hash
+        == location.source_zone_detector_protocol_hash
         == location.source_zone_protocol_hash
         and source.symbol == observation.symbol == location.symbol
         and source.instrument_id

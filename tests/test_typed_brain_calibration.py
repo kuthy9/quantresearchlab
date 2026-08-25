@@ -191,7 +191,7 @@ def test_engine_accepts_current_typed_config_and_rejects_incomplete_current_conf
         )
     incomplete = tmp_path / "model.json"
     incomplete.write_text(json.dumps({"schema_version": 1}), encoding="utf-8")
-    with pytest.raises(ValueError, match="model.schema_version must be 2"):
+    with pytest.raises(ValueError, match="model.schema_version must be 3"):
         ContinuousSMCEngine.from_config(
             incomplete,
             runtime_mode="development",

@@ -6,9 +6,9 @@ advances a second replay loop.
 
 The current fail-closed contract is protocol
 `market-episode-input-only-1.2.0`, NeutralMarketState schema 2, neutral Engine
-checkpoint schema 5, and market-input runner state schema 7. Schema-1 neutral
+checkpoint schema 6, and market-input runner state schema 7. Schema-1 neutral
 state, pre-v5 Engine checkpoints, protocol 1.1.0, and runner-state schemas 4/5/6
-cannot resume or materialize under this contract. Engine checkpoint schema 5
+cannot resume or materialize under this contract. Engine checkpoint schema 6
 binds the current Observation identity, compact canonical-Foundation state, and
 Neutral-state OpenMarketThesis identity; it does not change the 18-field
 MarketEpisode row schema. Runner schema 6 added one run-level

@@ -1142,7 +1142,7 @@ def _full_observer_config(payload: Mapping[str, Any]) -> Any:
         lightweight.config,
         project_scene_graph=True,
         materialize_event_view=True,
-        group4_projection_only=False,
+        range_auction_projection_only=False,
         eye_authority_mode=True,
     )
 

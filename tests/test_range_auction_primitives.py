@@ -10,10 +10,10 @@ import pandas as pd
 import pytest
 
 from smc_trader.causal import CausalMarketReader
-from smc_trader.group4 import (
-    CausalGroup4Tracker,
-    Group4Protocol,
-    Group4Update,
+from smc_trader.range_auction import (
+    CausalRangeAuctionTracker,
+    RangeAuctionProtocol,
+    RangeAuctionUpdate,
 )
 from smc_trader.model import (
     Bar,
@@ -61,8 +61,8 @@ H1_BASE = pd.Timestamp("2025-01-06T00:00:00-05:00")
 M1_BASE = pd.Timestamp("2025-01-07T09:30:00-05:00")
 
 
-def _protocol() -> Group4Protocol:
-    return Group4Protocol.from_file(PROTOCOL_PATH)
+def _protocol() -> RangeAuctionProtocol:
+    return RangeAuctionProtocol.from_file(PROTOCOL_PATH)
 
 
 def _candle(
@@ -213,7 +213,7 @@ def _pool(
 
 
 def _warm_h1(
-    tracker: CausalGroup4Tracker,
+    tracker: CausalRangeAuctionTracker,
     count: int = 14,
 ) -> None:
     for index in range(count):
@@ -222,7 +222,7 @@ def _warm_h1(
 
 
 def test_range_candidates_ignore_nonstructural_support_resistance() -> None:
-    tracker = CausalGroup4Tracker(_protocol())
+    tracker = CausalRangeAuctionTracker(_protocol())
     support = _zone("support")
     resistance = _zone("resistance")
 
@@ -243,13 +243,13 @@ def test_range_candidates_ignore_nonstructural_support_resistance() -> None:
 
 
 def _mature_range(
-    protocol: Group4Protocol,
+    protocol: RangeAuctionProtocol,
 ) -> tuple[
-    CausalGroup4Tracker,
+    CausalRangeAuctionTracker,
     DealingRangeState,
     DealingRangeState,
 ]:
-    tracker = CausalGroup4Tracker(protocol)
+    tracker = CausalRangeAuctionTracker(protocol)
     zones = (_zone("support"), _zone("resistance"))
     _warm_h1(tracker)
     formed = tracker.on_completed_h1(
@@ -275,7 +275,7 @@ def _mature_range(
 
 
 def _warm_m1(
-    tracker: CausalGroup4Tracker,
+    tracker: CausalRangeAuctionTracker,
     *,
     base: pd.Timestamp = M1_BASE,
     count: int = 15,
@@ -319,7 +319,7 @@ def _frozen_range_geometry(
 
 
 def _source_dispositions(
-    output: Group4Update,
+    output: RangeAuctionUpdate,
 ) -> dict[str, ManipulationSourceDispositionKind]:
     result = {
         item.source_inventory_item_id: item.disposition
@@ -329,12 +329,12 @@ def _source_dispositions(
     return result
 
 
-def _range_funnel(output: Group4Update):
+def _range_funnel(output: RangeAuctionUpdate):
     assert len(output.range_funnel) == 1
     return output.range_funnel[0]
 
 
-def test_group4_protocol_tracks_current_config_and_upstream_binding() -> None:
+def test_range_auction_protocol_tracks_current_config_and_upstream_binding() -> None:
     protocol = _protocol()
     payload = json.loads(PROTOCOL_PATH.read_bytes())
     parameters = payload["engineering_parameters"]
@@ -445,7 +445,7 @@ def test_h1_range_forms_matures_breaks_and_never_rewrites_geometry() -> None:
 
 
 def test_range_funnel_conserves_pair_selection_and_actual_gate_margins() -> None:
-    tracker = CausalGroup4Tracker(_protocol())
+    tracker = CausalRangeAuctionTracker(_protocol())
     zones = (_zone("support"), _zone("resistance"))
     _warm_h1(tracker)
 
@@ -541,7 +541,7 @@ def test_mature_range_owns_a_same_price_sweep_over_a_local_pool() -> None:
 
 
 def test_forming_deadline_includes_the_terminal_h1_bar() -> None:
-    tracker = CausalGroup4Tracker(_protocol())
+    tracker = CausalRangeAuctionTracker(_protocol())
     zones = (_zone("support"), _zone("resistance"))
     _warm_h1(tracker)
     tracker.on_completed_h1(
@@ -566,7 +566,7 @@ def test_forming_deadline_includes_the_terminal_h1_bar() -> None:
 
 
 def test_cold_existing_range_pair_waits_for_a_new_source_identity() -> None:
-    tracker = CausalGroup4Tracker(_protocol())
+    tracker = CausalRangeAuctionTracker(_protocol())
     zones = (_zone("support"), _zone("resistance"))
     _warm_h1(tracker)
     tracker.mark_existing_source_pairs_ineligible(zones)
@@ -600,7 +600,7 @@ def test_cold_existing_range_pair_waits_for_a_new_source_identity() -> None:
 
 
 def test_range_funnel_counts_new_pair_blocked_by_existing_live_range() -> None:
-    tracker = CausalGroup4Tracker(_protocol())
+    tracker = CausalRangeAuctionTracker(_protocol())
     support = _zone("support")
     resistance = _zone("resistance")
     _warm_h1(tracker)
@@ -627,7 +627,7 @@ def test_range_funnel_counts_new_pair_blocked_by_existing_live_range() -> None:
 
 
 def test_pool_source_must_exist_before_bar_then_reentry_must_hold() -> None:
-    tracker = CausalGroup4Tracker(_protocol())
+    tracker = CausalRangeAuctionTracker(_protocol())
     _warm_m1(tracker)
     gated = _m1(
         15,
@@ -751,7 +751,7 @@ def test_pool_source_must_exist_before_bar_then_reentry_must_hold() -> None:
 
 
 def test_pool_outside_acceptance_requires_two_consecutive_closes() -> None:
-    tracker = CausalGroup4Tracker(_protocol())
+    tracker = CausalRangeAuctionTracker(_protocol())
     _warm_m1(tracker)
     pool, inventory = _pool(
         "above",
@@ -788,7 +788,7 @@ def test_pool_outside_acceptance_requires_two_consecutive_closes() -> None:
 
 
 def test_pool_reentry_failure_resets_then_deadline_censors_unresolved() -> None:
-    tracker = CausalGroup4Tracker(_protocol())
+    tracker = CausalRangeAuctionTracker(_protocol())
     _warm_m1(tracker)
     pool, inventory = _pool(
         "above",
@@ -850,7 +850,7 @@ def test_pool_reentry_failure_resets_then_deadline_censors_unresolved() -> None:
 
 
 def test_manipulation_candidate_and_failure_enter_event_memory() -> None:
-    tracker = CausalGroup4Tracker(_protocol())
+    tracker = CausalRangeAuctionTracker(_protocol())
     _warm_m1(tracker)
     pool, inventory = _pool(
         "above",
@@ -935,14 +935,14 @@ def test_native_swept_pool_is_passed_to_group4_as_frozen_formation() -> None:
     assert formation.swept_at is None
     assert formation.sweep_extreme is None
     assert formation.close_outside_on_sweep is None
-    assert CausalGroup4Tracker(_protocol())._pool_by_inventory(
+    assert CausalRangeAuctionTracker(_protocol())._pool_by_inventory(
         inventory,
         (formation,),
     ) == formation
 
 
 def test_dual_side_sweep_is_ambiguous_and_creates_no_manipulation() -> None:
-    tracker = CausalGroup4Tracker(_protocol())
+    tracker = CausalRangeAuctionTracker(_protocol())
     _warm_m1(tracker)
     confirmed_at = M1_BASE - pd.Timedelta(minutes=1)
     upper_pool, upper_item = _pool(
@@ -989,7 +989,7 @@ def test_raw_crossed_sources_reject_missing_prior_or_stale_source() -> None:
         confirmed_at=confirmed_at,
         identity="cold-prior",
     )
-    cold = CausalGroup4Tracker(_protocol()).on_completed_update(
+    cold = CausalRangeAuctionTracker(_protocol()).on_completed_update(
         _m1(0, close=100.0, high=101.25),
         prior_inventory=(item,),
         liquidity_pools=(pool,),
@@ -1001,7 +1001,7 @@ def test_raw_crossed_sources_reject_missing_prior_or_stale_source() -> None:
         )
     }
 
-    stale_tracker = CausalGroup4Tracker(_protocol())
+    stale_tracker = CausalRangeAuctionTracker(_protocol())
     _warm_m1(stale_tracker)
     stale = stale_tracker.on_completed_update(
         _m1(15, close=100.0, high=101.25),
@@ -1023,7 +1023,7 @@ def test_duplicate_source_identity_is_rejected_before_partial_commit() -> None:
         confirmed_at=confirmed_at,
         identity="duplicate-source",
     )
-    tracker = CausalGroup4Tracker(_protocol())
+    tracker = CausalRangeAuctionTracker(_protocol())
     _warm_m1(tracker)
     last_end = tracker.last_m1_end
 
@@ -1069,7 +1069,7 @@ def test_same_side_sources_are_conserved_as_primary_and_secondaries() -> None:
         lower_bound=101.25,
         upper_bound=101.5,
     )
-    tracker = CausalGroup4Tracker(_protocol())
+    tracker = CausalRangeAuctionTracker(_protocol())
     _warm_m1(tracker)
     output = tracker.on_completed_update(
         _m1(15, close=100.0, high=102.0),
@@ -1142,7 +1142,7 @@ def test_existing_live_and_same_bar_resolution_block_new_sources() -> None:
         upper_bound=101.75,
     )
     pools = (live_pool, pending_pool, resolved_pool)
-    tracker = CausalGroup4Tracker(_protocol())
+    tracker = CausalRangeAuctionTracker(_protocol())
     _warm_m1(tracker)
     created = tracker.on_completed_update(
         _m1(15, close=101.25, high=101.5),
@@ -1334,16 +1334,16 @@ def test_observer_records_group4_range_terminal_only_at_boundary_clock(
         ObserverConfig(
             structure_protocol=str(GROUP12_PROTOCOL_PATH),
             liquidity_protocol=str(GROUP12_PROTOCOL_PATH),
-            group4_protocol=str(PROTOCOL_PATH),
+            range_auction_protocol=str(PROTOCOL_PATH),
             scale_specs=CORE_TEST_SCALE_SPECS,
             project_scene_graph=False,
         )
     )
-    observer._group4_tracker = tracker
+    observer._range_auction_tracker = tracker
     observer.memory.set_clock_coverage_start(formed.formed_at)
     for state in (formed, mature):
         observer._record_group4_events(
-            Group4Update(
+            RangeAuctionUpdate(
                 dealing_ranges=(state,),
                 manipulations=(),
                 range_boundary_inventory=(),
@@ -1459,7 +1459,7 @@ def test_observer_records_group4_range_terminal_only_at_boundary_clock(
 
 def test_exact_retry_is_cached_and_same_clock_or_older_input_fails() -> None:
     candle = _m1(1)
-    tracker = CausalGroup4Tracker(_protocol())
+    tracker = CausalRangeAuctionTracker(_protocol())
     first = tracker.on_completed_update(
         candle,
         prior_inventory=(),
@@ -1483,7 +1483,7 @@ def test_exact_retry_is_cached_and_same_clock_or_older_input_fails() -> None:
             liquidity_pools=(),
         )
 
-    boundary_tracker = CausalGroup4Tracker(_protocol())
+    boundary_tracker = CausalRangeAuctionTracker(_protocol())
     boundary_tracker.on_completed_update(
         candle,
         prior_inventory=(),
@@ -1506,7 +1506,7 @@ def test_exact_retry_is_cached_and_same_clock_or_older_input_fails() -> None:
     )
     assert recovered.manipulations == ()
 
-    older_tracker = CausalGroup4Tracker(_protocol())
+    older_tracker = CausalRangeAuctionTracker(_protocol())
     older_tracker.on_completed_update(
         candle,
         prior_inventory=(),
@@ -1582,7 +1582,7 @@ def test_cold_sweep_without_prior_atr_is_unclassified_and_advances() -> None:
 
 
 def test_h1_synthetic_bar_advances_only_the_raw_causal_cutoff() -> None:
-    tracker = CausalGroup4Tracker(_protocol())
+    tracker = CausalRangeAuctionTracker(_protocol())
     synthetic = _h1(0, synthetic=True)
     before = tracker.snapshot()
 
@@ -1603,7 +1603,7 @@ def test_h1_synthetic_bar_advances_only_the_raw_causal_cutoff() -> None:
 
 
 def test_session_aware_completed_h1_does_not_require_60_observed_minutes() -> None:
-    tracker = CausalGroup4Tracker(_protocol())
+    tracker = CausalRangeAuctionTracker(_protocol())
     shortened = replace(
         _h1(0),
         observed_minutes=45,
@@ -1617,7 +1617,7 @@ def test_session_aware_completed_h1_does_not_require_60_observed_minutes() -> No
 
 
 def test_synthetic_completed_bar_is_a_semantic_noop() -> None:
-    tracker = CausalGroup4Tracker(_protocol())
+    tracker = CausalRangeAuctionTracker(_protocol())
     before = tracker.snapshot()
     synthetic = _m1(0, synthetic=True)
 
@@ -1657,7 +1657,7 @@ def test_synthetic_completed_bar_is_a_semantic_noop() -> None:
 
 
 def test_cold_prefix_trailing_synthetic_bar_keeps_raw_cutoff() -> None:
-    tracker = CausalGroup4Tracker(_protocol())
+    tracker = CausalRangeAuctionTracker(_protocol())
     output = tracker.bootstrap_completed_1m_prefix(
         (_m1(0), _m1(1, synthetic=True)),
         pool_inventory=(),
@@ -1716,7 +1716,7 @@ def test_cold_prefix_reconstructs_first_sweep_and_next_bar_resolution() -> None:
         ),
     )
 
-    output = CausalGroup4Tracker(
+    output = CausalRangeAuctionTracker(
         protocol
     ).bootstrap_completed_1m_prefix(
         prefix,
@@ -1748,7 +1748,7 @@ def test_cold_prefix_starting_after_source_confirmation_fails_closed() -> None:
         ValueError,
         match="cold prefix lacks a real source predecessor",
     ):
-        CausalGroup4Tracker(
+        CausalRangeAuctionTracker(
             _protocol()
         ).bootstrap_completed_1m_prefix(
             (_m1(1),),
@@ -1758,7 +1758,7 @@ def test_cold_prefix_starting_after_source_confirmation_fails_closed() -> None:
 
 
 def test_exact_source_bindings_fail_closed_without_partial_commit() -> None:
-    pool_tracker = CausalGroup4Tracker(_protocol())
+    pool_tracker = CausalRangeAuctionTracker(_protocol())
     _warm_m1(pool_tracker)
     pool, inventory = _pool(
         "above",
@@ -1824,7 +1824,7 @@ def test_cold_prefix_validates_every_retained_pool_before_replay() -> None:
         confirmed_at=M1_BASE,
         identity="missing-cold-pool",
     )
-    tracker = CausalGroup4Tracker(_protocol())
+    tracker = CausalRangeAuctionTracker(_protocol())
 
     with pytest.raises(
         ValueError,
@@ -1849,7 +1849,7 @@ def test_group4_requires_the_typed_h1_structure_source() -> None:
                 liquidity_protocol=(
                     "configs/primitives_structure_liquidity.json"
                 ),
-                group4_protocol=str(PROTOCOL_PATH),
+                range_auction_protocol=str(PROTOCOL_PATH),
             )
         )
 
@@ -1907,7 +1907,7 @@ def test_same_clock_event_sequence_matches_the_frozen_causal_order() -> None:
             low=99.75,
         ),
     )
-    update = CausalGroup4Tracker(
+    update = CausalRangeAuctionTracker(
         _protocol()
     ).bootstrap_completed_1m_prefix(
         prefix,
@@ -1953,7 +1953,7 @@ def test_same_clock_event_sequence_matches_the_frozen_causal_order() -> None:
         last_updated_at=swept.swept_at,
     )
     observer._record_group4_events(
-        Group4Update(
+        RangeAuctionUpdate(
             dealing_ranges=(same_clock_range,),
             manipulations=(),
             range_boundary_inventory=(),

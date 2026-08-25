@@ -29,6 +29,10 @@ recorded in the
 The [round-two semantic review](refactor/semantic_review_round_2.md) separately
 grades definition validity and empirical validity; executable coverage is never
 treated as predictive validation.
+The numbered implementation modules are no longer runtime owners: Zone logic
+lives in `smc_trader/zone.py`, and Range Auction logic lives in
+`smc_trader/range_auction.py`. `group3.py` and `group4.py` are unexported,
+warning-only compatibility shims for historical pickle class lookup.
 The repository-owned target architecture is therefore only partially
 satisfied: the auditable ownership and fail-closed interfaces are substantially
 present, but the fitted empirical model, Execution Research, operational Shadow
@@ -148,7 +152,7 @@ the selected atomic version. It does not mint a composite or “full-stack v2”
 identity. Engine construction loads this pair once and derives the internal
 Foundation-enabled flag; Engine, Shadow, and checkpoint state freeze and
 compare the existing version/identity fields. The current combined Engine
-checkpoint schema is 5; earlier schemas are rejected rather than restored into
+checkpoint schema is 6; earlier schemas are rejected rather than restored into
 an incompatible Observation, Foundation, or Neutral-state contract.
 
 ### Hot-state boundary

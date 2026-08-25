@@ -3251,11 +3251,11 @@ def test_group4_projection_scanner_remains_explicit_compatibility_mode() -> None
             liquidity_protocol=(
                 "configs/primitives_structure_liquidity.json"
             ),
-            group4_protocol="configs/primitives_range.json",
+            range_auction_protocol="configs/primitives_range.json",
             scale_specs=CORE_TEST_SCALE_SPECS,
             project_scene_graph=False,
             materialize_event_view=False,
-            group4_projection_only=True,
+            range_auction_projection_only=True,
         )
     )
     update = ReaderUpdate(

@@ -32,7 +32,7 @@ if str(ROOT) not in sys.path:
 from smc_trader.artifact_stream import atomic_bytes  # noqa: E402
 from smc_trader.causal import CausalMarketReader  # noqa: E402
 from smc_trader.eye_statistics import EyeAuthorityStatistics  # noqa: E402
-from smc_trader.group4 import Group4Protocol  # noqa: E402
+from smc_trader.range_auction import RangeAuctionProtocol  # noqa: E402
 from smc_trader.io import LoadedOHLCV, iter_completed_bars, load_ohlcv  # noqa: E402
 from smc_trader.market_clock import is_registered_trading_minute  # noqa: E402
 from smc_trader.model import MarketObservation, Timeframe, to_primitive  # noqa: E402
@@ -116,8 +116,8 @@ RUNTIME_CODE_FILES = (
     "smc_trader/displacement.py",
     "smc_trader/displacement_observer.py",
     "smc_trader/eye_statistics.py",
-    "smc_trader/group3.py",
-    "smc_trader/group4.py",
+    "smc_trader/zone.py",
+    "smc_trader/range_auction.py",
     "smc_trader/group5.py",
     "smc_trader/io.py",
     "smc_trader/liquidity.py",
@@ -390,8 +390,8 @@ def _build_eye(
         "structure_protocol": EXPECTED_PROTOCOLS["group12"],
         "liquidity_protocol": EXPECTED_PROTOCOLS["group12"],
         "displacement_protocol": EXPECTED_PROTOCOLS["displacement"],
-        "group3_protocol": EXPECTED_PROTOCOLS["group3"],
-        "group4_protocol": EXPECTED_PROTOCOLS["group4"],
+        "zone_protocol": EXPECTED_PROTOCOLS["group3"],
+        "range_auction_protocol": EXPECTED_PROTOCOLS["group4"],
         "group5_protocol": EXPECTED_PROTOCOLS["group5"],
     }
     if any(
@@ -427,13 +427,13 @@ def _build_eye(
             displacement_protocol=str(
                 ROOT / EXPECTED_PROTOCOLS["displacement"]
             ),
-            group3_protocol=str(ROOT / EXPECTED_PROTOCOLS["group3"]),
-            group4_protocol=str(ROOT / EXPECTED_PROTOCOLS["group4"]),
+            zone_protocol=str(ROOT / EXPECTED_PROTOCOLS["group3"]),
+            range_auction_protocol=str(ROOT / EXPECTED_PROTOCOLS["group4"]),
             group5_protocol=str(ROOT / EXPECTED_PROTOCOLS["group5"]),
             scale_specs=specs,
             project_scene_graph=False,
             materialize_event_view=False,
-            group4_projection_only=False,
+            range_auction_projection_only=False,
             eye_authority_mode=True,
         )
     )
@@ -969,7 +969,7 @@ def run_scan(
             start=start,
             end_exclusive=end,
             coverage_start=warmup_start,
-            group4_protocol=Group4Protocol.from_file(
+            range_auction_protocol=RangeAuctionProtocol.from_file(
                 ROOT / EXPECTED_PROTOCOLS["group4"]
             ),
         )

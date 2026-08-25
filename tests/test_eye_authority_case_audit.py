@@ -47,7 +47,7 @@ def test_case_audit_is_full_view_eye_only() -> None:
     assert config.eye_authority_mode is True
     assert config.materialize_event_view is True
     assert config.project_scene_graph is True
-    assert config.group4_projection_only is False
+    assert config.range_auction_projection_only is False
 
 
 def test_case_transport_contract_is_clock_and_stratum_specific() -> None:

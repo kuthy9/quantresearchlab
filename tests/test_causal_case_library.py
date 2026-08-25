@@ -147,7 +147,7 @@ def _location(asof: pd.Timestamp, *, formed_at: pd.Timestamp | None = None) -> E
     return EntryLocationState(
         location_id="location:1",
         protocol_hash="p5",
-        source_group3_protocol_hash="p3",
+        source_zone_detector_protocol_hash="p3",
         symbol="NQH5",
         instrument_id=1,
         direction=Direction.LONG,

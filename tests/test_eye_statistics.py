@@ -865,7 +865,7 @@ def test_range_manipulation_displacement_and_ob_funnel_conservation() -> None:
         start=start,
         end_exclusive=end,
         coverage_start=start,
-        group4_protocol=protocol,
+        range_auction_protocol=protocol,
     )
     first = _transition("d1", "started", start, 0)
     ob1 = SimpleNamespace(

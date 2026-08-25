@@ -1724,25 +1724,25 @@ class CausalLiquidityTracker:
     def snapshot(
         self,
         *,
-        group4_sources_only: bool = False,
+        range_auction_sources_only: bool = False,
         include_support_resistance: bool = True,
     ) -> tuple[
         tuple[SupportResistanceState, ...],
         tuple[LiquidityPoolState, ...],
         tuple[LiquidityInventoryItem, ...],
     ]:
-        if type(group4_sources_only) is not bool:
+        if type(range_auction_sources_only) is not bool:
             raise TypeError("Group 4 source-only flag must be boolean")
         if type(include_support_resistance) is not bool:
             raise TypeError("support/resistance inclusion flag must be boolean")
-        if not group4_sources_only and not include_support_resistance:
+        if not range_auction_sources_only and not include_support_resistance:
             raise ValueError(
                 "support/resistance may be omitted only from a Group 4 "
                 "source projection"
             )
 
         pool_records = tuple(self._pools.values())
-        if group4_sources_only:
+        if range_auction_sources_only:
             pool_signature = tuple(
                 (
                     record.state,
@@ -1771,7 +1771,7 @@ class CausalLiquidityTracker:
             tuple(
                 (
                     record.state
-                    if group4_sources_only
+                    if range_auction_sources_only
                     else replace(
                         record.state,
                         age_bars=(
@@ -1803,7 +1803,7 @@ class CausalLiquidityTracker:
         pools = tuple(
             (
                 record.state
-                if group4_sources_only
+                if range_auction_sources_only
                 else replace(
                     record.state,
                     age_bars=max(
@@ -1821,7 +1821,7 @@ class CausalLiquidityTracker:
             )
         )
         inventory: list[LiquidityInventoryItem] = []
-        if group4_sources_only:
+        if range_auction_sources_only:
             for pool in pools:
                 consumed = pool.swept_at is not None
                 record = self._pools[pool.pool_id]

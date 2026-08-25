@@ -315,7 +315,7 @@ class EyeAuthorityStatistics:
         start: Any = None,
         end_exclusive: Any = None,
         coverage_start: Any = None,
-        group4_protocol: Any = None,
+        range_auction_protocol: Any = None,
     ) -> None:
         self.start = _clock(start)
         self.end_exclusive = _clock(end_exclusive)
@@ -334,7 +334,7 @@ class EyeAuthorityStatistics:
             and self.coverage_start > self.start
         ):
             raise ValueError("coverage_start cannot follow the report start")
-        self.group4_protocol = group4_protocol
+        self.range_auction_protocol = range_auction_protocol
         self._last_observation_key: tuple[str, int, str] | None = None
         self._observation_count = 0
         self._first_asof: pd.Timestamp | None = None

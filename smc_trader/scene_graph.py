@@ -7475,8 +7475,8 @@ def _build_unique_market_episode(
         or previous.source_displacement_id
         != location.source_displacement_id
         or previous.entry_location_protocol_hash != location.protocol_hash
-        or previous.source_group3_protocol_hash
-        != location.source_group3_protocol_hash
+        or previous.source_zone_detector_protocol_hash
+        != location.source_zone_detector_protocol_hash
         or previous.source_zone_kind != location.source_zone_kind
         or previous.source_zone_protocol_hash
         != location.source_zone_protocol_hash
@@ -7590,7 +7590,9 @@ def _build_unique_market_episode(
         source_zone_id=location.source_zone_id,
         source_displacement_id=location.source_displacement_id,
         entry_location_protocol_hash=location.protocol_hash,
-        source_group3_protocol_hash=location.source_group3_protocol_hash,
+        source_zone_detector_protocol_hash=(
+            location.source_zone_detector_protocol_hash
+        ),
         source_zone_kind=location.source_zone_kind,
         source_zone_protocol_hash=location.source_zone_protocol_hash,
         source_bos_id=location.source_bos_id,

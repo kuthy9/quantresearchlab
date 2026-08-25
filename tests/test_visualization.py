@@ -576,7 +576,7 @@ def _snapshot_with_sequence():
     location = EntryLocationState(
         location_id=location_id,
         protocol_hash="e" * 64,
-        source_group3_protocol_hash="f" * 64,
+        source_zone_detector_protocol_hash="f" * 64,
         symbol=snapshot.observation.symbol,
         instrument_id=snapshot.observation.instrument_id,
         direction=Direction.LONG,

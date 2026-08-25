@@ -601,8 +601,8 @@ def test_engine_neutral_state_is_pickle_checkpoint_ready() -> None:
     )
     encoded = pickle.dumps(engine, protocol=pickle.HIGHEST_PROTOCOL)
     resumed = pickle.loads(encoded)
-    assert NEUTRAL_ENGINE_CHECKPOINT_SCHEMA_VERSION == 5
-    assert engine.__getstate__()["_neutral_checkpoint_schema_version"] == 5
+    assert NEUTRAL_ENGINE_CHECKPOINT_SCHEMA_VERSION == 6
+    assert engine.__getstate__()["_neutral_checkpoint_schema_version"] == 6
     assert resumed.neutral_market_state == engine.neutral_market_state
     assert resumed.last_snapshot == engine.last_snapshot
     assert "market_snapshot" not in snapshot.__dict__

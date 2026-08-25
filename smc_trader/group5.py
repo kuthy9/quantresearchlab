@@ -48,8 +48,8 @@ class Group5Protocol:
 
     protocol_hash: str
     source_group12_protocol_hash: str
-    source_group3_protocol_hash: str
-    source_group4_protocol_hash: str
+    source_zone_protocol_hash: str
+    source_range_auction_protocol_hash: str
     tick_size: float
     m1_atr_period: int
     later_hold_bars: int
@@ -67,8 +67,8 @@ class Group5Protocol:
         hashes = (
             self.protocol_hash,
             self.source_group12_protocol_hash,
-            self.source_group3_protocol_hash,
-            self.source_group4_protocol_hash,
+            self.source_zone_protocol_hash,
+            self.source_range_auction_protocol_hash,
         )
         if (
             any(
@@ -129,10 +129,10 @@ class Group5Protocol:
             source_group12_protocol_hash=payload["upstream"][
                 "group12_protocol_sha256"
             ],
-            source_group3_protocol_hash=payload["upstream"][
+            source_zone_protocol_hash=payload["upstream"][
                 "group3_protocol_sha256"
             ],
-            source_group4_protocol_hash=payload["upstream"][
+            source_range_auction_protocol_hash=payload["upstream"][
                 "group4_protocol_sha256"
             ],
             tick_size=payload["tick_size"],
@@ -461,7 +461,7 @@ class CausalGroup5Reducer:
             raise ValueError("Group 5 entry-zone source identities repeat")
         if any(
             source.protocol_hash
-            != self.protocol.source_group3_protocol_hash
+            != self.protocol.source_zone_protocol_hash
             or (source.symbol, source.instrument_id) != identity
             or source.confirmed_at > candle.end
             for source in sources
@@ -477,7 +477,7 @@ class CausalGroup5Reducer:
             )
         if any(
             state.protocol_hash
-            != self.protocol.source_group4_protocol_hash
+            != self.protocol.source_range_auction_protocol_hash
             or state.source_kind != "formed_liquidity_pool"
             or (state.symbol, state.instrument_id) != identity
             or state.last_updated_at > candle.end
@@ -941,8 +941,8 @@ class CausalGroup5Reducer:
         location = EntryLocationState(
             location_id=location_id,
             protocol_hash=self.protocol.protocol_hash,
-            source_group3_protocol_hash=(
-                self.protocol.source_group3_protocol_hash
+            source_zone_detector_protocol_hash=(
+                self.protocol.source_zone_protocol_hash
             ),
             symbol=source.symbol,
             instrument_id=source.instrument_id,

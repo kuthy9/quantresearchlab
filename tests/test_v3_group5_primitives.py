@@ -383,7 +383,7 @@ def _zone_formation(
 def test_raw_fvg_is_visible_input_but_not_registered_by_group5() -> None:
     protocol = replace(
         _protocol(),
-        source_group3_protocol_hash=GROUP3_SHA,
+        source_zone_protocol_hash=GROUP3_SHA,
     )
     reducer = CausalGroup5Reducer(protocol)
     candle = _m1(0)
@@ -428,8 +428,8 @@ def test_group5_protocol_tracks_current_config_and_upstream_bindings() -> None:
     assert _sha256(PROTOCOL_PATH) == PROTOCOL_SHA
     assert protocol.protocol_hash == PROTOCOL_SHA
     assert protocol.source_group12_protocol_hash == GROUP12_SHA
-    assert protocol.source_group3_protocol_hash == GROUP3_SHA
-    assert protocol.source_group4_protocol_hash == GROUP4_SHA
+    assert protocol.source_zone_protocol_hash == GROUP3_SHA
+    assert protocol.source_range_auction_protocol_hash == GROUP4_SHA
     assert (
         payload["upstream"]["group12_protocol_sha256"]
         == GROUP12_SHA

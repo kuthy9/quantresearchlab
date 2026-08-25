@@ -45,12 +45,17 @@ registry/identity, then verifies that Foundation declares v1.2 as its parent.
 There is no `smc_semantics_v2.0` runtime and no synthetic full-stack version.
 `ContinuousSMCEngine` derives the internal projection gate from the validated
 pair and freezes the existing identities into Engine, Shadow, and checkpoint
-state. The current combined Engine checkpoint schema is 5; older schemas fail
+state. The current combined Engine checkpoint schema is 6; older schemas fail
 closed on restore into the current Observation, Foundation, and Neutral-state
 contracts. `MarketObservation` and `MarketSnapshot` schemas are 2. Shadow uses
 `phase9_shadow_live_v1.3`, compact checkpoint `shadow_compact_runtime_v4`, and
 component digest `phase9_shadow_component_digest_v2`. These
 bindings grant no empirical, Brain, Trade Intent, execution, or live authority.
+
+The current model schema is 3. Its observer configuration selects
+`zone_protocol` and `range_auction_protocol`; canonical runtime ownership lives
+in `smc_trader/zone.py` and `smc_trader/range_auction.py`. The old numbered
+modules are unexported legacy pickle-lookup shims, not alternate implementations.
 
 The compact-state migration is now implemented. `EventStore` owns
 atomic history; one append-only, in-memory `FoundationRecordLedger` owns full
@@ -344,7 +349,7 @@ rolling OOF, or sealed OOS.
 
 | Phase | Status | What is present | What remains |
 |---|---|---|---|
-| 1. Auditable foundation | **Complete for the active v1.2 plus additive-v2 path** | Causal clocks, exact tick admission, hash-bound semantic identities, immutable events/store, source-kind and cross-object validation, lifecycle uniqueness, production config admission, Engine checkpoint-schema-5 restore, compact hot-state/cold-ledger replay, fingerprints, and determinism tests. Phase 9 pickles the complete runner, including the active Hypothesis Manager ledger. | The Foundation cold ledger remains in memory, and a directly queryable belief-update archive across retired scopes is not persisted; registered input journals can replay both. |
+| 1. Auditable foundation | **Complete for the active v1.2 plus additive-v2 path** | Causal clocks, exact tick admission, hash-bound semantic identities, immutable events/store, source-kind and cross-object validation, lifecycle uniqueness, production config admission, Engine checkpoint-schema-6 restore, compact hot-state/cold-ledger replay, fingerprints, and determinism tests. Phase 9 pickles the complete runner, including the active Hypothesis Manager ledger. | The Foundation cold ledger remains in memory, and a directly queryable belief-update archive across retired scopes is not persisted; registered input journals can replay both. |
 | 2. Core atomic semantics | **v1.2 producer plus additive foundation-v2 lifecycle complete** | Existing Swing/candidate/touch/penetration/Sweep/Acceptance/Raw Break/FVG/Displacement producers are unchanged. Foundation v2 adds complete Structural Leg paths, same-level rearm, level retirement, competing interaction terminals, boundary attack, and multi-bar formation ancestry. | No arbitrary time TTL or new tutorial SMC detector was added. Any empirical expiry threshold still requires a later study/version. |
 | 3. Derived structure | **Foundation definitions complete; empirical value untested** | Persistent internal/external Structure Generations and transitions, Base Origin Core versus Qualified OB, Structural versus Balance Range, and Delivery Phase Generation are independently represented. MSS starts or updates a forming challenger; it cannot itself confirm an opposite regime. | Range extension remains undefined. Foundation definitions do not validate predictive value or retroactively change v1.2 artifacts. |
 | 4. Timeframe and relation state | **Complete with distinct geometry and relation generations** | Timeframe/Session/Snapshot and role hierarchy remain; Foundation v2 adds geometric Swing assignments, dual range locations, and persistent cross-timeframe Relation Generations. | Outcome value is not implied by deterministic nesting or relation state and remains an empirical question. |

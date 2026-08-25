@@ -3027,7 +3027,7 @@ def test_scene_graph_compaction_preserves_nonempty_market_recorder_rows() -> Non
         source_zone_id="fvg:compaction-fixture",
         source_displacement_id="displacement:compaction-fixture",
         entry_location_protocol_hash="entry-location-protocol:fixture",
-        source_group3_protocol_hash="group3-protocol:fixture",
+        source_zone_detector_protocol_hash="group3-protocol:fixture",
         source_zone_kind="fvg",
         source_zone_protocol_hash="fvg-protocol:fixture",
         source_bos_id=None,

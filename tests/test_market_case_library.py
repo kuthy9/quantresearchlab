@@ -82,7 +82,7 @@ def _episode(
         source_zone_id=source_zone_id,
         source_displacement_id="displacement:1",
         entry_location_protocol_hash="entry-location-protocol:1",
-        source_group3_protocol_hash="group3-protocol:1",
+        source_zone_detector_protocol_hash="group3-protocol:1",
         source_zone_kind="fvg",
         source_zone_protocol_hash="fvg-protocol:1",
         source_bos_id=None,

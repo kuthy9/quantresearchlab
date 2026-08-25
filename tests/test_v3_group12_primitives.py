@@ -1536,7 +1536,7 @@ def test_equal_pool_and_zone_lifecycles_are_incremental_and_frozen() -> None:
     assert (pool.lower_bound, pool.upper_bound) == (100.0, 100.25)
     assert any(item.kind == "equal_highs" for item in inventory)
     compact = tracker.snapshot(
-        group4_sources_only=True,
+        range_auction_sources_only=True,
         include_support_resistance=False,
     )
     assert compact[0] == ()
@@ -1547,7 +1547,7 @@ def test_equal_pool_and_zone_lifecycles_are_incremental_and_frozen() -> None:
         if item.kind in {"equal_highs", "equal_lows"}
     )
     assert tracker.snapshot(
-        group4_sources_only=True,
+        range_auction_sources_only=True,
         include_support_resistance=False,
     ) is compact
 
@@ -1572,7 +1572,7 @@ def test_equal_pool_and_zone_lifecycles_are_incremental_and_frozen() -> None:
         item for item in inventory if item.kind == "equal_highs"
     ).lifecycle is LiquidityInventoryLifecycle.CONSUMED
     compact = tracker.snapshot(
-        group4_sources_only=True,
+        range_auction_sources_only=True,
         include_support_resistance=False,
     )
     assert compact[1][0].lifecycle is LiquidityPoolLifecycle.SWEPT

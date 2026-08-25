@@ -348,7 +348,7 @@ def _episode_physical_payload(episode: Any) -> Mapping[str, Any]:
         "source_zone_id",
         "source_displacement_id",
         "entry_location_protocol_hash",
-        "source_group3_protocol_hash",
+        "source_zone_detector_protocol_hash",
         "source_zone_kind",
         "source_zone_protocol_hash",
         "source_bos_id",

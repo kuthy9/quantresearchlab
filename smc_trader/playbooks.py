@@ -4974,7 +4974,7 @@ def _entry_location_source_zone(
     if (
         source_failed
         or source.protocol_hash
-        != location.source_group3_protocol_hash
+        != location.source_zone_detector_protocol_hash
         or source.protocol_hash != location.source_zone_protocol_hash
         or source.symbol != observation.symbol
         or source.symbol != location.symbol

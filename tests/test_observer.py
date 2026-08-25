@@ -143,8 +143,8 @@ def _all_typed_observer_config(**overrides: object) -> ObserverConfig:
         "structure_protocol": STRUCTURE_PROTOCOL,
         "liquidity_protocol": STRUCTURE_PROTOCOL,
         "displacement_protocol": DISPLACEMENT_PROTOCOL,
-        "group3_protocol": GROUP3_PROTOCOL,
-        "group4_protocol": GROUP4_PROTOCOL,
+        "zone_protocol": GROUP3_PROTOCOL,
+        "range_auction_protocol": GROUP4_PROTOCOL,
         "group5_protocol": GROUP5_PROTOCOL,
         "scale_specs": MODEL_SCALE_SPECS,
         "project_scene_graph": False,
@@ -305,7 +305,7 @@ def test_authority_scan_projection_keeps_group4_state_identical() -> None:
     common = {
         "structure_protocol": STRUCTURE_PROTOCOL,
         "liquidity_protocol": STRUCTURE_PROTOCOL,
-        "group4_protocol": GROUP4_PROTOCOL,
+        "range_auction_protocol": GROUP4_PROTOCOL,
         "scale_specs": MODEL_SCALE_SPECS,
         "project_scene_graph": False,
     }
@@ -314,7 +314,7 @@ def test_authority_scan_projection_keeps_group4_state_identical() -> None:
         ObserverConfig(
             **common,
             materialize_event_view=False,
-            group4_projection_only=True,
+            range_auction_projection_only=True,
         )
     )
 
@@ -1490,12 +1490,12 @@ def test_lightweight_event_view_is_rejected_outside_authority_scan() -> None:
         )
 
 
-def test_eye_authority_mode_rejects_group4_projection_only() -> None:
+def test_eye_authority_mode_rejects_range_auction_projection_only() -> None:
     with pytest.raises(ValueError, match="Group 4 projection-only"):
         CausalObserver(
             _all_typed_observer_config(
                 materialize_event_view=False,
-                group4_projection_only=True,
+                range_auction_projection_only=True,
                 eye_authority_mode=True,
             )
         )
@@ -1509,7 +1509,7 @@ def test_eye_authority_mode_rejects_group4_projection_only() -> None:
             canonical_foundation_enabled=True,
         ),
         _all_typed_observer_config(
-            group4_projection_only=True,
+            range_auction_projection_only=True,
             canonical_foundation_enabled=True,
         ),
     ),

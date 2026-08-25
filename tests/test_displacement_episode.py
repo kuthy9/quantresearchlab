@@ -11,10 +11,10 @@ from smc_trader.displacement import (
     EPISODE_PROTOCOL_VERSION,
 )
 from smc_trader.displacement_observer import CausalDisplacementEye
-from smc_trader.group3 import (
-    CausalGroup3Tracker,
-    Group3BOSSource,
-    Group3Protocol,
+from smc_trader.zone import (
+    CausalZoneTracker,
+    ZoneBOSSource,
+    ZoneProtocol,
 )
 from smc_trader.model import (
     BOSLifecycle,
@@ -192,11 +192,11 @@ def test_episode_protocol_is_typed_available_pending_natural_authority() -> None
             scale_specs=CORE_TEST_SCALE_SPECS,
             structure_protocol=str(GROUP12_PATH),
             displacement_protocol=str(PROTOCOL_PATH),
-            group3_protocol=str(GROUP3_PATH),
+            zone_protocol=str(GROUP3_PATH),
         )
     )
     assert observer._displacement_downstream_authoritative is True
-    assert observer._group3_tracker is not None
+    assert observer._zone_tracker is not None
 
 
 def test_first_candidate_starts_before_a_later_large_bar_and_keeps_identity() -> None:
@@ -618,7 +618,7 @@ def _bos(
     *,
     break_bar_id: str,
     pending_at: pd.Timestamp,
-) -> Group3BOSSource:
+) -> ZoneBOSSource:
     state = BreakOfStructureState(
         bos_id="bos-after-interruption",
         timeframe=Timeframe.M5,
@@ -638,7 +638,7 @@ def _bos(
         break_distance_atr=0.5,
         post_break_state=BOSPostBreakState.PENDING,
     )
-    return Group3BOSSource(
+    return ZoneBOSSource(
         state=state,
         symbol=candle.symbol,
         instrument_id=candle.instrument_id,
@@ -650,8 +650,8 @@ def _bos(
 def test_group3_zones_keep_exact_episode_identity_across_interruption() -> None:
     displacement_protocol = _protocol()
     displacement = CausalDisplacementTracker(displacement_protocol)
-    group3 = CausalGroup3Tracker(
-        Group3Protocol.from_file(GROUP3_PATH),
+    group3 = CausalZoneTracker(
+        ZoneProtocol.from_file(GROUP3_PATH),
         displacement_protocol_hash=displacement_protocol.protocol_hash,
         structure_protocol_hash=STRUCTURE_HASH,
     )
@@ -659,7 +659,7 @@ def test_group3_zones_keep_exact_episode_identity_across_interruption() -> None:
     def send(
         index: int,
         values: tuple[float, float, float, float],
-        bos_sources: tuple[Group3BOSSource, ...] = (),
+        bos_sources: tuple[ZoneBOSSource, ...] = (),
     ):
         candle = _candle(index, values)
         update = displacement.on_completed_5m(candle)

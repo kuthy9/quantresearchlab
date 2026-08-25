@@ -531,7 +531,7 @@ class PathSequenceLifecycle(str, Enum):
     CENSORED = "censored"
 
 
-GROUP4_HARD_BOUNDARY_REASONS = frozenset(
+RANGE_AUCTION_HARD_BOUNDARY_REASONS = frozenset(
     {
         "data_gap_reset",
         "contract_change_reset",
@@ -539,7 +539,7 @@ GROUP4_HARD_BOUNDARY_REASONS = frozenset(
         "tick_size_mismatch",
     }
 )
-GROUP5_HARD_BOUNDARY_REASONS = GROUP4_HARD_BOUNDARY_REASONS
+GROUP5_HARD_BOUNDARY_REASONS = RANGE_AUCTION_HARD_BOUNDARY_REASONS
 GROUP5_CONTEXT_KINDS = frozenset(
     {"zone_return", "pool_reversal"}
 )
@@ -3125,7 +3125,7 @@ class ManipulationState:
                         self.last_updated_at != self.censored_at
                         or self.transition_reason
                         not in {
-                            *GROUP4_HARD_BOUNDARY_REASONS,
+                            *RANGE_AUCTION_HARD_BOUNDARY_REASONS,
                             "deadline_elapsed",
                         }
                     )
@@ -3928,7 +3928,7 @@ class EntryLocationState:
 
     location_id: str
     protocol_hash: str
-    source_group3_protocol_hash: str
+    source_zone_detector_protocol_hash: str
     symbol: str
     instrument_id: int
     direction: Direction
@@ -3988,7 +3988,7 @@ class EntryLocationState:
         if not all(
             (
                 self.protocol_hash,
-                self.source_group3_protocol_hash,
+                self.source_zone_detector_protocol_hash,
                 self.source_zone_protocol_hash,
             )
         ):
@@ -9123,7 +9123,7 @@ class MarketEpisodeState:
     source_zone_id: str
     source_displacement_id: str
     entry_location_protocol_hash: str
-    source_group3_protocol_hash: str
+    source_zone_detector_protocol_hash: str
     source_zone_kind: str
     source_zone_protocol_hash: str
     source_bos_id: str | None
@@ -9184,7 +9184,7 @@ class MarketEpisodeState:
             self.source_zone_id,
             self.source_displacement_id,
             self.entry_location_protocol_hash,
-            self.source_group3_protocol_hash,
+            self.source_zone_detector_protocol_hash,
             self.source_zone_kind,
             self.source_zone_protocol_hash,
         )

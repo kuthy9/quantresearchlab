@@ -13,11 +13,11 @@ from smc_trader.displacement import (
     DisplacementProtocol,
     DisplacementUpdate,
 )
-from smc_trader.group3 import (
-    CausalGroup3Tracker,
+from smc_trader.zone import (
+    CausalZoneTracker,
     FVG_BOUNDARY_REASONS,
-    Group3BOSSource,
-    Group3Protocol,
+    ZoneBOSSource,
+    ZoneProtocol,
     WINDOW_RESET_REASONS,
 )
 from smc_trader.model import (
@@ -128,8 +128,8 @@ _ORDER_BLOCK_FROZEN_FIELDS = (
 )
 
 
-def _group3_protocol() -> Group3Protocol:
-    return Group3Protocol.from_file(GROUP3_PROTOCOL_PATH)
+def _zone_protocol() -> ZoneProtocol:
+    return ZoneProtocol.from_file(GROUP3_PROTOCOL_PATH)
 
 
 def _displacement_protocol() -> DisplacementProtocol:
@@ -168,8 +168,8 @@ def _candle(
 class _Harness:
     def __init__(self) -> None:
         displacement_protocol = _displacement_protocol()
-        self.group3 = CausalGroup3Tracker(
-            _group3_protocol(),
+        self.group3 = CausalZoneTracker(
+            _zone_protocol(),
             displacement_protocol_hash=(
                 displacement_protocol.protocol_hash
             ),
@@ -340,16 +340,16 @@ def _bos_source(
     instrument_id: int | None = None,
     protocol_hash: str = STRUCTURE_PROTOCOL_SHA,
     tick_size: float = 0.25,
-) -> Group3BOSSource:
+) -> ZoneBOSSource:
     if (
         bos.lifecycle is BOSLifecycle.CONFIRMED
         and bos.break_bar_id == "current-break-bar"
     ):
-        break_id = CausalGroup3Tracker(
-            _group3_protocol()
+        break_id = CausalZoneTracker(
+            _zone_protocol()
         )._candle_id(candle)
         bos = replace(bos, break_bar_id=break_id)
-    return Group3BOSSource(
+    return ZoneBOSSource(
         state=bos,
         symbol=candle.symbol if symbol is None else symbol,
         instrument_id=(
@@ -482,11 +482,11 @@ def _form_order_block(direction: Direction = Direction.LONG):
         ("maximum_order_block_states", 0),
     ),
 )
-def test_group3_protocol_tracks_current_config_and_rejects_invalid_ranges(
+def test_zone_protocol_tracks_current_config_and_rejects_invalid_ranges(
     field: str,
     value: object,
 ) -> None:
-    protocol = _group3_protocol()
+    protocol = _zone_protocol()
     payload = json.loads(GROUP3_PROTOCOL_PATH.read_bytes())
 
     assert protocol.protocol_hash == GROUP3_PROTOCOL_SHA
@@ -531,7 +531,7 @@ def test_group3_protocol_tracks_current_config_and_rejects_invalid_ranges(
 
 def test_group3_requires_frozen_protocol_and_completed_tick_grid() -> None:
     with pytest.raises(TypeError, match="frozen Group 3 protocol"):
-        CausalGroup3Tracker(object())
+        CausalZoneTracker(object())
 
     base = _candle(0, (100.0, 101.0, 100.0, 100.0))
     invalid = (
@@ -545,7 +545,7 @@ def test_group3_requires_frozen_protocol_and_completed_tick_grid() -> None:
         _candle(0, (100.1, 101.0, 100.0, 100.5)),
     )
     for candle in invalid:
-        tracker = CausalGroup3Tracker(_group3_protocol())
+        tracker = CausalZoneTracker(_zone_protocol())
         with pytest.raises(ValueError):
             tracker.on_completed_5m(
                 candle,
@@ -1219,8 +1219,8 @@ def test_real_structure_displacement_ids_join_without_fixture_rewrite() -> None:
     displacement_tracker = CausalDisplacementTracker(
         displacement_protocol
     )
-    group3 = CausalGroup3Tracker(
-        _group3_protocol(),
+    group3 = CausalZoneTracker(
+        _zone_protocol(),
         displacement_protocol_hash=displacement_protocol.protocol_hash,
         structure_protocol_hash=structure_config.protocol_hash,
     )
@@ -1249,7 +1249,7 @@ def test_real_structure_displacement_ids_join_without_fixture_rewrite() -> None:
             and state.resolved_at == candle.end
         )
         sources = tuple(
-            Group3BOSSource(
+            ZoneBOSSource(
                 state=state,
                 symbol=candle.symbol,
                 instrument_id=candle.instrument_id,
@@ -1778,8 +1778,8 @@ def test_capacity_evicts_only_previously_exposed_terminal_state() -> None:
     terminal = _fvg_by_id(terminal_output, created.fvg_id)
     assert terminal.lifecycle is FairValueGapLifecycle.MITIGATED
 
-    protocol = _group3_protocol()
-    compactable = CausalGroup3Tracker(protocol)
+    protocol = _zone_protocol()
+    compactable = CausalZoneTracker(protocol)
     for index in range(protocol.maximum_fvg_states):
         entity_id = f"terminal-fvg-{index:03d}"
         terminal_clock = terminal.mitigated_at + pd.Timedelta(
@@ -1805,7 +1805,7 @@ def test_capacity_evicts_only_previously_exposed_terminal_state() -> None:
     )
     assert "terminal-fvg-200" not in compactable._fair_value_gaps
 
-    blocked = CausalGroup3Tracker(protocol)
+    blocked = CausalZoneTracker(protocol)
     for index in range(protocol.maximum_fvg_states):
         entity_id = f"live-fvg-{index:03d}"
         blocked._fair_value_gaps[entity_id] = replace(
@@ -1828,7 +1828,7 @@ def test_capacity_evicts_only_previously_exposed_terminal_state() -> None:
 
 def test_failed_completed_bar_update_is_transactional() -> None:
     harness, created, _, _, _ = _form_fvg(Direction.LONG)
-    protocol = _group3_protocol()
+    protocol = _zone_protocol()
     for index in range(1, protocol.maximum_fvg_states):
         entity_id = f"live-capacity-fvg-{index:03d}"
         harness.group3._fair_value_gaps[entity_id] = replace(

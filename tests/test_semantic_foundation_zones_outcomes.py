@@ -8,7 +8,7 @@ import pandas as pd
 import pytest
 
 from smc_trader.foundation_registry import FOUNDATION_VERSION
-from smc_trader.group3 import Group3RawOnlyStructureDisposition
+from smc_trader.zone import ZoneRawOnlyStructureDisposition
 from smc_trader.model import (
     BOSLifecycle,
     BOSScope,
@@ -49,7 +49,7 @@ from tests.test_v3_displacement_replay import (
     _m5 as _observer_m5,
     _update as _observer_update,
 )
-from tests.test_v3_group3_primitives import (
+from tests.test_zone_primitives import (
     _form_fvg,
     _form_order_block,
 )
@@ -296,8 +296,8 @@ def _raw_only_disposition(
     legacy,
     *,
     bos_id: str | None = None,
-) -> Group3RawOnlyStructureDisposition:
-    return Group3RawOnlyStructureDisposition(
+) -> ZoneRawOnlyStructureDisposition:
+    return ZoneRawOnlyStructureDisposition(
         bos_id=bos_id or legacy.source_bos_id,
         raw_break_event_id="canonical-raw-break",
         protected_assignment_event_id="canonical-protected-assignment",
@@ -318,7 +318,7 @@ def _production_observer() -> CausalObserver:
             structure_protocol=str(GROUP12_PROTOCOL_PATH),
             liquidity_protocol=str(GROUP12_PROTOCOL_PATH),
             displacement_protocol=str(PROTOCOL_PATH),
-            group3_protocol=str(GROUP3_PROTOCOL_PATH),
+            zone_protocol=str(GROUP3_PROTOCOL_PATH),
         )
     )
 
@@ -1109,7 +1109,7 @@ def _install_raw_only_qob_provenance(
     include_bos_displacement: bool = False,
     mutate_raw=None,
 ) -> tuple[str, MarketEvent]:
-    observer._group3_tracker = tracker
+    observer._zone_tracker = tracker
     completed = next(
         completed
         for completed in reversed(tracker._pending_foundation_completed)
@@ -1288,7 +1288,7 @@ def _install_raw_only_qob_provenance(
         protected_assignment_event_id
     )
     observer._raw_only_structure_dispositions[bos_id] = (
-        Group3RawOnlyStructureDisposition(
+        ZoneRawOnlyStructureDisposition(
             bos_id=bos_id,
             raw_break_event_id=raw.event_id,
             protected_assignment_event_id=(
@@ -2242,7 +2242,7 @@ def test_observer_publishes_base_core_at_start_and_keeps_history() -> None:
     observation = observer.observe(
         _observer_update(seed.end, m5=(seed,))
     )
-    projection = observer.last_group3_foundation_projection
+    projection = observer.last_zone_foundation_projection
     assert projection is not None
     assert observation.displacement is not None
     assert observation.displacement.lifecycle == "started"
@@ -2276,7 +2276,7 @@ def test_observer_publishes_base_core_at_start_and_keeps_history() -> None:
         )
     assert observation.displacement is not None
     assert observation.displacement.lifecycle == "idle"
-    retained = observer.last_group3_foundation_projection
+    retained = observer.last_zone_foundation_projection
     assert retained is not None
     assert retained.base_origin_cores == (core,)
     assert retained.qualified_order_blocks == ()
@@ -2304,7 +2304,7 @@ def test_observer_fvg_and_first_retest_sources_are_canonical_events() -> None:
             _observer_update(candle.end, m5=(candle,))
         )
         index += 1
-    projection = observer.last_group3_foundation_projection
+    projection = observer.last_zone_foundation_projection
     assert projection is not None
     lifecycle = projection.fvg_structural_lifecycles[0]
     created = observer.memory.audit_event_including_pending(
@@ -2321,7 +2321,7 @@ def test_observer_fvg_and_first_retest_sources_are_canonical_events() -> None:
     observer.observe(
         _observer_update(equality.end, m5=(equality,))
     )
-    projection = observer.last_group3_foundation_projection
+    projection = observer.last_zone_foundation_projection
     assert projection is not None
     assert len(projection.first_retest_transitions) == 1
     retest = projection.first_retest_transitions[0]
@@ -2344,7 +2344,7 @@ def test_observer_fvg_and_first_retest_sources_are_canonical_events() -> None:
         (102.5, 103.0, 102.0, 102.75),
     )
     observer.observe(_observer_update(future.end, m5=(future,)))
-    future_projection = observer.last_group3_foundation_projection
+    future_projection = observer.last_zone_foundation_projection
     assert future_projection is not None
     assert future_projection.first_retest_transitions == ()
     assert future_projection.first_retests == (retest,)
@@ -2427,7 +2427,7 @@ def test_observer_deferred_synthetic_boundary_is_censored_exactly() -> None:
         )
     )
 
-    projection = observer.last_group3_foundation_projection
+    projection = observer.last_zone_foundation_projection
     assert projection is not None
     assert projection.boundary_reason == "synthetic_interruption"
     terminal = projection.fvg_structural_transitions[0]

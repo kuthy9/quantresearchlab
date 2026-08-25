@@ -40,10 +40,10 @@ from .helpers import (
     market_observation,
     replace_market_observation,
 )
-from .test_v3_group4_primitives import (
+from .test_range_auction_primitives import (
     _m1 as _group4_m1,
     _mature_range,
-    _protocol as _group4_protocol,
+    _protocol as _range_auction_protocol,
 )
 from .test_v4_typed_vertical import (
     ROOT,
@@ -75,7 +75,7 @@ def _unparked_favr_brain() -> PlaybookBrain:
 
 
 def _range_failed_auction_fixture():
-    tracker, _, _ = _mature_range(_group4_protocol())
+    tracker, _, _ = _mature_range(_range_auction_protocol())
     inventory = tracker.snapshot().range_boundary_inventory
     for index in range(15):
         output = tracker.on_completed_update(
@@ -152,7 +152,7 @@ def _range_failed_auction():
 
 
 def _favr_fixture():
-    mature, manipulation, inventory, group4_updates = (
+    mature, manipulation, inventory, range_auction_updates = (
         _range_failed_auction_fixture()
     )
     reducer = CausalGroup5Reducer(_group5_protocol())
@@ -271,7 +271,7 @@ def _favr_fixture():
         fvg,
         tuple(updates),
         inventory,
-        group4_updates,
+        range_auction_updates,
     )
 
 
@@ -282,7 +282,7 @@ def _favr_observation():
 
 def test_lsr_optional_range_context_enriches_route_without_becoming_gate() -> None:
     base = _lsr_observation()
-    tracker, _, mature = _mature_range(_group4_protocol())
+    tracker, _, mature = _mature_range(_range_auction_protocol())
     range_inventory = tracker.snapshot().range_boundary_inventory
     swept_boundary = next(
         item for item in range_inventory if item.side == "above"
@@ -352,7 +352,7 @@ def test_lsr_optional_range_context_enriches_route_without_becoming_gate() -> No
 
 def test_lsr_optional_range_context_loss_does_not_invalidate_core_episode() -> None:
     base = _lsr_observation()
-    tracker, _, mature = _mature_range(_group4_protocol())
+    tracker, _, mature = _mature_range(_range_auction_protocol())
     range_inventory = tracker.snapshot().range_boundary_inventory
     swept_boundary = next(
         item for item in range_inventory if item.side == "above"
@@ -685,7 +685,7 @@ def _favr_public_scene_graph(
         fvg,
         updates,
         inventory,
-        group4_updates,
+        range_auction_updates,
     ) = _favr_fixture()
     graph = TemporalMarketSceneGraph()
     boundary_id = manipulation.source_inventory_item_id
@@ -749,16 +749,16 @@ def _favr_public_scene_graph(
                 inventory=visible_inventory,
             )
         )
-        for candle, group4_update in group4_updates:
+        for candle, range_auction_update in range_auction_updates:
             graph.update(
                 _favr_context_graph_observation(
                     candle.end,
                     price=candle.close,
                     mature=mature,
                     inventory=(
-                        group4_update.range_boundary_inventory
+                        range_auction_update.range_boundary_inventory
                     ),
-                    manipulations=group4_update.manipulations,
+                    manipulations=range_auction_update.manipulations,
                 )
             )
     else:

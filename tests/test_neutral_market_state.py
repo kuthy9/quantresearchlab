@@ -62,7 +62,7 @@ def _location(
     return EntryLocationState(
         location_id=location_id,
         protocol_hash="group5-protocol",
-        source_group3_protocol_hash="group3-protocol",
+        source_zone_detector_protocol_hash="group3-protocol",
         symbol=SYMBOL,
         instrument_id=INSTRUMENT_ID,
         direction=direction,

@@ -569,7 +569,7 @@ def test_off_grid_detector_candle_fails_closed_before_group3_projection() -> Non
             structure_protocol=str(GROUP12_PROTOCOL_PATH),
             liquidity_protocol=str(GROUP12_PROTOCOL_PATH),
             displacement_protocol=str(PROTOCOL_PATH),
-            group3_protocol=str(GROUP3_PROTOCOL_PATH),
+            zone_protocol=str(GROUP3_PROTOCOL_PATH),
         )
     )
     index = 0
@@ -608,7 +608,7 @@ def test_off_grid_detector_candle_fails_closed_before_group3_projection() -> Non
         (102.25, 102.5, 102.0, 102.1),
     )
     before_displacement = repr(observer._displacement_eye.__dict__)
-    before_group3 = repr(observer._group3_tracker.__dict__)
+    before_group3 = repr(observer._zone_tracker.__dict__)
     with pytest.raises(ValueError, match="off-grid"):
         observer.observe(_update(off_grid.end, m5=(off_grid,)))
 
@@ -616,7 +616,7 @@ def test_off_grid_detector_candle_fails_closed_before_group3_projection() -> Non
     # admission still precedes every detector boundary/cache path, so the
     # corrected same-clock input remains replayable without rounded ancestry.
     assert repr(observer._displacement_eye.__dict__) == before_displacement
-    assert repr(observer._group3_tracker.__dict__) == before_group3
+    assert repr(observer._zone_tracker.__dict__) == before_group3
     assert observer._terminal_failure is None
     corrected = replace(off_grid, close=102.25)
     recovered = observer.observe(
