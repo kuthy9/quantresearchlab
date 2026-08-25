@@ -9,7 +9,7 @@ import pandas as pd
 import pytest
 
 from smc_trader.event_store import (
-    ImmutableEventStore,
+    EventStore,
     read_event_journal,
     write_event_journal,
 )
@@ -81,9 +81,9 @@ def _events() -> tuple[MarketEvent, ...]:
     return first, second, third
 
 
-def _bound_store() -> tuple[SemanticRegistry, ImmutableEventStore]:
+def _bound_store() -> tuple[SemanticRegistry, EventStore]:
     registry = SemanticRegistry.from_file()
-    store = ImmutableEventStore(
+    store = EventStore(
         semantic_version=registry.semantic_version,
         definition_identity=registry.definition_identity,
     )
@@ -181,7 +181,7 @@ def test_event_store_fingerprint_and_checkpoint_bind_definition_identity() -> No
         registry.definition_identity,
         registry_sha256="0" * 64,
     )
-    drifted = ImmutableEventStore.from_events(
+    drifted = EventStore.from_events(
         _events(),
         definition_identity=drifted_identity,
     )
@@ -192,7 +192,7 @@ def test_event_store_fingerprint_and_checkpoint_bind_definition_identity() -> No
         store.require_definition_identity(drifted_identity)
 
     checkpoint = store.checkpoint_metadata()
-    restored = ImmutableEventStore.from_checkpoint(
+    restored = EventStore.from_checkpoint(
         store.events(),
         checkpoint,
         expected_definition_identity=registry.definition_identity,
@@ -203,7 +203,7 @@ def test_event_store_fingerprint_and_checkpoint_bind_definition_identity() -> No
     changed_checkpoint = dict(checkpoint)
     changed_checkpoint["event_fingerprint"] = "f" * 64
     with pytest.raises(ValueError, match="content binding"):
-        ImmutableEventStore.from_checkpoint(store.events(), changed_checkpoint)
+        EventStore.from_checkpoint(store.events(), changed_checkpoint)
 
 
 def test_parquet_event_journal_roundtrip_is_logically_deterministic(
@@ -298,7 +298,7 @@ def test_event_journal_rejects_wrong_expected_definition(tmp_path: Path) -> None
 def test_legacy_unbound_store_api_and_fingerprint_remain_compatible(
     tmp_path: Path,
 ) -> None:
-    store = ImmutableEventStore.from_events(
+    store = EventStore.from_events(
         _events(),
         semantic_version=SMC_SEMANTIC_VERSION,
     )
@@ -308,7 +308,7 @@ def test_legacy_unbound_store_api_and_fingerprint_remain_compatible(
         # relying on the private event-digest representation.
         assert event.semantic_version == SMC_SEMANTIC_VERSION
     assert store.semantic_definition_identity is None
-    assert store.fingerprint() == ImmutableEventStore.from_events(
+    assert store.fingerprint() == EventStore.from_events(
         _events()
     ).fingerprint()
     assert digest.hexdigest() != store.fingerprint()

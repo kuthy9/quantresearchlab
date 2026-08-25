@@ -108,7 +108,7 @@ question and may consume only already-known outputs from the layer above it:
 | Reasoning mode | Components | Question answered | Prohibited authority |
 |---|---|---|---|
 | Data fact admission | `io`, `market_clock`, `CausalMarketReader` | Which completed clocks and prices are legally knowable now? | No structure, probability, or action interpretation. |
-| Atomic observation | `CausalObserver`, Group 1–5 trackers, `ImmutableEventStore` | Which preregistered v1.2 market facts occurred, and from which exact sources? | No rewriting history and no trade decision. |
+| Atomic observation | `CausalObserver`, Group 1–5 trackers, `EventStore` | Which preregistered v1.2 market facts occurred, and from which exact sources? | No rewriting history and no trade decision. |
 | State and relation projection | timeframe/session reducers, `RelationResolver`, Foundation v2, `MarketSnapshotPublisher` | What is the deterministic current state, lifecycle, geometry, and cross-frame relation? | Foundation is an additive v1.2 projection, not a new detector or full-stack v2 authority. |
 | Competing-hypothesis reasoning | Scene Graph, `PlaybookBrain`, path belief, DOL, Signal Policy | Which still-falsifiable path or target is better supported by admitted evidence? | With no fitted/admitted artifacts, outputs remain neutral or shadow-only. |
 | Action constraint and validation | Trade Intent, Decision, Risk, execution FSM, simulator, Phase 7–9 runners | Is an already-described candidate allowed to become an intent, simulated action, or no-order audit fact? | No retroactive semantic change, broker authority, profit claim, or sealed-OOS access. |
@@ -131,7 +131,7 @@ they are not five duplicate same-named stacks:
 | Layer | Current implementation | Contract |
 |---|---|---|
 | Data Normalizer | `CausalMarketReader`, `_TimeframeAggregator`, and normalized-root publication in `CausalObserver` | Accept one completed M1 clock, distinguish real/clock-only/no-trade data, and complete higher frames without future data. |
-| Semantic Event Engine | `CausalObserver` plus `ImmutableEventStore` | Emit preregistered v1.2 atomic facts; Foundation v2 projects admitted facts and is not another detector. |
+| Semantic Event Engine | `CausalObserver` plus `EventStore` | Emit preregistered v1.2 atomic facts; Foundation v2 projects admitted facts and is not another detector. |
 | Timeframe State Reducer | pure `reduce_timeframe_state()` and `TimeframeEventReducer` | Reduce ordered normalized/atomic events into independent deterministic timeframe state. |
 | Cross-Timeframe Relation Resolver | `RelationResolver` owned by `MarketSnapshotPublisher` | Compute parent/child relations without allowing child votes to rewrite parent authority. |
 | Market Snapshot Publisher | `MarketSnapshotPublisher` | Publish timeframe, relation, session, event-delta, and Foundation views at one causal clock. |
@@ -153,7 +153,7 @@ an incompatible Observation, Foundation, or Neutral-state contract.
 
 ### Hot-state boundary
 
-`ImmutableEventStore` is the sole authoritative atomic history. A separate,
+`EventStore` is the sole authoritative atomic history. A separate,
 append-only in-memory `FoundationRecordLedger` is the single owner of immutable
 Foundation revisions and materializes full history only for explicit
 checkpoint or cold replay. Hot `FoundationProjection` state keeps the current
@@ -231,7 +231,7 @@ particular:
 - `observed_at` is the compatibility alias of `known_at` and must equal it;
 - event identity and one EventMemory are bound to one `semantic_version`;
 - semantic details/evidence are immutable after construction;
-- bounded EventMemory is the hot view, while `ImmutableEventStore` is the
+- bounded EventMemory is the hot view, while `EventStore` is the
   append-only in-memory audit/research store with deterministic as-of replay
   and a journal API. The formal January bundle persists three research ledgers,
   not the full 471,045-event audit journal.

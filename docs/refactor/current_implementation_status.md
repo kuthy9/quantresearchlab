@@ -52,7 +52,7 @@ contracts. `MarketObservation` and `MarketSnapshot` schemas are 2. Shadow uses
 component digest `phase9_shadow_component_digest_v2`. These
 bindings grant no empirical, Brain, Trade Intent, execution, or live authority.
 
-The compact-state migration is now implemented. `ImmutableEventStore` owns
+The compact-state migration is now implemented. `EventStore` owns
 atomic history; one append-only, in-memory `FoundationRecordLedger` owns full
 Foundation revisions. Hot Foundation state keeps the current logical-object
 view, required indexes, counts, current-view/rolling hashes, and lifecycle

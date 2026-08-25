@@ -2709,7 +2709,7 @@ class CanonicalFoundationAdapter:
         This predicate deliberately carries no new checkpointed tracker state.
         It can therefore accept only the immediately sourced Q-BOS/assignment
         pair while the exact canonical MSS transition is still current.
-        ImmutableEventStore validates the cited parent event kinds before the
+        EventStore validates the cited parent event kinds before the
         adapter sees production input; the adapter rechecks every state,
         timing, origin, ordering, and entity condition available locally.
         """

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pandas as pd
 
-from smc_trader.event_store import ImmutableEventStore, event_order_key
+from smc_trader.event_store import EventStore, event_order_key
 from smc_trader.market_state import (
     DeliveryPhase,
     HierarchicalReplayState,
@@ -389,7 +389,7 @@ def test_snapshot_projection_replays_to_same_hierarchical_state() -> None:
         semantic_events=(),
         anomalies=(),
     )
-    store = ImmutableEventStore.from_events(
+    store = EventStore.from_events(
         sorted((*first_events, *second_events), key=event_order_key)
     )
     replay = store.replay(

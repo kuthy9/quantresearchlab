@@ -40,7 +40,7 @@ governance artifacts during ordinary development.
   compares the existing identities. Missing, unknown, mismatched, or
   extra-field selections and every Engine checkpoint before current schema 5
   fail closed.
-- [ ] Atomic history remains exclusively in `ImmutableEventStore`; Foundation
+- [ ] Atomic history remains exclusively in `EventStore`; Foundation
   revision history remains exclusively in `FoundationRecordLedger`. Hot
   Foundation/lifecycle state contains current views, required fact/index
   identities, counts, and rolling hashes—not full revision/transition DTOs.

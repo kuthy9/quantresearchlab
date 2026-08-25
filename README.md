@@ -12,7 +12,7 @@ normalized completed M1 clock (real or clock-only synthetic)
     ↓
 immutable BAR_COMPLETED root + preregistered SEMANTIC_ATOMIC events
     ↓
-definition-bound ImmutableEventStore
+definition-bound EventStore
     ↓
 per-timeframe reducers + independent RelationState / SessionState
     ↓

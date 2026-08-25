@@ -51,7 +51,7 @@ completed 1m data
   -> CausalMarketReader and timeframe aggregators
   -> CausalObserver and existing semantic reducers
   -> MarketObservation + bounded EventMemory
-  -> immutable audit events / ImmutableEventStore
+  -> immutable audit events / EventStore
   -> MarketSnapshotPublisher
        - independent TimeframeState objects
        - independent RelationState objects
@@ -64,7 +64,7 @@ The existing reducers already recognize and maintain substantial structure,
 liquidity, displacement, imbalance, range, zone, and entry-path state. The
 semantic v1 work reuses those reducers and projects canonical immutable events
 with `event_time`, `known_at`, `semantic_version`, source IDs, evidence, and
-deterministic identity. `ImmutableEventStore` is append-only, rejects mixed
+deterministic identity. `EventStore` is append-only, rejects mixed
 semantic versions, orders by the causal availability clock, fingerprints the
 stream, and supports as-of replay with a supplied pure reducer.
 

@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING, Any, Iterable, Mapping, Sequence
 
 import pandas as pd
 
-from .event_store import ImmutableEventStore, validate_canonical_event
+from .event_store import EventStore, validate_canonical_event
 from .foundation_registry import (
     FOUNDATION_CANONICAL_IDENTITY,
     FOUNDATION_VERSION,
@@ -2171,11 +2171,11 @@ class TimeframeEventReducer:
         self._unresolved_forward_reference_ids = set()
         available_events: dict[str, MarketEvent] = {}
         for prior in self._events_by_id.values():
-            ImmutableEventStore._normalized_bar_identity(
+            EventStore._normalized_bar_identity(
                 prior,
                 bar_event_ids=self._normalized_bar_event_ids,
             )
-            ImmutableEventStore._terminal_crossing_identity(
+            EventStore._terminal_crossing_identity(
                 prior,
                 terminal_event_ids=self._terminal_crossing_event_ids,
             )
@@ -2205,16 +2205,16 @@ class TimeframeEventReducer:
         *,
         available_event_ids: Iterable[str] | None = None,
     ) -> None:
-        """Advance the same small authority indexes as ImmutableEventStore."""
+        """Advance the same small authority indexes as EventStore."""
 
-        bar_reservation = ImmutableEventStore._normalized_bar_identity(
+        bar_reservation = EventStore._normalized_bar_identity(
             event,
             bar_event_ids=self._normalized_bar_event_ids,
         )
         if bar_reservation is not None:
             bar_key, bar_event_id = bar_reservation
             self._normalized_bar_event_ids[bar_key] = bar_event_id
-        terminal_reservation = ImmutableEventStore._terminal_crossing_identity(
+        terminal_reservation = EventStore._terminal_crossing_identity(
             event,
             terminal_event_ids=self._terminal_crossing_event_ids,
         )
@@ -2224,7 +2224,7 @@ class TimeframeEventReducer:
                 generation_id
             ] = terminal_event_id
         protected_reservation = (
-            ImmutableEventStore._protected_assignment_identity(event)
+            EventStore._protected_assignment_identity(event)
         )
         if protected_reservation is not None:
             protected_id, assignment_event_id = protected_reservation
@@ -2247,7 +2247,7 @@ class TimeframeEventReducer:
             if available_event_ids is None
             else available_event_ids
         )
-        ImmutableEventStore._advance_unresolved_forward_references(
+        EventStore._advance_unresolved_forward_references(
             event,
             available_event_ids=available,
             unresolved_reference_ids=(
@@ -2290,11 +2290,11 @@ class TimeframeEventReducer:
         # Reserve read-only before any reducer state mutation. The audit store
         # normally enforces this first, while direct reducer/checkpoint users
         # must retain the same failure atomicity independently.
-        ImmutableEventStore._normalized_bar_identity(
+        EventStore._normalized_bar_identity(
             event,
             bar_event_ids=self._normalized_bar_event_ids,
         )
-        ImmutableEventStore._terminal_crossing_identity(
+        EventStore._terminal_crossing_identity(
             event,
             terminal_event_ids=self._terminal_crossing_event_ids,
         )

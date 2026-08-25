@@ -95,7 +95,7 @@ causal/open-thesis closure and action connectivity. It never enters
 `source_event_ids` merely because two facts occur inside a time window.
 
 The bounded `EventMemory` remains the hot view used by retained consumers.
-`ImmutableEventStore` is the append-only audit/research journal and supports
+`EventStore` is the append-only audit/research journal and supports
 deterministic as-of replay; the runtime need not keep an unbounded duplicate
 archive in every state object.
 

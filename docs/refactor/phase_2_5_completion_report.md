@@ -53,7 +53,7 @@ The incremental Eye and replay path is now:
 normalized completed M1 facts
   -> immutable normalized BAR_COMPLETED roots
   -> immutable SEMANTIC_ATOMIC events
-  -> definition-bound ImmutableEventStore
+  -> definition-bound EventStore
   -> TimeframeEventReducer for each timeframe
   -> independent RelationResolver and SessionStateReducer
   -> MarketSnapshot with atomic_event_reducer authority

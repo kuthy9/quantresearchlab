@@ -21,7 +21,7 @@ from .displacement_observer import (
     REGISTERED_CLOSURE_ANOMALIES,
     CausalDisplacementEye,
 )
-from .event_store import ImmutableEventStore, event_order_key
+from .event_store import EventStore, event_order_key
 from .foundation_adapter import CanonicalFoundationAdapter
 from .group3 import (
     CausalGroup3Tracker,
@@ -956,7 +956,7 @@ class EventMemory:
         self,
         maximum_events: int,
         *,
-        audit_store: ImmutableEventStore | None = None,
+        audit_store: EventStore | None = None,
     ) -> None:
         if type(maximum_events) is not int or maximum_events < 1:
             raise ValueError(
@@ -1950,7 +1950,7 @@ class CausalObserver:
                     "observer semantic registry path differs from selection"
                 )
         self.semantic_registry = semantic_registry
-        self.audit_store = ImmutableEventStore(
+        self.audit_store = EventStore(
             semantic_version=self.semantic_registry.semantic_version,
             definition_identity=self.semantic_registry.definition_identity,
         )

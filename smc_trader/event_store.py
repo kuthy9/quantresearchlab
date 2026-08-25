@@ -442,7 +442,7 @@ class ReplayResult(Generic[StateT]):
     event_fingerprint: str
 
 
-class ImmutableEventStore:
+class EventStore:
     """An append-only in-memory audit log of immutable ``MarketEvent`` values.
 
     The store exposes no update or delete operation. Re-appending an identical
@@ -531,7 +531,7 @@ class ImmutableEventStore:
 
     def __eq__(self, other: object) -> bool:
         return bool(
-            isinstance(other, ImmutableEventStore)
+            isinstance(other, EventStore)
             and self.semantic_version == other.semantic_version
             and self.semantic_definition_identity
             == other.semantic_definition_identity
@@ -565,7 +565,7 @@ class ImmutableEventStore:
         definition_identity = state.get("_definition_identity")
         if definition_identity is None:
             definition_identity = state.get("_definition_identity_digest")
-        rebuilt = ImmutableEventStore(
+        rebuilt = EventStore(
             semantic_version=semantic_version,
             definition_identity=definition_identity,
         )
@@ -903,7 +903,7 @@ class ImmutableEventStore:
                 tuple[Timeframe, pd.Timestamp], str
             ] = {}
             for candidate in available_events.values():
-                reservation = ImmutableEventStore._normalized_bar_identity(
+                reservation = EventStore._normalized_bar_identity(
                     candidate,
                     bar_event_ids=derived_bar_event_ids,
                 )
@@ -915,7 +915,7 @@ class ImmutableEventStore:
             latest_assignments: dict[str, MarketEvent] = {}
             for candidate in available_events.values():
                 reservation = (
-                    ImmutableEventStore._protected_assignment_identity(
+                    EventStore._protected_assignment_identity(
                         candidate
                     )
                 )
@@ -935,7 +935,7 @@ class ImmutableEventStore:
             latest_by_timeframe: dict[Timeframe, MarketEvent] = {}
             for candidate in available_events.values():
                 if (
-                    ImmutableEventStore._protected_assignment_identity(
+                    EventStore._protected_assignment_identity(
                         candidate
                     )
                     is None
@@ -986,7 +986,7 @@ class ImmutableEventStore:
                     "canonical event provenance is not causally ordered by "
                     f"known_at: {reference_id}"
                 )
-            if needs_cycle_check and ImmutableEventStore._provenance_reaches(
+            if needs_cycle_check and EventStore._provenance_reaches(
                 reference_id,
                 event.event_id,
                 available_events=available_events,
@@ -995,7 +995,7 @@ class ImmutableEventStore:
                     "canonical event provenance contains a cycle: "
                     f"{reference_id} -> {event.event_id}"
                 )
-        ImmutableEventStore._validate_authoritative_parent_contract(
+        EventStore._validate_authoritative_parent_contract(
             event,
             available_events=available_events,
             normalized_bar_event_ids=normalized_bar_event_ids,
@@ -1028,38 +1028,38 @@ class ImmutableEventStore:
         )
         exact_kinds = _EXACT_AUTHORITATIVE_SOURCE_KINDS.get(event.kind)
         if exact_kinds is not None:
-            ImmutableEventStore._require_source_kind_multiset(
+            EventStore._require_source_kind_multiset(
                 event,
                 source_parents,
                 exact_kinds,
             )
-            ImmutableEventStore._require_authoritative_parent_origins(
+            EventStore._require_authoritative_parent_origins(
                 event,
                 source_parents,
             )
 
         if event.kind is EventKind.SWING_CONFIRMED:
-            ImmutableEventStore._validate_confirmed_swing_contract(
+            EventStore._validate_confirmed_swing_contract(
                 event,
                 source_parents=source_parents,
             )
 
         if event.kind is EventKind.STRUCTURAL_LEG_CREATED:
-            ImmutableEventStore._validate_structural_leg_contract(
+            EventStore._validate_structural_leg_contract(
                 event,
                 source_parents=source_parents,
                 available_events=available_events,
             )
 
         if event.kind is EventKind.LIQUIDITY_LEVEL_CREATED:
-            ImmutableEventStore._validate_candidate_liquidity_contract(
+            EventStore._validate_candidate_liquidity_contract(
                 event,
                 source_parents=source_parents,
                 available_events=available_events,
             )
 
         if event.kind is EventKind.DISPLACEMENT_OBSERVED:
-            ImmutableEventStore._validate_displacement_contract(
+            EventStore._validate_displacement_contract(
                 event,
                 source_parents=source_parents,
                 available_events=available_events,
@@ -1067,13 +1067,13 @@ class ImmutableEventStore:
             )
 
         if event.kind is EventKind.RAW_BOUNDARY_BREAK:
-            ImmutableEventStore._validate_raw_break_contract(
+            EventStore._validate_raw_break_contract(
                 event,
                 source_parents=source_parents,
             )
 
         if event.kind is EventKind.STRUCTURE_DIRECTION_CONFIRMED:
-            ImmutableEventStore._validate_structure_direction_contract(
+            EventStore._validate_structure_direction_contract(
                 event,
                 source_parents=source_parents,
             )
@@ -1082,19 +1082,19 @@ class ImmutableEventStore:
             EventKind.QUALIFIED_BOS,
             EventKind.MSS_CORE_CONFIRMED,
         }:
-            ImmutableEventStore._validate_bos_relation_contract(
+            EventStore._validate_bos_relation_contract(
                 event,
                 source_parents=source_parents,
             )
 
         if event.kind is EventKind.PROTECTED_SWING_ASSIGNED:
-            ImmutableEventStore._validate_protected_swing_contract(
+            EventStore._validate_protected_swing_contract(
                 event,
                 source_parents=source_parents,
             )
 
         if event.kind is EventKind.LEVEL_PENETRATED:
-            ImmutableEventStore._validate_penetration_contract(
+            EventStore._validate_penetration_contract(
                 event,
                 source_parents=source_parents,
                 available_events=available_events,
@@ -1104,13 +1104,13 @@ class ImmutableEventStore:
             EventKind.SWEEP_CONFIRMED,
             EventKind.ACCEPTANCE_CONFIRMED,
         }:
-            ImmutableEventStore._validate_crossing_terminal_contract(
+            EventStore._validate_crossing_terminal_contract(
                 event,
                 source_parents=source_parents,
                 available_events=available_events,
             )
             if event.kind is EventKind.ACCEPTANCE_CONFIRMED:
-                ImmutableEventStore._validate_protected_acceptance_context(
+                EventStore._validate_protected_acceptance_context(
                     event,
                     available_events=available_events,
                     latest_protected_assignment_event_ids=(
@@ -1148,7 +1148,7 @@ class ImmutableEventStore:
                     f"missing={[kind.value for kind in missing]}, "
                     f"unexpected={[kind.value for kind in unexpected]}"
                 )
-            ImmutableEventStore._require_authoritative_parent_origins(
+            EventStore._require_authoritative_parent_origins(
                 event,
                 source_parents,
             )
@@ -1157,7 +1157,7 @@ class ImmutableEventStore:
             EventKind.ORIGIN_ZONE_MITIGATED,
             EventKind.ORIGIN_ZONE_INVALIDATED,
         }:
-            ImmutableEventStore._validate_origin_zone_terminal_contract(
+            EventStore._validate_origin_zone_terminal_contract(
                 event,
                 source_parents=source_parents,
                 available_events=available_events,
@@ -1176,14 +1176,14 @@ class ImmutableEventStore:
             )
         transition_reason = event.transition_reason or detail_reason
         if transition_reason == "close_beyond_frozen_range":
-            ImmutableEventStore._validate_external_range_invalidation(
+            EventStore._validate_external_range_invalidation(
                 event,
                 source_parents=source_parents,
             )
         elif transition_reason == (
             "close_beyond_frozen_range_before_activation"
         ):
-            ImmutableEventStore._validate_forming_range_invalidation(
+            EventStore._validate_forming_range_invalidation(
                 event,
                 source_parents=source_parents,
             )
@@ -1237,7 +1237,7 @@ class ImmutableEventStore:
                     f"{expected_origin.value}, got {parent.origin.value}"
                 )
             if parent.kind is EventKind.BAR_COMPLETED:
-                ImmutableEventStore._require_real_normalized_bar(
+                EventStore._require_real_normalized_bar(
                     parent,
                     contract=f"{event.kind.value} parent",
                 )
@@ -1346,12 +1346,12 @@ class ImmutableEventStore:
         span = _SWING_WINDOW_SPANS.get(event.timeframe)
         if span is None:
             raise ValueError("authoritative confirmed swing timeframe is invalid")
-        ImmutableEventStore._require_source_kind_multiset(
+        EventStore._require_source_kind_multiset(
             event,
             source_parents,
             (EventKind.BAR_COMPLETED,) * (2 * span + 1),
         )
-        ImmutableEventStore._require_authoritative_parent_origins(
+        EventStore._require_authoritative_parent_origins(
             event,
             source_parents,
         )
@@ -1392,11 +1392,11 @@ class ImmutableEventStore:
                 "authoritative confirmed swing BAR window has inconsistent "
                 "market identity"
             )
-        swing_id = ImmutableEventStore._required_authoritative_text(
+        swing_id = EventStore._required_authoritative_text(
             event,
             "source_entity_id",
         )
-        swing_side = ImmutableEventStore._required_authoritative_text(
+        swing_side = EventStore._required_authoritative_text(
             event,
             "side",
         )
@@ -1408,11 +1408,11 @@ class ImmutableEventStore:
             raise ValueError(
                 "authoritative confirmed swing side/entity identity conflicts"
             )
-        pivot_start = ImmutableEventStore._authoritative_clock(
+        pivot_start = EventStore._authoritative_clock(
             event,
             "pivot_start",
         )
-        pivot_end = ImmutableEventStore._authoritative_clock(
+        pivot_end = EventStore._authoritative_clock(
             event,
             "pivot_end",
         )
@@ -1441,11 +1441,11 @@ class ImmutableEventStore:
                 "with its frozen BAR window"
             )
         highs = tuple(
-            ImmutableEventStore._bar_number(parent, "high")
+            EventStore._bar_number(parent, "high")
             for parent in source_parents
         )
         lows = tuple(
-            ImmutableEventStore._bar_number(parent, "low")
+            EventStore._bar_number(parent, "low")
             for parent in source_parents
         )
         pivot_price = highs[span] if swing_side == "high" else lows[span]
@@ -1466,7 +1466,7 @@ class ImmutableEventStore:
                 "authoritative confirmed swing price is not the strict "
                 "two-sided pivot of its frozen BAR window"
             )
-        prominence_atr = ImmutableEventStore._finite_authoritative_number(
+        prominence_atr = EventStore._finite_authoritative_number(
             event,
             "prominence_atr",
         )
@@ -1483,9 +1483,9 @@ class ImmutableEventStore:
             raise ValueError(
                 "authoritative confirmed swing nesting/delta fields are invalid"
             )
-        ImmutableEventStore._required_authoritative_text(event, "relation")
-        ImmutableEventStore._required_authoritative_text(event, "semantic_rank")
-        magnitude = ImmutableEventStore._finite_authoritative_number(
+        EventStore._required_authoritative_text(event, "relation")
+        EventStore._required_authoritative_text(event, "semantic_rank")
+        magnitude = EventStore._finite_authoritative_number(
             event,
             "legacy_same_side_magnitude_atr",
         )
@@ -1502,29 +1502,29 @@ class ImmutableEventStore:
         available_events: Mapping[str, MarketEvent],
     ) -> None:
         start, end = source_parents
-        leg_id = ImmutableEventStore._required_authoritative_text(event, "leg_id")
-        start_id = ImmutableEventStore._required_authoritative_text(
+        leg_id = EventStore._required_authoritative_text(event, "leg_id")
+        start_id = EventStore._required_authoritative_text(
             event, "start_swing_id"
         )
-        end_id = ImmutableEventStore._required_authoritative_text(
+        end_id = EventStore._required_authoritative_text(
             event, "end_swing_id"
         )
-        start_parent_id = ImmutableEventStore._required_authoritative_text(
+        start_parent_id = EventStore._required_authoritative_text(
             start, "source_entity_id"
         )
-        end_parent_id = ImmutableEventStore._required_authoritative_text(
+        end_parent_id = EventStore._required_authoritative_text(
             end, "source_entity_id"
         )
-        start_clock = ImmutableEventStore._authoritative_clock(
+        start_clock = EventStore._authoritative_clock(
             event, "start_event_time"
         )
-        end_clock = ImmutableEventStore._authoritative_clock(
+        end_clock = EventStore._authoritative_clock(
             event, "end_event_time"
         )
-        start_price = ImmutableEventStore._finite_authoritative_number(
+        start_price = EventStore._finite_authoritative_number(
             event, "start_price"
         )
-        end_price = ImmutableEventStore._finite_authoritative_number(
+        end_price = EventStore._finite_authoritative_number(
             event, "end_price"
         )
         if (
@@ -1663,7 +1663,7 @@ class ImmutableEventStore:
         )
         all_bound_bars = (*atr_bars, *path_bars)
         for bar in all_bound_bars:
-            ImmutableEventStore._require_real_normalized_bar(
+            EventStore._require_real_normalized_bar(
                 bar,
                 timeframe=event.timeframe,
                 contract="foundation structural leg",
@@ -1770,7 +1770,7 @@ class ImmutableEventStore:
                 raise ValueError(
                     "foundation structural leg endpoint Swing pivot is unavailable"
                 )
-            ImmutableEventStore._require_real_normalized_bar(
+            EventStore._require_real_normalized_bar(
                 pivot_bar,
                 timeframe=event.timeframe,
                 contract="foundation structural leg endpoint Swing",
@@ -1781,9 +1781,9 @@ class ImmutableEventStore:
             start_pivot_bar.event_id != path_bars[0].event_id
             or end_pivot_bar.event_id != path_bars[-1].event_id
             or start_pivot_bar.known_at
-            != ImmutableEventStore._authoritative_clock(start, "pivot_end")
+            != EventStore._authoritative_clock(start, "pivot_end")
             or end_pivot_bar.known_at
-            != ImmutableEventStore._authoritative_clock(end, "pivot_end")
+            != EventStore._authoritative_clock(end, "pivot_end")
             or start_pivot_bar.known_at != start_clock + interval
             or end_pivot_bar.known_at != path_terminal
             or event.known_at != end.known_at
@@ -1793,7 +1793,7 @@ class ImmutableEventStore:
                 "confirmed Swing pivots and clocks"
             )
 
-        tick_size = ImmutableEventStore._finite_authoritative_number(
+        tick_size = EventStore._finite_authoritative_number(
             event,
             "tick_size",
         )
@@ -1819,62 +1819,62 @@ class ImmutableEventStore:
                 "foundation structural leg endpoint price is off-grid"
             ) from error
 
-        start_close = ImmutableEventStore._finite_authoritative_number(
+        start_close = EventStore._finite_authoritative_number(
             event,
             "start_close",
         )
-        end_close = ImmutableEventStore._finite_authoritative_number(
+        end_close = EventStore._finite_authoritative_number(
             event,
             "end_close",
         )
-        amplitude = ImmutableEventStore._finite_authoritative_number(
+        amplitude = EventStore._finite_authoritative_number(
             event,
             "amplitude_points",
         )
-        atr0 = ImmutableEventStore._finite_authoritative_number(
+        atr0 = EventStore._finite_authoritative_number(
             event,
             "atr_at_leg_start",
         )
-        amplitude_atr = ImmutableEventStore._finite_authoritative_number(
+        amplitude_atr = EventStore._finite_authoritative_number(
             event,
             "amplitude_atr",
         )
         duration_minutes = event.evidence.get("duration_minutes")
-        close_efficiency = ImmutableEventStore._finite_authoritative_number(
+        close_efficiency = EventStore._finite_authoritative_number(
             event,
             "close_efficiency",
         )
-        efficiency = ImmutableEventStore._finite_authoritative_number(
+        efficiency = EventStore._finite_authoritative_number(
             event,
             "efficiency",
         )
-        extreme_efficiency = ImmutableEventStore._finite_authoritative_number(
+        extreme_efficiency = EventStore._finite_authoritative_number(
             event,
             "extreme_path_efficiency",
         )
-        max_retracement = ImmutableEventStore._finite_authoritative_number(
+        max_retracement = EventStore._finite_authoritative_number(
             event,
             "max_retracement_points",
         )
         max_retracement_atr = (
-            ImmutableEventStore._finite_authoritative_number(
+            EventStore._finite_authoritative_number(
                 event,
                 "max_retracement_atr",
             )
         )
-        close_mae = ImmutableEventStore._finite_authoritative_number(
+        close_mae = EventStore._finite_authoritative_number(
             event,
             "close_mae_points",
         )
-        close_mae_atr = ImmutableEventStore._finite_authoritative_number(
+        close_mae_atr = EventStore._finite_authoritative_number(
             event,
             "close_mae_atr",
         )
-        wick_mae = ImmutableEventStore._finite_authoritative_number(
+        wick_mae = EventStore._finite_authoritative_number(
             event,
             "wick_mae_points",
         )
-        wick_mae_atr = ImmutableEventStore._finite_authoritative_number(
+        wick_mae_atr = EventStore._finite_authoritative_number(
             event,
             "wick_mae_atr",
         )
@@ -1909,11 +1909,11 @@ class ImmutableEventStore:
 
         true_ranges: list[float] = []
         for index, bar in enumerate(eligible_prior):
-            high = ImmutableEventStore._bar_number(bar, "high")
-            low = ImmutableEventStore._bar_number(bar, "low")
+            high = EventStore._bar_number(bar, "high")
+            low = EventStore._bar_number(bar, "low")
             true_range = high - low
             if index:
-                prior_close = ImmutableEventStore._bar_number(
+                prior_close = EventStore._bar_number(
                     eligible_prior[index - 1],
                     "close",
                 )
@@ -1926,7 +1926,7 @@ class ImmutableEventStore:
         expected_atr = sum(true_ranges[-14:]) / 14.0
 
         closes = tuple(
-            ImmutableEventStore._bar_number(bar, "close")
+            EventStore._bar_number(bar, "close")
             for bar in path_bars
         )
         close_travel = sum(
@@ -1960,7 +1960,7 @@ class ImmutableEventStore:
             (
                 start_price,
                 *(
-                    ImmutableEventStore._bar_number(bar, "high")
+                    EventStore._bar_number(bar, "high")
                     for bar in path_bars
                 ),
             )
@@ -1968,7 +1968,7 @@ class ImmutableEventStore:
             else (
                 start_price,
                 *(
-                    ImmutableEventStore._bar_number(bar, "low")
+                    EventStore._bar_number(bar, "low")
                     for bar in path_bars
                 ),
             )
@@ -1994,7 +1994,7 @@ class ImmutableEventStore:
                 0.0,
                 start_price
                 - min(
-                    ImmutableEventStore._bar_number(bar, "low")
+                    EventStore._bar_number(bar, "low")
                     for bar in path_bars
                 ),
             )
@@ -2002,7 +2002,7 @@ class ImmutableEventStore:
             else max(
                 0.0,
                 max(
-                    ImmutableEventStore._bar_number(bar, "high")
+                    EventStore._bar_number(bar, "high")
                     for bar in path_bars
                 )
                 - start_price,
@@ -2054,10 +2054,10 @@ class ImmutableEventStore:
         source_parents: tuple[MarketEvent, ...],
         available_events: Mapping[str, MarketEvent],
     ) -> None:
-        level_id = ImmutableEventStore._required_authoritative_text(
+        level_id = EventStore._required_authoritative_text(
             event, "level_id"
         )
-        source_kind = ImmutableEventStore._required_authoritative_text(
+        source_kind = EventStore._required_authoritative_text(
             event, "source_kind"
         )
         if (
@@ -2077,19 +2077,19 @@ class ImmutableEventStore:
                 "authoritative candidate liquidity identity, taxonomy, or "
                 "frozen geometry is invalid"
             )
-        ImmutableEventStore._require_authoritative_parent_origins(
+        EventStore._require_authoritative_parent_origins(
             event,
             source_parents,
         )
         parent_kinds = tuple(parent.kind for parent in source_parents)
         if source_kind == "confirmed_swing":
-            ImmutableEventStore._require_source_kind_multiset(
+            EventStore._require_source_kind_multiset(
                 event,
                 source_parents,
                 (EventKind.SWING_CONFIRMED,),
             )
             swing = source_parents[0]
-            swing_id = ImmutableEventStore._required_authoritative_text(
+            swing_id = EventStore._required_authoritative_text(
                 swing,
                 "source_entity_id",
             )
@@ -2125,7 +2125,7 @@ class ImmutableEventStore:
                     "confirmed Swing parents"
                 )
             swing_ids = tuple(
-                ImmutableEventStore._required_authoritative_text(
+                EventStore._required_authoritative_text(
                     parent,
                     "source_entity_id",
                 )
@@ -2163,25 +2163,25 @@ class ImmutableEventStore:
                     "exact extreme/admission BAR roots"
                 )
             for parent in source_parents:
-                ImmutableEventStore._require_real_normalized_bar(
+                EventStore._require_real_normalized_bar(
                     parent,
                     timeframe=Timeframe.M1,
                     contract="completed-period candidate",
                 )
             extreme, admission = source_parents
-            extreme_at = ImmutableEventStore._authoritative_clock(
+            extreme_at = EventStore._authoritative_clock(
                 event, "reference_extreme_at"
             )
-            admitted_at = ImmutableEventStore._authoritative_clock(
+            admitted_at = EventStore._authoritative_clock(
                 event, "reference_admitted_at"
             )
-            period_started_at = ImmutableEventStore._authoritative_clock(
+            period_started_at = EventStore._authoritative_clock(
                 event, "reference_period_started_at"
             )
-            period_last_at = ImmutableEventStore._authoritative_clock(
+            period_last_at = EventStore._authoritative_clock(
                 event, "reference_period_last_completed_at"
             )
-            source_confirmed_at = ImmutableEventStore._authoritative_clock(
+            source_confirmed_at = EventStore._authoritative_clock(
                 event, "source_confirmed_at"
             )
             raw_source_ids = event.evidence.get("source_ids")
@@ -2194,7 +2194,7 @@ class ImmutableEventStore:
                     source_ids = ()
             high_reference = source_kind.endswith("_high")
             expected_side = "above" if high_reference else "below"
-            expected_price = ImmutableEventStore._bar_number(
+            expected_price = EventStore._bar_number(
                 extreme,
                 "high" if high_reference else "low",
             )
@@ -2327,7 +2327,7 @@ class ImmutableEventStore:
                     "authoritative mature-range candidate requires its exact "
                     "activated range parent"
                 )
-            range_id = ImmutableEventStore._required_authoritative_text(
+            range_id = EventStore._required_authoritative_text(
                 source_parents[0],
                 "range_id",
             )
@@ -2352,12 +2352,12 @@ class ImmutableEventStore:
                     )
                 parent = source_parents[0]
                 if parent.kind is EventKind.BAR_COMPLETED:
-                    ImmutableEventStore._require_real_normalized_bar(
+                    EventStore._require_real_normalized_bar(
                         parent,
                         timeframe=event.timeframe,
                         contract="range-boundary candidate",
                     )
-                    expected_price = ImmutableEventStore._bar_number(
+                    expected_price = EventStore._bar_number(
                         parent,
                         "high" if event.side == "above" else "low",
                     )
@@ -2372,7 +2372,7 @@ class ImmutableEventStore:
                             "not bind its exact extreme geometry and clock"
                         )
                 else:
-                    range_id = ImmutableEventStore._required_authoritative_text(
+                    range_id = EventStore._required_authoritative_text(
                         parent,
                         "range_id",
                     )
@@ -2456,13 +2456,13 @@ class ImmutableEventStore:
         parent_by_kind = {parent.kind: parent for parent in source_parents}
         candidate = parent_by_kind[EventKind.LIQUIDITY_LEVEL_CREATED]
         bar = parent_by_kind[EventKind.BAR_COMPLETED]
-        ImmutableEventStore._require_real_normalized_bar(
+        EventStore._require_real_normalized_bar(
             bar,
             timeframe=event.timeframe,
             contract="level touch",
         )
-        level_id = ImmutableEventStore._required_crossing_text(event, "level_id")
-        candidate_level_id = ImmutableEventStore._required_crossing_text(
+        level_id = EventStore._required_crossing_text(event, "level_id")
+        candidate_level_id = EventStore._required_crossing_text(
             candidate,
             "level_id",
         )
@@ -2500,12 +2500,12 @@ class ImmutableEventStore:
             raise ValueError(
                 "authoritative displacement requires real M5 BAR parents"
             )
-        ImmutableEventStore._require_source_kind_multiset(
+        EventStore._require_source_kind_multiset(
             event,
             source_parents,
             (EventKind.BAR_COMPLETED,) * len(source_parents),
         )
-        ImmutableEventStore._require_authoritative_parent_origins(
+        EventStore._require_authoritative_parent_origins(
             event,
             source_parents,
         )
@@ -2552,11 +2552,11 @@ class ImmutableEventStore:
                 "authoritative displacement admitted detector BAR identities "
                 "conflict"
             )
-        displacement_id = ImmutableEventStore._required_authoritative_text(
+        displacement_id = EventStore._required_authoritative_text(
             event, "displacement_id"
         )
-        ImmutableEventStore._required_authoritative_text(event, "transition_id")
-        lifecycle = ImmutableEventStore._required_authoritative_text(
+        EventStore._required_authoritative_text(event, "transition_id")
+        lifecycle = EventStore._required_authoritative_text(
             event, "lifecycle"
         )
         terminal_reason = event.evidence.get("terminal_reason")
@@ -2578,7 +2578,7 @@ class ImmutableEventStore:
             raise ValueError(
                 "authoritative displacement lifecycle/entity identity is invalid"
             )
-        prefix_clock = ImmutableEventStore._authoritative_clock(
+        prefix_clock = EventStore._authoritative_clock(
             event, "prefix_last_admitted_at"
         )
         if prefix_clock != source_parents[-1].known_at or event.known_at < prefix_clock:
@@ -2598,7 +2598,7 @@ class ImmutableEventStore:
                 f"{sorted(missing_metrics)}"
             )
         numeric_metrics = {
-            name: ImmutableEventStore._finite_authoritative_number(
+            name: EventStore._finite_authoritative_number(
                 event,
                 name,
                 payload=metrics,
@@ -2715,36 +2715,36 @@ class ImmutableEventStore:
         parent_by_kind = {parent.kind: parent for parent in source_parents}
         swing = parent_by_kind[EventKind.SWING_CONFIRMED]
         bar = parent_by_kind[EventKind.BAR_COMPLETED]
-        ImmutableEventStore._require_real_normalized_bar(
+        EventStore._require_real_normalized_bar(
             bar,
             timeframe=event.timeframe,
             contract="raw boundary break",
         )
-        bos_id = ImmutableEventStore._required_authoritative_text(
+        bos_id = EventStore._required_authoritative_text(
             event,
             "bos_id",
         )
-        target_swing_id = ImmutableEventStore._required_authoritative_text(
+        target_swing_id = EventStore._required_authoritative_text(
             event,
             "target_swing_id",
         )
-        swing_id = ImmutableEventStore._required_authoritative_text(
+        swing_id = EventStore._required_authoritative_text(
             swing,
             "source_entity_id",
         )
-        scope = ImmutableEventStore._required_authoritative_text(
+        scope = EventStore._required_authoritative_text(
             event,
             "scope",
         )
-        break_bar_id = ImmutableEventStore._required_authoritative_text(
+        break_bar_id = EventStore._required_authoritative_text(
             event,
             "break_bar_id",
         )
-        break_close = ImmutableEventStore._finite_authoritative_number(
+        break_close = EventStore._finite_authoritative_number(
             event,
             "break_close",
         )
-        bar_close = ImmutableEventStore._bar_number(bar, "close")
+        bar_close = EventStore._bar_number(bar, "close")
         if (
             event.direction not in {Direction.LONG, Direction.SHORT}
             or scope not in {"continuation", "opposed", "local"}
@@ -2786,19 +2786,19 @@ class ImmutableEventStore:
         source_parents: tuple[MarketEvent, ...],
     ) -> None:
         high, low = source_parents
-        high_id = ImmutableEventStore._required_authoritative_text(
+        high_id = EventStore._required_authoritative_text(
             high,
             "source_entity_id",
         )
-        low_id = ImmutableEventStore._required_authoritative_text(
+        low_id = EventStore._required_authoritative_text(
             low,
             "source_entity_id",
         )
-        structure_id = ImmutableEventStore._required_authoritative_text(
+        structure_id = EventStore._required_authoritative_text(
             event,
             "structure_id",
         )
-        protected_id = ImmutableEventStore._required_authoritative_text(
+        protected_id = EventStore._required_authoritative_text(
             event,
             "candidate_protected_swing_id",
         )
@@ -2839,13 +2839,13 @@ class ImmutableEventStore:
         parent_by_kind = {parent.kind: parent for parent in source_parents}
         raw = parent_by_kind[EventKind.RAW_BOUNDARY_BREAK]
         structure = parent_by_kind[EventKind.STRUCTURE_DIRECTION_CONFIRMED]
-        bos_id = ImmutableEventStore._required_authoritative_text(event, "bos_id")
-        raw_bos_id = ImmutableEventStore._required_authoritative_text(raw, "bos_id")
-        structure_id = ImmutableEventStore._required_authoritative_text(
+        bos_id = EventStore._required_authoritative_text(event, "bos_id")
+        raw_bos_id = EventStore._required_authoritative_text(raw, "bos_id")
+        structure_id = EventStore._required_authoritative_text(
             structure, "structure_id"
         )
-        scope = ImmutableEventStore._required_authoritative_text(event, "scope")
-        raw_scope = ImmutableEventStore._required_authoritative_text(raw, "scope")
+        scope = EventStore._required_authoritative_text(event, "scope")
+        raw_scope = EventStore._required_authoritative_text(raw, "scope")
         expected_scope = (
             "continuation"
             if event.kind is EventKind.QUALIFIED_BOS
@@ -2901,14 +2901,14 @@ class ImmutableEventStore:
         qualified = parent_by_kind[EventKind.QUALIFIED_BOS]
         leg = parent_by_kind[EventKind.STRUCTURAL_LEG_CREATED]
         swing = parent_by_kind[EventKind.SWING_CONFIRMED]
-        bos_id = ImmutableEventStore._required_authoritative_text(event, "bos_id")
-        structure_id = ImmutableEventStore._required_authoritative_text(
+        bos_id = EventStore._required_authoritative_text(event, "bos_id")
+        structure_id = EventStore._required_authoritative_text(
             event, "structure_id"
         )
-        leg_id = ImmutableEventStore._required_authoritative_text(
+        leg_id = EventStore._required_authoritative_text(
             event, "origin_leg_id"
         )
-        protected_id = ImmutableEventStore._required_authoritative_text(
+        protected_id = EventStore._required_authoritative_text(
             event, "protected_swing_id"
         )
         if (
@@ -2959,13 +2959,13 @@ class ImmutableEventStore:
             raise ValueError(
                 "authoritative protected acceptance context is incomplete"
             )
-        protected_id = ImmutableEventStore._required_authoritative_text(
+        protected_id = EventStore._required_authoritative_text(
             event, "protected_swing_id"
         )
-        assignment_id = ImmutableEventStore._required_authoritative_text(
+        assignment_id = EventStore._required_authoritative_text(
             event, "protected_swing_event_id"
         )
-        level_id = ImmutableEventStore._required_authoritative_text(
+        level_id = EventStore._required_authoritative_text(
             event, "level_id"
         )
         assignment = available_events.get(assignment_id)
@@ -3107,11 +3107,11 @@ class ImmutableEventStore:
         candidate = parent_by_kind[EventKind.LIQUIDITY_LEVEL_CREATED]
         touch = parent_by_kind[EventKind.LEVEL_TOUCHED]
         crossing_bar = parent_by_kind[EventKind.BAR_COMPLETED]
-        touch_parents = ImmutableEventStore._authoritative_source_parents(
+        touch_parents = EventStore._authoritative_source_parents(
             touch,
             available_events=available_events,
         )
-        ImmutableEventStore._require_source_kind_multiset(
+        EventStore._require_source_kind_multiset(
             touch,
             touch_parents,
             (
@@ -3119,11 +3119,11 @@ class ImmutableEventStore:
                 EventKind.BAR_COMPLETED,
             ),
         )
-        ImmutableEventStore._require_authoritative_parent_origins(
+        EventStore._require_authoritative_parent_origins(
             touch,
             touch_parents,
         )
-        ImmutableEventStore._validate_level_touch_contract(
+        EventStore._validate_level_touch_contract(
             touch,
             source_parents=touch_parents,
         )
@@ -3140,15 +3140,15 @@ class ImmutableEventStore:
                 "and crossing bar"
             )
 
-        level_id = ImmutableEventStore._required_crossing_text(
+        level_id = EventStore._required_crossing_text(
             event,
             "level_id",
         )
-        candidate_level_id = ImmutableEventStore._required_crossing_text(
+        candidate_level_id = EventStore._required_crossing_text(
             candidate,
             "level_id",
         )
-        touch_level_id = ImmutableEventStore._required_crossing_text(
+        touch_level_id = EventStore._required_crossing_text(
             touch,
             "level_id",
         )
@@ -3159,16 +3159,16 @@ class ImmutableEventStore:
                 "level_id values differ"
             )
 
-        crossed_at = ImmutableEventStore._required_crossing_clock(
+        crossed_at = EventStore._required_crossing_clock(
             event,
             "crossed_at",
         )
-        generation_id = ImmutableEventStore._required_crossing_text(
+        generation_id = EventStore._required_crossing_text(
             event,
             "crossing_generation_id",
         )
         expected_generation_id = (
-            ImmutableEventStore._expected_crossing_generation_id(
+            EventStore._expected_crossing_generation_id(
                 event,
                 level_id=level_id,
                 crossed_at=crossed_at,
@@ -3219,14 +3219,14 @@ class ImmutableEventStore:
                 "differ"
             )
         expected_direction = (
-            ImmutableEventStore._expected_crossing_direction(event.side)
+            EventStore._expected_crossing_direction(event.side)
         )
         if event.direction is not expected_direction:
             raise ValueError(
                 "authoritative crossing contract failed for "
                 "level_penetrated: direction does not match crossing side"
             )
-        ImmutableEventStore._require_real_normalized_bar(
+        EventStore._require_real_normalized_bar(
             crossing_bar,
             timeframe=event.timeframe,
             contract="level penetration",
@@ -3245,23 +3245,23 @@ class ImmutableEventStore:
         penetration = parent_by_kind[EventKind.LEVEL_PENETRATED]
         resolution_bar = parent_by_kind[EventKind.BAR_COMPLETED]
         penetration_parents = (
-            ImmutableEventStore._authoritative_source_parents(
+            EventStore._authoritative_source_parents(
                 penetration,
                 available_events=available_events,
             )
         )
-        ImmutableEventStore._require_source_kind_multiset(
+        EventStore._require_source_kind_multiset(
             penetration,
             penetration_parents,
             _EXACT_AUTHORITATIVE_SOURCE_KINDS[
                 EventKind.LEVEL_PENETRATED
             ],
         )
-        ImmutableEventStore._require_authoritative_parent_origins(
+        EventStore._require_authoritative_parent_origins(
             penetration,
             penetration_parents,
         )
-        ImmutableEventStore._validate_penetration_contract(
+        EventStore._validate_penetration_contract(
             penetration,
             source_parents=penetration_parents,
             available_events=available_events,
@@ -3271,35 +3271,35 @@ class ImmutableEventStore:
         }
         candidate = penetration_by_kind[EventKind.LIQUIDITY_LEVEL_CREATED]
 
-        level_id = ImmutableEventStore._required_crossing_text(
+        level_id = EventStore._required_crossing_text(
             event,
             "level_id",
         )
-        penetration_level_id = ImmutableEventStore._required_crossing_text(
+        penetration_level_id = EventStore._required_crossing_text(
             penetration,
             "level_id",
         )
-        generation_id = ImmutableEventStore._required_crossing_text(
+        generation_id = EventStore._required_crossing_text(
             event,
             "crossing_generation_id",
         )
         penetration_generation_id = (
-            ImmutableEventStore._required_crossing_text(
+            EventStore._required_crossing_text(
                 penetration,
                 "crossing_generation_id",
             )
         )
-        crossed_at = ImmutableEventStore._required_crossing_clock(
+        crossed_at = EventStore._required_crossing_clock(
             event,
             "crossed_at",
         )
         penetration_crossed_at = (
-            ImmutableEventStore._required_crossing_clock(
+            EventStore._required_crossing_clock(
                 penetration,
                 "crossed_at",
             )
         )
-        resolved_at = ImmutableEventStore._required_crossing_clock(
+        resolved_at = EventStore._required_crossing_clock(
             event,
             "resolved_at",
         )
@@ -3314,7 +3314,7 @@ class ImmutableEventStore:
                 "identity differ"
             )
         expected_generation_id = (
-            ImmutableEventStore._expected_crossing_generation_id(
+            EventStore._expected_crossing_generation_id(
                 event,
                 level_id=level_id,
                 crossed_at=crossed_at,
@@ -3360,7 +3360,7 @@ class ImmutableEventStore:
                 f"{event.kind.value}: terminal and penetration sides differ"
             )
         crossing_direction = (
-            ImmutableEventStore._expected_crossing_direction(event.side)
+            EventStore._expected_crossing_direction(event.side)
         )
         expected_direction = (
             crossing_direction
@@ -3376,7 +3376,7 @@ class ImmutableEventStore:
                 "authoritative crossing contract failed for "
                 f"{event.kind.value}: direction does not match kind and side"
             )
-        ImmutableEventStore._require_real_normalized_bar(
+        EventStore._require_real_normalized_bar(
             resolution_bar,
             timeframe=event.timeframe,
             contract=f"{event.kind.value} resolution",
@@ -3391,7 +3391,7 @@ class ImmutableEventStore:
                 "authoritative crossing terminal candidate lacks frozen "
                 "geometry"
             )
-        resolved_close = ImmutableEventStore._bar_number(
+        resolved_close = EventStore._bar_number(
             resolution_bar,
             "close",
         )
@@ -3459,12 +3459,12 @@ class ImmutableEventStore:
     ) -> None:
         """Bind one terminal Origin Zone transition to its frozen zone/bar."""
 
-        ImmutableEventStore._require_source_kind_multiset(
+        EventStore._require_source_kind_multiset(
             event,
             source_parents,
             _ORIGIN_ZONE_TERMINAL_SOURCE_KINDS,
         )
-        ImmutableEventStore._require_authoritative_parent_origins(
+        EventStore._require_authoritative_parent_origins(
             event,
             source_parents,
         )
@@ -3472,7 +3472,7 @@ class ImmutableEventStore:
         created = parent_by_kind[EventKind.ORIGIN_ZONE_CREATED]
         transition_bar = parent_by_kind[EventKind.BAR_COMPLETED]
 
-        created_parents = ImmutableEventStore._authoritative_source_parents(
+        created_parents = EventStore._authoritative_source_parents(
             created,
             available_events=available_events,
         )
@@ -3493,7 +3493,7 @@ class ImmutableEventStore:
                 "authoritative origin-zone terminal contract references "
                 "an invalid ORIGIN_ZONE_CREATED parent"
             )
-        ImmutableEventStore._require_authoritative_parent_origins(
+        EventStore._require_authoritative_parent_origins(
             created,
             created_parents,
         )
@@ -3555,7 +3555,7 @@ class ImmutableEventStore:
                 "real completed transition BAR"
             )
 
-        transition_scope = ImmutableEventStore._origin_zone_bar_scope(
+        transition_scope = EventStore._origin_zone_bar_scope(
             transition_bar
         )
         anchor_bars = tuple(
@@ -3566,7 +3566,7 @@ class ImmutableEventStore:
         if (
             not anchor_bars
             or any(
-                ImmutableEventStore._origin_zone_bar_scope(anchor)
+                EventStore._origin_zone_bar_scope(anchor)
                 != transition_scope
                 for anchor in anchor_bars
             )
@@ -3615,15 +3615,15 @@ class ImmutableEventStore:
                 "frozen bounds or midpoint"
             )
 
-        low = ImmutableEventStore._origin_zone_bar_price(
+        low = EventStore._origin_zone_bar_price(
             transition_bar,
             "low",
         )
-        high = ImmutableEventStore._origin_zone_bar_price(
+        high = EventStore._origin_zone_bar_price(
             transition_bar,
             "high",
         )
-        close = ImmutableEventStore._origin_zone_bar_price(
+        close = EventStore._origin_zone_bar_price(
             transition_bar,
             "close",
         )
@@ -3666,17 +3666,17 @@ class ImmutableEventStore:
         *,
         source_parents: tuple[MarketEvent, ...],
     ) -> None:
-        ImmutableEventStore._require_source_kind_multiset(
+        EventStore._require_source_kind_multiset(
             event,
             source_parents,
             _RANGE_INVALIDATION_SOURCE_KINDS,
         )
-        ImmutableEventStore._require_authoritative_parent_origins(
+        EventStore._require_authoritative_parent_origins(
             event,
             source_parents,
         )
         parent_by_kind = {parent.kind: parent for parent in source_parents}
-        range_id = ImmutableEventStore._validate_range_break_geometry(
+        range_id = EventStore._validate_range_break_geometry(
             event,
             bar=parent_by_kind[EventKind.BAR_COMPLETED],
         )
@@ -3703,17 +3703,17 @@ class ImmutableEventStore:
         *,
         source_parents: tuple[MarketEvent, ...],
     ) -> None:
-        ImmutableEventStore._require_source_kind_multiset(
+        EventStore._require_source_kind_multiset(
             event,
             source_parents,
             _FORMING_RANGE_INVALIDATION_SOURCE_KINDS,
         )
-        ImmutableEventStore._require_authoritative_parent_origins(
+        EventStore._require_authoritative_parent_origins(
             event,
             source_parents,
         )
         parent_by_kind = {parent.kind: parent for parent in source_parents}
-        range_id = ImmutableEventStore._validate_range_break_geometry(
+        range_id = EventStore._validate_range_break_geometry(
             event,
             bar=parent_by_kind[EventKind.BAR_COMPLETED],
         )
@@ -3911,7 +3911,7 @@ class ImmutableEventStore:
         definition_identity: (
             SemanticDefinitionIdentity | Mapping[str, Any] | str | None
         ) = None,
-    ) -> "ImmutableEventStore":
+    ) -> "EventStore":
         store = cls(
             semantic_version=semantic_version,
             definition_identity=definition_identity,
@@ -3928,7 +3928,7 @@ class ImmutableEventStore:
         expected_definition_identity: (
             SemanticDefinitionIdentity | Mapping[str, Any] | str | None
         ) = None,
-    ) -> "ImmutableEventStore":
+    ) -> "EventStore":
         """Restore events only when all external checkpoint bindings agree."""
 
         expected_fields = {
@@ -4015,7 +4015,7 @@ def validate_canonical_event(
 ) -> None:
     """Validate one reducer input against the store's authority contract."""
 
-    ImmutableEventStore._validate_canonical_provenance(
+    EventStore._validate_canonical_provenance(
         event,
         available_events=available_events,
         normalized_bar_event_ids=normalized_bar_event_ids,
@@ -4042,7 +4042,7 @@ class EventJournalManifest:
 
 @dataclass(frozen=True)
 class EventJournalReadResult:
-    store: ImmutableEventStore
+    store: EventStore
     manifest: EventJournalManifest
 
     @property
@@ -4070,7 +4070,7 @@ def _journal_paths(
 
 
 def _journal_binding(
-    store: ImmutableEventStore,
+    store: EventStore,
     *,
     events: tuple[MarketEvent, ...],
 ) -> tuple[dict[str, Any], str]:
@@ -4101,7 +4101,7 @@ def _journal_binding(
 
 def write_event_journal(
     destination: str | Path,
-    store: ImmutableEventStore,
+    store: EventStore,
     *,
     maximum_rows_per_shard: int = 100_000,
     stream_name: str = _EVENT_JOURNAL_STREAM,
@@ -4114,8 +4114,8 @@ def write_event_journal(
     new destination.
     """
 
-    if not isinstance(store, ImmutableEventStore):
-        raise TypeError("event journal writer requires ImmutableEventStore")
+    if not isinstance(store, EventStore):
+        raise TypeError("event journal writer requires EventStore")
     if type(maximum_rows_per_shard) is not int or maximum_rows_per_shard < 1:
         raise ValueError("maximum_rows_per_shard must be positive")
     manifest_path, sidecar_path, shard_root = _journal_paths(
@@ -4410,7 +4410,7 @@ def read_event_journal(
     ):
         raise ValueError("event journal endpoint binding is invalid")
 
-    store = ImmutableEventStore.from_events(
+    store = EventStore.from_events(
         events,
         semantic_version=str(bindings["semantic_version"]),
         definition_identity=definition_binding,
@@ -4436,10 +4436,17 @@ def read_event_journal(
     return EventJournalReadResult(store=store, manifest=manifest)
 
 
+# Historical pickle compatibility only.  Checkpoints written before the
+# public class rename resolve this module global while every current producer
+# and type annotation uses ``EventStore``.  Keep the alias out of ``__all__``
+# and out of the package root so no new runtime can select the legacy name.
+ImmutableEventStore = EventStore
+
+
 __all__ = [
     "EventJournalManifest",
     "EventJournalReadResult",
-    "ImmutableEventStore",
+    "EventStore",
     "Reducer",
     "ReplayResult",
     "event_order_key",

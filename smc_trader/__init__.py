@@ -2,7 +2,7 @@
 
 from .engine import ContinuousSMCEngine
 from .execution_fsm import ExecutionFSM, RiskApprovedTradeIntent
-from .event_store import ImmutableEventStore
+from .event_store import EventStore
 from .market_state import (
     MarketSnapshot,
     MarketSnapshotAuthority,
@@ -26,7 +26,7 @@ __all__ = [
     "ContinuousSMCEngine",
     "Direction",
     "ExecutionFSM",
-    "ImmutableEventStore",
+    "EventStore",
     "MarketSnapshot",
     "MarketSnapshotAuthority",
     "Playbook",

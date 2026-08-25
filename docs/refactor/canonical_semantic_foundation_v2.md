@@ -78,7 +78,7 @@ model-config byte hash remains part of runtime identity. The current combined
 Engine checkpoint schema is 5; earlier checkpoints fail closed on restore into
 the current Observation, Foundation, and Neutral-state contracts.
 
-The compact migration separates history from hot state. `ImmutableEventStore`
+The compact migration separates history from hot state. `EventStore`
 owns atomic events; one append-only, in-memory `FoundationRecordLedger` owns all
 Foundation revisions. Hot `FoundationProjection` publishes only current logical
 records, total count, current-view fingerprint, and append-chain fingerprint.

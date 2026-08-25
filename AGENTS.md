@@ -32,7 +32,7 @@ No formatter is configured; match adjacent code and group imports.
 
 ## Runtime Authority Boundaries
 
-`ImmutableEventStore` owns atomic history; the in-memory Foundation ledger owns
+`EventStore` owns atomic history; the in-memory Foundation ledger owns
 Foundation revisions. Hot projections and snapshots carry current views,
 counts, indexes, and rolling hashes—not full revision history. Do not restore
 production `FOUNDATION_STATE_CHANGED` emission; its decoder is legacy-read-only.

@@ -10,8 +10,10 @@ from typing import Mapping
 import pandas as pd
 import pytest
 
+import smc_trader
+import smc_trader.event_store as event_store_module
 from smc_trader.event_store import (
-    ImmutableEventStore,
+    EventStore,
     read_event_journal,
     validate_canonical_event,
     write_event_journal,
@@ -31,6 +33,26 @@ from smc_trader.semantics import SemanticRegistry
 
 
 TZ = "America/New_York"
+
+
+def test_event_store_uses_new_public_identity_and_reads_legacy_pickle() -> None:
+    store = EventStore()
+    current_pickle = pickle.dumps(store, protocol=0)
+    current_global = b"csmc_trader.event_store\nEventStore\n"
+    legacy_global = b"csmc_trader.event_store\nImmutableEventStore\n"
+
+    assert EventStore.__module__ == "smc_trader.event_store"
+    assert EventStore.__qualname__ == "EventStore"
+    assert current_global in current_pickle
+    assert "EventStore" in event_store_module.__all__
+    assert "ImmutableEventStore" not in event_store_module.__all__
+    assert not hasattr(smc_trader, "ImmutableEventStore")
+
+    legacy_pickle = current_pickle.replace(current_global, legacy_global, 1)
+    restored = pickle.loads(legacy_pickle)
+
+    assert type(restored) is EventStore
+    assert restored == store
 
 
 def _clock(minutes: int) -> pd.Timestamp:
@@ -645,7 +667,7 @@ def test_foundation_structural_leg_binds_production_bar_ancestry() -> None:
             ),
         )
     )
-    restored = ImmutableEventStore.from_events(ordered)
+    restored = EventStore.from_events(ordered)
     assert restored.get(leg.event_id) == leg
 
 
@@ -1827,7 +1849,7 @@ def test_store_accepts_closed_sources_and_context_from_same_batch() -> None:
         source_entity_ids=("candidate-level:1",),
         context_event_ids=(context.event_id,),
     )
-    store = ImmutableEventStore()
+    store = EventStore()
 
     assert store.append_batch((parent, context, child)) == 3
     assert store.events() == (parent, context, child)
@@ -1848,7 +1870,7 @@ def test_append_batch_uses_overlay_without_copying_lifetime_history() -> None:
         canonical=True,
         source_event_ids=(parent.event_id,),
     )
-    store = ImmutableEventStore()
+    store = EventStore()
     assert store.append(parent)
     guarded = NonCopyableHistory()
     dict.update(guarded, store._by_id)
@@ -1869,7 +1891,7 @@ def test_store_rejects_dangling_canonical_event_references_atomically(
         canonical=True,
         **{namespace: ("missing",)},
     )
-    store = ImmutableEventStore()
+    store = EventStore()
 
     with pytest.raises(ValueError, match="unavailable earlier event"):
         store.append_batch((root, dangling))
@@ -1884,7 +1906,7 @@ def test_store_rejects_forward_reference_self_reference_and_cycle() -> None:
         canonical=True,
         source_event_ids=(parent.event_id,),
     )
-    store = ImmutableEventStore()
+    store = EventStore()
     with pytest.raises(ValueError, match="unavailable earlier event"):
         store.append_batch((forward_child, parent))
     assert len(store) == 0
@@ -1925,7 +1947,7 @@ def test_store_rejects_future_parent_and_cross_version_batch() -> None:
         canonical=True,
         source_event_ids=(future_parent.event_id,),
     )
-    store = ImmutableEventStore()
+    store = EventStore()
     assert store.append(future_parent) is True
     with pytest.raises(ValueError, match="causally ordered by known_at"):
         store.append(child)
@@ -1952,7 +1974,7 @@ def test_legacy_and_projection_events_retain_compatibility_boundary() -> None:
         projection=True,
         source_event_ids=("rebuildable-missing-parent",),
     )
-    store = ImmutableEventStore()
+    store = EventStore()
 
     assert legacy.source_event_ids == legacy.source_ids
     assert store.append_batch((legacy, projection)) == 2
@@ -1968,7 +1990,7 @@ def test_details_markers_cannot_spoof_explicit_event_origin() -> None:
         details={"canonical_semantic": True, "projection_only": False},
     )
     assert legacy.is_canonical_semantic is False
-    assert ImmutableEventStore.from_events((legacy,)).events() == (legacy,)
+    assert EventStore.from_events((legacy,)).events() == (legacy,)
 
     atomic = replace(
         _event(
@@ -1982,7 +2004,7 @@ def test_details_markers_cannot_spoof_explicit_event_origin() -> None:
     assert atomic.is_canonical_semantic is True
     assert atomic.is_projection is False
     with pytest.raises(ValueError, match="unavailable earlier event"):
-        ImmutableEventStore.from_events((atomic,))
+        EventStore.from_events((atomic,))
 
 
 def test_projection_digest_requires_bound_payload_and_cannot_be_spoofed() -> None:
@@ -1992,7 +2014,7 @@ def test_projection_digest_requires_bound_payload_and_cannot_be_spoofed() -> Non
         canonical=True,
         projection=True,
     )
-    store = ImmutableEventStore()
+    store = EventStore()
     assert store.append(projection) is True
 
     tampered_details = dict(projection.details)
@@ -2019,7 +2041,7 @@ def test_projection_digest_requires_bound_payload_and_cannot_be_spoofed() -> Non
 
 def test_store_accepts_complete_authoritative_phase23_parent_chain() -> None:
     events = _authoritative_phase23_chain()
-    store = ImmutableEventStore()
+    store = EventStore()
 
     assert store.append_batch(events) == len(events)
     assert store.events() == events
@@ -2043,7 +2065,7 @@ def test_store_accepts_closed_authoritative_crossing_chain(
         kind=kind,
         resolved_minutes=resolved_minutes,
     )
-    store = ImmutableEventStore()
+    store = EventStore()
 
     assert store.append_batch(events) == len(events)
     terminal = events[-1]
@@ -2065,7 +2087,7 @@ def test_m1_crossing_binds_higher_timeframe_candidate_explicitly() -> None:
         candidate_timeframe=Timeframe.M5,
     )
 
-    assert ImmutableEventStore.from_events(events).events() == events
+    assert EventStore.from_events(events).events() == events
 
     touch_index = next(
         index
@@ -2077,7 +2099,7 @@ def test_m1_crossing_binds_higher_timeframe_candidate_explicitly() -> None:
         source_timeframe=None,
     )
     with pytest.raises(ValueError, match="level touch does not bind"):
-        ImmutableEventStore.from_events(
+        EventStore.from_events(
             (*events[:touch_index], unbound_touch, *events[touch_index + 1 :])
         )
 
@@ -2091,23 +2113,23 @@ def test_crossing_terminal_generation_is_global_and_rebuilt() -> None:
         sequence_no=terminal.sequence_no + 1,
     )
 
-    store = ImmutableEventStore.from_events(events)
+    store = EventStore.from_events(events)
     with pytest.raises(ValueError, match="already has an immutable terminal"):
         store.append(duplicate)
 
-    empty = ImmutableEventStore()
+    empty = EventStore()
     with pytest.raises(ValueError, match="already has an immutable terminal"):
         empty.append_batch((*events, duplicate))
     assert len(empty) == 0
     with pytest.raises(ValueError, match="already has an immutable terminal"):
-        ImmutableEventStore.from_events((*events, duplicate))
+        EventStore.from_events((*events, duplicate))
     with pytest.raises(ValueError, match="already has an immutable terminal"):
-        ImmutableEventStore.from_checkpoint(
+        EventStore.from_checkpoint(
             (*events, duplicate),
             store.checkpoint_metadata(),
         )
 
-    restored = ImmutableEventStore.from_checkpoint(
+    restored = EventStore.from_checkpoint(
         events,
         store.checkpoint_metadata(),
     )
@@ -2148,29 +2170,29 @@ def test_crossing_requires_real_definitional_bar_roots(
     )
 
     with pytest.raises(ValueError, match="exact real normalized BAR"):
-        ImmutableEventStore.from_events(events)
+        EventStore.from_events(events)
 
 
 def test_synthetic_displacement_context_is_exact_open_closed_m1_subset() -> None:
     events = _synthetic_displacement_chain()
-    store = ImmutableEventStore.from_events(events)
+    store = EventStore.from_events(events)
 
     assert store.events() == events
     assert events[-1].context_event_ids == (events[4].event_id,)
 
     missing_context = replace(events[-1], context_event_ids=())
     with pytest.raises(ValueError, match="exact clock-only M1 subset"):
-        ImmutableEventStore.from_events((*events[:-1], missing_context))
+        EventStore.from_events((*events[:-1], missing_context))
 
     extra_context = replace(
         events[-1],
         context_event_ids=(events[3].event_id, events[4].event_id),
     )
     with pytest.raises(ValueError, match="exact clock-only M1 subset"):
-        ImmutableEventStore.from_events((*events[:-1], extra_context))
+        EventStore.from_events((*events[:-1], extra_context))
 
     with pytest.raises(ValueError, match="five contiguous unique M1"):
-        ImmutableEventStore.from_events((*events[:5], *events[6:]))
+        EventStore.from_events((*events[:5], *events[6:]))
 
     stale_source = replace(
         events[1],
@@ -2188,7 +2210,7 @@ def test_synthetic_displacement_context_is_exact_open_closed_m1_subset() -> None
         evidence=stale_payload,
     )
     with pytest.raises(ValueError, match="immediately preceding real M5"):
-        ImmutableEventStore.from_events(
+        EventStore.from_events(
             (events[0], stale_source, *events[2:-1], stale_terminal)
         )
 
@@ -2196,7 +2218,7 @@ def test_synthetic_displacement_context_is_exact_open_closed_m1_subset() -> None
 def test_normalized_bar_index_retry_batch_pickle_and_checkpoint_are_atomic(
 ) -> None:
     bar = _normalized_bar("indexed-bar", 0)
-    store = ImmutableEventStore.from_events((bar,))
+    store = EventStore.from_events((bar,))
     initial_index = dict(store._normalized_bar_event_ids)
 
     assert store.append(replace(bar, sequence_no=999)) is False
@@ -2221,7 +2243,7 @@ def test_normalized_bar_index_retry_batch_pickle_and_checkpoint_are_atomic(
 
     for restored in (
         pickle.loads(pickle.dumps(store)),
-        ImmutableEventStore.from_checkpoint(
+        EventStore.from_checkpoint(
             store.events(),
             store.checkpoint_metadata(),
         ),
@@ -2265,7 +2287,7 @@ def test_same_protected_assignment_may_resolve_distinct_crossing_generations(
 
     first = protected_crossing("protected-generation-one", 11)
     second = protected_crossing("protected-generation-two", 14)
-    store = ImmutableEventStore.from_events((*prefix, *first, *second))
+    store = EventStore.from_events((*prefix, *first, *second))
 
     assert store._latest_protected_assignment_event_ids == {
         "swing-a": protected.event_id
@@ -2310,7 +2332,7 @@ def test_m1_acceptance_binds_higher_timeframe_protected_assignment() -> None:
         context_event_ids=(protected.event_id,),
     )
 
-    store = ImmutableEventStore.from_events((*prefix, *crossing))
+    store = EventStore.from_events((*prefix, *crossing))
 
     assert store.events()[-1] == crossing[-1]
 
@@ -2370,7 +2392,7 @@ def test_protected_acceptance_must_reference_latest_timeframe_assignment(
     )
     accepted_prefix = (*first_prefix, *release, *second_assignment, *stale[:-1])
 
-    store = ImmutableEventStore.from_events(accepted_prefix)
+    store = EventStore.from_events(accepted_prefix)
     before = (
         store.events(),
         dict(store._latest_protected_assignment_event_ids_by_timeframe),
@@ -2452,7 +2474,7 @@ def test_completed_period_candidate_binds_exact_extreme_and_admission_bars(
 ) -> None:
     events = _completed_day_high_candidate()
 
-    assert ImmutableEventStore.from_events(events).events() == events
+    assert EventStore.from_events(events).events() == events
 
 
 @pytest.mark.parametrize(
@@ -2480,7 +2502,7 @@ def test_completed_period_candidate_rejects_forged_reference_contract(
         candidate = replace(candidate, timeframe=Timeframe.H1)
 
     with pytest.raises(ValueError, match="completed-period candidate"):
-        ImmutableEventStore.from_events((extreme, admission, candidate))
+        EventStore.from_events((extreme, admission, candidate))
 
 
 def _reference_zone_candidate_with_point_parent() -> tuple[MarketEvent, ...]:
@@ -2537,7 +2559,7 @@ def test_reference_zone_candidate_binds_exact_completed_period_point_parent(
 ) -> None:
     events = _reference_zone_candidate_with_point_parent()
 
-    assert ImmutableEventStore.from_events(events).events() == events
+    assert EventStore.from_events(events).events() == events
 
 
 def test_legacy_v1_2_source_free_reference_zone_candidate_remains_replayable(
@@ -2549,7 +2571,7 @@ def test_legacy_v1_2_source_free_reference_zone_candidate_remains_replayable(
         source_event_ids=(),
     )
 
-    assert ImmutableEventStore.from_events((context, legacy)).events() == (
+    assert EventStore.from_events((context, legacy)).events() == (
         context,
         legacy,
     )
@@ -2558,7 +2580,7 @@ def test_legacy_v1_2_source_free_reference_zone_candidate_remains_replayable(
     future_context = replace(context, semantic_version=future_version)
     future_legacy = replace(legacy, semantic_version=future_version)
     with pytest.raises(ValueError, match="source-free compatibility"):
-        ImmutableEventStore.from_events(
+        EventStore.from_events(
             (future_context, future_legacy),
             semantic_version=future_version,
         )
@@ -2647,7 +2669,7 @@ def test_sourceful_reference_zone_candidate_rejects_parent_tampering(
         )
 
     with pytest.raises(ValueError):
-        ImmutableEventStore.from_events(
+        EventStore.from_events(
             (extreme, admission, point, context, candidate)
         )
 
@@ -2667,7 +2689,7 @@ def test_sourceful_reference_zone_candidate_cannot_fall_back_to_legacy_seam(
         ValueError,
         match="exact completed-period point parent",
     ):
-        ImmutableEventStore.from_events(
+        EventStore.from_events(
             (extreme, admission, point, context, forged)
         )
 
@@ -2681,13 +2703,13 @@ def test_range_boundary_candidate_requires_exact_compatibility_or_bar_source(
         side="above",
         level_id="range-boundary-level",
     )
-    assert ImmutableEventStore.from_events((context, candidate)).events() == (
+    assert EventStore.from_events((context, candidate)).events() == (
         context,
         candidate,
     )
 
     with pytest.raises(ValueError, match="exact compatibility state"):
-        ImmutableEventStore.from_events(
+        EventStore.from_events(
             (replace(candidate, context_event_ids=()),)
         )
 
@@ -2704,7 +2726,7 @@ def test_range_boundary_candidate_requires_exact_compatibility_or_bar_source(
         context_event_ids=(),
     )
     with pytest.raises(ValueError, match="exact extreme geometry"):
-        ImmutableEventStore.from_events((unrelated, forged))
+        EventStore.from_events((unrelated, forged))
 
 
 def test_failed_batch_does_not_publish_staged_protected_or_forward_indexes(
@@ -2717,7 +2739,7 @@ def test_failed_batch_does_not_publish_staged_protected_or_forward_indexes(
     )
     prefix = phase_events[: protected_index + 1]
     protected = prefix[-1]
-    store = ImmutableEventStore.from_events(prefix)
+    store = EventStore.from_events(prefix)
     before_latest = dict(store._latest_protected_assignment_event_ids)
     before_unresolved = set(store._unresolved_forward_reference_ids)
     later_assignment = replace(
@@ -2764,13 +2786,13 @@ def test_normal_canonical_append_does_not_walk_complete_provenance(
         side="above",
         level_id="bounded-two",
     )
-    store = ImmutableEventStore.from_events((first_context, first))
+    store = EventStore.from_events((first_context, first))
 
     def unexpected_walk(*args: object, **kwargs: object) -> bool:
         raise AssertionError("normal canonical append performed a DAG walk")
 
     monkeypatch.setattr(
-        ImmutableEventStore,
+        EventStore,
         "_provenance_reaches",
         staticmethod(unexpected_walk),
     )
@@ -2925,7 +2947,7 @@ def test_legacy_unresolved_forward_reference_still_detects_cycle() -> None:
         context_event_ids=(legacy.event_id,),
         zone=(100.0, 100.0),
     )
-    store = ImmutableEventStore.from_events((legacy,))
+    store = EventStore.from_events((legacy,))
 
     with pytest.raises(ValueError, match="contains a cycle"):
         store.append(future)
@@ -3092,7 +3114,7 @@ def test_authority_cross_links_fail_closed(case: str) -> None:
         raise AssertionError(case)
 
     with pytest.raises(ValueError, match="authoritative"):
-        ImmutableEventStore.from_events(events)
+        EventStore.from_events(events)
 
 
 def test_acceptance_binds_the_live_protected_assignment_context() -> None:
@@ -3123,12 +3145,12 @@ def test_acceptance_binds_the_live_protected_assignment_context() -> None:
         context_event_ids=(protected.event_id,),
     )
 
-    store = ImmutableEventStore.from_events((*prefix, *crossing))
+    store = EventStore.from_events((*prefix, *crossing))
     assert store.events()[-1] == crossing[-1]
 
     missing_context = replace(crossing[-1], context_event_ids=())
     with pytest.raises(ValueError, match="protected-swing assignment context"):
-        ImmutableEventStore.from_events((*prefix, *crossing[:-1], missing_context))
+        EventStore.from_events((*prefix, *crossing[:-1], missing_context))
 
     later_assignment = replace(
         protected,
@@ -3136,7 +3158,7 @@ def test_acceptance_binds_the_live_protected_assignment_context() -> None:
         sequence_no=protected.sequence_no + 1,
     )
     with pytest.raises(ValueError, match="latest protected-swing assignment"):
-        ImmutableEventStore.from_events(
+        EventStore.from_events(
             (*prefix, later_assignment, *crossing)
         )
 
@@ -3167,7 +3189,7 @@ def test_store_rejects_terminal_with_missing_definitional_parent(
     )
 
     with pytest.raises(ValueError, match="authoritative parent contract"):
-        ImmutableEventStore.from_events((*events[:-1], forged))
+        EventStore.from_events((*events[:-1], forged))
 
 
 def test_store_rejects_raw_break_as_terminal_definitional_source() -> None:
@@ -3188,7 +3210,7 @@ def test_store_rejects_raw_break_as_terminal_definitional_source() -> None:
     )
 
     with pytest.raises(ValueError, match="authoritative parent contract"):
-        ImmutableEventStore.from_events(
+        EventStore.from_events(
             (*events[:2], raw_context, *events[2:-1], forged)
         )
 
@@ -3205,7 +3227,7 @@ def test_store_accepts_raw_break_only_as_terminal_context() -> None:
         terminal,
         context_event_ids=(raw_context.event_id,),
     )
-    store = ImmutableEventStore()
+    store = EventStore()
 
     ordered = (*events[:2], raw_context, *events[2:-1], contextual)
     assert store.append_batch(ordered) == len(ordered)
@@ -3229,7 +3251,7 @@ def test_store_rejects_terminal_identity_or_clock_drift(
     forged = _with_evidence(events[-1], **{field: value})
 
     with pytest.raises(ValueError, match=message):
-        ImmutableEventStore.from_events((*events[:-1], forged))
+        EventStore.from_events((*events[:-1], forged))
 
 
 def test_store_rejects_terminal_timeframe_side_and_direction_drift() -> None:
@@ -3245,7 +3267,7 @@ def test_store_rejects_terminal_timeframe_side_and_direction_drift() -> None:
         timeframe=Timeframe.H1,
     )
     with pytest.raises(ValueError, match="timeframes differ"):
-        ImmutableEventStore.from_events(
+        EventStore.from_events(
             tuple(
                 wrong_timeframe_bar if event is resolution_bar else event
                 for event in events
@@ -3254,11 +3276,11 @@ def test_store_rejects_terminal_timeframe_side_and_direction_drift() -> None:
 
     wrong_side = replace(terminal, side="below")
     with pytest.raises(ValueError, match="sides differ"):
-        ImmutableEventStore.from_events((*events[:-1], wrong_side))
+        EventStore.from_events((*events[:-1], wrong_side))
 
     wrong_direction = replace(terminal, direction=Direction.SHORT)
     with pytest.raises(ValueError, match="direction does not match"):
-        ImmutableEventStore.from_events((*events[:-1], wrong_direction))
+        EventStore.from_events((*events[:-1], wrong_direction))
 
 
 def test_store_rejects_incomplete_or_cross_generation_penetration_chain() -> None:
@@ -3280,7 +3302,7 @@ def test_store_rejects_incomplete_or_cross_generation_penetration_chain() -> Non
         source_event_ids=(touch.event_id, crossing_bar.event_id),
     )
     with pytest.raises(ValueError, match="authoritative parent contract"):
-        ImmutableEventStore.from_events(
+        EventStore.from_events(
             (*events[:penetration_index], missing_candidate)
         )
 
@@ -3289,7 +3311,7 @@ def test_store_rejects_incomplete_or_cross_generation_penetration_chain() -> Non
         crossing_generation_id="forged-generation",
     )
     with pytest.raises(ValueError, match="does not bind"):
-        ImmutableEventStore.from_events(
+        EventStore.from_events(
             (*events[:penetration_index], wrong_generation)
         )
 
@@ -3371,7 +3393,7 @@ def test_store_rejects_touch_from_different_candidate_generation() -> None:
     )
 
     with pytest.raises(ValueError, match="same candidate"):
-        ImmutableEventStore.from_events(prefix)
+        EventStore.from_events(prefix)
 
 
 @pytest.mark.parametrize(
@@ -3388,7 +3410,7 @@ def test_crossing_parent_contract_does_not_reclassify_legacy_terminal(
         source_ids=("opaque-crossing",),
     )
 
-    assert ImmutableEventStore.from_events((legacy,)).events() == (legacy,)
+    assert EventStore.from_events((legacy,)).events() == (legacy,)
 
 
 @pytest.mark.parametrize(
@@ -3419,7 +3441,7 @@ def test_store_rejects_missing_or_mistyped_authoritative_parents(
     kind: EventKind,
     source_event_ids: tuple[str, ...],
 ) -> None:
-    store = ImmutableEventStore.from_events(_authoritative_phase23_chain())
+    store = EventStore.from_events(_authoritative_phase23_chain())
     bad = _event(
         f"bad-{kind.value}",
         30,
@@ -3446,8 +3468,8 @@ def test_origin_zone_terminal_production_shape_replays(
 ) -> None:
     events = _origin_zone_terminal_chain(kind)
 
-    first = ImmutableEventStore.from_events(events)
-    replayed = ImmutableEventStore.from_events(first.events())
+    first = EventStore.from_events(events)
+    replayed = EventStore.from_events(first.events())
 
     assert replayed.events() == first.events()
     assert replayed.events()[-1].kind is kind
@@ -3540,7 +3562,7 @@ def test_origin_zone_terminal_contract_fails_closed(case: str) -> None:
             "authoritative origin_zone_mitigated parent requires an exact real"
         ),
     ):
-        ImmutableEventStore.from_events(events)
+        EventStore.from_events(events)
 
 
 def test_origin_zone_invalidation_requires_close_through_geometry() -> None:
@@ -3564,7 +3586,7 @@ def test_origin_zone_invalidation_requires_close_through_geometry() -> None:
         ValueError,
         match="origin-zone terminal contract conflicts",
     ):
-        ImmutableEventStore.from_events(events)
+        EventStore.from_events(events)
 
 
 def test_origin_zone_terminal_state_replay_and_unknown_identity_fail_closed(
@@ -3617,7 +3639,7 @@ def test_two_touches_cannot_masquerade_as_qualified_bos() -> None:
         kind=EventKind.QUALIFIED_BOS,
         source_event_ids=(touch_one.event_id, touch_two.event_id),
     )
-    store = ImmutableEventStore()
+    store = EventStore()
 
     with pytest.raises(
         ValueError,
@@ -3647,7 +3669,7 @@ def test_authoritative_bar_parent_must_be_normalized_data() -> None:
             bar_right.event_id,
         ),
     )
-    store = ImmutableEventStore()
+    store = EventStore()
 
     with pytest.raises(ValueError, match="must be normalized_data"):
         store.append_batch((legacy_bar, bar_middle, bar_right, fvg))
@@ -3674,7 +3696,7 @@ def test_authoritative_semantic_parent_must_itself_be_atomic() -> None:
         kind=EventKind.QUALIFIED_BOS,
         source_event_ids=(legacy_raw_break.event_id, direction.event_id),
     )
-    store = ImmutableEventStore()
+    store = EventStore()
 
     with pytest.raises(ValueError, match="must be semantic_atomic"):
         store.append_batch(
@@ -3689,7 +3711,7 @@ def test_authoritative_semantic_parent_must_itself_be_atomic() -> None:
 
 def test_store_accepts_complete_external_range_invalidation_chain() -> None:
     events = _external_range_chain()
-    store = ImmutableEventStore()
+    store = EventStore()
 
     assert store.append_batch(events) == len(events)
     assert store.events() == events
@@ -3697,7 +3719,7 @@ def test_store_accepts_complete_external_range_invalidation_chain() -> None:
 
 def test_store_accepts_forming_range_failure_without_active_ancestry() -> None:
     events = _forming_range_invalidation_chain()
-    store = ImmutableEventStore()
+    store = EventStore()
 
     assert store.append_batch(events) == len(events)
     assert store.events() == events
@@ -3710,7 +3732,7 @@ def test_forming_range_failure_requires_strictly_outside_h1_close(
     events = _forming_range_invalidation_chain(close=close)
 
     with pytest.raises(ValueError, match="strictly outside"):
-        ImmutableEventStore.from_events(events)
+        EventStore.from_events(events)
 
 
 def test_external_range_invalidation_requires_complete_parent_chain() -> None:
@@ -3738,7 +3760,7 @@ def test_external_range_invalidation_requires_complete_parent_chain() -> None:
             bar.event_id,
         ),
     )
-    store = ImmutableEventStore()
+    store = EventStore()
 
     with pytest.raises(ValueError, match="authoritative parent contract"):
         store.append_batch((*events[:-1], missing_acceptance))
@@ -3763,7 +3785,7 @@ def test_external_range_acceptance_must_be_h1_and_same_range(
     )
 
     with pytest.raises(ValueError, match=message):
-        ImmutableEventStore.from_events(events)
+        EventStore.from_events(events)
 
 
 @pytest.mark.parametrize("close", (100.0, 110.0))
@@ -3776,7 +3798,7 @@ def test_external_range_bar_must_close_strictly_outside_frozen_zone(
         ValueError,
         match="strictly outside|terminal kind conflicts",
     ):
-        ImmutableEventStore.from_events(events)
+        EventStore.from_events(events)
 
 
 @pytest.mark.parametrize(
@@ -3807,7 +3829,7 @@ def test_external_range_bar_must_close_strictly_outside_frozen_zone(
 def test_parent_contract_does_not_reclassify_non_atomic_origins(
     event: MarketEvent,
 ) -> None:
-    assert ImmutableEventStore.from_events((event,)).events() == (event,)
+    assert EventStore.from_events((event,)).events() == (event,)
 
 
 def test_explicit_source_namespaces_roundtrip_through_bound_journal(
@@ -3829,7 +3851,7 @@ def test_explicit_source_namespaces_roundtrip_through_bound_journal(
         source_entity_ids=("candidate-level:1",),
         context_event_ids=(context.event_id,),
     )
-    store = ImmutableEventStore(
+    store = EventStore(
         definition_identity=registry.definition_identity,
     )
     assert store.append_batch((parent, context, child)) == 3

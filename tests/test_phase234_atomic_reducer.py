@@ -11,7 +11,7 @@ import pandas as pd
 import pytest
 
 from smc_trader.causal import CausalMarketReader, ReaderUpdate
-from smc_trader.event_store import ImmutableEventStore, event_order_key
+from smc_trader.event_store import EventStore, event_order_key
 from smc_trader.foundation_registry import (
     FOUNDATION_CANONICAL_IDENTITY,
     FOUNDATION_VERSION,
@@ -370,7 +370,7 @@ def test_authoritative_atomic_parent_rejects_clock_only_bar(
     )
 
     with pytest.raises(ValueError, match="exact real normalized BAR"):
-        ImmutableEventStore._require_authoritative_parent_origins(
+        EventStore._require_authoritative_parent_origins(
             child,
             (clock_only,),
         )
@@ -395,7 +395,7 @@ def test_event_store_rejects_clock_only_root_without_coverage_proof() -> None:
     forged = replace(clock_only, details=evidence, evidence=evidence)
 
     with pytest.raises(ValueError, match="requires coverage"):
-        ImmutableEventStore._normalized_bar_identity(
+        EventStore._normalized_bar_identity(
             forged,
             bar_event_ids={},
         )
@@ -415,7 +415,7 @@ def test_event_store_rejects_clock_only_root_with_forged_registered_bounds() -> 
     forged = replace(clock_only, details=evidence, evidence=evidence)
 
     with pytest.raises(ValueError, match="registered bounds"):
-        ImmutableEventStore._normalized_bar_identity(
+        EventStore._normalized_bar_identity(
             forged,
             bar_event_ids={},
         )
@@ -457,7 +457,7 @@ def test_event_store_bar_root_contract_rejects_partial_or_conflicting_proof(
         invalid = replace(event, details=evidence, evidence=evidence)
 
     with pytest.raises(ValueError, match=message):
-        ImmutableEventStore._normalized_bar_identity(
+        EventStore._normalized_bar_identity(
             invalid,
             bar_event_ids={},
         )
@@ -480,7 +480,7 @@ def test_event_store_rejects_private_owner_fanout_markers(
     forged = replace(event, details=evidence, evidence=evidence)
 
     with pytest.raises(ValueError, match="private owner fanout markers"):
-        ImmutableEventStore._normalized_bar_identity(
+        EventStore._normalized_bar_identity(
             forged,
             bar_event_ids={},
         )

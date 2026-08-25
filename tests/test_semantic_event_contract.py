@@ -7,7 +7,7 @@ import pickle
 import pandas as pd
 import pytest
 
-from smc_trader.event_store import ImmutableEventStore
+from smc_trader.event_store import EventStore
 from smc_trader.model import EventKind, SMC_SEMANTIC_VERSION, Timeframe
 from smc_trader.observation import CausalObserver, EventMemory, _event
 from smc_trader.semantics import (
@@ -279,7 +279,7 @@ def test_semantic_event_payload_is_deeply_immutable_and_pickle_safe() -> None:
 
 def test_known_at_is_the_only_replay_availability_gate() -> None:
     event = _swing_event()
-    store = ImmutableEventStore.from_events((event,))
+    store = EventStore.from_events((event,))
 
     before = store.replay((), lambda state, item: (*state, item.event_id), known_at=_clock(5))
     at_confirmation = store.replay(
@@ -296,7 +296,7 @@ def test_known_at_is_the_only_replay_availability_gate() -> None:
 
 def test_event_store_is_idempotent_append_only_and_version_isolated() -> None:
     event = _swing_event()
-    store = ImmutableEventStore()
+    store = EventStore()
 
     assert store.append(event) is True
     assert store.append(event) is False
@@ -309,7 +309,7 @@ def test_event_store_is_idempotent_append_only_and_version_isolated() -> None:
 
 def test_event_store_treats_transport_resequencing_as_an_idempotent_retry() -> None:
     event = _swing_event()
-    store = ImmutableEventStore()
+    store = EventStore()
 
     assert store.append(event) is True
     assert store.append(replace(event, sequence_no=event.sequence_no + 99)) is False
@@ -329,7 +329,7 @@ def test_event_store_batch_is_atomic_and_replay_is_repeatable() -> None:
         direction=None,
     )
     invalid = replace(second, event_id="version-mismatch", semantic_version="v2")
-    store = ImmutableEventStore()
+    store = EventStore()
 
     with pytest.raises(ValueError, match="semantic versions"):
         store.append_batch((first, invalid))
@@ -384,7 +384,7 @@ def test_production_event_identity_is_bound_to_semantic_version() -> None:
 def test_canonical_retry_keeps_first_known_strength_after_hot_key_eviction() -> None:
     observer = object.__new__(CausalObserver)
     observer.semantic_registry = SemanticRegistry.from_file()
-    observer.audit_store = ImmutableEventStore()
+    observer.audit_store = EventStore()
     observer.memory = EventMemory(1, audit_store=observer.audit_store)
     source_ids = ("candidate-level",)
     observer.audit_store.append(

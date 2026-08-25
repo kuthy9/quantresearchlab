@@ -14,7 +14,7 @@ import smc_trader.event_store as event_store_module
 import smc_trader.shadow_live as shadow_live_module
 
 from smc_trader.engine import ContinuousSMCEngine
-from smc_trader.event_store import ImmutableEventStore
+from smc_trader.event_store import EventStore
 from smc_trader.foundation_adapter import CanonicalFoundationAdapter
 from smc_trader.execution_fsm import (
     ExecutionFact,
@@ -509,8 +509,8 @@ def test_component_digest_versions_are_explicit_and_old_checkpoints_replay() -> 
         "REBUILDABLE_PROJECTION_COMMITMENT_VERSION",
     )
     with pytest.raises(TypeError):
-        ImmutableEventStore(rebuildable_projection_compaction=False)
-    assert ImmutableEventStore() == ImmutableEventStore()
+        EventStore(rebuildable_projection_compaction=False)
+    assert EventStore() == EventStore()
 
     state = dict(current.engine.observer.audit_store.__getstate__())
     assert set(state) == {
@@ -530,7 +530,7 @@ def test_component_digest_versions_are_explicit_and_old_checkpoints_replay() -> 
             current.engine.observer.audit_store._terminal_crossing_event_ids
         ),
     }
-    legacy_rebuilt = object.__new__(ImmutableEventStore)
+    legacy_rebuilt = object.__new__(EventStore)
     legacy_rebuilt.__setstate__(legacy_state)
     assert legacy_rebuilt.events() == tuple(current_events)
     assert legacy_rebuilt.fingerprint() == (
