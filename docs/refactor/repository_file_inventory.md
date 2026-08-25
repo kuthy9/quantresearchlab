@@ -60,6 +60,17 @@ baseline findings and file rows below are intentionally not rewritten. See the
 [current implementation status](current_implementation_status.md) for current
 ownership, schemas, residual debt, and historical-receipt boundaries.
 
+### Post-baseline Foundation comparison tooling retirement
+
+The two inert comparison wrappers, their no-input comparator, and their two
+dedicated orchestration tests were retired on 2026-08-25. Their exact preimage
+hashes and recovery command are preserved in the
+[tooling retirement receipt](../evidence/foundation_comparison_tooling_retirement_2026-08-25.md).
+The four frozen comparison manifests remain byte-for-byte historical records;
+generic semantic and MBO research runners remain available for a newly frozen
+study. As with the retirements above, the frozen-baseline rows below are not
+rewritten.
+
 > **Frozen-baseline reading rule:** every finding, count, present-tense
 > disposition, and file row below this notice describes only the `4f180d2`
 > preimage. In particular, later statements that the Neutral-B2 island or the

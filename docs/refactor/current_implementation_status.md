@@ -522,6 +522,13 @@ comparison must use a new experiment identity, versioned manifest path and
 `frozen_at` value after the runtime is final; these four files must not be
 silently rebound again.
 
+The two comparison wrappers, their no-input comparator, and their dedicated
+tests have therefore been retired. The exact preimage hashes and recovery
+command are in the
+[tooling retirement receipt](../evidence/foundation_comparison_tooling_retirement_2026-08-25.md).
+The generic semantic and MBO research runners remain; the historical manifests
+above remain unchanged and are not redirected to those generic runners.
+
 The separately frozen v1.2 protocol-v3 r2 development diagnostic completed.
 Its [manifest](../../experiments/manifests/smc_semantics_v1_2_2024_01_phase5_diagnostic_v3_r2.yaml)
 and [result](../../experiments/results/smc_semantics_v1_2_2024_01_phase5_diagnostic_v3_r2.json)

@@ -14,10 +14,10 @@ results live in `experiments/`; current explanations and receipts live in
 Create the environment with `uv sync --extra test`; there is no compile step.
 
 - `env PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider`
-  runs daily semantic/runtime tests; historical and Phase 7-9 runner groups are
-  excluded by `pyproject.toml`.
-- `.venv/bin/python -m pytest -m research_runner -q -p no:cacheprovider`
-  runs bounded runner, publication, and operational-contract tests separately.
+  runs daily semantic/runtime tests; historical and research-orchestration
+  groups are excluded by `pyproject.toml`.
+- `.venv/bin/python -m pytest -m 'research_runner or research_orchestration' -q -p no:cacheprovider`
+  runs bounded study, publication, and operational-contract tests separately.
 - `.venv/bin/python -m pytest tests/test_foundation_adapter.py -q -p no:cacheprovider`
   runs a focused contract file.
 - `git diff --check` catches whitespace errors before commit.

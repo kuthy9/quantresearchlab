@@ -8,6 +8,8 @@ from typing import Iterator, Mapping
 import pandas as pd
 import pytest
 
+pytestmark = pytest.mark.research_orchestration
+
 import scripts.run_semantic_signal_research as runner
 
 

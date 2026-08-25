@@ -7,6 +7,8 @@ from types import SimpleNamespace
 import pandas as pd
 import pytest
 
+pytestmark = pytest.mark.research_orchestration
+
 from smc_trader.model import Direction, EventKind, EventOrigin, MarketEvent, Timeframe
 import scripts.run_mbo_mechanism_research as phase6_runner
 

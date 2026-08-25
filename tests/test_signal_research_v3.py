@@ -9,6 +9,8 @@ from types import SimpleNamespace
 import pandas as pd
 import pytest
 
+pytestmark = pytest.mark.research_orchestration
+
 from smc_trader.model import (
     Direction,
     EventKind,
