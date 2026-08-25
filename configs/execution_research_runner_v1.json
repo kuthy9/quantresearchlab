@@ -23,7 +23,7 @@
     "point_value": 20.0,
     "mapping_sha256": "f820a6f4f329e1df667a3b876e2e0e3738f5e7b122638e9846453a4fe5b362bc",
     "registry_path": "configs/shadow_live_v1.json",
-    "registry_sha256": "d8e543f54bc6e81bb820be51e02382b5477f8a3e8e676063aa685f0d599e7961"
+    "registry_sha256": "10accaa0db0818e9785b61cd640edcb6f0d26ec9d5f909b728c50e67feca91f0"
   },
   "windows": [
     {

@@ -68,7 +68,7 @@ SUMMARY_SCHEMA_VERSION = "phase8_execution_variant_summary_v1"
 OUTPUT_MANIFEST_SCHEMA_VERSION = "phase8_execution_research_output_manifest_v1"
 MINUTE_ARTIFACT_MANIFEST_SCHEMA_VERSION = "phase8_minute_execution_artifact_manifest_v1"
 RUNNER_CONFIG_SHA256 = (
-    "708cf08cf5f99ae0377c71d537778f547b3062c09cd48bb0e97d05bbfd608165"
+    "76dcb78acd3414410bc5185579b79abd8a7442ba251f0cb258ef2a71981c624e"
 )
 
 
@@ -582,7 +582,7 @@ def validate_phase8_run_manifest(
         elif name == "execution_v2_runtime":
             expected_sha = "42e6d9b679e8a7260f77d155bd50aa3fd3e7ff626f60e0df7685d8b84ba01e40"
         elif name == "instrument_mapping_registry":
-            expected_sha = "d8e543f54bc6e81bb820be51e02382b5477f8a3e8e676063aa685f0d599e7961"
+            expected_sha = "10accaa0db0818e9785b61cd640edcb6f0d26ec9d5f909b728c50e67feca91f0"
         _require_file_binding(
             root,
             runtime_bindings[name],
