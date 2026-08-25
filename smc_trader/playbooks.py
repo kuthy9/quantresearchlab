@@ -151,10 +151,12 @@ _LSR_CONNECTION_MEMO: ContextVar[
     dict[tuple[object, ...], bool] | None
 ] = ContextVar("lsr_connection_memo", default=None)
 
-# One unforgeable, process-local capability distinguishes the Engine's full
-# Neutral -> Brain path from standalone evaluator calls.  It is deliberately
-# private, transient, absent from Brain state/checkpoints, and excluded from
-# public exports and every runtime/configuration fingerprint.
+# One private, process-local sentinel distinguishes the Engine's full Neutral
+# -> Brain path from ordinary standalone evaluator calls.  It prevents
+# accidental API misuse; it is not a security boundary against same-process
+# code that can import or monkeypatch this module.  The sentinel is transient,
+# absent from Brain state/checkpoints, and excluded from public exports and
+# every runtime/configuration fingerprint.
 _NEUTRAL_AUTHORITY_CAPABILITY = object()
 
 
