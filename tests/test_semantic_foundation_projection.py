@@ -8,6 +8,7 @@ import pickle
 import pandas as pd
 import pytest
 
+import smc_trader.semantic_foundation as foundation_module
 from smc_trader.foundation_registry import (
     FOUNDATION_CANONICAL_IDENTITY,
     FOUNDATION_VERSION,
@@ -555,6 +556,9 @@ def test_projection_indexes_are_derived_pickle_safe_and_history_equivalent() -> 
     assert "records" not in primitive
     assert "_swing_geometry_views_cache" not in primitive
     assert "_swing_assignment_incumbents_cache" not in primitive
+    assert "_current_record_ids_cache" not in primitive
+    assert "_current_view_hash_cursor_cache" not in primitive
+    assert "_liquidity_interaction_ids_by_level_cache" not in primitive
     with pytest.raises(TypeError):
         incremental._swing_geometry_views_cache["invented"] = object()
     with pytest.raises(TypeError):
@@ -675,3 +679,146 @@ def test_10k_fixed_object_revisions_keep_hot_projection_and_lifecycle_bounded() 
     assert len(lifecycle.registered_bar_clocks) == 1
     assert len(lifecycle.real_bar_clocks) == 1
     assert final_lifecycle_bytes - first_lifecycle_bytes < 128
+
+
+def test_tail_revisions_do_not_rescan_the_complete_current_view(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    initial_records = tuple(
+        FoundationRecord.from_dto(
+            FVGStructuralLifecycle(
+                fvg_id=f"fvg-current-{index}",
+                source_creation_event_id=f"fvg-created-{index}",
+                symbol="NQ",
+                instrument_id=1,
+                timeframe=Timeframe.M1,
+                created_at=_clock(15),
+                known_at=_clock(15),
+            )
+        )
+        for index in range(128)
+    )
+    owner = FoundationProjectionOwner(
+        FoundationProjectionReducer.replay(initial_records)
+    )
+    integrity_batch_sizes: list[int] = []
+    cursor_rebuild_sizes: list[int] = []
+    original_integrity = (
+        foundation_module._require_foundation_record_identity_integrity
+    )
+    original_rebuild = (
+        foundation_module._FoundationCurrentViewHashCursor.rebuild.__func__
+    )
+
+    def counted_integrity(records: tuple[FoundationRecord, ...]) -> None:
+        batch = tuple(records)
+        integrity_batch_sizes.append(len(batch))
+        original_integrity(batch)
+
+    def counted_rebuild(
+        cls: type[object],
+        record_ids: tuple[str, ...],
+        *,
+        foundation_version: str,
+        registry_identity: str,
+    ) -> object:
+        identities = tuple(record_ids)
+        cursor_rebuild_sizes.append(len(identities))
+        return original_rebuild(
+            cls,
+            identities,
+            foundation_version=foundation_version,
+            registry_identity=registry_identity,
+        )
+
+    monkeypatch.setattr(
+        foundation_module,
+        "_require_foundation_record_identity_integrity",
+        counted_integrity,
+    )
+    monkeypatch.setattr(
+        foundation_module._FoundationCurrentViewHashCursor,
+        "rebuild",
+        classmethod(counted_rebuild),
+    )
+
+    for revision in range(1, 65):
+        updated = _clock(15) + pd.Timedelta(revision, unit="min")
+        record = FoundationRecord.from_dto(
+            FVGStructuralLifecycle(
+                fvg_id="fvg-current-127",
+                source_creation_event_id="fvg-created-127",
+                symbol="NQ",
+                instrument_id=1,
+                timeframe=Timeframe.M1,
+                created_at=_clock(15),
+                known_at=_clock(15),
+                age_bars=revision,
+                age_seconds=int((updated - _clock(15)).total_seconds()),
+                last_updated_at=updated,
+            )
+        )
+        transaction = owner.stage()
+        assert transaction.append(record)
+        projection = transaction.commit()
+        projection.identity_payload()
+
+    assert integrity_batch_sizes == [1] * 64
+    assert cursor_rebuild_sizes == []
+    projection = owner.freeze()
+
+    integrity_batch_sizes.clear()
+    cursor_rebuild_sizes.clear()
+    for revision in range(65, 73):
+        updated = _clock(15) + pd.Timedelta(revision, unit="min")
+        projection = FoundationProjectionReducer.reduce(
+            projection,
+            FoundationRecord.from_dto(
+                FVGStructuralLifecycle(
+                    fvg_id="fvg-current-127",
+                    source_creation_event_id="fvg-created-127",
+                    symbol="NQ",
+                    instrument_id=1,
+                    timeframe=Timeframe.M1,
+                    created_at=_clock(15),
+                    known_at=_clock(15),
+                    age_bars=revision,
+                    age_seconds=int(
+                        (updated - _clock(15)).total_seconds()
+                    ),
+                    last_updated_at=updated,
+                )
+            ),
+        )
+        projection.identity_payload()
+    assert integrity_batch_sizes == [1] * 8
+    assert cursor_rebuild_sizes == []
+
+    expected_view_fingerprint = foundation_module._canonical_digest(
+        {
+            "current_view_fingerprint_version": (
+                foundation_module.FOUNDATION_CURRENT_VIEW_FINGERPRINT_VERSION
+            ),
+            "foundation_version": projection.foundation_version,
+            "registry_identity": projection.registry_identity,
+            "current_record_ids": tuple(
+                record.record_id for record in projection.current_records
+            ),
+        }
+    )
+    assert projection.current_view_fingerprint == expected_view_fingerprint
+
+    integrity_batch_sizes.clear()
+    cursor_rebuild_sizes.clear()
+    checkpoint = FoundationProjectionReducer.checkpoint(projection)
+    restored_checkpoint = pickle.loads(pickle.dumps(checkpoint))
+    restored = FoundationProjectionReducer.restore(restored_checkpoint)
+    assert restored == projection
+    assert 128 in integrity_batch_sizes
+    assert 128 in cursor_rebuild_sizes
+
+    _tamper_record_bytes(restored.current_records[0], "payload")
+    with pytest.raises(ValueError, match="current record identity"):
+        FoundationProjectionReducer.checkpoint(restored)
+    with pytest.raises(ValueError, match="current record identity"):
+        FoundationProjectionReducer.replay(restored.current_records)

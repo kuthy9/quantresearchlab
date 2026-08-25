@@ -1874,7 +1874,7 @@ def test_market_snapshot_rejects_foundation_registry_or_version_drift(
         replace(snapshot, foundation=projection)
 
 
-def test_market_snapshot_fingerprint_rejects_foundation_record_byte_tamper(
+def test_snapshot_identity_stays_constant_size_and_replay_rejects_record_tamper(
 ) -> None:
     active_record, _ = _foundation_record_history()
     projection = FoundationProjectionReducer.replay((active_record,))
@@ -1892,6 +1892,7 @@ def test_market_snapshot_fingerprint_rejects_foundation_record_byte_tamper(
         semantic_registry_identity="definition-test",
     )
     snapshot = replace(snapshot, foundation=projection)
+    fingerprint = snapshot.fingerprint
     record_id = active_record.record_id
     object.__setattr__(
         active_record,
@@ -1900,8 +1901,11 @@ def test_market_snapshot_fingerprint_rejects_foundation_record_byte_tamper(
     )
 
     assert active_record.record_id == record_id
+    assert snapshot.fingerprint == fingerprint
     with pytest.raises(ValueError, match="current record identity"):
-        _ = snapshot.fingerprint
+        snapshot.replay_payload()
+    with pytest.raises(ValueError, match="current record identity"):
+        FoundationProjectionReducer.checkpoint(projection)
 
 
 def test_market_snapshot_rejects_future_foundation_clock() -> None:

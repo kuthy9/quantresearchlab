@@ -248,24 +248,169 @@ def _extend_foundation_component_fingerprint(
     )
 
 
-def _foundation_current_view_fingerprint(
-    records: Sequence["FoundationRecord"],
+def _canonical_json_scalar(value: str) -> bytes:
+    return json.dumps(
+        value,
+        ensure_ascii=True,
+        allow_nan=False,
+    ).encode("utf-8")
+
+
+def _foundation_current_view_hash_suffix(
     *,
     foundation_version: str,
     registry_identity: str,
-) -> str:
-    """Bind the compact current view without sorting or revision history."""
+) -> bytes:
+    """Return the exact suffix emitted by ``_canonical_digest`` above."""
 
-    return _canonical_digest(
-        {
-            "current_view_fingerprint_version": (
+    return b"".join(
+        (
+            b'],"current_view_fingerprint_version":',
+            _canonical_json_scalar(
                 FOUNDATION_CURRENT_VIEW_FINGERPRINT_VERSION
             ),
-            "foundation_version": foundation_version,
-            "registry_identity": registry_identity,
-            "current_record_ids": tuple(record.record_id for record in records),
-        }
+            b',"foundation_version":',
+            _canonical_json_scalar(foundation_version),
+            b',"registry_identity":',
+            _canonical_json_scalar(registry_identity),
+            b"}",
+        )
     )
+
+
+class _FoundationCurrentViewHashCursor:
+    """Private immutable-use SHA cursor for append/move-to-tail updates.
+
+    The published digest remains byte-for-byte identical to the registered
+    canonical-JSON digest.  Keeping only two SHA prefix states avoids retaining
+    another copy of current record identities or a persistent container.  The
+    cursor is deliberately excluded from every transport and pickle contract;
+    those boundaries rebuild and fully validate it from the current view.
+    """
+
+    __slots__ = (
+        "__before_last",
+        "__records",
+        "__record_count",
+        "__fingerprint",
+        "__foundation_version",
+        "__registry_identity",
+    )
+
+    def __init__(
+        self,
+        *,
+        before_last: Any,
+        records: Any,
+        record_count: int,
+        fingerprint: str,
+        foundation_version: str,
+        registry_identity: str,
+    ) -> None:
+        self.__before_last = before_last.copy()
+        self.__records = records.copy()
+        self.__record_count = record_count
+        self.__fingerprint = fingerprint
+        self.__foundation_version = foundation_version
+        self.__registry_identity = registry_identity
+
+    @classmethod
+    def rebuild(
+        cls,
+        record_ids: Sequence[str],
+        *,
+        foundation_version: str,
+        registry_identity: str,
+    ) -> "_FoundationCurrentViewHashCursor":
+        state = hashlib.sha256(b'{"current_record_ids":[')
+        before_last = state.copy()
+        count = 0
+        for record_id in record_ids:
+            if count:
+                state.update(b",")
+            before_last = state.copy()
+            state.update(_canonical_json_scalar(record_id))
+            count += 1
+        fingerprint_state = state.copy()
+        fingerprint_state.update(
+            _foundation_current_view_hash_suffix(
+                foundation_version=foundation_version,
+                registry_identity=registry_identity,
+            )
+        )
+        return cls(
+            before_last=before_last,
+            records=state,
+            record_count=count,
+            fingerprint=fingerprint_state.hexdigest(),
+            foundation_version=foundation_version,
+            registry_identity=registry_identity,
+        )
+
+    @property
+    def record_count(self) -> int:
+        return self.__record_count
+
+    @property
+    def fingerprint(self) -> str:
+        return self.__fingerprint
+
+    @property
+    def foundation_version(self) -> str:
+        return self.__foundation_version
+
+    @property
+    def registry_identity(self) -> str:
+        return self.__registry_identity
+
+    def _with_records_state(
+        self,
+        *,
+        before_last: Any,
+        records: Any,
+        record_count: int,
+    ) -> "_FoundationCurrentViewHashCursor":
+        fingerprint_state = records.copy()
+        fingerprint_state.update(
+            _foundation_current_view_hash_suffix(
+                foundation_version=self.foundation_version,
+                registry_identity=self.registry_identity,
+            )
+        )
+        return type(self)(
+            before_last=before_last,
+            records=records,
+            record_count=record_count,
+            fingerprint=fingerprint_state.hexdigest(),
+            foundation_version=self.foundation_version,
+            registry_identity=self.registry_identity,
+        )
+
+    def append(self, record_id: str) -> "_FoundationCurrentViewHashCursor":
+        state = self.__records.copy()
+        if self.record_count:
+            state.update(b",")
+        before_last = state.copy()
+        state.update(_canonical_json_scalar(record_id))
+        return self._with_records_state(
+            before_last=before_last,
+            records=state,
+            record_count=self.record_count + 1,
+        )
+
+    def replace_last(
+        self,
+        record_id: str,
+    ) -> "_FoundationCurrentViewHashCursor":
+        if not self.record_count:
+            raise ValueError("cannot replace the last record of an empty view")
+        state = self.__before_last.copy()
+        state.update(_canonical_json_scalar(record_id))
+        return self._with_records_state(
+            before_last=self.__before_last,
+            records=state,
+            record_count=self.record_count,
+        )
 
 
 def _payload_clock(
@@ -1552,22 +1697,29 @@ def _validate_projection_completeness(
     for (object_type, _), interaction in latest.items():
         if object_type is not FoundationObjectType.LIQUIDITY_INTERACTION_GENERATION:
             continue
-        level = latest.get(
-            (
-                FoundationObjectType.LIQUIDITY_LEVEL,
-                interaction.payload.get("level_id"),
-            )
+        _validate_liquidity_interaction_registration(latest, interaction)
+
+
+def _validate_liquidity_interaction_registration(
+    latest: Mapping[tuple[FoundationObjectType, str], FoundationRecord],
+    interaction: FoundationRecord,
+) -> None:
+    level = latest.get(
+        (
+            FoundationObjectType.LIQUIDITY_LEVEL,
+            interaction.payload.get("level_id"),
         )
-        if (
-            level is None
-            or interaction.object_id
-            not in tuple(level.payload.get("interaction_generation_ids", ()))
-            or interaction.payload.get("source_timeframe")
-            != level.payload.get("source_timeframe")
-        ):
-            raise ValueError(
-                "finalized liquidity interaction lacks its registered level"
-            )
+    )
+    if (
+        level is None
+        or interaction.object_id
+        not in tuple(level.payload.get("interaction_generation_ids", ()))
+        or interaction.payload.get("source_timeframe")
+        != level.payload.get("source_timeframe")
+    ):
+        raise ValueError(
+            "finalized liquidity interaction lacks its registered level"
+        )
 
 
 @dataclass(frozen=True)
@@ -1593,11 +1745,12 @@ class FoundationProjection:
         )
         if not self.component_fingerprint:
             object.__setattr__(self, "component_fingerprint", empty_fingerprint)
-        expected_view_fingerprint = _foundation_current_view_fingerprint(
-            records,
+        view_cursor = _FoundationCurrentViewHashCursor.rebuild(
+            tuple(record.record_id for record in records),
             foundation_version=self.foundation_version,
             registry_identity=self.registry_identity,
         )
+        expected_view_fingerprint = view_cursor.fingerprint
         if not self.current_view_fingerprint:
             object.__setattr__(
                 self,
@@ -1631,7 +1784,16 @@ class FoundationProjection:
             if record.object_type is FoundationObjectType.SWING_GEOMETRY_NODE
         }
         assignment_incumbents: dict[str, FoundationRecord] = {}
+        interaction_ids_by_level: dict[str, set[str]] = {}
         for record in records:
+            if (
+                record.object_type
+                is FoundationObjectType.LIQUIDITY_INTERACTION_GENERATION
+            ):
+                level_id = str(record.payload.get("level_id"))
+                interaction_ids_by_level.setdefault(level_id, set()).add(
+                    record.object_id
+                )
             if record.object_type is not FoundationObjectType.SWING_GEOMETRY_ASSIGNMENT:
                 continue
             child_id = str(record.payload.get("child_swing_id"))
@@ -1642,8 +1804,29 @@ class FoundationProjection:
             ):
                 assignment_incumbents[child_id] = record
         object.__setattr__(self, "_latest_records_by_key_cache", MappingProxyType(latest))
+        object.__setattr__(
+            self,
+            "_current_record_ids_cache",
+            frozenset(record.record_id for record in records),
+        )
         object.__setattr__(self, "_swing_geometry_views_cache", MappingProxyType(geometry_views))
         object.__setattr__(self, "_swing_assignment_incumbents_cache", MappingProxyType(assignment_incumbents))
+        object.__setattr__(
+            self,
+            "_liquidity_interaction_ids_by_level_cache",
+            MappingProxyType(
+                {
+                    level_id: frozenset(interaction_ids)
+                    for level_id, interaction_ids
+                    in interaction_ids_by_level.items()
+                }
+            ),
+        )
+        object.__setattr__(
+            self,
+            "_current_view_hash_cursor_cache",
+            view_cursor,
+        )
         expected_asof = max((record.known_at for record in records), default=None)
         if self.asof is None:
             object.__setattr__(self, "asof", expected_asof)
@@ -1652,6 +1835,111 @@ class FoundationProjection:
             object.__setattr__(self, "asof", asof)
             if expected_asof is None or asof < expected_asof:
                 raise ValueError("foundation projection asof predates its current view")
+
+    @classmethod
+    def _from_incremental_state(
+        cls,
+        *,
+        current_records: tuple[FoundationRecord, ...],
+        record_count: int,
+        component_fingerprint: str,
+        asof: pd.Timestamp | None,
+        latest_records_by_key: dict[
+            tuple[FoundationObjectType, str], FoundationRecord
+        ],
+        current_record_ids: set[str],
+        swing_geometry_views: dict[str, _SwingGeometryView],
+        swing_assignment_incumbents: dict[str, FoundationRecord],
+        liquidity_interaction_ids_by_level: dict[str, frozenset[str]],
+        current_view_hash_cursor: _FoundationCurrentViewHashCursor,
+        foundation_version: str,
+        registry_identity: str,
+    ) -> "FoundationProjection":
+        """Freeze an internally validated write-set without rescanning it.
+
+        This is not a public deserialization path.  Each added record has
+        already passed identity, revision, clock, and cross-link validation;
+        the maps and SHA cursor are derived only from the committed owner plus
+        that bounded write-set.  Public construction and every persistence
+        boundary continue through ``__post_init__`` and perform a full check.
+        """
+
+        if (
+            type(current_records) is not tuple
+            or type(record_count) is not int
+            or record_count < len(current_records)
+            or foundation_version != FOUNDATION_VERSION
+            or registry_identity != FOUNDATION_CANONICAL_IDENTITY
+            or len(component_fingerprint) != 64
+            or any(
+                character not in "0123456789abcdef"
+                for character in component_fingerprint
+            )
+            or not isinstance(
+                current_view_hash_cursor,
+                _FoundationCurrentViewHashCursor,
+            )
+            or current_view_hash_cursor.record_count != len(current_records)
+            or current_view_hash_cursor.foundation_version
+            != foundation_version
+            or current_view_hash_cursor.registry_identity != registry_identity
+            or len(latest_records_by_key) != len(current_records)
+            or len(current_record_ids) != len(current_records)
+            or (record_count == 0) != (not current_records)
+            or (current_records and asof is None)
+        ):
+            raise ValueError("incremental foundation projection is invalid")
+        frozen_asof = (
+            None
+            if asof is None
+            else aware_timestamp(asof, name="foundation_projection.asof")
+        )
+        projection = object.__new__(cls)
+        values = {
+            "current_records": current_records,
+            "record_count": record_count,
+            "component_fingerprint": component_fingerprint,
+            "current_view_fingerprint": (
+                current_view_hash_cursor.fingerprint
+            ),
+            "asof": frozen_asof,
+            "foundation_version": foundation_version,
+            "registry_identity": registry_identity,
+            "schema_version": FOUNDATION_PROJECTION_STATE_SCHEMA_VERSION,
+        }
+        for name, value in values.items():
+            object.__setattr__(projection, name, value)
+        object.__setattr__(
+            projection,
+            "_latest_records_by_key_cache",
+            MappingProxyType(latest_records_by_key),
+        )
+        object.__setattr__(
+            projection,
+            "_current_record_ids_cache",
+            frozenset(current_record_ids),
+        )
+        object.__setattr__(
+            projection,
+            "_swing_geometry_views_cache",
+            MappingProxyType(swing_geometry_views),
+        )
+        object.__setattr__(
+            projection,
+            "_swing_assignment_incumbents_cache",
+            MappingProxyType(swing_assignment_incumbents),
+        )
+        object.__setattr__(
+            projection,
+            "_liquidity_interaction_ids_by_level_cache",
+            MappingProxyType(liquidity_interaction_ids_by_level),
+        )
+        object.__setattr__(
+            projection,
+            "_current_view_hash_cursor_cache",
+            current_view_hash_cursor,
+        )
+        return projection
 
     def __getstate__(self) -> Mapping[str, Any]:
         """Serialize only current view, count, rolling hash, and identities."""
@@ -1753,9 +2041,13 @@ class FoundationProjection:
         )
 
     def identity_payload(self) -> Mapping[str, Any]:
-        """Return the constant-size identity used by hot snapshot hashing."""
+        """Return the constant-size identity used by hot snapshot hashing.
 
-        _require_foundation_record_identity_integrity(self.current_records)
+        The fields were derived from validated writes.  Record-byte integrity
+        is deliberately rechecked by transport, checkpoint, pickle, and cold
+        replay boundaries rather than on every snapshot fingerprint read.
+        """
+
         return FrozenDict(
             {
                 "schema_version": self.schema_version,
@@ -1864,42 +2156,15 @@ class FoundationProjectionReducer:
             raise TypeError("projection must be FoundationProjection")
         if not isinstance(record, FoundationRecord):
             raise TypeError("record must be FoundationRecord")
-        _require_foundation_record_identity_integrity((record,))
-        if any(
-            item.record_id == record.record_id
-            for item in projection.current_records
-        ):
+        owner = FoundationProjectionOwner(projection)
+        transaction = owner.stage()
+        if not transaction.append(record):
             return projection
-        if projection.asof is not None and record.known_at < projection.asof:
-            raise ValueError("foundation records must be appended in knowledge order")
-        previous = projection._latest_records_by_key_cache.get(
-            (record.object_type, record.object_id)
-        )
-        if previous is not None:
-            _validate_object_revision(previous, record)
-        _validate_record_cross_links(
-            projection._latest_records_by_key_cache,
-            record,
-            swing_geometry_views=projection._swing_geometry_views_cache,
-            swing_assignment_incumbents=(
-                projection._swing_assignment_incumbents_cache
-            ),
-        )
-        latest = dict(projection._latest_records_by_key_cache)
-        key = (record.object_type, record.object_id)
-        latest.pop(key, None)
-        latest[key] = record
-        return FoundationProjection(
-            current_records=tuple(latest.values()),
-            record_count=projection.record_count + 1,
-            component_fingerprint=_extend_foundation_component_fingerprint(
-                projection.component_fingerprint,
-                record.record_id,
-            ),
-            asof=record.known_at,
-            foundation_version=projection.foundation_version,
-            registry_identity=projection.registry_identity,
-        )
+        frozen = transaction.freeze()
+        # Pure replay permits an owner-first batch prefix to be temporarily
+        # incomplete.  ``replay`` performs the full completeness check after
+        # the complete suffix has been reduced.
+        return transaction._commit_prevalidated(frozen)
 
     @classmethod
     def replay(
@@ -1928,11 +2193,20 @@ class FoundationProjectionReducer:
 
         if not isinstance(projection, FoundationProjection):
             raise TypeError("projection must be FoundationProjection")
-        _require_foundation_record_identity_integrity(
-            projection.current_records
+        canonical = FoundationProjection(
+            current_records=projection.current_records,
+            record_count=projection.record_count,
+            component_fingerprint=projection.component_fingerprint,
+            current_view_fingerprint=projection.current_view_fingerprint,
+            asof=projection.asof,
+            foundation_version=projection.foundation_version,
+            registry_identity=projection.registry_identity,
+            schema_version=projection.schema_version,
         )
+        if canonical != projection:
+            raise ValueError("foundation current projection is invalid")
         _validate_projection_completeness(
-            projection._latest_records_by_key_cache
+            canonical._latest_records_by_key_cache
         )
         return projection
 
@@ -1968,9 +2242,7 @@ class FoundationProjectionOwner:
         if not isinstance(current, FoundationProjection):
             raise TypeError("foundation hot owner requires a compact projection")
         self._latest = dict(current._latest_records_by_key_cache)
-        self._current_record_ids = {
-            record.record_id for record in current.current_records
-        }
+        self._current_record_ids = set(current._current_record_ids_cache)
         self._record_count = current.record_count
         self._component_fingerprint = current.component_fingerprint
         self._asof = current.asof
@@ -1978,6 +2250,11 @@ class FoundationProjectionOwner:
         self._assignment_incumbents = dict(
             current._swing_assignment_incumbents_cache
         )
+        self._interaction_ids_by_level = {
+            level_id: set(interaction_ids)
+            for level_id, interaction_ids
+            in current._liquidity_interaction_ids_by_level_cache.items()
+        }
         self._projection_cache = current
         self._generation = 0
 
@@ -1997,7 +2274,9 @@ class FoundationProjectionOwner:
             registry_identity=projection.registry_identity,
             schema_version=projection.schema_version,
         )
-        FoundationProjectionReducer.validate_complete(canonical)
+        _validate_projection_completeness(
+            canonical._latest_records_by_key_cache
+        )
         return canonical
 
     def _require_internal_integrity(self) -> FoundationProjection:
@@ -2013,6 +2292,8 @@ class FoundationProjectionOwner:
             or self._asof != rebuilt._asof
             or self._geometry_views != rebuilt._geometry_views
             or self._assignment_incumbents != rebuilt._assignment_incumbents
+            or self._interaction_ids_by_level
+            != rebuilt._interaction_ids_by_level
         ):
             raise ValueError("foundation projection owner internals differ")
         return canonical
@@ -2071,6 +2352,11 @@ class FoundationProjectionTransaction:
         self._base_generation = owner.generation
         self._records: list[FoundationRecord] = []
         self._pending_ids: set[str] = set()
+        self._latest_writes: dict[
+            tuple[FoundationObjectType, str], FoundationRecord
+        ] = {}
+        self._geometry_writes: dict[str, _SwingGeometryView] = {}
+        self._assignment_writes: dict[str, FoundationRecord] = {}
         self._record_count = owner.record_count
         self._component_fingerprint = owner.component_fingerprint
         self._asof = owner._asof
@@ -2088,11 +2374,7 @@ class FoundationProjectionTransaction:
         return record_id in self._pending_ids or self._owner.contains(record_id)
 
     def _latest_view(self) -> Mapping[tuple[FoundationObjectType, str], FoundationRecord]:
-        writes = {
-            (record.object_type, record.object_id): record
-            for record in self._records
-        }
-        return ChainMap(writes, self._owner._latest)
+        return ChainMap(self._latest_writes, self._owner._latest)
 
     def append(self, record: FoundationRecord) -> bool:
         self._require_fresh()
@@ -2108,36 +2390,35 @@ class FoundationProjectionTransaction:
         previous = latest.get(key)
         if previous is not None:
             _validate_object_revision(previous, record)
-        geometry_writes = {
-            item.object_id: _swing_geometry_view(item)
-            for item in self._records
-            if item.object_type is FoundationObjectType.SWING_GEOMETRY_NODE
-        }
-        assignment_writes: dict[str, FoundationRecord] = {}
-        for item in self._records:
-            if item.object_type is not FoundationObjectType.SWING_GEOMETRY_ASSIGNMENT:
-                continue
-            child_id = str(item.payload.get("child_swing_id"))
-            incumbent = assignment_writes.get(child_id)
-            if incumbent is None or (item.known_at, item.object_id) > (
-                incumbent.known_at,
-                incumbent.object_id,
-            ):
-                assignment_writes[child_id] = item
         _validate_record_cross_links(
             latest,
             record,
             swing_geometry_views=ChainMap(
-                geometry_writes,
+                self._geometry_writes,
                 self._owner._geometry_views,
             ),
             swing_assignment_incumbents=ChainMap(
-                assignment_writes,
+                self._assignment_writes,
                 self._owner._assignment_incumbents,
             ),
         )
         self._records.append(record)
         self._pending_ids.add(record.record_id)
+        self._latest_writes[key] = record
+        if record.object_type is FoundationObjectType.SWING_GEOMETRY_NODE:
+            self._geometry_writes[record.object_id] = _swing_geometry_view(
+                record
+            )
+        elif record.object_type is FoundationObjectType.SWING_GEOMETRY_ASSIGNMENT:
+            child_id = str(record.payload.get("child_swing_id"))
+            incumbent = self._assignment_writes.get(child_id)
+            if incumbent is None:
+                incumbent = self._owner._assignment_incumbents.get(child_id)
+            if incumbent is None or (record.known_at, record.object_id) > (
+                incumbent.known_at,
+                incumbent.object_id,
+            ):
+                self._assignment_writes[child_id] = record
         self._record_count += 1
         self._component_fingerprint = _extend_foundation_component_fingerprint(
             self._component_fingerprint,
@@ -2151,15 +2432,95 @@ class FoundationProjectionTransaction:
         self._require_fresh()
         if self._projection_cache is None:
             latest = dict(self._owner._latest)
+            current_record_ids = set(self._owner._current_record_ids)
+            current_records = self._owner.freeze().current_records
+            view_cursor = (
+                self._owner.freeze()._current_view_hash_cursor_cache
+            )
+            interaction_ids_by_level = {
+                level_id: set(interaction_ids)
+                for level_id, interaction_ids
+                in self._owner._interaction_ids_by_level.items()
+            }
             for record in self._records:
                 key = (record.object_type, record.object_id)
+                previous = latest.get(key)
+                previous_was_last = bool(latest) and next(
+                    reversed(latest)
+                ) == key
                 latest.pop(key, None)
                 latest[key] = record
-            self._projection_cache = FoundationProjection(
-                current_records=tuple(latest.values()),
+                if (
+                    previous is not None
+                    and previous.object_type
+                    is FoundationObjectType.LIQUIDITY_INTERACTION_GENERATION
+                ):
+                    previous_level_id = str(
+                        previous.payload.get("level_id")
+                    )
+                    previous_ids = interaction_ids_by_level.get(
+                        previous_level_id
+                    )
+                    if previous_ids is not None:
+                        previous_ids.discard(previous.object_id)
+                        if not previous_ids:
+                            interaction_ids_by_level.pop(
+                                previous_level_id,
+                                None,
+                            )
+                if (
+                    record.object_type
+                    is FoundationObjectType.LIQUIDITY_INTERACTION_GENERATION
+                ):
+                    interaction_ids_by_level.setdefault(
+                        str(record.payload.get("level_id")),
+                        set(),
+                    ).add(record.object_id)
+                if previous is None:
+                    current_records = (*current_records, record)
+                    view_cursor = view_cursor.append(record.record_id)
+                elif previous_was_last:
+                    current_records = (*current_records[:-1], record)
+                    view_cursor = view_cursor.replace_last(record.record_id)
+                else:
+                    current_records = tuple(latest.values())
+                    view_cursor = _FoundationCurrentViewHashCursor.rebuild(
+                        tuple(
+                            item.record_id for item in current_records
+                        ),
+                        foundation_version=(
+                            self._owner.freeze().foundation_version
+                        ),
+                        registry_identity=(
+                            self._owner.freeze().registry_identity
+                        ),
+                    )
+                if previous is not None:
+                    current_record_ids.discard(previous.record_id)
+                current_record_ids.add(record.record_id)
+            geometry_views = dict(self._owner._geometry_views)
+            geometry_views.update(self._geometry_writes)
+            assignment_incumbents = dict(
+                self._owner._assignment_incumbents
+            )
+            assignment_incumbents.update(self._assignment_writes)
+            self._projection_cache = FoundationProjection._from_incremental_state(
+                current_records=current_records,
                 record_count=self._record_count,
                 component_fingerprint=self._component_fingerprint,
                 asof=self._asof,
+                latest_records_by_key=latest,
+                current_record_ids=current_record_ids,
+                swing_geometry_views=geometry_views,
+                swing_assignment_incumbents=assignment_incumbents,
+                liquidity_interaction_ids_by_level={
+                    level_id: frozenset(interaction_ids)
+                    for level_id, interaction_ids
+                    in interaction_ids_by_level.items()
+                },
+                current_view_hash_cursor=view_cursor,
+                foundation_version=self._owner.freeze().foundation_version,
+                registry_identity=self._owner.freeze().registry_identity,
             )
         return self._projection_cache
 
@@ -2176,7 +2537,45 @@ class FoundationProjectionTransaction:
 
     def validate_complete(self) -> None:
         self._require_fresh()
-        _validate_projection_completeness(self._latest_view())
+        latest = self._latest_view()
+        affected_level_ids: set[str] = set()
+        staged_interaction_ids: set[str] = set()
+        for record in self._records:
+            key = (record.object_type, record.object_id)
+            if record.object_type is FoundationObjectType.LIQUIDITY_LEVEL:
+                affected_level_ids.add(record.object_id)
+            elif (
+                record.object_type
+                is FoundationObjectType.LIQUIDITY_INTERACTION_GENERATION
+            ):
+                affected_level_ids.add(str(record.payload.get("level_id")))
+                staged_interaction_ids.add(record.object_id)
+                previous = self._owner._latest.get(key)
+                if previous is not None:
+                    affected_level_ids.add(
+                        str(previous.payload.get("level_id"))
+                    )
+        for level_id in affected_level_ids:
+            candidates = set(
+                self._owner._interaction_ids_by_level.get(level_id, ())
+            )
+            candidates.update(staged_interaction_ids)
+            for interaction_id in candidates:
+                interaction = latest.get(
+                    (
+                        FoundationObjectType.LIQUIDITY_INTERACTION_GENERATION,
+                        interaction_id,
+                    )
+                )
+                if (
+                    interaction is None
+                    or str(interaction.payload.get("level_id")) != level_id
+                ):
+                    continue
+                _validate_liquidity_interaction_registration(
+                    latest,
+                    interaction,
+                )
 
     def preflight_commit(self) -> FoundationProjection:
         """Validate every fallible condition before either authority mutates."""
@@ -2211,20 +2610,37 @@ class FoundationProjectionTransaction:
             prior = self._owner._latest.pop(key, None)
             if prior is not None:
                 self._owner._current_record_ids.discard(prior.record_id)
+                if (
+                    prior.object_type
+                    is FoundationObjectType.LIQUIDITY_INTERACTION_GENERATION
+                ):
+                    previous_level_id = str(
+                        prior.payload.get("level_id")
+                    )
+                    previous_ids = self._owner._interaction_ids_by_level.get(
+                        previous_level_id
+                    )
+                    if previous_ids is not None:
+                        previous_ids.discard(prior.object_id)
+                        if not previous_ids:
+                            self._owner._interaction_ids_by_level.pop(
+                                previous_level_id,
+                                None,
+                            )
             self._owner._latest[key] = record
             self._owner._current_record_ids.add(record.record_id)
-            if record.object_type is FoundationObjectType.SWING_GEOMETRY_NODE:
-                self._owner._geometry_views[record.object_id] = (
-                    _swing_geometry_view(record)
-                )
-            elif record.object_type is FoundationObjectType.SWING_GEOMETRY_ASSIGNMENT:
-                child_id = str(record.payload.get("child_swing_id"))
-                incumbent = self._owner._assignment_incumbents.get(child_id)
-                if incumbent is None or (record.known_at, record.object_id) > (
-                    incumbent.known_at,
-                    incumbent.object_id,
-                ):
-                    self._owner._assignment_incumbents[child_id] = record
+            if (
+                record.object_type
+                is FoundationObjectType.LIQUIDITY_INTERACTION_GENERATION
+            ):
+                self._owner._interaction_ids_by_level.setdefault(
+                    str(record.payload.get("level_id")),
+                    set(),
+                ).add(record.object_id)
+        self._owner._geometry_views.update(self._geometry_writes)
+        self._owner._assignment_incumbents.update(
+            self._assignment_writes
+        )
         self._owner._record_count = self._record_count
         self._owner._component_fingerprint = self._component_fingerprint
         self._owner._asof = self._asof
