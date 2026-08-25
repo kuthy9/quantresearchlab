@@ -41,6 +41,7 @@ from .helpers import (
     flat_account,
     long_plan,
     market_observation,
+    replace_market_observation,
 )
 
 
@@ -874,7 +875,10 @@ def test_executable_wait_requires_price_inside_zone_and_better_frozen_entry() ->
     utilities = _ready_layer()._flat_utilities(observation, belief)
     assert any(item.action is Action.WAIT for item in utilities)
 
-    outside = replace(observation, price=plan.entry_zone_upper + 0.25)
+    outside = replace_market_observation(
+        observation,
+        price=plan.entry_zone_upper + 0.25,
+    )
     outside_utilities = _ready_layer()._flat_utilities(outside, belief)
     assert all(item.action is not Action.WAIT for item in outside_utilities)
 
@@ -1199,7 +1203,7 @@ def test_position_hard_structural_conditions_exit(exit_kind: str) -> None:
     account = _typed_open_account(observation, belief)
 
     if exit_kind == "stop":
-        observation = replace(
+        observation = replace_market_observation(
             observation,
             price=account.position.current_stop,
         )
@@ -1293,7 +1297,7 @@ def test_position_protects_only_at_new_confirmed_causal_level() -> None:
         source_ids=(protection_source_id,),
     )
     frame = observation.frame(source.timeframe)
-    observation = replace(
+    observation = replace_market_observation(
         observation,
         frames={
             **observation.frames,

@@ -49,6 +49,7 @@ from .helpers import (
     CORE_TEST_SCALE_SPECS,
     MODEL_SCALE_SPECS,
     market_observation,
+    replace_market_observation,
 )
 
 
@@ -598,7 +599,7 @@ def test_update_uses_lightweight_token_before_full_snapshot_adaptation(
 
     monkeypatch.setattr(graph, "_adapt_snapshot_state", record_adaptation)
     graph.update(
-        replace(
+        replace_market_observation(
             first_observation,
             asof=t0 + pd.Timedelta(minutes=1),
             liquidity_inventory=(replace(item, age_bars=1),),
@@ -2837,7 +2838,7 @@ def test_runtime_compaction_bounds_cold_history_and_fails_closed() -> None:
             asof = start + pd.Timedelta(
                 minutes=cycle * 80 + minute
             )
-            current = replace(current, asof=asof)
+            current = replace_market_observation(current, asof=asof)
             graph.update(current)
             graph.add_node(
                 _node(
@@ -2944,7 +2945,7 @@ def test_compacted_stale_revision_discloses_new_source_at_current_clock() -> Non
             revision_id="",
         )
     )
-    next_observation = replace(
+    next_observation = replace_market_observation(
         observation,
         asof=disclosure_clock + pd.Timedelta(minutes=1),
     )
@@ -3014,7 +3015,7 @@ def test_runtime_compaction_retains_current_and_materialized_terminal_state(
     assert hot.node_id in retained_ids
     assert terminal.node_id in retained_ids
 
-    next_observation = replace(
+    next_observation = replace_market_observation(
         observation,
         asof=asof + pd.Timedelta(minutes=1),
     )

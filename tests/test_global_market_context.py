@@ -53,7 +53,11 @@ from smc_trader.scene_graph import (
     update_global_market_context,
 )
 
-from .helpers import executable_belief, market_observation
+from .helpers import (
+    executable_belief,
+    market_observation,
+    replace_market_observation,
+)
 
 
 TZ = "America/New_York"
@@ -426,7 +430,7 @@ def test_root_candidate_memory_is_bounded_during_identity_churn(
     observed_ids: list[str] = []
     for minute in range(1, 21):
         asof = first_clock + pd.Timedelta(minutes=minute)
-        observation = replace(
+        observation = replace_market_observation(
             first_observation,
             asof=asof,
             frames={

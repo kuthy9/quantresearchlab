@@ -26,6 +26,7 @@ from .test_brain_path_belief_integration import (
     _final_context,
     _observation,
 )
+from .helpers import replace_market_observation
 
 
 def _production_bos_resolution(
@@ -149,7 +150,7 @@ def _runtime_observation(
     current: tuple[MarketEvent, ...] = (),
 ):
     base = _observation(asof, real_completed=True)
-    return replace(
+    return replace_market_observation(
         base,
         recent_events=retained,
         semantic_events_this_update=current,

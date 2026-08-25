@@ -356,10 +356,8 @@ def market_observation(
         source="synthetic_observed_execution",
     )
     return MarketObservation(
-        asof=asof,
-        symbol="NQH5",
-        instrument_id=1,
-        price=price,
+        market_snapshot=None,
+        _snapshot_free_identity=(asof, "NQH5", 1, price, ()),
         frames=frames,
         recent_events=(sweep,),
         event_durations_minutes={"liquidity_sweep:below:1m": 3},
@@ -373,6 +371,65 @@ def market_observation(
         active_timeframes=tuple(frames),
         scale_registry_id=CORE_TEST_SCALE_REGISTRY_ID,
     )
+
+
+def replace_market_observation(
+    observation: MarketObservation,
+    /,
+    **changes: object,
+) -> MarketObservation:
+    """Replace an observation while keeping its sole snapshot identity aligned."""
+
+    identity_names = {
+        "asof",
+        "symbol",
+        "instrument_id",
+        "price",
+        "semantic_events_this_update",
+    }
+    identity_changes = {
+        name: changes.pop(name)
+        for name in tuple(changes)
+        if name in identity_names
+    }
+    if "market_snapshot" in changes and identity_changes:
+        raise ValueError(
+            "replace one observation identity through either snapshot or aliases"
+        )
+    snapshot = observation.market_snapshot
+    if snapshot is None:
+        current = {
+            "asof": observation.asof,
+            "symbol": observation.symbol,
+            "instrument_id": observation.instrument_id,
+            "price": observation.price,
+            "semantic_events_this_update": (
+                observation.semantic_events_this_update
+            ),
+        }
+        current.update(identity_changes)
+        changes["_snapshot_free_identity"] = (
+            current["asof"],
+            current["symbol"],
+            current["instrument_id"],
+            current["price"],
+            tuple(current["semantic_events_this_update"]),
+        )
+    elif identity_changes:
+        snapshot_changes: dict[str, object] = {}
+        for name, value in identity_changes.items():
+            snapshot_changes[
+                "events_this_update"
+                if name == "semantic_events_this_update"
+                else name
+            ] = value
+        if "asof" in identity_changes:
+            snapshot_changes["session"] = replace(
+                snapshot.session,
+                known_at=identity_changes["asof"],
+            )
+        changes["market_snapshot"] = replace(snapshot, **snapshot_changes)
+    return replace(observation, **changes)
 
 
 def long_plan(observation: MarketObservation | None = None) -> TradePlan:

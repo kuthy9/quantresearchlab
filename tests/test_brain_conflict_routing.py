@@ -51,7 +51,7 @@ from smc_trader.scene_graph import (
     update_global_market_context,
 )
 
-from .helpers import long_plan, market_observation
+from .helpers import long_plan, market_observation, replace_market_observation
 from .test_v4_typed_vertical import (
     _advance_observation,
     _brain,
@@ -271,7 +271,7 @@ def _select(
     items: tuple[LiquidityInventoryItem, ...],
     context: GlobalMarketContext,
 ):
-    observation = replace(
+    observation = replace_market_observation(
         market_observation(asof=BASE, price=entry),
         liquidity_inventory=items,
     )
@@ -1237,7 +1237,7 @@ def test_countertrend_target_skips_near_waypoint_below_one_R() -> None:
         lower=99.0,
         upper=99.0,
     )
-    observation = replace(
+    observation = replace_market_observation(
         base,
         price=101.0,
         liquidity_inventory=(
@@ -1310,7 +1310,7 @@ def test_typed_lsr_does_not_let_near_waypoint_cap_risk_qualified_target() -> Non
         for item in base.liquidity_inventory
         if item.lifecycle is LiquidityInventoryLifecycle.CONSUMED
     )
-    observation = replace(
+    observation = replace_market_observation(
         base,
         price=101.0,
         liquidity_inventory=(near, far, pool_source),
@@ -1429,7 +1429,7 @@ def test_countertrend_target_failure_reasons_are_specific(
             ),
         )
     result = _select_countertrend_lsr_target_result(
-        replace(
+        replace_market_observation(
             base,
             price=101.0,
             liquidity_inventory=(
@@ -1468,7 +1468,7 @@ def test_countertrend_target_distinguishes_exhausted_remaining_path() -> None:
         lower=99.0,
         upper=99.0,
     )
-    observation = replace(
+    observation = replace_market_observation(
         base,
         price=99.5,
         liquidity_inventory=(

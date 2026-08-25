@@ -12569,16 +12569,11 @@ class CausalObserver:
             )
         try:
             observation = MarketObservation(
-                asof=update.asof,
-                symbol=update.completed_1m.symbol,
-                instrument_id=update.completed_1m.instrument_id,
-                price=market_snapshot.price,
+                market_snapshot=market_snapshot,
                 frames=frames,
                 recent_events=recent_events,
                 event_durations_minutes=event_durations_minutes,
                 execution=execution,
-                semantic_events_this_update=semantic_events,
-                market_snapshot=market_snapshot,
                 anomalies=tuple(dict.fromkeys(anomalies)),
                 displacement=displacement,
                 liquidity_inventory=liquidity_inventory,

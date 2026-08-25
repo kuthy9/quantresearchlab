@@ -66,8 +66,11 @@ _REQUIRED_PRIMITIVE_PROTOCOLS = (
     "group5_protocol",
 )
 _LIVE_READINESS_TOKEN = object()
-RUNTIME_ACTION_POLICY_SCHEMA_VERSION = 1
-NEUTRAL_ENGINE_CHECKPOINT_SCHEMA_VERSION = 3
+RUNTIME_ACTION_POLICY_SCHEMA_VERSION = 2
+NEUTRAL_ENGINE_CHECKPOINT_SCHEMA_VERSION = 4
+MODEL_SCHEMA_VERSION = 2
+ACTION_PIPELINE_SCHEMA_VERSION = 1
+LEGACY_ACTION_PIPELINE_MODE = "legacy_decision_risk_compat"
 
 
 def normalize_action_disabled_playbooks(
@@ -162,6 +165,7 @@ class ContinuousSMCEngine:
         decision: UtilityDecisionLayer,
         risk: StructuralRiskEngine,
         runtime_mode: str,
+        action_pipeline_mode: str,
         action_disabled_playbooks: Iterable[Playbook | str] = (),
         _readiness_token: object | None = None,
     ) -> None:
@@ -183,6 +187,9 @@ class ContinuousSMCEngine:
         self.decision = decision
         self.risk = risk
         self.runtime_mode = runtime_mode
+        if action_pipeline_mode != LEGACY_ACTION_PIPELINE_MODE:
+            raise ValueError("unsupported action pipeline mode")
+        self._action_pipeline_mode = action_pipeline_mode
         self.action_disabled_playbooks = normalize_action_disabled_playbooks(
             action_disabled_playbooks
         )
@@ -215,6 +222,7 @@ class ContinuousSMCEngine:
         neutral_market_state = state.get("_neutral_market_state")
         foundation_version = state.get("_foundation_version")
         foundation_identity = state.get("_foundation_registry_identity")
+        action_pipeline_mode = state.get("_action_pipeline_mode")
         if (
             state.get("_neutral_checkpoint_schema_version")
             != NEUTRAL_ENGINE_CHECKPOINT_SCHEMA_VERSION
@@ -222,6 +230,8 @@ class ContinuousSMCEngine:
             or "_last_snapshot" not in state
             or "_foundation_version" not in state
             or "_foundation_registry_identity" not in state
+            or "_action_pipeline_mode" not in state
+            or action_pipeline_mode != LEGACY_ACTION_PIPELINE_MODE
             or (foundation_version is None) != (foundation_identity is None)
             or foundation_version not in {None, FOUNDATION_VERSION}
             or foundation_identity not in {
@@ -270,12 +280,30 @@ class ContinuousSMCEngine:
             source = Path(__file__).resolve().parents[1] / source
         raw_config = source.read_bytes()
         payload: dict[str, Any] = json.loads(raw_config)
-        if payload.get("schema_version") != 1:
-            raise ValueError("model.schema_version must be 1")
+        if payload.get("schema_version") != MODEL_SCHEMA_VERSION:
+            raise ValueError(
+                f"model.schema_version must be {MODEL_SCHEMA_VERSION}"
+            )
         semantic_selection = load_semantic_selection(
             payload.get("semantic_selection"),
             root=Path(__file__).resolve().parents[1],
         )
+        action_pipeline = payload.get("action_pipeline")
+        if (
+            not isinstance(action_pipeline, Mapping)
+            or action_pipeline.get("schema_version")
+            != ACTION_PIPELINE_SCHEMA_VERSION
+            or set(action_pipeline) != {"schema_version", "mode"}
+        ):
+            raise ValueError(
+                "model.action_pipeline schema is missing or unsupported"
+            )
+        action_pipeline_mode = action_pipeline.get("mode")
+        if action_pipeline_mode != LEGACY_ACTION_PIPELINE_MODE:
+            raise ValueError(
+                "model.action_pipeline.mode must select the explicit legacy "
+                "Decision/Risk compatibility authority"
+            )
         scales_raw = payload.get("scales")
         if not isinstance(scales_raw, list) or not scales_raw:
             raise ValueError("model.scales must register the current causal scale stack")
@@ -650,6 +678,7 @@ class ContinuousSMCEngine:
             decision=decision,
             risk=risk,
             runtime_mode=runtime_mode,
+            action_pipeline_mode=action_pipeline_mode,
             action_disabled_playbooks=action_disabled_playbooks,
             _readiness_token=_LIVE_READINESS_TOKEN,
         )
@@ -679,9 +708,14 @@ class ContinuousSMCEngine:
         return self._neutral_market_state
 
     @property
+    def action_pipeline_mode(self) -> str:
+        return self._action_pipeline_mode
+
+    @property
     def runtime_action_policy_identity(self) -> Mapping[str, Any]:
         return {
             "schema_version": RUNTIME_ACTION_POLICY_SCHEMA_VERSION,
+            "action_pipeline_mode": self.action_pipeline_mode,
             "scope": "new_entry_action_candidates_only",
             "disabled_new_entry_playbooks": [
                 playbook.value for playbook in self.action_disabled_playbooks
@@ -689,6 +723,7 @@ class ContinuousSMCEngine:
             "decision_belief_projection": "action_filtered",
             "engine_snapshot_belief_projection": "raw",
             "position_management_projection": "raw",
+            "trade_intent_projection": "disabled_in_legacy_compat",
         }
 
     def on_bar(
@@ -735,16 +770,11 @@ class ContinuousSMCEngine:
                 scene_graph=scene_graph,
                 scene_delta=scene_delta,
             )
-        # Phase 7 shadow projection is an append-only belief surface.  It can
-        # freeze never-submit Trade Intents, but the legacy Decision/Risk path
-        # below still consumes exactly the same action-candidate interface.
-        project_shadow_trade_intents = getattr(
-            self.brain,
-            "project_shadow_trade_intents",
-            None,
-        )
-        if callable(project_shadow_trade_intents):
-            belief = project_shadow_trade_intents(belief, account)
+        if belief.trade_intents:
+            raise RuntimeError(
+                "legacy Decision/Risk compatibility mode rejects non-zero "
+                "TradeIntent authority"
+            )
         decision_belief = (
             RuntimeActionBeliefView(
                 belief,
@@ -761,7 +791,6 @@ class ContinuousSMCEngine:
             decision=decision,
             risk=risk,
             neutral_market_state=neutral_market_state,
-            market_snapshot=getattr(observation, "market_snapshot", None),
         )
         self._last_snapshot = snapshot
         self._last_belief_position = resolved_belief_position
@@ -793,7 +822,6 @@ class ContinuousSMCEngine:
         snapshot = NeutralEngineSnapshot(
             observation=observation,
             neutral_market_state=neutral_market_state,
-            market_snapshot=getattr(observation, "market_snapshot", None),
         )
         self._last_snapshot = snapshot
         self._neutral_market_state = neutral_market_state

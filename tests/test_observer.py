@@ -459,9 +459,6 @@ def test_eye_authority_mode_preserves_all_typed_state_and_internal_memory() -> N
             event_ages_minutes={},
             retained_entity_timelines={},
                 incomplete_entity_timeline_keys=(),
-                semantic_events_this_update=(
-                    light_observation.semantic_events_this_update
-                ),
                 market_snapshot=light_observation.market_snapshot,
                 typed_transition_delta_available=True,
             liquidity_inventory_transitions_this_update=(

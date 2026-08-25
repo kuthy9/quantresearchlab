@@ -14,6 +14,7 @@ from smc_trader.calibration import (
 )
 from smc_trader.engine import (
     ContinuousSMCEngine,
+    LEGACY_ACTION_PIPELINE_MODE,
     normalize_action_disabled_playbooks,
 )
 from smc_trader.foundation_registry import (
@@ -185,10 +186,11 @@ def test_engine_accepts_current_typed_config_and_rejects_incomplete_current_conf
             decision=engine.decision,
             risk=engine.risk,
             runtime_mode="live",
+            action_pipeline_mode=LEGACY_ACTION_PIPELINE_MODE,
         )
     incomplete = tmp_path / "model.json"
     incomplete.write_text(json.dumps({"schema_version": 1}), encoding="utf-8")
-    with pytest.raises(ValueError, match="semantic_selection"):
+    with pytest.raises(ValueError, match="model.schema_version must be 2"):
         ContinuousSMCEngine.from_config(
             incomplete,
             runtime_mode="development",
@@ -198,6 +200,15 @@ def test_engine_accepts_current_typed_config_and_rejects_incomplete_current_conf
     payload["observer"].pop("group5_protocol")
     incomplete.write_text(json.dumps(payload), encoding="utf-8")
     with pytest.raises(ValueError, match="group5_protocol"):
+        ContinuousSMCEngine.from_config(
+            incomplete,
+            runtime_mode="development",
+        )
+
+    payload = json.loads(Path("configs/model.json").read_text(encoding="utf-8"))
+    payload["action_pipeline"]["mode"] = "trade_intent_fsm"
+    incomplete.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(ValueError, match="legacy Decision/Risk compatibility"):
         ContinuousSMCEngine.from_config(
             incomplete,
             runtime_mode="development",
@@ -249,12 +260,14 @@ def test_engine_runtime_action_policy_is_explicit_deterministic_and_fail_closed(
 
     assert engine.action_disabled_playbooks == (LSR,)
     assert engine.runtime_action_policy_identity == {
-        "schema_version": 1,
+        "schema_version": 2,
+        "action_pipeline_mode": LEGACY_ACTION_PIPELINE_MODE,
         "scope": "new_entry_action_candidates_only",
         "disabled_new_entry_playbooks": [LSR.value],
         "decision_belief_projection": "action_filtered",
         "engine_snapshot_belief_projection": "raw",
         "position_management_projection": "raw",
+        "trade_intent_projection": "disabled_in_legacy_compat",
     }
     assert normalize_action_disabled_playbooks((LSR.value, DFP)) == (
         DFP,
@@ -270,6 +283,7 @@ def test_engine_snapshot_retains_raw_belief_while_decision_gets_policy_view() ->
     lsr = SimpleNamespace(playbook=LSR)
     dfp = SimpleNamespace(playbook=DFP)
     raw_belief = SimpleNamespace(
+        trade_intents=(),
         action_candidate_items=lambda: (
             ("candidate:lsr", lsr),
             ("candidate:dfp", dfp),
@@ -289,10 +303,16 @@ def test_engine_snapshot_retains_raw_belief_while_decision_gets_policy_view() ->
             scene_graph=SimpleNamespace(),
             last_scene_delta=None,
         ),
-        brain=SimpleNamespace(update=lambda _observation, **_kwargs: raw_belief),
+        brain=SimpleNamespace(
+            update=lambda _observation, **_kwargs: raw_belief,
+            project_shadow_trade_intents=lambda *_args: pytest.fail(
+                "legacy authority must not invoke TradeIntent projection"
+            ),
+        ),
         decision=SimpleNamespace(decide=decide),
         risk=SimpleNamespace(review=lambda *_args: SimpleNamespace()),
         runtime_mode="development",
+        action_pipeline_mode=LEGACY_ACTION_PIPELINE_MODE,
         action_disabled_playbooks=(LSR,),
     )
 
@@ -308,6 +328,16 @@ def test_engine_snapshot_retains_raw_belief_while_decision_gets_policy_view() ->
         ("candidate:lsr", lsr),
         ("candidate:dfp", dfp),
     )
+
+    engine.brain.update = lambda _observation, **_kwargs: SimpleNamespace(
+        trade_intents=(object(),),
+        action_candidate_items=lambda: (),
+    )
+    engine.decision.decide = lambda *_args: pytest.fail(
+        "Decision must not run after non-zero TradeIntent rejection"
+    )
+    with pytest.raises(RuntimeError, match="rejects non-zero TradeIntent"):
+        engine.on_bar(SimpleNamespace())
 
 
 def test_engine_live_mode_has_one_fail_closed_release_gate(

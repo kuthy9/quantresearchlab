@@ -103,7 +103,11 @@ from smc_trader.scene_graph import (
     build_open_market_theses,
 )
 
-from .helpers import graph_free_action_belief, market_observation
+from .helpers import (
+    graph_free_action_belief,
+    market_observation,
+    replace_market_observation,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -600,7 +604,7 @@ def _advance_observation(
     price: float | None = None,
     execution: ExecutionObservation | None = None,
 ) -> MarketObservation:
-    return replace(
+    return replace_market_observation(
         observation,
         asof=asof,
         price=observation.price if price is None else price,
@@ -1226,7 +1230,7 @@ def test_absent_lsr_root_keeps_only_its_live_frozen_episode(
         )
         for timeframe, frame in observation.frames.items()
     }
-    waiting = replace(
+    waiting = replace_market_observation(
         observation,
         asof=waiting_at,
         frames=waiting_frames,
@@ -2776,7 +2780,7 @@ def test_graph_backed_position_retains_frozen_root_after_open_thesis_closes(
         with_position_barrier,
     )
     next_asof = entry_observation.asof + pd.Timedelta(minutes=1)
-    next_observation = replace(
+    next_observation = replace_market_observation(
         entry_observation,
         asof=next_asof,
         price=100.75,
@@ -2841,7 +2845,7 @@ def test_graph_backed_position_retains_frozen_root_after_open_thesis_closes(
         )
     ]
     later_asof = next_asof + pd.Timedelta(minutes=1)
-    later_observation = replace(
+    later_observation = replace_market_observation(
         next_observation,
         asof=later_asof,
         frames={
@@ -2873,7 +2877,7 @@ def test_graph_backed_position_retains_frozen_root_after_open_thesis_closes(
     # the portfolio releases that lifecycle position, the management-only
     # candidate is removed rather than becoming a latent entry candidate.
     terminal_asof = later_asof + pd.Timedelta(minutes=1)
-    terminal_observation = replace(
+    terminal_observation = replace_market_observation(
         later_observation,
         asof=terminal_asof,
         frames={
@@ -2904,7 +2908,7 @@ def test_graph_backed_position_retains_frozen_root_after_open_thesis_closes(
     assert set(brain._candidate_theses) == {candidate_id}
 
     released_asof = terminal_asof + pd.Timedelta(minutes=1)
-    released_observation = replace(
+    released_observation = replace_market_observation(
         terminal_observation,
         asof=released_asof,
         frames={
@@ -3161,7 +3165,7 @@ def test_dfp_aligned_micro_bos_is_an_alternative_entry_trigger() -> None:
     )
 
     next_asof = trigger_bar.end + pd.Timedelta(minutes=1)
-    next_observation = replace(
+    next_observation = replace_market_observation(
         observation,
         asof=next_asof,
         price=trigger_bar.close,
@@ -3667,7 +3671,7 @@ def test_historical_entry_trigger_does_not_weaken_a_filled_dfp() -> None:
         timeframe: replace(frame, cutoff=later)
         for timeframe, frame in triggered.frames.items()
     }
-    later_observation = replace(
+    later_observation = replace_market_observation(
         triggered,
         asof=later,
         price=100.75,
@@ -4567,7 +4571,7 @@ def _lsr_register_first_pullback(
                 transition_reason="first_pullback",
             )
         )
-    return replace(
+    return replace_market_observation(
         _advance_observation(observation, pullback_at),
         price=location.near_edge,
         entry_locations=(entered, *observation.entry_locations[1:]),
@@ -7711,7 +7715,7 @@ def test_entry_zone_cannot_cross_the_frozen_invalidation() -> None:
         source_upper_bound=100.50,
         sweep_extreme=100.75,
     )
-    wrong_side_zone = replace(
+    wrong_side_zone = replace_market_observation(
         observation,
         price=100.50,
         frames=frames,

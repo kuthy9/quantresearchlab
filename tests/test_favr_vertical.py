@@ -35,7 +35,11 @@ from smc_trader.scene_graph import (
 )
 from smc_trader.visualization import DecisionVisualizer
 
-from .helpers import graph_free_action_belief, market_observation
+from .helpers import (
+    graph_free_action_belief,
+    market_observation,
+    replace_market_observation,
+)
 from .test_v3_group4_primitives import (
     _m1 as _group4_m1,
     _mature_range,
@@ -460,7 +464,7 @@ def test_lsr_optional_range_context_loss_does_not_invalidate_core_episode() -> N
         )
         for timeframe, frame in contextual.frames.items()
     }
-    without_optional_context = replace(
+    without_optional_context = replace_market_observation(
         contextual,
         asof=later,
         frames=later_frames,
@@ -1122,7 +1126,7 @@ def test_favr_missing_frozen_sources_closes_episode_instead_of_resetting() -> No
             frames[timeframe],
             cutoff=next_clock,
         )
-    missing = replace(
+    missing = replace_market_observation(
         observation,
         asof=next_clock,
         frames=frames,

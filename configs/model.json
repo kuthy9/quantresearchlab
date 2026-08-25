@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "role": "repeatable_non_pnl_semantic_development",
   "release_readiness": {
     "active_model_natural_authority_validated": false,
@@ -36,6 +36,10 @@
     "dol_calibration_artifact": null,
     "outcome_model_artifact": null,
     "artifact_pins": null
+  },
+  "action_pipeline": {
+    "schema_version": 1,
+    "mode": "legacy_decision_risk_compat"
   },
   "calibration_artifact": null,
   "timezone": "America/New_York",

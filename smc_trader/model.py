@@ -9,7 +9,7 @@ import hashlib
 import json
 import math
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
 import pandas as pd
 
@@ -23,6 +23,50 @@ if TYPE_CHECKING:
 
 
 SMC_SEMANTIC_VERSION = "smc_semantics_v1.2"
+MARKET_OBSERVATION_SCHEMA_VERSION = 2
+ENGINE_SNAPSHOT_SCHEMA_VERSION = 2
+NEUTRAL_ENGINE_SNAPSHOT_SCHEMA_VERSION = 2
+
+
+def _exact_dataclass_pickle_state(
+    value: Any,
+    *,
+    schema_version: int,
+    label: str,
+) -> Mapping[str, Any]:
+    names = tuple(item.name for item in fields(value))
+    if set(value.__dict__) != set(names):
+        raise ValueError(f"{label} pickle state is not exact")
+    return {
+        "schema_version": schema_version,
+        "fields": tuple((name, getattr(value, name)) for name in names),
+    }
+
+
+def _restore_exact_dataclass_pickle_state(
+    value: Any,
+    state: Mapping[str, Any],
+    *,
+    schema_version: int,
+    label: str,
+) -> None:
+    names = tuple(item.name for item in fields(value))
+    serialized = state.get("fields") if isinstance(state, Mapping) else None
+    if (
+        not isinstance(state, Mapping)
+        or set(state) != {"schema_version", "fields"}
+        or state.get("schema_version") != schema_version
+        or not isinstance(serialized, tuple)
+        or len(serialized) != len(names)
+        or any(
+            not isinstance(item, tuple) or len(item) != 2
+            for item in serialized
+        )
+        or tuple(item[0] for item in serialized) != names
+    ):
+        raise ValueError(f"{label} pickle schema changed")
+    for name, item in serialized:
+        object.__setattr__(value, name, item)
 
 
 def _deep_freeze(value: Any) -> Any:
@@ -5637,16 +5681,23 @@ class DisplacementObservation:
 
 @dataclass(frozen=True)
 class MarketObservation:
-    asof: pd.Timestamp
-    symbol: str
-    instrument_id: int
-    price: float
+    market_snapshot: "MarketSnapshot | None"
     frames: Mapping[Timeframe, FrameObservation]
     recent_events: tuple[MarketEvent, ...]
     event_durations_minutes: Mapping[str, int]
     execution: ExecutionObservation
-    semantic_events_this_update: tuple[MarketEvent, ...] = ()
-    market_snapshot: "MarketSnapshot | None" = None
+    _snapshot_free_identity: tuple[
+        pd.Timestamp,
+        str,
+        int,
+        float,
+        tuple[MarketEvent, ...],
+    ] | None = field(
+        default=None,
+        repr=False,
+        compare=False,
+        metadata={"primitive": False},
+    )
     anomalies: tuple[str, ...] = ()
     displacement: DisplacementObservation | None = None
     liquidity_inventory: tuple[LiquidityInventoryItem, ...] = ()
@@ -5762,13 +5813,74 @@ class MarketObservation:
     scene_revised_edge_ids: tuple[str, ...] = ()
     scene_resolution_event_ids: tuple[str, ...] = ()
 
+    schema_version: ClassVar[int] = MARKET_OBSERVATION_SCHEMA_VERSION
+
+    @property
+    def asof(self) -> pd.Timestamp:
+        if self.market_snapshot is not None:
+            return self.market_snapshot.asof
+        assert self._snapshot_free_identity is not None
+        return self._snapshot_free_identity[0]
+
+    @property
+    def symbol(self) -> str:
+        if self.market_snapshot is not None:
+            return self.market_snapshot.symbol
+        assert self._snapshot_free_identity is not None
+        return self._snapshot_free_identity[1]
+
+    @property
+    def instrument_id(self) -> int:
+        if self.market_snapshot is not None:
+            return self.market_snapshot.instrument_id
+        assert self._snapshot_free_identity is not None
+        return self._snapshot_free_identity[2]
+
+    @property
+    def price(self) -> float:
+        if self.market_snapshot is not None:
+            return self.market_snapshot.price
+        assert self._snapshot_free_identity is not None
+        return self._snapshot_free_identity[3]
+
+    @property
+    def semantic_events_this_update(self) -> tuple[MarketEvent, ...]:
+        if self.market_snapshot is not None:
+            return self.market_snapshot.events_this_update
+        assert self._snapshot_free_identity is not None
+        return self._snapshot_free_identity[4]
+
     def __post_init__(self) -> None:
-        object.__setattr__(self, "asof", aware_timestamp(self.asof, name="observation.asof"))
-        object.__setattr__(
-            self,
-            "semantic_events_this_update",
-            tuple(self.semantic_events_this_update),
-        )
+        identity = self._snapshot_free_identity
+        if self.market_snapshot is None:
+            if (
+                not isinstance(identity, tuple)
+                or len(identity) != 5
+                or not isinstance(identity[1], str)
+                or not identity[1]
+                or type(identity[2]) is not int
+                or identity[2] < 0
+                or not math.isfinite(float(identity[3]))
+                or not isinstance(identity[4], tuple)
+            ):
+                raise ValueError(
+                    "snapshot-free observation identity is invalid"
+                )
+            object.__setattr__(
+                self,
+                "_snapshot_free_identity",
+                (
+                    aware_timestamp(identity[0], name="observation.asof"),
+                    identity[1],
+                    identity[2],
+                    float(identity[3]),
+                    tuple(identity[4]),
+                ),
+            )
+        elif identity is not None:
+            raise ValueError(
+                "published observation cannot duplicate snapshot identity"
+            )
         if any(
             not isinstance(event, MarketEvent)
             or event.known_at > self.asof
@@ -5776,13 +5888,6 @@ class MarketObservation:
         ):
             raise ValueError(
                 "observation semantic event delta contains future or invalid data"
-            )
-        if (
-            self.market_snapshot is not None
-            and self.market_snapshot.asof != self.asof
-        ):
-            raise ValueError(
-                "observation and hierarchical market snapshot clocks differ"
             )
         active_timeframes = tuple(self.active_timeframes)
         if not active_timeframes:
@@ -5796,6 +5901,7 @@ class MarketObservation:
             "scene_resolution_event_ids",
         ):
             object.__setattr__(self, name, tuple(getattr(self, name)))
+
         for name in (
             "liquidity_inventory_transitions_this_update",
             "liquidity_pool_transitions_this_update",
@@ -6688,6 +6794,22 @@ class MarketObservation:
         for name, values in zip(delta_names, delta_values, strict=True):
             object.__setattr__(clone, name, values)
         return clone
+
+    def __getstate__(self) -> Mapping[str, Any]:
+        return _exact_dataclass_pickle_state(
+            self,
+            schema_version=MARKET_OBSERVATION_SCHEMA_VERSION,
+            label="MarketObservation",
+        )
+
+    def __setstate__(self, state: Mapping[str, Any]) -> None:
+        _restore_exact_dataclass_pickle_state(
+            self,
+            state,
+            schema_version=MARKET_OBSERVATION_SCHEMA_VERSION,
+            label="MarketObservation",
+        )
+        self.__post_init__()
 
     def frame(self, timeframe: Timeframe) -> FrameObservation:
         return self.frames[timeframe]
@@ -10364,7 +10486,40 @@ class EngineSnapshot:
     decision: Decision
     risk: RiskAssessment
     neutral_market_state: NeutralMarketState | None = None
-    market_snapshot: "MarketSnapshot | None" = None
+
+    schema_version: ClassVar[int] = ENGINE_SNAPSHOT_SCHEMA_VERSION
+
+    @property
+    def market_snapshot(self) -> "MarketSnapshot | None":
+        return self.observation.market_snapshot
+
+    def __post_init__(self) -> None:
+        if (
+            self.neutral_market_state is not None
+            and (
+                not isinstance(self.neutral_market_state, NeutralMarketState)
+                or self.neutral_market_state.asof != self.observation.asof
+                or self.neutral_market_state.scene_revision_id
+                != self.observation.scene_revision_id
+            )
+        ):
+            raise ValueError("Engine snapshot observation and neutral state differ")
+
+    def __getstate__(self) -> Mapping[str, Any]:
+        return _exact_dataclass_pickle_state(
+            self,
+            schema_version=ENGINE_SNAPSHOT_SCHEMA_VERSION,
+            label="EngineSnapshot",
+        )
+
+    def __setstate__(self, state: Mapping[str, Any]) -> None:
+        _restore_exact_dataclass_pickle_state(
+            self,
+            state,
+            schema_version=ENGINE_SNAPSHOT_SCHEMA_VERSION,
+            label="EngineSnapshot",
+        )
+        self.__post_init__()
 
 
 @dataclass(frozen=True)
@@ -10373,7 +10528,12 @@ class NeutralEngineSnapshot:
 
     observation: MarketObservation
     neutral_market_state: NeutralMarketState
-    market_snapshot: "MarketSnapshot | None" = None
+
+    schema_version: ClassVar[int] = NEUTRAL_ENGINE_SNAPSHOT_SCHEMA_VERSION
+
+    @property
+    def market_snapshot(self) -> "MarketSnapshot | None":
+        return self.observation.market_snapshot
 
     def __post_init__(self) -> None:
         if (
@@ -10381,14 +10541,26 @@ class NeutralEngineSnapshot:
             or self.observation.asof != self.neutral_market_state.asof
             or self.observation.scene_revision_id
             != self.neutral_market_state.scene_revision_id
-            or (
-                self.market_snapshot is not None
-                and self.market_snapshot.asof != self.observation.asof
-            )
         ):
             raise ValueError(
                 "neutral Engine snapshot observation and state differ"
             )
+
+    def __getstate__(self) -> Mapping[str, Any]:
+        return _exact_dataclass_pickle_state(
+            self,
+            schema_version=NEUTRAL_ENGINE_SNAPSHOT_SCHEMA_VERSION,
+            label="NeutralEngineSnapshot",
+        )
+
+    def __setstate__(self, state: Mapping[str, Any]) -> None:
+        _restore_exact_dataclass_pickle_state(
+            self,
+            state,
+            schema_version=NEUTRAL_ENGINE_SNAPSHOT_SCHEMA_VERSION,
+            label="NeutralEngineSnapshot",
+        )
+        self.__post_init__()
 
 
 def to_primitive(value: Any) -> Any:
@@ -10446,6 +10618,7 @@ def to_primitive(value: Any) -> Any:
         return {
             item.name: to_primitive(getattr(value, item.name))
             for item in fields(value)
+            if item.metadata.get("primitive", True)
         }
     return value
 

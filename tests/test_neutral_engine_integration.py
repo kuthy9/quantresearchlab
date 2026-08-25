@@ -385,10 +385,19 @@ def test_engine_neutral_state_is_pickle_checkpoint_ready() -> None:
     )
     encoded = pickle.dumps(engine, protocol=pickle.HIGHEST_PROTOCOL)
     resumed = pickle.loads(encoded)
-    assert NEUTRAL_ENGINE_CHECKPOINT_SCHEMA_VERSION == 3
-    assert engine.__getstate__()["_neutral_checkpoint_schema_version"] == 3
+    assert NEUTRAL_ENGINE_CHECKPOINT_SCHEMA_VERSION == 4
+    assert engine.__getstate__()["_neutral_checkpoint_schema_version"] == 4
     assert resumed.neutral_market_state == engine.neutral_market_state
     assert resumed.last_snapshot == engine.last_snapshot
+    assert "market_snapshot" not in snapshot.__dict__
+    assert snapshot.market_snapshot is snapshot.observation.market_snapshot
+    assert {
+        "asof",
+        "symbol",
+        "instrument_id",
+        "price",
+        "semantic_events_this_update",
+    }.isdisjoint(snapshot.observation.__dict__)
     assert (
         resumed.last_snapshot.observation.market_snapshot.foundation
         == foundation
@@ -397,6 +406,19 @@ def test_engine_neutral_state_is_pickle_checkpoint_ready() -> None:
     drifted._foundation_registry_identity = "0" * 64
     with pytest.raises(ValueError, match="checkpoint neutral market state schema"):
         pickle.loads(pickle.dumps(drifted, protocol=pickle.HIGHEST_PROTOCOL))
+
+    duplicate = pickle.loads(pickle.dumps(snapshot))
+    duplicate.__dict__["market_snapshot"] = "forged-duplicate"
+    with pytest.raises(ValueError, match="EngineSnapshot pickle state is not exact"):
+        pickle.dumps(duplicate)
+
+    duplicate_observation = pickle.loads(pickle.dumps(snapshot.observation))
+    duplicate_observation.__dict__["asof"] = snapshot.observation.asof
+    with pytest.raises(
+        ValueError,
+        match="MarketObservation pickle state is not exact",
+    ):
+        pickle.dumps(duplicate_observation)
 
     for bar in bars[35:]:
         reality = ExecutionRealityInput(
