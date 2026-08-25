@@ -41,6 +41,15 @@
 - `KEEP—hash-bound evidence` can be large without being junk; move only through an inventory/receipt-preserving cold archive.
 - `REVIEW` means a bounded consolidation/archive decision is warranted, not that deletion is currently safe.
 
+### Post-baseline retirement
+
+On 2026-08-25 the isolated nine-file Neutral-B2 audit bundle and the
+non-authoritative prompt PDF were retired after a closed-reference audit. The
+[retirement receipt](../evidence/neutral_b2_retirement_receipt.md) preserves
+their exact paths, SHA-256 preimages, and recovery command. The complete tables
+below intentionally remain the `4f180d2` frozen-baseline inventory; their rows
+are historical preimages, not claims that every listed path remains present.
+
 ## Zero-reference result
 
 “Zero-reference” here means no inbound Python AST import and no literal tracked path/name reference in the frozen baseline. It is a triage signal, not proof that a file is dead. The strict detector found 111 roots/leaves: 71 pytest files, 16 human/evidence documents, four CLI entry points, three repository roots and 17 superseded manifests. It found **zero unreferenced `smc_trader/*.py` runtime modules**, zero unreferenced current configs and zero unreferenced semantic authorities.

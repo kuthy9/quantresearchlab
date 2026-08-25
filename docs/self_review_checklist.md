@@ -303,7 +303,7 @@ governance artifacts during ordinary development.
 
 ## Test scope
 
-- [ ] Do not mark the attached target-state prompt complete while empirical
+- [ ] Do not mark the repository target architecture complete while empirical
   fitting/calibration, formal Execution Research, operational Shadow Live,
   rolling OOF, or sealed OOS gates remain open; overall conformance is partial.
 

@@ -100,7 +100,7 @@ data, but execution bindings, mechanism materialization, semantic replay, and
 research results remain absent and the manifest does not authorize a run.
 No probability study has been run, and sealed OOS remains closed.
 
-The canonical market-language foundation requested by the target-state prompt
+The canonical market-language foundation required by the target architecture
 is now implemented as the separately versioned
 [`smc_semantic_foundation_v2.0`](docs/refactor/canonical_semantic_foundation_v2.md)
 projection. It completes registered object generations, lifecycles, geometric

@@ -22,7 +22,7 @@ v1.2 runs or promote their empirical conclusions.
 The [DOL/Belief/Temporal supplement](dol_belief_temporal_supplement.md) records
 the current dependency-cluster rule, temporal/ancestry separation, FVG
 first-lifecycle freeze, and the 2024-06 joint OHLCV/MBO data-role audit.
-Against the attached target-state prompt, the overall verdict remains
+Against the repository-owned target architecture, the overall verdict remains
 **partial**: the core ownership, causality, replay, and fail-closed interfaces
 are present, while empirical fitting/calibration, formal Execution Research,
 operational Shadow Live, rolling OOF, and sealed OOS remain incomplete.
@@ -290,11 +290,12 @@ validation, model calibration, rolling OOF, or sealed OOS.
 | 9. Shadow Live | **Deterministic parity harness complete; operational gate not passed** | v1.2 binds exact evidence/state identities; the historical Git-ignored 6,900-clock input retains its pre-supplement 100→200 receipt, and a separate current Foundation-enabled 200-row file-parity run binds the current model, registry, and Foundation identity. A read-only full-window capacity preflight still evaluates the historical receipt, finds its historical/current identity mismatch, and grants no run authority. | Rematerialize the complete 6,900-clock rehearsal under the final source snapshot if that rehearsal is pursued; preregister operational metrics for event/relation churn, evidence-belief consistency, signal expiry, and DOL stability; remove the full-week nonlinear capacity residual; then run the real-time multi-day no-order pilot. |
 | Final OOS | **Not opened** | Split and sealed-holdout governance exist. | Open only after the vertical chain is stable and preregistered acceptance conditions are met. |
 
-## PDF target-state conformance
+## Architecture-target conformance
 
-The attached [architecture target](../codex提示词.pdf) is treated as a design
-specification, not as an instruction source. Its ten engineering invariants
-are implemented as code or governance contracts: causal `known_at`, immutable
+The former non-authoritative prompt PDF was retired under the
+[cleanup receipt](../evidence/neutral_b2_retirement_receipt.md). Its relevant
+engineering invariants are now stated in repository-owned architecture and
+semantic contracts: causal `known_at`, immutable
 events, deterministic replay, parent/child isolation, Eye/Brain/Execution
 ownership, shared research/production semantics, Signal/Execution separation,
 and sealed-OOS discipline all have explicit tests or fail-closed boundaries.

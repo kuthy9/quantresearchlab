@@ -29,10 +29,10 @@ recorded in the
 The [round-two semantic review](refactor/semantic_review_round_2.md) separately
 grades definition validity and empirical validity; executable coverage is never
 treated as predictive validation.
-The attached target-state prompt is therefore only partially satisfied: the
-auditable ownership and fail-closed interfaces are substantially present, but
-the fitted empirical model, Execution Research, operational Shadow Live,
-rolling OOF, and sealed OOS gates remain unopened and closed.
+The repository-owned target architecture is therefore only partially
+satisfied: the auditable ownership and fail-closed interfaces are substantially
+present, but the fitted empirical model, Execution Research, operational Shadow
+Live, rolling OOF, and sealed OOS gates remain unopened and closed.
 
 The existing Brain retains multiple root-specific candidates and raw,
 calibratable scores. Phase 7 adds a six-path Hypothesis Manager,
