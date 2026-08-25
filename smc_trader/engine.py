@@ -377,6 +377,19 @@ class ContinuousSMCEngine:
                     semantic_selection.atomic_registry.source_path
                 ),
                 scale_specs=scale_specs,
+                # The full development Engine retains its existing downstream
+                # graph/Brain composition. Direct Eye construction defaults
+                # graph-free; alternate model configs may opt out through the
+                # existing Observer flags without a new compatibility facade.
+                project_scene_graph=observer_raw.get(
+                    "project_scene_graph", True
+                ),
+                materialize_event_view=observer_raw.get(
+                    "materialize_event_view", True
+                ),
+                persist_state_projections=observer_raw.get(
+                    "persist_state_projections", True
+                ),
                 canonical_foundation_enabled=True,
             ),
             semantic_registry=semantic_selection.atomic_registry,

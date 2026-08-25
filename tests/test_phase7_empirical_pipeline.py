@@ -24,6 +24,9 @@ from smc_trader.probability_cohorts import (
 from smc_trader.probability_fit import fit_history_conditional_likelihood
 
 
+pytestmark = pytest.mark.research_runner
+
+
 T0 = pd.Timestamp("2024-06-03T00:00:00Z")
 SHA_A = "a" * 64
 SHA_B = "b" * 64

@@ -171,6 +171,7 @@ def test_engine_accepts_current_typed_config_and_rejects_incomplete_current_conf
     assert engine.decision.calibration_version == "identity-unvalidated"
     assert engine.observer.config.eye_authority_mode is False
     assert engine.observer.config.canonical_foundation_enabled is True
+    assert engine.observer.config.project_scene_graph is True
     assert engine.observer.semantic_registry.identity == (
         "83f6f7dda806271c9dadfb78cbeb40ac14c2a0fda71463e65bd07a963e3040c7"
     )
@@ -195,7 +196,6 @@ def test_engine_accepts_current_typed_config_and_rejects_incomplete_current_conf
             incomplete,
             runtime_mode="development",
         )
-
     payload = json.loads(Path("configs/model.json").read_text(encoding="utf-8"))
     payload["observer"].pop("group5_protocol")
     incomplete.write_text(json.dumps(payload), encoding="utf-8")
@@ -249,6 +249,36 @@ def test_engine_accepts_current_typed_config_and_rejects_incomplete_current_conf
                 incomplete,
                 runtime_mode="development",
             )
+
+
+def test_engine_routes_existing_optional_eye_projection_flags(
+    tmp_path: Path,
+) -> None:
+    payload = json.loads(Path("configs/model.json").read_text(encoding="utf-8"))
+    payload["observer"].update(
+        project_scene_graph=False,
+        materialize_event_view=False,
+        persist_state_projections=False,
+    )
+    configured = tmp_path / "model.json"
+    configured.write_text(json.dumps(payload), encoding="utf-8")
+
+    engine = ContinuousSMCEngine.from_config(
+        configured,
+        runtime_mode="development",
+    )
+
+    assert engine.observer.config.project_scene_graph is False
+    assert engine.observer.config.materialize_event_view is False
+    assert engine.observer.config.persist_state_projections is False
+
+    payload["observer"]["project_scene_graph"] = "false"
+    configured.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(ValueError, match="projection flag must be boolean"):
+        ContinuousSMCEngine.from_config(
+            configured,
+            runtime_mode="development",
+        )
 
 
 def test_engine_runtime_action_policy_is_explicit_deterministic_and_fail_closed() -> None:

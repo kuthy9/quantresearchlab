@@ -46,6 +46,9 @@ from smc_trader.shadow_live import (
 from .test_shadow_live_parity import _engine, _input
 
 
+pytestmark = pytest.mark.research_runner
+
+
 ROOT = Path(__file__).resolve().parents[1]
 OPERATIONAL_PROTOCOL = ROOT / "configs/phase9_shadow_operational_v1.json"
 MONDAY = pd.Timestamp("2024-06-03T13:30:00Z")

@@ -20,6 +20,9 @@ from scripts.run_shadow_file_pilot import (
 from smc_trader.shadow_live import ShadowLiveError, ShadowLiveRunner
 
 
+pytestmark = pytest.mark.research_runner
+
+
 def _payload(index: int) -> dict[str, object]:
     start = pd.Timestamp("2024-06-03T13:30:00Z") + pd.Timedelta(
         index, unit="m"

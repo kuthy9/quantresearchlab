@@ -4393,7 +4393,10 @@ def test_snapshot_publisher_checkpoint_binds_price_and_session_to_replay() -> No
 def test_synthetic_no_trade_minute_is_replayable_clock_only_root() -> None:
     reader = CausalMarketReader(scale_specs=CORE_TEST_SCALE_SPECS)
     observer = CausalObserver(
-        ObserverConfig(scale_specs=CORE_TEST_SCALE_SPECS)
+        ObserverConfig(
+            scale_specs=CORE_TEST_SCALE_SPECS,
+            project_scene_graph=True,
+        )
     )
     starts = (_clock(0), _clock(1), _clock(2))
     updates = tuple(

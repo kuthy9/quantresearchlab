@@ -161,7 +161,9 @@ class ObserverConfig:
     group5_protocol: str | None = None
     semantic_registry: str = "semantics/registry_v1_2.yaml"
     scale_specs: tuple[ScaleSpec, ...] = ()
-    project_scene_graph: bool = True
+    # Scene Graph is an optional downstream research view, not part of the
+    # causal Eye publication path. Full Engine composition opts in explicitly.
+    project_scene_graph: bool = False
     materialize_event_view: bool = True
     group4_projection_only: bool = False
     eye_authority_mode: bool = False

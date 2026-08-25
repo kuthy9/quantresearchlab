@@ -209,18 +209,14 @@ def test_missing_deadline_remains_visible_to_risk_layer() -> None:
     assert "deadline_missing" in observation.anomalies
 
 
-def test_lightweight_observer_can_skip_only_scene_graph_projection() -> None:
+def test_direct_eye_defaults_to_no_scene_graph_projection() -> None:
     reader = CausalMarketReader(scale_specs=CORE_TEST_SCALE_SPECS)
     update = reader.on_bar(session_bars(1)[0])
-    observer = CausalObserver(
-        ObserverConfig(
-            scale_specs=CORE_TEST_SCALE_SPECS,
-            project_scene_graph=False,
-        )
-    )
+    observer = CausalObserver(ObserverConfig(scale_specs=CORE_TEST_SCALE_SPECS))
 
     observation = observer.observe(update)
 
+    assert observer.config.project_scene_graph is False
     assert observation.scene_revision_id is None
     assert observer.last_scene_delta is None
     assert observer.scene_graph.last_asof is None

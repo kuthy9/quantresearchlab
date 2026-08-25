@@ -45,6 +45,9 @@ from smc_trader.signal_policy import CancelCondition, CancelConditionKind, Setup
 from smc_trader.trade_intent import EntryMethod, TimeInForce, TradeIntent
 
 
+pytestmark = pytest.mark.research_runner
+
+
 ROOT = Path(__file__).resolve().parents[1]
 RUNNER_CONFIG = ROOT / "configs/execution_research_runner_v1.json"
 V1_CONFIG = ROOT / "configs/execution_research_v1.json"

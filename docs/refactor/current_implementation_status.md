@@ -130,6 +130,26 @@ identities are released. The cold ledger also remains a full in-memory revision
 list. No new Phase runner or facade is justified solely to rename these
 boundaries.
 
+The direct Eye path now defaults `project_scene_graph=false`. The full
+development Engine retains its existing Scene Graph/Brain composition, while
+`ContinuousSMCEngine.from_config()` now routes the existing
+`project_scene_graph`, `materialize_event_view`, and
+`persist_state_projections` flags for explicitly graph-free or projection-free
+runs. This changes no checked-in model bytes, semantic identity, Snapshot
+schema, or current development-Engine output. Phase 7 empirical, Phase 8 runner,
+and Phase 9 file/operational runner tests are registered as the separate
+`research_runner` group; they remain executable and are not deleted, but no
+longer inflate the default semantic/runtime test loop.
+
+This is only the safe boundary closure. `MarketSnapshot` already obtains
+`TimeframeState` from canonical events, but compatibility Brain and Scene Graph
+code still reads typed tracker projections and bounded observation histories.
+Removing those fields requires a versioned Observation/checkpoint/Shadow
+migration. Likewise, Foundation still owns registered generation/lifecycle,
+range, FVG-context, cluster, and retirement projections; reducing it to only
+owner/generation/relation views would change the Foundation registry and cold
+replay contract. Neither migration is disguised as a flag or alias here.
+
 The Neutral projection is now the single per-clock `OpenMarketThesis` owner.
 It updates `GlobalMarketContext`, builds one canonical thesis tuple, and stores
 that exact tuple in `NeutralMarketState`; full Engine Brain evaluation reuses

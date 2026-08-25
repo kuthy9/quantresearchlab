@@ -71,6 +71,10 @@ versioned probability layer retains the path marginalization formula and
 explicit `no_target_before_common_horizon` outcome for future admitted models.
 
 The downstream Scene Graph and Brain are sequenced after Eye publication.
+Direct `CausalObserver` construction is graph-free by default; the complete
+development `ContinuousSMCEngine` composition retains the graph and may disable
+it through the existing observer configuration flags. The graph is therefore
+an optional downstream research view, not an Eye publication requirement.
 `MarketObservation` stores one embedded `MarketSnapshot` as the sole owner of
 snapshot identity fields and exposes compatibility properties for callers; it
 still carries detector-facing and typed transition views, so the Brain contract

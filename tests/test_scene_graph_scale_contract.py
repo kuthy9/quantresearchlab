@@ -2792,7 +2792,10 @@ def test_observer_transfers_revised_edge_ids_into_observation() -> None:
         )
     )
     observer = CausalObserver(
-        ObserverConfig(scale_specs=MODEL_SCALE_SPECS)
+        ObserverConfig(
+            scale_specs=MODEL_SCALE_SPECS,
+            project_scene_graph=True,
+        )
     )
     delta = SceneGraphDelta(
         asof=update.asof,

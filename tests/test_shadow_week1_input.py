@@ -27,6 +27,9 @@ from scripts.run_shadow_file_pilot import shadow_clock_input_from_payload
 from smc_trader.model import Bar
 
 
+pytestmark = pytest.mark.research_runner
+
+
 def _bar(*, synthetic: bool = False) -> Bar:
     return Bar(
         start=pd.Timestamp("2024-06-03T13:30:00Z"),
