@@ -2342,6 +2342,20 @@ class MarketEpisodeCaseIndex:
         if len(spaces) > 1:
             raise CaseRetrievalError("neutral index mixes embedding spaces")
         self.embedding_space = next(iter(spaces), None)
+        # Encoder identity is carried by every record, so unlike source/config
+        # manifest hashes it can and must be verified at this lower boundary.
+        if (
+            self.dataset_contract is not None
+            and self.embedding_space is not None
+        ):
+            contract_space = (
+                self.dataset_contract["embedding_model_version"],
+                self.dataset_contract["embedding_checkpoint_id"],
+            )
+            if contract_space != self.embedding_space:
+                raise CaseRetrievalError(
+                    "neutral dataset contract embedding space differs from records"
+                )
         self.embedding_dim = embedding_dim
         self._vector_core = _ImmutableCosineMatrix(
             (item.decision_embedding for item in self.records),

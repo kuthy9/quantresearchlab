@@ -1648,6 +1648,53 @@ def test_market_episode_direct_constructor_requires_multi_run_source_contract() 
         )
 
 
+@pytest.mark.parametrize(
+    ("field", "forged_value"),
+    (
+        ("embedding_model_version", "forged:model"),
+        ("embedding_checkpoint_id", "f" * 64),
+    ),
+)
+def test_market_episode_dataset_contract_binds_record_embedding_space(
+    field: str,
+    forged_value: str,
+) -> None:
+    raw = _market_episode_case(
+        "contract-space",
+        1,
+        [1.0, 0.0, 0.0, 0.0],
+    )
+    record = MarketEpisodeEmbeddingRecord.from_mapping(
+        raw,
+        material_kind="trigger",
+        embedding_dim=DIM,
+    )
+    forged_contract = {
+        **MARKET_EPISODE_DATASET_CONTRACT,
+        field: forged_value,
+    }
+
+    with pytest.raises(CaseRetrievalError, match="embedding space differs"):
+        MarketEpisodeCaseIndex(
+            (record,),
+            artifact_lineages=(MARKET_EPISODE_LINEAGE,),
+            embedding_dim=DIM,
+            dataset_contract=forged_contract,
+        )
+
+    with pytest.raises(CaseRetrievalError, match="embedding space differs"):
+        MarketEpisodeCaseIndex.from_artifacts(
+            (
+                {
+                    "records": (raw,),
+                    "artifact_lineage": MARKET_EPISODE_LINEAGE,
+                    "dataset_contract": forged_contract,
+                },
+            ),
+            embedding_dim=DIM,
+        )
+
+
 def test_market_episode_direct_constructor_rejects_duplicate_and_cross_split() -> None:
     first = MarketEpisodeEmbeddingRecord.from_mapping(
         _market_episode_case("direct", 1, [1.0, 0.0, 0.0, 0.0]),

@@ -69,7 +69,10 @@ the same physical episode in another run therefore cannot create a
 self-neighbour. It accepts ensemble disagreement only from the active
 `next_lifecycle` and `scale_direction_alignment` heads. Missing independent
 ensemble members routes to abstention; no historical outcome distribution is
-joined.
+joined. The index directly binds the dataset contract's encoder model and
+checkpoint identities to those carried by every selected record. Source and
+model-config hashes remain a hash-bound loader/manifest trust boundary because
+neutral records do not independently carry those authorities.
 
 The neutral selector and legacy `CausalCase` selector keep distinct record
 schemas, identities, estimands, eligibility rules and leakage validators.
