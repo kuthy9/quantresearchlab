@@ -113,15 +113,22 @@ have not been migrated to one content-addressed identity. This is storage
 duplication, not a duplicate semantic authority; neither path may be removed
 independently yet.
 
-The highest-priority hot-history/container-copy debt is closed by the compact
-migration above. Remaining consolidation work is lower priority and should not
-be mixed with research execution: the five large responsibility modules may be
-split along existing ownership seams; Phase 7 orchestration may separate
-replay/cohort/fit/validation/publication; Phase 8 may share only common
-contracts/serialization; Phase 9 v2/v3 may share checkpoint/parity plumbing;
-and repeated hash helpers may converge after their frozen source identities are
-released. The current cold ledger also remains a full in-memory revision list.
-No new Phase runner or facade is justified solely to rename these boundaries.
+The compact migration closes revision-history copying, full-transition scans,
+and full-container staging copies. Normal tail revisions now validate and hash
+only their write set; full current-view validation remains at checkpoint,
+pickle, transport, and cold replay boundaries. Publishing an immutable
+projection still copies a tuple and lookup-map references proportional to the
+number of current logical objects, and a non-tail revision must rebuild the
+canonical current-view hash. Removing those bounded costs would require a new
+snapshot representation or persistent container and is not hidden behind a
+compatibility facade. Other consolidation work remains lower priority: the
+five large responsibility modules may be split along existing ownership seams;
+Phase 7 may separate replay/cohort/fit/validation/publication; Phase 8 may share
+only common contracts/serialization; Phase 9 v2/v3 may share checkpoint/parity
+plumbing; and repeated hash helpers may converge after their frozen source
+identities are released. The cold ledger also remains a full in-memory revision
+list. No new Phase runner or facade is justified solely to rename these
+boundaries.
 
 The Neutral projection is now the single per-clock `OpenMarketThesis` owner.
 It updates `GlobalMarketContext`, builds one canonical thesis tuple, and stores

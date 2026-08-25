@@ -152,8 +152,11 @@ hashes. One in-memory `FoundationRecordLedger` owns immutable revision history
 and materializes it only at explicit checkpoint/cold-replay boundaries;
 lifecycle hot state keeps current objects plus fact fingerprints rather than
 full transition DTOs. Per-clock adapter transactions use bounded suffix/write
-overlays. Snapshot fingerprint and replay payloads contain only the compact
-current Foundation identity/view. Production emits zero
+overlays; normal tail revisions update hashes and affected indexes incrementally,
+while full validation remains at explicit persistence/replay boundaries. Frozen
+view publication still copies references bounded by current logical objects.
+Snapshot fingerprint and replay payloads contain only the compact current
+Foundation identity/view. Production emits zero
 `FOUNDATION_STATE_CHANGED` events; the enum and strict decoder remain solely for
 legacy journal replay. The cold ledger is not yet an external durable store.
 

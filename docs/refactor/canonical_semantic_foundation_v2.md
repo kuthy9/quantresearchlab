@@ -85,9 +85,13 @@ records, total count, current-view fingerprint, and append-chain fingerprint.
 Lifecycle hot state keeps current objects, exact fact fingerprints, count, and
 rolling hash instead of full `AppliedTransition` DTOs. Snapshot identity and
 replay transport serialize the compact view. Per-clock adapter mutation uses
-suffix/write overlays and rejects stale sibling commits. Explicit checkpoints
-materialize the full cold ledger and validate that replay reconstructs the hot
-view and exact source lineage. The enum/encoder/decoder for
+suffix/write overlays and rejects stale sibling commits. Normal tail revisions
+update the current-view identity and affected indexes from their write set;
+full current-view validation remains at checkpoint, pickle, transport, and cold
+replay boundaries. Publishing the frozen view still copies tuple/map references
+in proportion to current logical objects. Explicit checkpoints materialize the
+full cold ledger and validate that replay reconstructs the hot view and exact
+source lineage. The enum/encoder/decoder for
 `FOUNDATION_STATE_CHANGED` remain only to read historical journals. The cold
 ledger is not yet an external durable store.
 

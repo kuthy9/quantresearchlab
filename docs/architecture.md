@@ -164,13 +164,15 @@ and rolling hash rather than full `AppliedTransition` DTO history.
 `MarketSnapshot` fingerprinting and replay transport serialize only that
 compact current view and component identities. The adapter stages per-clock
 BAR/crossing/binding/index mutations in suffix/write overlays and rejects stale
-sibling commits, avoiding full-container copies without aliasing committed
-state. Production emits no `FOUNDATION_STATE_CHANGED`; its enum, encoder helper,
-and strict decoder remain read-only compatibility seams for historical journals.
-Cold replay validates exact sources and reconstructs the hot projection. The
-cold ledger is still in memory and its checkpoint necessarily materializes full
-revision history; external durable archival remains separate work. Formal
-Signal and MBO research runners remain Eye-only.
+sibling commits. Tail revisions update hashes and affected indexes from their
+write set; checkpoint, pickle, transport, and cold replay retain full validation.
+Publishing an immutable view still copies current tuple/map references, bounded
+by live logical objects. Production emits no `FOUNDATION_STATE_CHANGED`; its
+enum, encoder helper, and strict decoder remain read-only compatibility seams
+for historical journals. Cold replay validates exact sources and reconstructs
+the hot projection. The cold ledger is still in memory and its checkpoint
+necessarily materializes full revision history; external durable archival
+remains separate work. Formal Signal and MBO research runners remain Eye-only.
 
 `ContinuousSMCEngine` has one incremental trader path, and its trader replay
 calls that same engine. The frozen Phase 5 diagnostic is deliberately a
