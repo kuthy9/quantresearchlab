@@ -45,17 +45,45 @@ registry/identity, then verifies that Foundation declares v1.2 as its parent.
 There is no `smc_semantics_v2.0` runtime and no synthetic full-stack version.
 `ContinuousSMCEngine` derives the internal projection gate from the validated
 pair and freezes the existing identities into Engine, Shadow, and checkpoint
-state. The current combined Engine checkpoint schema is 6; older schemas fail
+state. The current combined Engine checkpoint schema is 7; older schemas fail
 closed on restore into the current Observation, Foundation, and Neutral-state
-contracts. `MarketObservation` and `MarketSnapshot` schemas are 2. Shadow uses
+contracts. `MarketObservation` schema 3 publishes the canonical physical
+`InteractionUpdate`; `MarketSnapshot` remains schema 2. Shadow uses
 `phase9_shadow_live_v1.3`, compact checkpoint `shadow_compact_runtime_v4`, and
 component digest `phase9_shadow_component_digest_v2`. These
 bindings grant no empirical, Brain, Trade Intent, execution, or live authority.
 
-The current model schema is 3. Its observer configuration selects
+The current model schema is 4. Its observer configuration selects
 `zone_protocol` and `range_auction_protocol`; canonical runtime ownership lives
 in `smc_trader/zone.py` and `smc_trader/range_auction.py`. The old numbered
 modules are unexported legacy pickle-lookup shims, not alternate implementations.
+
+The former Group-5 implementation is now owned by `InteractionSemantics` in
+`interaction.py`; `group5.py` is a frozen import shim only. The Eye publishes
+zone/reacceptance physical state, ordered physical milestones, and raw
+`MicroBreakFact` records. Raw facts contain no aligned/opposed outcome or
+`qualified` flag. A single stateless Brain interpreter derives legacy entry
+sequence/setup vocabulary for playbook and risk consumers while retaining the
+frozen IDs. Legacy Group-5 fields live only in the explicit `group5.py`
+cold-reader adapter. They are absent from the schema-3 `MarketObservation`
+dataclass, constructor, exact pickle surface, and primitive transport; the
+canonical Observation carries only `interaction_update`. Interaction protocol,
+reducer, and DTO classes are internal-module imports and are not package-root
+exports. Historical case artifacts remain frozen evidence and are not accepted
+by current loaders. Current case artifacts no longer retain old slots:
+CausalCase
+schema 8/protocol 1.7 stores exact 15-key per-update raw Interaction payloads
+and an 11-key delta-only aggregate; MarketCase schema 2/protocol 1.3 stores the
+same nine raw Interaction collections in its single-clock row. Brain runner
+state schema 15 and MarketCase runner state schema 8 reject older identities.
+The hash-bound historical `configs/data_splits.json` is unchanged; new
+MarketCase runs select and hash-bind the sole current registry
+`configs/market_case_input_profiles_v2.json`.
+Normal Engine clocks construct one `BrainObservationView`; Neutral market
+episodes, OpenMarketThesis publication, and Brain share that object by
+identity. Raw paths own physical custody only. The Brain module owns the sole
+aligned/opposed terminal-role classifier, so Neutral neither reinterprets
+MicroBreak facts nor maintains a parallel reason table.
 
 The compact-state migration is now implemented. `EventStore` owns
 atomic history; one append-only, in-memory `FoundationRecordLedger` owns full

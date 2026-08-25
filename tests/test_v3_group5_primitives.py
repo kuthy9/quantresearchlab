@@ -490,6 +490,8 @@ def test_first_pullback_rejection_draw_and_event_memory_are_source_bound() -> No
         liquidity_inventory=(parked_range, draw),
         m1_atr=1.0,
     )
+    assert reducer._last_canonical is not None
+    created_canonical = reducer._last_canonical
 
     assert reducer.on_completed_1m(
         formation,
@@ -517,6 +519,8 @@ def test_first_pullback_rejection_draw_and_event_memory_are_source_bound() -> No
         liquidity_inventory=(parked_range, draw),
         m1_atr=1.0,
     )
+    assert reducer._last_canonical is not None
+    resolved_canonical = reducer._last_canonical
     location = resolved.entry_locations[0]
     path = resolved.path_sequences[0]
 
@@ -539,8 +543,8 @@ def test_first_pullback_rejection_draw_and_event_memory_are_source_bound() -> No
     observer = CausalObserver(
         ObserverConfig(scale_specs=CORE_TEST_SCALE_SPECS)
     )
-    observer._record_group5_events(created)
-    observer._record_group5_events(resolved)
+    observer._record_interaction_events(created_canonical)
+    observer._record_interaction_events(resolved_canonical)
     assert any(
         event.kind is EventKind.ENTRY_PATH_STEP
         for event in observer.memory.recent()
@@ -571,7 +575,8 @@ def test_first_pullback_rejection_draw_and_event_memory_are_source_bound() -> No
     assert failed.entry_locations[0].lifecycle is EntryLocationLifecycle.LEFT
     assert failed.path_sequences[0].lifecycle is PathSequenceLifecycle.CLOSED
     assert failed.path_sequences[0].transition_reason == "location_left"
-    observer._record_group5_events(failed)
+    assert reducer._last_canonical is not None
+    observer._record_interaction_events(reducer._last_canonical)
     observer.memory.sync_retained_entity_timelines(
         (timeline_key,),
         asof=failure_bar.end,

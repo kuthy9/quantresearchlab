@@ -75,7 +75,7 @@ derived compatibility detail, not a second configuration authority. This pair
 does not create `smc_semantics_v2.0` or any composite semantic identity. Engine
 and Shadow retain their existing version/identity receipt fields, and the
 model-config byte hash remains part of runtime identity. The current combined
-Engine checkpoint schema is 6; earlier checkpoints fail closed on restore into
+Engine checkpoint schema is 7; earlier checkpoints fail closed on restore into
 the current Observation, Foundation, and Neutral-state contracts.
 
 The compact migration separates history from hot state. `EventStore`

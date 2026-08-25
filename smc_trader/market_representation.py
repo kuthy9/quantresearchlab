@@ -25,6 +25,12 @@ from typing import Any, Iterable, Mapping, Sequence
 import numpy as np
 import pandas as pd
 
+from .market_cases import (
+    EVENTFUL_TRANSITION_ARTIFACT_COLLECTION_NAMES,
+    MARKET_CASE_FORBIDDEN_EXACT_KEYS,
+    MARKET_CASE_FORBIDDEN_KEY_MARKERS,
+)
+
 
 try:  # Optional by design; do not make replay import depend on PyTorch.
     import torch
@@ -45,8 +51,8 @@ except ModuleNotFoundError as exc:  # pragma: no cover - branch depends on env.
     TORCH_AVAILABLE = False
 
 
-MODEL_VERSION = "1.0.0-causal-multiscale-gru"
-FEATURE_SCHEMA_VERSION = 1
+MODEL_VERSION = "1.1.0-causal-multiscale-gru"
+FEATURE_SCHEMA_VERSION = 2
 TIMEFRAMES = ("4h", "1h", "15m", "5m", "1m")
 EMBEDDING_DIM = 128
 PARAMETER_BUDGET = 5_000_000
@@ -91,14 +97,14 @@ MASK_TOKEN_ID = 1
 BAR_END_INDEX_BINDING = "__index_is_completed_bar_end__"
 INFERENCE_INPUT_PROTOCOL = "inference_unmasked_v1"
 NEUTRAL_INFERENCE_INPUT_PROTOCOL = "neutral_direct_source_filtered_v1"
-NEUTRAL_TRAINING_CONTRACT = "neutral-market-representation-b0-v2"
+NEUTRAL_TRAINING_CONTRACT = "neutral-market-representation-b0-v3"
 _NEUTRAL_CHECKPOINT_METADATA_KEYS = frozenset({
     "training_contract", "direct_source_preprocessing", "inference_input_protocol",
     "member_id", "seed", "split_counts", "lineage", "outcome_fields_used",
     "model_capability_validated",
 })
 _NEUTRAL_DIRECT_SOURCE_EVENT_PREPROCESSING_PROTOCOL = {
-    "protocol_version": "neutral-direct-source-event-preprocessing-1.0.0",
+    "protocol_version": "neutral-direct-source-event-preprocessing-1.1.0",
     "scope": "neutral_market_episode",
     "direct_source_detector": "prepared_direct_label_source_event_mask_v1",
     "direct_source_action": "drop",
@@ -152,14 +158,18 @@ NEXT_EVENT_TYPE_VOCAB = {
     "group3_order_block_transitions_this_update": 8,
     "group4_range_transitions_this_update": 9,
     "group4_manipulation_transitions_this_update": 10,
-    "group5_entry_location_transitions_this_update": 11,
-    "group5_reacceptance_transitions_this_update": 12,
-    "group5_micro_bos_transitions_this_update": 13,
-    "group5_path_transitions_this_update": 14,
-    "group5_step_transitions_this_update": 15,
-    "scene_node_delta": 16,
-    "scene_edge_delta": 17,
-    "scene_resolution": 18,
+    "interaction_zone_interactions": 11,
+    "interaction_reacceptance_interactions": 12,
+    "interaction_micro_break_facts": 13,
+    "interaction_paths": 14,
+    "interaction_path_transitions": 15,
+    "interaction_reacceptance_transitions": 16,
+    "interaction_milestone_transitions": 17,
+    "interaction_cold_source_ids": 18,
+    "interaction_boundary_reasons": 19,
+    "scene_node_delta": 20,
+    "scene_edge_delta": 21,
+    "scene_resolution": 22,
 }
 NEXT_LIFECYCLE_VOCAB = {
     "<pad>": 0,
@@ -566,9 +576,16 @@ class EventGraphObservation:
         asof: pd.Timestamp,
         market_epoch_id: str,
     ) -> "EventGraphObservation":
-        observed_at = payload.get("observed_at", payload.get("active_at", asof))
+        observed_at = payload.get(
+            "observed_at",
+            payload.get(
+                "resolved_at",
+                payload.get("last_updated_at", payload.get("active_at", asof)),
+            ),
+        )
         active_since = payload.get(
-            "active_since", payload.get("formed_at", observed_at)
+            "active_since",
+            payload.get("formed_at", payload.get("anchor_at", observed_at)),
         )
         observed = _aware_timestamp(observed_at, name="event.observed_at")
         active = _aware_timestamp(active_since, name="event.active_since")
@@ -589,7 +606,9 @@ class EventGraphObservation:
             active_since=active,
             duration_seconds=duration,
             relation_types=tuple(str(item) for item in relations),
-            direction=_direction_code(payload.get("direction", 0)),
+            direction=_direction_code(
+                payload.get("direction", payload.get("context_direction", 0))
+            ),
             scale=str(payload.get("scale", payload.get("timeframe", "unknown"))),
             market_epoch_id=str(payload.get("market_epoch_id", market_epoch_id)),
         )
@@ -598,6 +617,7 @@ class EventGraphObservation:
 def _event_identity(payload: Mapping[str, Any], *, fallback: str) -> str:
     for name in (
         "event_id",
+        "item_id",
         "location_id",
         "path_id",
         "step_id",
@@ -607,6 +627,7 @@ def _event_identity(payload: Mapping[str, Any], *, fallback: str) -> str:
         "range_id",
         "reacceptance_id",
         "reference_id",
+        "sequence_id",
         "pool_id",
         "displacement_id",
         "source_displacement_id",
@@ -632,6 +653,8 @@ def _typed_transition_mappings(value: Any) -> Iterable[Mapping[str, Any]]:
             "location_id",
             "path_id",
             "step_id",
+            "reference_id",
+            "sequence_id",
         }
         if marker_keys.intersection(value):
             yield value
@@ -753,7 +776,11 @@ def _case_event_observations(
                 for index, event in enumerate(_typed_transition_mappings(values)):
                     event_payload = dict(event)
                     event_payload.setdefault(
-                        "event_id", f"{collection_name}:{index}:{_event_identity(event, fallback='event')}"
+                        "event_id",
+                        _event_identity(
+                            event,
+                            fallback=f"{collection_name}:{index}:event",
+                        ),
                     )
                     event_payload.setdefault(
                         "event_type",
@@ -2127,6 +2154,7 @@ _MARKET_CASE_RUN_KEYS = frozenset(
         "mode",
         "runtime_state_schema_version",
         "profile",
+        "profile_registry",
         "source",
         "model_config",
         "market_case_input_identity",
@@ -2156,6 +2184,9 @@ _MARKET_CASE_MODEL_CONFIG_KEYS = frozenset(
         "timezone",
     }
 )
+_MARKET_CASE_PROFILE_REGISTRY_KEYS = frozenset(
+    {"path", "sha256", "schema_version"}
+)
 _MARKET_CASE_WINDOW_KEYS = frozenset(
     {
         "start",
@@ -2166,29 +2197,6 @@ _MARKET_CASE_WINDOW_KEYS = frozenset(
         "capture_interval",
     }
 )
-_NEUTRAL_INPUT_FORBIDDEN_KEY_MARKERS = (
-    "playbook",
-    "shadow",
-    "brain_response",
-    "selected_action",
-    "decision",
-    "risk",
-    "outcome",
-    "profit",
-    "pnl",
-    "mfe",
-    "mae",
-)
-_NEUTRAL_MICRO_BOS_REFERENCE_ALIGNMENTS = frozenset(
-    {
-        "aligned",
-        "opposed",
-        "simultaneous_unknown",
-        "ambiguous_same_clock",
-    }
-)
-
-
 def _strict_manifest_section(
     value: Any,
     *,
@@ -2238,9 +2246,9 @@ def _neutral_forbidden_input_paths(
         for raw_key, nested in value.items():
             key = str(raw_key).strip().lower()
             child = f"{path}.{key}" if path else key
-            if any(
+            if key in MARKET_CASE_FORBIDDEN_EXACT_KEYS or any(
                 marker in key
-                for marker in _NEUTRAL_INPUT_FORBIDDEN_KEY_MARKERS
+                for marker in MARKET_CASE_FORBIDDEN_KEY_MARKERS
             ):
                 found.append(child)
                 continue
@@ -2259,13 +2267,7 @@ def _neutral_forbidden_input_paths(
 def _normalise_neutral_observation_input(
     observation: Any,
 ) -> Mapping[str, Any]:
-    """Turn the sole causal ``outcome`` enum into a typed relation token.
-
-    ``validate_market_case_input_row`` has already enforced the exact nested
-    path and four-value enum.  Removing the overloaded key here lets the
-    generic representation guard remain strict for every economic/future
-    outcome while retaining this same-clock MicroBOS reference fact.
-    """
+    """Interpret raw break facts once at the Brain representation boundary."""
 
     if not isinstance(observation, Mapping):
         raise RepresentationDataError(
@@ -2277,27 +2279,52 @@ def _normalise_neutral_observation_input(
         raise RepresentationDataError(
             "neutral Observation transition collections must be an object"
         )
-    micro_bos_events = collections.get(
-        "group5_micro_bos_transitions_this_update"
+    micro_break_events = collections.get(
+        "interaction_micro_break_facts"
     )
-    if not isinstance(micro_bos_events, list):
+    if not isinstance(micro_break_events, list):
         raise RepresentationDataError(
-            "neutral MicroBOS transition collection must be an array"
+            "neutral micro-break fact collection must be an array"
         )
-    for event in micro_bos_events:
-        if not isinstance(event, dict):
-            raise RepresentationDataError(
-                "neutral MicroBOS transition must be an object"
+    try:
+        from .brain_entry_sequence import interpret_micro_break_facts
+        from .model import BOSScope, Direction, MicroBreakFact
+
+        facts = tuple(
+            MicroBreakFact(
+                reference_id=str(event["reference_id"]),
+                protocol_hash=str(event["protocol_hash"]),
+                context_kind=str(event["context_kind"]),
+                context_id=str(event["context_id"]),
+                context_direction=Direction(event["context_direction"]),
+                anchor_at=event["anchor_at"],
+                bos_id=str(event["bos_id"]),
+                bos_direction=Direction(event["bos_direction"]),
+                target_swing_id=str(event["target_swing_id"]),
+                scope=BOSScope(event["scope"]),
+                pending_at=event["pending_at"],
+                resolved_at=event["resolved_at"],
+                relation=str(event["relation"]),
+                strength=float(event["strength"]),
             )
-        if "outcome" not in event:
-            continue
-        alignment = event.pop("outcome")
-        if (
-            not isinstance(alignment, str)
-            or alignment not in _NEUTRAL_MICRO_BOS_REFERENCE_ALIGNMENTS
-        ):
+            for event in micro_break_events
+            if isinstance(event, Mapping)
+        )
+        if len(facts) != len(micro_break_events):
+            raise ValueError("micro-break fact is not an object")
+        references = {
+            reference.reference_id: reference
+            for reference in interpret_micro_break_facts(facts)
+        }
+    except (KeyError, TypeError, ValueError) as exc:
+        raise RepresentationDataError(
+            "neutral micro-break fact contract changed"
+        ) from exc
+    for event in micro_break_events:
+        reference = references.get(str(event["reference_id"]))
+        if reference is None:
             raise RepresentationDataError(
-                "neutral MicroBOS reference alignment changed"
+                "neutral micro-break interpretation lost an identity"
             )
         raw_relations = event.get("relation_types", ())
         if raw_relations is None:
@@ -2321,7 +2348,7 @@ def _normalise_neutral_observation_input(
             dict.fromkeys(
                 (
                     *relations,
-                    f"micro_bos_reference_alignment:{alignment}",
+                    f"micro_bos_reference_alignment:{reference.outcome}",
                 )
             )
         )
@@ -2369,9 +2396,9 @@ def _validated_market_case_run_manifest(
     has_repository = "repository" in run_manifest
     has_data_continuity = "data_continuity" in run_manifest
     if not (
-        (runtime_schema == 5 and not has_repository and not has_data_continuity)
-        or (runtime_schema == 6 and has_repository and not has_data_continuity)
-        or (runtime_schema == 7 and has_repository and has_data_continuity)
+        runtime_schema == 8
+        and has_repository
+        and has_data_continuity
     ):
         raise RepresentationDataError(
             "market case run runtime/continuity version binding changed"
@@ -2401,6 +2428,36 @@ def _validated_market_case_run_manifest(
     )
     _manifest_text(profile["name"], name="profile.name")
     _sha256_identity(profile["identity"], name="profile.identity")
+
+    profile_registry = _strict_manifest_section(
+        run_manifest["profile_registry"],
+        keys=_MARKET_CASE_PROFILE_REGISTRY_KEYS,
+        name="profile_registry",
+    )
+    registry_path = Path(
+        _manifest_text(
+            profile_registry["path"],
+            name="profile_registry.path",
+        )
+    )
+    if not registry_path.is_absolute():
+        raise RepresentationDataError(
+            "market case profile registry path must be absolute"
+        )
+    registry_sha256 = _sha256_identity(
+        profile_registry["sha256"],
+        name="profile_registry.sha256",
+    )
+    if (
+        _nonnegative_manifest_integer(
+            profile_registry["schema_version"],
+            name="profile_registry.schema_version",
+        )
+        != 1
+    ):
+        raise RepresentationDataError(
+            "market case profile registry schema changed"
+        )
 
     source = _strict_manifest_section(
         run_manifest["source"],
@@ -2531,6 +2588,8 @@ def _validated_market_case_run_manifest(
         "source_last": source_last,
         "source_last_completed_asof": source_completed,
         "source_role": source_role,
+        "profile_registry_path": str(registry_path),
+        "profile_registry_sha256": registry_sha256,
         "symbol": source_symbol,
         "instrument_id": source_instrument_id,
         "model_config_path": str(config_path),
@@ -3079,6 +3138,8 @@ def _next_typed_event_and_lifecycle(
             continue
         update_clock = update.get("asof")
         for raw_name, values in collections.items():
+            if raw_name not in EVENTFUL_TRANSITION_ARTIFACT_COLLECTION_NAMES:
+                continue
             typed = tuple(_typed_transition_mappings(values))
             if not typed:
                 continue

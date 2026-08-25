@@ -93,6 +93,9 @@ NEUTRAL_EMBEDDING_ARTIFACT_SCHEMA = "smc-neutral-market-episode-embeddings-v2"
 NEUTRAL_HEAD_ARTIFACT_SCHEMA = "smc-neutral-market-episode-active-heads-v2"
 NEUTRAL_MATERIAL_SELECTION_CONTRACT = "first_online_market_episode_material_kind_by_revision_index_v1"
 DATA_SPLITS = ROOT / "configs/data_splits.json"
+MARKET_CASE_PROFILE_REGISTRY = (
+    ROOT / "configs/market_case_input_profiles_v2.json"
+)
 NEUTRAL_MAX_EPOCHS = 10
 NEUTRAL_B0_VALIDATION_CONTRACT: Mapping[str, Any] = {
     "protocol_version": "neutral-representation-b0-validation-1.0.0",
@@ -633,12 +636,18 @@ def _load_neutral_market_dataset(
         or manifest.get("stream") != "market_case_input_shards"
         or manifest.get("field_types") != dict(MARKET_CASE_INPUT_FIELD_TYPES)
         or manifest.get("schema_fingerprint") != fingerprint
-        or not isinstance(bindings, Mapping) or set(bindings) != {"run_manifest"}
+        or not isinstance(bindings, Mapping)
+        or set(bindings) != {"run_manifest", "run_manifest_sha256"}
     ):
         raise RepresentationDataError("neutral input manifest identity is invalid")
     if _neutral_bound_file(input_path.parent, bindings["run_manifest"],
                            name="run binding") != run_path:
         raise RepresentationDataError("neutral input binds another run manifest")
+    if _normalized_sha256(
+        bindings["run_manifest_sha256"],
+        name="neutral input run manifest sha256",
+    ) != run_sha:
+        raise RepresentationDataError("neutral input run manifest hash mismatch")
     shards, declared = manifest.get("shards"), manifest.get("rows")
     if type(declared) is not int or declared < 1 or not isinstance(shards, list) or not shards:
         raise RepresentationDataError("neutral input manifest contains no rows")
@@ -700,17 +709,23 @@ def _neutral_split_registry() -> tuple[Any, Mapping[str, Any], str]:
     from smc_trader.validation import ValidationProtocolError, load_validation_protocol
 
     try:
-        raw = DATA_SPLITS.read_bytes()
-        payload = json.loads(raw.decode("utf-8"))
+        profile_raw = MARKET_CASE_PROFILE_REGISTRY.read_bytes()
+        payload = json.loads(profile_raw.decode("utf-8"))
         protocol = load_validation_protocol(DATA_SPLITS)
     except (OSError, UnicodeDecodeError, json.JSONDecodeError,
             ValidationProtocolError) as exc:
         raise RepresentationDataError("neutral split registry is invalid") from exc
     profiles = payload.get("market_case_input_profiles")
-    if not isinstance(profiles, Mapping):
+    if (
+        not isinstance(profiles, Mapping)
+        or payload.get("schema_version") != 1
+        or payload.get("registry") != "market_case_input_profiles"
+        or payload.get("authority") != "current"
+        or payload.get("historical_registry") != "configs/data_splits.json"
+    ):
         raise RepresentationDataError("neutral profiles are missing")
     return (protocol.neutral_representation_splits, profiles,
-            hashlib.sha256(raw).hexdigest())
+            hashlib.sha256(profile_raw).hexdigest())
 
 
 def _neutral_b0_registry_contract() -> tuple[Mapping[str, Any], str, str]:
@@ -1054,7 +1069,10 @@ def _load_neutral_fit_collection(
             )
         normalized = loaded["run_identity"]["normalized"]
         if (
-            normalized["window_start"] != window.start
+            normalized["profile_registry_path"]
+            != str(MARKET_CASE_PROFILE_REGISTRY.resolve())
+            or normalized["profile_registry_sha256"] != registry_sha
+            or normalized["window_start"] != window.start
             or normalized["window_end_exclusive"] != window.end_exclusive
             or normalized["window_role"] != window.allowed_ohlcv_role
             or run["window"]["warmup_days"] != registry.warmup_calendar_days

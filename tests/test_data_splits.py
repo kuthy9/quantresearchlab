@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+import hashlib
 import json
 from pathlib import Path
 
@@ -24,6 +25,7 @@ from smc_trader.validation import ValidationProtocolError, load_validation_proto
 
 ROOT = Path(__file__).resolve().parents[1]
 DATA_SPLITS = ROOT / "configs/data_splits.json"
+MARKET_CASE_PROFILES = ROOT / "configs/market_case_input_profiles_v2.json"
 
 
 NEUTRAL_REPRESENTATION_PROFILES = {
@@ -106,6 +108,35 @@ def test_current_data_splits_preserve_causal_and_mbo_identities() -> None:
     }
 
 
+def test_market_case_registry_versions_without_rewriting_frozen_splits() -> None:
+    assert hashlib.sha256(DATA_SPLITS.read_bytes()).hexdigest() == (
+        "aee2d14f40eb9ebbfc050e9779c5604e06f4811f9e1e929179e25c04fc5f84c8"
+    )
+    historical = json.loads(DATA_SPLITS.read_text(encoding="utf-8"))[
+        "market_case_input_profiles"
+    ]
+    current_payload = json.loads(
+        MARKET_CASE_PROFILES.read_text(encoding="utf-8")
+    )
+    assert set(current_payload) == {
+        "schema_version",
+        "registry",
+        "authority",
+        "historical_registry",
+        "market_case_input_profiles",
+    }
+    assert current_payload["authority"] == "current"
+    current = current_payload["market_case_input_profiles"]
+    assert set(current) == set(historical)
+    for name, current_profile in current.items():
+        historical_profile = historical[name]
+        assert current_profile == {
+            **historical_profile,
+            "recorder_schema_version": 2,
+            "protocol_version": "market-episode-input-only-1.3.0",
+        }
+
+
 def test_neutral_representation_windows_are_preregistered_with_exact_roles() -> None:
     payload = json.loads(DATA_SPLITS.read_text(encoding="utf-8"))
     protocol = load_validation_protocol(DATA_SPLITS)
@@ -129,7 +160,9 @@ def test_neutral_representation_windows_are_preregistered_with_exact_roles() -> 
     }
     assert set(registry.windows) == set(NEUTRAL_REPRESENTATION_PROFILES)
 
-    profiles = payload["market_case_input_profiles"]
+    profiles = json.loads(
+        MARKET_CASE_PROFILES.read_text(encoding="utf-8")
+    )["market_case_input_profiles"]
     for name, expected in NEUTRAL_REPRESENTATION_PROFILES.items():
         role, start, end, ohlcv_role, fit_allowed, symbol, instrument_id = expected
         profile = profiles[name]
@@ -154,7 +187,7 @@ def test_neutral_representation_windows_are_preregistered_with_exact_roles() -> 
             - pd.DateOffset(days=14)
         )
         selected_name, selected = _load_market_case_input_profile(
-            DATA_SPLITS,
+            MARKET_CASE_PROFILES,
             start=pd.Timestamp(start),
             end=pd.Timestamp(end),
             warmup_days=14,
@@ -255,7 +288,7 @@ def test_neutral_representation_registry_rejects_insufficient_gap(
 
 
 def test_registered_replay_contract_must_match_preflight_identity() -> None:
-    payload = json.loads(DATA_SPLITS.read_text(encoding="utf-8"))
+    payload = json.loads(MARKET_CASE_PROFILES.read_text(encoding="utf-8"))
     profile = payload["market_case_input_profiles"][
         "neutral_representation_train_2021_02"
     ]

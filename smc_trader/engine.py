@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
+from .brain_entry_sequence import BrainObservationView, brain_observation_view
 from .calibration import (
     TypedBrainCalibrator,
 )
@@ -67,12 +68,11 @@ _REQUIRED_PRIMITIVE_PROTOCOLS = (
     "displacement_protocol",
     "zone_protocol",
     "range_auction_protocol",
-    "group5_protocol",
 )
 _LIVE_READINESS_TOKEN = object()
 RUNTIME_ACTION_POLICY_SCHEMA_VERSION = 2
-NEUTRAL_ENGINE_CHECKPOINT_SCHEMA_VERSION = 6
-MODEL_SCHEMA_VERSION = 3
+NEUTRAL_ENGINE_CHECKPOINT_SCHEMA_VERSION = 7
+MODEL_SCHEMA_VERSION = 4
 ACTION_PIPELINE_SCHEMA_VERSION = 1
 LEGACY_ACTION_PIPELINE_MODE = "legacy_decision_risk_compat"
 
@@ -329,12 +329,25 @@ class ContinuousSMCEngine:
         observer_raw = payload.get("observer")
         if not isinstance(observer_raw, Mapping):
             raise ValueError("model.observer must bind all typed primitive protocols")
+        if "group5_protocol" in observer_raw:
+            raise ValueError(
+                "model.observer no longer accepts group5_protocol; "
+                "select interaction_protocol"
+            )
+        interaction_protocol_path = observer_raw.get(
+            "interaction_protocol"
+        )
         missing_protocols = [
             field
             for field in _REQUIRED_PRIMITIVE_PROTOCOLS
             if not isinstance(observer_raw.get(field), (str, Path))
             or not str(observer_raw.get(field)).strip()
         ]
+        if (
+            not isinstance(interaction_protocol_path, (str, Path))
+            or not str(interaction_protocol_path).strip()
+        ):
+            missing_protocols.append("interaction_protocol")
         if missing_protocols:
             raise ValueError(
                 "model.observer must bind typed primitive protocols: "
@@ -372,7 +385,7 @@ class ContinuousSMCEngine:
                 ),
                 zone_protocol=observer_raw.get("zone_protocol"),
                 range_auction_protocol=observer_raw.get("range_auction_protocol"),
-                group5_protocol=observer_raw.get("group5_protocol"),
+                interaction_protocol=interaction_protocol_path,
                 semantic_registry=str(
                     semantic_selection.atomic_registry.source_path
                 ),
@@ -397,15 +410,15 @@ class ContinuousSMCEngine:
         registry = load_playbook_registry(
             payload.get("playbook_registry", "configs/playbooks.json")
         )
-        group5_protocol = observer.group5_protocol
-        if group5_protocol is None:
-            raise ValueError("current engine requires typed Group 5 state")
+        interaction_protocol = observer.interaction_protocol
+        if interaction_protocol is None:
+            raise ValueError("current engine requires interaction semantics")
         favr_parked = "parked" in registry.for_playbook(
             Playbook.FAILED_AUCTION_VALUE_RETURN
         ).status
-        if group5_protocol.favr_enabled == favr_parked:
+        if interaction_protocol.favr_enabled == favr_parked:
             raise ValueError(
-                "Group 5 favr_enabled must agree with the FAVR "
+                "interaction favr_enabled must agree with the FAVR "
                 "development restriction"
             )
         if runtime_mode == "live":
@@ -436,7 +449,7 @@ class ContinuousSMCEngine:
                     and readiness.get("live_execution_allowed") is True
                 ),
                 "group5_dfp_lsr_input_authority_validated": (
-                    group5_protocol.dfp_lsr_input_authority_validated
+                    interaction_protocol.dfp_lsr_input_authority_validated
                 ),
             }
             missing = tuple(
@@ -776,14 +789,19 @@ class ContinuousSMCEngine:
             if belief_position is not None
             else account.position
         )
+        # Construct the Brain adapter once.  Neutral thesis publication and
+        # every downstream Brain/Decision/Risk consumer share this exact
+        # interpreted view for the completed clock.
+        brain_observation = brain_observation_view(observation)
         _, neutral_market_state = self._project_neutral(
-            observation
+            observation,
+            brain_observation=brain_observation,
         )
         scene_graph = self.observer.scene_graph
         scene_delta = self.observer.last_scene_delta
         if neutral_market_state is not None:
             belief = self.brain.update(
-                observation,
+                brain_observation,
                 position=resolved_belief_position,
                 scene_graph=scene_graph,
                 scene_delta=scene_delta,
@@ -794,7 +812,7 @@ class ContinuousSMCEngine:
             )
         else:
             belief = self.brain.update(
-                observation,
+                brain_observation,
                 position=resolved_belief_position,
                 scene_graph=scene_graph,
                 scene_delta=scene_delta,
@@ -812,8 +830,12 @@ class ContinuousSMCEngine:
             if self.action_disabled_playbooks
             else belief
         )
-        decision = self.decision.decide(observation, decision_belief, account)
-        risk = self.risk.review(decision, observation, account)
+        decision = self.decision.decide(
+            brain_observation,
+            decision_belief,
+            account,
+        )
+        risk = self.risk.review(decision, brain_observation, account)
         snapshot = EngineSnapshot(
             observation=observation,
             belief=belief,
@@ -843,7 +865,11 @@ class ContinuousSMCEngine:
                 "neutral-only Engine requires Scene Graph projection"
             )
         observation = self._observe_bar(bar, execution=execution)
-        _, neutral_market_state = self._project_neutral(observation)
+        brain_observation = brain_observation_view(observation)
+        _, neutral_market_state = self._project_neutral(
+            observation,
+            brain_observation=brain_observation,
+        )
         if neutral_market_state is None:
             raise RuntimeError(
                 "neutral-only Engine did not produce a neutral state"
@@ -868,6 +894,8 @@ class ContinuousSMCEngine:
     def _project_neutral(
         self,
         observation: MarketObservation,
+        *,
+        brain_observation: BrainObservationView | None = None,
     ) -> tuple[GlobalMarketContext | None, NeutralMarketState | None]:
         scene_graph = self.observer.scene_graph
         scene_delta = self.observer.last_scene_delta
@@ -888,6 +916,8 @@ class ContinuousSMCEngine:
             if self._neutral_market_state is None
             else self._neutral_market_state.open_market_theses
         )
+        if brain_observation is None:
+            brain_observation = brain_observation_view(observation)
         neutral_global_context = replace(
             raw_global_context,
             open_market_theses=build_open_market_theses(
@@ -896,11 +926,12 @@ class ContinuousSMCEngine:
                 scene_delta,
                 scene_graph,
                 raw_global_context,
+                brain_interaction=brain_observation.interaction,
             ),
         )
         neutral_market_state = build_neutral_market_state(
             self._neutral_market_state,
-            observation,
+            brain_observation,
             neutral_global_context,
         )
         return neutral_global_context, neutral_market_state

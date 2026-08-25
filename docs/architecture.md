@@ -152,7 +152,7 @@ the selected atomic version. It does not mint a composite or “full-stack v2”
 identity. Engine construction loads this pair once and derives the internal
 Foundation-enabled flag; Engine, Shadow, and checkpoint state freeze and
 compare the existing version/identity fields. The current combined Engine
-checkpoint schema is 6; earlier schemas are rejected rather than restored into
+checkpoint schema is 7; earlier schemas are rejected rather than restored into
 an incompatible Observation, Foundation, or Neutral-state contract.
 
 ### Hot-state boundary

@@ -392,7 +392,7 @@ def _build_eye(
         "displacement_protocol": EXPECTED_PROTOCOLS["displacement"],
         "zone_protocol": EXPECTED_PROTOCOLS["group3"],
         "range_auction_protocol": EXPECTED_PROTOCOLS["group4"],
-        "group5_protocol": EXPECTED_PROTOCOLS["group5"],
+        "interaction_protocol": EXPECTED_PROTOCOLS["group5"],
     }
     if any(
         str(observer_raw.get(name)) != value
@@ -429,7 +429,7 @@ def _build_eye(
             ),
             zone_protocol=str(ROOT / EXPECTED_PROTOCOLS["group3"]),
             range_auction_protocol=str(ROOT / EXPECTED_PROTOCOLS["group4"]),
-            group5_protocol=str(ROOT / EXPECTED_PROTOCOLS["group5"]),
+            interaction_protocol=str(ROOT / EXPECTED_PROTOCOLS["group5"]),
             scale_specs=specs,
             project_scene_graph=False,
             materialize_event_view=False,

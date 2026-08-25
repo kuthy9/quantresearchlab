@@ -64,6 +64,15 @@ while still proving its interval complete. If the typed observer cannot prove
 an interval complete, `complete=false`; target builders must mask that interval
 rather than treating the next case stage as a market event.
 
+Recorder schema 8/protocol 1.7 binds `InteractionUpdate` schema 1 and raw Eye
+authority. Each retained `updates[*].collections` object has exactly 15 keys:
+six Group 1-4 deltas and nine Interaction collections. The four current
+Interaction views stay inside their own update; the top-level aggregate has
+exactly 11 event/delta keys and excludes those current views, so two clocks do
+not become duplicated pseudo-history. Current views alone never create a
+heartbeat. Exact nested DTO shapes and physical vocabulary reject Brain
+interpretation fields and legacy Group-5 collection names.
+
 Admission is fail-closed. A newly visible episode carrying an earlier
 first-pullback, trigger, or terminal clock is excluded and counted in
 `summary.skipped_quality`. LSR additionally rejects a new Context/Episode that
@@ -222,7 +231,7 @@ flags on unfilled or censored paths.
 Checkpoint/resume pickles the recorder inside the existing replay checkpoint.
 The run identity, exact Arrow schema fingerprints, shard hashes, row counts and
 contiguous shard indices are all verified before resume/finalization.
-Recorder schema 7 and causal-case protocol 1.6 bind the deterministic Scene
+Recorder schema 8 and causal-case protocol 1.7 bind the deterministic Scene
 projection together with the outcome-selection and censoring rules above;
-schema-6 checkpoints and run manifests fail closed rather than resuming under
-changed case identities.
+schema-7 artifacts and Brain runner-state schema 14 fail closed rather than
+resuming under the schema-8/runner-state-15 identities.

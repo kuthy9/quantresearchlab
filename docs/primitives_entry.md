@@ -483,3 +483,20 @@ failure parks the affected concept instead of starting threshold search.
 Primitive PnL, rolling OOF, MBO stability and sealed holdout are explicitly
 out of scope. Typed state may feed the Brain during development, but Group5
 never owns an independent action and FAVR remains disabled.
+
+Implementation naming changed without changing this frozen protocol identity:
+`InteractionSemantics` is the sole production reducer and `group5.py` is a
+legacy import shim. The Eye-side schema exposes raw `MicroBreakFact` and
+physical milestone paths only. Aligned/opposed classification, path success,
+setup qualification, entry method, SL/TP, and TradeIntent are Brain-owned.
+Historical `MicroBOSReference` and interpreted path names exist only in the
+explicit `group5.py` cold-reader adapter and are not serialized by
+`MarketObservation` schema 3. Schema 3 removes the former Group-5 availability,
+current-state, transition, and boundary fields from the canonical dataclass and
+exact pickle shape; all current consumers read its sole `interaction_update`.
+`InteractionProtocol`, `InteractionSemantics`, and `InteractionUpdate` remain
+explicit internal-module imports rather than package-root public exports.
+`InteractionUpdate` has an exact schema-1 pickle and artifact contract. Its
+nested locations, reacceptances, paths, steps, and MicroBreak facts reject
+missing or extra fields; cross-record custody uses bounded maps over the
+current update rather than retained history.

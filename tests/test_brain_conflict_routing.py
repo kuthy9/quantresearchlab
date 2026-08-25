@@ -1,10 +1,9 @@
 from __future__ import annotations
 
-from dataclasses import replace
-
 import pandas as pd
 import pytest
 
+from smc_trader.brain_entry_sequence import brain_observation_view
 from smc_trader.model import (
     Action,
     ActionUtility,
@@ -51,7 +50,7 @@ from smc_trader.scene_graph import (
     update_global_market_context,
 )
 
-from .helpers import long_plan, market_observation, replace_market_observation
+from .helpers import long_plan, market_observation
 from .test_v4_typed_vertical import (
     _advance_observation,
     _brain,
@@ -59,6 +58,8 @@ from .test_v4_typed_vertical import (
     _lsr_observation,
     _mapped_brain,
     _ready_decision_layer,
+    replace,
+    replace_market_observation,
 )
 
 
@@ -851,7 +852,7 @@ def test_one_identity_bound_unknown_contributes_uncertainty_once() -> None:
 
 
 def test_h1_authority_transition_pauses_h4_aligned_dfp_without_erasing_plan() -> None:
-    observation = market_observation(asof=BASE)
+    observation = brain_observation_view(market_observation(asof=BASE))
     plan = long_plan(observation)
     key = "displacement_first_pullback:long"
     conflict = _conflict(
@@ -917,7 +918,7 @@ def test_h1_authority_transition_pauses_h4_aligned_dfp_without_erasing_plan() ->
 
 
 def test_shared_global_authority_cannot_bind_an_unrelated_open_episode() -> None:
-    observation = market_observation(asof=BASE)
+    observation = brain_observation_view(market_observation(asof=BASE))
     plan = long_plan(observation)
     thesis = OpenMarketThesis(
         thesis_id="market-thesis:unrelated",
@@ -1023,7 +1024,7 @@ def test_open_thesis_unmatched_reason_is_explicit(
 
 
 def test_position_weakens_on_zero_delivery_or_material_authority_opposition() -> None:
-    observation = market_observation(asof=BASE)
+    observation = brain_observation_view(market_observation(asof=BASE))
     plan = long_plan(observation)
     position = PositionSnapshot(
         thesis_hash="position:test",

@@ -12,6 +12,7 @@ from typing import Collection, Mapping, Sequence
 
 import pandas as pd
 
+from .brain_entry_sequence import brain_observation_view
 from .calibration import TypedBrainCalibrator
 from .dol_ranking import (
     DOLCandidateFact,
@@ -2134,7 +2135,7 @@ def _stage_uncertainty(
     )
     typed_contract_missing = float(
         len(completed_steps) >= group5_required_after
-        and not observation.group5_typed_available
+        and observation.interaction_update is None
     )
     required_missing = typed_contract_missing
     timeframe_contract = _UNCERTAINTY_STEP_TIMEFRAMES[playbook]
@@ -4461,14 +4462,14 @@ def _typed_lsr(
         and entry_path.ended_at != observation.asof
     )
     frozen_pool_missing = bool(
-        observation.group5_typed_available
+        observation.interaction_update is not None
         and prior is not None
         and prior.phase not in _TERMINAL_PHASES
         and prior.setup_context_id is not None
         and pool_path is None
     )
     frozen_location_missing = bool(
-        observation.group5_typed_available
+        observation.interaction_update is not None
         and prior is not None
         and prior.phase not in _TERMINAL_PHASES
         and prior.entry_location_id is not None
@@ -5195,7 +5196,7 @@ def _typed_favr(
         prior,
     )
     frozen_location_missing = bool(
-        observation.group5_typed_available
+        observation.interaction_update is not None
         and prior_episode_live
         and prior is not None
         and prior.entry_location_id is not None
@@ -12133,6 +12134,8 @@ class PlaybookBrain:
         one fallback build for isolated evaluator and unit-test use.
         """
 
+        observation = brain_observation_view(observation)
+
         has_precomputed_state = _precomputed_neutral_state is not None
         has_neutral_capability = _neutral_authority_capability is not None
         if has_precomputed_state != has_neutral_capability:
@@ -12270,6 +12273,7 @@ class PlaybookBrain:
                         scene_delta,
                         scene_graph,
                         global_context,
+                        brain_interaction=observation.interaction,
                     ),
                 )
             else:

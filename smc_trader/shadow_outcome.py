@@ -17,6 +17,7 @@ from typing import Any, Mapping
 
 import pandas as pd
 
+from .brain_entry_sequence import brain_observation_view
 from .model import (
     BOSLifecycle,
     Bar,
@@ -1488,11 +1489,12 @@ def _entry_location_path_ids(
     observation: Any,
     location_id: str,
 ) -> tuple[str, ...]:
+    observation = brain_observation_view(observation)
     return tuple(
         sorted(
             {
                 str(path.sequence_id)
-                for path in getattr(observation, "path_sequences", ())
+                for path in observation.path_sequences
                 if getattr(path, "context_kind", None) == "zone_return"
                 and getattr(path, "context_id", None) == location_id
                 and isinstance(getattr(path, "sequence_id", None), str)
@@ -3540,7 +3542,7 @@ class ShadowCandidateOutcomeRecorder:
         context = getattr(snapshot.belief, "global_context", None)
         theses = () if context is None else context.open_market_theses
         action_candidates = _action_candidate_items(snapshot.belief)
-        observation = snapshot.observation
+        observation = brain_observation_view(snapshot.observation)
         specs: list[_CandidateSpec] = []
         for thesis in sorted(theses, key=lambda item: item.thesis_id):
             if getattr(thesis, "lifecycle", "forming") == "invalidated":
@@ -3622,7 +3624,7 @@ class ShadowCandidateOutcomeRecorder:
                 (
                     item
                     for identity in entry_location_ids
-                    for item in getattr(observation, "entry_locations", ())
+                    for item in observation.entry_locations
                     if getattr(item, "location_id", None) == identity
                 ),
                 None,
@@ -4100,7 +4102,7 @@ class ShadowCandidateOutcomeRecorder:
         *,
         allow_equal: bool,
     ) -> Any:
-        observation = snapshot.observation
+        observation = brain_observation_view(snapshot.observation)
         asof = aware_timestamp(
             observation.asof,
             name="shadow_outcome.observation.asof",
@@ -4148,7 +4150,7 @@ class ShadowCandidateOutcomeRecorder:
         self,
         snapshot: EngineSnapshot,
     ) -> tuple[_CandidateSpec, ...]:
-        observation = snapshot.observation
+        observation = brain_observation_view(snapshot.observation)
         asof = observation.asof
         specs: list[_CandidateSpec] = []
         for frame in observation.frames.values():
@@ -4193,7 +4195,7 @@ class ShadowCandidateOutcomeRecorder:
                         (transition.entity_id, transition.transition_id),
                     )
                 )
-        for location in observation.group5_entry_location_transitions_this_update:
+        for location in observation.entry_locations:
             (
                 binding_id,
                 binding,
@@ -4526,7 +4528,7 @@ class ShadowCandidateOutcomeRecorder:
                         direct_invalidation_id=manipulation.manipulation_id,
                     )
                 )
-        for reference in observation.group5_micro_bos_transitions_this_update:
+        for reference in observation.micro_bos_references:
             if reference.qualified and reference.resolved_at == asof:
                 location = self._location(
                     observation,
@@ -4551,7 +4553,7 @@ class ShadowCandidateOutcomeRecorder:
                         None if location is None else location.location_id,
                     )
                 )
-        for reacceptance in observation.group5_reacceptance_transitions_this_update:
+        for reacceptance in observation.qualified_reacceptances:
             if (
                 reacceptance.lifecycle
                 is QualifiedReacceptanceLifecycle.HELD
@@ -4583,10 +4585,11 @@ class ShadowCandidateOutcomeRecorder:
 
     @staticmethod
     def _location(observation: Any, location_id: str) -> Any | None:
+        observation = brain_observation_view(observation)
         return next(
             (
                 item
-                for item in getattr(observation, "entry_locations", ())
+                for item in observation.entry_locations
                 if item.location_id == location_id
             ),
             None,

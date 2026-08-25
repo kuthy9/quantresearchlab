@@ -7,13 +7,17 @@ from types import SimpleNamespace
 import pandas as pd
 import pytest
 
+from smc_trader.brain_entry_sequence import brain_observation_view
 from smc_trader.model import (
+    BOSScope,
     Direction,
     DirectionalObstructionView,
     EntryLocationLifecycle,
     EntryLocationState,
     GlobalMarketContext,
+    InteractionUpdate,
     MarketMode,
+    MicroBreakFact,
     NEUTRAL_MARKET_STATE_SCHEMA_VERSION,
     OpenMarketThesis,
     PathSequenceLifecycle,
@@ -119,6 +123,22 @@ def _path_step(
     predecessor: str | None,
     same_clock_relation: str,
 ) -> PathSequenceStep:
+    physical_reason = {
+        "zone_visible": "typed_entry_zone_registered",
+        "departure_confirmed": "later_close_on_delivery_side",
+        "first_pullback": "crossed_near_edge",
+        "wick_rejection": "same_bar_wick_rejection",
+        "reacceptance_held": "later_real_completed_hold",
+        "location_left": "close_beyond_far_edge",
+    }.get(kind)
+    if kind == "micro_bos_confirmed":
+        physical_reason = (
+            "confirmed_m1_break_at_anchor_clock"
+            if same_clock_relation == "same_clock_unknown"
+            else "first_strictly_later_confirmed_m1_break"
+        )
+    if physical_reason is None:
+        raise ValueError(f"test path step kind is not physical: {kind}")
     return PathSequenceStep(
         step_id=step_id,
         kind=kind,
@@ -129,7 +149,7 @@ def _path_step(
         same_clock_relation=same_clock_relation,
         direction=direction,
         strength=0.5,
-        reason=f"test:{kind}",
+        reason=physical_reason,
     )
 
 
@@ -329,17 +349,108 @@ def _observation(
     paths: tuple[PathSequenceState, ...],
     boundary_paths: tuple[PathSequenceState, ...] = (),
     anomalies: tuple[str, ...] = (),
-) -> SimpleNamespace:
-    return SimpleNamespace(
+) -> object:
+    physical_paths: list[PathSequenceState] = []
+    facts: list[MicroBreakFact] = []
+    locations_by_id = {location.location_id: location for location in locations}
+    for path in paths:
+        physical_steps: list[PathSequenceStep] = []
+        for step in path.steps:
+            if step.kind.startswith("micro_bos_"):
+                location = locations_by_id[path.context_id]
+                anchor_at = location.first_entered_at
+                if anchor_at is None:
+                    raise ValueError("test micro break requires its pullback")
+                relation = (
+                    "same_clock_unknown"
+                    if step.observed_at == anchor_at
+                    else "strictly_after"
+                )
+                physical_step = replace(
+                    step,
+                    step_id=f"{step.step_id}:physical",
+                    kind="micro_break_observed",
+                    predecessor_step_ids=(physical_steps[-1].step_id,),
+                    reason=(
+                        "confirmed_m1_break_at_anchor_clock"
+                        if relation == "same_clock_unknown"
+                        else "first_strictly_later_confirmed_m1_break"
+                    ),
+                )
+                facts.append(
+                    MicroBreakFact(
+                        reference_id=f"reference:{step.step_id}",
+                        protocol_hash=path.protocol_hash,
+                        context_kind=path.context_kind,
+                        context_id=path.context_id,
+                        context_direction=path.direction,
+                        anchor_at=anchor_at,
+                        bos_id=step.source_event_id or "",
+                        bos_direction=(
+                            (
+                                Direction.SHORT
+                                if path.direction is Direction.LONG
+                                else Direction.LONG
+                            )
+                            if path.transition_reason == "micro_bos_opposed"
+                            else path.direction
+                        ),
+                        target_swing_id=step.source_entity_id,
+                        scope=BOSScope.LOCAL,
+                        pending_at=step.observed_at - pd.Timedelta(minutes=1),
+                        resolved_at=step.observed_at,
+                        relation=relation,
+                        strength=step.strength,
+                    )
+                )
+            else:
+                physical_step = replace(
+                    step,
+                    predecessor_step_ids=(
+                        ()
+                        if not physical_steps
+                        else (physical_steps[-1].step_id,)
+                    ),
+                )
+            physical_steps.append(physical_step)
+        physical_paths.append(
+            replace(
+                path,
+                steps=tuple(physical_steps),
+                transition_reason=(
+                    "first_strict_micro_break_observed"
+                    if path.transition_reason
+                    in {
+                        "micro_bos_aligned",
+                        "micro_bos_opposed",
+                        "micro_bos_ambiguous_same_clock",
+                    }
+                    else path.transition_reason
+                ),
+            )
+        )
+    raw = SimpleNamespace(
         asof=context.updated_at,
         scene_revision_id=context.scene_revision_id,
         symbol=SYMBOL,
         instrument_id=INSTRUMENT_ID,
-        entry_locations=locations,
-        path_sequences=paths,
-        group5_boundary_path_transitions=boundary_paths,
+        interaction_update=InteractionUpdate(
+            zone_interactions=(() if boundary_paths else locations),
+            reacceptance_interactions=(),
+            micro_break_facts=(() if boundary_paths else tuple(facts)),
+            interaction_paths=(
+                () if boundary_paths else tuple(physical_paths)
+            ),
+            interaction_path_transitions=boundary_paths,
+            boundary_reason=(
+                None
+                if not boundary_paths
+                else boundary_paths[0].transition_reason
+            ),
+        ),
         anomalies=anomalies,
     )
+    return brain_observation_view(raw)
 
 
 def test_zero_one_many_claims_are_relations_on_one_physical_episode() -> None:
@@ -529,18 +640,13 @@ def test_unbound_unique_ambiguous_unique_preserves_physical_identity() -> None:
     location = _location()
     path = _path(location)
     context0 = _context(BASE)
-    state0 = build_neutral_market_state(
-        None,
-        _observation(context0, locations=(location,), paths=()),
-        context0,
-    )
-    assert state0.market_episodes == ()
-    assert state0.unbound_entry_location_ids == (location.location_id,)
+    with pytest.raises(ValueError, match="zones and paths differ"):
+        _observation(context0, locations=(location,), paths=())
 
     at1 = BASE + pd.Timedelta(minutes=1)
     context1 = _context(at1)
     state1 = build_neutral_market_state(
-        state0,
+        None,
         _observation(context1, locations=(location,), paths=(path,)),
         context1,
     )
@@ -555,25 +661,17 @@ def test_unbound_unique_ambiguous_unique_preserves_physical_identity() -> None:
     at2 = BASE + pd.Timedelta(minutes=2)
     context2 = _context(at2)
     sibling_path = _path(location, path_id="path:two")
-    state2 = build_neutral_market_state(
-        state1,
+    with pytest.raises(ValueError, match="path contexts repeat"):
         _observation(
             context2,
             locations=(location,),
             paths=(path, sibling_path),
-        ),
-        context2,
-    )
-    assert state2.market_episodes[0].episode_id == identity
-    assert state2.market_episodes[0].binding_status == "ambiguous"
-    assert state2.ambiguous_entry_location_path_ids == (
-        (location.location_id, ("path:one", "path:two")),
-    )
+        )
 
     at3 = BASE + pd.Timedelta(minutes=3)
     context3 = _context(at3)
     state3 = build_neutral_market_state(
-        state2,
+        state1,
         _observation(context3, locations=(location,), paths=(path,)),
         context3,
     )
@@ -586,16 +684,12 @@ def test_same_location_multi_path_never_admits_but_distinct_locations_do() -> No
     first_path = _path(first_location)
     second_path = _path(first_location, path_id="path:two")
     context = _context(BASE)
-    rejected = build_neutral_market_state(
-        None,
+    with pytest.raises(ValueError, match="path contexts repeat"):
         _observation(
             context,
             locations=(first_location,),
             paths=(first_path, second_path),
-        ),
-        context,
-    )
-    assert rejected.market_episodes == ()
+        )
 
     second_location = _location(
         location_id="location:two",
@@ -662,7 +756,7 @@ def test_same_bar_pullback_survives_location_left_and_wick_rejection() -> None:
 
 
 def test_terminal_episode_freezes_claims_and_never_retransitions() -> None:
-    at2 = BASE + pd.Timedelta(minutes=2)
+    at2 = BASE + pd.Timedelta(minutes=3)
     location = _location(
         asof=at2,
         lifecycle=EntryLocationLifecycle.LEFT,
@@ -672,6 +766,7 @@ def test_terminal_episode_freezes_claims_and_never_retransitions() -> None:
         asof=at2,
         terminal_reason="micro_bos_opposed",
         include_pullback=True,
+        include_trigger=True,
     )
     thesis = _thesis(
         1,
@@ -694,7 +789,7 @@ def test_terminal_episode_freezes_claims_and_never_retransitions() -> None:
     state2 = pickle.loads(pickle.dumps(state2, protocol=pickle.HIGHEST_PROTOCOL))
     assert state2.market_episodes == (terminal,)
 
-    at3 = BASE + pd.Timedelta(minutes=3)
+    at3 = BASE + pd.Timedelta(minutes=4)
     context3 = _context(at3)
     unchanged = build_neutral_market_state(
         state2,
@@ -704,19 +799,15 @@ def test_terminal_episode_freezes_claims_and_never_retransitions() -> None:
     assert unchanged.market_episodes == (terminal,)
     assert unchanged.episode_transitions_this_update == ()
 
-    unbound = build_neutral_market_state(
-        state2,
-        _observation(context3, locations=(location,), paths=()),
-        context3,
-    )
-    assert unbound.market_episodes == (terminal,)
-    assert unbound.episode_transitions_this_update == ()
+    with pytest.raises(ValueError, match="zones and paths differ"):
+        _observation(context3, locations=(location,), paths=())
 
     changed_terminal = _path(
         location,
         asof=at3,
         terminal_reason="micro_bos_opposed",
         include_pullback=True,
+        include_trigger=True,
     )
     with pytest.raises(ValueError, match="terminal custody changed"):
         build_neutral_market_state(
@@ -836,19 +927,25 @@ def test_trigger_relation_is_to_pullback_not_same_clock_predecessor() -> None:
         steps=(*current_path.steps, held, trigger),
     )
     current_context = _context(trigger_at)
+    current_observation = _observation(
+        current_context,
+        locations=(current_location,),
+        paths=(current_path,),
+    )
+    interpreted_trigger = next(
+        step
+        for step in current_observation.interaction.path_sequences[0].steps
+        if step.source_event_id == "bos:trigger"
+    )
     current = build_neutral_market_state(
         initial,
-        _observation(
-            current_context,
-            locations=(current_location,),
-            paths=(current_path,),
-        ),
+        current_observation,
         current_context,
     )
     episode = current.market_episodes[0]
 
     assert episode.first_pullback_at == pullback_at
-    assert episode.trigger_step_id == trigger.step_id
+    assert episode.trigger_step_id == interpreted_trigger.step_id
     assert episode.trigger_event_id == "bos:trigger"
     assert episode.trigger_at == trigger_at
     assert episode.successful_pulse_at == trigger_at
@@ -968,7 +1065,7 @@ def test_success_compaction_is_explicit_retirement_not_terminal() -> None:
     assert retired.episode_transitions_this_update == ()
 
 
-def test_unknown_closed_path_reason_fails_closed() -> None:
+def test_unknown_closed_path_reason_fails_at_interaction_boundary() -> None:
     at = BASE + pd.Timedelta(minutes=2)
     location = _location(
         asof=at,
@@ -981,11 +1078,14 @@ def test_unknown_closed_path_reason_fails_closed() -> None:
         include_pullback=True,
     )
     context = _context(at)
-    with pytest.raises(ValueError, match="unknown closed-path reason"):
-        build_neutral_market_state(
-            None,
-            _observation(context, locations=(location,), paths=(path,)),
+    with pytest.raises(
+        ValueError,
+        match="interaction path physical vocabulary or direction changed",
+    ):
+        _observation(
             context,
+            locations=(location,),
+            paths=(path,),
         )
 
 

@@ -625,23 +625,44 @@ def typed_identity_sets(observation: Any) -> dict[str, set[str]]:
         "manipulation",
         observation.group4_boundary_manipulation_transitions,
     )
-    _add_identities(identities, "entry_location", observation.entry_locations)
+    interaction = observation.interaction_update
+    entry_locations = (
+        () if interaction is None else interaction.zone_interactions
+    )
+    reacceptances = (
+        () if interaction is None else interaction.reacceptance_interactions
+    )
+    micro_breaks = (
+        () if interaction is None else interaction.micro_break_facts
+    )
+    paths = (
+        () if interaction is None else interaction.interaction_paths
+    )
+    boundary_paths = (
+        () if interaction is None else interaction.interaction_path_transitions
+    )
+    boundary_reacceptances = (
+        ()
+        if interaction is None
+        else interaction.reacceptance_interaction_transitions
+    )
+    _add_identities(identities, "entry_location", entry_locations)
     _add_identities(
         identities,
         "qualified_reacceptance",
-        observation.qualified_reacceptances,
+        reacceptances,
     )
-    _add_identities(identities, "micro_bos", observation.micro_bos_references)
-    _add_identities(identities, "path_sequence", observation.path_sequences)
+    _add_identities(identities, "micro_bos", micro_breaks)
+    _add_identities(identities, "path_sequence", paths)
     _add_identities(
         identities,
         "path_sequence",
-        observation.group5_boundary_path_transitions,
+        boundary_paths,
     )
     _add_identities(
         identities,
         "qualified_reacceptance",
-        observation.group5_boundary_reacceptance_transitions,
+        boundary_reacceptances,
     )
     displacement = observation.displacement
     if displacement is not None:
@@ -677,8 +698,14 @@ def _path_step_transport(
     current_epoch_id: str | None,
     sequence_id: str,
 ) -> dict[str, Any] | None:
-    paths = tuple(observation.path_sequences) + tuple(
-        observation.group5_boundary_path_transitions
+    interaction = observation.interaction_update
+    paths = (
+        ()
+        if interaction is None
+        else (
+            *interaction.interaction_paths,
+            *interaction.interaction_path_transitions,
+        )
     )
     path = next(
         (item for item in reversed(paths) if item.sequence_id == sequence_id),

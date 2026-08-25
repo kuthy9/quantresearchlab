@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import replace as _dataclass_replace
 import hashlib
 import pickle
 from pathlib import Path
@@ -9,6 +9,11 @@ from types import SimpleNamespace
 import pandas as pd
 import pytest
 
+from smc_trader.brain_entry_sequence import (
+    BrainObservationView,
+    brain_interaction_view,
+    brain_observation_view,
+)
 from smc_trader.calibration import (
     DimensionReliabilityMap,
     DimensionReliabilityPoint,
@@ -42,6 +47,7 @@ from smc_trader.model import (
     FVGQualification,
     FairValueGapState,
     HypothesisBelief,
+    InteractionUpdate,
     LiquidityInventoryItem,
     LiquidityInventoryLifecycle,
     LiquidityLevel,
@@ -49,6 +55,8 @@ from smc_trader.model import (
     LiquidityPoolState,
     ManipulationLifecycle,
     ManipulationState,
+    MicroBreakFact,
+    MicroBOSReference,
     GlobalMarketContext,
     MarketObservation,
     MarketMode,
@@ -106,7 +114,7 @@ from smc_trader.scene_graph import (
 from .helpers import (
     graph_free_action_belief,
     market_observation,
-    replace_market_observation,
+    replace_market_observation as _replace_market_observation,
 )
 
 
@@ -116,6 +124,228 @@ GROUP12_PROTOCOL_PATH = (
 )
 GROUP3_PROTOCOL_PATH = ROOT / "configs/primitives_zones.json"
 GROUP4_PROTOCOL_PATH = ROOT / "configs/primitives_range.json"
+
+
+def _interaction_identity(*parts: object) -> str:
+    return hashlib.sha256(
+        "|".join(
+            value.isoformat()
+            if isinstance(value, pd.Timestamp)
+            else str(value)
+            for value in parts
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _micro_break_facts(
+    references: tuple[object, ...],
+) -> tuple[MicroBreakFact, ...]:
+    return tuple(
+        MicroBreakFact(
+            reference_id=reference.reference_id,
+            protocol_hash=reference.protocol_hash,
+            context_kind=reference.context_kind,
+            context_id=reference.context_id,
+            context_direction=reference.expected_direction,
+            anchor_at=reference.anchor_at,
+            bos_id=reference.bos_id,
+            bos_direction=reference.bos_direction,
+            target_swing_id=reference.target_swing_id,
+            scope=reference.scope,
+            pending_at=reference.pending_at,
+            resolved_at=reference.resolved_at,
+            relation=reference.relation,
+            strength=reference.strength,
+        )
+        for reference in references
+    )
+
+
+def _physical_paths(
+    paths: tuple[PathSequenceState, ...],
+    references: tuple[object, ...],
+) -> tuple[PathSequenceState, ...]:
+    references_by_key = {
+        (reference.context_kind, reference.context_id, reference.bos_id): reference
+        for reference in references
+    }
+    legacy_micro_kinds = {
+        "micro_bos_simultaneous",
+        "micro_bos_confirmed",
+        "micro_bos_opposed",
+        "micro_bos_ambiguous",
+    }
+    physical_paths: list[PathSequenceState] = []
+    for path in paths:
+        physical_steps: list[PathSequenceStep] = []
+        converted_micro = False
+        for ordinal, step in enumerate(path.steps):
+            reference = references_by_key.get(
+                (
+                    path.context_kind,
+                    path.context_id,
+                    step.source_event_id or "",
+                )
+            )
+            if step.kind in legacy_micro_kinds:
+                # These fixtures edit the historical Brain view.  Removing a
+                # reference must also remove its interpreted step before the
+                # fixture is reconstructed as a canonical Eye update.
+                if reference is None:
+                    continue
+                converted_micro = True
+                kind = "micro_break_observed"
+                reason = (
+                    "confirmed_m1_break_at_anchor_clock"
+                    if reference.relation == "same_clock_unknown"
+                    else "first_strictly_later_confirmed_m1_break"
+                )
+                step_id = _interaction_identity(
+                    "group5-step-v1",
+                    path.protocol_hash,
+                    path.sequence_id,
+                    ordinal,
+                    kind,
+                    step.observed_at,
+                    step.source_entity_id,
+                )
+            else:
+                kind = step.kind
+                reason = step.reason
+                step_id = step.step_id
+            physical_steps.append(
+                _dataclass_replace(
+                    step,
+                    step_id=step_id,
+                    kind=kind,
+                    predecessor_step_ids=(
+                        ()
+                        if not physical_steps
+                        else (physical_steps[-1].step_id,)
+                    ),
+                    reason=reason,
+                )
+            )
+        transition_reason = path.transition_reason
+        interpreted_reason = transition_reason in {
+            "micro_bos_aligned",
+            "micro_bos_opposed",
+            "micro_bos_ambiguous_same_clock",
+            "pool_reversal_sequence_observed",
+        }
+        if converted_micro and interpreted_reason:
+            transition_reason = "first_strict_micro_break_observed"
+        elif interpreted_reason:
+            # The caller removed the interpreted break.  Restore the physical
+            # pre-break active state instead of smuggling a Brain success
+            # reason into InteractionUpdate.
+            last_step = physical_steps[-1]
+            transition_reason = {
+                "first_pullback": "context_registered",
+                "wick_rejection": "zone_rejection_observed",
+                "reacceptance_held": "qualified_reacceptance_held",
+            }.get(last_step.kind, "context_registered")
+            physical_paths.append(
+                _dataclass_replace(
+                    path,
+                    lifecycle=PathSequenceLifecycle.ACTIVE,
+                    state_started_at=last_step.observed_at,
+                    last_updated_at=last_step.observed_at,
+                    state_duration_real_1m_bars=0,
+                    steps=tuple(physical_steps),
+                    ended_at=None,
+                    transition_reason=transition_reason,
+                )
+            )
+            continue
+        physical_paths.append(
+            _dataclass_replace(
+                path,
+                steps=tuple(physical_steps),
+                transition_reason=transition_reason,
+            )
+        )
+    return tuple(physical_paths)
+
+
+def _interaction_update_from_brain_fields(
+    *,
+    entry_locations: tuple[object, ...],
+    qualified_reacceptances: tuple[object, ...],
+    micro_bos_references: tuple[object, ...],
+    path_sequences: tuple[PathSequenceState, ...],
+) -> InteractionUpdate:
+    return InteractionUpdate(
+        zone_interactions=tuple(entry_locations),
+        reacceptance_interactions=tuple(qualified_reacceptances),
+        micro_break_facts=_micro_break_facts(micro_bos_references),
+        interaction_paths=_physical_paths(
+            tuple(path_sequences),
+            tuple(micro_bos_references),
+        ),
+    )
+
+
+def _replace_brain_observation(
+    observation: BrainObservationView,
+    /,
+    **changes: object,
+) -> BrainObservationView:
+    raw = observation._observation
+    current = brain_interaction_view(observation)
+    names = {
+        "entry_locations",
+        "qualified_reacceptances",
+        "micro_bos_references",
+        "path_sequences",
+    }
+    brain_changes = {
+        name: changes.pop(name)
+        for name in tuple(changes)
+        if name in names
+    }
+    references = tuple(
+        brain_changes.get(
+            "micro_bos_references",
+            current.micro_bos_references,
+        )
+    )
+    paths = tuple(
+        brain_changes.get("path_sequences", current.path_sequences)
+    )
+    if brain_changes:
+        changes["interaction_update"] = _interaction_update_from_brain_fields(
+            entry_locations=tuple(
+                brain_changes.get("entry_locations", current.zone_interactions)
+            ),
+            qualified_reacceptances=tuple(
+                brain_changes.get(
+                    "qualified_reacceptances",
+                    current.reacceptance_interactions,
+                )
+            ),
+            micro_bos_references=references,
+            path_sequences=paths,
+        )
+    return brain_observation_view(
+        _replace_market_observation(raw, **changes)
+    )
+
+
+def replace(value: object, /, **changes: object):
+    if isinstance(value, BrainObservationView):
+        return _replace_brain_observation(value, **changes)
+    return _dataclass_replace(value, **changes)
+
+
+def replace_market_observation(
+    observation: object,
+    /,
+    **changes: object,
+):
+    if isinstance(observation, BrainObservationView):
+        return _replace_brain_observation(observation, **changes)
+    return _replace_market_observation(observation, **changes)
 
 
 def _sha256(path: Path) -> str:
@@ -520,17 +750,18 @@ def _dfp_observation(
         frames[Timeframe.M1],
         cutoff=asof,
     )
-    return replace(
+    return brain_observation_view(replace(
         base,
         frames=frames,
         execution=_execution(asof, cost=0.10),
         liquidity_inventory=(primary_draw, draw),
-        group5_typed_available=True,
-        entry_locations=output.entry_locations,
-        qualified_reacceptances=output.qualified_reacceptances,
-        micro_bos_references=output.micro_bos_references,
-        path_sequences=output.path_sequences,
-    )
+        interaction_update=_interaction_update_from_brain_fields(
+            entry_locations=output.entry_locations,
+            qualified_reacceptances=output.qualified_reacceptances,
+            micro_bos_references=output.micro_bos_references,
+            path_sequences=output.path_sequences,
+        ),
+    ))
 
 
 def _dfp_fixture():
@@ -1254,7 +1485,7 @@ def test_absent_lsr_root_keeps_only_its_live_frozen_episode(
                 state_duration_real_1m_bars=1,
                 steps=pool_path.steps[:-1],
                 ended_at=None,
-                transition_reason="opposite_displacement_linked",
+                transition_reason="context_registered",
             ),
             replace(
                 entry_path,
@@ -1265,7 +1496,7 @@ def test_absent_lsr_root_keeps_only_its_live_frozen_episode(
                 state_duration_real_1m_bars=0,
                 steps=entry_path.steps[:-1],
                 ended_at=None,
-                transition_reason="first_pullback",
+                transition_reason="context_registered",
             ),
         ),
     )
@@ -3234,7 +3465,7 @@ def test_same_episode_sequence_history_does_not_regress_with_trimmed_snapshot() 
     trimmed_path = replace(
         path,
         steps=path.steps[:2],
-        transition_reason="departure_confirmed",
+        transition_reason="context_registered",
     )
     later = triggered.asof + pd.Timedelta(minutes=1)
     trimmed = replace(
@@ -4269,19 +4500,20 @@ def _lsr_observation() -> MarketObservation:
         cutoff=trigger.end,
         structure_breaks=(trigger_bos,),
     )
-    return replace(
+    return brain_observation_view(replace(
         base,
         frames=frames,
         execution=_execution(trigger.end, cost=0.025),
         liquidity_inventory=(target, pool_inventory),
         liquidity_pool_states=(pool,),
         manipulations=(reaccepted_manipulation,),
-        group5_typed_available=True,
-        entry_locations=output.entry_locations,
-        qualified_reacceptances=output.qualified_reacceptances,
-        micro_bos_references=output.micro_bos_references,
-        path_sequences=output.path_sequences,
-    )
+        interaction_update=_interaction_update_from_brain_fields(
+            entry_locations=output.entry_locations,
+            qualified_reacceptances=output.qualified_reacceptances,
+            micro_bos_references=output.micro_bos_references,
+            path_sequences=output.path_sequences,
+        ),
+    ))
 
 
 def test_lsr_context_identity_requires_manipulation_and_displacement() -> None:
@@ -4420,7 +4652,7 @@ def _lsr_without_entry_trigger(
                 ),
                 steps=retained,
                 ended_at=None,
-                transition_reason="first_pullback",
+                transition_reason="context_registered",
             )
         )
     frames = dict(observation.frames)
@@ -4503,7 +4735,7 @@ def _lsr_waiting_for_first_pullback(
                 ),
                 steps=retained,
                 ended_at=None,
-                transition_reason="departure_confirmed",
+                transition_reason="context_registered",
             )
         )
     return replace(
@@ -4568,7 +4800,7 @@ def _lsr_register_first_pullback(
                 state_duration_real_1m_bars=0,
                 steps=(*path.steps, pullback),
                 ended_at=None,
-                transition_reason="first_pullback",
+                transition_reason="context_registered",
             )
         )
     return replace_market_observation(
@@ -4779,7 +5011,7 @@ def _lsr_add_zone_episode(
                 ),
                 direction=Direction.SHORT,
                 strength=0.7,
-                reason="qualified_zone_rejection",
+                reason="later_zone_rejection",
             )
         )
     path = replace(
@@ -4815,9 +5047,7 @@ def _lsr_add_zone_episode(
         transition_reason=(
             "zone_rejection_observed"
             if trigger_at is not None
-            else "first_pullback"
-            if pullback_at is not None
-            else "departure_confirmed"
+            else "context_registered"
         ),
     )
     frames = dict(observation.frames)
@@ -4872,7 +5102,7 @@ def _lsr_mark_first_zone_left(
             same_clock_relation="strictly_after",
             direction=Direction.SHORT,
             strength=1.0,
-            reason="failure_boundary_breached",
+            reason="close_beyond_far_edge",
         )
         paths.append(
             replace(
@@ -5046,7 +5276,7 @@ def test_lsr_same_update_full_executable_clock_is_ambiguous_and_checkpointed() -
             source_entity_id=first_location.location_id,
             predecessor_step_ids=(pullback.step_id,),
             same_clock_relation="strictly_after",
-            reason="qualified_zone_rejection",
+            reason="later_zone_rejection",
         )
         paths.append(
             replace(path, steps=(*path.steps[:-2], pullback, wick))
@@ -5125,20 +5355,31 @@ def test_lsr_execution_owner_freezes_plan_trigger_summary_and_focus() -> None:
 
     later_at = initial_observation.asof + pd.Timedelta(minutes=3)
     later = _advance_observation(initial_observation, later_at)
-    retained_paths = tuple(
-        replace(
-            path,
-            lifecycle=PathSequenceLifecycle.ACTIVE,
-            state_started_at=path.steps[-1].observed_at,
-            last_updated_at=later_at,
-            state_duration_real_1m_bars=3,
-            ended_at=None,
-            transition_reason="zone_trigger_retained",
+    retained_paths = []
+    for path in later.path_sequences:
+        if path.context_kind != "zone_return":
+            retained_paths.append(path)
+            continue
+        retained_trigger = replace(
+            path.steps[-1],
+            step_id="lsr-owner-retained-wick",
+            kind="wick_rejection",
+            source_event_id=None,
+            source_entity_id=path.context_id,
+            reason="later_zone_rejection",
         )
-        if path.context_kind == "zone_return"
-        else path
-        for path in later.path_sequences
-    )
+        retained_paths.append(
+            replace(
+                path,
+                lifecycle=PathSequenceLifecycle.ACTIVE,
+                state_started_at=retained_trigger.observed_at,
+                last_updated_at=later_at,
+                state_duration_real_1m_bars=3,
+                steps=(*path.steps[:-1], retained_trigger),
+                ended_at=None,
+                transition_reason="zone_rejection_observed",
+            )
+        )
     retained_locations = tuple(
         replace(
             location,
@@ -5151,8 +5392,13 @@ def test_lsr_execution_owner_freezes_plan_trigger_summary_and_focus() -> None:
     )
     later = replace(
         later,
-        path_sequences=retained_paths,
+        path_sequences=tuple(retained_paths),
         entry_locations=retained_locations,
+        micro_bos_references=tuple(
+            reference
+            for reference in later.micro_bos_references
+            if reference.context_kind != "zone_return"
+        ),
     )
     later = _lsr_add_zone_episode(
         later,
@@ -5221,6 +5467,60 @@ def test_lsr_execution_owner_freezes_plan_trigger_summary_and_focus() -> None:
 
 def test_lsr_execution_owner_freezes_route_on_opposed_micro_bos_terminal() -> None:
     observation = _lsr_observation()
+    owner_location = observation.entry_locations[0]
+    owner_paths = []
+    for path in observation.path_sequences:
+        if path.context_id != owner_location.location_id:
+            owner_paths.append(path)
+            continue
+        retained = tuple(
+            step for step in path.steps if step.kind != "micro_bos_confirmed"
+        )
+        wick = PathSequenceStep(
+            step_id="lsr-owner-wick-before-opposed-terminal",
+            kind="wick_rejection",
+            observed_at=observation.asof,
+            source_event_id=None,
+            source_entity_id=owner_location.location_id,
+            predecessor_step_ids=(retained[-1].step_id,),
+            same_clock_relation="strictly_after",
+            direction=path.direction,
+            strength=0.5,
+            reason="later_zone_rejection",
+        )
+        owner_paths.append(
+            replace(
+                path,
+                lifecycle=PathSequenceLifecycle.ACTIVE,
+                state_started_at=observation.asof,
+                last_updated_at=observation.asof,
+                state_duration_real_1m_bars=0,
+                steps=(*retained, wick),
+                ended_at=None,
+                transition_reason="zone_rejection_observed",
+            )
+        )
+    observation = replace(
+        observation,
+        entry_locations=(
+            replace(
+                owner_location,
+                lifecycle=EntryLocationLifecycle.REJECTED,
+                state_started_at=observation.asof,
+                last_updated_at=observation.asof,
+                state_duration_real_1m_bars=0,
+                rejected_at=observation.asof,
+                reaction_atr=0.5,
+                transition_reason="qualified_zone_rejection",
+            ),
+        ),
+        micro_bos_references=tuple(
+            reference
+            for reference in observation.micro_bos_references
+            if reference.context_kind != "zone_return"
+        ),
+        path_sequences=tuple(owner_paths),
+    )
     graph = TemporalMarketSceneGraph()
     brain = _brain()
     initial_belief = brain.update(
@@ -5259,10 +5559,39 @@ def test_lsr_execution_owner_freezes_route_on_opposed_micro_bos_terminal() -> No
         strength=0.9,
     )
     terminal_paths = []
+    opposed_references = []
     for path in terminal_observation.path_sequences:
-        if path.context_kind != "zone_return":
+        if (
+            path.context_kind != "zone_return"
+            or path.context_id != owner.plan.entry_location_id
+        ):
             terminal_paths.append(path)
             continue
+        location = next(
+            item
+            for item in terminal_observation.entry_locations
+            if item.location_id == path.context_id
+        )
+        opposed_references.append(
+            MicroBOSReference(
+                reference_id="lsr-opposed-reference-after-owner",
+                protocol_hash=path.protocol_hash,
+                context_kind=path.context_kind,
+                context_id=path.context_id,
+                expected_direction=path.direction,
+                anchor_at=location.first_entered_at,
+                bos_id="lsr-opposed-bos-after-owner",
+                bos_direction=Direction.LONG,
+                target_swing_id="lsr-opposed-swing-after-owner",
+                scope=BOSScope.LOCAL,
+                pending_at=terminal_at - pd.Timedelta(minutes=1),
+                resolved_at=terminal_at,
+                relation="strictly_after",
+                outcome="opposed",
+                qualified=False,
+                strength=1.0,
+            )
+        )
         opposed = PathSequenceStep(
             step_id="lsr-opposed-after-execution-owner",
             kind="micro_bos_opposed",
@@ -5271,7 +5600,7 @@ def test_lsr_execution_owner_freezes_route_on_opposed_micro_bos_terminal() -> No
             source_entity_id="lsr-opposed-swing-after-owner",
             predecessor_step_ids=(path.steps[-1].step_id,),
             same_clock_relation="strictly_after",
-            direction=Direction.LONG,
+            direction=path.direction,
             strength=1.0,
             reason="opposed_micro_bos_after_execution_owner",
         )
@@ -5292,6 +5621,10 @@ def test_lsr_execution_owner_freezes_route_on_opposed_micro_bos_terminal() -> No
         liquidity_inventory=(
             *terminal_observation.liquidity_inventory,
             later_intermediate,
+        ),
+        micro_bos_references=(
+            *terminal_observation.micro_bos_references,
+            *opposed_references,
         ),
         path_sequences=tuple(terminal_paths),
     )
@@ -5549,7 +5882,7 @@ def test_lsr_same_bar_wick_cannot_trigger_but_next_bar_wick_can() -> None:
         same_clock_relation="same_clock_known",
         direction=Direction.SHORT,
         strength=0.8,
-        reason="same_bar_order_unknown",
+        reason="same_bar_wick_rejection",
     )
     same_bar = replace(
         observation,
@@ -5573,7 +5906,7 @@ def test_lsr_same_bar_wick_cannot_trigger_but_next_bar_wick_can() -> None:
         step_id="lsr-next-bar-wick",
         observed_at=later_at,
         same_clock_relation="strictly_after",
-        reason="later_bar_order_proven",
+        reason="later_zone_rejection",
     )
     later = _advance_observation(observation, later_at)
     later = replace(
@@ -5929,23 +6262,6 @@ def test_lsr_established_context_ignores_late_accepted_outside_rollover() -> Non
         pullback_at=waiting.asof + pd.Timedelta(minutes=2),
         trigger_at=later_at,
     )
-    pool_path = next(
-        path
-        for path in later.path_sequences
-        if path.context_kind == "pool_reversal"
-    )
-    accepted_step = PathSequenceStep(
-        step_id="lsr-late-accepted-outside-rollover",
-        kind="accepted_outside",
-        observed_at=later_at,
-        source_event_id="manipulation:pool-above",
-        source_entity_id="manipulation:pool-above",
-        predecessor_step_ids=(pool_path.steps[-1].step_id,),
-        same_clock_relation="strictly_after",
-        direction=Direction.SHORT,
-        strength=1.0,
-        reason="later_lifecycle_rollover",
-    )
     later = replace(
         later,
         manipulations=tuple(
@@ -5969,21 +6285,6 @@ def test_lsr_established_context_ignores_late_accepted_outside_rollover() -> Non
                 transition_reason="later_lifecycle_rollover",
             )
             for item in later.manipulations
-        ),
-        path_sequences=tuple(
-            replace(
-                path,
-                lifecycle=PathSequenceLifecycle.CLOSED,
-                state_started_at=later_at,
-                last_updated_at=later_at,
-                state_duration_real_1m_bars=0,
-                steps=(*path.steps, accepted_step),
-                ended_at=later_at,
-                transition_reason="accepted_outside",
-            )
-            if path.sequence_id == pool_path.sequence_id
-            else path
-            for path in later.path_sequences
         ),
     )
     belief = brain.update(
@@ -6054,7 +6355,7 @@ def test_first_qualified_trigger_is_frozen_until_a_new_setup_rearms() -> None:
         same_clock_relation="strictly_after",
         direction=prior.direction,
         strength=0.95,
-        reason="later_supporting_trigger",
+        reason="later_real_completed_hold",
     )
     retained, support = _select_frozen_trigger(
         (later,),
@@ -6604,7 +6905,7 @@ def test_lsr_accepts_alternative_zone_trigger_and_original_sweep_stop() -> None:
             predecessor_step_ids=(first_pullback.step_id,),
             same_clock_relation="strictly_after",
             strength=0.25,
-            reason="later_bar_wick_rejection",
+            reason="later_zone_rejection",
         )
         paths.append(
             replace(
@@ -7474,7 +7775,7 @@ def _lsr_without_plan_or_trigger() -> MarketObservation:
                 state_duration_real_1m_bars=0,
                 steps=steps,
                 ended_at=None,
-                transition_reason="first_pullback_registered",
+                transition_reason="context_registered",
             )
         )
     return replace(

@@ -36,10 +36,10 @@ from .range_auction import (
     RangeAuctionProtocol,
     RangeAuctionUpdate,
 )
-from .group5 import (
-    CausalGroup5Reducer,
-    Group5Protocol,
-    Group5Update,
+from .interaction import (
+    InteractionProtocol,
+    InteractionSemantics,
+    InteractionUpdate,
 )
 from .liquidity import (
     CausalLiquidityTracker,
@@ -158,7 +158,7 @@ class ObserverConfig:
     displacement_protocol: str | None = None
     zone_protocol: str | None = None
     range_auction_protocol: str | None = None
-    group5_protocol: str | None = None
+    interaction_protocol: str | None = None
     semantic_registry: str = "semantics/registry_v1_2.yaml"
     scale_specs: tuple[ScaleSpec, ...] = ()
     # Scene Graph is an optional downstream research view, not part of the
@@ -2000,7 +2000,7 @@ class CausalObserver:
                 self.config.displacement_protocol,
                 self.config.zone_protocol,
                 self.config.range_auction_protocol,
-                self.config.group5_protocol,
+                self.config.interaction_protocol,
             )
             if (
                 self.config.range_auction_projection_only
@@ -2017,7 +2017,7 @@ class CausalObserver:
                 self.config.displacement_protocol,
                 self.config.zone_protocol,
                 self.config.range_auction_protocol,
-                self.config.group5_protocol,
+                self.config.interaction_protocol,
             )
             if (
                 self.config.range_auction_projection_only
@@ -2036,7 +2036,7 @@ class CausalObserver:
                 or self.config.range_auction_protocol is None
                 or self.config.displacement_protocol is not None
                 or self.config.zone_protocol is not None
-                or self.config.group5_protocol is not None
+                or self.config.interaction_protocol is not None
             )
         ):
             raise ValueError(
@@ -2049,7 +2049,7 @@ class CausalObserver:
             or self.config.range_auction_protocol is None
             or self.config.displacement_protocol is not None
             or self.config.zone_protocol is not None
-            or self.config.group5_protocol is not None
+            or self.config.interaction_protocol is not None
         ):
             raise ValueError(
                 "Group 4 projection-only mode is limited to the authority "
@@ -2241,23 +2241,23 @@ class CausalObserver:
             DealingRangeState
         ] = []
         self._group4_cold_pairs_marked = False
-        if self.config.group5_protocol is not None and (
+        if self.config.interaction_protocol is not None and (
             zone_protocol is None
             or range_auction_protocol is None
             or structure_config is None
             or liquidity_config is None
         ):
             raise ValueError(
-                "Group 5 requires Groups 1-4 typed sources"
+                "interaction semantics require Groups 1-4 typed sources"
             )
-        group5_protocol = (
-            Group5Protocol.from_file(self.config.group5_protocol)
-            if self.config.group5_protocol is not None
+        interaction_protocol = (
+            InteractionProtocol.from_file(self.config.interaction_protocol)
+            if self.config.interaction_protocol is not None
             else None
         )
-        if group5_protocol is not None and (
+        if interaction_protocol is not None and (
             not math.isclose(
-                group5_protocol.tick_size,
+                interaction_protocol.tick_size,
                 self.config.tick_size,
                 rel_tol=0.0,
                 abs_tol=0.0,
@@ -2266,24 +2266,24 @@ class CausalObserver:
             or range_auction_protocol is None
             or structure_config is None
             or liquidity_config is None
-            or group5_protocol.source_group12_protocol_hash
+            or interaction_protocol.source_group12_protocol_hash
             != structure_config.protocol_hash
-            or group5_protocol.source_group12_protocol_hash
+            or interaction_protocol.source_group12_protocol_hash
             != liquidity_config.protocol_hash
-            or group5_protocol.source_zone_protocol_hash
+            or interaction_protocol.source_zone_protocol_hash
             != zone_protocol.protocol_hash
-            or group5_protocol.source_range_auction_protocol_hash
+            or interaction_protocol.source_range_auction_protocol_hash
             != range_auction_protocol.protocol_hash
         ):
             raise ValueError(
-                "Group 5 and its Groups 1-4 protocol bindings disagree"
+                "interaction and Groups 1-4 protocol bindings disagree"
             )
-        self._group5_reducer = (
-            CausalGroup5Reducer(group5_protocol)
-            if group5_protocol is not None
+        self._interaction_semantics = (
+            InteractionSemantics(interaction_protocol)
+            if interaction_protocol is not None
             else None
         )
-        self._group5_boundary_update: Group5Update | None = None
+        self._interaction_boundary_update: InteractionUpdate | None = None
         self.memory = EventMemory(
             self.config.memory_events,
             audit_store=self.audit_store,
@@ -2467,11 +2467,11 @@ class CausalObserver:
         return self._foundation_adapter.materialize_foundation_history()
 
     @property
-    def group5_protocol(self) -> Group5Protocol | None:
+    def interaction_protocol(self) -> InteractionProtocol | None:
         return (
             None
-            if self._group5_reducer is None
-            else self._group5_reducer.protocol
+            if self._interaction_semantics is None
+            else self._interaction_semantics.protocol
         )
 
     @property
@@ -2510,14 +2510,14 @@ class CausalObserver:
         # A hard epoch boundary must not retain prior-contract signatures.
         self._typed_delta_signatures.clear()
         self._last_zone_foundation_projection = None
-        self._group5_boundary_update = (
-            self._group5_reducer.on_boundary(
+        self._interaction_boundary_update = (
+            self._interaction_semantics.on_boundary(
                 reason,
                 observed_at,
                 symbol=boundary_symbol,
                 instrument_id=boundary_instrument_id,
             )
-            if self._group5_reducer is not None
+            if self._interaction_semantics is not None
             else None
         )
         self._group4_boundary_update = (
@@ -9717,18 +9717,20 @@ class CausalObserver:
                     context_event_ids=(manipulation_state_event.event_id,),
                 )
 
-    def _record_group5_events(self, update: Group5Update) -> None:
+    def _record_interaction_events(self, update: InteractionUpdate) -> None:
         if update.boundary_reason is not None:
             return
+        path_transitions = update.interaction_path_transitions
+        milestone_transitions = update.milestone_transitions
 
         active = tuple(
             state
-            for state in update.path_transitions
+            for state in path_transitions
             if state.lifecycle is PathSequenceLifecycle.ACTIVE
         )
         terminal = tuple(
             state
-            for state in update.path_transitions
+            for state in path_transitions
             if state.lifecycle is not PathSequenceLifecycle.ACTIVE
         )
 
@@ -9772,7 +9774,7 @@ class CausalObserver:
             key=lambda item: (item.formed_at, item.sequence_id),
         ):
             append_path(state)
-        for sequence_id, step in update.step_transitions:
+        for sequence_id, step in milestone_transitions:
             source_ids = (
                 sequence_id,
                 step.step_id,
@@ -12010,52 +12012,54 @@ class CausalObserver:
                 ),
             )
         )
-        group5_update: Group5Update | None = None
-        if self._group5_reducer is not None:
+        interaction_update: InteractionUpdate | None = None
+        if self._interaction_semantics is not None:
             try:
-                if self._group5_boundary_update is not None:
-                    group5_update = self._group5_boundary_update
+                if self._interaction_boundary_update is not None:
+                    interaction_update = self._interaction_boundary_update
                 else:
-                    group5_update = self._group5_reducer.on_completed_1m(
-                        update.completed_1m,
-                        fair_value_gaps=(
-                            frames[Timeframe.M5].fair_value_gaps
-                        ),
-                        order_blocks=(
-                            frames[Timeframe.M5].order_blocks
-                        ),
-                        manipulations=(
-                            ()
-                            if range_auction_update is None
-                            else tuple(
-                                state
-                                for state
-                                in range_auction_update.manipulations
-                                if state.source_kind
-                                == "formed_liquidity_pool"
-                            )
-                        ),
-                        m1_bos=(
-                            frames[Timeframe.M1].structure_breaks
-                        ),
-                        liquidity_inventory=liquidity_inventory,
-                        m1_atr=(
-                            frames[Timeframe.M1].metrics["atr"]
-                        ),
+                    interaction_update = (
+                        self._interaction_semantics.on_completed_1m(
+                            update.completed_1m,
+                            fair_value_gaps=(
+                                frames[Timeframe.M5].fair_value_gaps
+                            ),
+                            order_blocks=(
+                                frames[Timeframe.M5].order_blocks
+                            ),
+                            manipulations=(
+                                ()
+                                if range_auction_update is None
+                                else tuple(
+                                    state
+                                    for state
+                                    in range_auction_update.manipulations
+                                    if state.source_kind
+                                    == "formed_liquidity_pool"
+                                )
+                            ),
+                            m1_bos=(
+                                frames[Timeframe.M1].structure_breaks
+                            ),
+                            liquidity_inventory=liquidity_inventory,
+                            m1_atr=(
+                                frames[Timeframe.M1].metrics["atr"]
+                            ),
+                        )
                     )
             except Exception:
                 self._terminal_failure = (
-                    "Group 5 update failed after upstream reducers may "
+                    "interaction update failed after upstream reducers may "
                     "have advanced; discard this observer and resume "
                     "from the last checkpoint"
                 )
                 raise
-        if group5_update is not None:
+        if interaction_update is not None:
             try:
-                self._record_group5_events(group5_update)
+                self._record_interaction_events(interaction_update)
             except Exception:
                 self._terminal_failure = (
-                    "Group 5 event projection failed after state may "
+                    "interaction event projection failed after state may "
                     "have changed; discard this observer and resume "
                     "from the last checkpoint"
                 )
@@ -12085,8 +12089,8 @@ class CausalObserver:
                         ),
                         (
                             ()
-                            if group5_update is None
-                            else group5_update.path_sequences
+                            if interaction_update is None
+                            else interaction_update.interaction_paths
                         ),
                         terminal_entity_keys=(
                             ()
@@ -12296,26 +12300,6 @@ class CausalObserver:
             if range_auction_update is None
             else range_auction_update.manipulations
         )
-        current_entry_locations = (
-            ()
-            if group5_update is None
-            else group5_update.entry_locations
-        )
-        current_reacceptances = (
-            ()
-            if group5_update is None
-            else group5_update.qualified_reacceptances
-        )
-        current_micro_bos = (
-            ()
-            if group5_update is None
-            else group5_update.micro_bos_references
-        )
-        current_paths = (
-            ()
-            if group5_update is None
-            else group5_update.path_sequences
-        )
         typed_delta_available = bool(
             self.config.eye_authority_mode
             or self.config.typed_transition_delta_transport
@@ -12326,20 +12310,11 @@ class CausalObserver:
         group3_order_block_delta: tuple[object, ...] = ()
         group4_range_delta: tuple[object, ...] = ()
         group4_manipulation_delta: tuple[object, ...] = ()
-        group5_entry_location_delta: tuple[object, ...] = ()
-        group5_reacceptance_delta: tuple[object, ...] = ()
-        group5_micro_bos_delta: tuple[object, ...] = ()
-        group5_path_delta: tuple[object, ...] = ()
-        group5_step_delta: tuple[tuple[str, PathSequenceStep], ...] = ()
         if typed_delta_available:
             baseline = prior_observation is None
             group4_boundary = bool(
                 range_auction_update is not None
                 and range_auction_update.boundary_reason is not None
-            )
-            group5_boundary = bool(
-                group5_update is not None
-                and group5_update.boundary_reason is not None
             )
 
             def cached(
@@ -12466,69 +12441,6 @@ class CausalObserver:
                 retained_states=current_manipulations,
             )
 
-            # Group 5 has complete path/step transitions.  Entry location,
-            # qualified reacceptance and micro-BOS remain bounded semantic
-            # snapshot fallbacks until their reducer exposes ordinary deltas.
-            group5_entry_location_delta = cached(
-                "group5_entry_location",
-                current_entry_locations,
-                "location_id",
-                excluded_fields=_ENTRY_LOCATION_VIEW_FIELDS,
-                retained_states=current_entry_locations,
-            )
-            group5_reacceptance_delta = cached(
-                "group5_reacceptance",
-                (
-                    *current_reacceptances,
-                    *(
-                        ()
-                        if group5_update is None
-                        else group5_update.reacceptance_transitions
-                    ),
-                ),
-                "reacceptance_id",
-                retained_states=current_reacceptances,
-            )
-            group5_micro_bos_delta = cached(
-                "group5_micro_bos",
-                current_micro_bos,
-                "reference_id",
-                retained_states=current_micro_bos,
-            )
-            if baseline and not group5_boundary:
-                path_candidates = current_paths
-                group5_step_delta = tuple(
-                    (path.sequence_id, step)
-                    for path in current_paths
-                    for step in path.steps
-                )
-            else:
-                group5_step_delta = (
-                    ()
-                    if group5_update is None
-                    else group5_update.step_transitions
-                )
-                step_path_ids = {
-                    sequence_id
-                    for sequence_id, _ in group5_step_delta
-                }
-                path_candidates = (
-                    *(
-                        ()
-                        if group5_update is None
-                        else group5_update.path_transitions
-                    ),
-                    *(
-                        state
-                        for state in current_paths
-                        if state.sequence_id in step_path_ids
-                    ),
-                )
-            group5_path_delta = _typed_state_delta_from_cache(
-                candidates=path_candidates,
-                signatures={},
-                identity_field="sequence_id",
-            )
         try:
             observation = MarketObservation(
                 market_snapshot=market_snapshot,
@@ -12564,19 +12476,6 @@ class CausalObserver:
                 group4_manipulation_transitions_this_update=(
                     group4_manipulation_delta
                 ),
-                group5_entry_location_transitions_this_update=(
-                    group5_entry_location_delta
-                ),
-                group5_reacceptance_transitions_this_update=(
-                    group5_reacceptance_delta
-                ),
-                group5_micro_bos_transitions_this_update=(
-                    group5_micro_bos_delta
-                ),
-                group5_path_transitions_this_update=(
-                    group5_path_delta
-                ),
-                group5_step_transitions_this_update=group5_step_delta,
                 group3_boundary_fvg_transitions=(
                     zone_update.fvg_transitions
                     if (
@@ -12643,45 +12542,7 @@ class CausalObserver:
                     if range_auction_update is None
                     else range_auction_update.range_funnel
                 ),
-                group5_typed_available=(
-                    self._group5_reducer is not None
-                ),
-                entry_locations=(
-                    ()
-                    if group5_update is None
-                    else group5_update.entry_locations
-                ),
-                qualified_reacceptances=(
-                    ()
-                    if group5_update is None
-                    else group5_update.qualified_reacceptances
-                ),
-                micro_bos_references=(
-                    ()
-                    if group5_update is None
-                    else group5_update.micro_bos_references
-                ),
-                path_sequences=(
-                    ()
-                    if group5_update is None
-                    else group5_update.path_sequences
-                ),
-                group5_boundary_path_transitions=(
-                    ()
-                    if (
-                        group5_update is None
-                        or group5_update.boundary_reason is None
-                    )
-                    else group5_update.path_transitions
-                ),
-                group5_boundary_reacceptance_transitions=(
-                    ()
-                    if (
-                        group5_update is None
-                        or group5_update.boundary_reason is None
-                    )
-                    else group5_update.reacceptance_transitions
-                ),
+                interaction_update=interaction_update,
                 active_timeframes=self._active_timeframes,
                 scale_registry_id=update.scale_registry_id,
             )
@@ -12725,7 +12586,7 @@ class CausalObserver:
         self._boundary_terminal_breaks.clear()
         self._boundary_reset_identity = None
         self._group4_boundary_update = None
-        self._group5_boundary_update = None
+        self._interaction_boundary_update = None
         self._last_zone_foundation_projection = zone_update
         self._last_market_epoch_reset_event_id = None
         self._prior = observation

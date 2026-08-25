@@ -21,6 +21,10 @@ from typing import Any, Mapping
 
 import pandas as pd
 
+from .brain_entry_sequence import (
+    brain_interaction_view,
+    brain_observation_view,
+)
 from .market_clock import MARKET_TIMEZONE, special_session_close
 from .model import (
     Bar,
@@ -1445,7 +1449,7 @@ class BrainCalibrationRecorder:
     ) -> None:
         """Resolve typed lifecycles, then freeze newly eligible samples."""
 
-        observation = snapshot.observation
+        observation = brain_observation_view(snapshot.observation)
         belief = snapshot.belief
         asof = aware_timestamp(
             observation.asof,
@@ -1513,7 +1517,7 @@ class BrainCalibrationRecorder:
             )
         locations = {
             item.location_id: item
-            for item in getattr(observation, "entry_locations", ())
+            for item in brain_interaction_view(observation).zone_interactions
         }
         # A completed bar can straddle a non-aligned frozen deadline, or
         # resolve an invalidation before the snapshot is built.  Settle those
@@ -1558,7 +1562,7 @@ class BrainCalibrationRecorder:
 
         if self._open or self._rows or self._pending_bar_resolutions:
             raise ValueError("calibration priming is allowed only before capture")
-        observation = snapshot.observation
+        observation = brain_observation_view(snapshot.observation)
         asof = aware_timestamp(
             observation.asof,
             name="brain_calibration.prime.asof",
@@ -1710,7 +1714,7 @@ class BrainCalibrationRecorder:
             is not None
             and any(
                 item.location_id == location_id
-                for item in getattr(observation, "entry_locations", ())
+                for item in brain_interaction_view(observation).zone_interactions
             )
         ):
             self._seen_location_ids.add((candidate_id, location_id))
@@ -3552,7 +3556,7 @@ class BrainCalibrationRecorder:
             and explicit != plan_path
         ):
             raise ValueError("belief and plan entry path identities disagree")
-        paths = tuple(getattr(observation, "path_sequences", ()))
+        paths = brain_interaction_view(observation).path_sequences
         frozen_path_id = explicit or plan_path
         if frozen_path_id is not None:
             exact = tuple(

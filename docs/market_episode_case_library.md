@@ -5,17 +5,18 @@ downstream consumer of the existing continuous replay and never starts or
 advances a second replay loop.
 
 The current fail-closed contract is protocol
-`market-episode-input-only-1.2.0`, NeutralMarketState schema 2, neutral Engine
-checkpoint schema 6, and market-input runner state schema 7. Schema-1 neutral
-state, pre-v5 Engine checkpoints, protocol 1.1.0, and runner-state schemas 4/5/6
-cannot resume or materialize under this contract. Engine checkpoint schema 6
-binds the current Observation identity, compact canonical-Foundation state, and
-Neutral-state OpenMarketThesis identity; it does not change the 18-field
-MarketEpisode row schema. Runner schema 6 added one run-level
-repository commit identity; schema 7 additionally binds the exact replay data
-continuity policy once in the run manifest. Neither is repeated in input rows.
-The recorder schema remains 1 and the Arrow row schema remains the same 18
-fields.
+`market-episode-input-only-1.3.0`, recorder schema 2,
+`InteractionUpdate` schema 1, NeutralMarketState schema 2, neutral Engine
+checkpoint schema 7, and market-input runner state schema 8. Older recorder,
+protocol, or runner identities cannot resume or materialize under this
+contract. Runner schema 8 binds the exact current MarketCase profile registry
+path and SHA-256 in addition to repository and data-continuity identity. The
+Arrow row schema remains the same 18 fields.
+
+`configs/data_splits.json` remains the hash-bound historical registry used by
+frozen evidence. New MarketCase runs select only
+`configs/market_case_input_profiles_v2.json`; the run manifest binds its bytes.
+There is no second current profile authority.
 
 ## Grain and admission
 
@@ -71,13 +72,20 @@ The input-only runner synthesizes at most five registered open minutes for a
 same-contract no-trade gap. A larger same-contract gap emits no synthetic run:
 the next real bar carries `data_gap_history_reset` and advances the market
 epoch. Cross-contract gaps remain fail-closed. This is a runner continuity fix
-under the existing protocol 1.2.0 reset semantics, not a row/protocol change.
+under the registered reset semantics; it grants no outcome or action authority.
 
 Every structured input JSON tree rejects non-finite values, future/outcome key
-markers, and future-dated evidence clocks. The sole `outcome` key allowed in an
-input is the protocol-bound `MicroBOSReference.outcome` inside the same-clock
-Eye `group5_micro_bos_transitions_this_update` collection, with one of its four
-causal structural enum values; the same key anywhere else remains forbidden.
+markers, and future-dated evidence clocks. Its exact 15-collection observation
+payload contains six Group 1-4 deltas plus nine raw Interaction collections:
+four current physical views, path/reacceptance deltas, ordered
+`[sequence_id, PathSequenceStep]` milestones, cold-source IDs, and at most one
+hard-boundary reason. Brain fields such as `outcome`, `qualified`,
+`expected_direction`, interpreted MicroBOS step kinds, and nested Brain
+responses are forbidden. A single downstream Brain interpreter derives those
+views without rewriting the Eye artifact. During normal replay the Neutral
+episode reducer consumes the same already-built `BrainObservationView` as
+OpenMarketThesis and Brain; raw paths remain its physical identity/custody
+source and no second outcome-reason table is maintained.
 Prefix cutoffs must be no later than the row `asof`. Revision IDs hash the
 canonical row payload, so checkpoint and resume produce the same identity
 without storing a second fingerprint.

@@ -12,6 +12,7 @@ from smc_trader.model import (
     EntryLocationLifecycle,
     EntryLocationState,
     HypothesisSequenceState,
+    InteractionUpdate,
     DrawSelection,
     LiquidityRoute,
     PathSequenceLifecycle,
@@ -114,18 +115,20 @@ def test_eye_only_group5_selection_prioritizes_sampled_case_identity() -> None:
         SimpleNamespace(sequence_id="path:peer", context_id="zone:focus"),
     )
     observation = SimpleNamespace(
-        entry_locations=(
-            SimpleNamespace(location_id="zone:old"),
-            SimpleNamespace(location_id="zone:focus"),
-        ),
-        path_sequences=paths,
-        qualified_reacceptances=(
-            SimpleNamespace(context_id="zone:old"),
-            SimpleNamespace(context_id="zone:focus"),
-        ),
-        micro_bos_references=(
-            SimpleNamespace(context_id="zone:old"),
-            SimpleNamespace(context_id="zone:focus"),
+        interaction_update=SimpleNamespace(
+            zone_interactions=(
+                SimpleNamespace(location_id="zone:old"),
+                SimpleNamespace(location_id="zone:focus"),
+            ),
+            interaction_paths=paths,
+            reacceptance_interactions=(
+                SimpleNamespace(context_id="zone:old"),
+                SimpleNamespace(context_id="zone:focus"),
+            ),
+            micro_break_facts=(
+                SimpleNamespace(context_id="zone:old"),
+                SimpleNamespace(context_id="zone:focus"),
+            ),
         ),
     )
     selected = _selected_group5_entities(
@@ -524,13 +527,13 @@ def _snapshot_with_sequence():
             step_id="visual-zone-visible",
             kind="zone_visible",
             observed_at=formed_at,
-            source_event_id=None,
+            source_event_id="visual-fvg",
             source_entity_id="visual-fvg",
             predecessor_step_ids=(),
             same_clock_relation="origin",
             direction=Direction.LONG,
             strength=0.8,
-            reason="frozen test zone became visible",
+            reason="typed_entry_zone_registered",
         ),
         PathSequenceStep(
             step_id="visual-departure",
@@ -542,7 +545,7 @@ def _snapshot_with_sequence():
             same_clock_relation="strictly_after",
             direction=Direction.LONG,
             strength=0.7,
-            reason="price departed before the first return",
+            reason="later_close_on_delivery_side",
         ),
         PathSequenceStep(
             step_id="visual-first-pullback",
@@ -554,7 +557,7 @@ def _snapshot_with_sequence():
             same_clock_relation="strictly_after",
             direction=Direction.LONG,
             strength=0.6,
-            reason="first completed-bar return to the frozen zone",
+            reason="crossed_near_edge",
         ),
     )
     path = PathSequenceState(
@@ -655,9 +658,12 @@ def _snapshot_with_sequence():
         snapshot,
         observation=replace(
             snapshot.observation,
-            group5_typed_available=True,
-            entry_locations=(location,),
-            path_sequences=(path,),
+            interaction_update=InteractionUpdate(
+                zone_interactions=(location,),
+                reacceptance_interactions=(),
+                micro_break_facts=(),
+                interaction_paths=(path,),
+            ),
         ),
         belief=replace(
             snapshot.belief,

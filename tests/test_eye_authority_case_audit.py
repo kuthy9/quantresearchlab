@@ -27,6 +27,22 @@ from smc_trader.visualization import VisualArtifact
 BASE = pd.Timestamp("2023-03-10T10:00:00-05:00")
 
 
+def _interaction(
+    *,
+    paths: tuple[object, ...] = (),
+    boundary_paths: tuple[object, ...] = (),
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        zone_interactions=(),
+        reacceptance_interactions=(),
+        micro_break_facts=(),
+        interaction_paths=paths,
+        interaction_path_transitions=boundary_paths,
+        reacceptance_interaction_transitions=(),
+        boundary_reason=(None if not boundary_paths else "data_gap_reset"),
+    )
+
+
 def _case(index: int, clock: pd.Timestamp) -> dict[str, object]:
     return {
         "case_id": f"case-{index:02d}",
@@ -167,8 +183,7 @@ def test_group5_step_transport_requires_ordered_memory_and_graph_steps() -> None
         )
 
     observation = SimpleNamespace(
-        path_sequences=(),
-        group5_boundary_path_transitions=(path,),
+        interaction_update=_interaction(boundary_paths=(path,)),
     )
     complete = _path_step_transport(
         observation=observation,
@@ -391,12 +406,7 @@ def test_transmission_record_links_observation_memory_graph_and_image(
         group4_boundary_range_transitions=(),
         manipulations=(),
         group4_boundary_manipulation_transitions=(),
-        entry_locations=(),
-        qualified_reacceptances=(),
-        micro_bos_references=(),
-        path_sequences=(),
-        group5_boundary_path_transitions=(),
-        group5_boundary_reacceptance_transitions=(),
+        interaction_update=_interaction(),
         displacement=None,
         anomalies=(),
         group4_range_funnel=(),
@@ -674,12 +684,7 @@ def test_transmission_record_rejects_old_epoch_or_wrong_state() -> None:
         group4_boundary_range_transitions=(),
         manipulations=(),
         group4_boundary_manipulation_transitions=(),
-        entry_locations=(),
-        qualified_reacceptances=(),
-        micro_bos_references=(),
-        path_sequences=(),
-        group5_boundary_path_transitions=(),
-        group5_boundary_reacceptance_transitions=(),
+        interaction_update=_interaction(),
         displacement=None,
         anomalies=(),
         group4_range_funnel=(),
@@ -789,12 +794,7 @@ def test_transmission_record_accepts_terminal_at_hard_epoch_boundary() -> None:
         group4_boundary_range_transitions=(terminal_state,),
         manipulations=(),
         group4_boundary_manipulation_transitions=(),
-        entry_locations=(),
-        qualified_reacceptances=(),
-        micro_bos_references=(),
-        path_sequences=(),
-        group5_boundary_path_transitions=(),
-        group5_boundary_reacceptance_transitions=(),
+        interaction_update=_interaction(),
         displacement=None,
         anomalies=("contract_change_history_reset",),
         group4_range_funnel=(),

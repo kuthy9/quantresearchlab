@@ -33,6 +33,9 @@ from smc_trader.artifact_stream import (  # noqa: E402
     write_stream_manifest,
     write_stream_shards_bounded,
 )
+from smc_trader.brain_entry_sequence import (  # noqa: E402
+    brain_observation_view,
+)
 from smc_trader.calibration_replay import (  # noqa: E402
     CalibrationSequentialReplay,
     ReplayCheckpointStore,
@@ -138,10 +141,14 @@ TRADE_COLUMNS = [
 ]
 
 # Versioned pickled legacy Brain runtime-state contract.
-BRAIN_RUNTIME_STATE_SCHEMA_VERSION = 14
+BRAIN_RUNTIME_STATE_SCHEMA_VERSION = 15
 # The input-only MarketEpisode mode has a disjoint, deliberately small state
 # shape and therefore owns an independent resume schema.
-MARKET_CASE_INPUT_RUNTIME_STATE_SCHEMA_VERSION = 7
+MARKET_CASE_INPUT_RUNTIME_STATE_SCHEMA_VERSION = 8
+MARKET_CASE_PROFILE_REGISTRY_SCHEMA_VERSION = 1
+DEFAULT_MARKET_CASE_PROFILE_REGISTRY = (
+    ROOT / "configs/market_case_input_profiles_v2.json"
+)
 
 # Versioned diagnostic-state contract.  Natural episode lifecycles are
 # intentionally broader than action candidates: a dormant episode cannot
@@ -537,6 +544,7 @@ def _calendar_warmup_start(
 
 
 def _source_provenance(observation, source_id: str) -> dict[str, Any] | None:
+    observation = brain_observation_view(observation)
     location = next(
         (
             value
@@ -2928,6 +2936,7 @@ def _unexplained_reason(first_failed_gate: str | None) -> str:
 
 
 def _root_descriptor(observation: Any, root_id: str) -> dict[str, Any]:
+    observation = brain_observation_view(observation)
     manipulation = next(
         (
             item
@@ -3804,6 +3813,14 @@ def parse_args() -> argparse.Namespace:
         "--validation-protocol",
         default="configs/data_splits.json",
     )
+    parser.add_argument(
+        "--market-case-profile-registry",
+        default=str(DEFAULT_MARKET_CASE_PROFILE_REGISTRY),
+        help=(
+            "versioned current MarketCase profile registry; only read by "
+            "--market-case-input"
+        ),
+    )
     parser.add_argument("--warmup-days", type=int, default=45)
     parser.add_argument(
         "--spread-points",
@@ -4080,6 +4097,25 @@ def _load_market_case_input_profile(
     """Bind input-only capture to one exact preregistered window."""
 
     payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    if (
+        type(payload) is not dict
+        or set(payload)
+        != {
+            "schema_version",
+            "registry",
+            "authority",
+            "historical_registry",
+            "market_case_input_profiles",
+        }
+        or payload.get("schema_version")
+        != MARKET_CASE_PROFILE_REGISTRY_SCHEMA_VERSION
+        or payload.get("registry") != "market_case_input_profiles"
+        or payload.get("authority") != "current"
+        or payload.get("historical_registry") != "configs/data_splits.json"
+    ):
+        raise ValueError(
+            "market-case input profile registry identity is invalid"
+        )
     profiles = payload.get("market_case_input_profiles")
     if not isinstance(profiles, Mapping):
         raise ValueError(
@@ -5483,7 +5519,7 @@ def _streamed_main(args: argparse.Namespace) -> None:
     )
     market_input_profile_match = (
         _load_market_case_input_profile(
-            args.validation_protocol,
+            args.market_case_profile_registry,
             start=start,
             end=end,
             warmup_days=int(args.warmup_days),
@@ -5832,6 +5868,17 @@ def _streamed_main(args: argparse.Namespace) -> None:
                     canonical_json(to_primitive(market_input_profile))
                 ).hexdigest(),
             },
+            "profile_registry": {
+                "path": str(
+                    Path(args.market_case_profile_registry).resolve()
+                ),
+                "sha256": sha256_file(
+                    Path(args.market_case_profile_registry)
+                ),
+                "schema_version": (
+                    MARKET_CASE_PROFILE_REGISTRY_SCHEMA_VERSION
+                ),
+            },
             "source": {
                 "path": str(source.resolve()),
                 "sha256": source_hash,
@@ -5868,6 +5915,7 @@ def _streamed_main(args: argparse.Namespace) -> None:
             },
         }
     run_manifest_bytes = canonical_json(to_primitive(run_manifest))
+    run_manifest_sha256 = hashlib.sha256(run_manifest_bytes).hexdigest()
     if args.resume:
         if not run_manifest_path.is_file():
             raise FileNotFoundError("resume requires run_manifest.json")
@@ -7064,7 +7112,14 @@ def _streamed_main(args: argparse.Namespace) -> None:
             name,
             state["streams"][name],
             artifact=f"continuous_development_{name}",
-            bindings=bindings,
+            bindings=(
+                {
+                    **bindings,
+                    "run_manifest_sha256": run_manifest_sha256,
+                }
+                if name == "market_case_input_shards"
+                else bindings
+            ),
         )
         stream_manifests[name] = str(manifest_path.relative_to(destination))
 
@@ -7336,6 +7391,7 @@ def _streamed_main(args: argparse.Namespace) -> None:
             "schema_version": 1,
             "mode": "market_case_input",
             "run_manifest": run_manifest_path.name,
+            "run_manifest_sha256": run_manifest_sha256,
             "source_rows_processed": int(state["source_rows_consumed"]),
             "source_rows_total": total_source_rows,
             "processed_bars": int(state["processed_bars"]),
@@ -7380,6 +7436,7 @@ def _streamed_main(args: argparse.Namespace) -> None:
             "schema_version": 1,
             "status": "complete",
             "run_manifest": run_manifest_path.name,
+            "run_manifest_sha256": run_manifest_sha256,
             "summary": summary_path.name,
             "progress": progress_path.name,
             "market_case_input_shards": stream_manifests[

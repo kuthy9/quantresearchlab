@@ -8,6 +8,10 @@ import pandas as pd
 import pytest
 
 from smc_trader.brain_calibration import BrainCalibrationRecorder
+from smc_trader.brain_entry_sequence import (
+    BrainInteractionView,
+    BrainObservationView,
+)
 from smc_trader.model import (
     BOSLifecycle,
     BOSScope,
@@ -22,6 +26,52 @@ from smc_trader.model import (
 
 
 TZ = "America/New_York"
+
+
+class _BrainFixtureObservation(BrainObservationView):
+    """Mutable test harness around the internal Brain consumer view."""
+
+    __slots__ = ()
+
+    def __init__(
+        self,
+        observation: SimpleNamespace,
+        *,
+        entry_locations: tuple[object, ...] = (),
+        path_sequences: tuple[object, ...] = (),
+    ) -> None:
+        object.__setattr__(self, "_observation", observation)
+        object.__setattr__(
+            self,
+            "_interaction",
+            BrainInteractionView(
+                zone_interactions=entry_locations,
+                reacceptance_interactions=(),
+                micro_bos_references=(),
+                path_sequences=path_sequences,
+            ),
+        )
+
+    def __setattr__(self, name: str, value: object) -> None:
+        interaction_field = {
+            "entry_locations": "zone_interactions",
+            "qualified_reacceptances": "reacceptance_interactions",
+            "micro_bos_references": "micro_bos_references",
+            "path_sequences": "path_sequences",
+        }.get(name)
+        if interaction_field is not None:
+            object.__setattr__(
+                self,
+                "_interaction",
+                replace(
+                    self._interaction,
+                    **{interaction_field: tuple(value)},
+                ),
+            )
+            return
+        setattr(self._observation, name, value)
+
+
 def _recorder() -> BrainCalibrationRecorder:
     return BrainCalibrationRecorder()
 
@@ -168,14 +218,16 @@ def _snapshot(
     context_theses: dict[str, SimpleNamespace] | None = None,
 ) -> SimpleNamespace:
     hypotheses = hypotheses or (_hypothesis(),)
-    observation = SimpleNamespace(
+    raw_observation = SimpleNamespace(
         asof=_clock(minute),
         symbol="NQH5",
         instrument_id=1,
         price=price,
         anomalies=anomalies,
+    )
+    observation = _BrainFixtureObservation(
+        raw_observation,
         entry_locations=(() if location is None else (location,)),
-        path_sequences=(),
     )
     contexts = {
         f"scene:{item.key}": SimpleNamespace(

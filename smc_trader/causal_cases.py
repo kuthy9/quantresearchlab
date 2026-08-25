@@ -16,6 +16,7 @@ from typing import Any, Iterable, Mapping, Sequence
 
 import pandas as pd
 
+from .brain_entry_sequence import brain_observation_view
 from .artifact_stream import (
     bound_regular_file,
     canonical_record_sha256,
@@ -23,11 +24,41 @@ from .artifact_stream import (
     read_json_object,
     sha256_file,
 )
-from .model import PlaybookPhase, Timeframe, aware_timestamp, to_primitive
+from .interaction import (
+    INTERACTION_ARTIFACT_COLLECTION_NAMES,
+    INTERACTION_CURRENT_ARTIFACT_COLLECTION_NAMES,
+    interaction_artifact_collections,
+    interaction_update_from_artifact_collections,
+)
+from .market_cases import (
+    BASE_TRANSITION_ARTIFACT_COLLECTION_NAMES,
+    EVENTFUL_TRANSITION_ARTIFACT_COLLECTION_NAMES,
+)
+from .model import (
+    INTERACTION_UPDATE_SCHEMA_VERSION,
+    InteractionUpdate,
+    PlaybookPhase,
+    Timeframe,
+    aware_timestamp,
+    to_primitive,
+)
+from .scene_graph import (
+    SCENE_EDGE_LIFECYCLE_VOCAB,
+    SCENE_NODE_KIND_VOCAB,
+    SCENE_NODE_LIFECYCLE_VOCAB,
+    SCENE_NODE_ROLE_VOCAB,
+    SceneEdgeKind,
+    StructuralScale,
+)
 
 
-CAUSAL_CASE_RECORDER_SCHEMA_VERSION = 7
-CAUSAL_CASE_PROTOCOL_VERSION = "entry-episode-causal-case-1.6.0"
+CAUSAL_CASE_RECORDER_SCHEMA_VERSION = 8
+CAUSAL_CASE_PROTOCOL_VERSION = "entry-episode-causal-case-1.7.0"
+
+_TRANSITION_COLLECTION_NAMES = (
+    *BASE_TRANSITION_ARTIFACT_COLLECTION_NAMES,
+    *INTERACTION_ARTIFACT_COLLECTION_NAMES,
+)
 
 CAUSAL_CASE_PROTOCOL: Mapping[str, Any] = {
     "protocol_version": CAUSAL_CASE_PROTOCOL_VERSION,
@@ -97,6 +128,14 @@ CAUSAL_CASE_PROTOCOL: Mapping[str, Any] = {
     ),
     "input_outcome_storage": "separate_arrow_streams_and_manifests",
     "model_feedback": "none_dataset_only",
+    "interaction_update_schema_version": INTERACTION_UPDATE_SCHEMA_VERSION,
+    "interaction_authority": "raw_eye_physical_facts_only_no_brain_interpretation",
+    "interaction_collections": list(INTERACTION_ARTIFACT_COLLECTION_NAMES),
+    "interaction_collection_semantics": (
+        "four_current_views_per_update_not_aggregated;two_this_update_state_"
+        "deltas;ordered_sequence_id_raw_step_milestones;cold_source_ids;zero_"
+        "or_one_hard_boundary_reason;current_views_never_create_heartbeats"
+    ),
 }
 
 
@@ -415,6 +454,7 @@ def _json(value: Any) -> str:
         sort_keys=True,
         separators=(",", ":"),
         ensure_ascii=False,
+        allow_nan=False,
     )
 
 
@@ -494,6 +534,7 @@ def _primary_identity(value: Any) -> str | None:
         "event_id",
         "location_id",
         "path_id",
+        "sequence_id",
         "step_id",
         "fvg_id",
         "order_block_id",
@@ -516,20 +557,20 @@ def _lifecycle(value: Any) -> str | None:
 
 
 def _transition_collections(observation: Any) -> tuple[tuple[str, Sequence[Any]], ...]:
-    names = (
-        "liquidity_inventory_transitions_this_update",
-        "liquidity_pool_transitions_this_update",
-        "group3_fvg_transitions_this_update",
-        "group3_order_block_transitions_this_update",
-        "group4_range_transitions_this_update",
-        "group4_manipulation_transitions_this_update",
-        "group5_entry_location_transitions_this_update",
-        "group5_reacceptance_transitions_this_update",
-        "group5_micro_bos_transitions_this_update",
-        "group5_path_transitions_this_update",
-        "group5_step_transitions_this_update",
+    interaction = getattr(observation, "interaction_update", None)
+    if type(interaction) is not InteractionUpdate:
+        raise ValueError("causal case interaction update type changed")
+    interaction_values = interaction_artifact_collections(interaction)
+    return (
+        *(
+            (name, tuple(getattr(observation, name, ())))
+            for name in BASE_TRANSITION_ARTIFACT_COLLECTION_NAMES
+        ),
+        *(
+            (name, interaction_values[name])
+            for name in INTERACTION_ARTIFACT_COLLECTION_NAMES
+        ),
     )
-    return tuple((name, tuple(getattr(observation, name, ()))) for name in names)
 
 
 def _observation_transition_payload(observation: Any) -> Mapping[str, Any]:
@@ -547,9 +588,6 @@ def _scene_node_relation_role(node: Any) -> str:
     liquidity_role = _enum_value(getattr(node, "liquidity_role", None))
     if isinstance(liquidity_role, str) and liquidity_role:
         return liquidity_role
-    for name, value in getattr(node, "semantic_attributes", ()):
-        if str(name) in {"role", "authority_role", "location_role"} and value:
-            return str(value)
     return str(getattr(node, "kind", "unknown"))
 
 
@@ -680,7 +718,9 @@ def _event_delta_ids(observation: Any) -> tuple[tuple[str, ...], tuple[str, ...]
     added = list(getattr(observation, "scene_added_node_ids", ()))
     added.extend(getattr(observation, "scene_added_edge_ids", ()))
     invalidated = list(getattr(observation, "scene_resolution_event_ids", ()))
-    for _name, values in _transition_collections(observation):
+    for name, values in _transition_collections(observation):
+        if name not in EVENTFUL_TRANSITION_ARTIFACT_COLLECTION_NAMES:
+            continue
         for value in values:
             identity = _primary_identity(value)
             if identity is None:
@@ -737,8 +777,25 @@ def _case_transition_update(
 def _transition_update_is_eventful(update: Mapping[str, Any]) -> bool:
     observation = update["observation_transition"]
     scene = update["scene_graph_delta"]
+    eventful_collection_names = {
+        "liquidity_inventory_transitions_this_update",
+        "liquidity_pool_transitions_this_update",
+        "group3_fvg_transitions_this_update",
+        "group3_order_block_transitions_this_update",
+        "group4_range_transitions_this_update",
+        "group4_manipulation_transitions_this_update",
+        "interaction_path_transitions",
+        "interaction_reacceptance_transitions",
+        "interaction_milestone_transitions",
+        "interaction_cold_source_ids",
+        "interaction_boundary_reasons",
+    }
     return bool(
-        any(tuple(values) for values in observation.get("collections", {}).values())
+        any(
+            tuple(values)
+            for name, values in observation.get("collections", {}).items()
+            if name in eventful_collection_names
+        )
         or any(
             tuple(scene.get(name, ()))
             for name in (
@@ -1502,6 +1559,7 @@ class CausalCaseRecorder:
         admitted_at: pd.Timestamp,
         observation: Any,
     ) -> str | None:
+        observation = brain_observation_view(observation)
         updated_at = _clock(episode.updated_at, name="causal_case.episode.updated_at")
         if updated_at != admitted_at:
             return "episode_not_admitted_on_current_revision"
@@ -1526,7 +1584,7 @@ class CausalCaseRecorder:
         ):
             locations = tuple(
                 item
-                for item in getattr(observation, "entry_locations", ())
+                for item in observation.entry_locations
                 if getattr(item, "location_id", None) == location_id
             )
             if len(locations) != 1:
@@ -1564,7 +1622,7 @@ class CausalCaseRecorder:
                 return "late_admission_with_prior_physical_first_entry"
             paths = tuple(
                 item
-                for item in getattr(observation, "path_sequences", ())
+                for item in observation.path_sequences
                 if getattr(item, "sequence_id", None) == path_id
             )
             if path_id is None or len(paths) != 1:
@@ -1671,6 +1729,7 @@ class CausalCaseRecorder:
             return
         contexts = getattr(snapshot.belief, "context_theses", {})
         episodes = getattr(snapshot.belief, "entry_episodes", {})
+        brain_observation = brain_observation_view(snapshot.observation)
         if not isinstance(contexts, Mapping) or not isinstance(episodes, Mapping):
             raise TypeError("causal case recorder requires typed Context/Episode mappings")
         seen_episode_ids: set[str] = set()
@@ -1704,7 +1763,7 @@ class CausalCaseRecorder:
                     episode,
                     context,
                     asof,
-                    snapshot.observation,
+                    brain_observation,
                 )
                 if quality_reason is not None:
                     self._skip(episode_id, quality_reason)
@@ -1791,7 +1850,7 @@ class CausalCaseRecorder:
                 case.entry_path_id = entry_path_id
                 matching_locations = tuple(
                     item
-                    for item in getattr(snapshot.observation, "entry_locations", ())
+                    for item in brain_observation.entry_locations
                     if getattr(item, "location_id", None) == entry_location_id
                 )
                 if len(matching_locations) == 1:
@@ -2012,7 +2071,9 @@ class CausalCaseRecorder:
                     "replay_update_ordinal": replay_update_ordinal,
                     "observation_transition": {
                         "typed_transition_delta_available": True,
-                        "collections": {},
+                        "collections": {
+                            name: () for name in _TRANSITION_COLLECTION_NAMES
+                        },
                         "case_boundary_terminal": {
                             "reason": boundary_terminal_reason,
                             "observed_at": asof,
@@ -2119,7 +2180,9 @@ class CausalCaseRecorder:
             "all_typed_deltas_available": typed_complete,
             "gap_free": gap_free,
         }
-        collections: dict[str, list[Any]] = {}
+        collections: dict[str, list[Any]] = {
+            name: [] for name in EVENTFUL_TRANSITION_ARTIFACT_COLLECTION_NAMES
+        }
         scene_values: dict[str, list[Any]] = {
             "added_node_ids": [],
             "revised_node_ids": [],
@@ -2144,7 +2207,8 @@ class CausalCaseRecorder:
                 }
             )
             for name, values in observation.get("collections", {}).items():
-                collections.setdefault(str(name), []).extend(tuple(values))
+                if name in collections:
+                    collections[name].extend(tuple(values))
             scene = update["scene_graph_delta"]
             scene_updates.append(
                 {
@@ -2664,9 +2728,13 @@ def _parse_json_field(row: Mapping[str, Any], name: str) -> Any:
     if not isinstance(raw, str):
         raise ValueError(f"causal case input {name} is not JSON text")
     try:
-        return json.loads(raw)
-    except json.JSONDecodeError as exc:
+        value = json.loads(raw)
+        expected = _json(value)
+    except (json.JSONDecodeError, TypeError, ValueError) as exc:
         raise ValueError(f"causal case input {name} is invalid JSON") from exc
+    if raw != expected:
+        raise ValueError(f"causal case input {name} is not canonical JSON")
+    return value
 
 
 def _validate_observed_clocks(value: Any, *, asof: pd.Timestamp, path: str = "") -> None:
@@ -2797,6 +2865,62 @@ def validate_case_input_row(row: Mapping[str, Any]) -> None:
         or len(updates) != len(scene_updates)
     ):
         raise ValueError("causal case transition coverage update count is invalid")
+    aggregate_collections = transition.get("collections")
+    if (
+        type(aggregate_collections) is not dict
+        or set(aggregate_collections)
+        != set(EVENTFUL_TRANSITION_ARTIFACT_COLLECTION_NAMES)
+        or any(not isinstance(value, list) for value in aggregate_collections.values())
+    ):
+        raise ValueError("causal case aggregate transition schema changed")
+    rebuilt_aggregate = {
+        name: [] for name in EVENTFUL_TRANSITION_ARTIFACT_COLLECTION_NAMES
+    }
+    update_base_keys = {
+        "asof",
+        "replay_update_ordinal",
+        "typed_transition_delta_available",
+        "collections",
+    }
+    for update in updates:
+        if not isinstance(update, Mapping):
+            raise ValueError("causal case transition update shape changed")
+        update_keys = frozenset(update)
+        if update_keys not in {
+            frozenset(update_base_keys),
+            frozenset((*update_base_keys, "case_boundary_terminal")),
+        } or type(update.get("typed_transition_delta_available")) is not bool:
+            raise ValueError("causal case transition update shape changed")
+        collections = update.get("collections")
+        if (
+            type(collections) is not dict
+            or set(collections) != set(_TRANSITION_COLLECTION_NAMES)
+            or any(not isinstance(value, list) for value in collections.values())
+        ):
+            raise ValueError("causal case transition collection schema changed")
+        interaction_update_from_artifact_collections(
+            {
+                name: collections[name]
+                for name in INTERACTION_ARTIFACT_COLLECTION_NAMES
+            }
+        )
+        for name in EVENTFUL_TRANSITION_ARTIFACT_COLLECTION_NAMES:
+            rebuilt_aggregate[name].extend(collections[name])
+        boundary = update.get("case_boundary_terminal")
+        if boundary is not None and (
+            type(boundary) is not dict
+            or set(boundary)
+            != {
+                "reason",
+                "observed_at",
+                "last_old_epoch_observation_at",
+            }
+            or not isinstance(boundary["reason"], str)
+            or not boundary["reason"]
+        ):
+            raise ValueError("causal case terminal boundary shape changed")
+    if aggregate_collections != rebuilt_aggregate:
+        raise ValueError("causal case aggregate transitions differ from updates")
     raw_observed_update_count = transition_coverage.get("observed_update_count")
     raw_eventful_update_count = transition_coverage.get("eventful_update_count")
     if (
@@ -2966,6 +3090,9 @@ def validate_case_input_row(row: Mapping[str, Any]) -> None:
         relation_descriptors_complete
     ) is not bool:
         raise ValueError("causal case Scene relation descriptor contract is invalid")
+    scene_relation_values = {item.value for item in SceneEdgeKind}
+    scene_timeframe_values = {item.value for item in Timeframe}
+    scene_scale_values = {item.value for item in StructuralScale}
     flattened_relation_descriptors: list[Mapping[str, Any]] = []
     all_relation_descriptors_complete = True
     for scene_update, scene_update_clock in zip(
@@ -3003,6 +3130,10 @@ def validate_case_input_row(row: Mapping[str, Any]) -> None:
             if not all(
                 isinstance(descriptor.get(name), str) and descriptor.get(name)
                 for name in ("relation", "lifecycle", "observed_at")
+            ) or (
+                descriptor["relation"] not in scene_relation_values
+                or descriptor["lifecycle"]
+                not in SCENE_EDGE_LIFECYCLE_VOCAB
             ):
                 raise ValueError("causal case Scene relation semantics are invalid")
             if _clock(
@@ -3022,6 +3153,14 @@ def validate_case_input_row(row: Mapping[str, Any]) -> None:
                         "structural_scale",
                         "lifecycle",
                     )
+                ) or (
+                    endpoint["kind"] not in SCENE_NODE_KIND_VOCAB
+                    or endpoint["role"] not in SCENE_NODE_ROLE_VOCAB
+                    or endpoint["timeframe"] not in scene_timeframe_values
+                    or endpoint["structural_scale"]
+                    not in scene_scale_values
+                    or endpoint["lifecycle"]
+                    not in SCENE_NODE_LIFECYCLE_VOCAB
                 ):
                     raise ValueError("causal case Scene endpoint descriptor is invalid")
         if len(descriptor_ids) != len(set(descriptor_ids)):

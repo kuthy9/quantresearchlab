@@ -29,6 +29,11 @@ from smc_trader.causal_cases import (
     validate_episode_disjoint_splits,
     write_causal_case_library_manifest,
 )
+from smc_trader.interaction import (
+    INTERACTION_ARTIFACT_COLLECTION_NAMES,
+    INTERACTION_CURRENT_ARTIFACT_COLLECTION_NAMES,
+    INTERACTION_DELTA_ARTIFACT_COLLECTION_NAMES,
+)
 from smc_trader.model import (
     Bar,
     ContextThesisState,
@@ -40,6 +45,7 @@ from smc_trader.model import (
     FrameObservation,
     FrozenLSRContext,
     FrozenTriggerState,
+    InteractionUpdate,
     LiquidityLevel,
     LiquidityRoute,
     PathSequenceLifecycle,
@@ -54,11 +60,22 @@ from smc_trader.model import (
 from smc_trader.market_representation import (
     representation_case_from_case_input_row,
 )
+from smc_trader.scene_graph import SceneEdgeKind, StructuralScale
 
 
 def _clock(minutes: int = 0) -> pd.Timestamp:
     return pd.Timestamp("2025-01-06 10:00", tz="America/New_York") + pd.Timedelta(
         minutes=minutes
+    )
+
+
+def _canonical_json(value: object) -> str:
+    return json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
     )
 
 
@@ -196,12 +213,12 @@ def _path(asof: pd.Timestamp, *, formed_at: pd.Timestamp | None = None) -> PathS
                 kind="zone_visible",
                 observed_at=formed,
                 source_event_id="zone:1",
-                source_entity_id="location:1",
+                source_entity_id="zone:1",
                 predecessor_step_ids=(),
                 same_clock_relation="origin",
                 direction=Direction.LONG,
                 strength=1.0,
-                reason="test",
+                reason="typed_entry_zone_registered",
             ),
         ),
     )
@@ -353,8 +370,12 @@ def _snapshot(
         frames=frames,
         anomalies=(),
         typed_transition_delta_available=True,
-        entry_locations=locations,
-        path_sequences=paths,
+        interaction_update=InteractionUpdate(
+            zone_interactions=locations,
+            reacceptance_interactions=(),
+            micro_break_facts=(),
+            interaction_paths=paths,
+        ),
         scene_revision_id=f"scene:{asof.isoformat()}",
         scene_added_node_ids=scene_added,
         scene_revised_node_ids=scene_revised,
@@ -420,16 +441,16 @@ def _scene_graph(
         liquidity_role=None,
         semantic_attributes=(("role", "impulse"),),
         timeframe="5m",
-        structural_scale=SimpleNamespace(value="internal"),
+        structural_scale=StructuralScale.INTERNAL,
         lifecycle="active",
     )
     target_node = SimpleNamespace(
         node_id="node:target",
         kind="entry_location",
-        liquidity_role=SimpleNamespace(value="entry_zone"),
+        liquidity_role=None,
         semantic_attributes=(),
         timeframe="1m",
-        structural_scale=SimpleNamespace(value="micro"),
+        structural_scale=StructuralScale.INTERNAL,
         lifecycle="active",
     )
     edges = {
@@ -437,7 +458,7 @@ def _scene_graph(
             edge_id=edge_id,
             source_node_id=source_node.node_id,
             target_node_id=target_node.node_id,
-            relation=SimpleNamespace(value=relation),
+            relation=SceneEdgeKind(relation),
             lifecycle="active",
             observed_at=asof,
         )
@@ -551,10 +572,17 @@ def _shadow_payload(
 
 
 def test_causal_outcome_selection_contract_versions_are_explicit() -> None:
-    assert CAUSAL_CASE_RECORDER_SCHEMA_VERSION == 7
-    assert CAUSAL_CASE_PROTOCOL_VERSION == "entry-episode-causal-case-1.6.0"
+    assert CAUSAL_CASE_RECORDER_SCHEMA_VERSION == 8
+    assert CAUSAL_CASE_PROTOCOL_VERSION == "entry-episode-causal-case-1.7.0"
     assert CAUSAL_CASE_PROTOCOL["shadow_outcome_selection"].endswith(
         "never_resolved_at_resolution_or_outcome"
+    )
+    assert CAUSAL_CASE_PROTOCOL["interaction_update_schema_version"] == 1
+    assert CAUSAL_CASE_PROTOCOL["interaction_authority"] == (
+        "raw_eye_physical_facts_only_no_brain_interpretation"
+    )
+    assert CAUSAL_CASE_PROTOCOL["interaction_collections"] == list(
+        INTERACTION_ARTIFACT_COLLECTION_NAMES
     )
 
 
@@ -658,6 +686,114 @@ def test_sparse_episode_revisions_do_not_emit_heartbeats_and_keep_prefix_bounds(
     assert not set(CAUSAL_CASE_OUTCOME_FIELD_TYPES).issubset(
         CAUSAL_CASE_INPUT_FIELD_TYPES
     )
+
+
+def test_current_interaction_views_stay_per_update_not_aggregate_history(
+    tmp_path: Path,
+) -> None:
+    recorder = _recorder(tmp_path)
+    t0 = _clock()
+    context = _context(t0)
+    episode = _episode(
+        t0,
+        location_id="location:1",
+        path_id="path:1",
+    )
+    recorder.observe(
+        _snapshot(
+            t0,
+            context,
+            episode,
+            locations=(_location(t0),),
+            paths=(_path(t0),),
+        ),
+        source_bar=_bar(t0),
+        source_row_ordinal=0,
+    )
+    recorder.drain_input_rows()
+
+    for minute in (1, 2):
+        clock = _clock(minute)
+        recorder.observe(
+            _snapshot(
+                clock,
+                context,
+                episode,
+                locations=(_location(clock, formed_at=t0),),
+                paths=(_path(clock, formed_at=t0),),
+                scene_added=(f"scene-event:{minute}",),
+            ),
+            source_bar=_bar(clock),
+            source_row_ordinal=minute,
+        )
+        assert recorder.drain_input_rows() == ()
+
+    t3 = _clock(3)
+    changed = replace(
+        context,
+        supporting_event_ids=("authority:1", "support:current-view"),
+        updated_at=t3,
+    )
+    recorder.observe(
+        _snapshot(
+            t3,
+            changed,
+            episode,
+            locations=(_location(t3, formed_at=t0),),
+            paths=(_path(t3, formed_at=t0),),
+        ),
+        source_bar=_bar(t3),
+        source_row_ordinal=3,
+    )
+    row = recorder.drain_input_rows()[0]
+    transition = json.loads(row.observation_transition_json)
+    base_names = {
+        "liquidity_inventory_transitions_this_update",
+        "liquidity_pool_transitions_this_update",
+        "group3_fvg_transitions_this_update",
+        "group3_order_block_transitions_this_update",
+        "group4_range_transitions_this_update",
+        "group4_manipulation_transitions_this_update",
+    }
+    assert set(transition["collections"]) == base_names | set(
+        INTERACTION_DELTA_ARTIFACT_COLLECTION_NAMES
+    )
+    assert set(transition["collections"]).isdisjoint(
+        INTERACTION_CURRENT_ARTIFACT_COLLECTION_NAMES
+    )
+    assert len(transition["updates"]) == 2
+    for update in transition["updates"]:
+        collections = update["collections"]
+        assert set(collections) == base_names | set(
+            INTERACTION_ARTIFACT_COLLECTION_NAMES
+        )
+        assert len(collections["interaction_zone_interactions"]) == 1
+        assert len(collections["interaction_paths"]) == 1
+    validate_case_input_row(row.to_dict())
+
+    legacy = dict(row.to_dict())
+    legacy_transition = json.loads(legacy["observation_transition_json"])
+    legacy_transition["updates"][0]["collections"][
+        "group5_micro_bos_transitions_this_update"
+    ] = []
+    legacy["observation_transition_json"] = _canonical_json(legacy_transition)
+    legacy["input_fingerprint"] = ""
+    with pytest.raises(ValueError, match="collection schema"):
+        validate_case_input_row(legacy)
+
+    brain_nested = dict(row.to_dict())
+    brain_transition = json.loads(
+        brain_nested["observation_transition_json"]
+    )
+    brain_transition["updates"][0]["collections"][
+        "interaction_zone_interactions"
+    ][0]["brain_response"] = {"qualified": True}
+    brain_nested["observation_transition_json"] = _canonical_json(
+        brain_transition
+    )
+    brain_nested["input_fingerprint"] = ""
+    with pytest.raises(ValueError, match="interaction artifact"):
+        validate_case_input_row(brain_nested)
 
 
 def test_old_context_is_carried_at_episode_admission_without_forged_formation(
@@ -784,10 +920,10 @@ def test_replay_update_coverage_is_separate_from_synthetic_source_rows(
     damaged = dict(changed_row)
     damaged_transition = json.loads(damaged["observation_transition_json"])
     damaged_transition["coverage"]["observed_update_count"] = 1
-    damaged["observation_transition_json"] = json.dumps(damaged_transition)
+    damaged["observation_transition_json"] = _canonical_json(damaged_transition)
     damaged_scene = json.loads(damaged["scene_graph_delta_json"])
     damaged_scene["coverage"]["observed_update_count"] = 1
-    damaged["scene_graph_delta_json"] = json.dumps(damaged_scene)
+    damaged["scene_graph_delta_json"] = _canonical_json(damaged_scene)
     damaged["input_fingerprint"] = ""
     with pytest.raises(ValueError, match="replay coverage is incomplete"):
         validate_case_library_rows([*inputs[:-1], damaged], outcomes)
@@ -804,23 +940,23 @@ def test_scene_delta_carries_typed_relation_topology_without_prices(
         liquidity_role=None,
         semantic_attributes=(("role", "impulse"),),
         timeframe="5m",
-        structural_scale=SimpleNamespace(value="internal"),
+        structural_scale=StructuralScale.INTERNAL,
         lifecycle="active",
     )
     target_node = SimpleNamespace(
         node_id="node:target",
         kind="entry_location",
-        liquidity_role=SimpleNamespace(value="entry_zone"),
+        liquidity_role=None,
         semantic_attributes=(),
         timeframe="1m",
-        structural_scale=SimpleNamespace(value="micro"),
+        structural_scale=StructuralScale.INTERNAL,
         lifecycle="active",
     )
     edge = SimpleNamespace(
         edge_id="edge:creates",
         source_node_id=source_node.node_id,
         target_node_id=target_node.node_id,
-        relation=SimpleNamespace(value="creates"),
+        relation=SceneEdgeKind.CREATES,
         lifecycle="active",
         observed_at=t0,
     )
@@ -847,10 +983,10 @@ def test_scene_delta_carries_typed_relation_topology_without_prices(
     scene = json.loads(row["scene_graph_delta_json"])
     assert scene["relation_descriptors_complete"] is True
     descriptor = scene["relation_descriptors"][0]
-    assert descriptor["relation"] == "creates"
+    assert descriptor["relation"] == SceneEdgeKind.CREATES.value
     assert descriptor["source"]["kind"] == "displacement"
-    assert descriptor["source"]["role"] == "impulse"
-    assert descriptor["target"]["role"] == "entry_zone"
+    assert descriptor["source"]["role"] == "displacement"
+    assert descriptor["target"]["role"] == "entry_location"
     assert "price" not in json.dumps(descriptor)
     representation = case_input_to_representation_mapping(row)
     assert representation["graph"]["relation_descriptors"] == [descriptor]
@@ -860,10 +996,10 @@ def test_scene_case_projection_is_byte_stable_under_set_permutations(
     tmp_path: Path,
 ) -> None:
     relations = {
-        "edge:z-added": "creates",
-        "edge:m-added": "supports",
-        "edge:b-revised": "blocks",
-        "edge:a-revised": "targets",
+        "edge:z-added": SceneEdgeKind.CREATES.value,
+        "edge:m-added": SceneEdgeKind.SOURCED_FROM.value,
+        "edge:b-revised": SceneEdgeKind.BLOCKS_PATH_TO.value,
+        "edge:a-revised": SceneEdgeKind.LOCATED_AT.value,
     }
     left = _scene_case_row(
         tmp_path,
@@ -927,20 +1063,20 @@ def test_scene_case_projection_changes_for_real_descriptor_content(
         "revised_edges": (),
         "resolutions": (),
     }
-    supports = _scene_case_row(
+    sourced = _scene_case_row(
         tmp_path,
-        relations={"edge:a": "supports"},
+        relations={"edge:a": SceneEdgeKind.SOURCED_FROM.value},
         **common,
     )
     blocks = _scene_case_row(
         tmp_path,
-        relations={"edge:a": "blocks"},
+        relations={"edge:a": SceneEdgeKind.BLOCKS_PATH_TO.value},
         **common,
     )
 
-    assert supports["scene_graph_delta_json"] != blocks["scene_graph_delta_json"]
-    assert supports["input_fingerprint"] != blocks["input_fingerprint"]
-    assert supports["revision_id"] != blocks["revision_id"]
+    assert sourced["scene_graph_delta_json"] != blocks["scene_graph_delta_json"]
+    assert sourced["input_fingerprint"] != blocks["input_fingerprint"]
+    assert sourced["revision_id"] != blocks["revision_id"]
 
 
 def test_scene_case_rejects_same_edge_as_added_and_revised(
@@ -959,7 +1095,10 @@ def test_scene_case_rejects_same_edge_as_added_and_revised(
             ),
             source_bar=_bar(t0),
             source_row_ordinal=0,
-            scene_graph=_scene_graph(t0, {"edge:both": "supports"}),
+            scene_graph=_scene_graph(
+                t0,
+                {"edge:both": SceneEdgeKind.SOURCED_FROM.value},
+            ),
         )
 
 
@@ -990,7 +1129,10 @@ def test_scene_case_canonicalization_survives_checkpoint_roundtrip(
         source_row_ordinal=1,
         scene_graph=_scene_graph(
             t1,
-            {"edge:z": "supports", "edge:a": "creates"},
+            {
+                "edge:z": SceneEdgeKind.SOURCED_FROM.value,
+                "edge:a": SceneEdgeKind.CREATES.value,
+            },
         ),
     )
     assert recorder.drain_input_rows() == ()
@@ -1007,7 +1149,10 @@ def test_scene_case_canonicalization_survives_checkpoint_roundtrip(
             ),
             source_bar=_bar(t2),
             source_row_ordinal=2,
-            scene_graph=_scene_graph(t2, {"edge:a": "blocks"}),
+            scene_graph=_scene_graph(
+                t2,
+                {"edge:a": SceneEdgeKind.BLOCKS_PATH_TO.value},
+            ),
         )
         assert candidate.drain_input_rows() == ()
 
@@ -1035,9 +1180,9 @@ def test_scene_case_canonicalization_survives_checkpoint_roundtrip(
     assert scene["added_edge_ids"] == ["edge:a", "edge:z"]
     assert scene["revised_edge_ids"] == ["edge:a"]
     assert [item["relation"] for item in scene["relation_descriptors"]] == [
-        "creates",
-        "supports",
-        "blocks",
+        SceneEdgeKind.CREATES.value,
+        SceneEdgeKind.SOURCED_FROM.value,
+        SceneEdgeKind.BLOCKS_PATH_TO.value,
     ]
 
 
@@ -1046,7 +1191,10 @@ def test_scene_case_validator_rejects_noncanonical_and_ambiguous_rows(
 ) -> None:
     row = _scene_case_row(
         tmp_path,
-        relations={"edge:z": "supports", "edge:a": "creates"},
+        relations={
+            "edge:z": SceneEdgeKind.SOURCED_FROM.value,
+            "edge:a": SceneEdgeKind.CREATES.value,
+        },
         added_nodes=("node:a", "node:z"),
         revised_nodes=(),
         added_edges=("edge:a", "edge:z"),
@@ -1054,11 +1202,25 @@ def test_scene_case_validator_rejects_noncanonical_and_ambiguous_rows(
         resolutions=(),
     )
 
+    noncanonical = dict(row)
+    noncanonical["scene_graph_delta_json"] = json.dumps(
+        json.loads(str(noncanonical["scene_graph_delta_json"]))
+    )
+    noncanonical["input_fingerprint"] = ""
+    with pytest.raises(ValueError, match="not canonical JSON"):
+        validate_case_input_row(noncanonical)
+
+    nonfinite = dict(row)
+    nonfinite["scene_graph_delta_json"] = "NaN"
+    nonfinite["input_fingerprint"] = ""
+    with pytest.raises(ValueError, match="invalid JSON"):
+        validate_case_input_row(nonfinite)
+
     unordered = dict(row)
     scene = json.loads(str(unordered["scene_graph_delta_json"]))
     scene["added_node_ids"].reverse()
     scene["updates"][0]["added_node_ids"].reverse()
-    unordered["scene_graph_delta_json"] = json.dumps(scene)
+    unordered["scene_graph_delta_json"] = _canonical_json(scene)
     unordered["input_fingerprint"] = ""
     with pytest.raises(ValueError, match="not sorted unique"):
         validate_case_input_row(unordered)
@@ -1068,7 +1230,7 @@ def test_scene_case_validator_rejects_noncanonical_and_ambiguous_rows(
     duplicate = dict(scene["updates"][0]["relation_descriptors"][0])
     scene["updates"][0]["relation_descriptors"].append(duplicate)
     scene["relation_descriptors"].append(duplicate)
-    duplicated_descriptor["scene_graph_delta_json"] = json.dumps(scene)
+    duplicated_descriptor["scene_graph_delta_json"] = _canonical_json(scene)
     duplicated_descriptor["input_fingerprint"] = ""
     with pytest.raises(ValueError, match="descriptor is duplicated"):
         validate_case_input_row(duplicated_descriptor)
@@ -1077,7 +1239,7 @@ def test_scene_case_validator_rejects_noncanonical_and_ambiguous_rows(
     scene = json.loads(str(overlapping_edge["scene_graph_delta_json"]))
     scene["updates"][0]["revised_edge_ids"] = ["edge:a"]
     scene["revised_edge_ids"] = ["edge:a"]
-    overlapping_edge["scene_graph_delta_json"] = json.dumps(scene)
+    overlapping_edge["scene_graph_delta_json"] = _canonical_json(scene)
     overlapping_edge["input_fingerprint"] = ""
     with pytest.raises(ValueError, match="both added and revised"):
         validate_case_input_row(overlapping_edge)
@@ -2475,7 +2637,7 @@ def test_leakage_guards_reject_future_input_and_shared_episode(tmp_path: Path) -
     leaked = dict(row)
     transition = json.loads(leaked["observation_transition_json"])
     transition["future_event"] = {"observed_at": _clock(1).isoformat()}
-    leaked["observation_transition_json"] = json.dumps(transition)
+    leaked["observation_transition_json"] = _canonical_json(transition)
     leaked["input_fingerprint"] = ""
     with pytest.raises(ValueError, match="clock exceeds asof"):
         validate_case_input_row(leaked)
@@ -2483,7 +2645,7 @@ def test_leakage_guards_reject_future_input_and_shared_episode(tmp_path: Path) -
     derived_deadline_leak = dict(row)
     transition = json.loads(derived_deadline_leak["observation_transition_json"])
     transition["deadline_result_at"] = _clock(1).isoformat()
-    derived_deadline_leak["observation_transition_json"] = json.dumps(transition)
+    derived_deadline_leak["observation_transition_json"] = _canonical_json(transition)
     derived_deadline_leak["input_fingerprint"] = ""
     with pytest.raises(ValueError, match="clock exceeds asof"):
         validate_case_input_row(derived_deadline_leak)
@@ -2491,7 +2653,7 @@ def test_leakage_guards_reject_future_input_and_shared_episode(tmp_path: Path) -
     naive_observed_clock = dict(row)
     transition = json.loads(naive_observed_clock["observation_transition_json"])
     transition["external_event"] = {"observed_at": "2025-01-06T10:01:00"}
-    naive_observed_clock["observation_transition_json"] = json.dumps(transition)
+    naive_observed_clock["observation_transition_json"] = _canonical_json(transition)
     naive_observed_clock["input_fingerprint"] = ""
     with pytest.raises(ValueError, match="timezone-naive"):
         validate_case_input_row(naive_observed_clock)
@@ -2499,7 +2661,7 @@ def test_leakage_guards_reject_future_input_and_shared_episode(tmp_path: Path) -
     naive_deadline_result = dict(row)
     transition = json.loads(naive_deadline_result["observation_transition_json"])
     transition["deadline_result_at"] = "2025-01-06T10:01:00"
-    naive_deadline_result["observation_transition_json"] = json.dumps(transition)
+    naive_deadline_result["observation_transition_json"] = _canonical_json(transition)
     naive_deadline_result["input_fingerprint"] = ""
     with pytest.raises(ValueError, match="timezone-naive"):
         validate_case_input_row(naive_deadline_result)
@@ -2519,8 +2681,8 @@ def test_leakage_guards_reject_future_input_and_shared_episode(tmp_path: Path) -
         scene = json.loads(malformed_coverage["scene_graph_delta_json"])
         transition["coverage"][coverage_field] = bad_value
         scene["coverage"][coverage_field] = bad_value
-        malformed_coverage["observation_transition_json"] = json.dumps(transition)
-        malformed_coverage["scene_graph_delta_json"] = json.dumps(scene)
+        malformed_coverage["observation_transition_json"] = _canonical_json(transition)
+        malformed_coverage["scene_graph_delta_json"] = _canonical_json(scene)
         malformed_coverage["input_fingerprint"] = ""
         with pytest.raises(ValueError, match=message):
             validate_case_input_row(malformed_coverage)
@@ -2528,7 +2690,7 @@ def test_leakage_guards_reject_future_input_and_shared_episode(tmp_path: Path) -
     malformed_prefix = dict(row)
     prefixes = json.loads(malformed_prefix["prefix_refs_json"])
     prefixes[0]["frame_row_start"] = "0"
-    malformed_prefix["prefix_refs_json"] = json.dumps(prefixes)
+    malformed_prefix["prefix_refs_json"] = _canonical_json(prefixes)
     malformed_prefix["input_fingerprint"] = ""
     with pytest.raises(ValueError, match="not integers"):
         validate_case_input_row(malformed_prefix)

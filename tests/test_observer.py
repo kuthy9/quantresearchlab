@@ -145,7 +145,7 @@ def _all_typed_observer_config(**overrides: object) -> ObserverConfig:
         "displacement_protocol": DISPLACEMENT_PROTOCOL,
         "zone_protocol": GROUP3_PROTOCOL,
         "range_auction_protocol": GROUP4_PROTOCOL,
-        "group5_protocol": GROUP5_PROTOCOL,
+        "interaction_protocol": GROUP5_PROTOCOL,
         "scale_specs": MODEL_SCALE_SPECS,
         "project_scene_graph": False,
     }
@@ -539,24 +539,6 @@ def test_eye_authority_mode_preserves_all_typed_state_and_internal_memory() -> N
                 light_observation
                 .group4_manipulation_transitions_this_update
             ),
-            group5_entry_location_transitions_this_update=(
-                light_observation
-                .group5_entry_location_transitions_this_update
-            ),
-            group5_reacceptance_transitions_this_update=(
-                light_observation
-                .group5_reacceptance_transitions_this_update
-            ),
-            group5_micro_bos_transitions_this_update=(
-                light_observation
-                .group5_micro_bos_transitions_this_update
-            ),
-            group5_path_transitions_this_update=(
-                light_observation.group5_path_transitions_this_update
-            ),
-            group5_step_transitions_this_update=(
-                light_observation.group5_step_transitions_this_update
-            ),
         )
         technical_memory_fields = {
             "_audit_store",
@@ -626,11 +608,6 @@ def test_typed_delta_transport_preserves_full_observer_semantics() -> None:
             group3_order_block_transitions_this_update=(),
             group4_range_transitions_this_update=(),
             group4_manipulation_transitions_this_update=(),
-            group5_entry_location_transitions_this_update=(),
-            group5_reacceptance_transitions_this_update=(),
-            group5_micro_bos_transitions_this_update=(),
-            group5_path_transitions_this_update=(),
-            group5_step_transitions_this_update=(),
         ) == expected
 
 
@@ -668,11 +645,6 @@ def test_normal_observer_skips_typed_delta_signature_generation(
             observation.group3_order_block_transitions_this_update,
             observation.group4_range_transitions_this_update,
             observation.group4_manipulation_transitions_this_update,
-            observation.group5_entry_location_transitions_this_update,
-            observation.group5_reacceptance_transitions_this_update,
-            observation.group5_micro_bos_transitions_this_update,
-            observation.group5_path_transitions_this_update,
-            observation.group5_step_transitions_this_update,
         )
     )
 

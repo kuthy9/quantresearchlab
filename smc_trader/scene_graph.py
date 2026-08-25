@@ -16,24 +16,36 @@ from enum import Enum
 import hashlib
 import math
 from pathlib import Path
-from typing import Any, Iterable, Mapping, Sequence
+from typing import TYPE_CHECKING, Any, Iterable, Mapping, Sequence
 import weakref
 
 import pandas as pd
 
+from .brain_entry_sequence import brain_path_terminal_role
+from .displacement import DisplacementLifecycle
+
+if TYPE_CHECKING:
+    from .brain_entry_sequence import BrainInteractionView, BrainObservationView
+
 from .model import (
     AuthorityLayer,
     BalanceContext,
+    BOSLifecycle,
     CORE_TIMEFRAMES,
+    DealingRangeLifecycle,
     DeliveryObstruction,
     Direction,
     DirectionalObstructionView,
+    EntryLocationLifecycle,
     EventKind,
+    FairValueGapLifecycle,
     GlobalConflictEvidence,
     GlobalConflictRole,
     GlobalMarketContext,
     LiquidityInventoryItem,
     LiquidityInventoryLifecycle,
+    LiquidityPoolLifecycle,
+    ManipulationLifecycle,
     MarketEpisodeState,
     MarketMode,
     MarketObservation,
@@ -42,13 +54,16 @@ from .model import (
     NeutralMarketState,
     OpenMarketThesis,
     OpenMarketThesisClaimRelation,
+    OrderBlockLifecycle,
     PathSequenceLifecycle,
     Playbook,
     PlaybookPhase,
     ScaleRelation,
     ScaleRelationState,
     StructureLifecycle,
+    SupportResistanceLifecycle,
     SwingLifecycle,
+    QualifiedReacceptanceLifecycle,
     ThesisEvidenceState,
     Timeframe,
     aware_timestamp,
@@ -538,6 +553,11 @@ class SceneEdgeKind(str, Enum):
     PRECEDES = "PRECEDES"
 
 
+SCENE_EDGE_LIFECYCLE_VOCAB = frozenset(
+    {"active", "closed", "invalidated"}
+)
+
+
 _CAUSAL_PATH_RELATIONS = frozenset(
     {
         SceneEdgeKind.BREAKS,
@@ -581,6 +601,73 @@ _HOT_STATE_KINDS = frozenset(
         "micro_bos",
         "path_sequence",
         "candle_structure",
+    }
+)
+
+_SCENE_EVENT_KIND_TO_NODE_KIND: Mapping[EventKind, str] = {
+    EventKind.SWING_STATE: "swing",
+    EventKind.STRUCTURE_STATE: "structure",
+    EventKind.BOS_STATE: "bos",
+    EventKind.BOS_POST_BREAK_STATE: "bos_post_break",
+    EventKind.STRUCTURE_BREAK: "bos",
+    EventKind.STRUCTURE_BREAK_FAILED: "bos",
+    EventKind.SUPPORT_RESISTANCE_STATE: "support_resistance",
+    EventKind.LIQUIDITY_POOL_STATE: "liquidity_pool",
+    EventKind.LIQUIDITY_RETIRED: "liquidity_retirement",
+    EventKind.FVG_STATE: "fvg",
+    EventKind.ORDER_BLOCK_STATE: "order_block",
+    EventKind.DEALING_RANGE_STATE: "range",
+    EventKind.MANIPULATION_STATE: "manipulation",
+    EventKind.ENTRY_PATH_STATE: "path_sequence",
+    EventKind.ENTRY_PATH_STEP: "path_step",
+}
+
+# This is the single vocabulary authority for Scene endpoint artifacts.  It is
+# derived from the actual EventKind adapter and the few native graph-only node
+# kinds, so artifact readers do not maintain a second guessed list.
+SCENE_NODE_KIND_VOCAB = frozenset(
+    {
+        *(item.value for item in EventKind),
+        *_SCENE_EVENT_KIND_TO_NODE_KIND.values(),
+        *_HOT_STATE_KINDS,
+        "manipulation_candidate",
+        "resolution",
+    }
+)
+SCENE_NODE_ROLE_VOCAB = frozenset(
+    {
+        *SCENE_NODE_KIND_VOCAB,
+        *(item.value for item in LiquidityRole),
+    }
+)
+SCENE_NODE_LIFECYCLE_VOCAB = frozenset(
+    {
+        *(
+            item.value
+            for lifecycle in (
+                SwingLifecycle,
+                StructureLifecycle,
+                BOSLifecycle,
+                SupportResistanceLifecycle,
+                LiquidityPoolLifecycle,
+                LiquidityInventoryLifecycle,
+                FairValueGapLifecycle,
+                OrderBlockLifecycle,
+                DealingRangeLifecycle,
+                ManipulationLifecycle,
+                EntryLocationLifecycle,
+                QualifiedReacceptanceLifecycle,
+                PathSequenceLifecycle,
+                DisplacementLifecycle,
+            )
+            for item in lifecycle
+        ),
+        "ambiguous",
+        "completed",
+        "conflicting",
+        "observed",
+        "terminal",
+        "unknown",
     }
 )
 
@@ -824,7 +911,7 @@ class SceneEdge:
             or not self.source_node_id
             or not self.target_node_id
             or self.source_node_id == self.target_node_id
-            or self.lifecycle not in {"active", "closed", "invalidated"}
+            or self.lifecycle not in SCENE_EDGE_LIFECYCLE_VOCAB
             or (self.lifecycle == "active") == bool(self.resolution_reason)
             or self.observed_at < self.first_observed_at
             or (
@@ -1389,6 +1476,11 @@ def _semantic_attributes(item: Any) -> tuple[tuple[str, str], ...]:
         "deadline_at": "deadline_at",
         "censored_at": "censored_at",
         "context_kind": "context_kind",
+        # Frozen schema-v2 MicroBOSReference compatibility only.  Canonical
+        # MicroBreakFact records intentionally have neither field, so their
+        # physical break cannot acquire Brain qualification in the Eye graph.
+        "outcome": "outcome",
+        "qualified": "qualified",
     }
     output: list[tuple[str, str]] = []
     for output_name, source_name in fields.items():
@@ -2723,23 +2815,10 @@ class TemporalMarketSceneGraph:
         )
     @staticmethod
     def _event_kind(event: MarketEvent) -> str:
-        return {
-            EventKind.SWING_STATE: "swing",
-            EventKind.STRUCTURE_STATE: "structure",
-            EventKind.BOS_STATE: "bos",
-            EventKind.BOS_POST_BREAK_STATE: "bos_post_break",
-            EventKind.STRUCTURE_BREAK: "bos",
-            EventKind.STRUCTURE_BREAK_FAILED: "bos",
-            EventKind.SUPPORT_RESISTANCE_STATE: "support_resistance",
-            EventKind.LIQUIDITY_POOL_STATE: "liquidity_pool",
-            EventKind.LIQUIDITY_RETIRED: "liquidity_retirement",
-            EventKind.FVG_STATE: "fvg",
-            EventKind.ORDER_BLOCK_STATE: "order_block",
-            EventKind.DEALING_RANGE_STATE: "range",
-            EventKind.MANIPULATION_STATE: "manipulation",
-            EventKind.ENTRY_PATH_STATE: "path_sequence",
-            EventKind.ENTRY_PATH_STEP: "path_step",
-        }.get(event.kind, event.kind.value)
+        return _SCENE_EVENT_KIND_TO_NODE_KIND.get(
+            event.kind,
+            event.kind.value,
+        )
 
     @staticmethod
     def _event_entity_id(event: MarketEvent) -> str:
@@ -2898,16 +2977,24 @@ class TemporalMarketSceneGraph:
             )
             for item in group
         )
+        interaction = observation.interaction_update
+        interaction_groups = (
+            ()
+            if interaction is None
+            else (
+                interaction.zone_interactions,
+                interaction.reacceptance_interactions,
+                interaction.micro_break_facts,
+                interaction.interaction_paths,
+            )
+        )
         top_level = tuple(
             (item, False)
             for group in (
                 observation.liquidity_inventory,
                 observation.liquidity_pool_states,
                 observation.manipulations,
-                observation.entry_locations,
-                observation.qualified_reacceptances,
-                observation.micro_bos_references,
-                observation.path_sequences,
+                *interaction_groups,
             )
             for item in group
         )
@@ -6818,10 +6905,13 @@ def _canonical_open_thesis_root_id(
         return _context_identity(candidate)
     if candidate.kind != "path_sequence":
         return _context_identity(candidate)
+    interaction = observation.interaction_update
+    paths = () if interaction is None else interaction.interaction_paths
+    locations = () if interaction is None else interaction.zone_interactions
     path = next(
         (
             item
-            for item in observation.path_sequences
+            for item in paths
             if item.sequence_id == _context_identity(candidate)
         ),
         None,
@@ -6833,7 +6923,7 @@ def _canonical_open_thesis_root_id(
     location = next(
         (
             item
-            for item in observation.entry_locations
+            for item in locations
             if item.location_id == path.context_id
         ),
         None,
@@ -6859,10 +6949,13 @@ def _is_supporting_open_thesis_trigger(node: SceneNode) -> bool:
     if node.kind == "reacceptance":
         return node.lifecycle == "held"
     if node.kind == "micro_bos":
+        # Only an explicit schema-v2 cold-reader interpretation can satisfy
+        # this compatibility path. Raw schema-v3 facts omit both fields and
+        # therefore cannot be silently treated as aligned.
         attributes = dict(node.semantic_attributes)
         return bool(
-            node.ambiguity_state is EvidenceStatus.CONFIRMED
-            and attributes.get("outcome", "aligned") == "aligned"
+            attributes.get("outcome") == "aligned"
+            and attributes.get("qualified") == "true"
         )
     return False
 
@@ -6873,6 +6966,8 @@ def build_open_market_theses(
     delta: SceneGraphDelta,
     graph: TemporalMarketSceneGraph,
     context: GlobalMarketContext,
+    *,
+    brain_interaction: BrainInteractionView | None = None,
 ) -> tuple[OpenMarketThesis, ...]:
     """Bind active graph roots into playbook-neutral, identity-only theses.
 
@@ -6904,7 +6999,27 @@ def build_open_market_theses(
         "path_sequence",
     }
     candidate_groups: dict[str, list[SceneNode]] = defaultdict(list)
-    for root_id in context.candidate_structured_episode_ids:
+    successful_paths = {
+        path.sequence_id: path
+        for path in (
+            ()
+            if brain_interaction is None
+            else brain_interaction.path_sequences
+        )
+        if (
+            brain_path_terminal_role(path) == "successful"
+            and path.ended_at == observation.asof
+        )
+    }
+    candidate_ids = tuple(
+        dict.fromkeys(
+            (
+                *context.candidate_structured_episode_ids,
+                *successful_paths,
+            )
+        )
+    )
+    for root_id in candidate_ids:
         candidate = _current_entity_node(graph, root_id)
         if candidate is None or (
             _is_terminal(candidate.kind, candidate.lifecycle)
@@ -6912,7 +7027,11 @@ def build_open_market_theses(
                 candidate.kind == "manipulation"
                 and candidate.lifecycle == "reaccepted"
             )
-            and not _successful_terminal_path_pulse(candidate)
+            and root_id not in successful_paths
+            and not (
+                brain_interaction is None
+                and _successful_terminal_path_pulse(candidate)
+            )
         ):
             continue
         canonical_id = _canonical_open_thesis_root_id(
@@ -7002,6 +7121,26 @@ def build_open_market_theses(
                             _context_identity(node),
                             *node.source_ids,
                         )
+                    ),
+                    *(
+                        reference.reference_id
+                        for candidate in candidates
+                        if candidate.kind == "path_sequence"
+                        and _context_identity(candidate) in successful_paths
+                        for reference in (
+                            ()
+                            if brain_interaction is None
+                            else brain_interaction.micro_bos_references
+                        )
+                        if reference.qualified
+                        and reference.context_kind
+                        == successful_paths[
+                            _context_identity(candidate)
+                        ].context_kind
+                        and reference.context_id
+                        == successful_paths[
+                            _context_identity(candidate)
+                        ].context_id
                     ),
                 )
             )
@@ -7289,19 +7428,6 @@ def market_episode_id(
     )
 
 
-_NEUTRAL_SUCCESSFUL_PATH_REASONS = frozenset(
-    {"micro_bos_aligned", "pool_reversal_sequence_observed"}
-)
-_NEUTRAL_LOCAL_TERMINAL_PATH_REASONS = frozenset(
-    {
-        "location_left",
-        "reacceptance_failed",
-        "micro_bos_opposed",
-        "micro_bos_ambiguous_same_clock",
-    }
-)
-
-
 def _neutral_claim_relations(
     context: GlobalMarketContext,
     *,
@@ -7428,7 +7554,7 @@ def _neutral_path_milestones(
     triggers = tuple(
         step
         for step in path.steps
-        if step.kind == "micro_bos_confirmed"
+        if step.kind in {"micro_break_observed", "micro_bos_confirmed"}
         and step.observed_at > pullback.observed_at
         and step.source_event_id is not None
     )
@@ -7452,15 +7578,16 @@ def _with_neutral_episode_update_clock(
 
 def _build_unique_market_episode(
     previous: MarketEpisodeState | None,
-    observation: MarketObservation,
+    observation: BrainObservationView,
     context: GlobalMarketContext,
     location: Any,
-    path: Any,
+    physical_path: Any,
+    interpreted_path: Any,
 ) -> tuple[MarketEpisodeState, bool]:
     identity = market_episode_id(
         context.market_epoch_id,
         location.location_id,
-        path.sequence_id,
+        physical_path.sequence_id,
         location.direction,
     )
     if previous is not None and (
@@ -7470,7 +7597,7 @@ def _build_unique_market_episode(
         or previous.instrument_id != location.instrument_id
         or previous.direction is not location.direction
         or previous.entry_location_id != location.location_id
-        or previous.entry_path_id != path.sequence_id
+        or previous.entry_path_id != physical_path.sequence_id
         or previous.source_zone_id != location.source_zone_id
         or previous.source_displacement_id
         != location.source_displacement_id
@@ -7490,7 +7617,10 @@ def _build_unique_market_episode(
         or previous.formed_at != location.formed_at
     ):
         raise ValueError("neutral market episode physical custody changed")
-    pullback, trigger = _neutral_path_milestones(location, path)
+    pullback, trigger = _neutral_path_milestones(
+        location,
+        interpreted_path,
+    )
     if previous is not None and (
         (
             previous.first_pullback_step_id,
@@ -7517,38 +7647,34 @@ def _build_unique_market_episode(
         and previous.trigger_at is not None
     ):
         raise ValueError("neutral market episode trigger custody changed")
+    terminal_role = brain_path_terminal_role(interpreted_path)
     successful_pulse_at = (
-        path.ended_at
-        if (
-            path.lifecycle is PathSequenceLifecycle.CLOSED
-            and path.transition_reason in _NEUTRAL_SUCCESSFUL_PATH_REASONS
-        )
+        interpreted_path.ended_at
+        if terminal_role == "successful"
         else None
     )
     successful_pulse_reason = (
-        path.transition_reason if successful_pulse_at is not None else None
+        interpreted_path.transition_reason
+        if successful_pulse_at is not None
+        else None
     )
-    local_terminal = bool(
-        path.lifecycle is PathSequenceLifecycle.CLOSED
-        and path.transition_reason
-        in _NEUTRAL_LOCAL_TERMINAL_PATH_REASONS
-    )
+    local_terminal = terminal_role == "local_terminal"
     if (
-        path.lifecycle is PathSequenceLifecycle.CLOSED
-        and successful_pulse_at is None
-        and not local_terminal
+        interpreted_path.lifecycle is PathSequenceLifecycle.CLOSED
+        and terminal_role == "unknown"
     ):
         raise ValueError(
             "neutral market episode encountered an unknown closed-path reason"
         )
     terminal_at = (
-        path.ended_at
-        if local_terminal
-        or path.lifecycle is PathSequenceLifecycle.CENSORED
+        interpreted_path.ended_at
+        if terminal_role in {"local_terminal", "censored"}
         else None
     )
     terminal_reason = (
-        path.transition_reason if terminal_at is not None else None
+        interpreted_path.transition_reason
+        if terminal_at is not None
+        else None
     )
     if previous is not None and previous.terminal_at is not None:
         if (
@@ -7586,7 +7712,7 @@ def _build_unique_market_episode(
         instrument_id=location.instrument_id,
         direction=location.direction,
         entry_location_id=location.location_id,
-        entry_path_id=path.sequence_id,
+        entry_path_id=physical_path.sequence_id,
         source_zone_id=location.source_zone_id,
         source_displacement_id=location.source_displacement_id,
         entry_location_protocol_hash=location.protocol_hash,
@@ -7673,9 +7799,14 @@ def _neutral_boundary_terminal(
     previous: MarketEpisodeState,
     observation: MarketObservation,
 ) -> MarketEpisodeState:
+    interaction = observation.interaction_update
     boundary_by_path = {
         path.sequence_id: path
-        for path in observation.group5_boundary_path_transitions
+        for path in (
+            ()
+            if interaction is None or interaction.boundary_reason is None
+            else interaction.interaction_path_transitions
+        )
     }
     boundary = boundary_by_path.get(previous.entry_path_id)
     if boundary is not None:
@@ -7698,10 +7829,15 @@ def _neutral_boundary_terminal(
 
 def build_neutral_market_state(
     previous: NeutralMarketState | None,
-    observation: MarketObservation,
+    observation: BrainObservationView,
     context: GlobalMarketContext,
 ) -> NeutralMarketState:
-    """Purely reduce typed physical pairs into a neutral market lifecycle."""
+    """Reduce physical pairs with one explicit Brain interpretation view.
+
+    Physical identity and custody always come from ``interaction_update``.
+    Aligned/opposed outcomes come only from the already-constructed Brain
+    view; this reducer never invokes the interpreter itself.
+    """
 
     if (
         context.updated_at != observation.asof
@@ -7729,8 +7865,27 @@ def build_neutral_market_state(
         previous_by_id = {}
         previous_by_location.clear()
 
+    interaction = observation.interaction_update
+    physical_paths = (
+        () if interaction is None else interaction.interaction_paths
+    )
+    physical_locations = (
+        () if interaction is None else interaction.zone_interactions
+    )
+    interpreted_paths = observation.interaction.path_sequences
+    interpreted_by_id = {
+        path.sequence_id: path for path in interpreted_paths
+    }
+    if (
+        len(interpreted_by_id) != len(interpreted_paths)
+        or set(interpreted_by_id)
+        != {path.sequence_id for path in physical_paths}
+    ):
+        raise ValueError(
+            "neutral market Brain view differs from physical paths"
+        )
     paths_by_location: dict[str, list[Any]] = defaultdict(list)
-    for path in observation.path_sequences:
+    for path in physical_paths:
         if path.context_kind == "zone_return":
             paths_by_location[path.context_id].append(path)
 
@@ -7740,7 +7895,7 @@ def build_neutral_market_state(
     rejected: list[tuple[str, str]] = []
     retirements: dict[str, str] = {}
     for location in sorted(
-        observation.entry_locations,
+        physical_locations,
         key=lambda item: (item.formed_at, item.location_id),
     ):
         paths = tuple(paths_by_location.get(location.location_id, ()))
@@ -7802,6 +7957,7 @@ def build_neutral_market_state(
             context,
             location,
             path,
+            interpreted_by_id[path.sequence_id],
         )
         episodes[identity] = episode
         if changed:
@@ -9040,6 +9196,10 @@ __all__ = [
     "LiquidityRole",
     "ScaleRole",
     "ScaleSpec",
+    "SCENE_EDGE_LIFECYCLE_VOCAB",
+    "SCENE_NODE_KIND_VOCAB",
+    "SCENE_NODE_LIFECYCLE_VOCAB",
+    "SCENE_NODE_ROLE_VOCAB",
     "SceneEdge",
     "SceneEdgeKind",
     "SceneGraphDelta",

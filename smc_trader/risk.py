@@ -6,6 +6,7 @@ from typing import Any
 
 import pandas as pd
 
+from .brain_entry_sequence import brain_observation_view
 from .model import (
     AccountState,
     Action,
@@ -291,6 +292,7 @@ class _CausalStopSource:
 def _canonical_stop_sources(
     observation: MarketObservation,
 ) -> dict[str, _CausalStopSource]:
+    observation = brain_observation_view(observation)
     sources: dict[str, _CausalStopSource] = {}
     ambiguous: set[str] = set()
 
@@ -1294,6 +1296,7 @@ class StructuralRiskEngine:
         observation: MarketObservation,
         account: AccountState | None = None,
     ) -> RiskAssessment:
+        observation = brain_observation_view(observation)
         account = account or AccountState(equity=100_000.0)
         forced = self._forced_position_exit(decision, observation, account)
         if forced is not None:

@@ -121,7 +121,8 @@ def _artifact(
         rows.append(item)
     config = trainer.ROOT / "configs/model.json"
     model_config = json.loads(config.read_text(encoding="utf-8"))
-    registry = json.loads((trainer.ROOT / "configs/data_splits.json").read_text())
+    registry_path = trainer.MARKET_CASE_PROFILE_REGISTRY
+    registry = json.loads(registry_path.read_text())
     profile_name = "market_episode_input_smoke_2024_01_08"
     profile = registry["market_case_input_profiles"][profile_name]
     profile_identity = hashlib.sha256(canonical_json(profile)).hexdigest()
@@ -129,8 +130,19 @@ def _artifact(
         "schema_version": 1,
         "runner": "continuous_replay",
         "mode": "market_case_input",
-        "runtime_state_schema_version": 5,
+        "runtime_state_schema_version": 8,
+        "repository": (
+            {"commit": "a" * 40} if repository is None else repository
+        ),
+        "data_continuity": dict(
+            market_cases.MARKET_CASE_INPUT_DATA_CONTINUITY_POLICY
+        ),
         "profile": {"name": profile_name, "identity": profile_identity},
+        "profile_registry": {
+            "path": str(registry_path.resolve()),
+            "sha256": sha256_file(registry_path),
+            "schema_version": 1,
+        },
         "source": {
             "path": str(source.resolve()),
             "sha256": sha256_file(source),
@@ -164,9 +176,6 @@ def _artifact(
             "checkpoint_bars": 1000,
         },
     }
-    if repository is not None:
-        run["runtime_state_schema_version"] = 6
-        run["repository"] = repository
     run_path = tmp_path / "run_manifest.json"
     atomic_bytes(run_path, canonical_json(run))
     state = new_stream_state(MARKET_CASE_INPUT_FIELD_TYPES)
@@ -183,7 +192,10 @@ def _artifact(
         "market_case_input_shards",
         state,
         artifact="continuous_development_market_case_input_shards",
-        bindings={"run_manifest": run_path.name},
+        bindings={
+            "run_manifest": run_path.name,
+            "run_manifest_sha256": sha256_file(run_path),
+        },
     )
     args = [
         "--neutral-dataset-audit-only",
@@ -219,7 +231,8 @@ def test_neutral_audit_is_fit_free_and_reports_active_state(
     assert report["training_performed"] is report["calibration_fit_allowed"] is False
     active = report["active_scale_state"]
     assert active["denominator_rows"] == 1
-    assert active["ambiguous_rows"] == active["unknown_or_disconnected_rows"] == 0
+    assert active["ambiguous_rows"] == 0
+    assert active["unknown_or_disconnected_rows"] == 1
     assert set(active["by_timeframe"]) == {"4H", "1H", "15m", "5m", "1m"}
 
 
@@ -476,6 +489,11 @@ def test_neutral_b1_registry_rejects_equal_but_wrong_json_types(
 def test_neutral_b0_rejects_holdout_before_loading_dataset(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(
+        trainer,
+        "_neutral_b0_registry_contract",
+        lambda: (trainer.NEUTRAL_B0_VALIDATION_CONTRACT, "a" * 64, "b" * 64),
+    )
     names = iter((
         "neutral_representation_train_2021_02",
         "neutral_representation_holdout_2025_02",
@@ -562,6 +580,11 @@ def test_neutral_b1_parent_b0_is_exact_failed_run(tmp_path: Path,
 def test_neutral_b1_manifest_binding_fails_before_dataset_load(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(
+        trainer,
+        "_neutral_b1_registry_contract",
+        lambda: (trainer.NEUTRAL_B1_VALIDATION_CONTRACT, "a" * 64, "b" * 64),
+    )
     parent = _valid_failed_neutral_b0_metrics_payload()
     expected = {
         item["input_manifest_sha256"] for item in parent["lineage"]["input_runs"]
@@ -624,6 +647,22 @@ def test_neutral_artifact_integrity_fails_closed(tmp_path: Path, change: str) ->
         atomic_bytes(run, canonical_json(payload))
     with pytest.raises(RepresentationDataError):
         trainer.main(args)
+
+
+def test_neutral_input_stream_rejects_replaced_valid_run_manifest(
+    tmp_path: Path,
+) -> None:
+    artifact = _artifact(tmp_path)
+    run_path = Path(artifact["run"])
+    replacement = json.loads(run_path.read_text())
+    replacement["repository"]["commit"] = "b" * 40
+    atomic_bytes(run_path, canonical_json(replacement))
+
+    with pytest.raises(
+        RepresentationDataError,
+        match="run manifest hash mismatch",
+    ):
+        trainer.main(artifact["args"])
 
 
 def test_legacy_default_does_not_enter_neutral_mode(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1206,6 +1245,10 @@ def test_neutral_fit_rejects_registered_profile_role_tamper(
             },
             "run_identity": {
                 "normalized": {
+                    "profile_registry_path": str(
+                        trainer.MARKET_CASE_PROFILE_REGISTRY.resolve()
+                    ),
+                    "profile_registry_sha256": "d" * 64,
                     "window_start": window.start,
                     "window_end_exclusive": window.end_exclusive,
                     "window_role": window.allowed_ohlcv_role,

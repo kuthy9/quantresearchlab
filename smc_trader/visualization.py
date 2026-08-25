@@ -9,6 +9,7 @@ from typing import Any, Mapping, Sequence
 
 import pandas as pd
 
+from .brain_entry_sequence import brain_interaction_view
 from .model import (
     Action,
     Candle,
@@ -357,15 +358,28 @@ def _selected_group5_entities(
     belief: Any,
     focus_entity_id: str | None = None,
 ) -> tuple[tuple[Any, ...], tuple[Any, ...], tuple[Any, ...], tuple[Any, ...]]:
+    observation = snapshot.observation
+    interaction = observation.interaction_update
+    if belief is None and interaction is not None:
+        locations = interaction.zone_interactions
+        paths = interaction.interaction_paths
+        reacceptances = interaction.reacceptance_interactions
+        micro_bos = interaction.micro_break_facts
+    else:
+        interpreted = brain_interaction_view(observation)
+        locations = interpreted.zone_interactions
+        paths = interpreted.path_sequences
+        reacceptances = interpreted.reacceptance_interactions
+        micro_bos = interpreted.micro_bos_references
     if belief is None:
         # Eye-only audits have no Brain hypothesis to select a setup.  The
         # renderer must still show the typed states actually emitted by the
         # Observer; this changes presentation only and grants no action
         # authority to Group 5.
-        locations = tuple(snapshot.observation.entry_locations)
-        paths = tuple(snapshot.observation.path_sequences)
-        reacceptances = tuple(snapshot.observation.qualified_reacceptances)
-        micro_bos = tuple(snapshot.observation.micro_bos_references)
+        locations = tuple(locations)
+        paths = tuple(paths)
+        reacceptances = tuple(reacceptances)
+        micro_bos = tuple(micro_bos)
         if focus_entity_id is None:
             return locations, paths, reacceptances, micro_bos
 
@@ -434,12 +448,12 @@ def _selected_group5_entities(
     entry_path_id = None if plan is None else plan.entry_path_id
     locations = tuple(
         item
-        for item in snapshot.observation.entry_locations
+        for item in locations
         if item.location_id in location_ids
     )
     paths = tuple(
         item
-        for item in snapshot.observation.path_sequences
+        for item in paths
         if (
             (entry_path_id is not None and item.sequence_id == entry_path_id)
             or item.sequence_id in setup_context_ids
@@ -451,12 +465,12 @@ def _selected_group5_entities(
     }
     reacceptances = tuple(
         item
-        for item in snapshot.observation.qualified_reacceptances
+        for item in reacceptances
         if item.context_id in context_ids
     )
     micro_bos = tuple(
         item
-        for item in snapshot.observation.micro_bos_references
+        for item in micro_bos
         if item.context_id in context_ids
     )
     return locations, paths, reacceptances, micro_bos
@@ -514,7 +528,10 @@ def _metric_text(
                 )
             )
         return "\n".join(rows)
-    if timeframe is Timeframe.M1 and snapshot.observation.group5_typed_available:
+    if (
+        timeframe is Timeframe.M1
+        and snapshot.observation.interaction_update is not None
+    ):
         _, paths, reacceptances, micro_bos_references = (
             _selected_group5_entities(
                 snapshot,
@@ -552,8 +569,16 @@ def _metric_text(
                     "none"
                     if micro_bos is None
                     else (
-                        f"{micro_bos.outcome} / "
-                        f"{'qualified' if micro_bos.qualified else 'not-qualified'}"
+                        f"{getattr(micro_bos, 'outcome', 'raw-break')} / "
+                        + (
+                            "physical-only"
+                            if not hasattr(micro_bos, "qualified")
+                            else (
+                                "qualified"
+                                if micro_bos.qualified
+                                else "not-qualified"
+                            )
+                        )
                     )
                 ),
             )
@@ -1296,7 +1321,7 @@ def _group5_overlay(
 ) -> None:
     """Mark exact first-pullback, reacceptance, micro-BOS and path order."""
 
-    if not candles or not snapshot.observation.group5_typed_available:
+    if not candles or snapshot.observation.interaction_update is None:
         return
     locations, paths, reacceptances, references = (
         _selected_group5_entities(snapshot, belief, focus_entity_id)
@@ -2063,7 +2088,8 @@ def _group5_text(
         )
     for item in micro_bos[-2:]:
         rows.append(
-            f"micro BOS {item.outcome} qualified={item.qualified} "
+            f"micro BOS {getattr(item, 'outcome', 'raw-break')} "
+            f"qualified={getattr(item, 'qualified', 'brain-only')} "
             f"id={_short_identity(item.reference_id)} "
             f"bos={_short_identity(item.bos_id)} at={item.resolved_at:%H:%M}"
         )
@@ -2949,7 +2975,11 @@ class DecisionVisualizer:
                 case_entity_id
                 if any(
                     path.sequence_id == case_entity_id
-                    for path in observation.path_sequences
+                    for path in (
+                        ()
+                        if observation.interaction_update is None
+                        else observation.interaction_update.interaction_paths
+                    )
                 )
                 else None
             ),

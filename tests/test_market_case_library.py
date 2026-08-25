@@ -15,7 +15,9 @@ from smc_trader.artifact_stream import (
     new_stream_state,
     write_stream_shard,
 )
+from smc_trader.interaction import INTERACTION_ARTIFACT_COLLECTION_NAMES
 from smc_trader.market_cases import (
+    BASE_TRANSITION_ARTIFACT_COLLECTION_NAMES,
     MARKET_CASE_INPUT_FIELD_TYPES,
     MARKET_CASE_PROTOCOL,
     MarketEpisodeCaseRecorder,
@@ -25,10 +27,22 @@ from smc_trader.market_cases import (
 )
 from smc_trader.model import (
     Direction,
+    DirectionalObstructionView,
+    GlobalMarketContext,
+    InteractionUpdate,
+    MarketMode,
     NEUTRAL_MARKET_STATE_SCHEMA_VERSION,
+    ScaleRelation,
+    ScaleRelationState,
     Timeframe,
 )
-from smc_trader.scene_graph import market_episode_id
+from smc_trader.scene_graph import (
+    SceneEdgeKind,
+    StructuralScale,
+    market_episode_id,
+)
+
+from .test_v3_group5_primitives import _fvg
 
 
 NY = "America/New_York"
@@ -119,20 +133,47 @@ def _episode(
     )
 
 
-def _global_context(minute: int, *, epoch: str) -> SimpleNamespace:
-    return SimpleNamespace(
+def _global_context(minute: int, *, epoch: str) -> GlobalMarketContext:
+    return GlobalMarketContext(
         updated_at=_at(minute),
         scene_revision_id=f"scene:{minute}",
         market_epoch_id=epoch,
         authority_stack=(),
-        market_mode="directional",
-        scale_relation_details={},
+        market_mode=MarketMode.UNCERTAIN,
+        scale_relation_details={
+            timeframe.value: ScaleRelationState(
+                timeframe=timeframe,
+                relation=ScaleRelation.UNKNOWN,
+                direction=None,
+                authority_layer_id=None,
+                evidence_ids=(),
+                evidence_kind=None,
+                structural_scope=None,
+                acceptance_state=None,
+                since=None,
+                age_bars=0,
+                graph_connected=False,
+                ambiguous=False,
+            )
+            for timeframe in Timeframe
+        },
         external_draw_candidates={"above": ("draw:1",), "below": ()},
-        obstruction_views={},
+        obstruction_views={
+            direction.value: DirectionalObstructionView(
+                direction=direction,
+                nearest_draw_id=None,
+                nearest_draw_price=None,
+                hard_barriers=(),
+                soft_frictions=(),
+            )
+            for direction in Direction
+        },
         material_conflicts=(),
         unknown_evidence=(),
         ambiguous_evidence=(),
-        dislocations_by_scale={},
+        dislocations_by_scale={
+            timeframe.value: () for timeframe in Timeframe
+        },
         balance_context=None,
         invalidated_source_ids=(),
         open_market_theses=(),
@@ -162,10 +203,10 @@ def _snapshot(
             Timeframe.M1,
         )
     }
-    event = SimpleNamespace(
-        event_id=f"fvg:{minute}",
-        observed_at=asof,
-        lifecycle="active",
+    event = replace(
+        _fvg(asof, identity=f"fvg:{minute}"),
+        symbol="MES",
+        instrument_id=1,
     )
     observation = SimpleNamespace(
         asof=asof,
@@ -187,11 +228,12 @@ def _snapshot(
         group3_order_block_transitions_this_update=(),
         group4_range_transitions_this_update=(),
         group4_manipulation_transitions_this_update=(),
-        group5_entry_location_transitions_this_update=(),
-        group5_reacceptance_transitions_this_update=(),
-        group5_micro_bos_transitions_this_update=(),
-        group5_path_transitions_this_update=(),
-        group5_step_transitions_this_update=(),
+        interaction_update=InteractionUpdate(
+            zone_interactions=(),
+            reacceptance_interactions=(),
+            micro_break_facts=(),
+            interaction_paths=(),
+        ),
     )
     neutral = SimpleNamespace(
         schema_version=NEUTRAL_MARKET_STATE_SCHEMA_VERSION,
@@ -271,11 +313,18 @@ def test_input_only_schema_has_one_stable_revision_and_no_legacy_dependencies() 
     }
     assert MARKET_CASE_PROTOCOL["input_only"] is True
     assert MARKET_CASE_PROTOCOL["protocol_version"] == (
-        "market-episode-input-only-1.2.0"
+        "market-episode-input-only-1.3.0"
     )
     assert MARKET_CASE_PROTOCOL["neutral_runtime_schema_version"] == 2
     assert MARKET_CASE_PROTOCOL["runtime_source"] == (
         "NeutralEngineSnapshot.neutral_market_state"
+    )
+    assert MARKET_CASE_PROTOCOL["interaction_update_schema_version"] == 1
+    assert MARKET_CASE_PROTOCOL["interaction_authority"] == (
+        "raw_eye_physical_facts_only_no_brain_interpretation"
+    )
+    assert MARKET_CASE_PROTOCOL["interaction_collections"] == list(
+        INTERACTION_ARTIFACT_COLLECTION_NAMES
     )
     assert market_cases_module.MARKET_CASE_INPUT_DATA_CONTINUITY_POLICY == {
         "maximum_no_trade_gap_minutes": 5,
@@ -286,7 +335,7 @@ def test_input_only_schema_has_one_stable_revision_and_no_legacy_dependencies() 
     }
     assert "data_continuity" not in MARKET_CASE_PROTOCOL
     assert expected_market_case_run_identity() == {
-        "recorder_schema_version": 1,
+        "recorder_schema_version": 2,
         "protocol": dict(MARKET_CASE_PROTOCOL),
         "input_stream": "market_case_input_shards",
         "input_only": True,
@@ -351,7 +400,7 @@ def test_formation_emits_one_input_row_with_same_clock_eye_scene_context_and_pre
     prefixes = json.loads(row["ohlcv_prefix_refs_json"])
     assert eye["asof"] == _at(0).isoformat()
     assert eye["collections"]["group3_fvg_transitions_this_update"][0][
-        "event_id"
+        "fvg_id"
     ] == "fvg:0"
     assert scene["added_node_ids"] == ["node:0"]
     assert scene["added_edge_ids"] == ["edge:0"]
@@ -762,7 +811,7 @@ def test_future_episode_clock_and_recursive_future_key_are_rejected() -> None:
     "outcome",
     ("aligned", "opposed", "simultaneous_unknown", "ambiguous_same_clock"),
 )
-def test_only_typed_micro_bos_observation_outcome_is_allowed(outcome: str) -> None:
+def test_raw_interaction_artifact_rejects_brain_outcome(outcome: str) -> None:
     episode = _episode(0)
     recorder = _recorder()
     _observe(
@@ -799,56 +848,27 @@ def test_only_typed_micro_bos_observation_outcome_is_allowed(outcome: str) -> No
         "qualified": outcome == "aligned",
         "strength": 0.75,
     }
-    observation["collections"][
-        "group5_micro_bos_transitions_this_update"
-    ] = [micro_bos]
-    row["observation_transition_json"] = canonical_json(observation).decode("utf-8")
-    row["revision_id"] = market_cases_module._expected_revision_id(row)
-    validate_market_case_input_row(row)
-
-    for field_name, invalid in (
-        (
-            "observation_transition_json",
-            {
-                **observation,
-                "collections": {
-                    **observation["collections"],
-                    "group5_micro_bos_transitions_this_update": [
-                        {**micro_bos, "outcome": "future_target"}
-                    ],
-                },
-            },
-        ),
-        (
-            "observation_transition_json",
-            {
-                **observation,
-                "collections": {
-                    **observation["collections"],
-                    "group5_micro_bos_transitions_this_update": [
-                        {**micro_bos, "outcome": {"value": outcome}}
-                    ],
-                },
-            },
-        ),
-        (
-            "observation_transition_json",
-            {
-                **observation,
-                "collections": {
-                    **observation["collections"],
-                    "group5_micro_bos_transitions_this_update": [],
-                    "group5_path_transitions_this_update": [
-                        micro_bos
-                    ],
-                },
-            },
-        ),
+    for invalid_payload in (
+        micro_bos,
+        {**micro_bos, "outcome": "future_target"},
+        {**micro_bos, "outcome": {"value": outcome}},
     ):
         tampered = dict(row)
-        tampered[field_name] = canonical_json(invalid).decode("utf-8")
+        invalid = {
+            **observation,
+            "collections": {
+                **observation["collections"],
+                "interaction_micro_break_facts": [invalid_payload],
+            },
+        }
+        tampered["observation_transition_json"] = canonical_json(invalid).decode(
+            "utf-8"
+        )
         tampered["revision_id"] = market_cases_module._expected_revision_id(tampered)
-        with pytest.raises(ValueError, match="future/outcome key"):
+        with pytest.raises(
+            ValueError,
+            match="interaction artifact|future/outcome key",
+        ):
             validate_market_case_input_row(tampered)
 
 
@@ -954,6 +974,227 @@ def test_checkpoint_resume_is_deterministic_and_drain_releases_pending_rows() ->
     assert recorder.summary["pending_row_count"] == 0
     assert not hasattr(recorder, "_outcome_rows")
     assert not hasattr(recorder, "_all_rows")
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    (
+        lambda state: state.pop("_protocol_version"),
+        lambda state: state.__setitem__("_extra", True),
+        lambda state: state.__setitem__("_recorder_schema_version", 1),
+        lambda state: state.__setitem__(
+            "_protocol_version", "market-episode-input-only-1.2.0"
+        ),
+    ),
+)
+def test_recorder_pickle_identity_rejects_invalid_state_failure_atomically(
+    mutate: object,
+) -> None:
+    recorder = _recorder()
+    before = dict(recorder.__dict__)
+    damaged = dict(recorder.__getstate__())
+    mutate(damaged)
+
+    with pytest.raises(ValueError, match="state identity changed"):
+        recorder.__setstate__(damaged)
+
+    assert recorder.__dict__ == before
+
+
+def test_unavailable_typed_delta_and_nonexact_raw_payloads_fail_closed() -> None:
+    episode = _episode(0)
+    recorder = _recorder()
+    _observe(
+        recorder,
+        _snapshot(
+            0,
+            episodes=(episode,),
+            transitions=(episode,),
+            eventful=True,
+        ),
+        source_ordinal=0,
+        replay_ordinal=0,
+    )
+    row = _row(recorder)
+
+    unavailable = dict(row)
+    observation = json.loads(unavailable["observation_transition_json"])
+    observation["typed_transition_delta_available"] = False
+    unavailable["observation_transition_json"] = canonical_json(observation).decode(
+        "utf-8"
+    )
+    unavailable["revision_id"] = market_cases_module._expected_revision_id(
+        unavailable
+    )
+    with pytest.raises(ValueError, match="unavailable typed transition"):
+        validate_market_case_input_row(unavailable)
+
+    for injected_key in ("brain_response", "qualified"):
+        injected = dict(row)
+        context = json.loads(injected["neutral_global_context_json"])
+        context[injected_key] = True
+        injected["neutral_global_context_json"] = canonical_json(context).decode(
+            "utf-8"
+        )
+        injected["revision_id"] = market_cases_module._expected_revision_id(
+            injected
+        )
+        with pytest.raises(ValueError, match="future/outcome key"):
+            validate_market_case_input_row(injected)
+
+    for mutation in ("missing", "extra"):
+        malformed = dict(row)
+        observation = json.loads(malformed["observation_transition_json"])
+        fvg = observation["collections"][
+            "group3_fvg_transitions_this_update"
+        ][0]
+        if mutation == "missing":
+            fvg.pop("qualification")
+        else:
+            fvg["brain_response"] = True
+        malformed["observation_transition_json"] = canonical_json(
+            observation
+        ).decode("utf-8")
+        malformed["revision_id"] = market_cases_module._expected_revision_id(
+            malformed
+        )
+        with pytest.raises(
+            ValueError,
+            match="future/outcome key|artifact shape changed",
+        ):
+            validate_market_case_input_row(malformed)
+
+
+@pytest.mark.parametrize("collection", BASE_TRANSITION_ARTIFACT_COLLECTION_NAMES)
+@pytest.mark.parametrize("payload", ({}, {"unexpected": True}))
+def test_each_base_eye_collection_requires_an_exact_dto(
+    collection: str,
+    payload: dict[str, object],
+) -> None:
+    episode = _episode(0)
+    recorder = _recorder()
+    _observe(
+        recorder,
+        _snapshot(0, episodes=(episode,), transitions=(episode,)),
+        source_ordinal=0,
+        replay_ordinal=0,
+    )
+    malformed = _row(recorder)
+    observation = json.loads(malformed["observation_transition_json"])
+    observation["collections"][collection] = [payload]
+    malformed["observation_transition_json"] = canonical_json(observation).decode(
+        "utf-8"
+    )
+    malformed["revision_id"] = market_cases_module._expected_revision_id(
+        malformed
+    )
+
+    with pytest.raises(ValueError, match="artifact shape changed"):
+        validate_market_case_input_row(malformed)
+
+
+def test_scene_descriptors_are_exact_complete_and_raw_only() -> None:
+    episode = _episode(0)
+    recorder = _recorder()
+    _observe(
+        recorder,
+        _snapshot(
+            0,
+            episodes=(episode,),
+            transitions=(episode,),
+            eventful=True,
+        ),
+        source_ordinal=0,
+        replay_ordinal=0,
+    )
+    row = _row(recorder)
+    scene = json.loads(row["scene_graph_delta_json"])
+    descriptor = {
+        "change_kind": "added",
+        "edge_id": scene["added_edge_ids"][0],
+        "relation": SceneEdgeKind.CREATES.value,
+        "lifecycle": "active",
+        "observed_at": row["asof"].isoformat(),
+        "source": {
+            "node_id": "node:source",
+            "kind": "structure",
+            "role": "structure",
+            "timeframe": Timeframe.H1.value,
+            "structural_scale": StructuralScale.EXTERNAL.value,
+            "lifecycle": "active",
+        },
+        "target": {
+            "node_id": "node:target",
+            "kind": "fvg",
+            "role": "fvg",
+            "timeframe": Timeframe.M5.value,
+            "structural_scale": StructuralScale.INTERNAL.value,
+            "lifecycle": "active",
+        },
+    }
+    scene["relation_descriptors"] = [descriptor]
+    scene["relation_descriptors_complete"] = True
+    valid = dict(row)
+    valid["scene_graph_delta_json"] = canonical_json(scene).decode("utf-8")
+    valid["revision_id"] = market_cases_module._expected_revision_id(valid)
+    validate_market_case_input_row(valid)
+
+    brain_injected = json.loads(valid["scene_graph_delta_json"])
+    brain_injected["relation_descriptors"][0]["source"]["playbook"] = "LSR"
+    injected = dict(valid)
+    injected["scene_graph_delta_json"] = canonical_json(brain_injected).decode(
+        "utf-8"
+    )
+    injected["revision_id"] = market_cases_module._expected_revision_id(
+        injected
+    )
+    with pytest.raises(ValueError, match="future/outcome key"):
+        validate_market_case_input_row(injected)
+
+    brain_value_mutations = (
+        (("relation",), "playbook"),
+        (("lifecycle",), "qualified"),
+        (("source", "kind"), "decision"),
+        (("source", "role"), "selected_action"),
+        (("target", "kind"), "risk"),
+        (("target", "role"), "hard_gate"),
+    )
+    for field_path, brain_value in brain_value_mutations:
+        damaged_scene = json.loads(valid["scene_graph_delta_json"])
+        descriptor_state = damaged_scene["relation_descriptors"][0]
+        if len(field_path) == 1:
+            descriptor_state[field_path[0]] = brain_value
+        else:
+            descriptor_state[field_path[0]][field_path[1]] = brain_value
+        damaged = dict(valid)
+        damaged["scene_graph_delta_json"] = canonical_json(
+            damaged_scene
+        ).decode("utf-8")
+        damaged["revision_id"] = market_cases_module._expected_revision_id(
+            damaged
+        )
+        with pytest.raises(ValueError, match="Scene"):
+            validate_market_case_input_row(damaged)
+
+    for mutation in ("wrong_change_kind", "duplicate", "missing_endpoint_key"):
+        damaged_scene = json.loads(valid["scene_graph_delta_json"])
+        if mutation == "wrong_change_kind":
+            damaged_scene["relation_descriptors"][0]["change_kind"] = "revised"
+        elif mutation == "duplicate":
+            damaged_scene["relation_descriptors"].append(
+                dict(damaged_scene["relation_descriptors"][0])
+            )
+        else:
+            damaged_scene["relation_descriptors"][0]["target"].pop("role")
+        damaged = dict(valid)
+        damaged["scene_graph_delta_json"] = canonical_json(damaged_scene).decode(
+            "utf-8"
+        )
+        damaged["revision_id"] = market_cases_module._expected_revision_id(
+            damaged
+        )
+        with pytest.raises(ValueError, match="Scene"):
+            validate_market_case_input_row(damaged)
 
 
 def test_generic_arrow_shard_roundtrip_preserves_utc_revision_identity(

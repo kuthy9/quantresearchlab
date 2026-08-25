@@ -1,5 +1,5 @@
 {
-  "schema_version": 3,
+  "schema_version": 4,
   "role": "repeatable_non_pnl_semantic_development",
   "release_readiness": {
     "active_model_natural_authority_validated": false,
@@ -103,7 +103,7 @@
     "displacement_protocol": "configs/primitives_displacement.json",
     "zone_protocol": "configs/primitives_zones.json",
     "range_auction_protocol": "configs/primitives_range.json",
-    "group5_protocol": "configs/primitives_entry.json",
+    "interaction_protocol": "configs/primitives_entry.json",
     "minimum_bars": {
       "4H": 16,
       "1H": 24,

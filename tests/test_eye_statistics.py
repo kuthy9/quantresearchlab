@@ -92,13 +92,15 @@ def _observation(
         group4_atr_unready_sweep_item_ids=(),
         group4_source_dispositions=dispositions,
         group4_range_funnel=range_funnel,
-        group5_typed_available=True,
-        entry_locations=entry_locations,
-        qualified_reacceptances=(),
-        micro_bos_references=(),
-        path_sequences=paths,
-        group5_boundary_path_transitions=(),
-        group5_boundary_reacceptance_transitions=(),
+        interaction_update=SimpleNamespace(
+            zone_interactions=entry_locations,
+            reacceptance_interactions=(),
+            micro_break_facts=(),
+            interaction_paths=paths,
+            interaction_path_transitions=(),
+            reacceptance_interaction_transitions=(),
+            boundary_reason=None,
+        ),
     )
 
 
@@ -126,11 +128,25 @@ def _delta_observation(
     result.group3_order_block_transitions_this_update = order_blocks
     result.group4_range_transitions_this_update = ranges
     result.group4_manipulation_transitions_this_update = manipulations
-    result.group5_entry_location_transitions_this_update = entry_locations
-    result.group5_reacceptance_transitions_this_update = reacceptances
-    result.group5_micro_bos_transitions_this_update = micro_bos
-    result.group5_path_transitions_this_update = paths
-    result.group5_step_transitions_this_update = ()
+    prior_interaction = getattr(observation, "interaction_update", None)
+    boundary_reason = (
+        None if prior_interaction is None else prior_interaction.boundary_reason
+    )
+    result.interaction_update = SimpleNamespace(
+        zone_interactions=(() if boundary_reason is not None else entry_locations),
+        reacceptance_interactions=(
+            () if boundary_reason is not None else reacceptances
+        ),
+        micro_break_facts=micro_bos,
+        interaction_paths=(() if boundary_reason is not None else paths),
+        interaction_path_transitions=(
+            paths if boundary_reason is not None else ()
+        ),
+        reacceptance_interaction_transitions=(
+            reacceptances if boundary_reason is not None else ()
+        ),
+        boundary_reason=boundary_reason,
+    )
     return result
 
 
@@ -2281,7 +2297,15 @@ def test_hard_boundary_delta_matches_dedicated_snapshot_transitions() -> None:
     boundary_snapshot.group4_boundary_manipulation_transitions = (
         censored_manipulation,
     )
-    boundary_snapshot.group5_boundary_path_transitions = (censored_path,)
+    boundary_snapshot.interaction_update = SimpleNamespace(
+        zone_interactions=(),
+        reacceptance_interactions=(),
+        micro_break_facts=(),
+        interaction_paths=(),
+        interaction_path_transitions=(censored_path,),
+        reacceptance_interaction_transitions=(),
+        boundary_reason="data_gap_reset",
+    )
     boundary_delta = _delta_observation(
         boundary_snapshot,
         fvgs=(invalidated_fvg,),

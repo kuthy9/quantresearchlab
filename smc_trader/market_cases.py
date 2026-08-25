@@ -15,25 +15,49 @@ from dataclasses import dataclass, fields, is_dataclass, replace
 from enum import Enum
 import json
 import math
-from typing import Any, Iterable
+import types
+from typing import Any, Iterable, get_args, get_origin, get_type_hints
 
 import pandas as pd
 
 from .artifact_stream import canonical_json, canonical_record_sha256
+from .interaction import (
+    INTERACTION_ARTIFACT_COLLECTION_NAMES,
+    INTERACTION_DELTA_ARTIFACT_COLLECTION_NAMES,
+    interaction_artifact_collections,
+    interaction_update_from_artifact_collections,
+)
 from .model import (
+    DealingRangeState,
     Direction,
+    FairValueGapState,
+    GlobalMarketContext,
+    INTERACTION_UPDATE_SCHEMA_VERSION,
+    InteractionUpdate,
+    LiquidityInventoryItem,
+    LiquidityPoolState,
+    ManipulationState,
     NEUTRAL_MARKET_STATE_SCHEMA_VERSION,
+    OrderBlockState,
     Timeframe,
     aware_timestamp,
 )
-from .scene_graph import market_episode_id as neutral_market_episode_id
+from .scene_graph import (
+    SCENE_EDGE_LIFECYCLE_VOCAB,
+    SCENE_NODE_KIND_VOCAB,
+    SCENE_NODE_LIFECYCLE_VOCAB,
+    SCENE_NODE_ROLE_VOCAB,
+    SceneEdgeKind,
+    StructuralScale,
+    market_episode_id as neutral_market_episode_id,
+)
 
 
-MARKET_CASE_RECORDER_SCHEMA_VERSION = 1
-MARKET_CASE_PROTOCOL_VERSION = "market-episode-input-only-1.2.0"
+MARKET_CASE_RECORDER_SCHEMA_VERSION = 2
+MARKET_CASE_PROTOCOL_VERSION = "market-episode-input-only-1.3.0"
 
 # Run-level replay policy, intentionally separate from the recorder protocol:
-# the row grain and validation contract are unchanged, while runner schema 7
+# the row grain and validation contract are unchanged, while runner schema 8
 # now binds how a large same-contract source discontinuity reaches the already
 # supported data-gap epoch boundary.
 MARKET_CASE_INPUT_DATA_CONTINUITY_POLICY: Mapping[str, Any] = {
@@ -66,18 +90,21 @@ _BOUNDARY_ANOMALIES = frozenset(
         "tick_size_mismatch",
     }
 )
-_TRANSITION_COLLECTION_NAMES = (
+BASE_TRANSITION_ARTIFACT_COLLECTION_NAMES = (
     "liquidity_inventory_transitions_this_update",
     "liquidity_pool_transitions_this_update",
     "group3_fvg_transitions_this_update",
     "group3_order_block_transitions_this_update",
     "group4_range_transitions_this_update",
     "group4_manipulation_transitions_this_update",
-    "group5_entry_location_transitions_this_update",
-    "group5_reacceptance_transitions_this_update",
-    "group5_micro_bos_transitions_this_update",
-    "group5_path_transitions_this_update",
-    "group5_step_transitions_this_update",
+)
+EVENTFUL_TRANSITION_ARTIFACT_COLLECTION_NAMES = (
+    *BASE_TRANSITION_ARTIFACT_COLLECTION_NAMES,
+    *INTERACTION_DELTA_ARTIFACT_COLLECTION_NAMES,
+)
+_TRANSITION_COLLECTION_NAMES = (
+    *BASE_TRANSITION_ARTIFACT_COLLECTION_NAMES,
+    *INTERACTION_ARTIFACT_COLLECTION_NAMES,
 )
 _SCENE_ID_FIELDS = (
     "added_node_ids",
@@ -85,6 +112,27 @@ _SCENE_ID_FIELDS = (
     "added_edge_ids",
     "revised_edge_ids",
     "resolution_event_ids",
+)
+_SCENE_RELATION_DESCRIPTOR_KEYS = frozenset(
+    {
+        "change_kind",
+        "edge_id",
+        "relation",
+        "lifecycle",
+        "observed_at",
+        "source",
+        "target",
+    }
+)
+_SCENE_ENDPOINT_DESCRIPTOR_KEYS = frozenset(
+    {
+        "node_id",
+        "kind",
+        "role",
+        "timeframe",
+        "structural_scale",
+        "lifecycle",
+    }
 )
 _TIMEFRAMES = (
     Timeframe.H4,
@@ -99,9 +147,16 @@ _RETIREMENT_REASONS = frozenset(
         "upstream_compacted_after_terminal",
     }
 )
-_FORBIDDEN_INPUT_KEY_MARKERS = (
+MARKET_CASE_FORBIDDEN_KEY_MARKERS = (
+    "brain_response",
+    "decision",
+    "hard_gate",
     "future",
     "outcome",
+    "playbook",
+    "risk",
+    "selected_action",
+    "shadow",
     "future_profit",
     "profit",
     "pnl",
@@ -116,15 +171,14 @@ _FORBIDDEN_INPUT_KEY_MARKERS = (
     "hit_2r",
     "draw_delivered",
 )
-_MICRO_BOS_REFERENCE_OUTCOMES = frozenset(
+MARKET_CASE_FORBIDDEN_EXACT_KEYS = frozenset(
     {
-        "aligned",
-        "opposed",
-        "simultaneous_unknown",
-        "ambiguous_same_clock",
+        "brain_response",
+        "expected_direction",
+        "micro_bos_reference",
+        "qualified",
     }
 )
-
 MARKET_CASE_PROTOCOL: Mapping[str, Any] = {
     "protocol_version": MARKET_CASE_PROTOCOL_VERSION,
     "grain": "one_market_episode_physical_milestone_at_one_observable_clock",
@@ -143,6 +197,13 @@ MARKET_CASE_PROTOCOL: Mapping[str, Any] = {
     ),
     "memory": "active_episodes_lightweight_closed_identities_pending_rows_only",
     "ohlcv_storage": "same_clock_prefix_boundaries_only_no_copied_bars",
+    "interaction_update_schema_version": INTERACTION_UPDATE_SCHEMA_VERSION,
+    "interaction_authority": "raw_eye_physical_facts_only_no_brain_interpretation",
+    "interaction_collections": list(INTERACTION_ARTIFACT_COLLECTION_NAMES),
+    "interaction_collection_semantics": (
+        "four_current_views;two_this_update_state_deltas;ordered_sequence_id_"
+        "raw_step_milestones;cold_source_ids;zero_or_one_hard_boundary_reason"
+    ),
 }
 
 
@@ -178,6 +239,28 @@ MARKET_CASE_INPUT_FIELD_TYPES: Mapping[str, str] = {
     "replay_update_ordinal": "int64",
     "source_bar_synthetic": "bool",
 }
+_MARKET_CASE_RECORDER_STATE_KEYS = frozenset(
+    {
+        "_recorder_schema_version",
+        "_protocol_version",
+        "_capture_start",
+        "_current_epoch_id",
+        "_epoch_source_row_start",
+        "_active",
+        "_closed",
+        "_pending_rows",
+        "_last_asof",
+        "_last_source_replay_ordinal",
+        "_last_replay_update_ordinal",
+        "_rows_emitted",
+        "_episodes_recorded",
+        "_terminal_rows",
+        "_epoch_resets",
+        "_primed_snapshots",
+        "_left_censored_seeded",
+        "_transition_kind_counts",
+    }
+)
 
 
 def _clock(value: Any, *, name: str) -> pd.Timestamp:
@@ -238,18 +321,149 @@ def _parse_json(raw: Any, *, name: str) -> Any:
         raise ValueError(f"market case {name} must be JSON text")
     try:
         value = json.loads(raw)
-    except json.JSONDecodeError as exc:
+        expected = json.dumps(
+            value,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        )
+    except (json.JSONDecodeError, TypeError, ValueError) as exc:
         raise ValueError(f"market case {name} is invalid JSON") from exc
-    expected = json.dumps(
-        value,
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=False,
-        allow_nan=False,
-    )
     if raw != expected:
         raise ValueError(f"market case {name} is not canonical JSON")
     return value
+
+
+_BASE_TRANSITION_ARTIFACT_TYPES: Mapping[str, type] = {
+    "liquidity_inventory_transitions_this_update": LiquidityInventoryItem,
+    "liquidity_pool_transitions_this_update": LiquidityPoolState,
+    "group3_fvg_transitions_this_update": FairValueGapState,
+    "group3_order_block_transitions_this_update": OrderBlockState,
+    "group4_range_transitions_this_update": DealingRangeState,
+    "group4_manipulation_transitions_this_update": ManipulationState,
+}
+
+
+def _artifact_value(
+    value: Any,
+    annotation: Any,
+    *,
+    label: str,
+) -> Any:
+    """Reconstruct one JSON value from its existing canonical DTO annotation."""
+
+    origin = get_origin(annotation)
+    arguments = get_args(annotation)
+    if origin is types.UnionType:
+        if value is None and type(None) in arguments:
+            return None
+        candidates = tuple(item for item in arguments if item is not type(None))
+        if len(candidates) != 1:
+            raise TypeError(f"market case {label} union annotation is unsupported")
+        return _artifact_value(value, candidates[0], label=label)
+    if is_dataclass(annotation):
+        expected = {item.name for item in fields(annotation)}
+        if type(value) is not dict or set(value) != expected:
+            raise ValueError(f"market case {label} artifact shape changed")
+        hints = get_type_hints(annotation)
+        try:
+            output = annotation(
+                **{
+                    item.name: _artifact_value(
+                        value[item.name],
+                        hints[item.name],
+                        label=f"{label}.{item.name}",
+                    )
+                    for item in fields(annotation)
+                }
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"market case {label} artifact is not canonical"
+            ) from exc
+        if _primitive(output) != value:
+            raise ValueError(f"market case {label} canonical state changed")
+        return output
+    if origin is tuple:
+        if not isinstance(value, list):
+            raise ValueError(f"market case {label} must be an array")
+        item_annotations = arguments
+        if len(arguments) == 2 and arguments[1] is Ellipsis:
+            item_annotations = (arguments[0],) * len(value)
+        if len(item_annotations) != len(value):
+            raise ValueError(f"market case {label} array length changed")
+        return tuple(
+            _artifact_value(item, item_annotation, label=f"{label}[{index}]")
+            for index, (item, item_annotation) in enumerate(
+                zip(value, item_annotations, strict=True)
+            )
+        )
+    if origin is Mapping:
+        if type(value) is not dict:
+            raise ValueError(f"market case {label} must be an object")
+        key_annotation, item_annotation = arguments
+        return {
+            _artifact_value(key, key_annotation, label=f"{label}.key"):
+            _artifact_value(item, item_annotation, label=f"{label}.{key}")
+            for key, item in value.items()
+        }
+    if isinstance(annotation, type) and issubclass(annotation, Enum):
+        try:
+            return annotation(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"market case {label} vocabulary changed") from exc
+    if annotation is pd.Timestamp:
+        return _clock(value, name=f"market_case.{label}")
+    if annotation is float:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError(f"market case {label} number changed")
+        if not math.isfinite(float(value)):
+            raise ValueError(f"market case {label} number is not finite")
+        return value
+    if annotation in {str, int, bool}:
+        if type(value) is not annotation:
+            raise ValueError(f"market case {label} scalar type changed")
+        return value
+    if annotation is Any:
+        return value
+    raise TypeError(f"market case {label} annotation is unsupported")
+
+
+def validate_base_transition_artifact_collections(
+    collections: Mapping[str, Any],
+    *,
+    typed_transition_delta_available: bool,
+) -> None:
+    """Admit only the exact six typed Eye DTO surfaces and finite vocabularies."""
+
+    if type(typed_transition_delta_available) is not bool or any(
+        name not in collections or not isinstance(collections[name], list)
+        for name in BASE_TRANSITION_ARTIFACT_COLLECTION_NAMES
+    ):
+        raise ValueError("typed transition artifact collection shape changed")
+    if not typed_transition_delta_available and any(
+        collections[name]
+        for name in BASE_TRANSITION_ARTIFACT_COLLECTION_NAMES
+    ):
+        raise ValueError("unavailable typed transition delta is not empty")
+    for name in BASE_TRANSITION_ARTIFACT_COLLECTION_NAMES:
+        kind = _BASE_TRANSITION_ARTIFACT_TYPES[name]
+        for value in collections[name]:
+            _artifact_value(value, kind, label=kind.__name__)
+
+
+def _global_context_artifact(value: Any) -> GlobalMarketContext:
+    """Re-admit the existing context DTO tree from its own type contract."""
+
+    output = _artifact_value(
+        value,
+        GlobalMarketContext,
+        label="GlobalMarketContext",
+    )
+    if not isinstance(output, GlobalMarketContext):
+        raise TypeError("market case GlobalMarketContext reconstruction changed")
+    return output
 
 
 def _hash_payload(value: Any) -> str:
@@ -291,22 +505,12 @@ def _validate_input_json_tree(
             if not isinstance(raw_key, str) or not raw_key:
                 raise ValueError("market case JSON key is invalid")
             lowered = raw_key.lower()
-            allowed_micro_bos_outcome = (
-                raw_key == "outcome"
-                and len(path) == 4
-                and path[:3]
-                == (
-                    "observation_transition_json",
-                    "collections",
-                    "group5_micro_bos_transitions_this_update",
-                )
-                and path[3].isdigit()
-                and isinstance(item, str)
-                and item in _MICRO_BOS_REFERENCE_OUTCOMES
-            )
             if (
-                any(marker in lowered for marker in _FORBIDDEN_INPUT_KEY_MARKERS)
-                and not allowed_micro_bos_outcome
+                lowered in MARKET_CASE_FORBIDDEN_EXACT_KEYS
+                or any(
+                    marker in lowered
+                    for marker in MARKET_CASE_FORBIDDEN_KEY_MARKERS
+                )
             ):
                 raise ValueError("market case input JSON contains a future/outcome key")
             if item is not None and _is_fact_clock_key(raw_key):
@@ -497,6 +701,10 @@ def _observation_transition_payload(
     asof: pd.Timestamp,
     replay_update_ordinal: int,
 ) -> Mapping[str, Any]:
+    interaction = getattr(observation, "interaction_update", None)
+    if type(interaction) is not InteractionUpdate:
+        raise ValueError("market case interaction update type changed")
+    interaction_collections = interaction_artifact_collections(interaction)
     return {
         "asof": asof,
         "replay_update_ordinal": replay_update_ordinal,
@@ -504,20 +712,24 @@ def _observation_transition_payload(
             getattr(observation, "typed_transition_delta_available", False)
         ),
         "collections": {
-            name: _primitive(tuple(getattr(observation, name, ())))
+            name: _primitive(
+                tuple(
+                    interaction_collections.get(
+                        name,
+                        getattr(observation, name, ()),
+                    )
+                )
+            )
             for name in _TRANSITION_COLLECTION_NAMES
         },
     }
 
 
 def _scene_node_descriptor(node: Any) -> Mapping[str, Any]:
-    role = None
-    for key, value in getattr(node, "semantic_attributes", ()):
-        if str(key) in {"role", "authority_role", "location_role"} and value:
-            role = str(value)
-            break
-    if role is None:
-        role = str(_enum_value(getattr(node, "liquidity_role", None)) or getattr(node, "kind", "unknown"))
+    role = str(
+        _enum_value(getattr(node, "liquidity_role", None))
+        or getattr(node, "kind", "unknown")
+    )
     return {
         "node_id": str(getattr(node, "node_id")),
         "kind": str(getattr(node, "kind", "unknown")),
@@ -617,6 +829,82 @@ def _scene_graph_delta_payload(
         "relation_descriptors": descriptors,
         "relation_descriptors_complete": complete,
     }
+
+
+def _validate_scene_relation_descriptors(
+    scene: Mapping[str, Any],
+    *,
+    asof: pd.Timestamp,
+) -> None:
+    descriptors = scene["relation_descriptors"]
+    complete = scene["relation_descriptors_complete"]
+    relation_values = {item.value for item in SceneEdgeKind}
+    timeframe_values = {item.value for item in Timeframe}
+    scale_values = {item.value for item in StructuralScale}
+    if not complete:
+        if descriptors:
+            raise ValueError(
+                "market case incomplete Scene descriptors are not empty"
+            )
+        return
+    expected = tuple(
+        ("added", edge_id) for edge_id in scene["added_edge_ids"]
+    ) + tuple(
+        ("revised", edge_id) for edge_id in scene["revised_edge_ids"]
+    )
+    if len(descriptors) != len(expected):
+        raise ValueError("market case Scene descriptor identities differ")
+    actual: list[tuple[str, str]] = []
+    for descriptor in descriptors:
+        if (
+            type(descriptor) is not dict
+            or set(descriptor) != set(_SCENE_RELATION_DESCRIPTOR_KEYS)
+            or any(
+                not isinstance(descriptor[name], str)
+                or not descriptor[name]
+                for name in (
+                    "change_kind",
+                    "edge_id",
+                    "relation",
+                    "lifecycle",
+                )
+            )
+            or descriptor["relation"] not in relation_values
+            or descriptor["lifecycle"]
+            not in SCENE_EDGE_LIFECYCLE_VOCAB
+            or _clock(
+                descriptor["observed_at"],
+                name="market_case.scene_descriptor.observed_at",
+            )
+            > asof
+        ):
+            raise ValueError("market case Scene descriptor shape changed")
+        for endpoint_name in ("source", "target"):
+            endpoint = descriptor[endpoint_name]
+            if (
+                type(endpoint) is not dict
+                or set(endpoint) != set(_SCENE_ENDPOINT_DESCRIPTOR_KEYS)
+                or any(
+                    not isinstance(value, str) or not value
+                    for value in endpoint.values()
+                )
+                or endpoint["kind"] not in SCENE_NODE_KIND_VOCAB
+                or endpoint["role"] not in SCENE_NODE_ROLE_VOCAB
+                or endpoint["timeframe"] not in timeframe_values
+                or endpoint["structural_scale"] not in scale_values
+                or endpoint["lifecycle"]
+                not in SCENE_NODE_LIFECYCLE_VOCAB
+            ):
+                raise ValueError(
+                    "market case Scene endpoint descriptor shape changed"
+                )
+        actual.append(
+            (descriptor["change_kind"], descriptor["edge_id"])
+        )
+    if tuple(actual) != expected:
+        raise ValueError(
+            "market case Scene descriptors are not canonical or complete"
+        )
 
 
 @dataclass(frozen=True)
@@ -864,6 +1152,13 @@ def validate_market_case_input_row(row: Mapping[str, Any]) -> None:
         row["ohlcv_prefix_refs_json"],
         name="ohlcv_prefix_refs_json",
     )
+    for name, value in (
+        ("observation_transition_json", observation),
+        ("scene_graph_delta_json", scene),
+        ("neutral_global_context_json", context),
+        ("ohlcv_prefix_refs_json", prefixes),
+    ):
+        _validate_input_json_tree(value, asof=asof, path=(name,))
     expected_observation_keys = {
         "asof",
         "replay_update_ordinal",
@@ -881,6 +1176,18 @@ def validate_market_case_input_row(row: Mapping[str, Any]) -> None:
         or any(not isinstance(value, list) for value in observation["collections"].values())
     ):
         raise ValueError("market case Observation transition shape changed")
+    validate_base_transition_artifact_collections(
+        observation["collections"],
+        typed_transition_delta_available=observation[
+            "typed_transition_delta_available"
+        ],
+    )
+    interaction_update_from_artifact_collections(
+        {
+            name: observation["collections"][name]
+            for name in INTERACTION_ARTIFACT_COLLECTION_NAMES
+        }
+    )
     expected_scene_keys = {
         "asof",
         "replay_update_ordinal",
@@ -906,11 +1213,13 @@ def validate_market_case_input_row(row: Mapping[str, Any]) -> None:
         or type(scene["relation_descriptors_complete"]) is not bool
     ):
         raise ValueError("market case Scene delta shape changed")
-    if not isinstance(context, Mapping) or (
-        context.get("market_epoch_id") != row["market_epoch_id"]
-        or context.get("scene_revision_id") != scene["revision_id"]
+    _validate_scene_relation_descriptors(scene, asof=asof)
+    canonical_context = _global_context_artifact(context)
+    if (
+        canonical_context.market_epoch_id != row["market_epoch_id"]
+        or canonical_context.scene_revision_id != scene["revision_id"]
         or _clock(
-            context.get("updated_at"),
+            canonical_context.updated_at,
             name="market_case.context.updated_at",
         )
         != asof
@@ -946,13 +1255,6 @@ def validate_market_case_input_row(row: Mapping[str, Any]) -> None:
             or _clock(prefix["cutoff"], name="market_case.prefix.cutoff") > asof
         ):
             raise ValueError("market case OHLCV prefix identity changed")
-    for name, value in (
-        ("observation_transition_json", observation),
-        ("scene_graph_delta_json", scene),
-        ("neutral_global_context_json", context),
-        ("ohlcv_prefix_refs_json", prefixes),
-    ):
-        _validate_input_json_tree(value, asof=asof, path=(name,))
     if row["revision_id"] != _expected_revision_id(row):
         raise ValueError("market case stable revision identity changed")
 
@@ -998,10 +1300,9 @@ def validate_market_case_rows(rows: Sequence[Mapping[str, Any]]) -> None:
 class MarketEpisodeCaseRecorder:
     """Bounded input-only recorder over one existing replay snapshot stream."""
 
-    recorder_schema_version = MARKET_CASE_RECORDER_SCHEMA_VERSION
-    protocol_version = MARKET_CASE_PROTOCOL_VERSION
-
     def __init__(self, *, capture_start: pd.Timestamp) -> None:
+        self._recorder_schema_version = MARKET_CASE_RECORDER_SCHEMA_VERSION
+        self._protocol_version = MARKET_CASE_PROTOCOL_VERSION
         self._capture_start = _clock(capture_start, name="market_case.capture_start")
         self._current_epoch_id: str | None = None
         self._epoch_source_row_start: int | None = None
@@ -1022,8 +1323,48 @@ class MarketEpisodeCaseRecorder:
         }
 
     @property
+    def recorder_schema_version(self) -> int:
+        return self._recorder_schema_version
+
+    @property
+    def protocol_version(self) -> str:
+        return self._protocol_version
+
+    def _validate_pickle_state(self) -> None:
+        if (
+            set(self.__dict__) != set(_MARKET_CASE_RECORDER_STATE_KEYS)
+            or self._recorder_schema_version
+            != MARKET_CASE_RECORDER_SCHEMA_VERSION
+            or self._protocol_version != MARKET_CASE_PROTOCOL_VERSION
+        ):
+            raise ValueError(
+                "market case recorder state identity changed; replay canonical inputs"
+            )
+
+    def __getstate__(self) -> Mapping[str, Any]:
+        self._validate_pickle_state()
+        return dict(self.__dict__)
+
+    def __setstate__(self, state: Mapping[str, Any]) -> None:
+        if (
+            type(state) is not dict
+            or set(state) != set(_MARKET_CASE_RECORDER_STATE_KEYS)
+            or state["_recorder_schema_version"]
+            != MARKET_CASE_RECORDER_SCHEMA_VERSION
+            or state["_protocol_version"] != MARKET_CASE_PROTOCOL_VERSION
+        ):
+            raise ValueError(
+                "market case recorder state identity changed; replay canonical inputs"
+            )
+        self.__dict__.clear()
+        self.__dict__.update(state)
+        self._validate_pickle_state()
+
+    @property
     def summary(self) -> Mapping[str, Any]:
         return {
+            "schema_version": self._recorder_schema_version,
+            "protocol_version": self._protocol_version,
             "input_only": True,
             "rows_emitted": self._rows_emitted,
             "episodes_recorded": self._episodes_recorded,
@@ -1390,7 +1731,11 @@ class MarketEpisodeCaseRecorder:
 
 
 __all__ = [
+    "BASE_TRANSITION_ARTIFACT_COLLECTION_NAMES",
+    "EVENTFUL_TRANSITION_ARTIFACT_COLLECTION_NAMES",
     "MARKET_CASE_INPUT_FIELD_TYPES",
+    "MARKET_CASE_FORBIDDEN_EXACT_KEYS",
+    "MARKET_CASE_FORBIDDEN_KEY_MARKERS",
     "MARKET_CASE_PROTOCOL",
     "MARKET_CASE_PROTOCOL_VERSION",
     "MARKET_CASE_RECORDER_SCHEMA_VERSION",
@@ -1399,4 +1744,5 @@ __all__ = [
     "expected_market_case_run_identity",
     "validate_market_case_input_row",
     "validate_market_case_rows",
+    "validate_base_transition_artifact_collections",
 ]

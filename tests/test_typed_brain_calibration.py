@@ -191,15 +191,34 @@ def test_engine_accepts_current_typed_config_and_rejects_incomplete_current_conf
         )
     incomplete = tmp_path / "model.json"
     incomplete.write_text(json.dumps({"schema_version": 1}), encoding="utf-8")
-    with pytest.raises(ValueError, match="model.schema_version must be 3"):
+    with pytest.raises(ValueError, match="model.schema_version must be 4"):
         ContinuousSMCEngine.from_config(
             incomplete,
             runtime_mode="development",
         )
     payload = json.loads(Path("configs/model.json").read_text(encoding="utf-8"))
-    payload["observer"].pop("group5_protocol")
+    payload["observer"].pop("interaction_protocol")
     incomplete.write_text(json.dumps(payload), encoding="utf-8")
-    with pytest.raises(ValueError, match="group5_protocol"):
+    with pytest.raises(ValueError, match="interaction_protocol"):
+        ContinuousSMCEngine.from_config(
+            incomplete,
+            runtime_mode="development",
+        )
+
+    payload = json.loads(Path("configs/model.json").read_text(encoding="utf-8"))
+    legacy_protocol = payload["observer"].pop("interaction_protocol")
+    payload["observer"]["group5_protocol"] = legacy_protocol
+    incomplete.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(ValueError, match="no longer accepts group5_protocol"):
+        ContinuousSMCEngine.from_config(
+            incomplete,
+            runtime_mode="development",
+        )
+
+    payload = json.loads(Path("configs/model.json").read_text(encoding="utf-8"))
+    payload["observer"]["group5_protocol"] = "configs/conflicting-entry.json"
+    incomplete.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(ValueError, match="no longer accepts group5_protocol"):
         ContinuousSMCEngine.from_config(
             incomplete,
             runtime_mode="development",
@@ -388,7 +407,7 @@ def test_engine_live_mode_has_one_fail_closed_release_gate(
     model = json.loads(
         Path("configs/model.json").read_text(encoding="utf-8")
     )
-    model["observer"]["group5_protocol"] = str(group5_path)
+    model["observer"]["interaction_protocol"] = str(group5_path)
     model["release_readiness"] = {
         "active_model_natural_authority_validated": True,
         "economic_validation_complete": True,

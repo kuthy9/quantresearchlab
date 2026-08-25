@@ -15,11 +15,11 @@ source hash, symbol, instrument, tick size and config identity come only from
 the run manifest; they are not repeated in each row. This path does not read a
 case library, Shadow artifact, outcome, PnL, Decision, Risk or playbook label.
 
-The one overloaded Group-5 MicroBOS field named `outcome` is not an economic
-result. After the market-row validator proves its exact collection path and
-four-value enum, the adapter deep-copies it into a
-`micro_bos_reference_alignment:*` relation token and removes the overloaded
-key. Every other nested outcome/future key remains forbidden.
+MarketCase schema 2 carries only the nine raw `InteractionUpdate` collections.
+The four current physical views may describe the as-of state, but only the five
+eventful Interaction deltas can supply next-event labels. Brain-owned fields
+such as MicroBOS `outcome`, `qualified`, and `expected_direction`, and all old
+Group-5 collection names, are rejected rather than tokenized.
 
 `build_neutral_market_revision_targets()` groups only by
 `(market_epoch_id, market_episode_id)`. It enables two targets supported by the
@@ -199,8 +199,11 @@ case revisions. Next-event, next-lifecycle and next-time labels are supervised
 only when `observation_transition.coverage` is complete and exactly spans the
 two revision clocks and its replay-update ordinals are contiguous; otherwise
 all three are `-100` (ignored), never a guessed
-`none`. The earliest typed/scene update supplies the label and simultaneous
-different types become `ambiguous`. The builder records the latest label clock
+`none`. The earliest typed/scene delta update supplies the label and simultaneous
+different types become `ambiguous`; retained current Interaction views are not
+events and cannot make an unrelated delta ambiguous. The fixed vocabulary is
+the six Group 1-4 deltas, nine raw Interaction collections, and three Scene
+families—there are no legacy Group-5 interpretation tokens. The builder records the latest label clock
 and never reads the separate Shadow outcome stream. Final or right-censored
 revisions retain `-100` for unavailable targets. Masked reconstruction and
 contrastive masks are produced only during batch collation.

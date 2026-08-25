@@ -1327,6 +1327,7 @@ def _command(
     end: str = "2022-06-06T18:32:00-04:00",
     visualize_at: tuple[str, ...] = (),
     validation_protocol: str | Path = "configs/data_splits.json",
+    market_case_profile_registry: str | Path | None = None,
     model_config: str | Path = "configs/model.json",
     action_disabled_playbooks: tuple[str, ...] = (),
 ) -> list[str]:
@@ -1353,6 +1354,13 @@ def _command(
         "5",
         "--acknowledge-research-roll-lineage",
     ]
+    if market_case_profile_registry is not None:
+        command.extend(
+            [
+                "--market-case-profile-registry",
+                str(market_case_profile_registry),
+            ]
+        )
     if resume:
         command.append("--resume")
     if stop_after:
@@ -1407,7 +1415,9 @@ def _write_short_market_input_protocol(
     end_exclusive: str = "2022-06-06T18:32:00-04:00",
 ) -> Path:
     payload = json.loads(
-        (ROOT / "configs/data_splits.json").read_text(encoding="utf-8")
+        (
+            ROOT / "configs/market_case_input_profiles_v2.json"
+        ).read_text(encoding="utf-8")
     )
     profile = payload["market_case_input_profiles"][
         "market_episode_input_smoke_2024_01_08"
@@ -1420,7 +1430,7 @@ def _write_short_market_input_protocol(
             "warmup_calendar_days": 0,
         }
     )
-    protocol = tmp_path / "short-market-input-data-splits.json"
+    protocol = tmp_path / "short-market-input-profile-registry.json"
     protocol.write_text(json.dumps(payload), encoding="utf-8")
     return protocol
 
@@ -2201,7 +2211,7 @@ def test_default_replay_is_lightweight_resumable_and_deterministic(
     old_runtime_manifest = json.loads(current_manifest_bytes)
     old_runtime_manifest["brain_runtime_identity"][
         "runtime_state_schema_version"
-    ] = 13
+    ] = 14
     manifest_path.write_text(
         json.dumps(old_runtime_manifest),
         encoding="utf-8",
@@ -2299,7 +2309,7 @@ def test_default_replay_is_lightweight_resumable_and_deterministic(
     assert runtime_identity["runtime_state_schema_version"] == (
         BRAIN_RUNTIME_STATE_SCHEMA_VERSION
     )
-    assert runtime_identity["runtime_state_schema_version"] == 14
+    assert runtime_identity["runtime_state_schema_version"] == 15
     assert len(runtime_identity["registry_fingerprint"]) == 64
     assert runtime_identity["registry_schema_version"] == 1
     assert set(runtime_identity["playbook_schema_versions"]) == {
@@ -3804,7 +3814,9 @@ def test_market_case_input_profiles_allow_additional_registered_windows(
     tmp_path: Path,
 ) -> None:
     payload = json.loads(
-        (ROOT / "configs/data_splits.json").read_text(encoding="utf-8")
+        (
+            ROOT / "configs/market_case_input_profiles_v2.json"
+        ).read_text(encoding="utf-8")
     )
     profiles = payload["market_case_input_profiles"]
     assert {
@@ -3895,7 +3907,7 @@ def test_market_case_input_rejects_multi_contract_before_output(
             source,
             output,
             market_case_input=True,
-            validation_protocol=protocol,
+            market_case_profile_registry=protocol,
         )
     )
 
@@ -3917,7 +3929,6 @@ def test_market_case_input_same_contract_gap_resets_and_resumes_exactly(
         _command(
             source,
             tmp_path / "default-gap-rejected",
-            validation_protocol=protocol,
             end=end,
         )
     )
@@ -3926,7 +3937,7 @@ def test_market_case_input_same_contract_gap_resets_and_resumes_exactly(
     assert "same_contract=True" in default_result.stderr
     common = {
         "market_case_input": True,
-        "validation_protocol": protocol,
+        "market_case_profile_registry": protocol,
         "end": end,
     }
     resumed_output = tmp_path / "market-input-gap-resumed"
@@ -3954,7 +3965,7 @@ def test_market_case_input_same_contract_gap_resets_and_resumes_exactly(
     run_manifest_path = resumed_output / "run_manifest.json"
     original_manifest = run_manifest_path.read_bytes()
     manifest = json.loads(original_manifest)
-    assert manifest["runtime_state_schema_version"] == 7
+    assert manifest["runtime_state_schema_version"] == 8
     assert manifest["data_continuity"] == dict(
         MARKET_CASE_INPUT_DATA_CONTINUITY_POLICY
     )
@@ -3966,9 +3977,9 @@ def test_market_case_input_same_contract_gap_resets_and_resumes_exactly(
         "synthesize_over_cap_missing_minutes": False,
     }
 
-    schema_six = json.loads(original_manifest)
-    schema_six["runtime_state_schema_version"] = 6
-    run_manifest_path.write_text(json.dumps(schema_six), encoding="utf-8")
+    schema_seven = json.loads(original_manifest)
+    schema_seven["runtime_state_schema_version"] = 7
+    run_manifest_path.write_text(json.dumps(schema_seven), encoding="utf-8")
     stale_resume = _run(
         _command(source, resumed_output, resume=True, **common)
     )
@@ -4064,7 +4075,7 @@ def test_market_case_input_runner_never_invokes_action_layers(
         source,
         output,
         market_case_input=True,
-        validation_protocol=protocol,
+        market_case_profile_registry=protocol,
     )
     monkeypatch.setattr(sys, "argv", command[1:])
 
@@ -4082,7 +4093,7 @@ def test_market_case_input_is_minimal_resumable_and_row_exact(
     protocol = _write_short_market_input_protocol(tmp_path)
     common = {
         "market_case_input": True,
-        "validation_protocol": protocol,
+        "market_case_profile_registry": protocol,
     }
     resumed_output = tmp_path / "market-input-resumed"
     interrupted = _run(
@@ -4162,7 +4173,6 @@ def test_market_case_input_is_minimal_resumable_and_row_exact(
             source,
             resumed_output,
             resume=True,
-            validation_protocol=protocol,
         )
     )
     assert wrong_mode.returncode != 0
@@ -4170,14 +4180,15 @@ def test_market_case_input_is_minimal_resumable_and_row_exact(
 
     run_manifest_path = resumed_output / "run_manifest.json"
     original_run_manifest = run_manifest_path.read_bytes()
-    version_six_run_manifest = json.loads(original_run_manifest)
-    version_six_run_manifest["runtime_state_schema_version"] = 6
-    run_manifest_path.write_text(json.dumps(version_six_run_manifest))
-    version_six_run_resume = _run(
+    run_manifest_sha256 = hashlib.sha256(original_run_manifest).hexdigest()
+    version_seven_run_manifest = json.loads(original_run_manifest)
+    version_seven_run_manifest["runtime_state_schema_version"] = 7
+    run_manifest_path.write_text(json.dumps(version_seven_run_manifest))
+    version_seven_run_resume = _run(
         _command(source, resumed_output, resume=True, **common)
     )
-    assert version_six_run_resume.returncode != 0
-    assert "run manifest differs" in version_six_run_resume.stderr
+    assert version_seven_run_resume.returncode != 0
+    assert "run manifest differs" in version_seven_run_resume.stderr
     run_manifest_path.write_bytes(original_run_manifest)
 
     protocol_one_one_run_manifest = json.loads(original_run_manifest)
@@ -4317,7 +4328,8 @@ def test_market_case_input_is_minimal_resumable_and_row_exact(
     stream_manifest = json.loads(stream_manifest_path.read_text())
     assert stream_manifest["field_types"] == dict(MARKET_CASE_INPUT_FIELD_TYPES)
     assert stream_manifest["bindings"] == {
-        "run_manifest": "run_manifest.json"
+        "run_manifest": "run_manifest.json",
+        "run_manifest_sha256": run_manifest_sha256,
     }
     assert all(
         sha256_file(resumed_output / shard["path"]) == shard["sha256"]
@@ -4335,6 +4347,7 @@ def test_market_case_input_is_minimal_resumable_and_row_exact(
         "data_continuity",
         "repository",
         "profile",
+        "profile_registry",
         "source",
         "model_config",
         "market_case_input_identity",
@@ -4345,7 +4358,7 @@ def test_market_case_input_is_minimal_resumable_and_row_exact(
     assert run_manifest["runtime_state_schema_version"] == (
         MARKET_CASE_INPUT_RUNTIME_STATE_SCHEMA_VERSION
     )
-    assert run_manifest["runtime_state_schema_version"] == 7
+    assert run_manifest["runtime_state_schema_version"] == 8
     assert run_manifest["data_continuity"] == dict(
         MARKET_CASE_INPUT_DATA_CONTINUITY_POLICY
     )
@@ -4365,6 +4378,11 @@ def test_market_case_input_is_minimal_resumable_and_row_exact(
     ).stdout.strip()
     assert repository_commit == expected_commit
     assert original_run_manifest.count(b'"commit":') == 1
+    assert run_manifest["profile_registry"] == {
+        "path": str(protocol.resolve()),
+        "sha256": sha256_file(protocol),
+        "schema_version": 1,
+    }
     assert set(run_manifest["source"]) == {
         "path",
         "sha256",
@@ -4409,6 +4427,7 @@ def test_market_case_input_is_minimal_resumable_and_row_exact(
     }.isdisjoint(input_rows.columns)
     summary = json.loads((resumed_output / "summary.json").read_text())
     assert summary["mode"] == "market_case_input"
+    assert summary["run_manifest_sha256"] == run_manifest_sha256
     assert summary["market_case_input"]["outcome_joined"] is False
     compaction = summary["scene_graph_compaction"]
     assert compaction["runs"] >= 1
@@ -4428,6 +4447,7 @@ def test_market_case_input_is_minimal_resumable_and_row_exact(
         "schema_version": 1,
         "status": "complete",
         "run_manifest": "run_manifest.json",
+        "run_manifest_sha256": run_manifest_sha256,
         "summary": "summary.json",
         "progress": "progress.json",
         "market_case_input_shards": (

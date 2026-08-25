@@ -1,9 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import replace
-
 import pandas as pd
 
+from smc_trader.brain_entry_sequence import brain_observation_view
 from smc_trader.decision import UtilityDecisionLayer
 from smc_trader.group5 import CausalGroup5Reducer
 from smc_trader.model import (
@@ -38,7 +37,6 @@ from smc_trader.visualization import DecisionVisualizer
 from .helpers import (
     graph_free_action_belief,
     market_observation,
-    replace_market_observation,
 )
 from .test_range_auction_primitives import (
     _m1 as _group4_m1,
@@ -54,6 +52,9 @@ from .test_v4_typed_vertical import (
     _m1,
     _lsr_observation,
     _opposed_m5_bos,
+    _interaction_update_from_brain_fields,
+    replace,
+    replace_market_observation,
 )
 
 
@@ -252,18 +253,19 @@ def _favr_fixture():
         frames[Timeframe.H4],
         cutoff=hold.end,
     )
-    observation = replace(
+    observation = brain_observation_view(replace(
         base,
         frames=frames,
         execution=_execution(hold.end, cost=0.025),
         liquidity_inventory=inventory,
         manipulations=(manipulation,),
-        group5_typed_available=True,
-        entry_locations=output.entry_locations,
-        qualified_reacceptances=output.qualified_reacceptances,
-        micro_bos_references=output.micro_bos_references,
-        path_sequences=output.path_sequences,
-    )
+        interaction_update=_interaction_update_from_brain_fields(
+            entry_locations=output.entry_locations,
+            qualified_reacceptances=output.qualified_reacceptances,
+            micro_bos_references=output.micro_bos_references,
+            path_sequences=output.path_sequences,
+        ),
+    ))
     return (
         observation,
         mature,
@@ -415,7 +417,7 @@ def test_lsr_optional_range_context_loss_does_not_invalidate_core_episode() -> N
         state_duration_real_1m_bars=0,
         steps=zone_path.steps[:2],
         ended_at=None,
-        transition_reason="departure_confirmed",
+        transition_reason="context_registered",
     )
     contextual = replace(
         base,
@@ -586,7 +588,6 @@ def _favr_context_graph_observation(
         execution=_execution(asof, cost=0.025),
         liquidity_inventory=inventory,
         manipulations=tuple(manipulations),
-        group5_typed_available=True,
     )
 
 
@@ -665,11 +666,12 @@ def _favr_public_graph_observation(
         liquidity_inventory=inventory,
         manipulations=(manipulation,),
         displacement=displacement,
-        group5_typed_available=True,
-        entry_locations=update.entry_locations,
-        qualified_reacceptances=update.qualified_reacceptances,
-        micro_bos_references=update.micro_bos_references,
-        path_sequences=update.path_sequences,
+        interaction_update=_interaction_update_from_brain_fields(
+            entry_locations=update.entry_locations,
+            qualified_reacceptances=update.qualified_reacceptances,
+            micro_bos_references=update.micro_bos_references,
+            path_sequences=update.path_sequences,
+        ),
     )
 
 
@@ -789,7 +791,7 @@ def _favr_public_scene_graph(
         observations.append(observation)
     return (
         graph,
-        observations[-1],
+        brain_observation_view(observations[-1]),
         original_observation,
         mature,
         manipulation,

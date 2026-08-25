@@ -6,6 +6,7 @@ import pickle
 import pandas as pd
 import pytest
 
+import smc_trader.brain_entry_sequence as brain_entry_module
 import smc_trader.engine as engine_module
 import smc_trader.playbooks as playbooks_module
 from smc_trader.engine import (
@@ -241,6 +242,66 @@ def test_full_engine_builds_one_authoritative_thesis_tuple_per_clock(
             snapshot.neutral_market_state.open_market_theses
             is snapshot.belief.global_context.open_market_theses
         )
+
+
+def test_engine_shares_one_brain_observation_view_with_neutral_and_brain(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = ContinuousSMCEngine.from_config(
+        "configs/model.json",
+        runtime_mode="development",
+    )
+    real_adapter = engine_module.brain_observation_view
+    real_interpreter = brain_entry_module.interpret_micro_break_facts
+    real_neutral_builder = engine_module.build_neutral_market_state
+    real_brain_update = engine.brain.update
+    constructed = []
+    neutral_inputs = []
+    brain_inputs = []
+    interpretation_calls = 0
+
+    def counted_interpreter(facts):
+        nonlocal interpretation_calls
+        interpretation_calls += 1
+        return real_interpreter(facts)
+
+    def counted_adapter(observation):
+        view = real_adapter(observation)
+        constructed.append(view)
+        return view
+
+    def capture_neutral(previous, observation, context):
+        neutral_inputs.append(observation)
+        return real_neutral_builder(previous, observation, context)
+
+    def capture_brain(observation, *args, **kwargs):
+        brain_inputs.append(observation)
+        return real_brain_update(observation, *args, **kwargs)
+
+    monkeypatch.setattr(
+        engine_module,
+        "brain_observation_view",
+        counted_adapter,
+    )
+    monkeypatch.setattr(
+        brain_entry_module,
+        "interpret_micro_break_facts",
+        counted_interpreter,
+    )
+    monkeypatch.setattr(
+        engine_module,
+        "build_neutral_market_state",
+        capture_neutral,
+    )
+    monkeypatch.setattr(engine.brain, "update", capture_brain)
+
+    engine.on_bar(_grid_bars(1)[0])
+
+    assert len(constructed) == 1
+    assert interpretation_calls == 1
+    assert len(neutral_inputs) == len(brain_inputs) == 1
+    assert neutral_inputs[0] is constructed[0]
+    assert brain_inputs[0] is constructed[0]
 
 
 @pytest.mark.parametrize(
@@ -601,8 +662,8 @@ def test_engine_neutral_state_is_pickle_checkpoint_ready() -> None:
     )
     encoded = pickle.dumps(engine, protocol=pickle.HIGHEST_PROTOCOL)
     resumed = pickle.loads(encoded)
-    assert NEUTRAL_ENGINE_CHECKPOINT_SCHEMA_VERSION == 6
-    assert engine.__getstate__()["_neutral_checkpoint_schema_version"] == 6
+    assert NEUTRAL_ENGINE_CHECKPOINT_SCHEMA_VERSION == 7
+    assert engine.__getstate__()["_neutral_checkpoint_schema_version"] == 7
     assert resumed.neutral_market_state == engine.neutral_market_state
     assert resumed.last_snapshot == engine.last_snapshot
     assert "market_snapshot" not in snapshot.__dict__

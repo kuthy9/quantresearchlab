@@ -12,8 +12,13 @@ from smc_trader.model import (
     Action,
     Bar,
     Direction,
+    EntryLocationState,
     EntryLocationLifecycle,
+    InteractionUpdate,
     LiquidityInventoryLifecycle,
+    PathSequenceLifecycle,
+    PathSequenceState,
+    PathSequenceStep,
     Playbook,
     PlaybookPhase,
     StructureLifecycle,
@@ -163,11 +168,13 @@ def _snapshot(
             transitions_this_update=(transition,) if event else ()
         ),
         liquidity_inventory=(target_item,),
-        group5_entry_location_transitions_this_update=(),
         group4_manipulation_transitions_this_update=(),
-        group5_micro_bos_transitions_this_update=(),
-        group5_reacceptance_transitions_this_update=(),
-        entry_locations=(),
+        interaction_update=InteractionUpdate(
+            zone_interactions=(),
+            reacceptance_interactions=(),
+            micro_break_facts=(),
+            interaction_paths=(),
+        ),
     )
     hypotheses = tuple(
         _hypothesis(
@@ -258,23 +265,150 @@ def _lsr_location(
     *,
     lifecycle: EntryLocationLifecycle,
     formed_at: pd.Timestamp | None = None,
-) -> SimpleNamespace:
-    formed = asof if formed_at is None else formed_at
-    return SimpleNamespace(
+) -> EntryLocationState:
+    formed = (
+        asof - pd.Timedelta(minutes=1)
+        if formed_at is None and lifecycle is EntryLocationLifecycle.IN_ZONE
+        else asof if formed_at is None else formed_at
+    )
+    entered_at = asof if lifecycle is EntryLocationLifecycle.IN_ZONE else None
+    return EntryLocationState(
         location_id=f"location:lsr:{suffix}",
+        protocol_hash="1" * 64,
+        source_zone_detector_protocol_hash="2" * 64,
+        symbol="NQH4",
+        instrument_id=1,
         direction=Direction.LONG,
         source_zone_kind="fvg",
         source_zone_id=f"zone:lsr:{suffix}",
+        source_zone_protocol_hash="2" * 64,
         source_displacement_id="displacement:lsr:shared",
         source_bos_id=None,
-        lower_bound=99.0,
+        lower_bound=98.0,
         upper_bound=100.0,
+        midpoint=99.0,
+        near_edge=100.0,
+        far_edge=98.0,
         failure_boundary=98.0,
         formed_at=formed,
         lifecycle=lifecycle,
-        first_entered_at=(
-            asof if lifecycle is EntryLocationLifecycle.IN_ZONE else None
+        state_started_at=entered_at or formed,
+        last_updated_at=asof,
+        age_real_1m_bars=max(
+            0,
+            int((asof - formed) / pd.Timedelta(minutes=1)),
         ),
+        state_duration_real_1m_bars=0,
+        current_price=100.0,
+        distance_to_zone_points=0.0,
+        distance_to_failure_points=2.0,
+        departure_confirmed_at=formed,
+        first_entered_at=entered_at,
+        entry_mode=(
+            "crossed_near_edge" if entered_at is not None else None
+        ),
+        contact_reference_price=(100.0 if entered_at is not None else None),
+        first_penetration_fraction=(0.5 if entered_at is not None else 0.0),
+        transition_reason=(
+            "first_completed_bar_entered_zone"
+            if entered_at is not None
+            else "departure_confirmed"
+        ),
+    )
+
+
+def _lsr_path(
+    location: EntryLocationState,
+    *,
+    sequence_id: str | None = None,
+) -> PathSequenceState:
+    steps = [
+        PathSequenceStep(
+            step_id=f"step:visible:{location.location_id}",
+            kind="zone_visible",
+            observed_at=location.formed_at,
+            source_event_id=location.source_zone_id,
+            source_entity_id=location.source_zone_id,
+            predecessor_step_ids=(),
+            same_clock_relation="origin",
+            direction=location.direction,
+            strength=0.5,
+            reason="typed_entry_zone_registered",
+        ),
+        PathSequenceStep(
+            step_id=f"step:departed:{location.location_id}",
+            kind="departure_confirmed",
+            observed_at=location.departure_confirmed_at,
+            source_event_id=None,
+            source_entity_id=location.location_id,
+            predecessor_step_ids=(f"step:visible:{location.location_id}",),
+            same_clock_relation="same_clock_known",
+            direction=location.direction,
+            strength=0.5,
+            reason="formation_close_on_delivery_side",
+        ),
+    ]
+    if location.first_entered_at is not None:
+        steps.append(
+            PathSequenceStep(
+                step_id=f"step:pullback:{location.location_id}",
+                kind="first_pullback",
+                observed_at=location.first_entered_at,
+                source_event_id=None,
+                source_entity_id=location.location_id,
+                predecessor_step_ids=(steps[-1].step_id,),
+                same_clock_relation="strictly_after",
+                direction=location.direction,
+                strength=0.5,
+                reason="crossed_near_edge",
+            )
+        )
+    return PathSequenceState(
+        sequence_id=(
+            f"path:lsr:{location.location_id}"
+            if sequence_id is None
+            else sequence_id
+        ),
+        protocol_hash=location.protocol_hash,
+        symbol=location.symbol,
+        instrument_id=location.instrument_id,
+        context_kind="zone_return",
+        context_id=location.location_id,
+        direction=location.direction,
+        lifecycle=PathSequenceLifecycle.ACTIVE,
+        formed_at=location.formed_at,
+        state_started_at=location.formed_at,
+        last_updated_at=location.last_updated_at,
+        age_real_1m_bars=location.age_real_1m_bars,
+        state_duration_real_1m_bars=location.age_real_1m_bars,
+        steps=tuple(steps),
+        transition_reason="context_registered",
+    )
+
+
+def _set_lsr_interaction(
+    snapshot: SimpleNamespace,
+    locations: tuple[EntryLocationState, ...],
+    *,
+    path_ids: tuple[str, ...] | None = None,
+) -> None:
+    unique_locations = tuple(
+        {item.location_id: item for item in locations}.values()
+    )
+    if path_ids is None:
+        paths = tuple(_lsr_path(item) for item in unique_locations)
+    else:
+        if len(path_ids) != len(unique_locations):
+            raise ValueError("test interaction path identities differ")
+        paths = tuple(
+            _lsr_path(item, sequence_id=path_id)
+            for item, path_id in zip(unique_locations, path_ids)
+        )
+    snapshot.observation.interaction_update = InteractionUpdate(
+        zone_interactions=unique_locations,
+        reacceptance_interactions=(),
+        micro_break_facts=(),
+        interaction_paths=paths,
     )
 
 
@@ -401,18 +535,8 @@ def _with_lsr_zone_siblings(
             authority_relation="opposed",
         ),
     )
-    snapshot.observation.entry_locations = locations
-    snapshot.observation.group5_entry_location_transitions_this_update = (
-        transition_locations
-    )
-    snapshot.observation.path_sequences = tuple(
-        SimpleNamespace(
-            sequence_id=f"path:lsr:{item.location_id}",
-            context_kind="zone_return",
-            context_id=item.location_id,
-        )
-        for item in locations
-    )
+    del transition_locations
+    _set_lsr_interaction(snapshot, locations)
     return tuple(siblings)
 
 
@@ -869,16 +993,10 @@ def test_lsr_terminal_tombstone_survives_projection_compaction_and_checkpoint(
         Direction.LONG,
         event=False,
     )
-    projection_free.observation.entry_locations = (entered,)
-    projection_free.observation.group5_entry_location_transitions_this_update = (
-        entered,
-    )
-    projection_free.observation.path_sequences = (
-        SimpleNamespace(
-            sequence_id=owner.entry_path_id,
-            context_kind="zone_return",
-            context_id=entered.location_id,
-        ),
+    _set_lsr_interaction(
+        projection_free,
+        (entered,),
+        path_ids=(owner.entry_path_id,),
     )
     restored.on_bar(first_bar)
     restored.observe(projection_free, source_bar=first_bar)
@@ -1105,12 +1223,10 @@ def test_lsr_first_entry_fails_closed_when_physical_path_drifted() -> None:
     drifted.belief.lifecycle_candidate_items = (
         drifted.belief.action_candidate_items
     )
-    drifted.observation.path_sequences = (
-        SimpleNamespace(
-            sequence_id="path:lsr:drifted-physical-path",
-            context_kind="zone_return",
-            context_id=entered.location_id,
-        ),
+    _set_lsr_interaction(
+        drifted,
+        (entered,),
+        path_ids=("path:lsr:drifted-physical-path",),
     )
     recorder.on_bar(later)
     recorder.observe(drifted, source_bar=later)
@@ -1530,17 +1646,7 @@ def test_lsr_zone_without_context_remains_root_level_and_unbound() -> None:
         lifecycle=EntryLocationLifecycle.IN_ZONE,
     )
     snapshot = _snapshot(source, Direction.LONG, event=False)
-    snapshot.observation.entry_locations = (entered,)
-    snapshot.observation.group5_entry_location_transitions_this_update = (
-        entered,
-    )
-    snapshot.observation.path_sequences = (
-        SimpleNamespace(
-            sequence_id=f"path:lsr:{entered.location_id}",
-            context_kind="zone_return",
-            context_id=entered.location_id,
-        ),
-    )
+    _set_lsr_interaction(snapshot, (entered,))
     recorder.on_bar(source)
     recorder.observe(snapshot, source_bar=source)
 
@@ -1584,7 +1690,7 @@ def test_lsr_zone_binding_is_frozen_before_divergent_future_outcomes() -> None:
     target_recorder = pickle.loads(pickle.dumps(recorder))
     stop_recorder = pickle.loads(pickle.dumps(recorder))
 
-    fill = _bar(source.end, high=100.0, low=99.4, close=99.75)
+    fill = _bar(source.end, high=100.0, low=98.9, close=99.75)
     _complete_engine_step(target_recorder, fill, Direction.LONG)
     _complete_engine_step(stop_recorder, fill, Direction.LONG)
     _complete_engine_step(

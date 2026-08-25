@@ -1041,6 +1041,8 @@ class EyeAuthorityStatistics:
     def _cache_baseline(self, observation: MarketObservation) -> None:
         """Retain warmup readiness, source identity, and live cohort identities."""
 
+        interaction = getattr(observation, "interaction_update", None)
+
         for timeframe, frame in observation.frames.items():
             tf = _value(timeframe) or str(timeframe)
             if bool(frame.ready):
@@ -1123,24 +1125,51 @@ class EyeAuthorityStatistics:
                 lifecycle=_mapping_value(displacement, "lifecycle"),
             )
 
-        for group, primitive, collection_name, identity_name in (
+        for group, primitive, collection, identity_name in (
             (
                 "group12",
                 "liquidity_pool",
-                "liquidity_pool_states",
+                observation.liquidity_pool_states,
                 "pool_id",
             ),
-            ("group4", "manipulation", "manipulations", "manipulation_id"),
-            ("group5", "entry_location", "entry_locations", "location_id"),
+            (
+                "group4",
+                "manipulation",
+                observation.manipulations,
+                "manipulation_id",
+            ),
+            (
+                "group5",
+                "entry_location",
+                (
+                    ()
+                    if interaction is None
+                    else interaction.zone_interactions
+                ),
+                "location_id",
+            ),
             (
                 "group5",
                 "qualified_reacceptance",
-                "qualified_reacceptances",
+                (
+                    ()
+                    if interaction is None
+                    else interaction.reacceptance_interactions
+                ),
                 "reacceptance_id",
             ),
-            ("group5", "path_sequence", "path_sequences", "sequence_id"),
+            (
+                "group5",
+                "path_sequence",
+                (
+                    ()
+                    if interaction is None
+                    else interaction.interaction_paths
+                ),
+                "sequence_id",
+            ),
         ):
-            for state in tuple(_mapping_value(observation, collection_name, ())):
+            for state in collection:
                 if primitive == "liquidity_pool":
                     self._index_pool_metadata(state)
                 elif primitive == "manipulation":
@@ -2033,7 +2062,8 @@ class EyeAuthorityStatistics:
         )
 
     def _observe_micro_bos(self, state: Any) -> None:
-        outcome = _value(state.outcome) or "unknown"
+        outcome = _value(_mapping_value(state, "outcome")) or "observed"
+        qualified = _mapping_value(state, "qualified")
         self._record_entity(
             group="group5",
             primitive="micro_bos",
@@ -2044,9 +2074,9 @@ class EyeAuthorityStatistics:
                 "direction": state.expected_direction,
                 "context_kind": state.context_kind,
                 "relation": state.relation,
-                "qualified": state.qualified,
+                "qualified": qualified,
             },
-            reason=state.outcome,
+            reason=outcome,
             state=state,
         )
 
@@ -2451,6 +2481,7 @@ class EyeAuthorityStatistics:
             return True
 
         self._prime_warmup_baseline()
+        interaction = getattr(observation, "interaction_update", None)
         delta_mode = bool(
             _mapping_value(
                 observation,
@@ -2588,58 +2619,39 @@ class EyeAuthorityStatistics:
             for state in observation.group4_boundary_manipulation_transitions:
                 self._observe_manipulation(state, asof)
         entry_values = (
-            _mapping_value(
-                observation,
-                "group5_entry_location_transitions_this_update",
-                (),
-            )
-            if delta_mode
-            else observation.entry_locations
+            () if interaction is None else interaction.zone_interactions
         )
         for state in entry_values:
             self._observe_entry_location(state, asof)
         reacceptance_values = (
-            _mapping_value(
-                observation,
-                "group5_reacceptance_transitions_this_update",
-                (),
+            ()
+            if interaction is None
+            else (
+                *interaction.reacceptance_interactions,
+                *interaction.reacceptance_interaction_transitions,
             )
-            if delta_mode
-            else observation.qualified_reacceptances
         )
         for state in reacceptance_values:
             self._observe_reacceptance(state, asof)
         micro_values = (
-            _mapping_value(
-                observation,
-                "group5_micro_bos_transitions_this_update",
-                (),
-            )
-            if delta_mode
-            else observation.micro_bos_references
+            () if interaction is None else interaction.micro_break_facts
         )
         for state in micro_values:
             self._observe_micro_bos(state)
         path_values = (
-            _mapping_value(
-                observation,
-                "group5_path_transitions_this_update",
-                (),
+            ()
+            if interaction is None
+            else (
+                interaction.interaction_path_transitions
+                if interaction.boundary_reason is not None
+                else interaction.interaction_paths
             )
-            if delta_mode
-            else observation.path_sequences
         )
         for state in path_values:
             self._observe_path(state, asof)
-        if not delta_mode:
-            for state in observation.group5_boundary_path_transitions:
-                self._observe_path(state, asof)
-            for state in observation.group5_boundary_reacceptance_transitions:
-                self._observe_reacceptance(state, asof)
         self._group5_contract_seen = (
             self._group5_contract_seen
-            or bool(_mapping_value(observation, "group5_typed_available", False))
-            or hasattr(observation, "path_sequences")
+            or interaction is not None
         )
 
         produced_dispositions = tuple(
@@ -3506,13 +3518,16 @@ class EyeAuthorityStatistics:
             self._observe_pool(state, asof)
         for state in observation.manipulations:
             self._observe_manipulation(state, asof)
-        for state in observation.entry_locations:
+        interaction = getattr(observation, "interaction_update", None)
+        for state in (() if interaction is None else interaction.zone_interactions):
             self._observe_entry_location(state, asof)
-        for state in observation.qualified_reacceptances:
+        for state in (
+            () if interaction is None else interaction.reacceptance_interactions
+        ):
             self._observe_reacceptance(state, asof)
-        for state in observation.micro_bos_references:
+        for state in (() if interaction is None else interaction.micro_break_facts):
             self._observe_micro_bos(state)
-        for state in observation.path_sequences:
+        for state in (() if interaction is None else interaction.interaction_paths):
             self._observe_path(state, asof)
         self._final_reconciled_observation_key = key
         self._transport_counts["final_snapshot_reconciliations"] += 1

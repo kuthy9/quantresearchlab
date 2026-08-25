@@ -14,12 +14,14 @@ import pytest
 
 import smc_trader.market_cases as market_cases_module
 from smc_trader.case_retrieval import MarketEpisodeCaseIndex
+from smc_trader.interaction import interaction_artifact_collections
 from smc_trader.market_cases import expected_market_case_run_identity
 from smc_trader.market_representation import (
     BAR_END_INDEX_BINDING,
     CAUSAL_CANDLE_FEATURES,
     EMBEDDING_DIM,
     EmbeddingEvaluationSample,
+    FEATURE_SCHEMA_VERSION,
     NEXT_EVENT_TYPE_VOCAB,
     NEXT_LIFECYCLE_VOCAB,
     NEUTRAL_MARKET_LIFECYCLE_TARGETS,
@@ -70,8 +72,28 @@ from smc_trader.market_representation import (
     validate_split_integrity,
     validate_single_embedding_checkpoint,
 )
-from smc_trader.model import Direction
-from smc_trader.scene_graph import market_episode_id
+from smc_trader.model import (
+    AuthorityLayer,
+    Direction,
+    DirectionalObstructionView,
+    FairValueGapLifecycle,
+    GlobalMarketContext,
+    LiquidityInventoryLifecycle,
+    MarketMode,
+    OpenMarketThesis,
+    ScaleRelation,
+    ScaleRelationState,
+    Timeframe,
+    to_primitive,
+)
+from smc_trader.scene_graph import (
+    SceneEdgeKind,
+    StructuralScale,
+    market_episode_id,
+)
+
+from .test_interaction_eye_brain_boundary import _strict_interaction
+from .test_v3_group5_primitives import _draw, _fvg
 
 
 def _frame(timeframe: str, *, scale: float = 1.0) -> pd.DataFrame:
@@ -194,6 +216,23 @@ def _case_library_row(
         }
         for timeframe in ("4H", "1H", "15m", "5m", "1m")
     ]
+    physical_event = to_primitive(
+        replace(
+            _fvg(asof, identity="zone-a"),
+            symbol="NQ",
+            instrument_id=1,
+        )
+    )
+    update_collections = {
+        name: [] for name in _NEUTRAL_TRANSITION_COLLECTIONS
+    }
+    update_collections[
+        "group3_fvg_transitions_this_update"
+    ] = [physical_event]
+    aggregate_collections = {
+        name: list(update_collections[name])
+        for name in _CAUSAL_AGGREGATE_TRANSITION_COLLECTIONS
+    }
     transition = {
         "typed_transition_delta_available": True,
         "coverage": {
@@ -212,60 +251,36 @@ def _case_library_row(
             "all_typed_deltas_available": True,
             "gap_free": True,
         },
-        "collections": {
-            "group5_entry_location_transitions_this_update": [
-                {
-                    "event_id": "zone-a",
-                    "kind": "entry_location",
-                    "lifecycle": "active",
-                    "observed_at": asof.isoformat(),
-                    "formed_at": (asof - timedelta(minutes=1)).isoformat(),
-                    "direction": "long",
-                    "timeframe": "1m",
-                }
-            ]
-        },
+        "collections": aggregate_collections,
         "updates": [
             {
                 "asof": asof.isoformat(),
                 "replay_update_ordinal": 0,
                 "typed_transition_delta_available": True,
-                "collections": {
-                    "group5_entry_location_transitions_this_update": [
-                        {
-                            "event_id": "zone-a",
-                            "kind": "entry_location",
-                            "lifecycle": "active",
-                            "observed_at": asof.isoformat(),
-                            "formed_at": (asof - timedelta(minutes=1)).isoformat(),
-                            "direction": "long",
-                            "timeframe": "1m",
-                        }
-                    ]
-                },
+                "collections": update_collections,
             }
         ],
     }
     coverage = transition["coverage"]
     relation_descriptor = {
         "edge_id": "edge-a",
-        "relation": "causes",
+        "relation": SceneEdgeKind.CREATES.value,
         "lifecycle": "active",
         "observed_at": asof.isoformat(),
         "source": {
             "node_id": "node-source-a",
             "kind": "manipulation",
-            "role": "source",
+            "role": "manipulation",
             "timeframe": "1m",
-            "structural_scale": "local",
+            "structural_scale": StructuralScale.INTERNAL.value,
             "lifecycle": "active",
         },
         "target": {
             "node_id": "node-target-a",
             "kind": "entry_location",
-            "role": "target",
+            "role": "entry_location",
             "timeframe": "1m",
-            "structural_scale": "local",
+            "structural_scale": StructuralScale.INTERNAL.value,
             "lifecycle": "active",
         },
     }
@@ -295,7 +310,13 @@ def _case_library_row(
             }
         ],
     }
-    json_field = lambda value: json.dumps(value, sort_keys=True)
+    json_field = lambda value: json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    )
     return {
         "revision_id": revision_id,
         "case_id": "case-library-a",
@@ -385,12 +406,39 @@ _NEUTRAL_TRANSITION_COLLECTIONS = (
     "group3_order_block_transitions_this_update",
     "group4_range_transitions_this_update",
     "group4_manipulation_transitions_this_update",
-    "group5_entry_location_transitions_this_update",
-    "group5_reacceptance_transitions_this_update",
-    "group5_micro_bos_transitions_this_update",
-    "group5_path_transitions_this_update",
-    "group5_step_transitions_this_update",
+    "interaction_zone_interactions",
+    "interaction_reacceptance_interactions",
+    "interaction_micro_break_facts",
+    "interaction_paths",
+    "interaction_path_transitions",
+    "interaction_reacceptance_transitions",
+    "interaction_milestone_transitions",
+    "interaction_cold_source_ids",
+    "interaction_boundary_reasons",
 )
+_CAUSAL_AGGREGATE_TRANSITION_COLLECTIONS = (
+    *_NEUTRAL_TRANSITION_COLLECTIONS[:6],
+    *_NEUTRAL_TRANSITION_COLLECTIONS[10:],
+)
+
+
+def test_next_event_vocab_has_only_raw_interaction_authority() -> None:
+    raw_interaction_names = _NEUTRAL_TRANSITION_COLLECTIONS[6:]
+    assert set(raw_interaction_names).issubset(NEXT_EVENT_TYPE_VOCAB)
+    assert tuple(
+        NEXT_EVENT_TYPE_VOCAB[name] for name in raw_interaction_names
+    ) == tuple(range(11, 20))
+    assert {
+        name for name in NEXT_EVENT_TYPE_VOCAB if name.startswith("group5_")
+    } == set()
+    assert {
+        name: NEXT_EVENT_TYPE_VOCAB[name]
+        for name in ("scene_node_delta", "scene_edge_delta", "scene_resolution")
+    } == {
+        "scene_node_delta": 20,
+        "scene_edge_delta": 21,
+        "scene_resolution": 22,
+    }
 
 
 def _canonical_json_text(value: object) -> str:
@@ -399,6 +447,88 @@ def _canonical_json_text(value: object) -> str:
         sort_keys=True,
         separators=(",", ":"),
         ensure_ascii=False,
+    )
+
+
+def _neutral_global_context(
+    *,
+    asof: pd.Timestamp,
+    epoch_id: str,
+    location_id: str,
+) -> GlobalMarketContext:
+    return GlobalMarketContext(
+        updated_at=asof,
+        scene_revision_id="scene:neutral",
+        market_epoch_id=epoch_id,
+        authority_stack=(
+            AuthorityLayer(
+                timeframe=Timeframe.H4,
+                direction=Direction.LONG,
+                structure_id="authority:neutral",
+                confirmed_at=asof - pd.Timedelta(minutes=30),
+                protected_level_id=None,
+                structural_scope="external",
+                acceptance_state="confirmed",
+                status="intact",
+                source_ids=("authority-source:neutral",),
+            ),
+        ),
+        market_mode=MarketMode.BALANCED,
+        scale_relation_details={
+            timeframe.value: ScaleRelationState(
+                timeframe=timeframe,
+                relation=ScaleRelation.UNKNOWN,
+                direction=None,
+                authority_layer_id=None,
+                evidence_ids=(),
+                evidence_kind=None,
+                structural_scope=None,
+                acceptance_state=None,
+                since=None,
+                age_bars=0,
+                graph_connected=False,
+                ambiguous=False,
+            )
+            for timeframe in Timeframe
+        },
+        external_draw_candidates={"above": (), "below": ()},
+        obstruction_views={
+            direction.value: DirectionalObstructionView(
+                direction=direction,
+                nearest_draw_id=None,
+                nearest_draw_price=None,
+                hard_barriers=(),
+                soft_frictions=(),
+            )
+            for direction in Direction
+        },
+        material_conflicts=(),
+        unknown_evidence=(),
+        ambiguous_evidence=(),
+        dislocations_by_scale={
+            timeframe.value: () for timeframe in Timeframe
+        },
+        balance_context=None,
+        invalidated_source_ids=(),
+        candidate_structured_episode_ids=(),
+        unexplained_structured_episode_ids=(),
+        open_market_theses=(
+            OpenMarketThesis(
+                thesis_id="thesis:neutral",
+                root_id="root:neutral",
+                market_epoch_id=epoch_id,
+                formed_at=asof - pd.Timedelta(minutes=2),
+                updated_at=asof,
+                direction=Direction.LONG,
+                source_timeframe=Timeframe.M5,
+                structural_scale="intermediate",
+                mechanism="zone_return",
+                authority_relation="aligned",
+                authority_source_ids=("authority:neutral",),
+                mechanism_event_ids=("root:neutral",),
+                entry_location_ids=(location_id,),
+            ),
+        ),
     )
 
 
@@ -420,15 +550,13 @@ def _neutral_market_case_row(
     )
     collections = {name: [] for name in _NEUTRAL_TRANSITION_COLLECTIONS}
     collections["group3_fvg_transitions_this_update"] = [
-        {
-            "event_id": "fvg:neutral",
-            "kind": "fvg",
-            "lifecycle": "active",
-            "observed_at": asof.isoformat(),
-            "formed_at": (asof - pd.Timedelta(minutes=1)).isoformat(),
-            "direction": "long",
-            "timeframe": "1m",
-        }
+        to_primitive(
+            replace(
+                _fvg(asof, identity="fvg:neutral"),
+                symbol="NQH4",
+                instrument_id=750,
+            )
+        )
     ]
     observation = {
         "asof": asof.isoformat(),
@@ -448,50 +576,13 @@ def _neutral_market_case_row(
         "relation_descriptors": [],
         "relation_descriptors_complete": True,
     }
-    context = {
-        "updated_at": asof.isoformat(),
-        "scene_revision_id": "scene:neutral",
-        "market_epoch_id": epoch_id,
-        "authority_stack": [
-            {
-                "timeframe": "4H",
-                "direction": "long",
-                "status": "intact",
-                "confirmed_at": (
-                    asof - pd.Timedelta(minutes=30)
-                ).isoformat(),
-            }
-        ],
-        "market_mode": "balanced",
-        "scale_relation_details": {},
-        "external_draw_candidates": {"above": [], "below": []},
-        "obstruction_views": {},
-        "material_conflicts": [],
-        "unknown_evidence": [],
-        "ambiguous_evidence": [],
-        "dislocations_by_scale": {},
-        "balance_context": None,
-        "invalidated_source_ids": [],
-        "candidate_structured_episode_ids": [],
-        "unexplained_structured_episode_ids": [],
-        "open_market_theses": [
-            {
-                "thesis_id": "thesis:neutral",
-                "root_id": "root:neutral",
-                "market_epoch_id": epoch_id,
-                "formed_at": (
-                    asof - pd.Timedelta(minutes=2)
-                ).isoformat(),
-                "updated_at": asof.isoformat(),
-                "direction": "long",
-                "source_timeframe": "5m",
-                "structural_scale": "intermediate",
-                "mechanism": "zone_return",
-                "authority_relation": "aligned",
-                "entry_location_ids": [location_id],
-            }
-        ],
-    }
+    context = to_primitive(
+        _neutral_global_context(
+            asof=asof,
+            epoch_id=epoch_id,
+            location_id=location_id,
+        )
+    )
     prefixes = [
         {
             "timeframe": timeframe,
@@ -530,12 +621,27 @@ def _neutral_market_case_row(
 
 
 def _neutral_run_manifest(tmp_path: Path) -> dict[str, object]:
+    profile_registry = (
+        Path(__file__).resolve().parents[1]
+        / "configs/market_case_input_profiles_v2.json"
+    )
     return {
         "schema_version": 1,
         "runner": "continuous_replay",
         "mode": "market_case_input",
-        "runtime_state_schema_version": 5,
+        "runtime_state_schema_version": 8,
+        "repository": {"commit": "a" * 40},
+        "data_continuity": dict(
+            market_cases_module.MARKET_CASE_INPUT_DATA_CONTINUITY_POLICY
+        ),
         "profile": {"name": "diagnostic", "identity": "c" * 64},
+        "profile_registry": {
+            "path": str(profile_registry),
+            "sha256": hashlib.sha256(
+                profile_registry.read_bytes()
+            ).hexdigest(),
+            "schema_version": 1,
+        },
         "source": {
             "path": str((tmp_path / "source.parquet").resolve()),
             "sha256": "a" * 64,
@@ -631,7 +737,7 @@ def _neutral_checkpoint_metadata() -> dict[str, object]:
                 "timezone": "America/New_York",
             },
             "market_case_protocol": expected_market_case_run_identity(),
-            "representation_feature_schema_version": 1,
+            "representation_feature_schema_version": FEATURE_SCHEMA_VERSION,
             "split_protocol": {
                 "registry_sha256": "3" * 64,
                 "protocol_version": "neutral-representation-splits-1.0.0",
@@ -711,7 +817,7 @@ def _with_neutral_scale_details(
     context = json.loads(str(result["neutral_global_context_json"]))
     detail_timeframes = ("4H", "1H", "15m", "5m", "1m")
     reference_direction = directions[0] if directions else None
-    context["scale_relation_details"] = {
+    context["scale_relation_details"].update({
         timeframe: {
             "timeframe": timeframe,
             "relation": (
@@ -741,7 +847,7 @@ def _with_neutral_scale_details(
             directions,
             strict=False,
         )
-    }
+    })
     result["neutral_global_context_json"] = _canonical_json_text(context)
     result["revision_id"] = market_cases_module._expected_revision_id(result)
     return result
@@ -785,10 +891,31 @@ def _with_complete_interval_ledger(
     *,
     previous_asof: pd.Timestamp,
     collections: dict[str, list[dict[str, object]]],
+    scene_added_node_ids: tuple[str, ...] = (),
+    scene_resolution_event_ids: tuple[str, ...] = (),
 ) -> dict[str, object]:
     result = dict(row)
     asof = pd.Timestamp(result["asof"])
-    eventful = bool(any(collections.values()))
+    unknown_collections = set(collections).difference(
+        _NEUTRAL_TRANSITION_COLLECTIONS
+    )
+    if unknown_collections:
+        raise AssertionError(
+            f"unknown fixture collections: {sorted(unknown_collections)}"
+        )
+    update_collections = {
+        name: list(collections.get(name, ()))
+        for name in _NEUTRAL_TRANSITION_COLLECTIONS
+    }
+    aggregate_collections = {
+        name: list(update_collections[name])
+        for name in _CAUSAL_AGGREGATE_TRANSITION_COLLECTIONS
+    }
+    eventful = bool(
+        any(aggregate_collections.values())
+        or scene_added_node_ids
+        or scene_resolution_event_ids
+    )
     end_ordinal = int(result["revision_index"])
     start_ordinal = max(0, end_ordinal - 1)
     coverage = {
@@ -811,7 +938,7 @@ def _with_complete_interval_ledger(
                 "asof": asof.isoformat(),
                 "replay_update_ordinal": end_ordinal,
                 "typed_transition_delta_available": True,
-                "collections": collections,
+                "collections": update_collections,
             }
         ]
         if eventful
@@ -823,11 +950,13 @@ def _with_complete_interval_ledger(
                 "asof": asof.isoformat(),
                 "replay_update_ordinal": end_ordinal,
                 "revision_id": "scene-interval",
-                "added_node_ids": [],
+                "added_node_ids": list(scene_added_node_ids),
                 "revised_node_ids": [],
                 "added_edge_ids": [],
                 "revised_edge_ids": [],
-                "resolution_event_ids": [],
+                "resolution_event_ids": list(
+                    scene_resolution_event_ids
+                ),
                 "relation_descriptors": [],
                 "relation_descriptors_complete": True,
             }
@@ -835,30 +964,28 @@ def _with_complete_interval_ledger(
         if eventful
         else []
     )
-    result["observation_transition_json"] = json.dumps(
+    result["observation_transition_json"] = _canonical_json_text(
         {
             "typed_transition_delta_available": True,
             "coverage": coverage,
-            "collections": collections,
+            "collections": aggregate_collections,
             "updates": transition_updates,
         },
-        sort_keys=True,
     )
-    result["scene_graph_delta_json"] = json.dumps(
+    result["scene_graph_delta_json"] = _canonical_json_text(
         {
             "asof": asof.isoformat(),
             "revision_id": "scene-interval",
             "coverage": coverage,
-            "added_node_ids": [],
+            "added_node_ids": list(scene_added_node_ids),
             "revised_node_ids": [],
             "added_edge_ids": [],
             "revised_edge_ids": [],
-            "resolution_event_ids": [],
+            "resolution_event_ids": list(scene_resolution_event_ids),
             "relation_descriptors": [],
             "relation_descriptors_complete": True,
             "updates": scene_updates,
         },
-        sort_keys=True,
     )
     return result
 
@@ -985,7 +1112,7 @@ def test_neutral_adapter_binds_market_episode_eye_scene_context_and_prefixes(
     event_types = {event.event_type for event in case.events}
     assert "market_episode_transition:episode_created" in event_types
     assert "market_episode_transition:zone_registered" in event_types
-    assert "fvg" in event_types
+    assert "group3_fvg_transitions_this_update" in event_types
     assert "graph_delta:added_node_ids:count=1" in event_types
     assert "neutral_global_context:market_mode=balanced" in event_types
     assert all(
@@ -995,41 +1122,121 @@ def test_neutral_adapter_binds_market_episode_eye_scene_context_and_prefixes(
     )
 
 
-def test_neutral_adapter_accepts_optional_repository_identity_without_tokenizing_it(
+def test_neutral_scene_descriptor_never_tokenizes_brain_vocabulary(
     tmp_path: Path,
 ) -> None:
     row = _neutral_market_case_row()
-    old_manifest = _neutral_run_manifest(tmp_path)
-    new_manifest = {
-        **old_manifest,
-        "runtime_state_schema_version": 6,
-        "repository": {"commit": "a" * 40},
-    }
+    scene = json.loads(str(row["scene_graph_delta_json"]))
+    scene["added_edge_ids"] = ["edge:physical"]
+    scene["relation_descriptors"] = [
+        {
+            "change_kind": "added",
+            "edge_id": "edge:physical",
+            "relation": SceneEdgeKind.SWEEPS.value,
+            "lifecycle": "active",
+            "observed_at": pd.Timestamp(row["asof"]).isoformat(),
+            "source": {
+                "node_id": "node:source",
+                "kind": "manipulation",
+                "role": "manipulation",
+                "timeframe": Timeframe.M1.value,
+                "structural_scale": StructuralScale.INTERNAL.value,
+                "lifecycle": "swept",
+            },
+            "target": {
+                "node_id": "node:target",
+                "kind": "liquidity",
+                "role": "liquidity",
+                "timeframe": Timeframe.M1.value,
+                "structural_scale": StructuralScale.INTERNAL.value,
+                "lifecycle": "consumed",
+            },
+        }
+    ]
+    valid = dict(row)
+    valid["scene_graph_delta_json"] = _canonical_json_text(scene)
+    valid["revision_id"] = market_cases_module._expected_revision_id(valid)
+    case = representation_case_from_market_case_input_row(
+        valid,
+        _neutral_run_manifest(tmp_path),
+    )
+    relation_event = next(
+        event
+        for event in case.events
+        if event.event_type.startswith("scene_relation:")
+    )
+    tokens = "|".join(
+        (
+            relation_event.event_type,
+            relation_event.lifecycle,
+            *relation_event.relation_types,
+        )
+    ).lower()
+    assert not any(
+        term in tokens
+        for term in (
+            "playbook",
+            "qualified",
+            "decision",
+            "selected_action",
+            "risk",
+            "hard_gate",
+        )
+    )
 
-    old_mapping = market_case_input_to_representation_mapping(row, old_manifest)
-    new_mapping = market_case_input_to_representation_mapping(row, new_manifest)
+    attacks = (
+        (("relation",), "playbook"),
+        (("lifecycle",), "qualified"),
+        (("source", "kind"), "decision"),
+        (("source", "role"), "selected_action"),
+        (("target", "kind"), "risk"),
+        (("target", "role"), "hard_gate"),
+    )
+    for field_path, brain_value in attacks:
+        attacked_scene = json.loads(str(valid["scene_graph_delta_json"]))
+        descriptor = attacked_scene["relation_descriptors"][0]
+        if len(field_path) == 1:
+            descriptor[field_path[0]] = brain_value
+        else:
+            descriptor[field_path[0]][field_path[1]] = brain_value
+        attacked = dict(valid)
+        attacked["scene_graph_delta_json"] = _canonical_json_text(
+            attacked_scene
+        )
+        attacked["revision_id"] = market_cases_module._expected_revision_id(
+            attacked
+        )
+        with pytest.raises(RepresentationDataError, match="input row is invalid"):
+            representation_case_from_market_case_input_row(
+                attacked,
+                _neutral_run_manifest(tmp_path),
+            )
 
-    assert new_mapping == old_mapping
-    assert "repository" not in new_mapping
 
-
-def test_neutral_adapter_accepts_schema_seven_data_continuity_without_tokenizing_it(
+def test_neutral_adapter_requires_repository_identity_without_tokenizing_it(
     tmp_path: Path,
 ) -> None:
     row = _neutral_market_case_row()
-    old_manifest = _neutral_run_manifest(tmp_path)
-    new_manifest = {
-        **old_manifest,
-        "runtime_state_schema_version": 7,
-        "repository": {"commit": "a" * 40},
-        "data_continuity": dict(
-            market_cases_module.MARKET_CASE_INPUT_DATA_CONTINUITY_POLICY
-        ),
-    }
+    manifest = _neutral_run_manifest(tmp_path)
+    mapping = market_case_input_to_representation_mapping(row, manifest)
+    assert "repository" not in mapping
 
-    assert market_case_input_to_representation_mapping(
-        row, new_manifest
-    ) == market_case_input_to_representation_mapping(row, old_manifest)
+    missing = dict(manifest)
+    missing.pop("repository")
+    with pytest.raises(
+        RepresentationDataError,
+        match="runtime/continuity|manifest schema",
+    ):
+        market_case_input_to_representation_mapping(row, missing)
+
+
+def test_neutral_adapter_accepts_schema_eight_data_continuity_without_tokenizing_it(
+    tmp_path: Path,
+) -> None:
+    row = _neutral_market_case_row()
+    manifest = _neutral_run_manifest(tmp_path)
+    mapping = market_case_input_to_representation_mapping(row, manifest)
+    assert "data_continuity" not in mapping
 
 
 @pytest.mark.parametrize(
@@ -1042,12 +1249,11 @@ def test_neutral_adapter_accepts_schema_seven_data_continuity_without_tokenizing
         {"commit": "a" * 40, "branch": "main"},
     ),
 )
-def test_neutral_adapter_rejects_invalid_optional_repository_identity(
+def test_neutral_adapter_rejects_invalid_repository_identity(
     tmp_path: Path,
     repository: object,
 ) -> None:
     manifest = _neutral_run_manifest(tmp_path)
-    manifest["runtime_state_schema_version"] = 6
     manifest["repository"] = repository
     with pytest.raises(RepresentationDataError, match="repository identity"):
         representation_case_from_market_case_input_row(
@@ -1058,13 +1264,11 @@ def test_neutral_adapter_rejects_invalid_optional_repository_identity(
 @pytest.mark.parametrize(
     ("runtime_schema", "repository", "data_continuity"),
     (
-        (1, None, None),
-        (4, None, None),
         (5, {"commit": "a" * 40}, None),
-        (5, None, {}),
-        (6, None, None),
-        (6, {"commit": "a" * 40}, {}),
-        (7, {"commit": "a" * 40}, None),
+        (6, {"commit": "a" * 40}, None),
+        (7, {"commit": "a" * 40}, {}),
+        (8, None, {}),
+        (8, {"commit": "a" * 40}, None),
     ),
 )
 def test_neutral_adapter_rejects_unbound_runtime_continuity_versions(
@@ -1075,9 +1279,13 @@ def test_neutral_adapter_rejects_unbound_runtime_continuity_versions(
 ) -> None:
     manifest = _neutral_run_manifest(tmp_path)
     manifest["runtime_state_schema_version"] = runtime_schema
-    if repository is not None:
+    if repository is None:
+        manifest.pop("repository")
+    else:
         manifest["repository"] = repository
-    if data_continuity is not None:
+    if data_continuity is None:
+        manifest.pop("data_continuity")
+    else:
         manifest["data_continuity"] = data_continuity
     with pytest.raises(
         RepresentationDataError,
@@ -1101,7 +1309,7 @@ def test_neutral_adapter_rejects_unbound_runtime_continuity_versions(
         ("unexpected", False),
     ),
 )
-def test_neutral_adapter_rejects_schema_seven_data_continuity_tamper(
+def test_neutral_adapter_rejects_schema_eight_data_continuity_tamper(
     tmp_path: Path,
     key: str,
     value: object,
@@ -1109,7 +1317,7 @@ def test_neutral_adapter_rejects_schema_seven_data_continuity_tamper(
     manifest = _neutral_run_manifest(tmp_path)
     manifest.update(
         {
-            "runtime_state_schema_version": 7,
+            "runtime_state_schema_version": 8,
             "repository": {"commit": "a" * 40},
             "data_continuity": {
                 **market_cases_module.MARKET_CASE_INPUT_DATA_CONTINUITY_POLICY,
@@ -1124,45 +1332,61 @@ def test_neutral_adapter_rejects_schema_seven_data_continuity_tamper(
 
 
 @pytest.mark.parametrize(
-    "alignment",
-    ("aligned", "opposed", "simultaneous_unknown", "ambiguous_same_clock"),
+    ("directions", "alignment"),
+    (
+        ((Direction.LONG,), "aligned"),
+        ((Direction.SHORT,), "opposed"),
+        (
+            (Direction.LONG, Direction.SHORT),
+            "ambiguous_same_clock",
+        ),
+    ),
 )
 def test_neutral_adapter_preserves_legal_micro_bos_reference_alignment_as_relation(
     tmp_path: Path,
+    directions: tuple[Direction, ...],
     alignment: str,
 ) -> None:
-    row = _neutral_market_case_row()
+    update, asof = _strict_interaction(*directions)
+    row = _neutral_market_case_row(asof=asof)
     observation = json.loads(str(row["observation_transition_json"]))
-    observation["collections"][
-        "group5_micro_bos_transitions_this_update"
-    ].append(
-        {
-            "event_id": "micro-bos:neutral",
-            "kind": "micro_bos_reference",
-            "lifecycle": "active",
-            "observed_at": pd.Timestamp(row["asof"]).isoformat(),
-            "direction": "long",
-            "timeframe": "1m",
-            "outcome": alignment,
-        }
+    observation["collections"].update(
+        to_primitive(dict(interaction_artifact_collections(update)))
     )
     row["observation_transition_json"] = _canonical_json_text(observation)
     row["revision_id"] = market_cases_module._expected_revision_id(row)
 
+    manifest = _neutral_run_manifest(tmp_path)
+    manifest["source"].update(
+        {
+            "first": (asof - pd.Timedelta(minutes=33)).isoformat(),
+            "last": (asof + pd.Timedelta(hours=6)).isoformat(),
+            "last_completed_asof": (
+                asof + pd.Timedelta(hours=6, minutes=1)
+            ).isoformat(),
+        }
+    )
+    manifest["window"].update(
+        {
+            "start": (asof - pd.Timedelta(minutes=3)).isoformat(),
+            "end_exclusive": (asof + pd.Timedelta(hours=6)).isoformat(),
+        }
+    )
     mapping = market_case_input_to_representation_mapping(
         row,
-        _neutral_run_manifest(tmp_path),
+        manifest,
     )
     case = RepresentationCase.from_mapping(mapping)
+    reference_id = update.micro_break_facts[0].reference_id
     event = next(
-        value for value in case.events if value.event_id == "micro-bos:neutral"
+        value for value in case.events if value.event_id == reference_id
     )
 
     assert (
         f"micro_bos_reference_alignment:{alignment}" in event.relation_types
     )
     assert "\"outcome\"" not in _canonical_json_text(mapping["events"])
-    assert "\"outcome\"" in str(row["observation_transition_json"])
+    assert "\"outcome\"" not in str(row["observation_transition_json"])
 
 
 @pytest.mark.parametrize("tamper", ("path", "type", "value"))
@@ -1173,9 +1397,9 @@ def test_neutral_adapter_rejects_non_whitelisted_micro_bos_outcome(
     row = _neutral_market_case_row()
     observation = json.loads(str(row["observation_transition_json"]))
     collection = (
-        "group5_path_transitions_this_update"
+        "interaction_paths"
         if tamper == "path"
-        else "group5_micro_bos_transitions_this_update"
+        else "interaction_micro_break_facts"
     )
     outcome: object = (
         {"aligned": True}
@@ -1562,7 +1786,14 @@ def test_neutral_row_cannot_supply_source_or_model_config(
 
 @pytest.mark.parametrize(
     "forbidden_key",
-    ("playbook", "shadow_snapshot", "future_outcome", "pnl"),
+    (
+        "brain_response",
+        "future_outcome",
+        "playbook",
+        "pnl",
+        "qualified",
+        "shadow_snapshot",
+    ),
 )
 def test_neutral_adapter_rejects_control_shadow_and_economic_keys(
     tmp_path: Path,
@@ -1681,12 +1912,12 @@ def test_split_integrity_uses_market_epoch_and_market_episode_pair() -> None:
 def test_case_library_authority_direction_is_not_fabricated_from_thesis() -> None:
     long_case = representation_case_from_case_input_row(_case_library_row())
     short_row = _case_library_row(revision_id="revision-library-short")
-    short_row["authority_json"] = json.dumps(
+    short_row["authority_json"] = _canonical_json_text(
         {"authority_direction": "SHORT", "authority_timeframe": "4H"}
     )
     short_case = representation_case_from_case_input_row(short_row)
     unknown_row = _case_library_row(revision_id="revision-library-unknown")
-    unknown_row["authority_json"] = json.dumps({})
+    unknown_row["authority_json"] = _canonical_json_text({})
     unknown_case = representation_case_from_case_input_row(unknown_row)
 
     assert long_case.direction == short_case.direction == unknown_case.direction == 1
@@ -1699,12 +1930,14 @@ def test_graph_encoder_preserves_typed_relation_topology_not_only_counts() -> No
     first_row = _case_library_row()
     second_row = dict(first_row)
     second_graph = json.loads(str(first_row["scene_graph_delta_json"]))
-    second_graph["relation_descriptors"][0]["relation"] = "blocks"
+    second_graph["relation_descriptors"][0][
+        "relation"
+    ] = SceneEdgeKind.BLOCKS_PATH_TO.value
     second_graph["relation_descriptors"][0]["target"]["kind"] = "liquidity_pool"
     second_graph["updates"][0]["relation_descriptors"] = second_graph[
         "relation_descriptors"
     ]
-    second_row["scene_graph_delta_json"] = json.dumps(second_graph, sort_keys=True)
+    second_row["scene_graph_delta_json"] = _canonical_json_text(second_graph)
 
     first = representation_case_from_case_input_row(first_row)
     second = representation_case_from_case_input_row(second_row)
@@ -1727,8 +1960,8 @@ def test_graph_encoder_preserves_typed_relation_topology_not_only_counts() -> No
     incomplete_graph = json.loads(str(first_row["scene_graph_delta_json"]))
     incomplete_graph["relation_descriptors_complete"] = False
     incomplete_graph["updates"][0]["relation_descriptors_complete"] = False
-    incomplete_row["scene_graph_delta_json"] = json.dumps(
-        incomplete_graph, sort_keys=True
+    incomplete_row["scene_graph_delta_json"] = _canonical_json_text(
+        incomplete_graph
     )
     with pytest.raises(RepresentationDataError, match="relation descriptors are incomplete"):
         representation_case_from_case_input_row(incomplete_row)
@@ -1952,7 +2185,7 @@ def test_brain_response_and_control_fields_cannot_change_market_embedding() -> N
     import torch
 
     first_row = _case_library_row()
-    first_row["entry_episode_json"] = json.dumps(
+    first_row["entry_episode_json"] = _canonical_json_text(
         {
             "lifecycle": "active",
             "playbook": "LIQUIDITY_SWEEP_REVERSAL",
@@ -1960,7 +2193,7 @@ def test_brain_response_and_control_fields_cannot_change_market_embedding() -> N
         }
     )
     second_row = dict(first_row)
-    second_row["brain_response_json"] = json.dumps(
+    second_row["brain_response_json"] = _canonical_json_text(
         {
             "selected_action": "SUBMIT",
             "risk_action": "RAISE_SIZE",
@@ -1968,7 +2201,7 @@ def test_brain_response_and_control_fields_cannot_change_market_embedding() -> N
             "nested": {"decision": "BUY", "hard_gate": False},
         }
     )
-    second_row["entry_episode_json"] = json.dumps(
+    second_row["entry_episode_json"] = _canonical_json_text(
         {
             "lifecycle": "active",
             "playbook": "DIFFERENT_LABEL_ONLY",
@@ -2734,13 +2967,28 @@ def test_split_keeps_episode_and_identical_prefix_input_together() -> None:
 def test_observable_target_builder_uses_next_typed_transition_not_case_stage() -> None:
     first = _case_library_row()
     second_asof = pd.Timestamp("2022-01-03 09:40", tz="UTC")
+    fvg_next = to_primitive(
+        replace(
+            _fvg(
+                second_asof - pd.Timedelta(minutes=5),
+                identity="fvg-next-a",
+            ),
+            symbol="NQ",
+            instrument_id=1,
+            lifecycle=FairValueGapLifecycle.INVALIDATED,
+            state_started_at=second_asof,
+            last_updated_at=second_asof,
+            invalidated_at=second_asof,
+            transition_reason="close_beyond_frozen_far_edge",
+        )
+    )
     second = _case_library_row(
         asof=second_asof,
         revision_id="revision-library-b",
         revision_index=1,
         revision_stage="first_pullback",
     )
-    second["observation_transition_json"] = json.dumps(
+    second["observation_transition_json"] = _canonical_json_text(
         {
             "typed_transition_delta_available": True,
             "coverage": {
@@ -2758,14 +3006,12 @@ def test_observable_target_builder_uses_next_typed_transition_not_case_stage() -
                 "gap_free": True,
             },
             "collections": {
-                "group5_micro_bos_transitions_this_update": [
-                    {
-                        "event_id": "micro-bos-a",
-                        "kind": "micro_bos",
-                        "lifecycle": "confirmed",
-                        "observed_at": second_asof.isoformat(),
-                        "formed_at": second_asof.isoformat(),
-                    }
+                **{
+                    name: []
+                    for name in _CAUSAL_AGGREGATE_TRANSITION_COLLECTIONS
+                },
+                "group3_fvg_transitions_this_update": [
+                    fvg_next
                 ]
             },
             "updates": [
@@ -2774,22 +3020,19 @@ def test_observable_target_builder_uses_next_typed_transition_not_case_stage() -
                     "replay_update_ordinal": 1,
                     "typed_transition_delta_available": True,
                     "collections": {
-                        "group5_micro_bos_transitions_this_update": [
-                            {
-                                "event_id": "micro-bos-a",
-                                "kind": "micro_bos",
-                                "lifecycle": "confirmed",
-                                "observed_at": second_asof.isoformat(),
-                                "formed_at": second_asof.isoformat(),
-                            }
+                        **{
+                            name: []
+                            for name in _NEUTRAL_TRANSITION_COLLECTIONS
+                        },
+                        "group3_fvg_transitions_this_update": [
+                            fvg_next
                         ]
                     },
                 }
             ],
         },
-        sort_keys=True,
     )
-    second["scene_graph_delta_json"] = json.dumps(
+    second["scene_graph_delta_json"] = _canonical_json_text(
         {
             "asof": second_asof.isoformat(),
             "revision_id": "scene-b",
@@ -2829,7 +3072,6 @@ def test_observable_target_builder_uses_next_typed_transition_not_case_stage() -
                 }
             ],
         },
-        sort_keys=True,
     )
     third_asof = pd.Timestamp("2022-01-03 10:00", tz="UTC")
     third = _case_library_row(
@@ -2838,17 +3080,16 @@ def test_observable_target_builder_uses_next_typed_transition_not_case_stage() -
         revision_index=2,
         revision_stage="terminal",
     )
-    third["draw_json"] = json.dumps(
-        {"context_draw": {"lifecycle": "consumed"}}, sort_keys=True
+    third["draw_json"] = _canonical_json_text(
+        {"context_draw": {"lifecycle": "consumed"}}
     )
-    third["entry_episode_json"] = json.dumps(
+    third["entry_episode_json"] = _canonical_json_text(
         {
             "lifecycle": "closed",
             "terminal_reason": "source_invalidated",
             "source_displacement_id": "disp-a",
             "updated_at": third_asof.isoformat(),
         },
-        sort_keys=True,
     )
 
     built = build_observable_revision_targets((third, first, second))
@@ -2856,9 +3097,9 @@ def test_observable_target_builder_uses_next_typed_transition_not_case_stage() -
 
     assert target.next_revision_id == "revision-library-b"
     assert target.target.next_event_type == NEXT_EVENT_TYPE_VOCAB[
-        "group5_micro_bos_transitions_this_update"
+        "group3_fvg_transitions_this_update"
     ]
-    assert target.target.next_lifecycle == NEXT_LIFECYCLE_VOCAB["confirmed"]
+    assert target.target.next_lifecycle == NEXT_LIFECYCLE_VOCAB["invalidated"]
     assert target.target.next_event_time_bucket == 2
     # Episode/source persistence and a later draw snapshot are not exact entity
     # lifecycle evidence, so neither task may use those sparse-state proxies.
@@ -2875,14 +3116,14 @@ def test_observable_target_builder_uses_next_typed_transition_not_case_stage() -
     uncovered_transition["typed_transition_delta_available"] = False
     uncovered_transition["updates"][0]["typed_transition_delta_available"] = False
     uncovered_transition["coverage"]["all_typed_deltas_available"] = False
-    uncovered_second["observation_transition_json"] = json.dumps(
-        uncovered_transition, sort_keys=True
+    uncovered_second["observation_transition_json"] = _canonical_json_text(
+        uncovered_transition
     )
     uncovered_scene = json.loads(second["scene_graph_delta_json"])
     uncovered_scene["coverage"]["complete"] = False
     uncovered_scene["coverage"]["all_typed_deltas_available"] = False
-    uncovered_second["scene_graph_delta_json"] = json.dumps(
-        uncovered_scene, sort_keys=True
+    uncovered_second["scene_graph_delta_json"] = _canonical_json_text(
+        uncovered_scene
     )
     uncovered = build_observable_revision_targets((first, uncovered_second, third))
     assert uncovered["revision-library-a"].target.next_event_type == -100
@@ -2916,6 +3157,56 @@ def test_observable_target_builder_is_input_order_invariant_and_epoch_bounded() 
     assert bounded["revision-library-a"].target.next_event_type == -100
 
 
+def test_retained_interaction_current_view_cannot_change_next_delta_target() -> None:
+    interaction, next_asof = _strict_interaction(Direction.LONG)
+    first_asof = next_asof - pd.Timedelta(minutes=2)
+    first = _case_library_row(asof=first_asof)
+    second = _case_library_row(
+        asof=next_asof,
+        revision_id="revision-library-with-future-fvg",
+        revision_index=1,
+        revision_stage="trigger",
+    )
+    fvg_delta = to_primitive(
+        replace(
+            _fvg(next_asof, identity="fvg:future-delta"),
+            symbol="NQ",
+            instrument_id=1,
+        )
+    )
+    without_current = _with_complete_interval_ledger(
+        second,
+        previous_asof=first_asof,
+        collections={
+            "group3_fvg_transitions_this_update": [fvg_delta],
+        },
+    )
+    current_interaction = interaction_artifact_collections(interaction)
+    with_current = _with_complete_interval_ledger(
+        second,
+        previous_asof=first_asof,
+        collections={
+            "group3_fvg_transitions_this_update": [fvg_delta],
+            **{
+                name: [to_primitive(value) for value in values]
+                for name, values in current_interaction.items()
+                if name in _NEUTRAL_TRANSITION_COLLECTIONS[6:10]
+            },
+        },
+    )
+
+    baseline = build_observable_revision_targets((first, without_current))[
+        "revision-library-a"
+    ].target
+    retained = build_observable_revision_targets((first, with_current))[
+        "revision-library-a"
+    ].target
+    assert baseline == retained
+    assert baseline.next_event_type == NEXT_EVENT_TYPE_VOCAB[
+        "group3_fvg_transitions_this_update"
+    ]
+
+
 def test_entity_targets_require_exact_ledger_identity_not_episode_proxy() -> None:
     first = _case_library_row()
     first_asof = pd.Timestamp(first["asof"])
@@ -2930,7 +3221,7 @@ def test_entity_targets_require_exact_ledger_identity_not_episode_proxy() -> Non
             revision_index=1,
             revision_stage="terminal" if episode_lifecycle == "closed" else "trigger",
         )
-        row["entry_episode_json"] = json.dumps(
+        row["entry_episode_json"] = _canonical_json_text(
             {
                 "lifecycle": episode_lifecycle,
                 "terminal_reason": (
@@ -2939,20 +3230,17 @@ def test_entity_targets_require_exact_ledger_identity_not_episode_proxy() -> Non
                 "source_displacement_id": "disp-a",
                 "updated_at": next_asof.isoformat(),
             },
-            sort_keys=True,
         )
         return _with_complete_interval_ledger(
             row,
             previous_asof=first_asof,
-            collections={
-                "displacement_transitions_this_update": [
-                    {
-                        "event_id": "disp-a",
-                        "lifecycle": lifecycle,
-                        "observed_at": next_asof.isoformat(),
-                    }
-                ]
-            },
+            collections={},
+            scene_added_node_ids=(
+                ("disp-a",) if lifecycle == "active" else ()
+            ),
+            scene_resolution_event_ids=(
+                ("disp-a",) if lifecycle == "exhausted" else ()
+            ),
         )
 
     episode_failed_but_displacement_active = build_observable_revision_targets(
@@ -2966,9 +3254,8 @@ def test_entity_targets_require_exact_ledger_identity_not_episode_proxy() -> Non
     assert episode_active_but_displacement_exhausted == 0
 
     draw_first = dict(first)
-    draw_first["draw_json"] = json.dumps(
+    draw_first["draw_json"] = _canonical_json_text(
         {"context_draw": {"draw_id": "draw-a", "lifecycle": "active"}},
-        sort_keys=True,
     )
     consumed = _case_library_row(
         asof=next_asof,
@@ -2980,12 +3267,23 @@ def test_entity_targets_require_exact_ledger_identity_not_episode_proxy() -> Non
         consumed,
         previous_asof=first_asof,
         collections={
-            "liquidity_pool_transitions_this_update": [
-                {
-                    "event_id": "draw-a",
-                    "lifecycle": "consumed",
-                    "observed_at": next_asof.isoformat(),
-                }
+            "liquidity_inventory_transitions_this_update": [
+                to_primitive(
+                    replace(
+                        _draw(
+                            identity="draw-a",
+                            side="above",
+                            kind="swing",
+                            price=101.0,
+                            confirmed_at=(
+                                next_asof - pd.Timedelta(minutes=1)
+                            ),
+                        ),
+                        lifecycle=LiquidityInventoryLifecycle.CONSUMED,
+                        consumed_at=next_asof,
+                        lifecycle_reason="swing_swept",
+                    )
+                )
             ]
         },
     )

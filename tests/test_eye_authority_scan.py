@@ -156,7 +156,7 @@ def test_eye_builder_enables_only_lightweight_typed_observer() -> None:
     assert observer._displacement_eye is not None
     assert observer._zone_tracker is not None
     assert observer._range_auction_tracker is not None
-    assert observer._group5_reducer is not None
+    assert observer._interaction_semantics is not None
 
 
 def test_macos_authority_scan_rejects_rosetta_python(

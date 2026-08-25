@@ -427,7 +427,7 @@ def _build_eye(
             displacement_protocol=str(ROOT / raw["displacement_protocol"]),
             zone_protocol=str(ROOT / raw["zone_protocol"]),
             range_auction_protocol=str(ROOT / raw["range_auction_protocol"]),
-            group5_protocol=str(ROOT / raw["group5_protocol"]),
+            interaction_protocol=str(ROOT / raw["group5_protocol"]),
             persist_state_projections=False,
             semantic_registry=str(selection.atomic_registry.source_path),
             scale_specs=specs,
