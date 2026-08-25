@@ -140,7 +140,22 @@ def _legacy_engine_step(
     )
 
 
-def test_engine_neutral_integration_preserves_old_outputs_each_clock() -> None:
+def test_engine_neutral_integration_preserves_old_outputs_each_clock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    standalone_build_calls = 0
+    standalone_builder = playbooks_module.build_open_market_theses
+
+    def counted_standalone_builder(*args, **kwargs):
+        nonlocal standalone_build_calls
+        standalone_build_calls += 1
+        return standalone_builder(*args, **kwargs)
+
+    monkeypatch.setattr(
+        playbooks_module,
+        "build_open_market_theses",
+        counted_standalone_builder,
+    )
     integrated = ContinuousSMCEngine.from_config(
         "configs/model.json",
         runtime_mode="development",
@@ -165,9 +180,89 @@ def test_engine_neutral_integration_preserves_old_outputs_each_clock() -> None:
             == actual.belief.global_context.open_market_theses
         )
         assert (
+            actual.neutral_market_state.open_market_theses
+            is actual.belief.global_context.open_market_theses
+        )
+        assert (
             actual.neutral_market_state.asof
             == actual.observation.asof
             == actual.belief.asof
+        )
+    assert standalone_build_calls == 100
+
+
+def test_full_engine_builds_one_authoritative_thesis_tuple_per_clock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine_build_calls = 0
+    engine_builder = engine_module.build_open_market_theses
+
+    def counted_engine_builder(*args, **kwargs):
+        nonlocal engine_build_calls
+        engine_build_calls += 1
+        return engine_builder(*args, **kwargs)
+
+    def reject_brain_rebuild(*args, **kwargs):
+        raise AssertionError("full Engine Brain rebuilt neutral theses")
+
+    monkeypatch.setattr(
+        engine_module,
+        "build_open_market_theses",
+        counted_engine_builder,
+    )
+    monkeypatch.setattr(
+        playbooks_module,
+        "build_open_market_theses",
+        reject_brain_rebuild,
+    )
+    engine = ContinuousSMCEngine.from_config(
+        "configs/model.json",
+        runtime_mode="development",
+    )
+    bars = _grid_bars(12)
+    for index, bar in enumerate(bars, start=1):
+        snapshot = engine.on_bar(bar)
+        assert snapshot.neutral_market_state is not None
+        assert snapshot.belief.global_context is not None
+        assert engine_build_calls == index
+        assert (
+            snapshot.neutral_market_state.open_market_theses
+            is snapshot.belief.global_context.open_market_theses
+        )
+
+
+@pytest.mark.parametrize(
+    "malformation",
+    ("type", "clock", "revision", "epoch"),
+)
+def test_brain_rejects_malformed_precomputed_neutral_context(
+    malformation: str,
+) -> None:
+    engine = ContinuousSMCEngine.from_config(
+        "configs/model.json",
+        runtime_mode="development",
+    )
+    observation = engine._observe_bar(_grid_bars(1)[0], execution=None)
+    context, neutral = engine._project_neutral(observation)
+    assert context is not None and neutral is not None
+    if malformation == "type":
+        malformed = object()
+    elif malformation == "clock":
+        malformed = replace(
+            context,
+            updated_at=context.updated_at + pd.Timedelta(minutes=1),
+        )
+    elif malformation == "revision":
+        malformed = replace(context, scene_revision_id="scene:forged")
+    else:
+        malformed = replace(context, market_epoch_id="epoch:forged")
+
+    with pytest.raises(ValueError, match="precomputed global context"):
+        engine.brain.update(
+            observation,
+            scene_graph=engine.observer.scene_graph,
+            scene_delta=engine.observer.last_scene_delta,
+            precomputed_global_context=malformed,  # type: ignore[arg-type]
         )
 
 
@@ -398,6 +493,12 @@ def test_engine_neutral_state_is_pickle_checkpoint_ready() -> None:
         "price",
         "semantic_events_this_update",
     }.isdisjoint(snapshot.observation.__dict__)
+    assert isinstance(resumed.last_snapshot, EngineSnapshot)
+    assert resumed.last_snapshot.belief.global_context is not None
+    assert (
+        resumed.neutral_market_state.open_market_theses
+        is resumed.last_snapshot.belief.global_context.open_market_theses
+    )
     assert (
         resumed.last_snapshot.observation.market_snapshot.foundation
         == foundation
@@ -429,6 +530,12 @@ def test_engine_neutral_state_is_pickle_checkpoint_ready() -> None:
         expected = engine.on_bar(bar, execution=reality)
         actual = resumed.on_bar(bar, execution=reality)
         assert to_primitive(actual) == to_primitive(expected)
+        assert actual.neutral_market_state is not None
+        assert actual.belief.global_context is not None
+        assert (
+            actual.neutral_market_state.open_market_theses
+            is actual.belief.global_context.open_market_theses
+        )
 
     assert resumed.last_snapshot is not None
     resumed_replay = replay_atomic_market_snapshot(
@@ -802,6 +909,10 @@ def test_hard_reset_advances_epoch_and_clears_neutral_context(
     )
     assert reset.neutral_market_state is not None
     assert reset.belief.global_context is not None
+    assert (
+        reset.neutral_market_state.open_market_theses
+        is reset.belief.global_context.open_market_theses
+    )
     assert (
         reset.neutral_market_state.market_epoch_id
         == reset.belief.global_context.market_epoch_id

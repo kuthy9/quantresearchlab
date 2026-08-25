@@ -9094,6 +9094,50 @@ def _route_terminal_delta_to_global_context(
     )
 
 
+def _validate_precomputed_global_context(
+    context: GlobalMarketContext,
+    observation: MarketObservation,
+    scene_delta: SceneGraphDelta,
+    scene_graph: TemporalMarketSceneGraph,
+) -> GlobalMarketContext:
+    """Fail closed unless Neutral supplied the exact current authority view."""
+
+    if type(context) is not GlobalMarketContext:
+        raise ValueError(
+            "precomputed global context must be a GlobalMarketContext"
+        )
+    theses = context.open_market_theses
+    if (
+        type(scene_delta) is not SceneGraphDelta
+        or not isinstance(scene_graph, TemporalMarketSceneGraph)
+        or scene_delta.asof != observation.asof
+        or scene_graph.last_asof != observation.asof
+        or context.updated_at != observation.asof
+        or context.scene_revision_id != scene_delta.revision_id
+        or context.scene_revision_id != scene_graph.revision_id
+        or context.market_epoch_id != scene_graph._market_epoch_id
+        or any(type(thesis) is not OpenMarketThesis for thesis in theses)
+        or len({thesis.thesis_id for thesis in theses}) != len(theses)
+        or len({thesis.root_id for thesis in theses}) != len(theses)
+        or theses
+        != tuple(
+            sorted(
+                theses,
+                key=lambda thesis: (thesis.formed_at, thesis.thesis_id),
+            )
+        )
+        or any(
+            thesis.market_epoch_id != context.market_epoch_id
+            or thesis.updated_at > context.updated_at
+            for thesis in theses
+        )
+    ):
+        raise ValueError(
+            "precomputed global context is not the current neutral authority"
+        )
+    return context
+
+
 def _candidate_requires_explanation(
     candidate_id: str,
     observation: MarketObservation,
@@ -12041,9 +12085,10 @@ class PlaybookBrain:
     ) -> MarketBelief:
         """Update one completed clock with an update-local graph-query memo.
 
-        Runtime Engine supplies the raw, once-reduced global context.  Direct
-        Brain callers retain the historical fallback that computes that raw
-        base here before applying terminal routing and typed thesis building.
+        Runtime Engine supplies Neutral's complete authoritative context.
+        Brain reuses its thesis tuple and only derives a transient terminal-
+        role view for candidate lifecycle routing.  Direct Brain callers keep
+        one fallback build for isolated evaluator and unit-test use.
         """
 
         previous_belief = self._belief
@@ -12136,8 +12181,7 @@ class PlaybookBrain:
                 "precomputed global context requires its graph and delta"
             )
         if scene_graph is not None and scene_delta is not None:
-            global_context = precomputed_global_context
-            if global_context is None:
+            if precomputed_global_context is None:
                 global_context = update_global_market_context(
                     (
                         None
@@ -12148,38 +12192,48 @@ class PlaybookBrain:
                     scene_delta,
                     scene_graph,
                 )
-            elif (
-                global_context.updated_at != observation.asof
-                or global_context.scene_revision_id
-                != scene_delta.revision_id
-                or global_context.market_epoch_id
-                != scene_graph._market_epoch_id
-                or global_context.open_market_theses
-            ):
-                raise ValueError(
-                    "precomputed global context is not the raw current base"
+                global_context = _route_terminal_delta_to_global_context(
+                    global_context,
+                    previous_belief,
+                    scene_delta,
+                    scene_graph,
                 )
-            global_context = _route_terminal_delta_to_global_context(
-                global_context,
-                previous_belief,
-                scene_delta,
-                scene_graph,
-            )
-            global_context = replace(
-                global_context,
-                open_market_theses=build_open_market_theses(
-                    (
-                        ()
-                        if previous_belief is None
-                        or previous_belief.global_context is None
-                        else previous_belief.global_context.open_market_theses
+                global_context = replace(
+                    global_context,
+                    open_market_theses=build_open_market_theses(
+                        (
+                            ()
+                            if previous_belief is None
+                            or previous_belief.global_context is None
+                            else previous_belief.global_context.open_market_theses
+                        ),
+                        observation,
+                        scene_delta,
+                        scene_graph,
+                        global_context,
                     ),
+                )
+            else:
+                global_context = _validate_precomputed_global_context(
+                    precomputed_global_context,
                     observation,
                     scene_delta,
                     scene_graph,
+                )
+                # Candidate terminal roles are Brain-owned.  This replace may
+                # refine invalidated_source_ids for local lifecycle consumers,
+                # but it preserves Neutral's exact thesis tuple by identity.
+                authoritative_theses = global_context.open_market_theses
+                global_context = _route_terminal_delta_to_global_context(
                     global_context,
-                ),
-            )
+                    previous_belief,
+                    scene_delta,
+                    scene_graph,
+                )
+                if global_context.open_market_theses is not authoritative_theses:
+                    raise RuntimeError(
+                        "terminal routing replaced neutral market theses"
+                    )
             if (
                 self._candidate_epoch_id is not None
                 and self._candidate_epoch_id

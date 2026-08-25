@@ -987,3 +987,35 @@ def test_unknown_closed_path_reason_fails_closed() -> None:
             _observation(context, locations=(location,), paths=(path,)),
             context,
         )
+
+
+def test_global_context_requires_typed_unique_canonical_thesis_roots() -> None:
+    first = _thesis(
+        1,
+        "location:one",
+        direction=Direction.LONG,
+        epoch="epoch:one",
+        asof=BASE,
+    )
+    second = _thesis(
+        2,
+        "location:two",
+        direction=Direction.SHORT,
+        epoch="epoch:one",
+        asof=BASE,
+    )
+    canonical = _context(BASE, theses=(first, second))
+    assert canonical.open_market_theses == (first, second)
+
+    with pytest.raises(ValueError, match="global market context is invalid"):
+        _context(BASE, theses=(second, first))
+    with pytest.raises(ValueError, match="global market context is invalid"):
+        _context(
+            BASE,
+            theses=(first, replace(first, thesis_id="thesis:duplicate")),
+        )
+    with pytest.raises(ValueError, match="global market context is invalid"):
+        _context(
+            BASE,
+            theses=(SimpleNamespace(thesis_id="thesis:forged"),),  # type: ignore[arg-type]
+        )

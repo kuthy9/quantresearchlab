@@ -750,18 +750,18 @@ class ContinuousSMCEngine:
             if belief_position is not None
             else account.position
         )
-        raw_global_context, neutral_market_state = self._project_neutral(
+        neutral_global_context, neutral_market_state = self._project_neutral(
             observation
         )
         scene_graph = self.observer.scene_graph
         scene_delta = self.observer.last_scene_delta
-        if raw_global_context is not None:
+        if neutral_global_context is not None:
             belief = self.brain.update(
                 observation,
                 position=resolved_belief_position,
                 scene_graph=scene_graph,
                 scene_delta=scene_delta,
-                precomputed_global_context=raw_global_context,
+                precomputed_global_context=neutral_global_context,
             )
         else:
             belief = self.brain.update(
@@ -874,7 +874,7 @@ class ContinuousSMCEngine:
             observation,
             neutral_global_context,
         )
-        return raw_global_context, neutral_market_state
+        return neutral_global_context, neutral_market_state
 
     def compact_scene_graph_runtime(self) -> Mapping[str, Any]:
         """Compact only cold Scene Graph history after snapshot consumption.

@@ -8891,6 +8891,22 @@ class GlobalMarketContext:
         object.__setattr__(self, "material_conflicts", conflicts)
         open_theses = tuple(self.open_market_theses)
         object.__setattr__(self, "open_market_theses", open_theses)
+        open_theses_are_typed = all(
+            type(thesis) is OpenMarketThesis for thesis in open_theses
+        )
+        open_theses_are_canonical = bool(
+            open_theses_are_typed
+            and open_theses
+            == tuple(
+                sorted(
+                    open_theses,
+                    key=lambda thesis: (
+                        thesis.formed_at,
+                        thesis.thesis_id,
+                    ),
+                )
+            )
+        )
         expected_scales = {timeframe.value for timeframe in Timeframe}
         if (
             not self.scene_revision_id
@@ -8952,11 +8968,14 @@ class GlobalMarketContext:
             )
             or len({conflict.conflict_id for conflict in conflicts})
             != len(conflicts)
+            or not open_theses_are_typed
+            or not open_theses_are_canonical
             or len({thesis.thesis_id for thesis in open_theses})
             != len(open_theses)
+            or len({thesis.root_id for thesis in open_theses})
+            != len(open_theses)
             or any(
-                not isinstance(thesis, OpenMarketThesis)
-                or thesis.market_epoch_id != self.market_epoch_id
+                thesis.market_epoch_id != self.market_epoch_id
                 or thesis.updated_at > self.updated_at
                 for thesis in open_theses
             )
