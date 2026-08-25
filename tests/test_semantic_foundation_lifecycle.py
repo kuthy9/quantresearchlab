@@ -1675,6 +1675,14 @@ def test_checkpoint_resume_and_duplicate_replay_are_deterministic() -> None:
     with pytest.raises(ValueError, match="checkpoint"):
         SemanticLifecycleReducer.restore(missing_schema)
 
+    missing_state_schema = pickle.loads(pickle.dumps(checkpoint))
+    vars(missing_state_schema.state).pop("schema_version")
+    vars(missing_state_schema)["state_digest"] = content_hash(
+        missing_state_schema.state
+    )
+    with pytest.raises(ValueError, match="checkpoint"):
+        SemanticLifecycleReducer.restore(missing_state_schema)
+
     missing_registered_ledger = pickle.loads(pickle.dumps(checkpoint))
     vars(missing_registered_ledger.state).pop("registered_bar_clocks")
     vars(missing_registered_ledger)["state_digest"] = content_hash(

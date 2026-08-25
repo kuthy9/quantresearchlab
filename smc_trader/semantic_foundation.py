@@ -1,13 +1,14 @@
-"""Version-bound append-only projection for semantic-foundation DTOs.
+"""Version-bound projection and cold ledger for foundation-v2 DTOs.
 
-This module is deliberately a projection envelope, not a detector, event
-store, or second semantic reducer.  It accepts only the frozen foundation-v2
-DTO types produced by the existing lifecycle, geometry, and zone modules and
-retains every immutable revision for deterministic replay.
+The hot :class:`FoundationProjection` retains only the deterministic current
+view, record count, and rolling chain identity.  Immutable revision history
+lives in :class:`FoundationRecordLedger` and is materialized only for an
+explicit checkpoint or cold replay.  Neither layer detects market semantics.
 """
 
 from __future__ import annotations
 
+from collections import ChainMap
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, fields as dataclass_fields
 from enum import Enum
@@ -71,6 +72,14 @@ from .semantic_zones import (
 FOUNDATION_COMPONENT_FINGERPRINT_VERSION = (
     "foundation_projection_append_chain_v1"
 )
+FOUNDATION_CURRENT_VIEW_FINGERPRINT_VERSION = (
+    "foundation_projection_current_view_v1"
+)
+FOUNDATION_PROJECTION_STATE_SCHEMA_VERSION = 2
+FOUNDATION_PROJECTION_CHECKPOINT_SCHEMA_VERSION = 2
+FOUNDATION_RECORD_LEDGER_SCHEMA_VERSION = 1
+FOUNDATION_RECORD_DELTA_SCHEMA_VERSION = 2
+FOUNDATION_PROJECTION_OWNER_STATE_SCHEMA_VERSION = 1
 
 
 class FoundationObjectType(str, Enum):
@@ -235,6 +244,26 @@ def _extend_foundation_component_fingerprint(
             ),
             "previous": previous,
             "record_id": record_id,
+        }
+    )
+
+
+def _foundation_current_view_fingerprint(
+    records: Sequence["FoundationRecord"],
+    *,
+    foundation_version: str,
+    registry_identity: str,
+) -> str:
+    """Bind the compact current view without sorting or revision history."""
+
+    return _canonical_digest(
+        {
+            "current_view_fingerprint_version": (
+                FOUNDATION_CURRENT_VIEW_FINGERPRINT_VERSION
+            ),
+            "foundation_version": foundation_version,
+            "registry_identity": registry_identity,
+            "current_record_ids": tuple(record.record_id for record in records),
         }
     )
 
@@ -718,6 +747,40 @@ class FoundationRecord:
             payload=payload,
             source_event_ids=sources,
         )
+
+
+def _foundation_record_fingerprint(record: FoundationRecord) -> str:
+    digest = _canonical_digest(
+        {
+            "foundation_version": record.foundation_version,
+            "registry_identity": record.registry_identity,
+            "object_type": record.object_type.value,
+            "object_id": record.object_id,
+            "status": record.status.value,
+            "known_at": record.known_at.isoformat(),
+            "payload": record.payload,
+            "source_event_ids": record.source_event_ids,
+        }
+    )
+    if record.record_id != f"foundation-record:{digest}":
+        raise ValueError("foundation record identity differs from its bytes")
+    return digest
+
+
+def _require_foundation_record_identity_integrity(
+    records: Sequence[FoundationRecord],
+) -> None:
+    """Fail closed when a frozen record envelope no longer binds its bytes."""
+
+    for record in records:
+        if not isinstance(record, FoundationRecord):
+            raise ValueError("foundation current record identity is invalid")
+        try:
+            _foundation_record_fingerprint(record)
+        except (AttributeError, TypeError, ValueError) as error:
+            raise ValueError(
+                "foundation current record identity is invalid"
+            ) from error
 
 
 @dataclass(frozen=True, slots=True)
@@ -1509,274 +1572,130 @@ def _validate_projection_completeness(
 
 @dataclass(frozen=True)
 class FoundationProjection:
-    """Append-only record history plus deterministic current-state views."""
+    """Frozen current view published by the single-writer hot owner."""
 
-    records: tuple[FoundationRecord, ...] = ()
+    current_records: tuple[FoundationRecord, ...] = ()
+    record_count: int = 0
+    component_fingerprint: str = ""
+    current_view_fingerprint: str = ""
     asof: pd.Timestamp | None = None
     foundation_version: str = FOUNDATION_VERSION
     registry_identity: str = FOUNDATION_CANONICAL_IDENTITY
-    _latest_records_cache: tuple[FoundationRecord, ...] = field(
-        init=False,
-        repr=False,
-        compare=False,
-    )
+    schema_version: int = FOUNDATION_PROJECTION_STATE_SCHEMA_VERSION
 
     def __post_init__(self) -> None:
-        records = tuple(self.records)
-        object.__setattr__(self, "records", records)
+        records = tuple(self.current_records)
+        object.__setattr__(self, "current_records", records)
+        _require_foundation_record_identity_integrity(records)
+        empty_fingerprint = _foundation_component_fingerprint_seed(
+            foundation_version=self.foundation_version,
+            registry_identity=self.registry_identity,
+        )
+        if not self.component_fingerprint:
+            object.__setattr__(self, "component_fingerprint", empty_fingerprint)
+        expected_view_fingerprint = _foundation_current_view_fingerprint(
+            records,
+            foundation_version=self.foundation_version,
+            registry_identity=self.registry_identity,
+        )
+        if not self.current_view_fingerprint:
+            object.__setattr__(
+                self,
+                "current_view_fingerprint",
+                expected_view_fingerprint,
+            )
+        keys = tuple((record.object_type, record.object_id) for record in records)
         if (
-            self.foundation_version != FOUNDATION_VERSION
+            self.schema_version != FOUNDATION_PROJECTION_STATE_SCHEMA_VERSION
+            or self.foundation_version != FOUNDATION_VERSION
             or self.registry_identity != FOUNDATION_CANONICAL_IDENTITY
-            or any(not isinstance(record, FoundationRecord) for record in records)
+            or type(self.record_count) is not int
+            or self.record_count < len(records)
+            or len(keys) != len(set(keys))
             or any(
                 record.foundation_version != self.foundation_version
                 or record.registry_identity != self.registry_identity
                 for record in records
             )
-            or len({record.record_id for record in records}) != len(records)
-            or any(
-                right.known_at < left.known_at
-                for left, right in zip(records, records[1:])
-            )
+            or len(self.component_fingerprint) != 64
+            or any(character not in "0123456789abcdef" for character in self.component_fingerprint)
+            or self.current_view_fingerprint != expected_view_fingerprint
+            or (self.record_count == 0) != (not records)
+            or (self.record_count == 0 and self.component_fingerprint != empty_fingerprint)
         ):
-            raise ValueError("foundation projection history is invalid")
-        latest: dict[tuple[FoundationObjectType, str], FoundationRecord] = {}
-        records_by_key: dict[
-            tuple[FoundationObjectType, str],
-            list[FoundationRecord],
-        ] = {}
-        geometry_views: dict[str, _SwingGeometryView] = {}
-        assignment_incumbents: dict[str, FoundationRecord] = {}
-        component_fingerprint = _foundation_component_fingerprint_seed(
-            foundation_version=self.foundation_version,
-            registry_identity=self.registry_identity,
-        )
-        for record in records:
-            component_fingerprint = _extend_foundation_component_fingerprint(
-                component_fingerprint,
-                record.record_id,
-            )
-            key = (record.object_type, record.object_id)
-            records_by_key.setdefault(key, []).append(record)
-            previous = latest.get(key)
-            if previous is not None:
-                _validate_object_revision(previous, record)
-                del latest[key]
-            _validate_record_cross_links(
-                latest,
-                record,
-                swing_geometry_views=geometry_views,
-                swing_assignment_incumbents=assignment_incumbents,
-            )
-            latest[key] = record
-            if record.object_type is FoundationObjectType.SWING_GEOMETRY_NODE:
-                geometry_views[record.object_id] = _swing_geometry_view(record)
-            elif (
-                record.object_type
-                is FoundationObjectType.SWING_GEOMETRY_ASSIGNMENT
-            ):
-                child_id = str(record.payload.get("child_swing_id"))
-                incumbent = assignment_incumbents.get(child_id)
-                if incumbent is None or (
-                    record.known_at,
-                    record.object_id,
-                ) > (incumbent.known_at, incumbent.object_id):
-                    assignment_incumbents[child_id] = record
-        _validate_projection_completeness(latest)
-        object.__setattr__(self, "_latest_records_cache", tuple(latest.values()))
-        object.__setattr__(
-            self,
-            "_latest_records_by_key_cache",
-            MappingProxyType(latest),
-        )
-        object.__setattr__(
-            self,
-            "_record_ids_cache",
-            frozenset(record.record_id for record in records),
-        )
-        immutable_records_by_key = {
-            key: tuple(history)
-            for key, history in records_by_key.items()
+            raise ValueError("foundation current projection is invalid")
+        latest = dict(zip(keys, records))
+        geometry_views = {
+            record.object_id: _swing_geometry_view(record)
+            for record in records
+            if record.object_type is FoundationObjectType.SWING_GEOMETRY_NODE
         }
-        object.__setattr__(
-            self,
-            "_records_by_key_cache",
-            MappingProxyType(immutable_records_by_key),
-        )
-        object.__setattr__(
-            self,
-            "_first_records_by_key_cache",
-            MappingProxyType(
-                {
-                    key: history[0]
-                    for key, history in immutable_records_by_key.items()
-                }
-            ),
-        )
-        object.__setattr__(
-            self,
-            "_component_fingerprint_cache",
-            component_fingerprint,
-        )
-        object.__setattr__(
-            self,
-            "_swing_geometry_views_cache",
-            MappingProxyType(geometry_views),
-        )
-        object.__setattr__(
-            self,
-            "_swing_assignment_incumbents_cache",
-            MappingProxyType(assignment_incumbents),
-        )
-        expected_asof = records[-1].known_at if records else None
+        assignment_incumbents: dict[str, FoundationRecord] = {}
+        for record in records:
+            if record.object_type is not FoundationObjectType.SWING_GEOMETRY_ASSIGNMENT:
+                continue
+            child_id = str(record.payload.get("child_swing_id"))
+            incumbent = assignment_incumbents.get(child_id)
+            if incumbent is None or (record.known_at, record.object_id) > (
+                incumbent.known_at,
+                incumbent.object_id,
+            ):
+                assignment_incumbents[child_id] = record
+        object.__setattr__(self, "_latest_records_by_key_cache", MappingProxyType(latest))
+        object.__setattr__(self, "_swing_geometry_views_cache", MappingProxyType(geometry_views))
+        object.__setattr__(self, "_swing_assignment_incumbents_cache", MappingProxyType(assignment_incumbents))
+        expected_asof = max((record.known_at for record in records), default=None)
         if self.asof is None:
             object.__setattr__(self, "asof", expected_asof)
         else:
             asof = aware_timestamp(self.asof, name="foundation_projection.asof")
             object.__setattr__(self, "asof", asof)
-            if asof != expected_asof:
-                raise ValueError("foundation projection asof must equal final record clock")
+            if expected_asof is None or asof < expected_asof:
+                raise ValueError("foundation projection asof predates its current view")
 
     def __getstate__(self) -> Mapping[str, Any]:
-        """Serialize canonical fields only; all indexes are derived caches."""
+        """Serialize only current view, count, rolling hash, and identities."""
 
+        _require_foundation_record_identity_integrity(self.current_records)
         return {
-            "records": self.records,
+            "schema_version": self.schema_version,
+            "current_records": self.current_records,
+            "record_count": self.record_count,
+            "component_fingerprint": self.component_fingerprint,
+            "current_view_fingerprint": self.current_view_fingerprint,
             "asof": self.asof,
             "foundation_version": self.foundation_version,
             "registry_identity": self.registry_identity,
         }
 
     def __setstate__(self, state: Mapping[str, Any]) -> None:
-        """Rebuild ignored indexes and revalidate an unpickled history."""
-
-        if not isinstance(state, Mapping):
-            raise ValueError("foundation projection checkpoint state is invalid")
-        for name in (
-            "records",
+        expected = {
+            "schema_version",
+            "current_records",
+            "record_count",
+            "component_fingerprint",
+            "current_view_fingerprint",
             "asof",
             "foundation_version",
             "registry_identity",
+        }
+        if (
+            not isinstance(state, Mapping)
+            or set(state) != expected
+            or state.get("schema_version") != FOUNDATION_PROJECTION_STATE_SCHEMA_VERSION
         ):
-            if name not in state:
-                raise ValueError(
-                    "foundation projection checkpoint state is incomplete"
-                )
+            raise ValueError("foundation projection checkpoint schema changed")
+        for name in expected:
             object.__setattr__(self, name, state[name])
         self.__post_init__()
 
     def __deepcopy__(self, memo: dict[int, Any]) -> "FoundationProjection":
-        """Reuse this value in adapter transactions because it is immutable."""
-
         memo[id(self)] = self
         return self
 
-    @classmethod
-    def _from_validated_append(
-        cls,
-        previous: "FoundationProjection",
-        record: FoundationRecord,
-    ) -> "FoundationProjection":
-        """Append one already delta-validated record without replaying history.
-
-        The public constructor remains the fail-closed boundary for arbitrary
-        histories. ``FoundationProjectionReducer.reduce`` validates the one
-        new edge before entering this internal path, so rechecking every prior
-        immutable edge here would turn streaming projection into quadratic
-        work without adding an integrity guarantee.
-        """
-
-        projection = object.__new__(cls)
-        object.__setattr__(
-            projection,
-            "records",
-            (*previous.records, record),
-        )
-        object.__setattr__(projection, "asof", record.known_at)
-        object.__setattr__(
-            projection,
-            "foundation_version",
-            previous.foundation_version,
-        )
-        object.__setattr__(
-            projection,
-            "registry_identity",
-            previous.registry_identity,
-        )
-        key = (record.object_type, record.object_id)
-        latest = dict(previous._latest_records_by_key_cache)
-        latest.pop(key, None)
-        latest[key] = record
-        object.__setattr__(projection, "_latest_records_cache", tuple(latest.values()))
-        object.__setattr__(
-            projection,
-            "_latest_records_by_key_cache",
-            MappingProxyType(latest),
-        )
-        object.__setattr__(
-            projection,
-            "_record_ids_cache",
-            previous._record_ids_cache | {record.record_id},
-        )
-        records_by_key = dict(previous._records_by_key_cache)
-        records_by_key[key] = (
-            *records_by_key.get(key, ()),
-            record,
-        )
-        object.__setattr__(
-            projection,
-            "_records_by_key_cache",
-            MappingProxyType(records_by_key),
-        )
-        first_records = previous._first_records_by_key_cache
-        if key not in first_records:
-            first_records_update = dict(first_records)
-            first_records_update[key] = record
-            first_records = MappingProxyType(first_records_update)
-        object.__setattr__(
-            projection,
-            "_first_records_by_key_cache",
-            first_records,
-        )
-        object.__setattr__(
-            projection,
-            "_component_fingerprint_cache",
-            _extend_foundation_component_fingerprint(
-                previous._component_fingerprint_cache,
-                record.record_id,
-            ),
-        )
-        geometry_views = previous._swing_geometry_views_cache
-        if record.object_type is FoundationObjectType.SWING_GEOMETRY_NODE:
-            geometry_views_update = dict(geometry_views)
-            geometry_views_update[record.object_id] = _swing_geometry_view(record)
-            geometry_views = MappingProxyType(geometry_views_update)
-        object.__setattr__(
-            projection,
-            "_swing_geometry_views_cache",
-            geometry_views,
-        )
-        assignment_incumbents = previous._swing_assignment_incumbents_cache
-        if record.object_type is FoundationObjectType.SWING_GEOMETRY_ASSIGNMENT:
-            child_id = str(record.payload.get("child_swing_id"))
-            incumbent = assignment_incumbents.get(child_id)
-            if incumbent is None or (
-                record.known_at,
-                record.object_id,
-            ) > (incumbent.known_at, incumbent.object_id):
-                assignment_update = dict(assignment_incumbents)
-                assignment_update[child_id] = record
-                assignment_incumbents = MappingProxyType(assignment_update)
-        object.__setattr__(
-            projection,
-            "_swing_assignment_incumbents_cache",
-            assignment_incumbents,
-        )
-        return projection
-
     @property
     def latest_records(self) -> tuple[FoundationRecord, ...]:
-        return self._latest_records_cache
+        return self.current_records
 
     @property
     def active_records(self) -> tuple[FoundationRecord, ...]:
@@ -1795,22 +1714,6 @@ class FoundationProjection:
         )
 
     @property
-    def active_history(self) -> tuple[FoundationRecord, ...]:
-        return tuple(
-            record
-            for record in self.records
-            if record.status is FoundationRecordStatus.ACTIVE
-        )
-
-    @property
-    def terminal_history(self) -> tuple[FoundationRecord, ...]:
-        return tuple(
-            record
-            for record in self.records
-            if record.status is FoundationRecordStatus.TERMINAL
-        )
-
-    @property
     def active_dol_candidate_ids(self) -> tuple[str, ...]:
         return tuple(
             record.object_id
@@ -1824,40 +1727,62 @@ class FoundationProjection:
             }
         )
 
-    def records_for(
-        self,
-        object_type: FoundationObjectType,
-        object_id: str,
-    ) -> tuple[FoundationRecord, ...]:
-        kind = FoundationObjectType(object_type)
-        return self._records_by_key_cache.get((kind, object_id), ())
-
-    def first_record_for(
+    def current_record_for(
         self,
         object_type: FoundationObjectType,
         object_id: str,
     ) -> FoundationRecord | None:
-        """Return one object's immutable first revision in constant time."""
-
         kind = FoundationObjectType(object_type)
-        return self._first_records_by_key_cache.get(
-            (kind, object_id)
+        return self._latest_records_by_key_cache.get((kind, object_id))
+
+    def transport_payload(self) -> Mapping[str, Any]:
+        """Return the compact snapshot/replay transport contract."""
+
+        _require_foundation_record_identity_integrity(self.current_records)
+        return FrozenDict(
+            {
+                "schema_version": self.schema_version,
+                "current_records": to_primitive(self.current_records),
+                "record_count": self.record_count,
+                "component_fingerprint": self.component_fingerprint,
+                "current_view_fingerprint": self.current_view_fingerprint,
+                "asof": to_primitive(self.asof),
+                "foundation_version": self.foundation_version,
+                "registry_identity": self.registry_identity,
+            }
         )
 
-    @property
-    def component_fingerprint(self) -> str:
-        """Versioned append-chain digest for downstream hot-path identity."""
+    def identity_payload(self) -> Mapping[str, Any]:
+        """Return the constant-size identity used by hot snapshot hashing."""
 
-        return self._component_fingerprint_cache
+        _require_foundation_record_identity_integrity(self.current_records)
+        return FrozenDict(
+            {
+                "schema_version": self.schema_version,
+                "record_count": self.record_count,
+                "component_fingerprint": self.component_fingerprint,
+                "current_view_fingerprint": self.current_view_fingerprint,
+                "asof": to_primitive(self.asof),
+                "foundation_version": self.foundation_version,
+                "registry_identity": self.registry_identity,
+            }
+        )
 
 
 def _projection_digest(projection: FoundationProjection) -> str:
+    _require_foundation_record_identity_integrity(projection.current_records)
     return _canonical_digest(
         {
+            "schema_version": projection.schema_version,
             "foundation_version": projection.foundation_version,
             "registry_identity": projection.registry_identity,
             "asof": projection.asof.isoformat() if projection.asof is not None else None,
-            "record_ids": tuple(record.record_id for record in projection.records),
+            "current_record_ids": tuple(
+                record.record_id for record in projection.current_records
+            ),
+            "record_count": projection.record_count,
+            "component_fingerprint": projection.component_fingerprint,
+            "current_view_fingerprint": projection.current_view_fingerprint,
         }
     )
 
@@ -1865,16 +1790,34 @@ def _projection_digest(projection: FoundationProjection) -> str:
 @dataclass(frozen=True)
 class FoundationProjectionCheckpoint:
     projection: FoundationProjection
+    schema_version: int = FOUNDATION_PROJECTION_CHECKPOINT_SCHEMA_VERSION
     checkpoint_id: str = field(init=False)
 
     def __post_init__(self) -> None:
-        if not isinstance(self.projection, FoundationProjection):
+        if (
+            not isinstance(self.projection, FoundationProjection)
+            or self.schema_version != FOUNDATION_PROJECTION_CHECKPOINT_SCHEMA_VERSION
+        ):
             raise TypeError("checkpoint requires a FoundationProjection")
         object.__setattr__(
             self,
             "checkpoint_id",
             f"foundation-checkpoint:{_projection_digest(self.projection)}",
         )
+
+    def __getstate__(self) -> Mapping[str, Any]:
+        return {
+            "projection": self.projection,
+            "schema_version": self.schema_version,
+        }
+
+    def __setstate__(self, state: Mapping[str, Any]) -> None:
+        expected = {"projection", "schema_version"}
+        if not isinstance(state, Mapping) or set(state) != expected:
+            raise ValueError("foundation projection checkpoint schema changed")
+        for name in expected:
+            object.__setattr__(self, name, state[name])
+        self.__post_init__()
 
 
 @lru_cache(maxsize=8192)
@@ -1888,7 +1831,7 @@ def _record_from_immutable_dto(
 
 
 class FoundationProjectionReducer:
-    """Pure append/replay operations over already-authoritative DTO records."""
+    """Cold pure replay operations over already-authoritative DTO records."""
 
     @staticmethod
     def initial_projection() -> FoundationProjection:
@@ -1921,14 +1864,11 @@ class FoundationProjectionReducer:
             raise TypeError("projection must be FoundationProjection")
         if not isinstance(record, FoundationRecord):
             raise TypeError("record must be FoundationRecord")
-        if record.record_id in projection._record_ids_cache:
-            existing = next(
-                item
-                for item in reversed(projection.records)
-                if item.record_id == record.record_id
-            )
-            if existing != record:
-                raise ValueError("foundation record_id collision")
+        _require_foundation_record_identity_integrity((record,))
+        if any(
+            item.record_id == record.record_id
+            for item in projection.current_records
+        ):
             return projection
         if projection.asof is not None and record.known_at < projection.asof:
             raise ValueError("foundation records must be appended in knowledge order")
@@ -1945,7 +1885,21 @@ class FoundationProjectionReducer:
                 projection._swing_assignment_incumbents_cache
             ),
         )
-        return FoundationProjection._from_validated_append(projection, record)
+        latest = dict(projection._latest_records_by_key_cache)
+        key = (record.object_type, record.object_id)
+        latest.pop(key, None)
+        latest[key] = record
+        return FoundationProjection(
+            current_records=tuple(latest.values()),
+            record_count=projection.record_count + 1,
+            component_fingerprint=_extend_foundation_component_fingerprint(
+                projection.component_fingerprint,
+                record.record_id,
+            ),
+            asof=record.known_at,
+            foundation_version=projection.foundation_version,
+            registry_identity=projection.registry_identity,
+        )
 
     @classmethod
     def replay(
@@ -1955,7 +1909,14 @@ class FoundationProjectionReducer:
         initial: FoundationProjection | None = None,
     ) -> FoundationProjection:
         projection = initial or cls.initial_projection()
+        seen: dict[str, FoundationRecord] = {}
         for record in records:
+            prior = seen.get(record.record_id)
+            if prior is not None:
+                if prior != record:
+                    raise ValueError("foundation record_id collision")
+                continue
+            seen[record.record_id] = record
             projection = cls.reduce(projection, record)
         return cls.validate_complete(projection)
 
@@ -1967,6 +1928,9 @@ class FoundationProjectionReducer:
 
         if not isinstance(projection, FoundationProjection):
             raise TypeError("projection must be FoundationProjection")
+        _require_foundation_record_identity_integrity(
+            projection.current_records
+        )
         _validate_projection_completeness(
             projection._latest_records_by_key_cache
         )
@@ -1985,17 +1949,572 @@ class FoundationProjectionReducer:
     ) -> FoundationProjection:
         if not isinstance(checkpoint, FoundationProjectionCheckpoint):
             raise TypeError("restore requires FoundationProjectionCheckpoint")
+        if checkpoint.schema_version != FOUNDATION_PROJECTION_CHECKPOINT_SCHEMA_VERSION:
+            raise ValueError("foundation checkpoint schema changed")
         expected = f"foundation-checkpoint:{_projection_digest(checkpoint.projection)}"
         if checkpoint.checkpoint_id != expected:
             raise ValueError("foundation checkpoint integrity mismatch")
         return checkpoint.projection
 
 
+class FoundationProjectionOwner:
+    """Single-writer mutable owner; snapshots never expose its containers."""
+
+    def __init__(
+        self,
+        projection: FoundationProjection | None = None,
+    ) -> None:
+        current = projection or FoundationProjectionReducer.initial_projection()
+        if not isinstance(current, FoundationProjection):
+            raise TypeError("foundation hot owner requires a compact projection")
+        self._latest = dict(current._latest_records_by_key_cache)
+        self._current_record_ids = {
+            record.record_id for record in current.current_records
+        }
+        self._record_count = current.record_count
+        self._component_fingerprint = current.component_fingerprint
+        self._asof = current.asof
+        self._geometry_views = dict(current._swing_geometry_views_cache)
+        self._assignment_incumbents = dict(
+            current._swing_assignment_incumbents_cache
+        )
+        self._projection_cache = current
+        self._generation = 0
+
+    @staticmethod
+    def _canonical_projection(
+        projection: FoundationProjection,
+    ) -> FoundationProjection:
+        if not isinstance(projection, FoundationProjection):
+            raise ValueError("foundation projection owner state is invalid")
+        canonical = FoundationProjection(
+            current_records=projection.current_records,
+            record_count=projection.record_count,
+            component_fingerprint=projection.component_fingerprint,
+            current_view_fingerprint=projection.current_view_fingerprint,
+            asof=projection.asof,
+            foundation_version=projection.foundation_version,
+            registry_identity=projection.registry_identity,
+            schema_version=projection.schema_version,
+        )
+        FoundationProjectionReducer.validate_complete(canonical)
+        return canonical
+
+    def _require_internal_integrity(self) -> FoundationProjection:
+        canonical = self._canonical_projection(self._projection_cache)
+        rebuilt = type(self)(canonical)
+        if (
+            type(self._generation) is not int
+            or self._generation < 0
+            or self._latest != rebuilt._latest
+            or self._current_record_ids != rebuilt._current_record_ids
+            or self._record_count != rebuilt._record_count
+            or self._component_fingerprint != rebuilt._component_fingerprint
+            or self._asof != rebuilt._asof
+            or self._geometry_views != rebuilt._geometry_views
+            or self._assignment_incumbents != rebuilt._assignment_incumbents
+        ):
+            raise ValueError("foundation projection owner internals differ")
+        return canonical
+
+    def __getstate__(self) -> Mapping[str, Any]:
+        return {
+            "schema_version": FOUNDATION_PROJECTION_OWNER_STATE_SCHEMA_VERSION,
+            "projection": self._require_internal_integrity(),
+            "generation": self._generation,
+        }
+
+    def __setstate__(self, state: Mapping[str, Any]) -> None:
+        expected = {"schema_version", "projection", "generation"}
+        if (
+            not isinstance(state, Mapping)
+            or set(state) != expected
+            or state.get("schema_version")
+            != FOUNDATION_PROJECTION_OWNER_STATE_SCHEMA_VERSION
+            or type(state.get("generation")) is not int
+            or state["generation"] < 0
+        ):
+            raise ValueError("foundation projection owner pickle schema changed")
+        canonical = self._canonical_projection(state["projection"])
+        self.__init__(canonical)
+        self._generation = state["generation"]
+
+    @property
+    def record_count(self) -> int:
+        return self._record_count
+
+    @property
+    def component_fingerprint(self) -> str:
+        return self._component_fingerprint
+
+    @property
+    def generation(self) -> int:
+        return self._generation
+
+    def contains(self, record_id: str) -> bool:
+        return record_id in self._current_record_ids
+
+    def freeze(self) -> FoundationProjection:
+        return self._projection_cache
+
+    def stage(self) -> "FoundationProjectionTransaction":
+        return FoundationProjectionTransaction(self)
+
+
+class FoundationProjectionTransaction:
+    """Ordinary bounded write-set over one committed hot owner."""
+
+    def __init__(self, owner: FoundationProjectionOwner) -> None:
+        if not isinstance(owner, FoundationProjectionOwner):
+            raise TypeError("foundation projection transaction requires its owner")
+        self._owner = owner
+        self._base_generation = owner.generation
+        self._records: list[FoundationRecord] = []
+        self._pending_ids: set[str] = set()
+        self._record_count = owner.record_count
+        self._component_fingerprint = owner.component_fingerprint
+        self._asof = owner._asof
+        self._projection_cache: FoundationProjection | None = owner.freeze()
+        self._closed = False
+
+    def _require_fresh(self) -> None:
+        if self._closed:
+            raise ValueError("foundation projection transaction is closed")
+        if self._owner.generation != self._base_generation:
+            raise ValueError("foundation projection transaction is stale")
+
+    def contains(self, record_id: str) -> bool:
+        self._require_fresh()
+        return record_id in self._pending_ids or self._owner.contains(record_id)
+
+    def _latest_view(self) -> Mapping[tuple[FoundationObjectType, str], FoundationRecord]:
+        writes = {
+            (record.object_type, record.object_id): record
+            for record in self._records
+        }
+        return ChainMap(writes, self._owner._latest)
+
+    def append(self, record: FoundationRecord) -> bool:
+        self._require_fresh()
+        if not isinstance(record, FoundationRecord):
+            raise TypeError("foundation projection transaction requires a record")
+        _require_foundation_record_identity_integrity((record,))
+        if self.contains(record.record_id):
+            return False
+        if self._asof is not None and record.known_at < self._asof:
+            raise ValueError("foundation records must be appended in knowledge order")
+        latest = self._latest_view()
+        key = (record.object_type, record.object_id)
+        previous = latest.get(key)
+        if previous is not None:
+            _validate_object_revision(previous, record)
+        geometry_writes = {
+            item.object_id: _swing_geometry_view(item)
+            for item in self._records
+            if item.object_type is FoundationObjectType.SWING_GEOMETRY_NODE
+        }
+        assignment_writes: dict[str, FoundationRecord] = {}
+        for item in self._records:
+            if item.object_type is not FoundationObjectType.SWING_GEOMETRY_ASSIGNMENT:
+                continue
+            child_id = str(item.payload.get("child_swing_id"))
+            incumbent = assignment_writes.get(child_id)
+            if incumbent is None or (item.known_at, item.object_id) > (
+                incumbent.known_at,
+                incumbent.object_id,
+            ):
+                assignment_writes[child_id] = item
+        _validate_record_cross_links(
+            latest,
+            record,
+            swing_geometry_views=ChainMap(
+                geometry_writes,
+                self._owner._geometry_views,
+            ),
+            swing_assignment_incumbents=ChainMap(
+                assignment_writes,
+                self._owner._assignment_incumbents,
+            ),
+        )
+        self._records.append(record)
+        self._pending_ids.add(record.record_id)
+        self._record_count += 1
+        self._component_fingerprint = _extend_foundation_component_fingerprint(
+            self._component_fingerprint,
+            record.record_id,
+        )
+        self._asof = record.known_at
+        self._projection_cache = None
+        return True
+
+    def freeze(self) -> FoundationProjection:
+        self._require_fresh()
+        if self._projection_cache is None:
+            latest = dict(self._owner._latest)
+            for record in self._records:
+                key = (record.object_type, record.object_id)
+                latest.pop(key, None)
+                latest[key] = record
+            self._projection_cache = FoundationProjection(
+                current_records=tuple(latest.values()),
+                record_count=self._record_count,
+                component_fingerprint=self._component_fingerprint,
+                asof=self._asof,
+            )
+        return self._projection_cache
+
+    def delta(self) -> "FoundationRecordDelta":
+        self._require_fresh()
+        start_count = self._owner.record_count
+        return FoundationRecordDelta(
+            start_count=start_count,
+            end_count=self._record_count,
+            start_fingerprint=self._owner.component_fingerprint,
+            end_fingerprint=self._component_fingerprint,
+            records=tuple(self._records),
+        )
+
+    def validate_complete(self) -> None:
+        self._require_fresh()
+        _validate_projection_completeness(self._latest_view())
+
+    def preflight_commit(self) -> FoundationProjection:
+        """Validate every fallible condition before either authority mutates."""
+
+        self.validate_complete()
+        return self.freeze()
+
+    def commit(
+        self,
+        *,
+        prevalidated: FoundationProjection | None = None,
+    ) -> FoundationProjection:
+        self._require_fresh()
+        frozen = self.preflight_commit() if prevalidated is None else prevalidated
+        if frozen != self.freeze():
+            raise ValueError("foundation prevalidated projection changed")
+        return self._commit_prevalidated(frozen)
+
+    def _commit_prevalidated(
+        self,
+        frozen: FoundationProjection,
+    ) -> FoundationProjection:
+        """Apply an already checked write-set without another fallible read.
+
+        The adapter calls this only after projection, lifecycle, and cold-ledger
+        preflight have all succeeded.  Keeping the mutation tail validation-free
+        prevents a one-sided cold-ledger commit.
+        """
+
+        for record in self._records:
+            key = (record.object_type, record.object_id)
+            prior = self._owner._latest.pop(key, None)
+            if prior is not None:
+                self._owner._current_record_ids.discard(prior.record_id)
+            self._owner._latest[key] = record
+            self._owner._current_record_ids.add(record.record_id)
+            if record.object_type is FoundationObjectType.SWING_GEOMETRY_NODE:
+                self._owner._geometry_views[record.object_id] = (
+                    _swing_geometry_view(record)
+                )
+            elif record.object_type is FoundationObjectType.SWING_GEOMETRY_ASSIGNMENT:
+                child_id = str(record.payload.get("child_swing_id"))
+                incumbent = self._owner._assignment_incumbents.get(child_id)
+                if incumbent is None or (record.known_at, record.object_id) > (
+                    incumbent.known_at,
+                    incumbent.object_id,
+                ):
+                    self._owner._assignment_incumbents[child_id] = record
+        self._owner._record_count = self._record_count
+        self._owner._component_fingerprint = self._component_fingerprint
+        self._owner._asof = self._asof
+        self._owner._projection_cache = frozen
+        self._owner._generation += 1
+        self._closed = True
+        return frozen
+
+
+@dataclass(frozen=True)
+class FoundationRecordDelta:
+    """One bounded hot-to-cold transport suffix; never a history container."""
+
+    start_count: int
+    end_count: int
+    start_fingerprint: str
+    end_fingerprint: str
+    records: tuple[FoundationRecord, ...] = ()
+    schema_version: int = FOUNDATION_RECORD_DELTA_SCHEMA_VERSION
+
+    def __post_init__(self) -> None:
+        records = tuple(self.records)
+        object.__setattr__(self, "records", records)
+        _require_foundation_record_identity_integrity(records)
+        fingerprint = self.start_fingerprint
+        for record in records:
+            fingerprint = _extend_foundation_component_fingerprint(
+                fingerprint,
+                record.record_id,
+            )
+        if (
+            self.schema_version != FOUNDATION_RECORD_DELTA_SCHEMA_VERSION
+            or type(self.start_count) is not int
+            or type(self.end_count) is not int
+            or self.start_count < 0
+            or self.end_count != self.start_count + len(records)
+            or fingerprint != self.end_fingerprint
+        ):
+            raise ValueError("foundation record delta cursor is invalid")
+
+    def __getstate__(self) -> Mapping[str, Any]:
+        return {
+            "start_count": self.start_count,
+            "end_count": self.end_count,
+            "start_fingerprint": self.start_fingerprint,
+            "end_fingerprint": self.end_fingerprint,
+            "records": self.records,
+            "schema_version": self.schema_version,
+        }
+
+    def __setstate__(self, state: Mapping[str, Any]) -> None:
+        expected = {
+            "start_count",
+            "end_count",
+            "start_fingerprint",
+            "end_fingerprint",
+            "records",
+            "schema_version",
+        }
+        if not isinstance(state, Mapping) or set(state) != expected:
+            raise ValueError("foundation record delta schema changed")
+        for name in expected:
+            object.__setattr__(self, name, state[name])
+        self.__post_init__()
+
+
+@dataclass(frozen=True)
+class FoundationRecordLedgerCheckpoint:
+    """Explicit cold-history materialization for checkpoint/replay only."""
+
+    records: tuple[FoundationRecord, ...]
+    record_count: int
+    component_fingerprint: str
+    schema_version: int = FOUNDATION_RECORD_LEDGER_SCHEMA_VERSION
+    checkpoint_id: str = field(init=False)
+
+    def __post_init__(self) -> None:
+        records = tuple(self.records)
+        object.__setattr__(self, "records", records)
+        replayed = FoundationProjectionReducer.replay(records)
+        if (
+            self.schema_version != FOUNDATION_RECORD_LEDGER_SCHEMA_VERSION
+            or self.record_count != len(records)
+            or replayed.record_count != self.record_count
+            or replayed.component_fingerprint != self.component_fingerprint
+        ):
+            raise ValueError("foundation cold-ledger checkpoint is invalid")
+        object.__setattr__(
+            self,
+            "checkpoint_id",
+            "foundation-record-ledger:"
+            + _canonical_digest(
+                {
+                    "schema_version": self.schema_version,
+                    "record_count": self.record_count,
+                    "component_fingerprint": self.component_fingerprint,
+                    "record_ids": tuple(record.record_id for record in records),
+                }
+            ),
+        )
+
+    def __getstate__(self) -> Mapping[str, Any]:
+        return {
+            "records": self.records,
+            "record_count": self.record_count,
+            "component_fingerprint": self.component_fingerprint,
+            "schema_version": self.schema_version,
+        }
+
+    def __setstate__(self, state: Mapping[str, Any]) -> None:
+        expected = {
+            "records",
+            "record_count",
+            "component_fingerprint",
+            "schema_version",
+        }
+        if not isinstance(state, Mapping) or set(state) != expected:
+            raise ValueError("foundation cold-ledger checkpoint schema changed")
+        for name in expected:
+            object.__setattr__(self, name, state[name])
+        self.__post_init__()
+
+
+class FoundationRecordLedger:
+    """Single append-only cold owner of immutable Foundation revisions."""
+
+    def __init__(self) -> None:
+        self._records: list[FoundationRecord] = []
+        self._records_by_id: dict[str, str] = {}
+        self._component_fingerprint = _foundation_component_fingerprint_seed(
+            foundation_version=FOUNDATION_VERSION,
+            registry_identity=FOUNDATION_CANONICAL_IDENTITY,
+        )
+
+    def _require_derived_index_integrity(self) -> None:
+        expected = {
+            record.record_id: _foundation_record_fingerprint(record)
+            for record in self._records
+        }
+        if self._records_by_id != expected:
+            raise ValueError("foundation cold-ledger identity index differs")
+
+    def __getstate__(self) -> Mapping[str, Any]:
+        checkpoint = self.checkpoint()
+        return {
+            "schema_version": FOUNDATION_RECORD_LEDGER_SCHEMA_VERSION,
+            "records": checkpoint.records,
+            "record_count": checkpoint.record_count,
+            "component_fingerprint": checkpoint.component_fingerprint,
+        }
+
+    def __setstate__(self, state: Mapping[str, Any]) -> None:
+        expected = {
+            "schema_version",
+            "records",
+            "record_count",
+            "component_fingerprint",
+        }
+        if (
+            not isinstance(state, Mapping)
+            or set(state) != expected
+            or state.get("schema_version")
+            != FOUNDATION_RECORD_LEDGER_SCHEMA_VERSION
+        ):
+            raise ValueError("foundation cold-ledger pickle schema changed")
+        checkpoint = FoundationRecordLedgerCheckpoint(
+            records=state["records"],
+            record_count=state["record_count"],
+            component_fingerprint=state["component_fingerprint"],
+            schema_version=state["schema_version"],
+        )
+        restored = type(self).restore(checkpoint)
+        self.__dict__.update(restored.__dict__)
+
+    @property
+    def record_count(self) -> int:
+        return len(self._records)
+
+    @property
+    def component_fingerprint(self) -> str:
+        return self._component_fingerprint
+
+    def contains(self, record_id: str) -> bool:
+        return record_id in self._records_by_id
+
+    def preview_append(
+        self,
+        records: Sequence[FoundationRecord],
+    ) -> FoundationRecordDelta:
+        """Validate a suffix and compute its cursor without mutating history."""
+
+        batch = tuple(records)
+        start_count = self.record_count
+        start_fingerprint = self.component_fingerprint
+        staged: dict[str, str] = {}
+        last_clock = self._records[-1].known_at if self._records else None
+        for record in batch:
+            if not isinstance(record, FoundationRecord):
+                raise TypeError("foundation cold ledger accepts only records")
+            record_fingerprint = _foundation_record_fingerprint(record)
+            previous = self._records_by_id.get(record.record_id) or staged.get(record.record_id)
+            if previous is not None:
+                if previous != record_fingerprint:
+                    raise ValueError("foundation cold ledger record identity conflicts")
+                raise ValueError("foundation cold ledger suffix repeats a record")
+            if last_clock is not None and record.known_at < last_clock:
+                raise ValueError("foundation cold ledger moved backwards in time")
+            staged[record.record_id] = record_fingerprint
+            last_clock = record.known_at
+        fingerprint = start_fingerprint
+        for record in batch:
+            fingerprint = _extend_foundation_component_fingerprint(
+                fingerprint,
+                record.record_id,
+            )
+        return FoundationRecordDelta(
+            start_count=start_count,
+            end_count=start_count + len(batch),
+            start_fingerprint=start_fingerprint,
+            end_fingerprint=fingerprint,
+            records=batch,
+        )
+
+    def commit_prevalidated(
+        self,
+        delta: FoundationRecordDelta,
+    ) -> FoundationRecordDelta:
+        """Append a previously validated suffix at its exact cold cursor."""
+
+        if not isinstance(delta, FoundationRecordDelta):
+            raise TypeError("foundation cold ledger commit requires a delta")
+        if (
+            delta.start_count != self.record_count
+            or delta.start_fingerprint != self.component_fingerprint
+        ):
+            raise ValueError("foundation cold ledger prevalidated cursor is stale")
+        self._records.extend(delta.records)
+        self._records_by_id.update(
+            (record.record_id, _foundation_record_fingerprint(record))
+            for record in delta.records
+        )
+        self._component_fingerprint = delta.end_fingerprint
+        return delta
+
+    def append(self, records: Sequence[FoundationRecord]) -> FoundationRecordDelta:
+        return self.commit_prevalidated(self.preview_append(records))
+
+    def materialize(self) -> tuple[FoundationRecord, ...]:
+        """Materialize history only at an explicit cold-reader boundary."""
+
+        return tuple(self._records)
+
+    def checkpoint(self) -> FoundationRecordLedgerCheckpoint:
+        self._require_derived_index_integrity()
+        return FoundationRecordLedgerCheckpoint(
+            records=self.materialize(),
+            record_count=self.record_count,
+            component_fingerprint=self.component_fingerprint,
+        )
+
+    @classmethod
+    def restore(
+        cls,
+        checkpoint: FoundationRecordLedgerCheckpoint,
+    ) -> "FoundationRecordLedger":
+        if not isinstance(checkpoint, FoundationRecordLedgerCheckpoint):
+            raise TypeError("foundation cold-ledger restore requires its checkpoint")
+        ledger = cls()
+        ledger.append(checkpoint.records)
+        if (
+            ledger.record_count != checkpoint.record_count
+            or ledger.component_fingerprint != checkpoint.component_fingerprint
+        ):
+            raise ValueError("foundation cold-ledger checkpoint differs on replay")
+        return ledger
+
+
 __all__ = [
+    "FOUNDATION_PROJECTION_CHECKPOINT_SCHEMA_VERSION",
+    "FOUNDATION_PROJECTION_STATE_SCHEMA_VERSION",
+    "FOUNDATION_RECORD_DELTA_SCHEMA_VERSION",
+    "FOUNDATION_RECORD_LEDGER_SCHEMA_VERSION",
     "FoundationObjectType",
     "FoundationProjection",
     "FoundationProjectionCheckpoint",
+    "FoundationProjectionOwner",
     "FoundationProjectionReducer",
     "FoundationRecord",
+    "FoundationRecordDelta",
+    "FoundationRecordLedger",
+    "FoundationRecordLedgerCheckpoint",
     "FoundationRecordStatus",
 ]

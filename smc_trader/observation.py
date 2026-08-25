@@ -104,7 +104,6 @@ from .market_state import (
     foundation_dol_candidate_template,
     foundation_dol_protected_candidate_template,
     foundation_dol_timeframe_states,
-    foundation_record_projection_event,
     session_name_phase,
     terminate_structural_range,
     update_liquidity_clusters,
@@ -2322,7 +2321,6 @@ class CausalObserver:
             tuple[object, ...], object
         ] = {}
         self._foundation_dol_templates: dict[str, DOLCandidateView] = {}
-        self._foundation_published_record_ids: set[str] = set()
         self._terminal_failure: str | None = None
         self._last_displacement_input: tuple[object, ...] | None = None
         self._last_displacement_observation = None
@@ -2458,6 +2456,13 @@ class CausalObserver:
             str,
             dict[str, tuple[tuple[str, object], ...]],
         ] = {}
+
+    def materialize_foundation_history(self) -> tuple[FoundationRecord, ...]:
+        """Materialize the unique cold ledger only for checkpoint/replay."""
+
+        if self._foundation_adapter is None:
+            return ()
+        return self._foundation_adapter.materialize_foundation_history()
 
     @property
     def group5_protocol(self) -> Group5Protocol | None:
@@ -8232,9 +8237,6 @@ class CausalObserver:
             if generation.lifecycle
             is StructureGenerationLifecycle.TERMINATED
         }
-        prior_record_count = len(
-            self._foundation_adapter.projection.records
-        )
         latest_group3 = group3_update
         contextual_fvg_transitions: list[object] = []
         for clock in clocks:
@@ -8366,9 +8368,7 @@ class CausalObserver:
             )
         except ValueError:
             current_bar_event_id = None
-        new_precluster_records = candidate.projection.records[
-            prior_record_count:
-        ]
+        new_precluster_records = candidate.pending_record_delta.records
         clusters_invalidated = (
             self._foundation_cluster_membership_invalidated(
                 new_precluster_records,
@@ -8438,12 +8438,7 @@ class CausalObserver:
                 ),
             )
             self._validate_group3_foundation_projection(latest_group3)
-        new_records = candidate.projection.records[prior_record_count:]
-        if any(
-            record.record_id in self._foundation_published_record_ids
-            for record in new_records
-        ):
-            raise ValueError("foundation transport would republish a record")
+        new_records = candidate.pending_record_delta.records
         candidate.seal_staged_candidate()
         return (
             candidate,
@@ -8457,18 +8452,6 @@ class CausalObserver:
             plan_revisions,
             dol_templates,
         )
-
-    @staticmethod
-    def _foundation_transport_timeframe(record: FoundationRecord) -> Timeframe:
-        value = (
-            record.payload.get("timeframe")
-            or record.payload.get("source_timeframe")
-            or record.payload.get("child_tf")
-        )
-        try:
-            return Timeframe(value)
-        except (TypeError, ValueError):
-            return Timeframe.M1
 
     def _record_group3_events(
         self,
@@ -12189,7 +12172,6 @@ class CausalObserver:
                 )
             )
             foundation_stage = None
-            foundation_events: tuple[MarketEvent, ...] = ()
             if self._foundation_adapter is not None:
                 foundation_stage = self._stage_foundation_projection(
                     asof=update.asof,
@@ -12199,16 +12181,6 @@ class CausalObserver:
                     group4_update=group4_update,
                     snapshot=market_snapshot,
                     semantic_events=semantic_events,
-                )
-                foundation_events = tuple(
-                    foundation_record_projection_event(
-                        record,
-                        timeframe=self._foundation_transport_timeframe(
-                            record
-                        ),
-                        published_at=update.asof,
-                    )
-                    for record in foundation_stage[6]
                 )
             if self.config.persist_state_projections:
                 for event in projection_events:
@@ -12220,22 +12192,13 @@ class CausalObserver:
                             + 1_000_000
                         ),
                     )
-            for event in foundation_events:
-                self.memory.append(
-                    event,
-                    include_in_recent=False,
-                    sequence_floor=(
-                        EventMemory._GROUP4_CREATION_SEQUENCE_FLOOR
-                        + 2_000_000
-                    ),
-                )
-            if self.config.persist_state_projections or foundation_events:
+            if self.config.persist_state_projections:
                 self.memory.flush_audit()
             semantic_events = self.audit_store.events_since(audit_start)
             foundation_projection = (
                 None
                 if foundation_stage is None
-                or not foundation_stage[0].projection.records
+                or foundation_stage[0].projection.record_count == 0
                 else foundation_stage[0].projection
             )
             foundation_states = foundation_dol_timeframe_states(
@@ -12283,14 +12246,11 @@ class CausalObserver:
                     self._foundation_active_clusters,
                     self._foundation_structural_ranges,
                     self._foundation_fvg_contexts,
-                    new_foundation_records,
+                    _,
                     group3_update,
                     self._foundation_plan_revisions,
                     self._foundation_dol_templates,
                 ) = foundation_stage
-                self._foundation_published_record_ids.update(
-                    record.record_id for record in new_foundation_records
-                )
             self.last_market_snapshot = market_snapshot
         except Exception:
             self._terminal_failure = (

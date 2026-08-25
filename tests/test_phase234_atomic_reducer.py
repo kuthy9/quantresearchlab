@@ -18,6 +18,7 @@ from smc_trader.foundation_registry import (
 )
 from smc_trader.market_state import (
     DeliveryPhase,
+    MarketSnapshot,
     MarketSnapshotPublisher,
     MarketSnapshotAuthority,
     RelationRole,
@@ -52,6 +53,7 @@ from smc_trader.semantic_foundation import (
     FoundationProjection,
     FoundationProjectionReducer,
     FoundationRecord,
+    FoundationRecordStatus,
 )
 from smc_trader.semantic_zones import (
     BaseOriginCore,
@@ -848,7 +850,8 @@ def test_foundation_projection_can_publish_old_warmup_record_at_current_clock() 
 
     assert replayed.asof == published_at
     assert replayed.foundation is not None
-    assert replayed.foundation.records == (active_record,)
+    assert replayed.foundation.current_records == (active_record,)
+    assert replayed.foundation.record_count == 1
     assert replayed.foundation.asof == active_record.known_at
 
 
@@ -1595,6 +1598,53 @@ def test_atomic_replay_rejects_source_after_embedded_record_knowledge() -> None:
         )
 
 
+def test_cold_foundation_replay_rejects_noncritical_future_source() -> None:
+    active_record, _ = _foundation_record_history()
+    future_bar = replace(
+        _replayable_m1_event(
+            1,
+            100.0,
+            active_timeframes=(Timeframe.M1, Timeframe.M5),
+        ),
+        event_id="foundation-noncritical-future-source",
+    )
+    cold_record = FoundationRecord(
+        object_type=active_record.object_type,
+        object_id=active_record.object_id,
+        status=active_record.status,
+        known_at=active_record.known_at,
+        payload=active_record.payload,
+        source_event_ids=(
+            *active_record.source_event_ids,
+            future_bar.event_id,
+        ),
+    )
+
+    assert future_bar.event_id not in cold_record.payload.get(
+        "context_source_event_ids", ()
+    )
+    events = (*_foundation_fvg_source_events(), future_bar)
+    authoritative = {
+        event.event_id: event
+        for event in events
+        if event.origin
+        in {EventOrigin.NORMALIZED_DATA, EventOrigin.SEMANTIC_ATOMIC}
+    }
+    _validate_foundation_authoritative_sources(
+        cold_record,
+        authoritative,
+    )
+    with pytest.raises(
+        ValueError,
+        match="cold foundation record sources occur after embedded",
+    ):
+        replay_atomic_market_snapshot(
+            events,
+            semantic_registry_identity="definition-test",
+            foundation_records=(cold_record,),
+        )
+
+
 def test_atomic_replay_mixes_legacy_and_foundation_projection_with_history() -> None:
     active_record, terminal_record = _foundation_record_history()
     active_timeframes = (Timeframe.M1, Timeframe.M5)
@@ -1621,6 +1671,12 @@ def test_atomic_replay_mixes_legacy_and_foundation_projection_with_history() -> 
     terminal_projection = foundation_record_projection_event(
         terminal_record,
         timeframe=Timeframe.M5,
+        sequence_no=1,
+    )
+    repeated_superseded_projection = foundation_record_projection_event(
+        active_record,
+        timeframe=Timeframe.M5,
+        published_at=_clock(2),
         sequence_no=1,
     )
     legacy_state = {"legacy_projection": True}
@@ -1650,6 +1706,7 @@ def test_atomic_replay_mixes_legacy_and_foundation_projection_with_history() -> 
         terminal_source,
         terminal_projection,
         final_bar,
+        repeated_superseded_projection,
     )
 
     replayed = replay_atomic_market_snapshot(
@@ -1662,9 +1719,31 @@ def test_atomic_replay_mixes_legacy_and_foundation_projection_with_history() -> 
     )
 
     assert replayed.foundation is not None
-    assert replayed.foundation.records == (active_record, terminal_record)
-    assert replayed.foundation.active_history == (active_record,)
-    assert replayed.foundation.terminal_history == (terminal_record,)
+    assert replayed.foundation.current_records == (terminal_record,)
+    assert replayed.foundation.record_count == 2
+    assert "current_records" not in replayed.foundation.identity_payload()
+    assert tuple(
+        item["record_id"]
+        for item in replayed.replay_payload()["foundation"]["current_records"]
+    ) == (terminal_record.record_id,)
+    missing_schema = replayed.__getstate__()
+    missing_schema.pop("schema_version")
+    with pytest.raises(ValueError, match="market snapshot pickle schema changed"):
+        object.__new__(MarketSnapshot).__setstate__(missing_schema)
+    unknown_field = replayed.__getstate__()
+    unknown_field["unknown_field"] = "must-fail-closed"
+    with pytest.raises(ValueError, match="market snapshot pickle schema changed"):
+        object.__new__(MarketSnapshot).__setstate__(unknown_field)
+    assert tuple(
+        record
+        for record in (active_record, terminal_record)
+        if record.status is FoundationRecordStatus.ACTIVE
+    ) == (active_record,)
+    assert tuple(
+        record
+        for record in (active_record, terminal_record)
+        if record.status is FoundationRecordStatus.TERMINAL
+    ) == (terminal_record,)
     assert replayed.foundation.active_records == ()
     assert replayed.foundation.terminal_records == (terminal_record,)
     assert replayed.foundation.asof == _clock(1)
@@ -1756,9 +1835,10 @@ def test_epoch_reset_retains_foundation_history_until_explicit_terminal() -> Non
 
     assert replayed.symbol == "NQM5"
     assert replayed.foundation is not None
-    assert replayed.foundation.records == (active_record, terminal_record)
-    assert replayed.foundation.active_history == (active_record,)
-    assert replayed.foundation.terminal_history == (terminal_record,)
+    assert replayed.foundation.current_records == (terminal_record,)
+    assert replayed.foundation.record_count == 2
+    assert active_record.status is FoundationRecordStatus.ACTIVE
+    assert terminal_record.status is FoundationRecordStatus.TERMINAL
     assert replayed.foundation.latest_records == (terminal_record,)
 
 
@@ -1792,6 +1872,36 @@ def test_market_snapshot_rejects_foundation_registry_or_version_drift(
 
     with pytest.raises(ValueError, match="market snapshot identity"):
         replace(snapshot, foundation=projection)
+
+
+def test_market_snapshot_fingerprint_rejects_foundation_record_byte_tamper(
+) -> None:
+    active_record, _ = _foundation_record_history()
+    projection = FoundationProjectionReducer.replay((active_record,))
+    snapshot = replay_atomic_market_snapshot(
+        (
+            replace(
+                _replayable_m1_event(
+                    0,
+                    100.0,
+                    active_timeframes=(Timeframe.M1,),
+                ),
+                event_id="foundation-source-created",
+            ),
+        ),
+        semantic_registry_identity="definition-test",
+    )
+    snapshot = replace(snapshot, foundation=projection)
+    record_id = active_record.record_id
+    object.__setattr__(
+        active_record,
+        "source_event_ids",
+        (*active_record.source_event_ids, "forged-snapshot-source"),
+    )
+
+    assert active_record.record_id == record_id
+    with pytest.raises(ValueError, match="current record identity"):
+        _ = snapshot.fingerprint
 
 
 def test_market_snapshot_rejects_future_foundation_clock() -> None:

@@ -280,12 +280,10 @@ def foundation_dol_inventory(
             != level_record.object_id
         ):
             raise ValueError("foundation DOL generation join is incomplete")
-        creation_record = projection.first_record_for(
-            FoundationObjectType.LIQUIDITY_LEVEL,
-            level_record.object_id,
+        created_at = aware_timestamp(
+            level_record.payload.get("created_at"),
+            name="foundation DOL level created_at",
         )
-        if creation_record is None:
-            raise ValueError("foundation DOL level lacks creation history")
         inventory_kind = _FOUNDATION_SOURCE_TO_INVENTORY_KIND.get(source_kind)
         if source_kind in {"formed_liquidity_pool", "formed_pool"}:
             inventory_kind = (
@@ -357,14 +355,14 @@ def foundation_dol_inventory(
                             # SceneNode.  The canonical creation and
                             # interaction records already carry the exact
                             # authoritative event ancestry.
-                            *creation_record.source_event_ids,
+                            *level_record.source_event_ids,
                             generation_id,
                             *generation_record.source_event_ids,
                         )
                     )
                 ),
-                formed_at=creation_record.known_at,
-                confirmed_at=creation_record.known_at,
+                formed_at=created_at,
+                confirmed_at=created_at,
                 structural_rank=published.rank,
                 strength=float(published.strength),
                 age_bars=published.age_bars,

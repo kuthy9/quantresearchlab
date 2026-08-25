@@ -47,10 +47,10 @@ from .observation import ExecutionRealityInput
 from .semantics import load_semantic_selection
 
 
-SHADOW_LIVE_SCHEMA_VERSION = "phase9_shadow_live_v1.2"
+SHADOW_LIVE_SCHEMA_VERSION = "phase9_shadow_live_v1.3"
 SHADOW_LIVE_STATUS = "engineering_validation_only"
 SHADOW_LIVE_AUTHORITY = "null_gateway_no_external_submission"
-SHADOW_COMPONENT_DIGEST_VERSION = "phase9_shadow_component_digest_v1"
+SHADOW_COMPONENT_DIGEST_VERSION = "phase9_shadow_component_digest_v2"
 SHADOW_LEGACY_COMPONENT_DIGEST_VERSION = (
     "phase9_shadow_component_digest_legacy_v1_2"
 )
@@ -99,13 +99,7 @@ _LEGACY_SHADOW_RUNTIME_BINDING_KEYS = tuple(
     for key in SHADOW_RUNTIME_BINDING_KEYS
     if key != "shadow_component_digest_version"
 )
-SHADOW_COMPACT_RUNTIME_CHECKPOINT_SCHEMA = "shadow_compact_runtime_v3"
-_PREVIOUS_SHADOW_COMPACT_RUNTIME_CHECKPOINT_SCHEMA = (
-    "shadow_compact_runtime_v2"
-)
-_LEGACY_SHADOW_COMPACT_RUNTIME_CHECKPOINT_SCHEMA = (
-    "shadow_compact_runtime_v1"
-)
+SHADOW_COMPACT_RUNTIME_CHECKPOINT_SCHEMA = "shadow_compact_runtime_v4"
 
 _SHADOW_COMPONENT_FINGERPRINT_FIELDS = tuple(
     name
@@ -435,6 +429,7 @@ def _current_shadow_component_digest_bundle(
             if foundation is None
             else {
                 "component_fingerprint": foundation.component_fingerprint,
+                "current_view_fingerprint": foundation.current_view_fingerprint,
                 "asof": foundation.asof,
                 "foundation_version": foundation.foundation_version,
                 "registry_identity": foundation.registry_identity,
@@ -651,7 +646,8 @@ class ShadowLiveProtocol:
             "record_fields",
         }
         if (
-            not isinstance(payload, Mapping)
+            "schema_version" not in vars(self)
+            or not isinstance(payload, Mapping)
             or set(payload) != required
             or self.schema_version != payload.get("schema_version")
             or self.status != payload.get("status")
@@ -1861,7 +1857,9 @@ class ShadowLiveRunner:
                 "checkpoint foundation lifecycle is not canonical"
             )
         expected_projection = (
-            adapter.projection if adapter.projection.records else None
+            adapter.projection
+            if adapter.projection.record_count > 0
+            else None
         )
         if expected_projection != published_projection:
             raise ShadowLiveError(
@@ -1924,13 +1922,11 @@ class ShadowLiveRunner:
                 )
             try:
                 from .foundation_adapter import CanonicalFoundationAdapter
-                from .market_state import foundation_record_from_projection_event
                 from .semantic_foundation import (
                     FoundationObjectType,
                     FoundationProjectionReducer,
                 )
                 from .semantic_lifecycle import (
-                    AppliedTransition,
                     BoundaryAttackFact,
                     NormalizedLifecycleTransition,
                     NormalizedTransitionKind,
@@ -1941,11 +1937,7 @@ class ShadowLiveRunner:
                     tick_size=authoritative_tick_size
                 )
                 replayed.consume_batch(authoritative_events)
-                foundation_records = tuple(
-                    foundation_record_from_projection_event(event)
-                    for event in audit_events
-                    if event.kind is EventKind.FOUNDATION_STATE_CHANGED
-                )
+                foundation_records = adapter.materialize_foundation_history()
                 replayed_projection = FoundationProjectionReducer.replay(
                     foundation_records
                 )
@@ -1957,15 +1949,14 @@ class ShadowLiveRunner:
                 raise ShadowLiveError(
                     "checkpoint foundation projection differs from audit replay"
                 )
-            replayed_applied = {
-                item.fact_id: item
-                for item in replayed.lifecycle.applied_transitions
-            }
-            actual_applied = {
-                item.fact_id: item
-                for item in adapter.lifecycle.applied_transitions
-            }
-            manual_applied: dict[str, Any] = {}
+            replayed_applied = dict(
+                replayed.lifecycle_fact_fingerprints
+            )
+            actual_applied = dict(
+                adapter.lifecycle_fact_fingerprints
+            )
+            manual_applied: dict[str, str] = {}
+            manual_known_at: dict[str, pd.Timestamp] = {}
             try:
                 real_bars: dict[tuple[str, pd.Timestamp], Any] = {}
                 relation_states: dict[tuple[str, pd.Timestamp], Mapping[str, Any]] = {}
@@ -2017,25 +2008,22 @@ class ShadowLiveRunner:
                 def register_manual(
                     transition: NormalizedLifecycleTransition,
                 ) -> None:
-                    value = AppliedTransition(
-                        fact_id=transition.fact_id,
-                        fingerprint=content_hash(transition),
-                        known_at=transition.known_at,
-                    )
-                    previous = manual_applied.get(value.fact_id)
+                    value = content_hash(transition)
+                    previous = manual_applied.get(transition.fact_id)
                     if previous is not None and previous != value:
                         raise ValueError(
                             "foundation manual transition identity conflicts"
                         )
-                    manual_applied[value.fact_id] = value
+                    manual_applied[transition.fact_id] = value
+                    manual_known_at[transition.fact_id] = transition.known_at
 
                 records_by_clock: dict[pd.Timestamp, list[Any]] = {}
                 structures: dict[str, Mapping[str, Any]] = {}
                 raw_record_ids = {
                     record.record_id
-                    for record in replayed.projection.records
+                    for record in replayed.materialize_foundation_history()
                 }
-                for record in replayed_projection.records:
+                for record in foundation_records:
                     records_by_clock.setdefault(record.known_at, []).append(record)
                     if (
                         record.object_type
@@ -2460,9 +2448,17 @@ class ShadowLiveRunner:
                 ) from error
             expected_applied = {**replayed_applied, **manual_applied}
             expected_lifecycle_asof = (
-                None
-                if not expected_applied
-                else max(item.known_at for item in expected_applied.values())
+                max(
+                    (
+                        *(
+                            ()
+                            if replayed.lifecycle.asof is None
+                            else (replayed.lifecycle.asof,)
+                        ),
+                        *manual_known_at.values(),
+                    ),
+                    default=None,
+                )
             )
             if actual_applied != expected_applied:
                 actual_only = tuple(
@@ -2538,7 +2534,7 @@ class ShadowLiveRunner:
             ) in lifecycle_record_types.items():
                 published: list[tuple[str, str]] = []
                 published_indexes: dict[str, int] = {}
-                for record in replayed_projection.records:
+                for record in foundation_records:
                     if record.object_type is not object_type:
                         continue
                     value = (
@@ -2615,16 +2611,12 @@ class ShadowLiveRunner:
         self._require_runtime_bindings()
         if self._failure is not None or self.gateway.submission_attempts != 0:
             raise ShadowLiveError("only a healthy no-order runner can checkpoint")
-        current_schema = (
-            self._component_digest_version
-            == SHADOW_COMPONENT_DIGEST_VERSION
-        )
+        if self._component_digest_version != SHADOW_COMPONENT_DIGEST_VERSION:
+            raise ShadowLiveError(
+                "legacy component digest cannot publish a compact checkpoint"
+            )
         checkpoint = {
-            "schema_version": (
-                SHADOW_COMPACT_RUNTIME_CHECKPOINT_SCHEMA
-                if current_schema
-                else _LEGACY_SHADOW_COMPACT_RUNTIME_CHECKPOINT_SCHEMA
-            ),
+            "schema_version": SHADOW_COMPACT_RUNTIME_CHECKPOINT_SCHEMA,
             "engine": self.engine,
             "protocol": self.protocol,
             "runtime_bindings": self.runtime_bindings,
@@ -2641,12 +2633,11 @@ class ShadowLiveRunner:
             ),
             "external_submission_attempts": 0,
         }
-        if current_schema:
-            checkpoint["foundation_authority_digest"] = (
-                self._foundation_authority_digest(
-                    validate_audit_registry=False
-                )
+        checkpoint["foundation_authority_digest"] = (
+            self._foundation_authority_digest(
+                validate_audit_registry=False
             )
+        )
         return checkpoint
 
     @classmethod
@@ -2675,21 +2666,16 @@ class ShadowLiveRunner:
             "last_record_id",
             "external_submission_attempts",
         }
+        if not isinstance(state, Mapping):
+            raise ShadowLiveError("compact shadow runtime checkpoint changed")
         schema_version = state.get("schema_version")
-        expected_fields = common_fields | (
-            {"foundation_authority_digest"}
-            if schema_version == SHADOW_COMPACT_RUNTIME_CHECKPOINT_SCHEMA
-            else set()
-        )
+        if schema_version != SHADOW_COMPACT_RUNTIME_CHECKPOINT_SCHEMA:
+            raise ShadowLiveError(
+                "legacy compact shadow runtime schema is read-only/unsupported"
+            )
+        expected_fields = common_fields | {"foundation_authority_digest"}
         if (
-            not isinstance(state, Mapping)
-            or set(state) != expected_fields
-            or state.get("schema_version")
-            not in {
-                SHADOW_COMPACT_RUNTIME_CHECKPOINT_SCHEMA,
-                _PREVIOUS_SHADOW_COMPACT_RUNTIME_CHECKPOINT_SCHEMA,
-                _LEGACY_SHADOW_COMPACT_RUNTIME_CHECKPOINT_SCHEMA,
-            }
+            set(state) != expected_fields
             or state.get("external_submission_attempts") != 0
             or state.get("journal_events") != len(journal_events)
             or state.get("records") != len(records)
@@ -2733,20 +2719,11 @@ class ShadowLiveRunner:
         runner._by_feed_id = {record.feed_event_id: record for record in records}
         runner._failure = None
         runner._rebuild_component_digest_caches()
-        expected_checkpoint_schemas = (
-            {
-                SHADOW_COMPACT_RUNTIME_CHECKPOINT_SCHEMA,
-                _PREVIOUS_SHADOW_COMPACT_RUNTIME_CHECKPOINT_SCHEMA,
-            }
-            if runner._component_digest_version
-            == SHADOW_COMPONENT_DIGEST_VERSION
-            else {_LEGACY_SHADOW_COMPACT_RUNTIME_CHECKPOINT_SCHEMA}
-        )
         if any(
             record.feed_event_id != value.feed_event_id
             or record.input_digest != value.input_digest
             for record, value in zip(records, journal_events, strict=True)
-        ) or state.get("schema_version") not in expected_checkpoint_schemas:
+        ) or state.get("schema_version") != SHADOW_COMPACT_RUNTIME_CHECKPOINT_SCHEMA:
             raise ShadowLiveError("compact checkpoint histories do not align")
         runner._require_internal_consistency()
         runner._require_runtime_bindings()
@@ -3156,6 +3133,10 @@ def audit_shadow_parity(
                                 semantic_version=market.semantic_version,
                                 expected_timeframes=(
                                     market.timeframe_states.keys()
+                                ),
+                                foundation_records=(
+                                    runner.engine.observer
+                                    .materialize_foundation_history()
                                 ),
                             )
                             if (

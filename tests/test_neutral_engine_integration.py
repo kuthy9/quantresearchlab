@@ -469,10 +469,18 @@ def test_engine_neutral_state_is_pickle_checkpoint_ready() -> None:
     assert engine.last_snapshot is not None
     foundation = engine.last_snapshot.observation.market_snapshot.foundation
     assert foundation is not None
-    assert foundation.records
+    assert foundation.current_records
+    market_snapshot = engine.last_snapshot.observation.market_snapshot
+    missing_market_schema = market_snapshot.__getstate__()
+    missing_market_schema.pop("schema_version")
+    with pytest.raises(ValueError, match="market snapshot pickle schema"):
+        object.__new__(type(market_snapshot)).__setstate__(
+            missing_market_schema
+        )
     replayed = replay_atomic_market_snapshot(
         engine.observer.audit_store.events(),
         semantic_registry_identity=engine.observer.semantic_registry.identity,
+        foundation_records=engine.observer.materialize_foundation_history(),
     )
     assert (
         replayed.replay_payload()
@@ -480,8 +488,8 @@ def test_engine_neutral_state_is_pickle_checkpoint_ready() -> None:
     )
     encoded = pickle.dumps(engine, protocol=pickle.HIGHEST_PROTOCOL)
     resumed = pickle.loads(encoded)
-    assert NEUTRAL_ENGINE_CHECKPOINT_SCHEMA_VERSION == 4
-    assert engine.__getstate__()["_neutral_checkpoint_schema_version"] == 4
+    assert NEUTRAL_ENGINE_CHECKPOINT_SCHEMA_VERSION == 5
+    assert engine.__getstate__()["_neutral_checkpoint_schema_version"] == 5
     assert resumed.neutral_market_state == engine.neutral_market_state
     assert resumed.last_snapshot == engine.last_snapshot
     assert "market_snapshot" not in snapshot.__dict__
@@ -541,6 +549,7 @@ def test_engine_neutral_state_is_pickle_checkpoint_ready() -> None:
     resumed_replay = replay_atomic_market_snapshot(
         resumed.observer.audit_store.events(),
         semantic_registry_identity=resumed.observer.semantic_registry.identity,
+        foundation_records=resumed.observer.materialize_foundation_history(),
     )
     assert (
         resumed_replay.replay_payload()
@@ -627,6 +636,7 @@ def test_2024_06_engine_foundation_dol_role_and_pool_anchor_replay_exact() -> No
     replayed = replay_atomic_market_snapshot(
         engine.observer.audit_store.events(),
         semantic_registry_identity=engine.observer.semantic_registry.identity,
+        foundation_records=engine.observer.materialize_foundation_history(),
     )
     assert (
         replayed.replay_payload()

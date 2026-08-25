@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 from dataclasses import FrozenInstanceError, dataclass
+import json
 import pickle
 
 import pandas as pd
@@ -15,17 +16,21 @@ from smc_trader.market_state import (
     SwingGeometryNode,
     update_swing_geometry_assignments,
 )
+from smc_trader.market_clock import next_registered_native_completion
 from smc_trader.model import FrozenDict, Timeframe, to_primitive
 from smc_trader.semantic_foundation import (
     FoundationObjectType,
     FoundationProjection,
+    FoundationProjectionOwner,
     FoundationProjectionReducer,
     FoundationRecord,
+    FoundationRecordLedger,
     FoundationRecordStatus,
 )
 from smc_trader.semantic_lifecycle import (
     NormalizedLifecycleTransition,
     NormalizedTransitionKind,
+    SemanticLifecycleOwner,
     SemanticLifecycleReducer,
 )
 from smc_trader.semantic_zones import FVGStructuralLifecycle
@@ -106,6 +111,60 @@ def _active_fvg() -> FVGStructuralLifecycle:
         created_at=_clock(15),
         known_at=_clock(15),
     )
+
+
+def _tamper_record_bytes(record: FoundationRecord, field: str) -> None:
+    if field == "source_event_ids":
+        value = (*record.source_event_ids, "forged-source-event")
+    else:
+        payload = dict(record.payload)
+        payload["forged_payload_byte"] = True
+        value = FrozenDict(payload)
+    object.__setattr__(record, field, value)
+
+
+@pytest.mark.parametrize("field", ("source_event_ids", "payload"))
+def test_projection_construction_rejects_record_bytes_not_bound_to_id(
+    field: str,
+) -> None:
+    record = FoundationRecord.from_dto(_active_fvg())
+    record_id = record.record_id
+    _tamper_record_bytes(record, field)
+
+    assert record.record_id == record_id
+    with pytest.raises(ValueError, match="current record identity"):
+        FoundationProjection(
+            current_records=(record,),
+            record_count=1,
+            component_fingerprint="0" * 64,
+        )
+
+
+@pytest.mark.parametrize("field", ("source_event_ids", "payload"))
+def test_projection_pickle_rejects_post_construction_record_byte_tamper(
+    field: str,
+) -> None:
+    projection = FoundationProjectionReducer.replay(
+        (FoundationRecord.from_dto(_active_fvg()),)
+    )
+    _tamper_record_bytes(projection.current_records[0], field)
+
+    with pytest.raises(ValueError, match="current record identity"):
+        pickle.dumps(projection)
+
+
+def test_projection_and_cold_ledger_checkpoints_reject_record_byte_tamper(
+) -> None:
+    record = FoundationRecord.from_dto(_active_fvg())
+    projection = FoundationProjectionReducer.replay((record,))
+    ledger = FoundationRecordLedger()
+    ledger.append((record,))
+    _tamper_record_bytes(record, "payload")
+
+    with pytest.raises(ValueError, match="current record identity"):
+        FoundationProjectionReducer.checkpoint(projection)
+    with pytest.raises(ValueError, match="identity differs from its bytes"):
+        ledger.checkpoint()
 
 
 def test_record_is_deeply_immutable_version_bound_and_deterministic() -> None:
@@ -299,21 +358,30 @@ def test_append_only_replay_checkpoint_and_retirement_filter_are_deterministic()
     assert resumed == full
     assert resumed.component_fingerprint == full.component_fingerprint
     assert prefix.component_fingerprint != full.component_fingerprint
-    assert len(full.records) == 4
-    assert full.records_for(
+    assert full.record_count == 4
+    assert full.current_record_for(
         FoundationObjectType.LIQUIDITY_LEVEL, active.level_id
-    ) == (active_record, retired_record)
-    assert full.first_record_for(
-        FoundationObjectType.LIQUIDITY_LEVEL, active.level_id
-    ) is active_record
-    assert full.first_record_for(
+    ) == retired_record
+    assert full.current_record_for(
         FoundationObjectType.LIQUIDITY_LEVEL, "missing-level"
     ) is None
     assert full.latest_records == (retired_interaction_record, retired_record)
     assert full.active_records == ()
     assert full.terminal_records == (retired_interaction_record, retired_record)
-    assert full.active_history == (active_interaction_record, active_record)
-    assert full.terminal_history == (retired_interaction_record, retired_record)
+    cold_history = (
+        active_interaction_record,
+        active_record,
+        retired_interaction_record,
+        retired_record,
+    )
+    assert tuple(
+        record for record in cold_history
+        if record.status is FoundationRecordStatus.ACTIVE
+    ) == (active_interaction_record, active_record)
+    assert tuple(
+        record for record in cold_history
+        if record.status is FoundationRecordStatus.TERMINAL
+    ) == (retired_interaction_record, retired_record)
     assert full.active_dol_candidate_ids == ()
     assert prefix.active_dol_candidate_ids == (active.level_id,)
     assert full.asof == retired.updated_at
@@ -343,11 +411,11 @@ def test_same_clock_canonical_revisions_keep_order_but_lifecycle_cannot_rewind()
     projection = FoundationProjectionReducer.replay(
         (active_interaction_record, active_record, disarmed)
     )
-    assert projection.records == (
+    assert projection.current_records == (
         active_interaction_record,
-        active_record,
         disarmed,
     )
+    assert projection.record_count == 3
 
     rewound_payload = dict(active_record.payload)
     rewound_payload["source_event_ids"] = (
@@ -476,25 +544,23 @@ def test_projection_indexes_are_derived_pickle_safe_and_history_equivalent() -> 
     )
 
     incremental = FoundationProjectionReducer.replay(records)
-    arbitrary_history = FoundationProjection(records=records)
-    assert arbitrary_history == incremental
-    assert arbitrary_history.latest_records == incremental.latest_records
+    reconstructed_view = FoundationProjection(**dict(incremental.__getstate__()))
+    assert reconstructed_view == incremental
+    assert reconstructed_view.latest_records == incremental.latest_records
     assert copy.deepcopy(incremental) is incremental
 
     primitive = to_primitive(incremental)
     assert "_record_ids_cache" not in primitive
     assert "_latest_records_by_key_cache" not in primitive
-    assert "_records_by_key_cache" not in primitive
-    assert "_first_records_by_key_cache" not in primitive
-    assert "_component_fingerprint_cache" not in primitive
+    assert "records" not in primitive
     assert "_swing_geometry_views_cache" not in primitive
     assert "_swing_assignment_incumbents_cache" not in primitive
     with pytest.raises(TypeError):
         incremental._swing_geometry_views_cache["invented"] = object()
     with pytest.raises(TypeError):
-        incremental._records_by_key_cache[
+        incremental._latest_records_by_key_cache[
             (FoundationObjectType.SWING_GEOMETRY_NODE, "invented")
-        ] = ()
+        ] = records[0]
 
     checkpoint = FoundationProjectionReducer.checkpoint(incremental)
     restored_checkpoint = pickle.loads(pickle.dumps(checkpoint))
@@ -502,19 +568,110 @@ def test_projection_indexes_are_derived_pickle_safe_and_history_equivalent() -> 
     assert restored == incremental
     assert restored.latest_records == incremental.latest_records
     assert restored_checkpoint.checkpoint_id == checkpoint.checkpoint_id
-    assert restored._record_ids_cache == incremental._record_ids_cache
-    assert restored._records_by_key_cache == incremental._records_by_key_cache
     assert (
-        restored._first_records_by_key_cache
-        == incremental._first_records_by_key_cache
+        restored._latest_records_by_key_cache
+        == incremental._latest_records_by_key_cache
     )
     assert restored.component_fingerprint == incremental.component_fingerprint
+    assert (
+        restored.current_view_fingerprint
+        == incremental.current_view_fingerprint
+    )
 
     tampered_state = dict(incremental.__getstate__())
-    tampered_state["_component_fingerprint_cache"] = "0" * 64
+    tampered_state["current_view_fingerprint"] = "0" * 64
     restored_from_tampered_state = object.__new__(FoundationProjection)
-    restored_from_tampered_state.__setstate__(tampered_state)
-    assert (
-        restored_from_tampered_state.component_fingerprint
-        == incremental.component_fingerprint
+    with pytest.raises(ValueError, match="current projection is invalid"):
+        restored_from_tampered_state.__setstate__(tampered_state)
+
+
+def test_10k_fixed_object_revisions_keep_hot_projection_and_lifecycle_bounded() -> None:
+    projection_owner = FoundationProjectionOwner()
+    ledger = FoundationRecordLedger()
+    first_projection_bytes = None
+    first_transport_bytes = None
+    for index in range(10_000):
+        updated = _clock(15) + pd.Timedelta(index, unit="min")
+        dto = FVGStructuralLifecycle(
+            fvg_id="fvg-hot-fixed",
+            source_creation_event_id="fvg-hot-created",
+            symbol="NQ",
+            instrument_id=1,
+            timeframe=Timeframe.M1,
+            created_at=_clock(15),
+            known_at=_clock(15),
+            age_bars=index,
+            age_seconds=int((updated - _clock(15)).total_seconds()),
+            last_updated_at=updated,
+        )
+        record = FoundationRecord.from_dto(dto)
+        transaction = projection_owner.stage()
+        assert transaction.append(record)
+        delta = transaction.delta()
+        assert ledger.append(delta.records) == delta
+        transaction.commit()
+        if index == 0:
+            first_projection_bytes = len(pickle.dumps(projection_owner.freeze()))
+            first_transport_bytes = len(
+                json.dumps(
+                    dict(projection_owner.freeze().transport_payload()),
+                    sort_keys=True,
+                ).encode("utf-8")
+            )
+
+    projection = projection_owner.freeze()
+    final_projection_bytes = len(pickle.dumps(projection))
+    final_transport_bytes = len(
+        json.dumps(
+            dict(projection.transport_payload()),
+            sort_keys=True,
+        ).encode("utf-8")
     )
+    replayed = FoundationProjectionReducer.replay(ledger.materialize())
+    assert projection == replayed
+    assert projection.record_count == ledger.record_count == 10_000
+    assert projection.component_fingerprint == ledger.component_fingerprint
+    assert len(projection.current_records) == 1
+    assert projection.current_records[0].record_id == ledger.materialize()[-1].record_id
+    assert len(projection_owner._current_record_ids) == 1
+    assert all(isinstance(value, str) for value in ledger._records_by_id.values())
+    assert "_generation" not in ledger.__dict__
+    assert final_projection_bytes - first_projection_bytes < 128
+    assert final_transport_bytes - first_transport_bytes < 128
+
+    lifecycle_owner = SemanticLifecycleOwner()
+    first_lifecycle_bytes = None
+    clock = _clock(0)
+    for index in range(10_000):
+        transition = NormalizedLifecycleTransition(
+            fact_id=f"fixed-clock:{index}",
+            kind=NormalizedTransitionKind.REAL_BAR_COMPLETED,
+            known_at=clock,
+            timeframe=Timeframe.M1,
+            source_event_ids=(f"fixed-bar:{index}",),
+            payload={
+                "bar_event_id": f"fixed-bar:{index}",
+                "real_completed": True,
+            },
+        )
+        transaction = lifecycle_owner.stage()
+        transaction.reduce(transition)
+        transaction.commit()
+        if index == 0:
+            first_lifecycle_bytes = len(pickle.dumps(lifecycle_owner.freeze()))
+        clock = next_registered_native_completion(
+            clock,
+            timeframe_minutes=1,
+        )
+
+    lifecycle = lifecycle_owner.freeze()
+    final_lifecycle_bytes = len(pickle.dumps(lifecycle))
+    restored_lifecycle = SemanticLifecycleOwner.restore(
+        lifecycle_owner.checkpoint()
+    ).freeze()
+    assert lifecycle == restored_lifecycle
+    assert lifecycle.transition_count == 10_000
+    assert lifecycle.applied_transition_fingerprints == {}
+    assert len(lifecycle.registered_bar_clocks) == 1
+    assert len(lifecycle.real_bar_clocks) == 1
+    assert final_lifecycle_bytes - first_lifecycle_bytes < 128

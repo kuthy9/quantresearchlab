@@ -63,7 +63,7 @@ from .test_execution_fsm import T0, _account, _approved, _book
 
 ROOT = Path(__file__).resolve().parents[1]
 PROTOCOL_PATH = ROOT / "configs/shadow_live_v1.json"
-PROTOCOL_SHA256 = "d8e543f54bc6e81bb820be51e02382b5477f8a3e8e676063aa685f0d599e7961"
+PROTOCOL_SHA256 = "10accaa0db0818e9785b61cd640edcb6f0d26ec9d5f909b728c50e67feca91f0"
 
 
 def _bindings() -> tuple[tuple[str, str], ...]:
@@ -483,18 +483,8 @@ def test_component_digest_versions_are_explicit_and_old_checkpoints_replay() -> 
     assert legacy_record.observation_fingerprint == shadow_live_module._digest(
         legacy.engine.last_snapshot.observation
     )
-    legacy_checkpoint = legacy.compact_runtime_checkpoint()
-    assert legacy_checkpoint["schema_version"] == (
-        "shadow_compact_runtime_v1"
-    )
-    assert "foundation_authority_digest" not in legacy_checkpoint
-    restored_legacy_checkpoint = (
-        ShadowLiveRunner.from_compact_runtime_checkpoint(
-            pickle.loads(pickle.dumps(legacy_checkpoint)),
-            journal_events=legacy.journal.events,
-            records=legacy.records,
-        )
-    )
+    with pytest.raises(ShadowLiveError, match="legacy component digest"):
+        legacy.compact_runtime_checkpoint()
     technical_kinds = {
         EventKind.TIMEFRAME_STATE_CHANGED,
         EventKind.RELATION_STATE_CHANGED,
@@ -549,20 +539,22 @@ def test_component_digest_versions_are_explicit_and_old_checkpoints_replay() -> 
 
     current_checkpoint = current.compact_runtime_checkpoint()
     assert current_checkpoint["schema_version"] == (
-        "shadow_compact_runtime_v3"
+        "shadow_compact_runtime_v4"
     )
     previous_checkpoint = copy.deepcopy(current_checkpoint)
-    previous_checkpoint["schema_version"] = "shadow_compact_runtime_v2"
-    previous_checkpoint.pop("foundation_authority_digest")
+    previous_checkpoint["schema_version"] = "shadow_compact_runtime_v3"
+    with pytest.raises(ShadowLiveError, match="legacy compact"):
+        ShadowLiveRunner.from_compact_runtime_checkpoint(
+            pickle.loads(pickle.dumps(previous_checkpoint)),
+            journal_events=current.journal.events,
+            records=current.records,
+        )
     restored = ShadowLiveRunner.from_compact_runtime_checkpoint(
-        pickle.loads(pickle.dumps(previous_checkpoint)),
+        pickle.loads(pickle.dumps(current_checkpoint)),
         journal_events=current.journal.events,
         records=current.records,
     )
     assert restored.process(_input(1)) == current.process(_input(1))
-    assert restored_legacy_checkpoint.process(_input(1)) == legacy.process(
-        _input(1)
-    )
 
     restored_legacy = pickle.loads(pickle.dumps(legacy))
     assert restored_legacy.records == legacy.records
@@ -902,8 +894,8 @@ def test_compact_restore_rehydrates_all_engine_derived_indexes() -> None:
     whole_adapter = whole_runner_tamper.engine.observer._foundation_adapter
     whole_adapter.lifecycle = type(whole_adapter.lifecycle)()
     with pytest.raises(
-        ShadowLiveError,
-        match="foundation .* differs",
+        ValueError,
+        match="foundation adapter pickle lifecycle owner differs",
     ):
         pickle.loads(pickle.dumps(whole_runner_tamper))
 
@@ -940,31 +932,14 @@ def test_foundation_restore_rejects_self_consistent_runtime_authority_tamper() -
 
     applied_tamper = copy.deepcopy(checkpoint)
     adapter = applied_tamper["engine"].observer._foundation_adapter
-    manual = next(
-        item
-        for item in adapter.lifecycle.applied_transitions
-        if item.fact_id.startswith("observer-boundary-attack:")
+    manual_id = next(
+        fact_id
+        for fact_id in adapter.lifecycle_fact_fingerprints
+        if fact_id.startswith("observer-boundary-attack:")
     )
-    adapter.lifecycle = replace(
-        adapter.lifecycle,
-        applied_transitions=tuple(
-            item
-            for item in adapter.lifecycle.applied_transitions
-            if item.fact_id != manual.fact_id
-        ),
-    )
-    applied_tamper["foundation_authority_digest"] = (
-        adapter.checkpoint().checkpoint_digest
-    )
-    with pytest.raises(
-        ShadowLiveError,
-        match="foundation .* differs",
-    ):
-        ShadowLiveRunner.from_compact_runtime_checkpoint(
-            applied_tamper,
-            journal_events=journal,
-            records=records,
-        )
+    adapter._lifecycle_owner._fact_fingerprints[manual_id] = "0" * 64
+    with pytest.raises(ValueError, match="lifecycle owner fact chain differs"):
+        adapter.checkpoint()
 
     asof_tamper = copy.deepcopy(checkpoint)
     adapter = asof_tamper["engine"].observer._foundation_adapter
@@ -972,6 +947,7 @@ def test_foundation_restore_rejects_self_consistent_runtime_authority_tamper() -
         adapter.lifecycle,
         asof=pd.Timestamp("2099-01-01T00:00:00Z"),
     )
+    adapter._lifecycle_owner._state = adapter.lifecycle
     asof_tamper["foundation_authority_digest"] = (
         adapter.checkpoint().checkpoint_digest
     )
@@ -1043,18 +1019,8 @@ def test_foundation_restore_rejects_self_consistent_runtime_authority_tamper() -
         (*adapter.lifecycle.levels, adapter.lifecycle.levels[-1]),
     )
     adapter._rebuild_derived_indexes()
-    duplicate_tamper["foundation_authority_digest"] = (
-        adapter.checkpoint().checkpoint_digest
-    )
-    with pytest.raises(
-        ShadowLiveError,
-        match="foundation lifecycle is not canonical",
-    ):
-        ShadowLiveRunner.from_compact_runtime_checkpoint(
-            duplicate_tamper,
-            journal_events=journal,
-            records=records,
-        )
+    with pytest.raises(ValueError, match="lifecycle owner differs"):
+        adapter.checkpoint()
 
     order_tamper = copy.deepcopy(checkpoint)
     adapter = order_tamper["engine"].observer._foundation_adapter
@@ -1063,6 +1029,7 @@ def test_foundation_restore_rejects_self_consistent_runtime_authority_tamper() -
         adapter.lifecycle,
         levels=tuple(reversed(adapter.lifecycle.levels)),
     )
+    adapter._lifecycle_owner._state = adapter.lifecycle
     adapter._rebuild_derived_indexes()
     order_tamper["foundation_authority_digest"] = (
         adapter.checkpoint().checkpoint_digest
@@ -1086,8 +1053,8 @@ def test_foundation_restore_rejects_self_consistent_runtime_authority_tamper() -
     )
     adapter._rebuild_derived_indexes()
     with pytest.raises(
-        ShadowLiveError,
-        match="foundation lifecycle is not canonical",
+        ValueError,
+        match="foundation adapter pickle lifecycle owner differs",
     ):
         pickle.loads(pickle.dumps(whole_duplicate_tamper))
 
@@ -1104,7 +1071,7 @@ def test_component_digest_final_audit_replays_full_market_payload() -> None:
     projection = tampered.engine.last_snapshot.market_snapshot.foundation
     assert projection is not None
     object.__setattr__(
-        projection.records[-1],
+        projection.current_records[-1],
         "record_id",
         "foundation-record:" + "0" * 64,
     )
@@ -1157,19 +1124,12 @@ def test_real_w1_manual_foundation_transitions_restore_and_continue_exactly() ->
     for prefix in ("relation-observation:", "delivery-observation:"):
         tampered = copy.deepcopy(checkpoint)
         adapter = tampered["engine"].observer._foundation_adapter
-        target = next(
-            item
-            for item in adapter.lifecycle.applied_transitions
-            if item.fact_id.startswith(prefix)
+        target_id = next(
+            fact_id
+            for fact_id in adapter.lifecycle_fact_fingerprints
+            if fact_id.startswith(prefix)
         )
-        adapter.lifecycle = replace(
-            adapter.lifecycle,
-            applied_transitions=tuple(
-                item
-                for item in adapter.lifecycle.applied_transitions
-                if item.fact_id != target.fact_id
-            ),
-        )
+        adapter._lifecycle_owner._fact_fingerprints[target_id] = "0" * 64
         adapter._rebuild_derived_indexes()
         tampered["foundation_authority_digest"] = (
             adapter.checkpoint().checkpoint_digest

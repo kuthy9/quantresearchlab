@@ -67,7 +67,7 @@ _REQUIRED_PRIMITIVE_PROTOCOLS = (
 )
 _LIVE_READINESS_TOKEN = object()
 RUNTIME_ACTION_POLICY_SCHEMA_VERSION = 2
-NEUTRAL_ENGINE_CHECKPOINT_SCHEMA_VERSION = 4
+NEUTRAL_ENGINE_CHECKPOINT_SCHEMA_VERSION = 5
 MODEL_SCHEMA_VERSION = 2
 ACTION_PIPELINE_SCHEMA_VERSION = 1
 LEGACY_ACTION_PIPELINE_MODE = "legacy_decision_risk_compat"
@@ -256,6 +256,15 @@ class ContinuousSMCEngine:
                 and last_snapshot is not None
                 and last_snapshot.observation.asof
                 != neutral_market_state.asof
+            )
+            or (
+                isinstance(last_snapshot, EngineSnapshot)
+                and neutral_market_state is not None
+                and (
+                    last_snapshot.belief.global_context is None
+                    or last_snapshot.belief.global_context.open_market_theses
+                    != neutral_market_state.open_market_theses
+                )
             )
         ):
             raise ValueError(

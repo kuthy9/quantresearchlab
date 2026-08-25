@@ -1,5 +1,5 @@
 {
-  "schema_version": "phase9_shadow_live_v1.2",
+  "schema_version": "phase9_shadow_live_v1.3",
   "status": "engineering_validation_only",
   "authority": "null_gateway_no_external_submission",
   "external_submission_allowed": false,

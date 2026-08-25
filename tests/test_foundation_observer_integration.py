@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 from collections import Counter
 from dataclasses import replace
 from pathlib import Path
@@ -7,7 +8,6 @@ from types import SimpleNamespace
 import pandas as pd
 import pytest
 
-import smc_trader.observation as observation_module
 from smc_trader.causal import CausalMarketReader
 from smc_trader.foundation_adapter import CanonicalFoundationAdapter
 from smc_trader.market_state import (
@@ -440,12 +440,43 @@ def _assert_atomic_replay_parity(observer: CausalObserver, observation) -> None:
     replayed = replay_atomic_market_snapshot(
         observer.audit_store.events(),
         semantic_registry_identity=observer.semantic_registry.identity,
+        foundation_records=observer.materialize_foundation_history(),
     )
     assert replayed.foundation == expected.foundation
     assert replayed.timeframe_states == expected.timeframe_states
     assert replayed.relations == expected.relations
     assert replayed.session == expected.session
     assert replayed.foundation_range_locations == expected.foundation_range_locations
+
+
+def _legacy_foundation_transport_stream(
+    observer: CausalObserver,
+) -> tuple:
+    """Materialize the retained v1 transport only for legacy decoder tests."""
+
+    events = observer.audit_store.events()
+    records = observer.materialize_foundation_history()
+    if not records:
+        return events
+    published_at = observer.last_market_snapshot.asof
+    start_sequence = 1 + max(
+        (
+            event.sequence_no
+            for event in events
+            if event.known_at == published_at
+        ),
+        default=0,
+    )
+    transports = tuple(
+        foundation_record_projection_event(
+            record,
+            timeframe=Timeframe.M1,
+            published_at=published_at,
+            sequence_no=start_sequence + index,
+        )
+        for index, record in enumerate(records)
+    )
+    return tuple(sorted((*events, *transports), key=event_order_key))
 
 
 _JUNE_2024_CAUSAL_FRONT = (
@@ -534,6 +565,7 @@ def test_2024_06_tracker_only_evidence_stays_noncanonical_and_replayable() -> No
     assert active_relations[0].last_updated_at < observation.market_snapshot.asof
     _assert_atomic_replay_parity(observer, observation)
 
+    events = _legacy_foundation_transport_stream(observer)
     transports = tuple(
         event
         for event in events
@@ -596,33 +628,31 @@ def test_2024_06_tracker_only_evidence_stays_noncanonical_and_replayable() -> No
         )
 
 
-def test_eye_foundation_transport_is_exact_replayable_and_not_republished() -> None:
+def test_eye_foundation_cold_ledger_is_exact_and_not_event_republished() -> None:
     reader, observer = _eye()
     observation = _observe(observer, reader, _tick_aligned_bars(61))
     projection = observation.market_snapshot.foundation
     events = observer.audit_store.events()
-    transports = tuple(
-        event
-        for event in events
-        if event.kind is EventKind.FOUNDATION_STATE_CHANGED
+    cold_records = observer.materialize_foundation_history()
+    assert not any(
+        event.kind is EventKind.FOUNDATION_STATE_CHANGED for event in events
     )
-
-    assert len(transports) == len(projection.records)
-    assert len({event.event_id for event in transports}) == len(transports)
-    assert tuple(
-        foundation_record_from_projection_event(event) for event in transports
-    ) == projection.records
+    assert len(cold_records) == projection.record_count
+    assert (
+        FoundationProjectionReducer.replay(cold_records) == projection
+    )
     order = {event.event_id: index for index, event in enumerate(events)}
-    for event in transports:
-        record = foundation_record_from_projection_event(event)
-        assert event.origin is EventOrigin.STATE_PROJECTION
+    for record in cold_records:
         assert all(source_id in order for source_id in record.source_event_ids)
-        assert all(order[source_id] < order[event.event_id] for source_id in record.source_event_ids)
         assert all(
             events[order[source_id]].origin
             in {EventOrigin.NORMALIZED_DATA, EventOrigin.SEMANTIC_ATOMIC}
             for source_id in record.source_event_ids
         )
+    adapter = observer._foundation_adapter
+    assert adapter.pending_record_delta.records == ()
+    assert adapter.pending_record_delta.end_count == projection.record_count
+    assert not hasattr(observation, "foundation_record_delta")
     assert not any(
         event.kind is EventKind.FOUNDATION_STATE_CHANGED
         for event in observation.semantic_events_this_update
@@ -630,17 +660,50 @@ def test_eye_foundation_transport_is_exact_replayable_and_not_republished() -> N
     _assert_atomic_replay_parity(observer, observation)
 
 
+def test_cold_replay_tracks_superseded_record_ids_without_hot_history() -> None:
+    reader, observer = _eye()
+    observation = _observe(observer, reader, _m5_parent_m1_child_mss_bars())
+    cold_records = observer.materialize_foundation_history()
+    current_ids = {
+        record.record_id
+        for record in observation.market_snapshot.foundation.current_records
+    }
+    superseded = next(
+        record for record in cold_records if record.record_id not in current_ids
+    )
+
+    replayed = replay_atomic_market_snapshot(
+        observer.audit_store.events(),
+        semantic_registry_identity=observer.semantic_registry.identity,
+        foundation_records=(*cold_records, superseded),
+    )
+    assert replayed.foundation == observation.market_snapshot.foundation
+
+    conflicting = copy.copy(superseded)
+    object.__setattr__(
+        conflicting,
+        "source_event_ids",
+        (*superseded.source_event_ids, "forged-source"),
+    )
+    with pytest.raises(ValueError, match="record_id collision"):
+        replay_atomic_market_snapshot(
+            observer.audit_store.events(),
+            semantic_registry_identity=observer.semantic_registry.identity,
+            foundation_records=(*cold_records, conflicting),
+        )
+
+
 def test_atomic_replay_rejects_structure_transition_and_terminal_kind_swaps() -> None:
     reader, observer = _eye()
     observation = _observe(observer, reader, _m5_parent_m1_child_mss_bars())
-    events = observer.audit_store.events()
+    events = _legacy_foundation_transport_stream(observer)
     authoritative = {event.event_id: event for event in events}
     transports = {
         foundation_record_from_projection_event(event).record_id: event
         for event in events
         if event.kind is EventKind.FOUNDATION_STATE_CHANGED
     }
-    records = observation.market_snapshot.foundation.records
+    records = observer.materialize_foundation_history()
 
     def replay_with(
         original_record: FoundationRecord,
@@ -808,9 +871,10 @@ def test_group3_fvg_terminal_freezes_age_and_exact_terminal_ancestry() -> None:
     reader, observer = _eye()
     observation = _observe(observer, reader, bars)
     projection = observation.market_snapshot.foundation
+    cold_records = observer.materialize_foundation_history()
     fvg_records = tuple(
         record
-        for record in projection.records
+        for record in cold_records
         if record.object_type is FoundationObjectType.FVG_STRUCTURAL_LIFECYCLE
     )
     terminal = tuple(
@@ -822,7 +886,12 @@ def test_group3_fvg_terminal_freezes_age_and_exact_terminal_ancestry() -> None:
     assert terminal
     events = {event.event_id: event for event in observer.audit_store.events()}
     for record in terminal:
-        history = projection.records_for(record.object_type, record.object_id)
+        history = tuple(
+            item
+            for item in cold_records
+            if item.object_type is record.object_type
+            and item.object_id == record.object_id
+        )
         assert len(history) == 2
         assert history[0].payload["age_bars"] == 0
         assert record.payload["age_bars"] >= 1
@@ -870,10 +939,14 @@ def test_contract_reset_keeps_foundation_history_and_explicitly_closes_fvg() -> 
     )
     assert len(reset_events) == 1
     reset_id = reset_events[0].event_id
+    cold_records = observer.materialize_foundation_history()
     for fvg_id in active_ids:
-        history = projection.records_for(
-            FoundationObjectType.FVG_STRUCTURAL_LIFECYCLE,
-            fvg_id,
+        history = tuple(
+            record
+            for record in cold_records
+            if record.object_type
+            is FoundationObjectType.FVG_STRUCTURAL_LIFECYCLE
+            and record.object_id == fvg_id
         )
         assert history[0].status is FoundationRecordStatus.ACTIVE
         assert history[-1].status is FoundationRecordStatus.TERMINAL
@@ -882,7 +955,7 @@ def test_contract_reset_keeps_foundation_history_and_explicitly_closes_fvg() -> 
     _assert_atomic_replay_parity(observer, observation)
 
 
-def test_foundation_publication_failure_does_not_commit_staged_adapter(
+def test_foundation_cold_ledger_failure_does_not_commit_staged_adapter(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     reader, observer = _eye()
@@ -891,27 +964,27 @@ def test_foundation_publication_failure_does_not_commit_staged_adapter(
         observer.observe(reader.on_bar(bar))
     raised = False
 
-    def reject_projection(*args, **kwargs):
-        raise RuntimeError("injected foundation transport failure")
+    def reject_ledger(_records):
+        raise RuntimeError("injected foundation cold ledger failure")
 
     monkeypatch.setattr(
-        observation_module,
-        "foundation_record_projection_event",
-        reject_projection,
+        observer._foundation_adapter._record_ledger,
+        "preview_append",
+        reject_ledger,
     )
     failed_update = None
     for bar in bars[14:]:
         checkpoint = observer._foundation_adapter.checkpoint()
-        published = frozenset(observer._foundation_published_record_ids)
+        cold_records = observer.materialize_foundation_history()
         event_count = len(observer.audit_store)
         update = reader.on_bar(bar)
         try:
             observer.observe(update)
         except RuntimeError as error:
-            assert "injected foundation transport failure" in str(error)
+            assert "injected foundation cold ledger failure" in str(error)
             raised = True
             assert observer._foundation_adapter.checkpoint() == checkpoint
-            assert frozenset(observer._foundation_published_record_ids) == published
+            assert observer.materialize_foundation_history() == cold_records
             new_events = observer.audit_store.events_since(event_count)
             assert new_events
             assert not any(
@@ -1057,7 +1130,7 @@ def test_equal_tick_structure_has_no_range_but_balance_and_later_range_survive(
     ) == 2
     assert not any(
         record.object_type is FoundationObjectType.STRUCTURAL_RANGE
-        for record in adapter.projection.records
+        for record in adapter.materialize_foundation_history()
     )
 
     # The immutable equal-tick origin remains explicitly range-ineligible on
@@ -1187,7 +1260,7 @@ def test_structural_range_location_and_delivery_use_independent_native_clocks() 
     assert location.x_balance_range is None
     deliveries = tuple(
         record
-        for record in projection.records
+        for record in observer.materialize_foundation_history()
         if record.object_type is FoundationObjectType.DELIVERY_PHASE_GENERATION
         and record.payload["timeframe"] == Timeframe.M1.value
     )
@@ -1241,7 +1314,7 @@ def test_atomic_replay_rebinds_foundation_range_delivery_and_attack_payloads(
 ) -> None:
     reader, observer = _eye()
     observation = _observe(observer, reader, _m1_structure_bars())
-    events = observer.audit_store.events()
+    events = _legacy_foundation_transport_stream(observer)
     records = tuple(
         record
         for record in observation.market_snapshot.foundation.latest_records
@@ -1291,7 +1364,7 @@ def test_atomic_replay_rebinds_foundation_range_delivery_and_attack_payloads(
 def test_boundary_attack_cannot_borrow_an_ordinal_into_a_new_generation() -> None:
     reader, observer = _eye()
     observation = _observe(observer, reader, _m5_parent_m1_child_mss_bars())
-    events = observer.audit_store.events()
+    events = _legacy_foundation_transport_stream(observer)
     attacks = tuple(
         record
         for record in observation.market_snapshot.foundation.latest_records
@@ -1632,13 +1705,16 @@ def test_mature_range_invalidation_retires_both_boundary_targets() -> None:
         authoritative_events=(invalidation,),
         revisions={},
     ) == ()
-    lower_history = adapter.projection.records_for(
-        FoundationObjectType.LIQUIDITY_LEVEL,
-        levels["range-lower"].level_id,
+    cold_records = adapter.materialize_foundation_history()
+    lower_history = tuple(
+        record
+        for record in cold_records
+        if record.object_type is FoundationObjectType.LIQUIDITY_LEVEL
+        and record.object_id == levels["range-lower"].level_id
     )
     assert lower_history[-1].status is FoundationRecordStatus.TERMINAL
     assert invalidation.event_id in lower_history[-1].source_event_ids
     assert (
-        FoundationProjectionReducer.replay(adapter.projection.records)
+        FoundationProjectionReducer.replay(cold_records)
         == adapter.projection
     )

@@ -205,7 +205,36 @@ _TIMEFRAME_ANCHOR_MINUTE = {
     Timeframe.H1: 0,
     Timeframe.H4: 18 * 60,
 }
-LIFECYCLE_CHECKPOINT_SCHEMA_VERSION = 2
+LIFECYCLE_STATE_SCHEMA_VERSION = 2
+LIFECYCLE_CHECKPOINT_SCHEMA_VERSION = 3
+LIFECYCLE_COMPONENT_FINGERPRINT_VERSION = "foundation_lifecycle_fact_chain_v1"
+LIFECYCLE_OWNER_STATE_SCHEMA_VERSION = 1
+
+
+def _lifecycle_component_fingerprint_seed() -> str:
+    return content_hash(
+        {
+            "component_fingerprint_version": LIFECYCLE_COMPONENT_FINGERPRINT_VERSION,
+            "semantic_version": FOUNDATION_VERSION,
+            "fact_chain": "empty",
+        }
+    )
+
+
+def _extend_lifecycle_component_fingerprint(
+    previous: str,
+    *,
+    fact_id: str,
+    fingerprint: str,
+) -> str:
+    return content_hash(
+        {
+            "component_fingerprint_version": LIFECYCLE_COMPONENT_FINGERPRINT_VERSION,
+            "previous": previous,
+            "fact_id": fact_id,
+            "fingerprint": fingerprint,
+        }
+    )
 
 # Exact aliases frozen by foundation_v2_0.yaml.  This is deliberately not a
 # prefix/family heuristic: adding an alias requires a versioned registry edit.
@@ -1783,10 +1812,17 @@ class SemanticLifecycleState:
     boundary_attacks: tuple[BoundaryAttackFact, ...] = ()
     registered_bar_clocks: tuple[RegisteredBarClock, ...] = ()
     real_bar_clocks: tuple[RealBarClock, ...] = ()
-    applied_transitions: tuple[AppliedTransition, ...] = ()
+    applied_transition_fingerprints: Mapping[str, str] = field(
+        default_factory=dict,
+        repr=False,
+    )
+    transition_count: int = 0
+    transition_fingerprint: str = ""
     asof: pd.Timestamp | None = None
     epoch: int = 0
     semantic_version: str = FOUNDATION_VERSION
+    schema_version: int = LIFECYCLE_STATE_SCHEMA_VERSION
+    complete_validation: bool = field(default=True, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         for name in (
@@ -1799,15 +1835,50 @@ class SemanticLifecycleState:
             "boundary_attacks",
             "registered_bar_clocks",
             "real_bar_clocks",
-            "applied_transitions",
         ):
             object.__setattr__(self, name, tuple(getattr(self, name)))
+        fingerprints = FrozenDict(self.applied_transition_fingerprints)
+        object.__setattr__(
+            self,
+            "applied_transition_fingerprints",
+            fingerprints,
+        )
+        if not self.transition_fingerprint:
+            object.__setattr__(
+                self,
+                "transition_fingerprint",
+                _lifecycle_component_fingerprint_seed(),
+            )
         if self.asof is not None:
             object.__setattr__(
                 self, "asof", aware_timestamp(self.asof, name="lifecycle_state.asof")
             )
-        if self.epoch < 0 or self.semantic_version != FOUNDATION_VERSION:
+        if (
+            self.epoch < 0
+            or self.semantic_version != FOUNDATION_VERSION
+            or self.schema_version != LIFECYCLE_STATE_SCHEMA_VERSION
+            or type(self.transition_count) is not int
+            or self.transition_count < len(fingerprints)
+            or (
+                self.complete_validation
+                and self.transition_count != len(fingerprints)
+            )
+            or len(self.transition_fingerprint) != 64
+            or any(
+                not isinstance(fact_id, str)
+                or not fact_id
+                or not isinstance(fingerprint, str)
+                or len(fingerprint) != 64
+                or any(
+                    character not in "0123456789abcdef"
+                    for character in fingerprint
+                )
+                for fact_id, fingerprint in fingerprints.items()
+            )
+        ):
             raise ValueError("semantic lifecycle state version or epoch is invalid")
+        if not self.complete_validation:
+            return
         identity_specs = (
             (self.levels, "level_id"),
             (self.interactions, "generation_id"),
@@ -1818,7 +1889,6 @@ class SemanticLifecycleState:
             (self.boundary_attacks, "boundary_attack_id"),
             (self.registered_bar_clocks, "timeframe"),
             (self.real_bar_clocks, "timeframe"),
-            (self.applied_transitions, "fact_id"),
         )
         for items, attribute in identity_specs:
             identities = tuple(getattr(item, attribute) for item in items)
@@ -1874,6 +1944,57 @@ class SemanticLifecycleState:
                 "real BAR clock conflicts with its registered transport clock"
             )
 
+    def __getstate__(self) -> Mapping[str, Any]:
+        return {
+            "levels": self.levels,
+            "interactions": self.interactions,
+            "structure_generations": self.structure_generations,
+            "structure_transitions": self.structure_transitions,
+            "relation_generations": self.relation_generations,
+            "delivery_generations": self.delivery_generations,
+            "boundary_attacks": self.boundary_attacks,
+            "registered_bar_clocks": self.registered_bar_clocks,
+            "real_bar_clocks": self.real_bar_clocks,
+            "applied_transition_fingerprints": self.applied_transition_fingerprints,
+            "transition_count": self.transition_count,
+            "transition_fingerprint": self.transition_fingerprint,
+            "asof": self.asof,
+            "epoch": self.epoch,
+            "semantic_version": self.semantic_version,
+            "schema_version": self.schema_version,
+            "complete_validation": self.complete_validation,
+        }
+
+    def __setstate__(self, state: Mapping[str, Any]) -> None:
+        expected = {
+            "levels",
+            "interactions",
+            "structure_generations",
+            "structure_transitions",
+            "relation_generations",
+            "delivery_generations",
+            "boundary_attacks",
+            "registered_bar_clocks",
+            "real_bar_clocks",
+            "applied_transition_fingerprints",
+            "transition_count",
+            "transition_fingerprint",
+            "asof",
+            "epoch",
+            "semantic_version",
+            "schema_version",
+            "complete_validation",
+        }
+        if (
+            not isinstance(state, Mapping)
+            or set(state) != expected
+            or state.get("schema_version") != LIFECYCLE_STATE_SCHEMA_VERSION
+        ):
+            raise ValueError("semantic lifecycle state pickle schema changed")
+        for name in expected:
+            object.__setattr__(self, name, state[name])
+        self.__post_init__()
+
     def level(self, level_id: str) -> LiquidityLevelState:
         return _find(self.levels, "level_id", level_id)
 
@@ -1903,12 +2024,39 @@ class LifecycleCheckpoint:
             "schema_version" not in vars(self)
             or not isinstance(self.state, SemanticLifecycleState)
             or "registered_bar_clocks" not in vars(self.state)
+            or "schema_version" not in vars(self.state)
+            or "complete_validation" not in vars(self.state)
+            or "applied_transition_fingerprints" not in vars(self.state)
+            or self.state.complete_validation is not True
+            or self.state.transition_count
+            != len(self.state.applied_transition_fingerprints)
             or self.schema_version != LIFECYCLE_CHECKPOINT_SCHEMA_VERSION
             or self.semantic_version != FOUNDATION_VERSION
             or self.state.semantic_version != self.semantic_version
             or self.state_digest != content_hash(self.state)
         ):
             raise ValueError("semantic lifecycle checkpoint is invalid")
+
+    def __getstate__(self) -> Mapping[str, Any]:
+        return {
+            "state": self.state,
+            "state_digest": self.state_digest,
+            "schema_version": self.schema_version,
+            "semantic_version": self.semantic_version,
+        }
+
+    def __setstate__(self, state: Mapping[str, Any]) -> None:
+        expected = {
+            "state",
+            "state_digest",
+            "schema_version",
+            "semantic_version",
+        }
+        if not isinstance(state, Mapping) or set(state) != expected:
+            raise ValueError("semantic lifecycle checkpoint schema changed")
+        for name in expected:
+            object.__setattr__(self, name, state[name])
+        self.__post_init__()
 
 
 def _find(items: Sequence[Any], attribute: str, identity: object) -> Any:
@@ -2008,13 +2156,11 @@ class SemanticLifecycleReducer:
             raise ValueError("semantic lifecycle state version mismatch")
 
         fingerprint = content_hash(transition)
-        prior_facts = tuple(
-            item
-            for item in state.applied_transitions
-            if item.fact_id == transition.fact_id
+        prior_fingerprint = state.applied_transition_fingerprints.get(
+            transition.fact_id
         )
-        if prior_facts:
-            if len(prior_facts) != 1 or prior_facts[0].fingerprint != fingerprint:
+        if prior_fingerprint is not None:
+            if prior_fingerprint != fingerprint:
                 raise ValueError("normalized fact identity conflicts with replay history")
             return state
         if state.asof is not None and transition.known_at < state.asof:
@@ -2048,17 +2194,81 @@ class SemanticLifecycleReducer:
             NormalizedTransitionKind.BOUNDARY_ATTACK_OBSERVED: cls._boundary_attack,
         }
         projected = handlers[transition.kind](state, transition)
+        applied = dict(projected.applied_transition_fingerprints)
+        applied[transition.fact_id] = fingerprint
         return replace(
             projected,
-            applied_transitions=(
-                *projected.applied_transitions,
-                AppliedTransition(
-                    fact_id=transition.fact_id,
-                    fingerprint=fingerprint,
-                    known_at=transition.known_at,
-                ),
+            applied_transition_fingerprints=applied,
+            transition_count=projected.transition_count + 1,
+            transition_fingerprint=_extend_lifecycle_component_fingerprint(
+                projected.transition_fingerprint,
+                fact_id=transition.fact_id,
+                fingerprint=fingerprint,
             ),
             asof=transition.known_at,
+        )
+
+    @classmethod
+    def reduce_hot(
+        cls,
+        state: SemanticLifecycleState,
+        transition: NormalizedLifecycleTransition,
+    ) -> SemanticLifecycleState:
+        """Project one owner-validated fact without embedding replay history.
+
+        This is the production hot-path primitive.  Fact identity/conflict
+        checks live in :class:`SemanticLifecycleOwner`; the pure ``reduce``
+        method above remains the cold replay/compatibility authority.
+        """
+
+        if not isinstance(state, SemanticLifecycleState):
+            raise TypeError("semantic lifecycle reducer requires its state DTO")
+        if not isinstance(transition, NormalizedLifecycleTransition):
+            raise TypeError("semantic lifecycle reducer requires normalized input")
+        if state.semantic_version != FOUNDATION_VERSION:
+            raise ValueError("semantic lifecycle state version mismatch")
+        if state.asof is not None and transition.known_at < state.asof:
+            raise ValueError("normalized lifecycle replay moved backwards in time")
+        handler = {
+            NormalizedTransitionKind.REAL_BAR_COMPLETED: cls._real_bar_completed,
+            NormalizedTransitionKind.RESET: cls._reset,
+            NormalizedTransitionKind.LIQUIDITY_LEVEL_CREATED: cls._level_created,
+            NormalizedTransitionKind.LIQUIDITY_TOUCHED: cls._liquidity_touched,
+            NormalizedTransitionKind.LIQUIDITY_PENETRATED: cls._liquidity_penetrated,
+            NormalizedTransitionKind.LIQUIDITY_SWEEP_TERMINAL: cls._liquidity_terminal,
+            NormalizedTransitionKind.LIQUIDITY_ACCEPTANCE_TERMINAL: cls._liquidity_terminal,
+            NormalizedTransitionKind.LIQUIDITY_UNRESOLVED_TERMINAL: cls._liquidity_unresolved,
+            NormalizedTransitionKind.LIQUIDITY_LEVEL_REARMABLE: cls._level_rearmable,
+            NormalizedTransitionKind.LIQUIDITY_LEVEL_REARMED: cls._level_rearmed,
+            NormalizedTransitionKind.LIQUIDITY_LEVEL_RETIRED: cls._level_retired,
+            NormalizedTransitionKind.LIQUIDITY_LEVEL_ARCHIVED: cls._level_archived,
+            NormalizedTransitionKind.STRUCTURE_GENERATION_STARTED: cls._structure_started,
+            NormalizedTransitionKind.STRUCTURE_GENERATION_CONFIRMED: cls._structure_confirmed,
+            NormalizedTransitionKind.STRUCTURE_GENERATION_EVIDENCE: cls._structure_evidence,
+            NormalizedTransitionKind.STRUCTURE_GENERATION_TERMINATED: cls._structure_terminated,
+            NormalizedTransitionKind.MSS_TRANSITION_STARTED: cls._transition_started,
+            NormalizedTransitionKind.STRUCTURE_TRANSITION_EVIDENCE: cls._transition_evidence,
+            NormalizedTransitionKind.STRUCTURE_TRANSITION_CONFIRMED: cls._transition_confirmed,
+            NormalizedTransitionKind.STRUCTURE_DIRECTION_RESUMED: cls._transition_failed,
+            NormalizedTransitionKind.RELATION_OBSERVED: cls._relation_observed,
+            NormalizedTransitionKind.RELATION_TERMINATED: cls._relation_terminated,
+            NormalizedTransitionKind.DELIVERY_PHASE_OBSERVED: cls._delivery_observed,
+            NormalizedTransitionKind.DELIVERY_PHASE_TERMINATED: cls._delivery_terminated,
+            NormalizedTransitionKind.BOUNDARY_ATTACK_OBSERVED: cls._boundary_attack,
+        }[transition.kind]
+        projected = handler(state, transition)
+        fingerprint = content_hash(transition)
+        return replace(
+            projected,
+            applied_transition_fingerprints={},
+            transition_count=projected.transition_count + 1,
+            transition_fingerprint=_extend_lifecycle_component_fingerprint(
+                projected.transition_fingerprint,
+                fact_id=transition.fact_id,
+                fingerprint=fingerprint,
+            ),
+            asof=transition.known_at,
+            complete_validation=False,
         )
 
     @classmethod
@@ -2183,6 +2393,12 @@ class SemanticLifecycleReducer:
             "schema_version" not in vars(checkpoint)
             or not isinstance(checkpoint.state, SemanticLifecycleState)
             or "registered_bar_clocks" not in vars(checkpoint.state)
+            or "schema_version" not in vars(checkpoint.state)
+            or "complete_validation" not in vars(checkpoint.state)
+            or "applied_transition_fingerprints" not in vars(checkpoint.state)
+            or checkpoint.state.complete_validation is not True
+            or checkpoint.state.transition_count
+            != len(checkpoint.state.applied_transition_fingerprints)
             or checkpoint.schema_version != LIFECYCLE_CHECKPOINT_SCHEMA_VERSION
             or checkpoint.state_digest != content_hash(checkpoint.state)
         ):
@@ -4512,3 +4728,202 @@ class SemanticLifecycleReducer:
                 state.boundary_attacks, "boundary_attack_id", fact
             ),
         )
+
+
+class SemanticLifecycleOwner:
+    """Single-writer hot owner for compact lifecycle state and fact identity."""
+
+    def __init__(
+        self,
+        state: SemanticLifecycleState | None = None,
+        *,
+        fact_fingerprints: Mapping[str, str] | None = None,
+    ) -> None:
+        source = state or SemanticLifecycleReducer.initial_state()
+        if not isinstance(source, SemanticLifecycleState):
+            raise TypeError("lifecycle owner requires SemanticLifecycleState")
+        fingerprints = dict(
+            source.applied_transition_fingerprints
+            if fact_fingerprints is None
+            else fact_fingerprints
+        )
+        if source.transition_count != len(fingerprints):
+            raise ValueError("lifecycle owner fact index is incomplete")
+        self._state = replace(
+            source,
+            applied_transition_fingerprints={},
+            complete_validation=False,
+        )
+        self._fact_fingerprints = fingerprints
+        self._generation = 0
+
+    def _validated_checkpoint(self) -> LifecycleCheckpoint:
+        if (
+            type(self._generation) is not int
+            or self._generation < 0
+            or self._state.complete_validation is not False
+            or self._state.applied_transition_fingerprints
+            or self._state.transition_count != len(self._fact_fingerprints)
+        ):
+            raise ValueError("lifecycle owner internals differ")
+        fingerprint = _lifecycle_component_fingerprint_seed()
+        for fact_id, fact_fingerprint in self._fact_fingerprints.items():
+            fingerprint = _extend_lifecycle_component_fingerprint(
+                fingerprint,
+                fact_id=fact_id,
+                fingerprint=fact_fingerprint,
+            )
+        if fingerprint != self._state.transition_fingerprint:
+            raise ValueError("lifecycle owner fact chain differs")
+        state = replace(
+            self._state,
+            applied_transition_fingerprints=self._fact_fingerprints,
+            complete_validation=True,
+        )
+        return SemanticLifecycleReducer.checkpoint(state)
+
+    def __getstate__(self) -> Mapping[str, Any]:
+        self._validated_checkpoint()
+        return {
+            "schema_version": LIFECYCLE_OWNER_STATE_SCHEMA_VERSION,
+            "state": self._state,
+            "fact_fingerprints": tuple(self._fact_fingerprints.items()),
+            "generation": self._generation,
+        }
+
+    def __setstate__(self, state: Mapping[str, Any]) -> None:
+        expected = {
+            "schema_version",
+            "state",
+            "fact_fingerprints",
+            "generation",
+        }
+        if (
+            not isinstance(state, Mapping)
+            or set(state) != expected
+            or state.get("schema_version") != LIFECYCLE_OWNER_STATE_SCHEMA_VERSION
+            or type(state.get("generation")) is not int
+            or state["generation"] < 0
+            or not isinstance(state.get("state"), SemanticLifecycleState)
+        ):
+            raise ValueError("lifecycle owner pickle schema changed")
+        try:
+            pairs = tuple(state["fact_fingerprints"])
+            fingerprints = dict(pairs)
+        except (TypeError, ValueError) as error:
+            raise ValueError("lifecycle owner fact index is invalid") from error
+        if len(pairs) != len(fingerprints):
+            raise ValueError("lifecycle owner fact index repeats an identity")
+        self.__init__(state["state"], fact_fingerprints=fingerprints)
+        self._generation = state["generation"]
+        self._validated_checkpoint()
+
+    @property
+    def generation(self) -> int:
+        return self._generation
+
+    def freeze(self) -> SemanticLifecycleState:
+        return self._state
+
+    def fact_fingerprints(self) -> Mapping[str, str]:
+        """Materialize the cold identity index only for audit/checkpoint use."""
+
+        return FrozenDict(self._fact_fingerprints)
+
+    def stage(self) -> "SemanticLifecycleTransaction":
+        return SemanticLifecycleTransaction(self)
+
+    def checkpoint(self) -> LifecycleCheckpoint:
+        return self._validated_checkpoint()
+
+    @classmethod
+    def restore(cls, checkpoint: LifecycleCheckpoint) -> "SemanticLifecycleOwner":
+        state = SemanticLifecycleReducer.restore(checkpoint)
+        return cls(state)
+
+
+class SemanticLifecycleTransaction:
+    """Bounded lifecycle fact write-set over one committed owner."""
+
+    def __init__(self, owner: SemanticLifecycleOwner) -> None:
+        if not isinstance(owner, SemanticLifecycleOwner):
+            raise TypeError("lifecycle transaction requires its owner")
+        self._owner = owner
+        self._base_generation = owner.generation
+        self._state = owner.freeze()
+        self._writes: dict[str, str] = {}
+        self._closed = False
+
+    def _require_fresh(self) -> None:
+        if self._closed:
+            raise ValueError("lifecycle transaction is closed")
+        if self._owner.generation != self._base_generation:
+            raise ValueError("lifecycle transaction is stale")
+
+    def freeze(self) -> SemanticLifecycleState:
+        self._require_fresh()
+        return self._state
+
+    def reduce(
+        self,
+        transition: NormalizedLifecycleTransition,
+    ) -> SemanticLifecycleState:
+        self._require_fresh()
+        if not isinstance(transition, NormalizedLifecycleTransition):
+            raise TypeError("lifecycle transaction requires normalized input")
+        fingerprint = content_hash(transition)
+        prior = self._writes.get(transition.fact_id)
+        if prior is None:
+            prior = self._owner._fact_fingerprints.get(transition.fact_id)
+        if prior is not None:
+            if prior != fingerprint:
+                raise ValueError("normalized fact identity conflicts with replay history")
+            return self._state
+        self._state = SemanticLifecycleReducer.reduce_hot(
+            self._state,
+            transition,
+        )
+        self._writes[transition.fact_id] = fingerprint
+        return self._state
+
+    def preflight_commit(self) -> SemanticLifecycleState:
+        self._require_fresh()
+        if self._state.transition_count != (
+            len(self._owner._fact_fingerprints) + len(self._writes)
+        ):
+            raise ValueError("lifecycle hot/cold fact cursors diverged")
+        return self._state
+
+    def checkpoint(self) -> LifecycleCheckpoint:
+        self.preflight_commit()
+        fingerprints = dict(self._owner._fact_fingerprints)
+        fingerprints.update(self._writes)
+        state = replace(
+            self._state,
+            applied_transition_fingerprints=fingerprints,
+            complete_validation=True,
+        )
+        return SemanticLifecycleReducer.checkpoint(state)
+
+    def commit(
+        self,
+        *,
+        prevalidated: SemanticLifecycleState | None = None,
+    ) -> SemanticLifecycleState:
+        self._require_fresh()
+        state = self.preflight_commit() if prevalidated is None else prevalidated
+        if state != self._state:
+            raise ValueError("lifecycle prevalidated state changed")
+        return self._commit_prevalidated(state)
+
+    def _commit_prevalidated(
+        self,
+        state: SemanticLifecycleState,
+    ) -> SemanticLifecycleState:
+        """Apply a preflighted fact write-set without another fallible read."""
+
+        self._owner._fact_fingerprints.update(self._writes)
+        self._owner._state = state
+        self._owner._generation += 1
+        self._closed = True
+        return state

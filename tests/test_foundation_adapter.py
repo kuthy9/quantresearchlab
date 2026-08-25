@@ -41,6 +41,8 @@ from smc_trader.semantic_lifecycle import (
 from smc_trader.semantic_zones import FVGStructuralLifecycle
 from smc_trader.semantic_foundation import (
     FoundationObjectType,
+    FoundationProjection,
+    FoundationProjectionCheckpoint,
     FoundationProjectionReducer,
 )
 
@@ -317,6 +319,13 @@ def test_stage_batch_forks_only_mutable_transaction_containers() -> None:
         adapter._seen_event_fingerprints
     )
     assert empty_candidate._real_bars is not adapter._real_bars
+    assert empty_candidate._real_bars._base is adapter._real_bars
+    assert empty_candidate._real_bar_by_id._base is adapter._real_bar_by_id
+    assert empty_candidate._crossings._base is adapter._crossings
+    assert (
+        empty_candidate._structure_bindings._base
+        is adapter._structure_bindings
+    )
 
     level = _atomic(
         "level-created:staged-level",
@@ -342,6 +351,148 @@ def test_stage_batch_forks_only_mutable_transaction_containers() -> None:
     assert level.event_id in candidate.known_input_event_ids
     assert candidate.lifecycle is not prior_lifecycle
     assert candidate.projection is not prior_projection
+
+
+def test_sibling_candidates_fail_stale_without_partial_authority_commit() -> None:
+    adapter = CanonicalFoundationAdapter(tick_size=TICK)
+    first, _ = adapter.stage_batch((_bar(0),))
+    second, _ = adapter.stage_batch((_bar(0),))
+    first.seal_staged_candidate()
+    second.seal_staged_candidate()
+    first.commit_staged_candidate()
+    committed = pickle.dumps(first.checkpoint())
+    cold_count = len(first.materialize_foundation_history())
+
+    with pytest.raises(ValueError, match="stale|another commit"):
+        _ = second.projection
+    with pytest.raises(ValueError, match="stale|another commit"):
+        second.checkpoint()
+    with pytest.raises(ValueError, match="stale|another commit"):
+        second.materialize_foundation_history()
+    with pytest.raises(ValueError, match="stale|another commit"):
+        _ = second.known_input_event_ids
+    with pytest.raises(ValueError, match="stale|another commit"):
+        second.contains_projection_record_id("foundation-record:missing")
+    with pytest.raises(ValueError, match="stale|another commit"):
+        pickle.dumps(second)
+    with pytest.raises(ValueError, match="stale|another commit"):
+        second.commit_staged_candidate()
+
+    assert pickle.dumps(first.checkpoint()) == committed
+    assert len(first.materialize_foundation_history()) == cold_count
+
+
+def test_cold_ledger_preflight_failure_keeps_all_base_authorities_exact(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = CanonicalFoundationAdapter(tick_size=TICK)
+    before = pickle.dumps(adapter.checkpoint())
+    candidate, _ = adapter.stage_batch((_bar(0),))
+    candidate.seal_staged_candidate()
+
+    def reject(_records):
+        raise ValueError("injected cold ledger identity conflict")
+
+    monkeypatch.setattr(candidate._record_ledger, "preview_append", reject)
+    with pytest.raises(ValueError, match="injected cold ledger"):
+        candidate.commit_staged_candidate()
+
+    assert pickle.dumps(adapter.checkpoint()) == before
+    assert adapter.materialize_foundation_history() == ()
+
+
+def test_checkpoint_rejects_projection_chain_not_bound_to_cold_ledger() -> None:
+    adapter = CanonicalFoundationAdapter(tick_size=TICK)
+    _seed_level(adapter, label="chain-tamper")
+    checkpoint = adapter.checkpoint()
+    state = dict(checkpoint.projection_checkpoint.projection.__getstate__())
+    state["component_fingerprint"] = "0" * 64
+    projection = FoundationProjection(**state)
+
+    with pytest.raises(ValueError, match="hot projection differs from cold replay"):
+        replace(
+            checkpoint,
+            projection_checkpoint=FoundationProjectionCheckpoint(projection),
+        )
+
+
+@pytest.mark.parametrize("mutation", ("missing_schema", "unknown_field"))
+def test_versioned_foundation_checkpoint_dtos_reject_pickle_shape_drift(
+    mutation: str,
+) -> None:
+    adapter = CanonicalFoundationAdapter(tick_size=TICK)
+    _seed_level(adapter, label=f"pickle-shape-{mutation}")
+    checkpoint = adapter.checkpoint()
+    values = (
+        checkpoint.projection_checkpoint.projection,
+        checkpoint.projection_checkpoint,
+        adapter._projection_owner,
+        adapter.pending_record_delta,
+        checkpoint.record_ledger_checkpoint,
+        adapter._record_ledger,
+        checkpoint.lifecycle_checkpoint.state,
+        checkpoint.lifecycle_checkpoint,
+        adapter._lifecycle_owner,
+        checkpoint,
+    )
+
+    for value in values:
+        state = dict(value.__getstate__())
+        if mutation == "missing_schema":
+            state.pop("schema_version")
+        else:
+            state["unknown_field"] = "must-fail-closed"
+        with pytest.raises(ValueError):
+            object.__new__(type(value)).__setstate__(state)
+
+
+def test_cold_ledger_pickle_rejects_tampered_derived_identity_index() -> None:
+    adapter = CanonicalFoundationAdapter(tick_size=TICK)
+    _seed_level(adapter, label="ledger-index-tamper")
+    adapter._record_ledger._records_by_id["forged-record"] = "0" * 64
+
+    with pytest.raises(ValueError, match="identity index differs"):
+        pickle.dumps(adapter)
+
+
+def test_adapter_publish_boundaries_reject_foundation_record_byte_tamper(
+) -> None:
+    adapter = CanonicalFoundationAdapter(tick_size=TICK)
+    _seed_level(adapter, label="record-byte-tamper")
+    record = adapter.projection.current_records[-1]
+    object.__setattr__(
+        record,
+        "source_event_ids",
+        (*record.source_event_ids, "forged-adapter-source"),
+    )
+
+    with pytest.raises(ValueError, match="current record identity"):
+        adapter.checkpoint()
+    with pytest.raises(ValueError, match="current record identity"):
+        pickle.dumps(adapter)
+
+
+def test_projection_owner_pickle_rejects_shrunken_derived_view() -> None:
+    adapter = CanonicalFoundationAdapter(tick_size=TICK)
+    _seed_level(adapter, label="projection-owner-tamper")
+    published = adapter.projection
+    assert published.current_records
+    adapter._projection_owner._latest.clear()
+
+    with pytest.raises(ValueError, match="projection owner internals differ"):
+        pickle.dumps(adapter)
+    assert adapter.projection == published
+    assert adapter.projection.current_records
+
+
+def test_lifecycle_owner_pickle_rejects_missing_full_fact_index() -> None:
+    adapter = CanonicalFoundationAdapter(tick_size=TICK)
+    _seed_level(adapter, label="lifecycle-owner-tamper")
+    assert adapter._lifecycle_owner._fact_fingerprints
+    adapter._lifecycle_owner._fact_fingerprints.clear()
+
+    with pytest.raises(ValueError, match="lifecycle owner internals differ"):
+        pickle.dumps(adapter)
 
 
 def test_single_input_identity_query_matches_public_snapshot() -> None:
@@ -541,7 +692,7 @@ def test_terminal_interaction_authority_rejects_cross_level_terminal_fact() -> N
         resolved_minute=2,
         terminal_kind=EventKind.SWEEP_CONFIRMED,
     )
-    records = adapter.projection.records
+    records = adapter.materialize_foundation_history()
     record_index = next(
         index
         for index, record in enumerate(records)
@@ -885,7 +1036,9 @@ def test_clock_only_bar_advances_registered_clock_without_real_semantics() -> No
 
     adapter.consume(first)
     assert (
-        adapter.lifecycle.applied_transitions[0].fingerprint
+        adapter.lifecycle_fact_fingerprints[
+            frozen_real_transition.fact_id
+        ]
         == content_hash(frozen_real_transition)
     )
     projection_before = adapter.projection
@@ -1890,7 +2043,7 @@ def test_retirement_and_reference_replacement_leave_no_stale_dol_candidate() -> 
     assert all(
         metadata[source_id]
         in {EventOrigin.NORMALIZED_DATA, EventOrigin.SEMANTIC_ATOMIC}
-        for record in retired_adapter.projection.records
+        for record in retired_adapter.materialize_foundation_history()
         for source_id in record.source_event_ids
     )
 
@@ -2666,7 +2819,11 @@ def test_exact_evidence_for_rolled_internal_owner_stays_noncanonical() -> None:
     _consume(adapter, (stale_counter_bar, stale_counter_raw))
     checkpoint = adapter.checkpoint()
     assert adapter.consume(stale_counter_mss).ignored is True
-    assert adapter.lifecycle == checkpoint.lifecycle_checkpoint.state
+    assert adapter.lifecycle == replace(
+        checkpoint.lifecycle_checkpoint.state,
+        applied_transition_fingerprints={},
+        complete_validation=False,
+    )
 
 
 def test_counter_mss_on_internal_challenger_does_not_confirm_resumption() -> None:

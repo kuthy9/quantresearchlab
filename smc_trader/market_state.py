@@ -67,6 +67,9 @@ if TYPE_CHECKING:
     from .semantic_foundation import FoundationProjection, FoundationRecord
 
 
+MARKET_SNAPSHOT_SCHEMA_VERSION = 2
+
+
 class DeliveryPhase(str, Enum):
     BALANCE = "balance"
     EXPANSION = "expansion"
@@ -941,6 +944,7 @@ class MarketSnapshot:
     authority: MarketSnapshotAuthority = (
         MarketSnapshotAuthority.LEGACY_UNSPECIFIED
     )
+    schema_version: int = MARKET_SNAPSHOT_SCHEMA_VERSION
     foundation: "FoundationProjection | None" = None
     foundation_range_locations: Mapping[
         Timeframe, DualRangeLocation
@@ -985,6 +989,7 @@ class MarketSnapshot:
             )
         if (
             not self.symbol
+            or self.schema_version != MARKET_SNAPSHOT_SCHEMA_VERSION
             or self.instrument_id < 0
             or not math.isfinite(float(self.price))
             or not self.semantic_version
@@ -1004,25 +1009,53 @@ class MarketSnapshot:
         ):
             raise ValueError("market snapshot identity or causal clock is invalid")
 
+    def __getstate__(self) -> dict[str, Any]:
+        state = dict(self.__dict__)
+        state["schema_version"] = MARKET_SNAPSHOT_SCHEMA_VERSION
+        return state
+
+    def __setstate__(self, state: Mapping[str, Any]) -> None:
+        expected = {
+            "asof",
+            "symbol",
+            "instrument_id",
+            "price",
+            "semantic_version",
+            "semantic_registry_identity",
+            "timeframe_states",
+            "relations",
+            "session",
+            "events_this_update",
+            "labels",
+            "authority",
+            "schema_version",
+            "foundation",
+            "foundation_range_locations",
+        }
+        if (
+            not isinstance(state, Mapping)
+            or set(state) != expected
+            or state.get("schema_version") != MARKET_SNAPSHOT_SCHEMA_VERSION
+        ):
+            raise ValueError("market snapshot pickle schema changed")
+        for name, value in state.items():
+            object.__setattr__(self, name, value)
+        self.__post_init__()
+
     @property
     def fingerprint(self) -> str:
-        primitive = dict(to_primitive(self))
+        snapshot_fields = dict(self.__dict__)
+        snapshot_fields.pop("foundation", None)
+        primitive = dict(to_primitive(snapshot_fields))
         if self.foundation is None:
             # Preserve historical snapshot identities when no v2 projection
             # transport is present.
             primitive.pop("foundation", None)
             primitive.pop("foundation_range_locations", None)
         else:
-            # FoundationProjection keeps private immutable lookup caches for
-            # streaming performance.  They are derived implementation state,
-            # not part of the published/replay identity (and may contain
-            # sets or tuple-keyed maps that are intentionally non-JSON).
-            primitive["foundation"] = {
-                "records": to_primitive(self.foundation.records),
-                "asof": to_primitive(self.foundation.asof),
-                "foundation_version": self.foundation.foundation_version,
-                "registry_identity": self.foundation.registry_identity,
-            }
+            primitive["foundation"] = dict(
+                self.foundation.identity_payload()
+            )
         payload = json.dumps(
             primitive,
             sort_keys=True,
@@ -1032,6 +1065,7 @@ class MarketSnapshot:
 
     def replay_payload(self) -> Mapping[str, Any]:
         payload = {
+            "schema_version": self.schema_version,
             "timeframes": {
                 timeframe.value: to_primitive(state)
                 for timeframe, state in self.timeframe_states.items()
@@ -1044,12 +1078,9 @@ class MarketSnapshot:
             "authority": self.authority.value,
         }
         if self.foundation is not None:
-            payload["foundation"] = {
-                "records": to_primitive(self.foundation.records),
-                "asof": to_primitive(self.foundation.asof),
-                "foundation_version": self.foundation.foundation_version,
-                "registry_identity": self.foundation.registry_identity,
-            }
+            payload["foundation"] = dict(
+                self.foundation.transport_payload()
+            )
             payload["foundation_range_locations"] = {
                 timeframe.value: to_primitive(location)
                 for timeframe, location
@@ -3984,7 +4015,12 @@ def foundation_record_projection_event(
     published_at: pd.Timestamp | None = None,
     sequence_no: int = 0,
 ) -> MarketEvent:
-    """Encode one immutable foundation revision in existing projection transport."""
+    """Build a legacy read-only replay envelope for historical journals.
+
+    Production publication stopped at snapshot schema v2.  This non-exported
+    helper remains only so decoder/tamper tests can construct the old wire
+    shape and prove cold replay compatibility.
+    """
 
     # Local import is required because semantic_foundation owns the DTO but
     # imports this module's geometry types.
@@ -5854,7 +5890,7 @@ class MarketSnapshotPublisher:
         (Timeframe.M15, Timeframe.M5),
         (Timeframe.M5, Timeframe.M1),
     )
-    _STATE_SCHEMA_VERSION = 1
+    _STATE_SCHEMA_VERSION = 2
 
     def __init__(
         self,
@@ -7094,6 +7130,7 @@ def replay_atomic_market_snapshot(
     semantic_registry_identity: str,
     semantic_version: str = SMC_SEMANTIC_VERSION,
     expected_timeframes: Iterable[Timeframe] | None = None,
+    foundation_records: Iterable["FoundationRecord"] = (),
 ) -> MarketSnapshot:
     """Rebuild the latest hierarchy from normalized and semantic events only.
 
@@ -7104,7 +7141,10 @@ def replay_atomic_market_snapshot(
     remains append-only until explicit terminal/archive records close it.
     """
 
-    from .semantic_foundation import FoundationProjectionReducer
+    from .semantic_foundation import (
+        FoundationProjectionReducer,
+        FoundationRecord,
+    )
 
     reducer = TimeframeEventReducer(
         semantic_registry_identity=semantic_registry_identity,
@@ -7124,6 +7164,7 @@ def replay_atomic_market_snapshot(
     last_input_order_key: tuple[pd.Timestamp, int, str] | None = None
     input_event_ids: set[str] = set()
     authoritative_events: dict[str, MarketEvent] = {}
+    legacy_foundation_records_by_id: dict[str, FoundationRecord] = {}
     for event in events:
         if not isinstance(event, MarketEvent):
             raise TypeError("atomic replay accepts only MarketEvent values")
@@ -7136,6 +7177,13 @@ def replay_atomic_market_snapshot(
         input_event_ids.add(event.event_id)
         if event.kind is EventKind.FOUNDATION_STATE_CHANGED:
             record = foundation_record_from_projection_event(event)
+            prior_record = legacy_foundation_records_by_id.get(record.record_id)
+            if prior_record is not None:
+                if prior_record != record:
+                    raise ValueError("foundation record_id collision")
+                retained_events.append(event)
+                continue
+            legacy_foundation_records_by_id[record.record_id] = record
             missing_sources = tuple(
                 source_id
                 for source_id in record.source_event_ids
@@ -7316,7 +7364,57 @@ def replay_atomic_market_snapshot(
                 "atomic replay contains unregistered timeframe state: "
                 + ", ".join(timeframe.value for timeframe in unexpected)
             )
-    if foundation is not None:
+    cold_records = tuple(foundation_records)
+    if cold_records:
+        cold_projection = FoundationProjectionReducer.initial_projection()
+        cold_records_by_id: dict[str, FoundationRecord] = {}
+        for record in cold_records:
+            if not isinstance(record, FoundationRecord):
+                raise TypeError("atomic replay cold foundation ledger is invalid")
+            prior_record = cold_records_by_id.get(record.record_id)
+            if prior_record is not None:
+                if prior_record != record:
+                    raise ValueError("foundation record_id collision")
+                continue
+            cold_records_by_id[record.record_id] = record
+            missing_sources = tuple(
+                source_id
+                for source_id in record.source_event_ids
+                if source_id not in authoritative_events
+            )
+            if missing_sources:
+                raise ValueError(
+                    "cold foundation record references unavailable source events: "
+                    + ", ".join(missing_sources)
+                )
+            future_sources = tuple(
+                source_id
+                for source_id in record.source_event_ids
+                if authoritative_events[source_id].known_at > record.known_at
+            )
+            if future_sources:
+                raise ValueError(
+                    "cold foundation record sources occur after embedded "
+                    "record knowledge: " + ", ".join(future_sources)
+                )
+            _validate_foundation_authoritative_sources(
+                record,
+                authoritative_events,
+                cold_projection,
+            )
+            cold_projection = FoundationProjectionReducer.reduce(
+                cold_projection,
+                record,
+            )
+        cold_projection = FoundationProjectionReducer.validate_complete(
+            cold_projection
+        )
+        if foundation is not None and foundation != cold_projection:
+            raise ValueError(
+                "legacy foundation transport differs from cold ledger replay"
+            )
+        foundation = cold_projection
+    elif foundation is not None:
         foundation = FoundationProjectionReducer.validate_complete(foundation)
     states = foundation_dol_timeframe_states(
         foundation,
@@ -7371,6 +7469,7 @@ __all__ = [
     "MarketSnapshot",
     "MarketSnapshotAuthority",
     "MarketSnapshotPublisher",
+    "MARKET_SNAPSHOT_SCHEMA_VERSION",
     "PriceZoneView",
     "RelationRole",
     "RelationResolver",
@@ -7395,7 +7494,6 @@ __all__ = [
     "build_swing_geometry_nodes",
     "dual_range_location",
     "foundation_record_from_projection_event",
-    "foundation_record_projection_event",
     "foundation_dual_range_locations",
     "foundation_dol_candidate_template",
     "foundation_dol_protected_candidate_template",

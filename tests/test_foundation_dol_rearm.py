@@ -346,7 +346,7 @@ def test_active_generation_ancestry_survives_legacy_source_disappearance() -> No
     assert dict(history[1].descriptive_metrics)["visibility_strength"] == 0.0
 
     replayed_projection = FoundationProjectionReducer.replay(
-        adapter.projection.records
+        adapter.materialize_foundation_history()
     )
     replayed_snapshot = replace(
         published_without_legacy.market_snapshot,
@@ -488,7 +488,9 @@ def test_sweep_departure_generation_two_reenters_graph_context_and_brain() -> No
         Direction.LONG.value
     ]
 
-    replayed = FoundationProjectionReducer.replay(adapter.projection.records)
+    replayed = FoundationProjectionReducer.replay(
+        adapter.materialize_foundation_history()
+    )
     replay_observation = _observation(
         base,
         minute=2,
