@@ -539,10 +539,10 @@ def test_component_digest_versions_are_explicit_and_old_checkpoints_replay() -> 
 
     current_checkpoint = current.compact_runtime_checkpoint()
     assert current_checkpoint["schema_version"] == (
-        "shadow_compact_runtime_v5"
+        "shadow_compact_runtime_v6"
     )
     previous_checkpoint = copy.deepcopy(current_checkpoint)
-    previous_checkpoint["schema_version"] = "shadow_compact_runtime_v4"
+    previous_checkpoint["schema_version"] = "shadow_compact_runtime_v5"
     with pytest.raises(ShadowLiveError, match="legacy compact"):
         ShadowLiveRunner.from_compact_runtime_checkpoint(
             pickle.loads(pickle.dumps(previous_checkpoint)),

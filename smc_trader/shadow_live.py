@@ -99,7 +99,7 @@ _LEGACY_SHADOW_RUNTIME_BINDING_KEYS = tuple(
     for key in SHADOW_RUNTIME_BINDING_KEYS
     if key != "shadow_component_digest_version"
 )
-SHADOW_COMPACT_RUNTIME_CHECKPOINT_SCHEMA = "shadow_compact_runtime_v5"
+SHADOW_COMPACT_RUNTIME_CHECKPOINT_SCHEMA = "shadow_compact_runtime_v6"
 
 _SHADOW_COMPONENT_FINGERPRINT_FIELDS = tuple(
     name

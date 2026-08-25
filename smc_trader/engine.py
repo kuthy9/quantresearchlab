@@ -71,7 +71,7 @@ _REQUIRED_PRIMITIVE_PROTOCOLS = (
 )
 _LIVE_READINESS_TOKEN = object()
 RUNTIME_ACTION_POLICY_SCHEMA_VERSION = 2
-NEUTRAL_ENGINE_CHECKPOINT_SCHEMA_VERSION = 8
+NEUTRAL_ENGINE_CHECKPOINT_SCHEMA_VERSION = 9
 MODEL_SCHEMA_VERSION = 4
 ACTION_PIPELINE_SCHEMA_VERSION = 1
 LEGACY_ACTION_PIPELINE_MODE = "legacy_decision_risk_compat"
@@ -261,18 +261,6 @@ class ContinuousSMCEngine:
                 audit_store = observer.audit_store
                 publisher = observer.market_snapshot_publisher
                 reducer = publisher._event_reducer
-                fact_events = tuple(
-                    event
-                    for name in (
-                        "structure",
-                        "structure_context",
-                        "liquidity",
-                        "displacement",
-                        "zones",
-                        "ranges",
-                    )
-                    for event in getattr(market_snapshot.current_facts, name)
-                )
                 eye_snapshot_bound = bool(
                     market_snapshot is not None
                     and observer.memory._audit_store is audit_store
@@ -282,12 +270,6 @@ class ContinuousSMCEngine:
                     and market_snapshot.event_count == len(audit_store)
                     and market_snapshot.event_prefix_fingerprint
                     == audit_store.fingerprint()
-                    and market_snapshot.current_facts
-                    == reducer.current_facts()
-                    and all(
-                        audit_store.get(event.event_id) is event
-                        for event in fact_events
-                    )
                     and all(
                         audit_store.get(event.event_id) is event
                         for event in market_snapshot.events_this_update

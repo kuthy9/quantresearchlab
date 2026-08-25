@@ -595,7 +595,7 @@ def test_schema_v3_serializes_only_canonical_interaction_facts() -> None:
     )
 
     payload = to_primitive(observation)
-    assert MARKET_OBSERVATION_SCHEMA_VERSION == 4
+    assert MARKET_OBSERVATION_SCHEMA_VERSION == 5
     assert "interaction_update" in payload
     assert "micro_break_facts" in payload["interaction_update"]
     assert "micro_bos_references" not in payload

@@ -17,6 +17,8 @@ from smc_trader.foundation_registry import (
     FOUNDATION_VERSION,
 )
 from smc_trader.market_state import (
+    MARKET_SNAPSHOT_SCHEMA_VERSION,
+    TIMEFRAME_EVENT_REDUCER_SCHEMA_VERSION,
     DeliveryPhase,
     MarketSnapshot,
     MarketSnapshotPublisher,
@@ -73,6 +75,7 @@ from .helpers import (
     CORE_TEST_SCALE_SPECS,
 )
 from .test_event_provenance_contract import (
+    _authoritative_phase23_chain,
     _normalized_bar as _canonical_normalized_bar,
 )
 from .test_semantic_foundation_geometry import _balance_range
@@ -134,13 +137,136 @@ def _reducer_hot_state(reducer: TimeframeEventReducer) -> bytes:
             reducer.cursor,
             reducer._epoch_cursor,
             reducer._last_order_key,
-            reducer._current_fact_event_ids,
             reducer._latest_real_m1_event_id,
             reducer.expected_timeframes,
             reducer._store_prefix_fingerprint,
         ),
         protocol=pickle.HIGHEST_PROTOCOL,
     )
+
+
+def test_timeframe_reducer_owns_only_store_cursor_and_compact_market_state() -> None:
+    chain = _authoritative_phase23_chain()
+    raw_index = next(
+        index
+        for index, event in enumerate(chain)
+        if event.kind is EventKind.RAW_BOUNDARY_BREAK
+    )
+    prefix = chain[: raw_index + 1]
+    raw_break = prefix[-1]
+    store = EventStore.from_events(prefix)
+    reducer = TimeframeEventReducer(
+        event_store=store,
+        semantic_registry_identity="definition-test",
+    )
+
+    assert reducer.consume_available() == prefix
+    assert reducer.event_store is store
+    assert reducer.cursor == len(prefix)
+    assert raw_break.kind is EventKind.RAW_BOUNDARY_BREAK
+    assert "_current_fact_event_ids" not in reducer.__dict__
+
+    checkpoint = reducer.__getstate__()
+    assert TIMEFRAME_EVENT_REDUCER_SCHEMA_VERSION == 2
+    assert "_current_fact_event_ids" not in checkpoint
+    old_checkpoint = dict(checkpoint)
+    old_checkpoint["_reducer_schema_version"] = 1
+    old_checkpoint["_current_fact_event_ids"] = {}
+    before = dict(reducer.__dict__)
+    with pytest.raises(ValueError, match="checkpoint schema changed"):
+        reducer.__setstate__(old_checkpoint)
+    assert reducer.__dict__ == before
+
+    resumed = pickle.loads(pickle.dumps(reducer))
+    cold_store = EventStore.from_events(prefix)
+    cold = TimeframeEventReducer(
+        event_store=cold_store,
+        semantic_registry_identity="definition-test",
+    )
+    cold.consume_available()
+    assert resumed.cursor == cold.cursor == reducer.cursor
+    assert resumed.states == cold.states == reducer.states
+
+    reset = _event(
+        EventKind.MARKET_EPOCH_RESET,
+        100,
+        Timeframe.M1,
+        event_id="market-state-reset",
+        price=None,
+        evidence={"reason": "test_boundary"},
+        origin=EventOrigin.SEMANTIC_ATOMIC,
+    )
+    store.append(reset)
+    assert reducer.consume_available() == (reset,)
+    assert reducer.states == {}
+
+    forged = _event(
+        EventKind.DEALING_RANGE_CREATED,
+        101,
+        Timeframe.M1,
+        event_id="forged-legacy-range",
+        evidence={"range_id": "forged"},
+        zone=(90.0, 110.0),
+    )
+    store.append(forged)
+    with pytest.raises(ValueError, match="noncanonical origin"):
+        reducer.consume_available()
+    assert reducer.cursor == len(prefix) + 1
+    assert reducer.states == {}
+
+
+def test_timeframe_reducer_10k_suffix_keeps_hot_state_history_independent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = EventStore()
+    reducer = TimeframeEventReducer(
+        event_store=store,
+        semantic_registry_identity="definition-test",
+    )
+    events = tuple(
+        _event(
+            EventKind.ENTRY_PATH_STEP,
+            0,
+            Timeframe.M1,
+            event_id=f"legacy-delta:{index:05d}",
+            sequence_no=index,
+            evidence={"step_id": f"step:{index:05d}"},
+        )
+        for index in range(10_000)
+    )
+    store.append_batch(events)
+    original_events_since = store.events_since
+    suffix_calls = 0
+
+    def counted_suffix(index: int):
+        nonlocal suffix_calls
+        suffix_calls += 1
+        return original_events_since(index)
+
+    def forbidden_history_scan(*args, **kwargs):
+        raise AssertionError("hot reducer scanned EventStore history")
+
+    monkeypatch.setattr(store, "events_since", counted_suffix)
+    monkeypatch.setattr(store, "events", forbidden_history_scan)
+    monkeypatch.setattr(store, "prefix_fingerprint", forbidden_history_scan)
+
+    assert reducer.consume_available() == events
+    assert suffix_calls == 1
+    assert reducer.cursor == 10_000
+    assert reducer.states == {}
+    hot_state = pickle.dumps(
+        (
+            reducer.states,
+            reducer.cursor,
+            reducer._epoch_cursor,
+            reducer._last_order_key,
+            reducer._latest_real_m1_event_id,
+            reducer.expected_timeframes,
+            reducer._store_prefix_fingerprint,
+        ),
+        protocol=pickle.HIGHEST_PROTOCOL,
+    )
+    assert len(hot_state) < 1_024
 
 
 def _publisher_hot_state(publisher: MarketSnapshotPublisher) -> bytes:
@@ -1898,6 +2024,14 @@ def test_atomic_replay_mixes_legacy_and_foundation_projection_with_history() -> 
     unknown_field["unknown_field"] = "must-fail-closed"
     with pytest.raises(ValueError, match="market snapshot pickle schema changed"):
         object.__new__(MarketSnapshot).__setstate__(unknown_field)
+    previous_snapshot = replayed.__getstate__()
+    previous_snapshot["schema_version"] = 3
+    previous_snapshot["current_facts"] = {}
+    with pytest.raises(ValueError, match="market snapshot pickle schema changed"):
+        object.__new__(MarketSnapshot).__setstate__(previous_snapshot)
+    assert MARKET_SNAPSHOT_SCHEMA_VERSION == 4
+    assert "current_facts" not in replayed.__dict__
+    assert "current_facts" not in replayed.replay_payload()
     assert tuple(
         record
         for record in (active_record, terminal_record)

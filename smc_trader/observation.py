@@ -12235,9 +12235,6 @@ class CausalObserver:
                 events_this_update=semantic_events,
                 event_count=self.market_snapshot_publisher._event_reducer.cursor,
                 event_prefix_fingerprint=self.audit_store.fingerprint(),
-                current_facts=(
-                    self.market_snapshot_publisher._event_reducer.current_facts()
-                ),
                 foundation=foundation_projection,
                 foundation_range_locations=(
                     foundation_dual_range_locations(

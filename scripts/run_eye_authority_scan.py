@@ -113,7 +113,6 @@ RUNTIME_CODE_FILES = (
     "scripts/run_eye_authority_scan.py",
     "smc_trader/artifact_stream.py",
     "smc_trader/causal.py",
-    "smc_trader/current_facts.py",
     "smc_trader/displacement.py",
     "smc_trader/displacement_observer.py",
     "smc_trader/event_store.py",

@@ -19,13 +19,6 @@ from typing import TYPE_CHECKING, Any, Iterable, Mapping, Sequence
 
 import pandas as pd
 
-from .current_facts import (
-    CurrentMarketFacts,
-    _CURRENT_FACT_FAMILIES,
-    advance_bos_resolution,
-    advance_current_facts,
-    materialize_current_facts,
-)
 from .event_store import EventStore
 from .foundation_registry import (
     FOUNDATION_CANONICAL_IDENTITY,
@@ -74,8 +67,8 @@ if TYPE_CHECKING:
     from .semantic_foundation import FoundationProjection, FoundationRecord
 
 
-MARKET_SNAPSHOT_SCHEMA_VERSION = 3
-TIMEFRAME_EVENT_REDUCER_SCHEMA_VERSION = 1
+MARKET_SNAPSHOT_SCHEMA_VERSION = 4
+TIMEFRAME_EVENT_REDUCER_SCHEMA_VERSION = 2
 
 
 class DeliveryPhase(str, Enum):
@@ -959,7 +952,6 @@ class MarketSnapshot:
     foundation_range_locations: Mapping[
         Timeframe, DualRangeLocation
     ] = field(default_factory=dict)
-    current_facts: CurrentMarketFacts = field(default_factory=CurrentMarketFacts)
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -1017,20 +1009,6 @@ class MarketSnapshot:
             or any(relation.relation_id != key for key, relation in relations.items())
             or self.session.known_at != self.asof
             or any(event.known_at > self.asof for event in self.events_this_update)
-            or type(self.current_facts) is not CurrentMarketFacts
-            or any(
-                event.known_at > self.asof
-                or event.semantic_version != self.semantic_version
-                for values in (
-                    self.current_facts.structure,
-                    self.current_facts.structure_context,
-                    self.current_facts.liquidity,
-                    self.current_facts.displacement,
-                    self.current_facts.zones,
-                    self.current_facts.ranges,
-                )
-                for event in values
-            )
             or foundation_invalid
             or any(
                 not isinstance(timeframe, Timeframe)
@@ -1066,7 +1044,6 @@ class MarketSnapshot:
             "schema_version",
             "foundation",
             "foundation_range_locations",
-            "current_facts",
         }
         if (
             not isinstance(state, Mapping)
@@ -1117,7 +1094,6 @@ class MarketSnapshot:
             "authority": self.authority.value,
             "event_count": self.event_count,
             "event_prefix_fingerprint": self.event_prefix_fingerprint,
-            "current_facts": to_primitive(self.current_facts),
         }
         if self.foundation is not None:
             payload["foundation"] = dict(
@@ -1168,6 +1144,25 @@ _TIMEFRAME_REDUCER_KINDS = frozenset(
         EventKind.ORIGIN_ZONE_TOUCHED,
         EventKind.ORIGIN_ZONE_MITIGATED,
         EventKind.ORIGIN_ZONE_INVALIDATED,
+    }
+)
+
+# The reducer accepts only the atomic kinds emitted by the v1.2 semantic
+# registry plus the journal-level epoch reset.  Reserved compatibility kinds
+# remain readable in EventStore but cannot acquire atomic authority here.
+_CANONICAL_ATOMIC_KINDS = frozenset(
+    (
+        _TIMEFRAME_REDUCER_KINDS
+        - {
+            EventKind.BAR_COMPLETED,
+            EventKind.FVG_EXPIRED,
+            EventKind.ORIGIN_ZONE_TOUCHED,
+            EventKind.DEALING_RANGE_EXTENDED,
+        }
+    )
+    | {
+        EventKind.RAW_BOUNDARY_BREAK,
+        EventKind.MARKET_EPOCH_RESET,
     }
 )
 
@@ -2113,9 +2108,6 @@ class TimeframeEventReducer:
         self._cursor = 0
         self._epoch_cursor = 0
         self._last_order_key: tuple[pd.Timestamp, int, str] | None = None
-        self._current_fact_event_ids: dict[
-            tuple[str, str, str, str], str
-        ] = {}
         self._latest_real_m1_event_id: str | None = None
         self._expected_timeframes: tuple[Timeframe, ...] | None = None
         self._store_prefix_fingerprint = event_store.fingerprint()
@@ -2181,7 +2173,6 @@ class TimeframeEventReducer:
             "_cursor",
             "_epoch_cursor",
             "_last_order_key",
-            "_current_fact_event_ids",
             "_latest_real_m1_event_id",
             "_expected_timeframes",
             "_store_prefix_fingerprint",
@@ -2211,10 +2202,8 @@ class TimeframeEventReducer:
             or self._store_prefix_fingerprint
             != self.event_store.prefix_fingerprint(self._cursor)
             or not isinstance(self.states, dict)
-            or not isinstance(self._current_fact_event_ids, dict)
         ):
             raise ValueError("timeframe reducer checkpoint is not store-bound")
-        self.current_facts()
         _ = self.latest_real_m1_event
         # Checkpoint restore is the explicit cold-validation boundary.  The
         # hot reducer never scans history; restore proves that compact state
@@ -2238,8 +2227,6 @@ class TimeframeEventReducer:
             verifier.states != self.states
             or verifier._epoch_cursor != self._epoch_cursor
             or verifier._last_order_key != self._last_order_key
-            or verifier._current_fact_event_ids
-            != self._current_fact_event_ids
             or verifier._latest_real_m1_event_id
             != self._latest_real_m1_event_id
         ):
@@ -2261,12 +2248,6 @@ class TimeframeEventReducer:
             raise ValueError("timeframe reducer latest real M1 index is invalid")
         return event
 
-    def current_facts(self) -> CurrentMarketFacts:
-        return materialize_current_facts(
-            event_store=self.event_store,
-            index=self._current_fact_event_ids,
-        )
-
     def consume_available(
         self,
         *,
@@ -2286,7 +2267,6 @@ class TimeframeEventReducer:
         staged = object.__new__(type(self))
         staged.__dict__ = dict(self.__dict__)
         staged.states = dict(self.states)
-        staged._current_fact_event_ids = dict(self._current_fact_event_ids)
         for offset, event in enumerate(suffix, start=self._cursor):
             if projection_only and not (
                 event.origin is EventOrigin.STATE_PROJECTION
@@ -2302,32 +2282,10 @@ class TimeframeEventReducer:
         self._cursor = staged._cursor
         self._epoch_cursor = staged._epoch_cursor
         self._last_order_key = staged._last_order_key
-        self._current_fact_event_ids = staged._current_fact_event_ids
         self._latest_real_m1_event_id = staged._latest_real_m1_event_id
         self._expected_timeframes = staged._expected_timeframes
         self._store_prefix_fingerprint = staged._store_prefix_fingerprint
         return suffix
-
-    def _advance_current_facts(
-        self,
-        event: MarketEvent,
-        *,
-        source_timeframe: Timeframe | None,
-    ) -> None:
-        advance_current_facts(
-            event_store=self.event_store,
-            index=self._current_fact_event_ids,
-            states=self.states,
-            event=event,
-            source_timeframe=source_timeframe,
-        )
-
-    def _advance_bos_resolution(self, event: MarketEvent) -> None:
-        advance_bos_resolution(
-            event_store=self.event_store,
-            index=self._current_fact_event_ids,
-            event=event,
-        )
 
     def _consume_committed(self, event: MarketEvent, *, store_index: int) -> None:
         if self.event_store.get(event.event_id) is not event:
@@ -2357,10 +2315,9 @@ class TimeframeEventReducer:
             return
         if event.origin is EventOrigin.LEGACY_TRANSPORT:
             if (
-                event.kind in _CURRENT_FACT_FAMILIES
+                event.kind in _CANONICAL_ATOMIC_KINDS
                 or event.kind in {
                     EventKind.BAR_COMPLETED,
-                    EventKind.MARKET_EPOCH_RESET,
                 }
             ):
                 raise ValueError(
@@ -2373,10 +2330,7 @@ class TimeframeEventReducer:
                     "normalized-data origin is reserved for BAR roots"
                 )
         elif event.origin is EventOrigin.SEMANTIC_ATOMIC:
-            if (
-                event.kind not in _CURRENT_FACT_FAMILIES
-                and event.kind is not EventKind.MARKET_EPOCH_RESET
-            ):
+            if event.kind not in _CANONICAL_ATOMIC_KINDS:
                 raise ValueError(
                     "semantic-atomic current-state kind is not registry-emitted"
                 )
@@ -2440,7 +2394,6 @@ class TimeframeEventReducer:
             )
         if event.kind is EventKind.MARKET_EPOCH_RESET:
             self.states.clear()
-            self._current_fact_event_ids.clear()
             self._latest_real_m1_event_id = None
             self._epoch_cursor = store_index + 1
             self._expected_timeframes = staged_expected_timeframes
@@ -2502,11 +2455,6 @@ class TimeframeEventReducer:
             and event.evidence.get("clock_only") is False
         ):
             self._latest_real_m1_event_id = event.event_id
-        self._advance_current_facts(
-            event,
-            source_timeframe=source_timeframe,
-        )
-        self._advance_bos_resolution(event)
         self._expected_timeframes = staged_expected_timeframes
 
 
@@ -5942,7 +5890,7 @@ class MarketSnapshotPublisher:
         (Timeframe.M15, Timeframe.M5),
         (Timeframe.M5, Timeframe.M1),
     )
-    _STATE_SCHEMA_VERSION = 3
+    _STATE_SCHEMA_VERSION = 4
     _PICKLE_FIELDS = frozenset(
         {
             "semantic_registry_identity",
@@ -6957,9 +6905,6 @@ class MarketSnapshotPublisher:
             "_cursor": self._event_reducer._cursor,
             "_epoch_cursor": self._event_reducer._epoch_cursor,
             "_last_order_key": self._event_reducer._last_order_key,
-            "_current_fact_event_ids": dict(
-                self._event_reducer._current_fact_event_ids
-            ),
             "_latest_real_m1_event_id": (
                 self._event_reducer._latest_real_m1_event_id
             ),
@@ -7280,7 +7225,6 @@ class MarketSnapshotPublisher:
             event_count=self._event_reducer.cursor,
             event_prefix_fingerprint=self.event_store.fingerprint(),
             authority=authority,
-            current_facts=self._event_reducer.current_facts(),
         )
         if self.atomic_authority and has_epoch_reset:
             self._boundary_reset_pending = False
@@ -7633,7 +7577,6 @@ def replay_atomic_market_snapshot(
             price=float(latest_real_bar.close),
             timeframes=states,
         ),
-        current_facts=reducer.current_facts(),
     )
 
 
