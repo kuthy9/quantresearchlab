@@ -2172,12 +2172,14 @@ def test_default_replay_is_lightweight_resumable_and_deterministic(
     assert "causal_case_input_rows" not in checkpoint
     assert "causal_case_outcome_rows" not in checkpoint
     empty_action_policy = {
-        "schema_version": 1,
+        "schema_version": 2,
+        "action_pipeline_mode": "legacy_decision_risk_compat",
         "scope": "new_entry_action_candidates_only",
         "disabled_new_entry_playbooks": [],
         "decision_belief_projection": "action_filtered",
         "engine_snapshot_belief_projection": "raw",
         "position_management_projection": "raw",
+        "trade_intent_projection": "disabled_in_legacy_compat",
     }
     assert checkpoint["runtime_action_policy_identity"] == empty_action_policy
     assert checkpoint["replay"].engine.runtime_action_policy_identity == (

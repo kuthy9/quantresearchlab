@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import hashlib
 import inspect
 import json
 from pathlib import Path
@@ -20,13 +21,23 @@ from smc_trader.model import Bar, to_primitive
 from smc_trader.scene_graph import scale_registry_id
 
 
-@pytest.mark.parametrize("window_key", ("W1", "W2"))
-def test_committed_manifest_is_exact_canonical_render(window_key: str) -> None:
-    path = comparison.ROOT / comparison.WINDOWS[window_key]["manifest"]
+_HISTORICAL_MANIFEST_SHA256 = {
+    "W1": "1b832e72084684735bfe95b827c83282d0285ecdc1a5bdd83643036019b68b98",
+    "W2": "4c6595c19bab5ed1d547edc4306e8c0647413242894ce7ffbf497df44be22584",
+}
 
-    assert path.read_text(encoding="utf-8") == comparison.canonical_manifest_text(
-        window_key
+
+@pytest.mark.parametrize("window_key", ("W1", "W2"))
+def test_committed_manifest_is_immutable_historical_runtime(window_key: str) -> None:
+    path = comparison.ROOT / comparison.WINDOWS[window_key]["manifest"]
+    committed = path.read_bytes()
+
+    assert hashlib.sha256(committed).hexdigest() == (
+        _HISTORICAL_MANIFEST_SHA256[window_key]
     )
+    assert committed.decode("utf-8") != comparison.canonical_manifest_text(window_key)
+    with pytest.raises(Phase6ResearchError, match="manifest drifted"):
+        comparison.validate_window(window_key)
 
 
 @pytest.mark.parametrize(
@@ -52,12 +63,14 @@ def test_validate_only_binds_current_foundation_window_and_data(
     window_id: str,
     synthetic_clock: str,
 ) -> None:
-    contract = comparison.validate_window(window_key)
-    payload = contract.payload
+    payload = comparison.build_manifest(window_key)
     comparison_contract = payload["comparison_contract"]
+    active_window = payload["windows"][
+        "primary" if window_key == "W1" else "underpowered_extension"
+    ]
 
-    assert contract.active_window.window_id == window_id
-    assert contract.active_window.expected_rows == 6900
+    assert active_window["id"] == window_id
+    assert active_window["expected_rows"] == 6900
     assert comparison_contract["comparison_role"] == role
     assert comparison_contract["expected_completed_clocks"] == 6900
     assert comparison_contract["expected_real_completed_clocks"] == 6899

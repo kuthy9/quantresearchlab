@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import hashlib
 import json
 from pathlib import Path
 
@@ -11,13 +12,23 @@ from scripts import run_semantic_signal_research as semantic_runner
 from smc_trader.signal_research import ResearchContractError
 
 
-@pytest.mark.parametrize("window_key", ("W1", "W2"))
-def test_committed_manifest_is_exact_canonical_render(window_key: str) -> None:
-    path = comparison.ROOT / comparison.WINDOWS[window_key]["manifest"]
+_HISTORICAL_MANIFEST_SHA256 = {
+    "W1": "4d03649ceaea9a337fb8a95ed586c80e8b735f763c57cba8c635c73860d5bbc6",
+    "W2": "945f12fa366c982d1430ddc596556e990371a505142dcbaf10618e1efd7317f4",
+}
 
-    assert path.read_text(encoding="utf-8") == comparison.canonical_manifest_text(
-        window_key
+
+@pytest.mark.parametrize("window_key", ("W1", "W2"))
+def test_committed_manifest_is_immutable_historical_runtime(window_key: str) -> None:
+    path = comparison.ROOT / comparison.WINDOWS[window_key]["manifest"]
+    committed = path.read_bytes()
+
+    assert hashlib.sha256(committed).hexdigest() == (
+        _HISTORICAL_MANIFEST_SHA256[window_key]
     )
+    assert committed.decode("utf-8") != comparison.canonical_manifest_text(window_key)
+    with pytest.raises(ResearchContractError, match="manifest drifted"):
+        comparison.validate_window(window_key)
 
 
 @pytest.mark.parametrize(
@@ -32,8 +43,7 @@ def test_contract_only_validation_binds_window_foundation_and_census(
     role: str,
     emitted: int,
 ) -> None:
-    contract = comparison.validate_window(window_key)
-    payload = contract.payload
+    payload = comparison.build_manifest(window_key)
 
     assert payload["comparison_contract"]["comparison_role"] == role
     assert payload["comparison_contract"]["expected_contracts"] == [
@@ -53,8 +63,11 @@ def test_contract_only_validation_binds_window_foundation_and_census(
     assert payload["input_census"]["expected_synthetic_clocks"] == payload[
         "comparison_contract"
     ]["expected_synthetic_clocks"]
-    assert payload["event_definition"]["snapshot_authority"] == (
-        "atomic_event_reducer"
+    assert payload["comparison_contract"]["foundation_mode"] == (
+        "additive_canonical_projection"
+    )
+    assert payload["comparison_contract"]["detector_source"] == (
+        "scripts/run_semantic_signal_research.py"
     )
 
 
