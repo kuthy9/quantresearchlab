@@ -6,7 +6,6 @@ import argparse
 from collections import Counter
 from dataclasses import replace
 from datetime import datetime
-import hashlib
 import json
 from pathlib import Path
 import sys
@@ -18,11 +17,18 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from smc_trader.artifact_stream import atomic_bytes, canonical_json  # noqa: E402
+from smc_trader.artifact_stream import (  # noqa: E402
+    bound_regular_file,
+    normalise_sha256,
+    publish_canonical_manifest,
+    read_json_object,
+    sha256_file,
+)
 from smc_trader.case_retrieval import (  # noqa: E402
     MARKET_EPISODE_ACTIVE_ENSEMBLE_HEAD_WIDTHS,
     MARKET_EPISODE_FIRST_OCCURRENCE_SELECTION_CONTRACT,
     MARKET_EPISODE_MATERIAL_KINDS,
+    MARKET_EPISODE_RETRIEVAL_PROTOCOL,
     CaseRetrievalError,
     MarketEpisodeCaseIndex,
     MarketEpisodeEmbeddingQuery,
@@ -80,33 +86,30 @@ HEAD_FIELDS = {
 }
 
 def _sha(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+    return sha256_file(path)
 
 def _digest(value: Any, name: str) -> str:
-    token = str(value or "").strip().lower()
-    if len(token) != 64 or any(char not in "0123456789abcdef" for char in token):
-        raise CaseRetrievalError(f"{name} is not a SHA-256")
-    return token
+    try:
+        return normalise_sha256(value, name=name)
+    except ValueError as exc:
+        raise CaseRetrievalError(str(exc)) from exc
 
 def _object(path: Path, name: str) -> Mapping[str, Any]:
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise CaseRetrievalError(f"{name} is invalid JSON") from exc
-    if not isinstance(value, Mapping):
-        raise CaseRetrievalError(f"{name} must be an object")
-    return value
+        return read_json_object(path, name=name)
+    except (OSError, ValueError) as exc:
+        raise CaseRetrievalError(str(exc)) from exc
 
 def _bound(owner: Path, raw: Any, name: str) -> Path:
-    path = Path(str(raw or ""))
-    path = path if path.is_absolute() else owner.parent / path
-    if path.is_symlink() or not path.is_file():
-        raise CaseRetrievalError(f"{name} is absent or not a regular file")
-    return path.resolve()
+    try:
+        return bound_regular_file(
+            owner.parent,
+            Path(str(raw or "")),
+            name=name,
+            allow_absolute_within_root=True,
+        )
+    except (OSError, ValueError) as exc:
+        raise CaseRetrievalError(str(exc)) from exc
 
 def _rows(path: Path) -> list[dict[str, Any]]:
     output: list[dict[str, Any]] = []
@@ -427,7 +430,9 @@ def evaluate(
     disagreements = [item.ensemble_disagreement for item in unique.values() if item.ensemble_disagreement is not None]
     missing = [item for item in unique.values() if item.ensemble_members < expected_members]
     return {
-        "schema_version": 2, "evaluation": "neutral_market_episode_geometry_retrieval_ood",
+        "schema_version": 3,
+        "evaluation": "neutral_market_episode_geometry_retrieval_ood",
+        "retrieval_protocol": dict(MARKET_EPISODE_RETRIEVAL_PROTOCOL),
         "input_artifact_sha256": {"embeddings": embeddings["artifact_sha256"], "active_heads": heads["artifact_sha256"]},
         "direct_source_preprocessing": (
             neutral_direct_source_preprocessing_identity()
@@ -444,7 +449,10 @@ def evaluate(
                 "coverage_with_eligible_neighbour": sum(value > 0 for value in eligible) / len(eligible),
                 "mean_local_density": _mean([item.local_density for item in assessments]),
                 "different_calendar_date_required": True,
-                "scoped_episode_identity": "run_manifest_sha256+market_epoch_id+market_episode_id",
+                "neighbour_scope": (
+                    "same_source_contract+same_market_epoch+strictly_prior+"
+                    "different_physical_market_episode_id_across_all_runs"
+                ),
             },
             "ood": {
                 "policy_counts": dict(sorted(Counter(item.policy.value for item in assessments).items())),
@@ -479,8 +487,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             k=args.k,
             thresholds=thresholds,
         )
-        atomic_bytes(args.output.resolve(), canonical_json(report))
-    except (CaseRetrievalError, TypeError, ValueError) as exc:
+        publish_canonical_manifest(args.output.resolve(), report)
+    except (CaseRetrievalError, FileExistsError, TypeError, ValueError) as exc:
         raise SystemExit(f"neutral retrieval evaluation refused input: {exc}") from exc
     return 0
 

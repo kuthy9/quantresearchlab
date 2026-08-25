@@ -88,9 +88,12 @@ terminal/retired identities, and rows waiting to be drained. Draining releases
 the pending rows; the recorder does not retain a year of prior rows or
 fingerprints.
 
-The runner's generic Arrow stream machinery owns shard schema, hash, key-bound,
-checkpoint, and manifest integrity. V1 deliberately has no separate case
-library finalizer.
+The runner's protocol-neutral artifact machinery owns Arrow shard storage,
+canonical manifest/path/hash validation and atomic publication. Retrieval uses
+the same immutable vector/cosine core as the legacy `CausalCase` index, but the
+MarketEpisode schema, identity, input-only validator and estimand remain
+independent. V1 deliberately has no separate case-library finalizer or outcome
+stream.
 
 ## One-time migration parity
 

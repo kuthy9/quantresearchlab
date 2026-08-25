@@ -3,8 +3,11 @@
 > The EntryEpisode/outcome material below documents the legacy compatibility
 > path. New neutral work uses `MarketEpisodeCaseIndex`: input-stream and run
 > manifest hashes plus an explicit physical milestone select the first online
-> occurrence, and retrieval is limited to strictly prior, same-epoch,
-> different-MarketEpisode embeddings. Its result has no outcome distribution.
+> occurrence. Protocol `market-episode-case-retrieval-1.1.0` requires the same
+> source contract and market epoch, a strictly prior clock, and a different
+> run-independent physical MarketEpisode ID. An overlapping replay run cannot
+> retrieve the query episode as its own neighbour. Its result has no outcome
+> distribution.
 > Ensemble disagreement accepts only `next_lifecycle` and
 > `scale_direction_alignment`; missing independent members abstains. The
 > January 2024 neutral corpus is audit-only, so no trained neutral retrieval
@@ -16,9 +19,14 @@ MarketEpisode/location/path identities and the complete same-clock material
 kind set, binds the unmasked encoder checkpoint, and contains no outcome
 payload. The current audit-only CLI deliberately never calls these exporters.
 
-The retrieval layer is a read-only empirical-prior service over the unified
-causal case library. It does not replay the market, alter a playbook gate, or
-own a Decision, Risk, Eye, or execution action.
+The retrieval layer is a read-only empirical-prior service. `CausalCase` and
+neutral `MarketEpisode` remain separate semantic protocols: the former may
+join an independently resolved outcome only after neighbour selection, while
+the latter is input-only. Their implementations share storage, canonical
+manifest/path/hash checks, no-clobber publishing, immutable vector storage and
+cosine/OOD mechanics—not schemas, estimands, eligibility or leakage rules. The
+layer does not replay the market, alter a playbook gate, or own a Decision,
+Risk, Eye, or execution action.
 
 ## Input contract
 

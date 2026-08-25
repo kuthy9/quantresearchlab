@@ -1,10 +1,16 @@
-"""Atomic, hash-bound Parquet shard streams used by long calibration jobs."""
+"""Small, protocol-neutral primitives for hash-bound research artifacts.
+
+Semantic schemas and leakage rules belong to their owning recorders.  This
+module owns only canonical encoding, safe path binding, content hashes and
+atomic publication/storage mechanics shared by those protocols.
+"""
 from __future__ import annotations
 
 import hashlib
 import json
 import os
 from pathlib import Path
+import tempfile
 from typing import Any, Mapping
 
 import pandas as pd
@@ -24,7 +30,124 @@ def canonical_json(payload: Mapping[str, Any]) -> bytes:
         sort_keys=True,
         separators=(",", ":"),
         ensure_ascii=False,
+        allow_nan=False,
     ).encode("utf-8")
+
+
+def canonical_record_sha256(payload: Mapping[str, Any]) -> str:
+    """Hash one JSON-safe record using the shared canonical encoding."""
+
+    return hashlib.sha256(canonical_json(payload)).hexdigest()
+
+
+def normalise_sha256(value: Any, *, name: str) -> str:
+    """Return one lowercase SHA-256 or reject the external identity."""
+
+    digest = str(value or "").strip().lower()
+    if len(digest) != 64 or any(
+        character not in "0123456789abcdef" for character in digest
+    ):
+        raise ValueError(f"{name} must be a SHA-256")
+    return digest
+
+
+def bound_regular_file(
+    root: str | Path,
+    value: str | Path,
+    *,
+    name: str,
+    direct_child: bool = False,
+    allow_absolute_within_root: bool = False,
+) -> Path:
+    """Resolve one non-symlink file while confining it to ``root``."""
+
+    owner = Path(root).resolve()
+    relative = Path(value)
+    if not relative.parts or ".." in relative.parts:
+        raise ValueError(f"{name} binding must be relative")
+    if relative.is_absolute():
+        if not allow_absolute_within_root:
+            raise ValueError(f"{name} binding must be relative")
+        unresolved = relative
+    else:
+        unresolved = owner / relative
+    if unresolved.is_symlink() or not unresolved.is_file():
+        raise FileNotFoundError(f"{name} binding is missing: {unresolved}")
+    resolved = unresolved.resolve()
+    if owner != resolved.parent and owner not in resolved.parents:
+        raise ValueError(f"{name} binding escaped its root")
+    if direct_child and resolved.parent != owner:
+        raise ValueError(f"{name} binding must be a direct child")
+    return resolved
+
+
+def read_json_object(
+    path: str | Path,
+    *,
+    expected_sha256: str | None = None,
+    name: str = "JSON artifact",
+    require_canonical: bool = False,
+) -> dict[str, Any]:
+    """Read and optionally hash/canonical-check one regular JSON object."""
+
+    source = Path(path)
+    if source.is_symlink() or not source.is_file():
+        raise FileNotFoundError(f"{name} is not a regular file: {source}")
+    payload = source.read_bytes()
+    if expected_sha256 is not None:
+        expected = normalise_sha256(expected_sha256, name=f"{name} SHA-256")
+        actual = hashlib.sha256(payload).hexdigest()
+        if actual != expected:
+            raise ValueError(f"{name} content hash mismatch")
+    try:
+        value = json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"{name} is not valid JSON") from exc
+    if not isinstance(value, Mapping):
+        raise ValueError(f"{name} must be an object")
+    output = dict(value)
+    if require_canonical and payload != canonical_json(output):
+        raise ValueError(f"{name} is not canonical JSON")
+    return output
+
+
+def publish_bytes_no_clobber(path: str | Path, payload: bytes) -> Path:
+    """Atomically publish bytes exactly once without replacing any target.
+
+    A same-directory temporary is fsynced and hard-linked into place.  The
+    link operation is an atomic compare-and-set: an existing file or symlink
+    causes ``FileExistsError`` and remains untouched.
+    """
+
+    destination = Path(path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="wb",
+            dir=destination.parent,
+            prefix=f".{destination.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            temporary = Path(handle.name)
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.link(temporary, destination)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+    return destination
+
+
+def publish_canonical_manifest(
+    path: str | Path,
+    payload: Mapping[str, Any],
+) -> Path:
+    """No-clobber publication for a canonical JSON manifest or report."""
+
+    return publish_bytes_no_clobber(path, canonical_json(payload))
 
 
 def atomic_bytes(path: str | Path, payload: bytes) -> None:
@@ -263,8 +386,14 @@ def write_stream_manifest(
 __all__ = [
     "atomic_bytes",
     "atomic_parquet",
+    "bound_regular_file",
     "canonical_json",
+    "canonical_record_sha256",
     "new_stream_state",
+    "normalise_sha256",
+    "publish_bytes_no_clobber",
+    "publish_canonical_manifest",
+    "read_json_object",
     "sha256_file",
     "verify_stream_shards",
     "write_stream_manifest",

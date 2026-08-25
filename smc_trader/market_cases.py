@@ -13,14 +13,13 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, fields, is_dataclass, replace
 from enum import Enum
-import hashlib
 import json
 import math
 from typing import Any, Iterable
 
 import pandas as pd
 
-from .artifact_stream import canonical_json
+from .artifact_stream import canonical_json, canonical_record_sha256
 from .model import (
     Direction,
     NEUTRAL_MARKET_STATE_SCHEMA_VERSION,
@@ -254,7 +253,10 @@ def _parse_json(raw: Any, *, name: str) -> Any:
 
 
 def _hash_payload(value: Any) -> str:
-    return hashlib.sha256(canonical_json(_primitive(value))).hexdigest()
+    payload = _primitive(value)
+    if not isinstance(payload, Mapping):
+        raise ValueError("market case identity payload must be an object")
+    return canonical_record_sha256(payload)
 
 
 def _canonical_id_set(values: Iterable[Any], *, name: str) -> tuple[str, ...]:

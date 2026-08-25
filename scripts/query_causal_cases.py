@@ -19,7 +19,13 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from smc_trader.artifact_stream import atomic_bytes, canonical_json  # noqa: E402
+from smc_trader.artifact_stream import (  # noqa: E402
+    canonical_json,
+    normalise_sha256,
+    publish_canonical_manifest,
+    read_json_object,
+    sha256_file,
+)
 from smc_trader.case_retrieval import (  # noqa: E402
     DEFAULT_MARKET_EMBEDDING_DIM,
     CaseRetrievalError,
@@ -122,20 +128,14 @@ def _read_records(path: Path) -> list[dict[str, Any]]:
 
 
 def _sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+    return sha256_file(path)
 
 
 def _manifest_sha(value: str | None, *, name: str) -> str:
-    normalised = str(value or "").strip().lower()
-    if len(normalised) != 64 or any(
-        character not in "0123456789abcdef" for character in normalised
-    ):
-        raise CaseRetrievalError(f"{name} must be a pre-registered SHA-256")
-    return normalised
+    try:
+        return normalise_sha256(value, name=name)
+    except ValueError as exc:
+        raise CaseRetrievalError(str(exc)) from exc
 
 
 def _artifact_lineage(payload: Mapping[str, Any]) -> dict[str, Any]:
@@ -193,11 +193,9 @@ def _validate_export_artifact(
     if _sha256_file(manifest) != expected_sha:
         raise CaseRetrievalError("artifact manifest content hash mismatch")
     try:
-        payload = json.loads(manifest.read_text(encoding="utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise CaseRetrievalError("artifact manifest is invalid JSON") from exc
-    if not isinstance(payload, Mapping):
-        raise CaseRetrievalError("artifact manifest must be an object")
+        payload = read_json_object(manifest, name="artifact manifest")
+    except (OSError, ValueError) as exc:
+        raise CaseRetrievalError(str(exc)) from exc
     if (
         payload.get("schema") != expected_schema
         or payload.get("status") != "complete"
@@ -368,7 +366,12 @@ def _write_or_print(payload: Mapping[str, Any], destination: Path | None) -> Non
     if destination is None:
         sys.stdout.write(encoded.decode("utf-8") + "\n")
     else:
-        atomic_bytes(destination, encoded)
+        try:
+            publish_canonical_manifest(destination, payload)
+        except FileExistsError as exc:
+            raise CaseRetrievalError(
+                f"output already exists and will not be replaced: {destination}"
+            ) from exc
 
 
 def _build(args: argparse.Namespace) -> None:

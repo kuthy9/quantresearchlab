@@ -63,10 +63,20 @@ no-gradient reports and are never used to tune a threshold.
 `MarketEpisodeCaseIndex` is a thin, outcome-free retrieval facade over the
 shared cosine-distance, local-density and OOD routing core. It admits only the
 first online occurrence of an explicitly selected physical milestone, requires
-strictly prior neighbours from the same epoch and a different MarketEpisode,
-and accepts ensemble disagreement only from the active `next_lifecycle` and
-`scale_direction_alignment` heads. Missing independent ensemble members routes
-to abstention; no historical outcome distribution is joined.
+the exact same source/dataset contract, the same market epoch, a strictly prior
+clock, and a different run-independent physical MarketEpisode ID. Replaying
+the same physical episode in another run therefore cannot create a
+self-neighbour. It accepts ensemble disagreement only from the active
+`next_lifecycle` and `scale_direction_alignment` heads. Missing independent
+ensemble members routes to abstention; no historical outcome distribution is
+joined.
+
+The neutral selector and legacy `CausalCase` selector keep distinct record
+schemas, identities, estimands, eligibility rules and leakage validators.
+They share only protocol-neutral mechanics: canonical JSON/hash/path checks,
+no-clobber publication, Arrow shard storage, an immutable vector matrix and
+deterministic cosine/OOD calculations. In particular, the neutral path cannot
+load or publish a future-outcome channel.
 
 `encode_market_episode_records()` is the neutral artifact handoff. It preserves
 the canonical MarketEpisode, location, path, full same-clock transition-kind

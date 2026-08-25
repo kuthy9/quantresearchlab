@@ -25,6 +25,7 @@ from typing import Any, Iterable, Mapping, Sequence
 import numpy as np
 import pandas as pd
 
+from .artifact_stream import canonical_record_sha256
 from .market_representation import (
     INFERENCE_INPUT_PROTOCOL,
     NEUTRAL_INFERENCE_INPUT_PROTOCOL,
@@ -72,6 +73,10 @@ MARKET_EPISODE_MATERIAL_KINDS = (
 MARKET_EPISODE_FIRST_OCCURRENCE_SELECTION_CONTRACT = (
     "first_online_market_episode_material_kind_by_revision_index_v1"
 )
+MARKET_EPISODE_RETRIEVAL_SCHEMA_VERSION = 1
+MARKET_EPISODE_RETRIEVAL_PROTOCOL_VERSION = (
+    "market-episode-case-retrieval-1.1.0"
+)
 MARKET_EPISODE_ACTIVE_ENSEMBLE_HEAD_WIDTHS: Mapping[str, int] = {
     name: OUTCOME_BLIND_HEAD_WIDTHS[name]
     for name in ("next_lifecycle", "scale_direction_alignment")
@@ -91,6 +96,21 @@ MARKET_EPISODE_DATASET_CONTRACT_KEYS = frozenset(
 )
 _MARKET_EPISODE_MATERIAL_KIND_ORDER = {
     name: index for index, name in enumerate(MARKET_EPISODE_MATERIAL_KINDS)
+}
+
+MARKET_EPISODE_RETRIEVAL_PROTOCOL: Mapping[str, Any] = {
+    "schema_version": MARKET_EPISODE_RETRIEVAL_SCHEMA_VERSION,
+    "protocol_version": MARKET_EPISODE_RETRIEVAL_PROTOCOL_VERSION,
+    "record_protocol": "neutral_market_episode_input_only",
+    "outcome_channel": "forbidden",
+    "distance": "cosine_on_l2_normalized_market_embedding",
+    "neighbour_guards": (
+        "exact_same_source_contract",
+        "same_market_epoch",
+        "strictly_prior_decision_clock",
+        "different_physical_market_episode_fingerprint_across_all_runs",
+    ),
+    "action_authority": "none_empirical_prior_only",
 }
 
 CASE_RETRIEVAL_PROTOCOL: Mapping[str, Any] = {
@@ -769,31 +789,29 @@ class EpisodeEmbeddingRecord:
     def input_fingerprint(self) -> str:
         """Hash only fields allowed to determine neighbours."""
 
-        return _sha256(
-            _canonical_json(
-                {
-                    "case_id": self.case_id,
-                    "revision_id": self.revision_id,
-                    "revision_stage": self.revision_stage,
-                    "revision_index": self.revision_index,
-                    "stage_identity": self.stage_identity,
-                    "stage_occurrence": self.stage_occurrence,
-                    "market_epoch_id": self.market_epoch_id,
-                    "context_thesis_id": self.context_thesis_id,
-                    "entry_episode_id": self.entry_episode_id,
-                    "decision_at": self.decision_at.isoformat(),
-                    "direction": self.direction,
-                    "regime": self.regime,
-                    "data_split": self.data_split,
-                    "embedding_model_version": self.embedding_model_version,
-                    "embedding_checkpoint_id": self.embedding_checkpoint_id,
-                    "embedding_input_protocol": self.embedding_input_protocol,
-                    "embedding_asof": self.embedding_asof.isoformat(),
-                    "feature_max_at": self.feature_max_at.isoformat(),
-                    "embedding_feature_names": self.embedding_feature_names,
-                    "decision_embedding": self.decision_embedding,
-                }
-            )
+        return canonical_record_sha256(
+            {
+                "case_id": self.case_id,
+                "revision_id": self.revision_id,
+                "revision_stage": self.revision_stage,
+                "revision_index": self.revision_index,
+                "stage_identity": self.stage_identity,
+                "stage_occurrence": self.stage_occurrence,
+                "market_epoch_id": self.market_epoch_id,
+                "context_thesis_id": self.context_thesis_id,
+                "entry_episode_id": self.entry_episode_id,
+                "decision_at": self.decision_at.isoformat(),
+                "direction": self.direction,
+                "regime": self.regime,
+                "data_split": self.data_split,
+                "embedding_model_version": self.embedding_model_version,
+                "embedding_checkpoint_id": self.embedding_checkpoint_id,
+                "embedding_input_protocol": self.embedding_input_protocol,
+                "embedding_asof": self.embedding_asof.isoformat(),
+                "feature_max_at": self.feature_max_at.isoformat(),
+                "embedding_feature_names": self.embedding_feature_names,
+                "decision_embedding": self.decision_embedding,
+            }
         )
 
     def checkpoint_metadata(self) -> dict[str, Any]:
@@ -1032,6 +1050,12 @@ class MarketEpisodeEmbeddingRecord:
         object.__setattr__(self, "data_split", data_split)
         object.__setattr__(self, "decision_at", decision_at)
         object.__setattr__(self, "feature_max_at", feature_max_at)
+
+    @property
+    def physical_episode_fingerprint(self) -> str:
+        """Run-independent identity of the physical neutral episode."""
+
+        return self.market_episode_id
 
     @classmethod
     def from_mapping(
@@ -1691,6 +1715,60 @@ def _cosine_density_snapshot(
     )
 
 
+class _ImmutableCosineMatrix:
+    """Protocol-neutral immutable vectors plus deterministic query mechanics."""
+
+    __slots__ = ("_values", "embedding_dim")
+
+    def __init__(
+        self,
+        embeddings: Iterable[Sequence[float] | np.ndarray],
+        *,
+        embedding_dim: int,
+    ) -> None:
+        if embedding_dim < 1:
+            raise CaseRetrievalError("embedding_dim must be positive")
+        rows = [
+            _normalise_embedding(value, expected_dim=embedding_dim)
+            for value in embeddings
+        ]
+        values = (
+            np.asarray(rows, dtype=np.float64)
+            if rows
+            else np.empty((0, embedding_dim), dtype=np.float64)
+        )
+        values.setflags(write=False)
+        self._values = values
+        self.embedding_dim = int(embedding_dim)
+
+    @property
+    def values(self) -> np.ndarray:
+        view = self._values.view()
+        view.setflags(write=False)
+        return view
+
+    def snapshot(
+        self,
+        eligible_indices: Sequence[int],
+        query_embedding: Sequence[float] | np.ndarray,
+        rank_keys: Sequence[tuple[Any, ...]],
+        *,
+        k: int,
+        thresholds: OODThresholds,
+    ) -> tuple[Any, ...]:
+        return _cosine_density_snapshot(
+            self._values,
+            eligible_indices,
+            _normalise_embedding(
+                query_embedding,
+                expected_dim=self.embedding_dim,
+            ),
+            rank_keys,
+            k=k,
+            thresholds=thresholds,
+        )
+
+
 class EpisodeCaseIndex:
     """Immutable, episode-deduplicated cosine index."""
 
@@ -1702,8 +1780,6 @@ class EpisodeCaseIndex:
         ignored_non_decision_revisions: int = 0,
         artifact_lineage: Mapping[str, Any] | None = None,
     ) -> None:
-        if embedding_dim < 1:
-            raise CaseRetrievalError("embedding_dim must be positive")
         ordered = tuple(
             sorted(
                 records,
@@ -1744,20 +1820,11 @@ class EpisodeCaseIndex:
                 raise CaseRetrievalError(
                     "one index cannot mix encoder checkpoint embedding spaces"
                 )
-            matrix = np.asarray(
-                [
-                    _normalise_embedding(
-                        item.decision_embedding, expected_dim=embedding_dim
-                    )
-                    for item in ordered
-                ],
-                dtype=np.float64,
-            )
-        else:
-            matrix = np.empty((0, embedding_dim), dtype=np.float64)
-        matrix.setflags(write=False)
+        self._vector_core = _ImmutableCosineMatrix(
+            (item.decision_embedding for item in ordered),
+            embedding_dim=embedding_dim,
+        )
         self._records = ordered
-        self._vectors = matrix
         self.embedding_dim = int(embedding_dim)
         self.embedding_checkpoint_id = (
             None if not ordered else ordered[0].embedding_checkpoint_id
@@ -1850,9 +1917,7 @@ class EpisodeCaseIndex:
 
     @property
     def vectors(self) -> np.ndarray:
-        view = self._vectors.view()
-        view.setflags(write=False)
-        return view
+        return self._vector_core.values
 
     def query(
         self,
@@ -1891,9 +1956,6 @@ class EpisodeCaseIndex:
             raise CaseRetrievalError(
                 "query/index encoder checkpoint embedding spaces differ"
             )
-        query_vector = _normalise_embedding(
-            query.decision_embedding, expected_dim=self.embedding_dim
-        )
         eligible_indices = [
             index
             for index, record in enumerate(self._records)
@@ -1906,8 +1968,9 @@ class EpisodeCaseIndex:
         (
             ranked, selected, density_count, local_density,
             nearest_distance, mean_distance,
-        ) = _cosine_density_snapshot(
-            self._vectors, eligible_indices, query_vector,
+        ) = self._vector_core.snapshot(
+            eligible_indices,
+            query.decision_embedding,
             tuple(
                 (-record.decision_at.value, record.entry_episode_id)
                 for record in self._records
@@ -2068,7 +2131,7 @@ class EpisodeCaseIndex:
         destination = Path(path)
         destination.parent.mkdir(parents=True, exist_ok=True)
         temporary = destination.with_name(f".{destination.name}.tmp")
-        vectors = np.asarray(self._vectors, dtype="<f4")
+        vectors = np.asarray(self._vector_core.values, dtype="<f4")
         metadata_payload = _canonical_json(
             [record.checkpoint_metadata() for record in self._records]
         )
@@ -2235,14 +2298,14 @@ class MarketEpisodeCaseIndex:
             raise CaseRetrievalError("neutral index mixes embedding spaces")
         self.embedding_space = next(iter(spaces), None)
         self.embedding_dim = embedding_dim
-        self.vectors = np.asarray([
-            _normalise_embedding(
-                item.decision_embedding,
-                expected_dim=embedding_dim,
-            )
-            for item in self.records
-        ], dtype=np.float64).reshape((-1, embedding_dim))
-        self.vectors.setflags(write=False)
+        self._vector_core = _ImmutableCosineMatrix(
+            (item.decision_embedding for item in self.records),
+            embedding_dim=embedding_dim,
+        )
+
+    @property
+    def vectors(self) -> np.ndarray:
+        return self._vector_core.values
 
     @classmethod
     def from_mappings(
@@ -2458,11 +2521,6 @@ class MarketEpisodeCaseIndex:
             for member in ensemble
         ):
             raise CaseRetrievalError("neutral ensemble run lineage is invalid")
-        query_scope = (
-            query_run,
-            query.market_epoch_id,
-            query.market_episode_id,
-        )
         timezone = (
             "UTC"
             if self.dataset_contract is None
@@ -2479,25 +2537,18 @@ class MarketEpisodeCaseIndex:
             for index, record in enumerate(self.records)
             if record.data_split in query.reference_splits
             and record.material_kind == query.material_kind
-            and (
-                record.run_manifest_sha256,
-                record.market_epoch_id,
-                record.market_episode_id,
-            )
-            != query_scope
+            and record.market_epoch_id == query.market_epoch_id
+            and record.physical_episode_fingerprint
+            != query.physical_episode_fingerprint
             and record.decision_at < query.decision_at
             and (
                 not require_different_calendar_date
                 or record.decision_at.tz_convert(timezone).date() != query_date
             )
         ]
-        ranked, selected, density, local, nearest, mean = _cosine_density_snapshot(
-            self.vectors,
+        ranked, selected, density, local, nearest, mean = self._vector_core.snapshot(
             eligible,
-            _normalise_embedding(
-                query.decision_embedding,
-                expected_dim=self.embedding_dim,
-            ),
+            query.decision_embedding,
             tuple(
                 (
                     -item.decision_at.value,
@@ -2566,6 +2617,9 @@ __all__ = [
     "MARKET_EPISODE_DATASET_CONTRACT_KEYS",
     "MARKET_EPISODE_FIRST_OCCURRENCE_SELECTION_CONTRACT",
     "MARKET_EPISODE_MATERIAL_KINDS",
+    "MARKET_EPISODE_RETRIEVAL_PROTOCOL",
+    "MARKET_EPISODE_RETRIEVAL_PROTOCOL_VERSION",
+    "MARKET_EPISODE_RETRIEVAL_SCHEMA_VERSION",
     "CaseRetrievalError",
     "CaseRetrievalResult",
     "EnsembleMemberPrediction",

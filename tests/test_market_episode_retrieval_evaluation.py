@@ -10,7 +10,10 @@ import pytest
 from scripts import evaluate_market_episode_retrieval as evaluator
 from scripts import train_market_representation as trainer
 from smc_trader.artifact_stream import atomic_bytes, canonical_json, sha256_file
-from smc_trader.case_retrieval import CaseRetrievalError
+from smc_trader.case_retrieval import (
+    MARKET_EPISODE_RETRIEVAL_PROTOCOL,
+    CaseRetrievalError,
+)
 from smc_trader.market_cases import expected_market_case_run_identity
 from smc_trader.market_representation import (
     MarketRepresentationModel,
@@ -99,7 +102,7 @@ def _fit_artifacts(tmp_path: Path) -> tuple[Path, Path]:
                 asof=pd.Timestamp(raw_date, tz="America/New_York"),
                 revision_index=0, source_replay_ordinal=10 + index,
                 replay_update_ordinal=10 + index, lifecycle="registered",
-                transition_kinds=("zone_registered",), epoch_id=f"epoch:{role}",
+                transition_kinds=("zone_registered",), epoch_id="epoch:shared-source",
                 location_id=f"location:{role}:{index}", path_id=f"path:{role}:{index}",
             ),
             adapter_manifest,
@@ -153,6 +156,10 @@ def test_real_fit_export_handoff_reports_only_geometry_and_ood(tmp_path: Path) -
     assert report["outcomes_used"] is False
     assert report["prediction_quality_claimed"] is False
     assert report["action_authority"] == "none"
+    assert report["schema_version"] == 3
+    assert report["retrieval_protocol"] == json.loads(
+        canonical_json(dict(MARKET_EPISODE_RETRIEVAL_PROTOCOL))
+    )
     assert report["b0_compatible"] is True
     assert report["direct_source_preprocessing"] == (
         neutral_direct_source_preprocessing_identity()

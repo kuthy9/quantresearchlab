@@ -16,7 +16,14 @@ from typing import Any, Iterable, Mapping, Sequence
 
 import pandas as pd
 
-from .artifact_stream import atomic_bytes, canonical_json, sha256_file
+from .artifact_stream import (
+    bound_regular_file,
+    canonical_json,
+    canonical_record_sha256,
+    publish_canonical_manifest,
+    read_json_object,
+    sha256_file,
+)
 from .model import PlaybookPhase, Timeframe, aware_timestamp, to_primitive
 
 
@@ -413,7 +420,10 @@ def _json(value: Any) -> str:
 
 
 def _hash_payload(value: Any) -> str:
-    return hashlib.sha256(_json(value).encode("utf-8")).hexdigest()
+    payload = to_primitive(value)
+    if not isinstance(payload, Mapping):
+        raise ValueError("causal case identity payload must be an object")
+    return canonical_record_sha256(payload)
 
 
 def _finite(value: Any) -> float | None:
@@ -3521,33 +3531,31 @@ def write_causal_case_library_manifest(
 
     root = Path(destination)
     root_resolved = root.resolve()
-
-    def bound_path(value: str | Path) -> Path:
-        relative = Path(value)
-        if relative.is_absolute() or ".." in relative.parts:
-            raise ValueError("causal case manifest binding must be relative")
-        resolved = (root / relative).resolve()
-        if resolved.parent != root_resolved:
-            raise ValueError("causal case manifest binding escaped its run root")
-        return resolved
-
-    inputs = bound_path(input_stream_manifest)
-    outcomes = bound_path(outcome_stream_manifest)
-    run = bound_path(run_manifest)
-    for path in (inputs, outcomes, run):
-        if path.is_symlink() or not path.is_file():
-            raise FileNotFoundError(f"causal case manifest binding is missing: {path}")
-    input_payload = json.loads(inputs.read_text(encoding="utf-8"))
-    outcome_payload = json.loads(outcomes.read_text(encoding="utf-8"))
-    try:
-        run_bytes = run.read_bytes()
-        run_payload = json.loads(run_bytes.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise ValueError("causal case run manifest is not valid JSON") from exc
-    if not isinstance(run_payload, Mapping):
-        raise ValueError("causal case run manifest must be an object")
-    if run_bytes != canonical_json(run_payload):
-        raise ValueError("causal case run manifest is not canonical JSON")
+    bindings = (
+        (input_stream_manifest, "causal case input stream manifest"),
+        (outcome_stream_manifest, "causal case outcome stream manifest"),
+        (run_manifest, "causal case run manifest"),
+    )
+    inputs, outcomes, run = (
+        bound_regular_file(
+            root,
+            value,
+            name=name,
+            direct_child=True,
+        )
+        for value, name in bindings
+    )
+    input_payload = read_json_object(inputs, name="causal case input stream manifest")
+    outcome_payload = read_json_object(
+        outcomes,
+        name="causal case outcome stream manifest",
+    )
+    run_payload = read_json_object(
+        run,
+        name="causal case run manifest",
+        require_canonical=True,
+    )
+    run_bytes = run.read_bytes()
     validated_run_sha256 = hashlib.sha256(run_bytes).hexdigest()
     run_output = run_payload.get("output")
     stream_families = (
@@ -3652,9 +3660,10 @@ def write_causal_case_library_manifest(
             "normalization_prefix_only": True,
         },
     }
-    path = root / "causal_case_library.manifest.json"
-    atomic_bytes(path, canonical_json(payload))
-    return path
+    return publish_canonical_manifest(
+        root / "causal_case_library.manifest.json",
+        payload,
+    )
 
 
 __all__ = [

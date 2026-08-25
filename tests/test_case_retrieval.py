@@ -19,6 +19,7 @@ from smc_trader.case_retrieval import (
     MARKET_EPISODE_ACTIVE_ENSEMBLE_HEAD_WIDTHS,
     MARKET_EPISODE_FIRST_OCCURRENCE_SELECTION_CONTRACT,
     MARKET_EPISODE_MATERIAL_KINDS,
+    MARKET_EPISODE_RETRIEVAL_PROTOCOL,
     CaseRetrievalError,
     EnsembleMemberPrediction,
     EpisodeCaseIndex,
@@ -1442,9 +1443,9 @@ def test_market_episode_query_is_strictly_prior_and_outcome_free() -> None:
     )
 
     assert result.ood.policy is RetrievalPolicy.CONTINUE_EVALUATION
-    assert result.ood.eligible_neighbours == 6
+    assert result.ood.eligible_neighbours == 5
     assert {item["market_episode_id"] for item in result.neighbours} == {
-        item["market_episode_id"] for item in [*eligible, records[-2]]
+        item["market_episode_id"] for item in eligible
     }
     assert set(result.ood.head_disagreement) == set(
         MARKET_EPISODE_ACTIVE_ENSEMBLE_HEAD_WIDTHS
@@ -1519,7 +1520,7 @@ def test_market_episode_index_rechecks_query_preprocessing_contract() -> None:
         index.query(query, artifact_lineage=MARKET_EPISODE_LINEAGE)
 
 
-def test_market_episode_cross_artifact_query_uses_scoped_episode_identity() -> None:
+def test_market_episode_cross_run_self_neighbour_is_rejected() -> None:
     reference = _market_episode_case(
         "shared-local-identity",
         1,
@@ -1541,6 +1542,12 @@ def test_market_episode_cross_artifact_query_uses_scoped_episode_identity() -> N
         "stream_manifest_sha256": "4" * 64,
         "run_manifest_sha256": "2" * 64,
     }
+    independent_reference = _market_episode_case(
+        "independent-physical-episode",
+        24 * 60 + 2,
+        [1.0, 0.02, 0.0, 0.0],
+        run_manifest_sha256="2" * 64,
+    )
     query_lineage = {
         **MARKET_EPISODE_LINEAGE,
         "stream_manifest_sha256": "5" * 64,
@@ -1554,7 +1561,7 @@ def test_market_episode_cross_artifact_query_uses_scoped_episode_identity() -> N
                 "dataset_contract": MARKET_EPISODE_DATASET_CONTRACT,
             },
             {
-                "records": [second_reference],
+                "records": [second_reference, independent_reference],
                 "artifact_lineage": second_reference_lineage,
                 "dataset_contract": MARKET_EPISODE_DATASET_CONTRACT,
             },
@@ -1577,15 +1584,14 @@ def test_market_episode_cross_artifact_query_uses_scoped_episode_identity() -> N
         ensemble=_market_episode_ensemble([0.49, 0.50, 0.51], query=query),
     )
 
-    assert result.ood.eligible_neighbours == 2
-    assert {row["run_manifest_sha256"] for row in result.neighbours} == {
-        "1" * 64,
-        "2" * 64,
+    assert result.ood.eligible_neighbours == 1
+    assert {row["market_episode_id"] for row in result.neighbours} == {
+        independent_reference["market_episode_id"]
     }
     assert result.as_dict()["query_run_manifest_sha256"] == "3" * 64
     assert (
         result.neighbours[0]["market_episode_id"]
-        == result.query_market_episode_id
+        != result.query_market_episode_id
     )
 
     with pytest.raises(CaseRetrievalError, match="dataset contracts differ"):
@@ -1597,6 +1603,50 @@ def test_market_episode_cross_artifact_query_uses_scoped_episode_identity() -> N
                 "source_sha256": "4" * 64,
             },
         )
+
+
+def test_case_protocols_cannot_be_swapped_or_receive_neutral_outcomes() -> None:
+    neutral = _market_episode_case("neutral", 1, [1.0, 0.0, 0.0, 0.0])
+    assert MARKET_EPISODE_RETRIEVAL_PROTOCOL["outcome_channel"] == "forbidden"
+    with pytest.raises(CaseRetrievalError):
+        EpisodeCaseIndex.from_mappings([neutral], embedding_dim=DIM)
+
+    causal = _case("causal", 1, [1.0, 0.0, 0.0, 0.0])
+    causal.pop("frozen_outcome")
+    with pytest.raises(CaseRetrievalError):
+        MarketEpisodeCaseIndex.from_mappings(
+            [causal],
+            artifact_lineage=MARKET_EPISODE_LINEAGE,
+            embedding_dim=DIM,
+        )
+
+    injected = dict(neutral)
+    injected["outcome"] = {}
+    with pytest.raises(CaseRetrievalError, match="not outcome-blind"):
+        MarketEpisodeCaseIndex.from_mappings(
+            [injected],
+            artifact_lineage=MARKET_EPISODE_LINEAGE,
+            embedding_dim=DIM,
+        )
+
+
+def test_both_case_indexes_expose_read_only_vector_views() -> None:
+    causal = EpisodeCaseIndex.from_mappings(
+        [_case("causal", 1, [1.0, 0.0, 0.0, 0.0])],
+        embedding_dim=DIM,
+    )
+    neutral = MarketEpisodeCaseIndex.from_mappings(
+        [_market_episode_case("neutral", 1, [1.0, 0.0, 0.0, 0.0])],
+        artifact_lineage=MARKET_EPISODE_LINEAGE,
+        embedding_dim=DIM,
+    )
+
+    assert causal.vectors.flags.writeable is False
+    assert neutral.vectors.flags.writeable is False
+    with pytest.raises(ValueError, match="read-only"):
+        causal.vectors[0, 0] = 0.0
+    with pytest.raises(ValueError, match="read-only"):
+        neutral.vectors[0, 0] = 0.0
 
 
 def test_market_episode_lineage_and_active_heads_fail_closed() -> None:
