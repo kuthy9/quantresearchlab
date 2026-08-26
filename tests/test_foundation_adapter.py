@@ -42,7 +42,6 @@ from smc_trader.semantic_lifecycle import (
     StructureScope,
     StructureTransitionLifecycle,
 )
-from smc_trader.semantic_zones import FVGStructuralLifecycle
 from smc_trader.semantic_foundation import (
     FoundationObjectType,
     FoundationProjection,
@@ -910,6 +909,11 @@ def test_consume_available_reads_one_suffix_and_releases_it(monkeypatch) -> None
     assert normalized_bar_lookups == 0
     assert adapter._available_suffix == ()
     assert adapter._event_cursor == len(adapter._event_store)
+    assert not any(
+        record.object_type
+        is FoundationObjectType.FVG_STRUCTURAL_LIFECYCLE
+        for record in adapter.projection.current_records
+    )
     assert events[0].event_id.encode("utf-8") not in checkpoint_bytes
     assert len(checkpoint_bytes) < 20_000
     for removed in (
@@ -5306,7 +5310,7 @@ def test_reset_replay_checkpoint_pickle_and_explicit_boundary_attack() -> None:
         clock_adapter.observe_boundary_attack(clock_fact)
 
 
-def test_unknown_event_is_noop_but_missing_sources_and_out_of_order_fail_closed() -> None:
+def test_fvg_atom_is_not_a_foundation_hot_producer_and_errors_fail_closed() -> None:
     adapter = CanonicalFoundationAdapter(tick_size=TICK)
     bar = _bar(0)
     adapter.consume(bar)
@@ -5405,35 +5409,7 @@ def test_mss_internal_generation_is_explicitly_censored_by_reset() -> None:
 def test_append_dto_requires_seen_authoritative_sources_not_future_knowledge() -> None:
     adapter = CanonicalFoundationAdapter(tick_size=TICK)
     bar = _bar(0)
-    creation = _atomic(
-        "fvg-source",
-        EventKind.FVG_CREATED,
-        0,
-        1,
-        source_event_ids=(bar.event_id,),
-        evidence={"fvg_id": "fvg-a"},
-    )
-    _consume(adapter, (bar, creation))
-    lifecycle = FVGStructuralLifecycle(
-        fvg_id="fvg-a",
-        source_creation_event_id=creation.event_id,
-        symbol="ES",
-        instrument_id=1,
-        timeframe=Timeframe.M1,
-        created_at=_clock(0),
-        known_at=_clock(0),
-    )
-
-    update = adapter.append_dto(lifecycle)
-    assert len(update.records) == 1
-    assert creation.event_id in adapter.known_input_event_ids
-    assert adapter.append_dto(lifecycle).ignored is True
-    with pytest.raises(ValueError, match="differ from exact DTO ancestry"):
-        adapter.append_dto(
-            lifecycle,
-            source_event_ids=(bar.event_id,),
-        )
-
+    adapter.consume(bar)
     geometry = SwingGeometryNode(
         swing_id="geometry-a",
         timeframe=Timeframe.M1,
@@ -5446,11 +5422,16 @@ def test_append_dto_requires_seen_authoritative_sources_not_future_knowledge() -
         known_at=_clock(0),
         source_candle_ids=("candle:geometry-a",),
     )
-    geometry_update = adapter.append_dto(
+    assert len(
+        adapter.append_dto(
+            geometry,
+            source_event_ids=(bar.event_id,),
+        ).records
+    ) == 1
+    assert adapter.append_dto(
         geometry,
         source_event_ids=(bar.event_id,),
-    )
-    assert len(geometry_update.records) == 1
+    ).ignored is True
 
     projection_state = {"fvg_id": "state-projection-fvg"}
     projection_sha256 = hashlib.sha256(
@@ -5481,17 +5462,15 @@ def test_append_dto_requires_seen_authoritative_sources_not_future_knowledge() -
         origin=EventOrigin.STATE_PROJECTION,
     )
     adapter.consume(state_source)
-    state_lifecycle = FVGStructuralLifecycle(
-        fvg_id="state-projection-fvg",
-        source_creation_event_id=state_source.event_id,
-        symbol="ES",
-        instrument_id=1,
-        timeframe=Timeframe.M1,
-        created_at=_clock(0),
-        known_at=_clock(0),
+    state_geometry = replace(
+        geometry,
+        swing_id="geometry-state-projection",
     )
     with pytest.raises(ValueError, match="non-authoritative DTO sources"):
-        adapter.append_dto(state_lifecycle)
+        adapter.append_dto(
+            state_geometry,
+            source_event_ids=(state_source.event_id,),
+        )
     level_from_projection = _atomic(
         "level-from-state-projection",
         EventKind.LIQUIDITY_LEVEL_CREATED,
@@ -5514,73 +5493,54 @@ def test_append_dto_requires_seen_authoritative_sources_not_future_knowledge() -
     # The immutable EventStore retains even a fixture that Foundation rejects.
     # Continue the independent future-knowledge checks on a fresh authority.
     adapter = CanonicalFoundationAdapter(tick_size=TICK)
-    _consume(adapter, (bar, creation))
-    future_creation = _atomic(
-        "future-fvg-source",
-        EventKind.FVG_CREATED,
-        1,
-        1,
-        source_event_ids=(creation.event_id,),
-        evidence={"fvg_id": "fvg-future"},
-    )
-    adapter.consume(future_creation)
-    future_leak = FVGStructuralLifecycle(
-        fvg_id="fvg-future",
-        source_creation_event_id=future_creation.event_id,
-        symbol="ES",
-        instrument_id=1,
-        timeframe=Timeframe.M1,
-        created_at=_clock(0),
-        known_at=_clock(0),
-    )
+    adapter.consume(bar)
+    future_bar = _bar(1)
+    adapter.consume(future_bar)
+    future_geometry = replace(geometry, swing_id="geometry-future")
     frozen = adapter.checkpoint()
-    with pytest.raises(ValueError, match="predates exact source-event knowledge"):
-        adapter.append_dto(future_leak)
+    with pytest.raises(
+        ValueError,
+        match="predates exact source-event knowledge",
+    ):
+        adapter.append_dto(
+            future_geometry,
+            source_event_ids=(future_bar.event_id,),
+        )
     assert adapter.checkpoint() == frozen
 
-    legacy = MarketEvent(
-        event_id="legacy-fvg-source",
-        kind=EventKind.FVG_CREATED,
-        observed_at=_clock(2),
-        timeframe=Timeframe.M1,
-        side="above",
-        price=100.0,
-        strength=0.0,
-        sequence_no=0,
-        evidence={"fvg_id": "legacy-fvg"},
-    )
-    adapter.consume(legacy)
-    legacy_lifecycle = FVGStructuralLifecycle(
-        fvg_id="legacy-fvg",
-        source_creation_event_id=legacy.event_id,
-        symbol="ES",
-        instrument_id=1,
-        timeframe=Timeframe.M1,
-        created_at=_clock(2),
-        known_at=_clock(2),
-    )
-    with pytest.raises(ValueError, match="non-authoritative DTO sources"):
-        adapter.append_dto(legacy_lifecycle)
-
-    legacy_swing = MarketEvent(
+    legacy_source = MarketEvent(
         event_id="legacy-swing-source",
         kind=EventKind.SWING_CONFIRMED,
-        observed_at=_clock(3),
-        timeframe=Timeframe.H1,
+        observed_at=_clock(2),
+        timeframe=Timeframe.M1,
         side="above",
         price=101.0,
         strength=0.0,
         sequence_no=0,
+        event_time=_clock(2),
+        known_at=_clock(2),
         evidence={"source_entity_id": "legacy-swing"},
     )
-    adapter.consume(legacy_swing)
+    adapter.consume(legacy_source)
+    legacy_geometry = replace(
+        geometry,
+        swing_id="geometry-legacy",
+        window_end=_clock(2),
+        known_at=_clock(2),
+    )
+    with pytest.raises(ValueError, match="non-authoritative DTO sources"):
+        adapter.append_dto(
+            legacy_geometry,
+            source_event_ids=(legacy_source.event_id,),
+        )
+
     level_from_legacy = _atomic(
         "level-from-legacy",
         EventKind.LIQUIDITY_LEVEL_CREATED,
-        3,
+        2,
         1,
         timeframe=Timeframe.H1,
-        source_event_ids=(legacy_swing.event_id,),
+        source_event_ids=(legacy_source.event_id,),
         evidence={
             "level_id": "legacy-level",
             "source_kind": "confirmed_swing",

@@ -656,8 +656,7 @@ def test_engine_neutral_state_is_pickle_checkpoint_ready() -> None:
     assert snapshot.observation.execution.spread_points == 0.25
     assert engine.last_snapshot is not None
     foundation = engine.last_snapshot.observation.market_snapshot.foundation
-    assert foundation is not None
-    assert foundation.current_records
+    assert foundation is None
     market_snapshot = engine.last_snapshot.observation.market_snapshot
     missing_market_schema = market_snapshot.__getstate__()
     missing_market_schema.pop("schema_version")
@@ -713,10 +712,10 @@ def test_engine_neutral_state_is_pickle_checkpoint_ready() -> None:
     )
     encoded = pickle.dumps(engine, protocol=pickle.HIGHEST_PROTOCOL)
     resumed = pickle.loads(encoded)
-    assert NEUTRAL_ENGINE_CHECKPOINT_SCHEMA_VERSION == 9
-    assert engine.__getstate__()["_neutral_checkpoint_schema_version"] == 9
+    assert NEUTRAL_ENGINE_CHECKPOINT_SCHEMA_VERSION == 10
+    assert engine.__getstate__()["_neutral_checkpoint_schema_version"] == 10
     previous_engine = engine.__getstate__()
-    previous_engine["_neutral_checkpoint_schema_version"] = 8
+    previous_engine["_neutral_checkpoint_schema_version"] = 9
     with pytest.raises(
         ValueError,
         match="checkpoint neutral market state schema",
@@ -1144,7 +1143,7 @@ def test_neutral_only_scene_compaction_preserves_continuation() -> None:
             assert result["after"]["nodes"] <= result["before"]["nodes"]
 
 
-@pytest.mark.parametrize("legacy_version", (None, 1, 2))
+@pytest.mark.parametrize("legacy_version", (None, 1, 2, 9))
 def test_old_engine_checkpoint_without_neutral_schema_fails_closed(
     legacy_version: int | None,
 ) -> None:

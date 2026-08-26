@@ -28,7 +28,6 @@ from .zone import (
     FVG_BOUNDARY_REASONS,
     ZoneBOSSource,
     ZoneProtocol,
-    ZoneRawOnlyStructureDisposition,
     ZoneUpdate,
 )
 from .range_auction import (
@@ -116,11 +115,6 @@ from .scene_graph import (
     scale_registry_id,
 )
 from .semantics import SemanticRegistry
-from .semantic_zones import (
-    CompatibleStructureKind,
-    FVGTerminationCause,
-    ZoneObjectKind,
-)
 from .semantic_foundation import (
     FoundationObjectType,
     FoundationProjectionReducer,
@@ -2164,7 +2158,6 @@ class CausalObserver:
             else None
         )
         self._group3_hidden_entity_ids: set[str] = set()
-        self._last_zone_foundation_projection: ZoneUpdate | None = None
         self._structure_trackers = (
             {
                 timeframe: StructureTracker(timeframe, structure_config)
@@ -2318,9 +2311,6 @@ class CausalObserver:
         self._foundation_structural_ranges: dict[
             Timeframe, StructuralRangeState
         ] = {}
-        self._foundation_fvg_contexts: dict[
-            str, tuple[str | None, str | None]
-        ] = {}
         # Compact typed revision cache for immutable/transition DTO plans.
         # It is a local optimization only: the adapter projection remains the
         # authority.  A staged copy is committed with the projection so a
@@ -2386,18 +2376,12 @@ class CausalObserver:
             str,
         ] = {}
         self._raw_break_event_ids: dict[str, str] = {}
-        self._raw_only_structure_dispositions: dict[
-            str,
-            ZoneRawOnlyStructureDisposition,
-        ] = {}
-        self._qualified_structure_event_ids: dict[str, str] = {}
         self._displacement_event_ids: dict[str, str] = {}
         self._protected_swing_event_ids: dict[str, str] = {}
         self._terminal_crossing_events: dict[str, MarketEvent] = {}
         self._fvg_created_event_ids: dict[str, str] = {}
         self._fvg_terminal_event_ids: dict[str, str] = {}
         self._origin_zone_created_event_ids: dict[str, str] = {}
-        self._last_market_epoch_reset_event_id: str | None = None
         self._range_created_event_ids: dict[str, str] = {}
         self._range_active_event_ids: dict[str, str] = {}
         self._range_terminal_event_ids: dict[str, str] = {}
@@ -2480,12 +2464,6 @@ class CausalObserver:
             else self._interaction_semantics.protocol
         )
 
-    @property
-    def last_zone_foundation_projection(self) -> ZoneUpdate | None:
-        """Latest committed Group-3 foundation view, outside v1.2 DTOs."""
-
-        return self._last_zone_foundation_projection
-
     @staticmethod
     def _remember_bounded(
         value,
@@ -2515,7 +2493,6 @@ class CausalObserver:
         # Delta transport is an authority-scan projection, not causal state.
         # A hard epoch boundary must not retain prior-contract signatures.
         self._typed_delta_signatures.clear()
-        self._last_zone_foundation_projection = None
         self._interaction_boundary_update = (
             self._interaction_semantics.on_boundary(
                 reason,
@@ -2573,7 +2550,7 @@ class CausalObserver:
             asof=observed_at,
         )
         self.memory.transfer_pending_from(prior_memory)
-        reset_event = self._append_semantic_atomic(
+        self._append_semantic_atomic(
             EventKind.MARKET_EPOCH_RESET,
             observed_at,
             Timeframe.M1,
@@ -2589,7 +2566,6 @@ class CausalObserver:
             },
             event_time=observed_at,
         )
-        self._last_market_epoch_reset_event_id = reset_event.event_id
         self._prior = None
         self._known_level_ids.clear()
         self._known_level_order.clear()
@@ -2612,8 +2588,6 @@ class CausalObserver:
         self._known_level_touch_order.clear()
         self._penetration_event_ids.clear()
         self._raw_break_event_ids.clear()
-        self._raw_only_structure_dispositions.clear()
-        self._qualified_structure_event_ids.clear()
         self._displacement_event_ids.clear()
         self._protected_swing_event_ids.clear()
         self._terminal_crossing_events.clear()
@@ -3305,96 +3279,6 @@ class CausalObserver:
                 "assignments"
             )
         return tuple(assignments)
-
-    def _historical_live_protected_assignment(
-        self,
-        timeframe: Timeframe,
-        *,
-        at_event: MarketEvent,
-    ) -> MarketEvent | None:
-        """Replay protected custody only through one immutable event order."""
-
-        if (
-            at_event.kind is not EventKind.RAW_BOUNDARY_BREAK
-            or not at_event.is_canonical_semantic
-            or at_event.timeframe is not timeframe
-        ):
-            raise ValueError(
-                "raw-only QOB disposition historical custody requires its "
-                "exact raw boundary-break event"
-            )
-        events_by_id = {
-            event.event_id: event for event in self.audit_store.events()
-        }
-        for event in self.memory._audit_pending:
-            prior = events_by_id.get(event.event_id)
-            if prior is not None:
-                committed = self.audit_store.get(event.event_id)
-                if (
-                    committed is None
-                    or self.audit_store.event_digest(event.event_id)
-                    != self.audit_store.recompute_event_digest(event)
-                ):
-                    raise ValueError(
-                        "pending protected-swing history conflicts with audit"
-                    )
-                continue
-            events_by_id[event.event_id] = event
-        cutoff = event_order_key(at_event)
-        live: MarketEvent | None = None
-        for event in sorted(events_by_id.values(), key=event_order_key):
-            if event_order_key(event) > cutoff:
-                break
-            if (
-                event.kind is EventKind.PROTECTED_SWING_ASSIGNED
-                and event.timeframe is timeframe
-            ):
-                protected_swing_id = event.evidence.get(
-                    "protected_swing_id"
-                )
-                if (
-                    not event.is_canonical_semantic
-                    or not isinstance(protected_swing_id, str)
-                    or not protected_swing_id
-                    or protected_swing_id not in event.source_entity_ids
-                    or event.direction
-                    not in {Direction.LONG, Direction.SHORT}
-                    or event.price is None
-                ):
-                    raise ValueError(
-                        "historical protected-swing assignment is invalid"
-                    )
-                live = event
-                continue
-            if (
-                live is None
-                or event.kind is not EventKind.ACCEPTANCE_CONFIRMED
-                or event.evidence.get("protected_swing_event_id")
-                != live.event_id
-            ):
-                continue
-            protected_swing_id = live.evidence.get("protected_swing_id")
-            source_timeframe = event.evidence.get(
-                "source_timeframe", event.timeframe.value
-            )
-            if (
-                not event.is_canonical_semantic
-                or event.evidence.get("protected_swing_id")
-                != protected_swing_id
-                or live.event_id not in event.context_event_ids
-                or source_timeframe != timeframe.value
-                or event.direction
-                is not (
-                    Direction.SHORT
-                    if live.direction is Direction.LONG
-                    else Direction.LONG
-                )
-            ):
-                raise ValueError(
-                    "historical protected-swing terminal is invalid"
-                )
-            live = None
-        return live
 
     def _replace_live_protected_assignment(
         self,
@@ -5559,48 +5443,6 @@ class CausalObserver:
                             is not item.direction
                         )
                     if (
-                        continuation_opposes_live_protection
-                        and frame.timeframe is Timeframe.M5
-                        and item.source_structure_id is not None
-                        and item.break_bar_id is not None
-                    ):
-                        if len(live_protected_assignments) != 1:
-                            raise ValueError(
-                                "raw-only continuation suppression lacks one "
-                                "exact protected-assignment witness"
-                            )
-                        disposition = ZoneRawOnlyStructureDisposition(
-                            bos_id=item.bos_id,
-                            raw_break_event_id=raw_break.event_id,
-                            protected_assignment_event_id=(
-                                live_protected_assignments[0][1]
-                            ),
-                            timeframe=frame.timeframe,
-                            direction=item.direction,
-                            resolved_at=item.resolved_at,
-                            source_structure_id=item.source_structure_id,
-                            target_swing_id=item.target_swing_id,
-                            break_bar_id=item.break_bar_id,
-                            bos_source_displacement_id=(
-                                item.source_displacement_id
-                            ),
-                        )
-                        prior_disposition = (
-                            self._raw_only_structure_dispositions.get(
-                                item.bos_id
-                            )
-                        )
-                        if (
-                            prior_disposition is not None
-                            and prior_disposition != disposition
-                        ):
-                            raise ValueError(
-                                "raw-only continuation disposition drifted"
-                            )
-                        self._raw_only_structure_dispositions[
-                            item.bos_id
-                        ] = disposition
-                    if (
                         item.scope is BOSScope.CONTINUATION
                         and not continuation_opposes_live_protection
                     ):
@@ -5648,9 +5490,6 @@ class CausalObserver:
                                 item.source_structure_id,
                             ),
                         )
-                        self._qualified_structure_event_ids[
-                            item.bos_id
-                        ] = qualified_bos.event_id
                         origin_leg = next(
                             (
                                 leg
@@ -5809,9 +5648,6 @@ class CausalObserver:
                                 item.source_structure_id,
                             ),
                         )
-                        self._qualified_structure_event_ids[
-                            item.bos_id
-                        ] = mss_core.event_id
             post_break_at = item.accepted_at or item.rejected_at
             if (
                 item.lifecycle is BOSLifecycle.CONFIRMED
@@ -5938,705 +5774,6 @@ class CausalObserver:
                         ),
                     )
 
-    def _group3_foundation_source_event(
-        self,
-        event_id: str,
-        *,
-        expected_kinds: frozenset[EventKind],
-    ) -> MarketEvent:
-        event = self.memory.audit_event_including_pending(event_id)
-        if event is None or event.kind not in expected_kinds:
-            raise ValueError(
-                "Group 3 foundation source is absent or has the wrong kind"
-            )
-        if event.kind is EventKind.BAR_COMPLETED:
-            if (
-                event.origin is not EventOrigin.NORMALIZED_DATA
-                or event.evidence.get("real_completed") is not True
-                or event.evidence.get("clock_only") is not False
-            ):
-                raise ValueError(
-                    "Group 3 foundation BAR source is not a real normalized BAR"
-                )
-        elif not event.is_canonical_semantic:
-            raise ValueError(
-                "Group 3 foundation source is not canonical semantic data"
-            )
-        return event
-
-    def _validate_group3_foundation_projection(
-        self,
-        update: ZoneUpdate,
-    ) -> None:
-        cores_by_id = {
-            core.core_id: core for core in update.base_origin_cores
-        }
-        qualified_by_id = {
-            qualified.qualified_ob_id: qualified
-            for qualified in update.qualified_order_blocks
-        }
-        for core in update.base_origin_cores:
-            displacement = self._group3_foundation_source_event(
-                core.source_displacement_event_id,
-                expected_kinds=frozenset(
-                    {EventKind.DISPLACEMENT_OBSERVED}
-                ),
-            )
-            if (
-                displacement.evidence.get("displacement_id")
-                != core.source_displacement_id
-            ):
-                raise ValueError(
-                    "Base Origin Core displacement event is not exact"
-                )
-            for candle_id, bar_event_id in zip(
-                core.anchor_candle_ids,
-                core.anchor_bar_event_ids,
-            ):
-                bar = self._group3_foundation_source_event(
-                    bar_event_id,
-                    expected_kinds=frozenset(
-                        {EventKind.BAR_COMPLETED}
-                    ),
-                )
-                if bar.evidence.get("detector_candle_id") != candle_id:
-                    raise ValueError(
-                        "Base Origin Core BAR event is not exact"
-                    )
-        for qualified in update.qualified_order_blocks:
-            core = cores_by_id.get(qualified.base_origin_core_id)
-            if core is None:
-                raise ValueError(
-                    "Qualified OB lost its exact Base Origin Core"
-                )
-            displacement = self._group3_foundation_source_event(
-                qualified.source_displacement_event_id,
-                expected_kinds=frozenset(
-                    {EventKind.DISPLACEMENT_OBSERVED}
-                ),
-            )
-            if (
-                displacement.evidence.get("displacement_id")
-                != qualified.source_displacement_id
-                or qualified.source_displacement_event_id
-                != core.source_displacement_event_id
-            ):
-                raise ValueError(
-                    "Qualified OB displacement event is not exact"
-                )
-            expected_kind = (
-                EventKind.QUALIFIED_BOS
-                if qualified.compatible_structure_kind
-                is CompatibleStructureKind.QUALIFIED_BOS
-                else EventKind.MSS_CORE_CONFIRMED
-            )
-            self._group3_foundation_source_event(
-                qualified.compatible_structure_event_id,
-                expected_kinds=frozenset({expected_kind}),
-            )
-        for lifecycle in update.fvg_structural_lifecycles:
-            creation = self._group3_foundation_source_event(
-                lifecycle.source_creation_event_id,
-                expected_kinds=frozenset({EventKind.FVG_CREATED}),
-            )
-            if creation.evidence.get("fvg_id") != lifecycle.fvg_id:
-                raise ValueError("FVG foundation creation event is not exact")
-            for context_event_id in lifecycle.context_source_event_ids:
-                self._group3_foundation_source_event(
-                    context_event_id,
-                    expected_kinds=frozenset(
-                        {
-                            EventKind.STRUCTURE_DIRECTION_CONFIRMED,
-                            EventKind.SWING_CONFIRMED,
-                        }
-                    ),
-                )
-            if lifecycle.terminal_reason is not None:
-                if (
-                    lifecycle.terminal_event_id is None
-                    or lifecycle.terminal_event_id
-                    not in lifecycle.terminal_source_event_ids
-                    or tuple(
-                        lifecycle.terminal_source_event_ids[
-                            : 1
-                            + len(lifecycle.context_source_event_ids)
-                        ]
-                    )
-                    != (
-                        lifecycle.source_creation_event_id,
-                        *lifecycle.context_source_event_ids,
-                    )
-                ):
-                    raise ValueError(
-                        "FVG terminal fact is absent from exact ancestry"
-                    )
-                if (
-                    lifecycle.terminal_reason
-                    is FVGTerminationCause.CLOSE_THROUGH_FAR_EDGE
-                ):
-                    source_kind = frozenset({EventKind.BAR_COMPLETED})
-                elif (
-                    lifecycle.terminal_reason
-                    is FVGTerminationCause.DATA_GAP
-                ):
-                    source_kind = frozenset(
-                        {
-                            EventKind.MARKET_EPOCH_RESET,
-                            EventKind.DISPLACEMENT_OBSERVED,
-                        }
-                    )
-                elif lifecycle.terminal_reason in {
-                    FVGTerminationCause.PARENT_STRUCTURE_TERMINATED,
-                    FVGTerminationCause.STRUCTURAL_RANGE_REPLACED,
-                }:
-                    source_kind = frozenset(
-                        {
-                            EventKind.ACCEPTANCE_CONFIRMED,
-                            EventKind.STRUCTURE_DIRECTION_CONFIRMED,
-                            EventKind.MARKET_EPOCH_RESET,
-                        }
-                    )
-                else:
-                    source_kind = frozenset(
-                        {EventKind.MARKET_EPOCH_RESET}
-                    )
-                cause_event_ids = tuple(
-                    event_id
-                    for event_id in lifecycle.terminal_source_event_ids[
-                        1
-                        + len(lifecycle.context_source_event_ids)
-                        :
-                    ]
-                    if event_id != lifecycle.terminal_event_id
-                )
-                for event_id in cause_event_ids:
-                    source = self._group3_foundation_source_event(
-                        event_id,
-                        expected_kinds=source_kind,
-                    )
-                    if (
-                        source.kind is EventKind.DISPLACEMENT_OBSERVED
-                        and (
-                            source.evidence.get("lifecycle") != "censored"
-                            or source.evidence.get("terminal_reason")
-                            not in {
-                                "data_gap_history_reset",
-                                "data_anomaly",
-                                "synthetic_interruption",
-                            }
-                        )
-                    ):
-                        raise ValueError(
-                            "FVG censorship event is not an exact boundary"
-                        )
-                if (
-                    lifecycle.terminal_reason
-                    is FVGTerminationCause.CLOSE_THROUGH_FAR_EDGE
-                ):
-                    terminal_kind = frozenset(
-                        {EventKind.FVG_INVALIDATED}
-                    )
-                else:
-                    terminal_kind = source_kind
-                terminal = self._group3_foundation_source_event(
-                    lifecycle.terminal_event_id,
-                    expected_kinds=terminal_kind,
-                )
-                if (
-                    lifecycle.terminal_reason
-                    is FVGTerminationCause.DATA_GAP
-                    and terminal.kind is EventKind.DISPLACEMENT_OBSERVED
-                    and (
-                        terminal.evidence.get("lifecycle") != "censored"
-                        or terminal.evidence.get("terminal_reason")
-                        not in {
-                            "data_gap_history_reset",
-                            "data_anomaly",
-                            "synthetic_interruption",
-                        }
-                    )
-                ):
-                    raise ValueError(
-                        "FVG censorship terminal is not an exact boundary"
-                    )
-        for retest in update.first_retests:
-            creation_kind = (
-                EventKind.FVG_CREATED
-                if retest.object_kind is ZoneObjectKind.FVG
-                else EventKind.ORIGIN_ZONE_CREATED
-            )
-            creation = self._group3_foundation_source_event(
-                retest.creation_event_id,
-                expected_kinds=frozenset({creation_kind}),
-            )
-            qualified = qualified_by_id.get(retest.object_id)
-            if retest.object_kind is ZoneObjectKind.FVG:
-                if creation.evidence.get("fvg_id") != retest.object_id:
-                    raise ValueError(
-                        "first FVG retest creation event is not exact"
-                    )
-                expected_displacement_id = creation.evidence.get(
-                    "source_displacement_id"
-                )
-            else:
-                if (
-                    qualified is None
-                    or creation.evidence.get("source_displacement_id")
-                    != qualified.source_displacement_id
-                    or creation.zone
-                    != (qualified.lower_bound, qualified.upper_bound)
-                ):
-                    raise ValueError(
-                        "first OB retest creation event is not exact"
-                    )
-                expected_displacement_id = (
-                    qualified.source_displacement_id
-                )
-            departure = self._group3_foundation_source_event(
-                retest.departure_source_event_id,
-                expected_kinds=frozenset(
-                    {
-                        EventKind.DISPLACEMENT_OBSERVED,
-                        EventKind.BAR_COMPLETED,
-                    }
-                ),
-            )
-            if (
-                departure.kind is EventKind.DISPLACEMENT_OBSERVED
-                and departure.evidence.get("displacement_id")
-                != expected_displacement_id
-            ):
-                raise ValueError(
-                    "first retest departure event is not exact"
-                )
-            source_bar = self._group3_foundation_source_event(
-                retest.source_bar_event_id,
-                expected_kinds=frozenset({EventKind.BAR_COMPLETED}),
-            )
-            if (
-                source_bar.timeframe is not retest.timeframe
-                or source_bar.known_at != retest.known_at
-                or source_bar.evidence.get("real_completed") is not True
-                or source_bar.evidence.get("clock_only") is not False
-            ):
-                raise ValueError("first retest BAR event is not exact")
-            for event_id in retest.context_event_ids:
-                if self.memory.audit_event_including_pending(event_id) is None:
-                    raise ValueError("first retest context event is absent")
-
-    def _group3_raw_only_structure_dispositions(
-        self,
-    ) -> tuple[ZoneRawOnlyStructureDisposition, ...]:
-        """Prove provisional QOB sources that intentionally stopped at RAW."""
-
-        if self._zone_tracker is None:
-            return ()
-        raw_only: list[ZoneRawOnlyStructureDisposition] = []
-        for completed in self._zone_tracker._pending_foundation_completed:
-            for seed in completed.new_qualified_order_blocks:
-                state = seed.legacy_state
-                bos_id = seed.compatible_structure_entity_id
-                disposition = self._raw_only_structure_dispositions.get(
-                    bos_id
-                )
-                if bos_id in self._qualified_structure_event_ids:
-                    if disposition is not None:
-                        raise ValueError(
-                            "raw-only QOB disposition conflicts with a "
-                            "qualified BOS/MSS binding"
-                        )
-                    continue
-                if disposition is None:
-                    # A generic missing binding is not evidence that the BOS
-                    # was intentionally left raw; finalization remains
-                    # fail-closed for that case.
-                    continue
-                raw_event_id = self._raw_break_event_ids.get(bos_id)
-                if raw_event_id != disposition.raw_break_event_id:
-                    raise ValueError(
-                        "raw-only QOB disposition lost its exact raw-break "
-                        "custody"
-                    )
-                raw = self._group3_foundation_source_event(
-                    disposition.raw_break_event_id,
-                    expected_kinds=frozenset(
-                        {EventKind.RAW_BOUNDARY_BREAK}
-                    ),
-                )
-                relation_events = tuple(
-                    event
-                    for event in (
-                        *self.audit_store.events(),
-                        *self.memory._audit_pending,
-                    )
-                    if event.kind
-                    in {
-                        EventKind.QUALIFIED_BOS,
-                        EventKind.MSS_CORE_CONFIRMED,
-                    }
-                    and event.evidence.get("bos_id") == bos_id
-                )
-                if relation_events:
-                    raise ValueError(
-                        "raw-only QOB disposition has a qualified BOS/MSS "
-                        "audit fact"
-                    )
-                target_event_id = self._confirmed_swing_event_ids.get(
-                    state.source_bos_target_swing_id
-                )
-                break_bar_event_id = self._bar_event_ids_by_candle_id.get(
-                    state.source_bos_break_bar_id
-                )
-                structure_event_id = self._structure_direction_event_ids.get(
-                    state.source_bos_structure_id
-                )
-                active_displacement_event_id = (
-                    self._displacement_event_ids.get(
-                        state.source_active_transition_id
-                    )
-                )
-                bos_source_displacement_event_id = (
-                    None
-                    if disposition.bos_source_displacement_id is None
-                    else (
-                        raw.context_event_ids[1]
-                        if len(raw.context_event_ids) == 2
-                        else None
-                    )
-                )
-                if (
-                    disposition.bos_source_displacement_id is not None
-                    and bos_source_displacement_event_id is None
-                ):
-                    raise ValueError(
-                        "raw-only QOB disposition lacks its exact optional "
-                        "BOS displacement source"
-                    )
-                if any(
-                    event_id is None
-                    for event_id in (
-                        target_event_id,
-                        break_bar_event_id,
-                        structure_event_id,
-                        active_displacement_event_id,
-                    )
-                ):
-                    raise ValueError(
-                        "raw-only QOB disposition lacks its exact canonical "
-                        "source chain"
-                    )
-                expected_raw_context = (
-                    raw.context_event_ids[:1]
-                    + (
-                        ()
-                        if bos_source_displacement_event_id is None
-                        else (bos_source_displacement_event_id,)
-                    )
-                )
-                if (
-                    not raw.context_event_ids
-                    or raw.context_event_ids != expected_raw_context
-                ):
-                    raise ValueError(
-                        "raw-only QOB disposition has an invalid context chain"
-                    )
-                protected_assignment = (
-                    self._historical_live_protected_assignment(
-                        state.timeframe,
-                        at_event=raw,
-                    )
-                )
-                if (
-                    protected_assignment is None
-                    or protected_assignment.event_id
-                    != disposition.protected_assignment_event_id
-                ):
-                    raise ValueError(
-                        "raw-only QOB disposition lost its exact historical "
-                        "protected-assignment witness"
-                    )
-                bos_state = self.memory.audit_event_including_pending(
-                    raw.context_event_ids[0]
-                )
-                active_displacement = (
-                    self.memory.audit_event_including_pending(
-                        active_displacement_event_id
-                    )
-                )
-                bos_source_displacement = (
-                    None
-                    if bos_source_displacement_event_id is None
-                    else self.memory.audit_event_including_pending(
-                        bos_source_displacement_event_id
-                    )
-                )
-                structure = self.memory.audit_event_including_pending(
-                    structure_event_id
-                )
-                if (
-                    bos_state is None
-                    or active_displacement is None
-                    or structure is None
-                    or (
-                        bos_source_displacement_event_id is not None
-                        and bos_source_displacement is None
-                    )
-                ):
-                    raise ValueError(
-                        "raw-only QOB disposition lacks its exact audit "
-                        "source chain"
-                    )
-                expected_source_entities = (
-                    bos_id,
-                    state.source_bos_target_swing_id,
-                    state.source_bos_structure_id,
-                    *(
-                        ()
-                        if disposition.bos_source_displacement_id is None
-                        else (disposition.bos_source_displacement_id,)
-                    ),
-                )
-                expected_bos_sources = (
-                    state.source_bos_target_swing_id,
-                    state.source_bos_structure_id,
-                    *(
-                        ()
-                        if disposition.bos_source_displacement_id is None
-                        else (disposition.bos_source_displacement_id,)
-                    ),
-                    state.source_bos_break_bar_id,
-                )
-                invalid_bos_source_displacement = bool(
-                    bos_source_displacement is not None
-                    and (
-                        bos_source_displacement.kind
-                        is not EventKind.DISPLACEMENT_OBSERVED
-                        or not bos_source_displacement.is_canonical_semantic
-                        or bos_source_displacement.timeframe
-                        is not state.timeframe
-                        or bos_source_displacement.direction
-                        is not state.direction
-                        or bos_source_displacement.evidence.get(
-                            "displacement_id"
-                        )
-                        != disposition.bos_source_displacement_id
-                    )
-                )
-                if (
-                    seed.compatible_structure_kind
-                    is not CompatibleStructureKind.QUALIFIED_BOS
-                    or state.source_bos_id != bos_id
-                    or state.source_bos_scope is not BOSScope.CONTINUATION
-                    or state.source_bos_mss_qualified
-                    or state.timeframe is not Timeframe.M5
-                    or state.source_bos_resolved_at != state.confirmed_at
-                    or state.confirmed_at != completed.candle.end
-                    or state.source_bos_break_bar_id
-                    != completed.candle_id
-                    or disposition.bos_id != bos_id
-                    or disposition.timeframe is not state.timeframe
-                    or disposition.direction is not state.direction
-                    or disposition.resolved_at
-                    != state.source_bos_resolved_at
-                    or disposition.source_structure_id
-                    != state.source_bos_structure_id
-                    or disposition.target_swing_id
-                    != state.source_bos_target_swing_id
-                    or disposition.break_bar_id
-                    != state.source_bos_break_bar_id
-                    or protected_assignment.event_id
-                    != disposition.protected_assignment_event_id
-                    or protected_assignment.timeframe is not state.timeframe
-                    or protected_assignment.direction is state.direction
-                    or protected_assignment.known_at
-                    > state.source_bos_resolved_at
-                    or raw.timeframe is not state.timeframe
-                    or raw.direction is not state.direction
-                    or raw.event_time != state.source_bos_resolved_at
-                    or raw.known_at != state.source_bos_resolved_at
-                    or raw.evidence.get("bos_id") != bos_id
-                    or raw.evidence.get("scope")
-                    != BOSScope.CONTINUATION.value
-                    or raw.evidence.get("target_swing_id")
-                    != state.source_bos_target_swing_id
-                    or raw.evidence.get("break_bar_id")
-                    != state.source_bos_break_bar_id
-                    or raw.evidence.get("source_displacement_id")
-                    != disposition.bos_source_displacement_id
-                    or raw.source_event_ids
-                    != (target_event_id, break_bar_event_id)
-                    or raw.source_data_ids
-                    != (state.source_bos_break_bar_id,)
-                    or raw.source_entity_ids != expected_source_entities
-                    or raw.context_event_ids != expected_raw_context
-                    or bos_state.kind is not EventKind.STRUCTURE_BREAK
-                    or bos_state.entity_id != bos_id
-                    or bos_state.lifecycle != BOSLifecycle.CONFIRMED.value
-                    or bos_state.timeframe is not state.timeframe
-                    or bos_state.direction is not state.direction
-                    or bos_state.formed_at != state.source_bos_pending_at
-                    or bos_state.confirmed_at
-                    != state.source_bos_resolved_at
-                    or bos_state.known_at != state.source_bos_resolved_at
-                    or bos_state.source_ids != expected_bos_sources
-                    or bos_state.evidence.get("bos_id") != bos_id
-                    or bos_state.evidence.get("scope")
-                    != BOSScope.CONTINUATION.value
-                    or bos_state.evidence.get("source_structure_id")
-                    != state.source_bos_structure_id
-                    or bos_state.evidence.get("break_bar_id")
-                    != state.source_bos_break_bar_id
-                    or bos_state.evidence.get("source_displacement_id")
-                    != disposition.bos_source_displacement_id
-                    or structure.kind
-                    is not EventKind.STRUCTURE_DIRECTION_CONFIRMED
-                    or not structure.is_canonical_semantic
-                    or structure.timeframe is not state.timeframe
-                    or structure.direction is not state.direction
-                    or structure.evidence.get("structure_id")
-                    != state.source_bos_structure_id
-                    or not structure.source_entity_ids
-                    or structure.source_entity_ids[0]
-                    != state.source_bos_structure_id
-                    or active_displacement.kind
-                    is not EventKind.DISPLACEMENT_OBSERVED
-                    or not active_displacement.is_canonical_semantic
-                    or active_displacement.timeframe is not state.timeframe
-                    or active_displacement.direction is not state.direction
-                    or active_displacement.known_at
-                    != state.source_displacement_active_at
-                    or active_displacement.event_time
-                    != state.source_displacement_started_at
-                    or active_displacement.evidence.get("transition_id")
-                    != state.source_active_transition_id
-                    or active_displacement.evidence.get("displacement_id")
-                    != state.source_displacement_id
-                    or active_displacement.evidence.get("lifecycle")
-                    != DisplacementLifecycle.ACTIVE.value
-                    or active_displacement.source_entity_ids
-                    != (state.source_displacement_id,)
-                    or invalid_bos_source_displacement
-                ):
-                    raise ValueError(
-                        "raw-only QOB disposition does not match its exact "
-                        "BOS, structure, displacement, or BAR provenance"
-                    )
-                raw_only.append(disposition)
-        if len(raw_only) != len({item.bos_id for item in raw_only}):
-            raise ValueError("raw-only QOB disposition is ambiguous")
-        return tuple(raw_only)
-
-    def _finalize_group3_foundation(
-        self,
-        update: ZoneUpdate,
-        reader_update: ReaderUpdate,
-    ) -> ZoneUpdate:
-        if self._zone_tracker is None:
-            return update
-        sessions = {
-            candle.end: session_name_phase(candle.end)[0]
-            for candle in reader_update.newly_completed.get(
-                Timeframe.M5,
-                (),
-            )
-        }
-        raw_only_dispositions = (
-            self._group3_raw_only_structure_dispositions()
-        )
-        finalized = self._zone_tracker.finalize_foundation(
-            update,
-            bar_event_ids_by_candle_id=(
-                self._bar_event_ids_by_candle_id
-            ),
-            displacement_event_ids_by_identity=(
-                self._displacement_event_ids
-            ),
-            displacement_event_known_at_by_identity={
-                identity: event.known_at
-                for identity, event_id in self._displacement_event_ids.items()
-                if (
-                    event := self.memory.audit_event_including_pending(
-                        event_id
-                    )
-                ) is not None
-                and event.kind is EventKind.DISPLACEMENT_OBSERVED
-            },
-            structure_event_ids_by_entity=(
-                self._qualified_structure_event_ids
-            ),
-            raw_only_structure_dispositions=(
-                raw_only_dispositions
-            ),
-            fvg_creation_event_ids_by_entity=(
-                self._fvg_created_event_ids
-            ),
-            fvg_terminal_event_ids_by_entity=(
-                self._fvg_terminal_event_ids
-            ),
-            order_block_creation_event_ids_by_entity=(
-                self._origin_zone_created_event_ids
-            ),
-            sessions_by_clock=sessions,
-        )
-        self._validate_group3_foundation_projection(finalized)
-        if any(
-            self._raw_only_structure_dispositions.get(disposition.bos_id)
-            != disposition
-            for disposition in raw_only_dispositions
-        ):
-            raise RuntimeError(
-                "raw-only QOB disposition changed during finalization"
-            )
-        for disposition in raw_only_dispositions:
-            del self._raw_only_structure_dispositions[disposition.bos_id]
-        return finalized
-
-    def _finalize_group3_foundation_boundary(
-        self,
-        update: ZoneUpdate,
-    ) -> ZoneUpdate:
-        if self._zone_tracker is None:
-            return update
-        pending = self._zone_tracker._pending_foundation_boundary
-        if pending is None:
-            return update
-        reason, clock = pending
-        boundary_event_id = self._last_market_epoch_reset_event_id
-        if boundary_event_id is None:
-            expected_terminal_reason = {
-                "data_gap_reset": "data_gap_history_reset",
-                "data_anomaly": "data_anomaly",
-                "synthetic_interruption": "synthetic_interruption",
-            }.get(reason)
-            candidates = tuple(
-                event
-                for event_id in dict.fromkeys(
-                    self._displacement_event_ids.values()
-                )
-                if (
-                    (event := self.memory.audit_event_including_pending(
-                        event_id
-                    ))
-                    is not None
-                    and event.kind is EventKind.DISPLACEMENT_OBSERVED
-                    and event.known_at == clock
-                    and event.evidence.get("lifecycle") == "censored"
-                    and event.evidence.get("terminal_reason")
-                    == expected_terminal_reason
-                )
-            )
-            if len(candidates) != 1:
-                raise ValueError(
-                    "foundation FVG censorship lacks its exact canonical "
-                    "boundary event"
-                )
-            boundary_event_id = candidates[0].event_id
-        finalized = self._zone_tracker.finalize_foundation_boundary(
-            update,
-            boundary_event_id=boundary_event_id,
-        )
-        self._validate_group3_foundation_projection(finalized)
-        return finalized
 
     def _foundation_exact_event(self, event_id: str) -> MarketEvent:
         event = self.audit_store.get(event_id)
@@ -6733,96 +5870,6 @@ class CausalObserver:
                 return type(value).__name__, identity
         raise TypeError("foundation plan lacks a deterministic typed identity")
 
-    def _foundation_group3_plans(
-        self,
-        update: ZoneUpdate | None,
-        revisions: dict[tuple[object, ...], object],
-    ) -> tuple[tuple[pd.Timestamp, int, str, object, tuple[str, ...] | None], ...]:
-        if update is None:
-            return ()
-        plans: list[
-            tuple[pd.Timestamp, int, str, object, tuple[str, ...] | None]
-        ] = []
-        for core in update.base_origin_cores:
-            if self._foundation_plan_is_new(
-                revisions,
-                key=("base_origin_core", core.core_id, core.known_at),
-                value=core,
-            ):
-                plans.append((core.known_at, 40, "dto", core, None))
-        for qualified in update.qualified_order_blocks:
-            if self._foundation_plan_is_new(
-                revisions,
-                key=(
-                    "qualified_order_block",
-                    qualified.qualified_ob_id,
-                    qualified.known_at,
-                ),
-                value=qualified,
-            ):
-                plans.append(
-                    (qualified.known_at, 50, "dto", qualified, None)
-                )
-        # Transitions retain an ACTIVE revision that may no longer be present
-        # in the bounded current view.  Preserve that revision before its
-        # terminal state instead of publishing only hindsight state.
-        fvg_values = (
-            *update.fvg_structural_transitions,
-            *update.fvg_structural_lifecycles,
-        )
-        pending_fvgs: dict[tuple[object, ...], object] = {}
-        for lifecycle in fvg_values:
-            if lifecycle.terminal_reason is None and lifecycle.age_bars != 0:
-                continue
-            key = (
-                "fvg_structural_lifecycle",
-                lifecycle.fvg_id,
-                lifecycle.last_updated_at,
-                lifecycle.availability.value,
-            )
-            incumbent = revisions.get(key)
-            if incumbent is not None:
-                if type(incumbent) is not type(lifecycle) or incumbent != lifecycle:
-                    raise ValueError(
-                        "foundation typed revision changed after first publication"
-                    )
-                continue
-            pending = pending_fvgs.get(key)
-            if pending is not None:
-                if pending != lifecycle:
-                    raise ValueError(
-                        "Group 3 emitted conflicting same-clock FVG revisions"
-                    )
-                continue
-            # Creation-time context can be bound while this plan is staged.
-            # Register the final bound DTO in the clock loop, not this
-            # pre-binding value.
-            pending_fvgs[key] = lifecycle
-            plans.append(
-                (
-                    lifecycle.last_updated_at,
-                    60,
-                    "fvg",
-                    lifecycle,
-                    None,
-                )
-            )
-        retests = (*update.first_retest_transitions, *update.first_retests)
-        for retest in retests:
-            if self._foundation_plan_is_new(
-                revisions,
-                key=(
-                    "zone_first_retest",
-                    retest.first_retest_event_id,
-                    retest.known_at,
-                ),
-                value=retest,
-            ):
-                # Group 3 freezes geometric first reinteraction before it
-                # applies the same completed BAR's terminal FVG transition.
-                # Preserve that causal order in the append-only projection.
-                plans.append((retest.known_at, 55, "dto", retest, None))
-        return tuple(plans)
 
     def _foundation_geometry_plans(
         self,
@@ -7434,111 +6481,6 @@ class CausalObserver:
             updated[timeframe] = state
         return updated, tuple(terminated)
 
-    def _foundation_bind_fvg_context(
-        self,
-        *,
-        adapter: CanonicalFoundationAdapter,
-        ranges: Mapping[Timeframe, StructuralRangeState],
-        lifecycle,
-        contexts: dict[str, tuple[str | None, str | None]],
-    ):
-        prior = contexts.get(lifecycle.fvg_id)
-        if prior is None:
-            generation = self._foundation_structure_at(
-                adapter,
-                lifecycle.timeframe,
-                lifecycle.known_at,
-            )
-            structural_range = ranges.get(lifecycle.timeframe)
-            if (
-                structural_range is not None
-                and (
-                    structural_range.known_at > lifecycle.known_at
-                    or (
-                        structural_range.terminated_at is not None
-                        and structural_range.terminated_at
-                        <= lifecycle.known_at
-                    )
-                    or generation is None
-                    or structural_range.structure_generation_id
-                    != generation.generation_id
-                )
-            ):
-                structural_range = None
-            prior = (
-                None if generation is None else generation.generation_id,
-                None if structural_range is None else structural_range.range_id,
-            )
-            contexts[lifecycle.fvg_id] = prior
-        parent_id, range_id = prior
-        if parent_id is None:
-            if (
-                lifecycle.parent_structure_generation_id is not None
-                or lifecycle.structural_range_id is not None
-            ):
-                raise ValueError("FVG context conflicts with creation-time state")
-            return lifecycle
-        if lifecycle.parent_structure_generation_id is not None:
-            if (
-                lifecycle.parent_structure_generation_id != parent_id
-                or lifecycle.structural_range_id != range_id
-                or not lifecycle.context_source_event_ids
-            ):
-                raise ValueError("FVG structural context is not immutable")
-            return lifecycle
-        generation = next(
-            item
-            for item in adapter.lifecycle.structure_generations
-            if item.generation_id == parent_id
-        )
-        context_sources = [generation.confirmation_event_id or ""]
-        if range_id is not None:
-            structural_range = next(
-                state
-                for state in ranges.values()
-                if state.range_id == range_id
-            )
-            context_sources.extend(
-                (
-                    self._confirmed_swing_event_ids.get(
-                        structural_range.lower_swing_id,
-                        "",
-                    ),
-                    self._confirmed_swing_event_ids.get(
-                        structural_range.upper_swing_id,
-                        "",
-                    ),
-                )
-            )
-        sources = self._foundation_unique_ids(context_sources)
-        if lifecycle.parent_structure_generation_id is None:
-            if lifecycle.age_bars != 0:
-                raise ValueError(
-                    "FVG structural context was not bound at creation"
-                )
-            if self._zone_tracker is None:
-                raise ValueError("FVG context requires the canonical Group3 owner")
-            refreshed = self._zone_tracker.bind_fvg_foundation_context(
-                fvg_id=lifecycle.fvg_id,
-                parent_structure_generation_id=parent_id,
-                structural_range_id=range_id,
-                source_event_ids=sources,
-            )
-            matches = tuple(
-                item
-                for item in refreshed.fvg_structural_lifecycles
-                if item.fvg_id == lifecycle.fvg_id
-            )
-            if len(matches) != 1:
-                raise ValueError("Group3 lost its bound FVG lifecycle")
-            lifecycle = matches[0]
-        if (
-            lifecycle.parent_structure_generation_id != parent_id
-            or lifecycle.structural_range_id != range_id
-            or tuple(lifecycle.context_source_event_ids) != sources
-        ):
-            raise ValueError("FVG structural context is not immutable")
-        return lifecycle
 
     def _foundation_update_clusters(
         self,
@@ -8035,86 +6977,6 @@ class CausalObserver:
                 timeframe=level.source_timeframe,
             )
 
-    def _foundation_expire_group3(
-        self,
-        *,
-        adapter: CanonicalFoundationAdapter,
-        known_at: pd.Timestamp,
-        clock_events: Sequence[MarketEvent],
-        processed_structure_ids: set[str],
-        range_terminations: Sequence[tuple[str, str]],
-    ) -> ZoneUpdate | None:
-        if self._zone_tracker is None:
-            return None
-        latest: ZoneUpdate | None = None
-        reset = next(
-            (
-                event
-                for event in clock_events
-                if event.kind is EventKind.MARKET_EPOCH_RESET
-            ),
-            None,
-        )
-        for generation in adapter.lifecycle.structure_generations:
-            if (
-                generation.scope is not StructureScope.EXTERNAL
-                or generation.lifecycle
-                is not StructureGenerationLifecycle.TERMINATED
-                or generation.terminated_at != known_at
-                or generation.generation_id in processed_structure_ids
-            ):
-                continue
-            cause_event_id = generation.protected_acceptance_event_id
-            if cause_event_id is None and reset is not None:
-                cause_event_id = reset.event_id
-            if cause_event_id is None:
-                candidates = tuple(
-                    event_id
-                    for event_id in reversed(generation.source_event_ids)
-                    if self._foundation_exact_event(event_id).known_at
-                    == known_at
-                )
-                if not candidates:
-                    raise ValueError(
-                        "structure termination lacks an exact canonical cause"
-                    )
-                cause_event_id = candidates[0]
-            self._foundation_exact_event(cause_event_id)
-            latest = self._zone_tracker.expire_fvg_foundation_context(
-                cause=FVGTerminationCause.PARENT_STRUCTURE_TERMINATED,
-                related_entity_id=generation.generation_id,
-                known_at=known_at,
-                cause_event_id=cause_event_id,
-            )
-            for lifecycle in latest.fvg_structural_transitions:
-                adapter.append_dto(lifecycle)
-            processed_structure_ids.add(generation.generation_id)
-        for range_id, cause_event_id in range_terminations:
-            self._foundation_exact_event(cause_event_id)
-            boundary_level_ids = tuple(
-                level_id
-                for (candidate_range_id, _), level_id
-                in self._range_boundary_level_ids.items()
-                if candidate_range_id == range_id
-            )
-            self._foundation_retire_structural_levels(
-                adapter=adapter,
-                source_identities=boundary_level_ids,
-                reason="structure_generation_terminated",
-                cause_event_id=cause_event_id,
-                known_at=known_at,
-            )
-            latest = self._zone_tracker.expire_fvg_foundation_context(
-                cause=FVGTerminationCause.STRUCTURAL_RANGE_REPLACED,
-                related_entity_id=range_id,
-                known_at=known_at,
-                cause_event_id=cause_event_id,
-            )
-            for lifecycle in latest.fvg_structural_transitions:
-                adapter.append_dto(lifecycle)
-        if latest is not None:
-            self._validate_group3_foundation_projection(latest)
-        return latest
 
     def _stage_foundation_projection(
         self,
@@ -8122,7 +6984,6 @@ class CausalObserver:
         asof: pd.Timestamp,
         frames: Mapping[Timeframe, FrameObservation],
         histories: Mapping[Timeframe, Sequence[Candle]],
-        zone_update: ZoneUpdate | None,
         range_auction_update: RangeAuctionUpdate | None,
         snapshot: MarketSnapshot,
         semantic_events: Sequence[MarketEvent],
@@ -8199,10 +7060,6 @@ class CausalObserver:
             *geometry_plans,
             *self._foundation_leg_plans(frames, plan_revisions),
             *self._foundation_boundary_plans(frames, plan_revisions),
-            *self._foundation_group3_plans(
-                zone_update,
-                plan_revisions,
-            ),
             *self._foundation_balance_plans(
                 range_auction_update,
                 plan_revisions,
@@ -8239,15 +7096,6 @@ class CausalObserver:
             )
         )
         ranges = dict(self._foundation_structural_ranges)
-        contexts = dict(self._foundation_fvg_contexts)
-        processed_structure_ids = {
-            generation.generation_id
-            for generation in self._foundation_adapter.lifecycle.structure_generations
-            if generation.lifecycle
-            is StructureGenerationLifecycle.TERMINATED
-        }
-        latest_group3 = zone_update
-        contextual_fvg_transitions: list[object] = []
         for clock in clocks:
             clock_events = tuple(
                 sorted(events_by_clock.get(clock, ()), key=event_order_key)
@@ -8306,30 +7154,6 @@ class CausalObserver:
                     continue
                 if kind == "boundary":
                     candidate.observe_boundary_attack(value)
-                elif kind == "fvg":
-                    lifecycle = self._foundation_bind_fvg_context(
-                        adapter=candidate,
-                        ranges=ranges,
-                        lifecycle=value,
-                        contexts=contexts,
-                    )
-                    self._foundation_plan_is_new(
-                        plan_revisions,
-                        key=(
-                            "fvg_structural_lifecycle",
-                            lifecycle.fvg_id,
-                            lifecycle.last_updated_at,
-                            lifecycle.availability.value,
-                        ),
-                        value=lifecycle,
-                    )
-                    record = FoundationProjectionReducer.record_from_dto(
-                        lifecycle
-                    )
-                    if not candidate.contains_projection_record_id(
-                        record.record_id
-                    ):
-                        candidate.append_dto(lifecycle)
                 else:
                     record = FoundationProjectionReducer.record_from_dto(
                         value,
@@ -8342,17 +7166,20 @@ class CausalObserver:
                             value,
                             source_event_ids=source_ids,
                         )
-            expired = self._foundation_expire_group3(
-                adapter=candidate,
-                known_at=clock,
-                clock_events=clock_events,
-                processed_structure_ids=processed_structure_ids,
-                range_terminations=range_terminations,
-            )
-            if expired is not None:
-                latest_group3 = expired
-                contextual_fvg_transitions.extend(
-                    expired.fvg_structural_transitions
+            for range_id, cause_event_id in range_terminations:
+                self._foundation_exact_event(cause_event_id)
+                boundary_level_ids = tuple(
+                    level_id
+                    for (candidate_range_id, _), level_id
+                    in self._range_boundary_level_ids.items()
+                    if candidate_range_id == range_id
+                )
+                self._foundation_retire_structural_levels(
+                    adapter=candidate,
+                    source_identities=boundary_level_ids,
+                    reason="structure_generation_terminated",
+                    cause_event_id=cause_event_id,
+                    known_at=clock,
                 )
 
         reset_in_update = any(
@@ -8409,34 +7236,6 @@ class CausalObserver:
             snapshot=snapshot,
             current_bar_event_id=current_bar_event_id,
         )
-        if self._zone_tracker is not None and zone_update is not None:
-            current_group3 = self._zone_tracker.current_update()
-            transitions_by_identity = {
-                (
-                    item.fvg_id,
-                    item.last_updated_at,
-                    item.availability.value,
-                ): item
-                for item in (
-                    *zone_update.fvg_structural_transitions,
-                    *contextual_fvg_transitions,
-                )
-            }
-            latest_group3 = replace(
-                zone_update,
-                base_origin_cores=current_group3.base_origin_cores,
-                qualified_order_blocks=(
-                    current_group3.qualified_order_blocks
-                ),
-                first_retests=current_group3.first_retests,
-                fvg_structural_lifecycles=(
-                    current_group3.fvg_structural_lifecycles
-                ),
-                fvg_structural_transitions=tuple(
-                    transitions_by_identity.values()
-                ),
-            )
-            self._validate_group3_foundation_projection(latest_group3)
         new_records = candidate.pending_record_delta.records
         candidate.seal_staged_candidate()
         return (
@@ -8445,9 +7244,7 @@ class CausalObserver:
             assignments,
             clusters,
             ranges,
-            contexts,
             new_records,
-            latest_group3,
             plan_revisions,
             dol_templates,
         )
@@ -9853,12 +8650,8 @@ class CausalObserver:
                 self._zone_tracker.on_boundary(
                     boundary,
                     update.asof,
-                    foundation_boundary_event_id=(
-                        self._last_market_epoch_reset_event_id
-                    ),
                 )
             )
-            self._validate_group3_foundation_projection(projected)
             return projected
         batch = self._displacement_eye.last_batch
         expected = tuple(
@@ -11903,36 +10696,6 @@ class CausalObserver:
                 )
                 raise
         if (
-            zone_update is not None
-            and zone_update.boundary_reason is None
-        ):
-            try:
-                zone_update = self._finalize_group3_foundation(
-                    zone_update,
-                    update,
-                )
-            except Exception:
-                self._terminal_failure = (
-                    "Group 3 foundation projection failed exact source "
-                    "binding; discard this observer and resume from the "
-                    "last checkpoint"
-                )
-                raise
-        elif zone_update is not None:
-            try:
-                zone_update = (
-                    self._finalize_group3_foundation_boundary(
-                        zone_update
-                    )
-                )
-            except Exception:
-                self._terminal_failure = (
-                    "Group 3 foundation boundary projection failed exact "
-                    "source binding; discard this observer and resume "
-                    "from the last checkpoint"
-                )
-                raise
-        if (
             self._group4_bootstrap_range_transitions
             and not self.config.range_auction_projection_only
         ):
@@ -12177,7 +10940,6 @@ class CausalObserver:
                     asof=update.asof,
                     frames=frames,
                     histories=histories,
-                    zone_update=zone_update,
                     range_auction_update=range_auction_update,
                     snapshot=market_snapshot,
                     semantic_events=semantic_events,
@@ -12207,7 +10969,7 @@ class CausalObserver:
                 states=market_snapshot.timeframe_states,
                 price=market_snapshot.price,
                 candidate_templates=(
-                    None if foundation_stage is None else foundation_stage[9]
+                    None if foundation_stage is None else foundation_stage[7]
                 ),
                 real_bar_ordinals=(
                     None
@@ -12248,9 +11010,7 @@ class CausalObserver:
                     self._foundation_geometry_assignments,
                     self._foundation_active_clusters,
                     self._foundation_structural_ranges,
-                    self._foundation_fvg_contexts,
                     _,
-                    zone_update,
                     self._foundation_plan_revisions,
                     self._foundation_dol_templates,
                 ) = foundation_stage
@@ -12584,8 +11344,6 @@ class CausalObserver:
         self._boundary_reset_identity = None
         self._group4_boundary_update = None
         self._interaction_boundary_update = None
-        self._last_zone_foundation_projection = zone_update
-        self._last_market_epoch_reset_event_id = None
         self._prior = observation
         return observation
 

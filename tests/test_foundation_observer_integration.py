@@ -68,7 +68,6 @@ def _observe(observer: CausalObserver, reader: CausalMarketReader, bars):
         observation = observer.observe(reader.on_bar(bar))
     assert observation is not None
     assert observation.market_snapshot is not None
-    assert observation.market_snapshot.foundation is not None
     return observation
 
 
@@ -637,10 +636,8 @@ def test_eye_foundation_cold_ledger_is_exact_and_not_event_republished() -> None
     assert not any(
         event.kind is EventKind.FOUNDATION_STATE_CHANGED for event in events
     )
-    assert len(cold_records) == projection.record_count
-    assert (
-        FoundationProjectionReducer.replay(cold_records) == projection
-    )
+    assert cold_records == ()
+    assert projection is None
     order = {event.event_id: index for index, event in enumerate(events)}
     for record in cold_records:
         assert all(source_id in order for source_id in record.source_event_ids)
@@ -651,7 +648,7 @@ def test_eye_foundation_cold_ledger_is_exact_and_not_event_republished() -> None
         )
     adapter = observer._foundation_adapter
     assert adapter.pending_record_delta.records == ()
-    assert adapter.pending_record_delta.end_count == projection.record_count
+    assert adapter.pending_record_delta.end_count == 0
     assert not hasattr(observation, "foundation_record_delta")
     assert not any(
         event.kind is EventKind.FOUNDATION_STATE_CHANGED
@@ -865,60 +862,49 @@ def test_atomic_replay_rejects_structure_transition_and_terminal_kind_swaps() ->
     )
 
 
-def test_group3_fvg_terminal_freezes_age_and_exact_terminal_ancestry() -> None:
+def test_group3_fvg_atoms_do_not_hot_produce_foundation_companions() -> None:
     prefix = _tick_aligned_bars(30)
     bars = (*prefix, *_descending_tail(prefix[-1].end, 6))
     reader, observer = _eye()
     observation = _observe(observer, reader, bars)
-    projection = observation.market_snapshot.foundation
-    cold_records = observer.materialize_foundation_history()
-    fvg_records = tuple(
-        record
-        for record in cold_records
-        if record.object_type is FoundationObjectType.FVG_STRUCTURAL_LIFECYCLE
+    events = tuple(observer.audit_store.events())
+    created = {
+        event.event_id: event
+        for event in events
+        if event.kind is EventKind.FVG_CREATED
+    }
+    invalidated = tuple(
+        event for event in events if event.kind is EventKind.FVG_INVALIDATED
     )
-    terminal = tuple(
-        record
-        for record in fvg_records
-        if record.status is FoundationRecordStatus.TERMINAL
-        and record.payload["availability"] == "invalidated"
+    assert created
+    assert invalidated
+    for event in invalidated:
+        assert event.source_event_ids[0] in created
+        assert tuple(
+            observer.audit_store.get(source_id).kind
+            for source_id in event.source_event_ids
+        ) == (EventKind.FVG_CREATED, EventKind.BAR_COMPLETED)
+    assert not any(
+        record.object_type
+        is FoundationObjectType.FVG_STRUCTURAL_LIFECYCLE
+        for record in observer.materialize_foundation_history()
     )
-    assert terminal
-    events = {event.event_id: event for event in observer.audit_store.events()}
-    for record in terminal:
-        history = tuple(
-            item
-            for item in cold_records
-            if item.object_type is record.object_type
-            and item.object_id == record.object_id
-        )
-        assert len(history) == 2
-        assert history[0].payload["age_bars"] == 0
-        assert record.payload["age_bars"] >= 1
-        assert record.payload["age_seconds"] > 0
-        assert record.source_event_ids == tuple(record.payload["terminal_source_event_ids"])
-        kinds = tuple(events[source_id].kind for source_id in record.source_event_ids)
-        assert kinds[0] is EventKind.FVG_CREATED
-        assert kinds.count(EventKind.BAR_COMPLETED) == 1
-        assert kinds[-1] is EventKind.FVG_INVALIDATED
-        assert all(
-            events[source_id].origin
-            in {EventOrigin.NORMALIZED_DATA, EventOrigin.SEMANTIC_ATOMIC}
-            for source_id in record.source_event_ids
-        )
     _assert_atomic_replay_parity(observer, observation)
 
 
-def test_contract_reset_keeps_foundation_history_and_explicitly_closes_fvg() -> None:
+def test_contract_reset_preserves_fvg_atoms_without_foundation_companion() -> None:
     prefix = _tick_aligned_bars(30)
     reader, observer = _eye()
-    before = _observe(observer, reader, prefix)
-    active_ids = {
-        record.object_id
-        for record in before.market_snapshot.foundation.active_records
-        if record.object_type is FoundationObjectType.FVG_STRUCTURAL_LIFECYCLE
-    }
-    assert active_ids
+    _observe(observer, reader, prefix)
+    assert any(
+        event.kind is EventKind.FVG_CREATED
+        for event in observer.audit_store.events()
+    )
+    assert not any(
+        record.object_type
+        is FoundationObjectType.FVG_STRUCTURAL_LIFECYCLE
+        for record in observer.materialize_foundation_history()
+    )
     prior = prefix[-1]
     reset_bar = Bar(
         start=prior.end,
@@ -931,28 +917,18 @@ def test_contract_reset_keeps_foundation_history_and_explicitly_closes_fvg() -> 
         instrument_id=2,
     )
     observation = observer.observe(reader.on_bar(reset_bar))
-    projection = observation.market_snapshot.foundation
-    reset_events = tuple(
-        event
+    assert tuple(
+        event.kind
         for event in observation.semantic_events_this_update
         if event.kind is EventKind.MARKET_EPOCH_RESET
+    ) == (EventKind.MARKET_EPOCH_RESET,)
+    assert not any(
+        record.object_type
+        is FoundationObjectType.FVG_STRUCTURAL_LIFECYCLE
+        for record in observer.materialize_foundation_history()
     )
-    assert len(reset_events) == 1
-    reset_id = reset_events[0].event_id
-    cold_records = observer.materialize_foundation_history()
-    for fvg_id in active_ids:
-        history = tuple(
-            record
-            for record in cold_records
-            if record.object_type
-            is FoundationObjectType.FVG_STRUCTURAL_LIFECYCLE
-            and record.object_id == fvg_id
-        )
-        assert history[0].status is FoundationRecordStatus.ACTIVE
-        assert history[-1].status is FoundationRecordStatus.TERMINAL
-        assert history[-1].payload["terminal_reason"] == "contract_rollover"
-        assert reset_id in history[-1].source_event_ids
     _assert_atomic_replay_parity(observer, observation)
+
 
 
 def test_foundation_cold_ledger_failure_does_not_commit_staged_adapter(
@@ -997,6 +973,141 @@ def test_foundation_cold_ledger_failure_does_not_commit_staged_adapter(
     assert failed_update is not None
     with pytest.raises(RuntimeError, match="discard this observer"):
         observer.observe(failed_update)
+
+
+def test_same_clock_range_retirement_follows_boundary_and_balance_plans(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reader, observer = _eye()
+    observation = _observe(observer, reader, _tick_aligned_bars(1))
+    snapshot = observation.market_snapshot
+    cause = next(
+        event
+        for event in reversed(observer.audit_store.events())
+        if event.known_at == snapshot.asof
+        and event.origin
+        in {EventOrigin.NORMALIZED_DATA, EventOrigin.SEMANTIC_ATOMIC}
+    )
+    candidate = observer._foundation_adapter.begin_suffix()
+    monkeypatch.setattr(
+        observer._foundation_adapter,
+        "begin_suffix",
+        lambda: candidate,
+    )
+    calls = []
+    boundary = SimpleNamespace(fact_id="boundary:same-clock")
+    balance = SimpleNamespace(range_id="balance:same-clock")
+    monkeypatch.setattr(
+        observer,
+        "_foundation_geometry_invalidated",
+        lambda _events: False,
+    )
+    monkeypatch.setattr(
+        observer,
+        "_foundation_leg_plans",
+        lambda _frames, _revisions: (),
+    )
+    monkeypatch.setattr(
+        observer,
+        "_foundation_boundary_plans",
+        lambda _frames, _revisions: (
+            (snapshot.asof, 35, "boundary", boundary, None),
+        ),
+    )
+    monkeypatch.setattr(
+        observer,
+        "_foundation_balance_plans",
+        lambda _update, _revisions: (
+            (
+                snapshot.asof,
+                80,
+                "dto",
+                balance,
+                (cause.event_id,),
+            ),
+        ),
+    )
+
+    def update_ranges(**_kwargs):
+        calls.append(("range_terminal", cause.event_id))
+        return {}, (("structural-range:same-clock", cause.event_id),)
+
+    monkeypatch.setattr(
+        observer,
+        "_foundation_update_structural_ranges",
+        update_ranges,
+    )
+    observer._range_boundary_level_ids = {
+        ("structural-range:same-clock", "above"): "range-upper",
+        ("structural-range:same-clock", "below"): "range-lower",
+    }
+    monkeypatch.setattr(
+        candidate,
+        "contains_projection_record_id",
+        lambda _record_id: False,
+    )
+    monkeypatch.setattr(
+        candidate,
+        "observe_boundary_attack",
+        lambda value: calls.append(("boundary", value.fact_id)),
+    )
+    monkeypatch.setattr(
+        candidate,
+        "append_dto",
+        lambda value, *, source_event_ids=None: calls.append(
+            ("balance", value.range_id, tuple(source_event_ids or ()))
+        ),
+    )
+    monkeypatch.setattr(
+        FoundationProjectionReducer,
+        "record_from_dto",
+        staticmethod(
+            lambda value, *, source_event_ids=None: SimpleNamespace(
+                record_id=f"record:{value.range_id}"
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        observer,
+        "_foundation_retire_structural_levels",
+        lambda **kwargs: calls.append(
+            (
+                "retire",
+                tuple(kwargs["source_identities"]),
+                kwargs["cause_event_id"],
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        observer,
+        "_foundation_cluster_membership_invalidated",
+        lambda _records, _events: False,
+    )
+    monkeypatch.setattr(
+        observer,
+        "_foundation_relation_delivery",
+        lambda **_kwargs: None,
+    )
+
+    observer._stage_foundation_projection(
+        asof=snapshot.asof,
+        frames={},
+        histories={},
+        range_auction_update=None,
+        snapshot=snapshot,
+        semantic_events=(),
+    )
+
+    assert calls == [
+        ("range_terminal", cause.event_id),
+        ("boundary", boundary.fact_id),
+        ("balance", balance.range_id, (cause.event_id,)),
+        (
+            "retire",
+            ("range-upper", "range-lower"),
+            cause.event_id,
+        ),
+    ]
 
 
 def test_equal_tick_structure_has_no_range_but_balance_and_later_range_survive(
@@ -1110,7 +1221,7 @@ def test_equal_tick_structure_has_no_range_but_balance_and_later_range_survive(
         low_price=100.0,
         high_price=100.0,
     )
-    ranges, terminated = observer._foundation_update_structural_ranges(
+    ranges, range_terminations = observer._foundation_update_structural_ranges(
         adapter=adapter,
         ranges={},
         frames={Timeframe.H1: equal_frame},
@@ -1119,7 +1230,7 @@ def test_equal_tick_structure_has_no_range_but_balance_and_later_range_survive(
         revisions=revisions,
     )
     assert ranges == {}
-    assert terminated == ()
+    assert range_terminations == ()
     assert len(
         tuple(
             record
@@ -1135,7 +1246,7 @@ def test_equal_tick_structure_has_no_range_but_balance_and_later_range_survive(
 
     # The immutable equal-tick origin remains explicitly range-ineligible on
     # later clocks; it must not trip the missed-confirmation guard.
-    ranges, terminated = observer._foundation_update_structural_ranges(
+    ranges, range_terminations = observer._foundation_update_structural_ranges(
         adapter=adapter,
         ranges=ranges,
         frames={Timeframe.H1: equal_frame},
@@ -1144,7 +1255,7 @@ def test_equal_tick_structure_has_no_range_but_balance_and_later_range_survive(
         revisions=revisions,
     )
     assert ranges == {}
-    assert terminated == ()
+    assert range_terminations == ()
     balance = _balance_range()
     balance_only = dual_range_location(
         100.0,
@@ -1163,7 +1274,7 @@ def test_equal_tick_structure_has_no_range_but_balance_and_later_range_survive(
         evidence={"reason": "semantic_reset"},
     )
     adapter.consume(reset)
-    ranges, _ = observer._foundation_update_structural_ranges(
+    ranges, range_terminations = observer._foundation_update_structural_ranges(
         adapter=adapter,
         ranges=ranges,
         frames={Timeframe.H1: equal_frame},
@@ -1171,6 +1282,7 @@ def test_equal_tick_structure_has_no_range_but_balance_and_later_range_survive(
         clock_events=(reset,),
         revisions=revisions,
     )
+    assert range_terminations == ()
 
     valid_frame, valid_events = publish_structure(
         183,
@@ -1178,7 +1290,7 @@ def test_equal_tick_structure_has_no_range_but_balance_and_later_range_survive(
         low_price=90.0,
         high_price=110.0,
     )
-    ranges, terminated = observer._foundation_update_structural_ranges(
+    ranges, range_terminations = observer._foundation_update_structural_ranges(
         adapter=adapter,
         ranges=ranges,
         frames={Timeframe.H1: valid_frame},
@@ -1186,10 +1298,10 @@ def test_equal_tick_structure_has_no_range_but_balance_and_later_range_survive(
         clock_events=valid_events,
         revisions=revisions,
     )
+    assert range_terminations == ()
     active_range = ranges[Timeframe.H1]
     assert active_range.terminated_at is None
     assert (active_range.lower_bound, active_range.upper_bound) == (90.0, 110.0)
-    assert terminated == ()
     coexisting = dual_range_location(
         100.0,
         structural_range=active_range,
@@ -1210,7 +1322,7 @@ def test_equal_tick_structure_has_no_range_but_balance_and_later_range_survive(
         adapter.consume(final_reset)
     assert (adapter.projection, adapter.lifecycle) == before_reset
     candidate, _ = adapter.stage_batch((final_reset,))
-    ranges, terminated = observer._foundation_update_structural_ranges(
+    ranges, range_terminations = observer._foundation_update_structural_ranges(
         adapter=candidate,
         ranges=ranges,
         frames={Timeframe.H1: valid_frame},
@@ -1218,12 +1330,14 @@ def test_equal_tick_structure_has_no_range_but_balance_and_later_range_survive(
         clock_events=(final_reset,),
         revisions=revisions,
     )
+    assert range_terminations == (
+        (active_range.range_id, final_reset.event_id),
+    )
     candidate.seal_staged_candidate()
     candidate.commit_staged_candidate()
     adapter = candidate
     terminal_range = ranges[Timeframe.H1]
     assert terminal_range.termination_reason == "semantic_reset"
-    assert terminated == ((active_range.range_id, final_reset.event_id),)
     after_terminal = dual_range_location(
         100.0,
         structural_range=terminal_range,

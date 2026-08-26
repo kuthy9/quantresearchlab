@@ -6,6 +6,7 @@ import pickle
 
 import pandas as pd
 import pytest
+import smc_trader.zone as zone_module
 
 from smc_trader.displacement import (
     CausalDisplacementTracker,
@@ -1757,6 +1758,16 @@ def test_exact_retry_requires_identical_upstream_provenance() -> None:
 def test_pickle_resume_matches_uninterrupted_lifecycle() -> None:
     harness, created, _, _, _ = _form_fvg(Direction.LONG)
     harness.send((102.25, 102.5, 101.0, 101.75))
+    direct_state = harness.group3.__getstate__()
+    assert zone_module.ZONE_TRACKER_CHECKPOINT_SCHEMA_VERSION == 1
+    assert direct_state["_zone_tracker_checkpoint_schema_version"] == 1
+    assert set(direct_state) == CausalZoneTracker._CHECKPOINT_FIELDS
+    direct = pickle.loads(pickle.dumps(harness.group3))
+    assert direct.current_update() == harness.group3.current_update()
+    assert set(direct.__dict__) == (
+        CausalZoneTracker._CHECKPOINT_FIELDS
+        - {"_zone_tracker_checkpoint_schema_version"}
+    )
     resumed = pickle.loads(pickle.dumps(harness))
     assert resumed.group3.snapshot() == harness.group3.snapshot()
     assert resumed.displacement.snapshot() == harness.displacement.snapshot()
@@ -1768,6 +1779,61 @@ def test_pickle_resume_matches_uninterrupted_lifecycle() -> None:
     assert harness.group3.snapshot() == resumed.group3.snapshot()
     terminal = _fvg_by_id(left[-1], created.fvg_id)
     assert terminal.lifecycle is FairValueGapLifecycle.MITIGATED
+
+
+def test_old_zone_companion_checkpoint_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tracker = CausalZoneTracker(_zone_protocol())
+    legacy_state = tracker.__getstate__()
+    legacy_state.pop("_zone_tracker_checkpoint_schema_version")
+    legacy_state.update(
+        {
+            "_base_origin_cores": {},
+            "_qualified_order_blocks": {},
+            "_fvg_structural_lifecycles": {},
+            "_zone_reinteraction_trackers": {},
+            "_pending_foundation_completed": [],
+            "_pending_foundation_boundary": None,
+        }
+    )
+    with monkeypatch.context() as legacy:
+        legacy.setattr(
+            CausalZoneTracker,
+            "__getstate__",
+            lambda _tracker: legacy_state,
+        )
+        encoded = pickle.dumps(tracker, protocol=pickle.HIGHEST_PROTOCOL)
+    with pytest.raises(
+        ValueError,
+        match="Group 3 tracker checkpoint schema changed",
+    ):
+        pickle.loads(encoded)
+
+
+@pytest.mark.parametrize("mutation", ("extra", "missing"))
+def test_zone_tracker_checkpoint_shape_is_exact(mutation: str) -> None:
+    tracker = CausalZoneTracker(_zone_protocol())
+    before = dict(tracker.__dict__)
+    state = tracker.__getstate__()
+    if mutation == "extra":
+        state["legacy_history"] = ()
+    else:
+        state.pop("_history")
+    with pytest.raises(
+        ValueError,
+        match="Group 3 tracker checkpoint schema changed",
+    ):
+        tracker.__setstate__(state)
+    assert tracker.__dict__ == before
+
+    stale = pickle.loads(pickle.dumps(tracker))
+    stale.__dict__["legacy_history"] = ()
+    with pytest.raises(
+        ValueError,
+        match="Group 3 tracker checkpoint state is not exact",
+    ):
+        pickle.dumps(stale)
 
 
 def test_capacity_evicts_only_previously_exposed_terminal_state() -> None:

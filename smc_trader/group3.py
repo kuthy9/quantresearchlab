@@ -15,7 +15,6 @@ from .zone import (
     WINDOW_RESET_REASONS,
     ZoneBOSSource,
     ZoneProtocol,
-    ZoneRawOnlyStructureDisposition,
     ZoneUpdate,
 )
 
@@ -28,7 +27,6 @@ warnings.warn(
 CausalGroup3Tracker = CausalZoneTracker
 Group3BOSSource = ZoneBOSSource
 Group3Protocol = ZoneProtocol
-Group3RawOnlyStructureDisposition = ZoneRawOnlyStructureDisposition
 Group3Update = ZoneUpdate
 
 __all__: tuple[str, ...] = ()

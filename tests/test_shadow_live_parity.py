@@ -10,6 +10,7 @@ from types import SimpleNamespace
 
 import pandas as pd
 import pytest
+import smc_trader.engine as engine_module
 import smc_trader.event_store as event_store_module
 import smc_trader.shadow_live as shadow_live_module
 
@@ -538,10 +539,10 @@ def test_component_digest_versions_are_explicit_and_old_checkpoints_replay() -> 
 
     current_checkpoint = current.compact_runtime_checkpoint()
     assert current_checkpoint["schema_version"] == (
-        "shadow_compact_runtime_v6"
+        "shadow_compact_runtime_v7"
     )
     previous_checkpoint = copy.deepcopy(current_checkpoint)
-    previous_checkpoint["schema_version"] = "shadow_compact_runtime_v5"
+    previous_checkpoint["schema_version"] = "shadow_compact_runtime_v6"
     with pytest.raises(ShadowLiveError, match="legacy compact"):
         ShadowLiveRunner.from_compact_runtime_checkpoint(
             pickle.loads(pickle.dumps(previous_checkpoint)),
@@ -561,6 +562,28 @@ def test_component_digest_versions_are_explicit_and_old_checkpoints_replay() -> 
         restored_legacy._component_digest_version  # noqa: SLF001
         == SHADOW_LEGACY_COMPONENT_DIGEST_VERSION
     )
+
+
+def test_full_shadow_engine9_checkpoint_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = ShadowLiveRunner(
+        engine=_engine(),
+        protocol=load_shadow_live_protocol(PROTOCOL_PATH),
+        runtime_bindings=_bindings(),
+    )
+    with monkeypatch.context() as legacy:
+        legacy.setattr(
+            engine_module,
+            "NEUTRAL_ENGINE_CHECKPOINT_SCHEMA_VERSION",
+            9,
+        )
+        encoded = pickle.dumps(runner, protocol=pickle.HIGHEST_PROTOCOL)
+    with pytest.raises(
+        ValueError,
+        match="checkpoint neutral market state schema changed",
+    ):
+        pickle.loads(encoded)
 
 
 def test_component_digest_recomputes_mutable_hypotheses_without_a_cache() -> None:
@@ -857,7 +880,7 @@ def test_compact_restore_rehydrates_all_engine_derived_indexes() -> None:
     empty_authority["engine"].observer._foundation_adapter = None
     with pytest.raises(
         ShadowLiveError,
-        match="foundation authority is missing",
+        match="compact checkpoint foundation authority differs",
     ):
         ShadowLiveRunner.from_compact_runtime_checkpoint(
             empty_authority,
@@ -958,12 +981,11 @@ def test_component_digest_final_audit_replays_full_market_payload() -> None:
     for index in range(36):
         valid.process(_input(index))
     tampered = pickle.loads(pickle.dumps(valid))
-    projection = tampered.engine.last_snapshot.market_snapshot.foundation
-    assert projection is not None
+    market = tampered.engine.last_snapshot.market_snapshot
     object.__setattr__(
-        projection.current_records[-1],
-        "record_id",
-        "foundation-record:" + "0" * 64,
+        market,
+        "event_count",
+        market.event_count - 1,
     )
 
     audit = audit_shadow_parity(valid, tampered)
