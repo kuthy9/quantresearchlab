@@ -48,7 +48,7 @@ from .semantics import load_semantic_selection
 SHADOW_LIVE_SCHEMA_VERSION = "phase9_shadow_live_v1.3"
 SHADOW_LIVE_STATUS = "engineering_validation_only"
 SHADOW_LIVE_AUTHORITY = "null_gateway_no_external_submission"
-SHADOW_COMPONENT_DIGEST_VERSION = "phase9_shadow_component_digest_v2"
+SHADOW_COMPONENT_DIGEST_VERSION = "phase9_shadow_component_digest_v3"
 SHADOW_LEGACY_COMPONENT_DIGEST_VERSION = (
     "phase9_shadow_component_digest_legacy_v1_2"
 )
@@ -84,8 +84,6 @@ SHADOW_RUNTIME_BINDING_KEYS = (
     "dol_probability_protocol_fingerprint",
     "dol_ranking_protocol_fingerprint",
     "execution_protocol_fingerprint",
-    "foundation_registry_identity",
-    "foundation_version",
     "model_config_sha256",
     "path_protocol_fingerprint",
     "semantic_version",
@@ -97,7 +95,7 @@ _LEGACY_SHADOW_RUNTIME_BINDING_KEYS = tuple(
     for key in SHADOW_RUNTIME_BINDING_KEYS
     if key != "shadow_component_digest_version"
 )
-SHADOW_COMPACT_RUNTIME_CHECKPOINT_SCHEMA = "shadow_compact_runtime_v7"
+SHADOW_COMPACT_RUNTIME_CHECKPOINT_SCHEMA = "shadow_compact_runtime_v8"
 
 _SHADOW_COMPONENT_FINGERPRINT_FIELDS = tuple(
     name
@@ -418,21 +416,6 @@ def _current_shadow_component_digest_bundle(
         events_fingerprint = _digest_canonical_contract(
             market.events_this_update
         )
-        range_locations_fingerprint = _digest_canonical_contract(
-            market.foundation_range_locations
-        )
-        foundation = market.foundation
-        foundation_component = (
-            None
-            if foundation is None
-            else {
-                "component_fingerprint": foundation.component_fingerprint,
-                "current_view_fingerprint": foundation.current_view_fingerprint,
-                "asof": foundation.asof,
-                "foundation_version": foundation.foundation_version,
-                "registry_identity": foundation.registry_identity,
-            }
-        )
         market_snapshot_fingerprint = _canonical_contract_component_digest(
             "market_snapshot",
             {
@@ -450,10 +433,6 @@ def _current_shadow_component_digest_bundle(
                 "events_this_update_fingerprint": events_fingerprint,
                 "labels": market.labels,
                 "authority": market.authority,
-                "foundation": foundation_component,
-                "foundation_range_locations_fingerprint": (
-                    range_locations_fingerprint
-                ),
             },
             version=SHADOW_COMPONENT_DIGEST_VERSION,
         )
@@ -464,10 +443,6 @@ def _current_shadow_component_digest_bundle(
                 "relations_fingerprint": relation_fingerprint,
                 "session_fingerprint": session_fingerprint,
                 "authority": market.authority,
-                "foundation": foundation_component,
-                "foundation_range_locations_fingerprint": (
-                    range_locations_fingerprint
-                ),
             },
             version=SHADOW_COMPONENT_DIGEST_VERSION,
         )
@@ -823,10 +798,6 @@ def shadow_runtime_bindings_from_model_config(
                 "protocol_fingerprint"
             ],
             "execution_protocol_fingerprint": EXECUTION_PROTOCOL_FINGERPRINT,
-            "foundation_registry_identity": (
-                selection.foundation_registry_identity
-            ),
-            "foundation_version": selection.foundation_projection_version,
             "shadow_component_digest_version": (
                 SHADOW_COMPONENT_DIGEST_VERSION
             ),
@@ -843,7 +814,7 @@ def shadow_runtime_bindings_from_model_config(
                 raise ShadowLiveError(
                     "shadow component digest version binding changed"
                 )
-        elif key not in {"semantic_version", "foundation_version"} and (
+        elif key != "semantic_version" and (
             len(value) != 64
             or any(character not in "0123456789abcdef" for character in value)
         ):
@@ -1526,9 +1497,6 @@ class ShadowLiveRunner:
         if (
             engine.model_config_sha256 != binding_map["model_config_sha256"]
             or SMC_SEMANTIC_VERSION != binding_map["semantic_version"]
-            or engine.foundation_version != binding_map["foundation_version"]
-            or engine.foundation_registry_identity
-            != binding_map["foundation_registry_identity"]
             or engine.brain.path_protocol.fingerprint
             != binding_map["path_protocol_fingerprint"]
             or engine.brain.dol_protocol.fingerprint
@@ -1641,10 +1609,6 @@ class ShadowLiveRunner:
             or not model_contract_matches
             or self.engine.model_config_sha256 != binding_map["model_config_sha256"]
             or SMC_SEMANTIC_VERSION != binding_map["semantic_version"]
-            or self.engine.foundation_version
-            != binding_map["foundation_version"]
-            or self.engine.foundation_registry_identity
-            != binding_map["foundation_registry_identity"]
             or self.engine.brain.path_protocol.fingerprint
             != binding_map["path_protocol_fingerprint"]
             or self.engine.brain.dol_protocol.fingerprint
@@ -1794,115 +1758,7 @@ class ShadowLiveRunner:
                 + ",".join(mismatches)
             )
 
-    def _foundation_authority_digest(
-        self,
-        *,
-        validate_audit_registry: bool,
-    ) -> str:
-        """Validate the mutable foundation authority behind its snapshot."""
-
-        observer = self.engine.observer
-        adapter = getattr(observer, "_foundation_adapter", None)
-        published_market = getattr(observer, "last_market_snapshot", None)
-        snapshot = self.engine.last_snapshot
-        snapshot_market = (
-            snapshot.market_snapshot
-            if isinstance(snapshot, EngineSnapshot)
-            else None
-        )
-        if published_market != snapshot_market:
-            raise ShadowLiveError(
-                "checkpoint foundation authority differs from Engine snapshot"
-            )
-        published_projection = (
-            None if published_market is None else published_market.foundation
-        )
-        if adapter is None:
-            if published_projection is not None:
-                raise ShadowLiveError(
-                    "checkpoint foundation authority is missing"
-                )
-            return _digest_primitive(None)
-        authoritative_tick_size = float(observer.config.tick_size)
-        protocol_tick_size = float(
-            dict(self.protocol.instrument_mapping)["tick_size"]
-        )
-        if (
-            float(adapter.tick_size) != authoritative_tick_size
-            or protocol_tick_size != authoritative_tick_size
-        ):
-            raise ShadowLiveError(
-                "checkpoint foundation tick size differs from runtime authority"
-            )
-        if getattr(adapter, "_staged_transaction_open", None) is not False:
-            raise ShadowLiveError(
-                "checkpoint foundation transaction is not committed"
-            )
-        try:
-            rebuilt_lifecycle = type(adapter.lifecycle)(
-                **{
-                    item.name: getattr(adapter.lifecycle, item.name)
-                    for item in fields(adapter.lifecycle)
-                    if item.init
-                }
-            )
-        except Exception as error:
-            raise ShadowLiveError(
-                "checkpoint foundation lifecycle is not canonical"
-            ) from error
-        if rebuilt_lifecycle != adapter.lifecycle:
-            raise ShadowLiveError(
-                "checkpoint foundation lifecycle is not canonical"
-            )
-        expected_projection = (
-            adapter.projection
-            if adapter.projection.record_count > 0
-            else None
-        )
-        if expected_projection != published_projection:
-            raise ShadowLiveError(
-                "checkpoint foundation authority differs from published projection"
-            )
-        try:
-            checkpoint = adapter.checkpoint()
-        except Exception as error:
-            raise ShadowLiveError(
-                "checkpoint foundation authority is invalid"
-            ) from error
-
-        if validate_audit_registry:
-            if (
-                adapter._event_store is not observer.audit_store
-                or checkpoint.event_cursor != adapter._event_cursor
-            ):
-                raise ShadowLiveError(
-                    "checkpoint Foundation cursor differs from EventStore"
-                )
-            try:
-                adapter._validate_cold_replay(
-                    event_store=adapter._event_store,
-                    event_cursor=adapter._event_cursor,
-                    tick_size=adapter.tick_size,
-                    record_ledger=adapter._record_ledger,
-                    projection=adapter.projection,
-                    lifecycle=adapter.lifecycle,
-                )
-            except Exception as error:
-                raise ShadowLiveError(
-                    "checkpoint Foundation cold replay failed"
-                ) from error
-        return checkpoint.checkpoint_digest
-
     def __getstate__(self) -> dict[str, Any]:
-        observer = self.engine.observer
-        adapter = getattr(observer, "_foundation_adapter", None)
-        if (
-            adapter is not None
-            and float(adapter.tick_size) != float(observer.config.tick_size)
-        ):
-            raise ShadowLiveError(
-                "checkpoint foundation tick size differs from runtime authority"
-            )
         state = dict(self.__dict__)
         state.pop("_record_sequence_digest", None)
         state.pop("_component_digest_version", None)
@@ -1921,7 +1777,6 @@ class ShadowLiveRunner:
         self._require_internal_consistency()
         self._require_runtime_bindings()
         self._require_terminal_snapshot_exact()
-        self._foundation_authority_digest(validate_audit_registry=True)
         audit = audit_shadow_parity(self, self)
         if any(
             value != "non_independent_runner_alias"
@@ -1957,7 +1812,7 @@ class ShadowLiveRunner:
             raise ShadowLiveError(
                 "legacy component digest cannot publish a compact checkpoint"
             )
-        checkpoint = {
+        return {
             "schema_version": SHADOW_COMPACT_RUNTIME_CHECKPOINT_SCHEMA,
             "engine": self.engine,
             "protocol": self.protocol,
@@ -1975,12 +1830,6 @@ class ShadowLiveRunner:
             ),
             "external_submission_attempts": 0,
         }
-        checkpoint["foundation_authority_digest"] = (
-            self._foundation_authority_digest(
-                validate_audit_registry=False
-            )
-        )
-        return checkpoint
 
     @classmethod
     def from_compact_runtime_checkpoint(
@@ -2015,9 +1864,8 @@ class ShadowLiveRunner:
             raise ShadowLiveError(
                 "legacy compact shadow runtime schema is read-only/unsupported"
             )
-        expected_fields = common_fields | {"foundation_authority_digest"}
         if (
-            set(state) != expected_fields
+            set(state) != common_fields
             or state.get("external_submission_attempts") != 0
             or state.get("journal_events") != len(journal_events)
             or state.get("records") != len(records)
@@ -2026,9 +1874,8 @@ class ShadowLiveRunner:
             raise ShadowLiveError("compact shadow runtime checkpoint changed")
         # ``state`` is a public mapping API and callers may pass a live object
         # graph rather than bytes just decoded by pickle.  Normalize the
-        # Engine through its canonical pickle boundary so every nested owner
-        # (EventStore, FoundationProjection, FoundationAdapter, and Engine)
-        # drops/rebuilds derived indexes before any fingerprint is trusted.
+        # Engine through its canonical pickle boundary so nested owners drop
+        # and rebuild derived indexes before any fingerprint is trusted.
         try:
             restored_engine = pickle.loads(
                 pickle.dumps(
@@ -2037,19 +1884,6 @@ class ShadowLiveRunner:
                 )
             )
         except Exception as error:
-            source_observer = getattr(state.get("engine"), "observer", None)
-            source_adapter = getattr(
-                source_observer, "_foundation_adapter", None
-            )
-            if (
-                source_adapter is not None
-                and source_observer is not None
-                and float(source_adapter.tick_size)
-                != float(source_observer.config.tick_size)
-            ):
-                raise ShadowLiveError(
-                    "checkpoint foundation tick size differs from runtime authority"
-                ) from error
             raise ShadowLiveError(
                 "compact checkpoint Engine state cannot be revalidated"
             ) from error
@@ -2082,18 +1916,6 @@ class ShadowLiveRunner:
             raise ShadowLiveError("compact checkpoint histories do not align")
         runner._require_internal_consistency()
         runner._require_runtime_bindings()
-        restored_foundation_digest = runner._foundation_authority_digest(
-            validate_audit_registry=True
-        )
-        if (
-            state.get("schema_version")
-            == SHADOW_COMPACT_RUNTIME_CHECKPOINT_SCHEMA
-            and restored_foundation_digest
-            != state.get("foundation_authority_digest")
-        ):
-            raise ShadowLiveError(
-                "compact checkpoint foundation authority differs"
-            )
         runner._require_terminal_snapshot_exact()
         if (
             runner.journal.fingerprint != state["journal_fingerprint"]
@@ -2488,10 +2310,6 @@ def audit_shadow_parity(
                                 semantic_version=market.semantic_version,
                                 expected_timeframes=(
                                     market.timeframe_states.keys()
-                                ),
-                                foundation_records=(
-                                    runner.engine.observer
-                                    .materialize_foundation_history()
                                 ),
                             )
                             if (

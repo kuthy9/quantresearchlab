@@ -131,7 +131,6 @@ from .scene_graph import (
     current_dol_inventory,
     dol_level_terminal_sources,
     EvidenceStatus,
-    FoundationDOLInventoryView,
     SceneEdgeKind,
     SceneGraphDelta,
     TemporalMarketSceneGraph,
@@ -868,10 +867,7 @@ def _draw_rank(
             level.confirmed_at,
             level.level_id,
         )
-    higher_timeframe = bool(
-        not isinstance(item, FoundationDOLInventoryView)
-        and item.timeframe in {Timeframe.H4, Timeframe.H1}
-    )
+    higher_timeframe = item.timeframe in {Timeframe.H4, Timeframe.H1}
     pooled = item.kind in {"equal_highs", "equal_lows"}
     external = bool(
         item.structural_rank == "external"
@@ -1002,10 +998,7 @@ def _select_target(
                 and (
                     item.structural_rank == "external"
                     or item.is_protected_swing
-                    or (
-                        not isinstance(item, FoundationDOLInventoryView)
-                        and item.timeframe in {Timeframe.H4, Timeframe.H1}
-                    )
+                    or item.timeframe in {Timeframe.H4, Timeframe.H1}
                 )
             )
             and _target_is_deliverable(

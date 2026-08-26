@@ -70,6 +70,10 @@ _EXACT_AUTHORITATIVE_SOURCE_KINDS: Mapping[
     EventKind,
     tuple[EventKind, ...],
 ] = {
+    EventKind.LEVEL_TOUCHED: (
+        EventKind.LIQUIDITY_LEVEL_CREATED,
+        EventKind.BAR_COMPLETED,
+    ),
     EventKind.LEVEL_PENETRATED: (
         EventKind.LIQUIDITY_LEVEL_CREATED,
         EventKind.LEVEL_TOUCHED,
@@ -1119,6 +1123,12 @@ class EventStore:
 
         if event.kind is EventKind.PROTECTED_SWING_ASSIGNED:
             EventStore._validate_protected_swing_contract(
+                event,
+                source_parents=source_parents,
+            )
+
+        if event.kind is EventKind.LEVEL_TOUCHED:
+            EventStore._validate_level_touch_contract(
                 event,
                 source_parents=source_parents,
             )

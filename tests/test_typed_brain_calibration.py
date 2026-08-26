@@ -17,10 +17,6 @@ from smc_trader.engine import (
     LEGACY_ACTION_PIPELINE_MODE,
     normalize_action_disabled_playbooks,
 )
-from smc_trader.foundation_registry import (
-    FOUNDATION_CANONICAL_IDENTITY,
-    FOUNDATION_VERSION,
-)
 from smc_trader.model import Playbook
 from smc_trader.playbook_registry import load_playbook_registry
 
@@ -170,13 +166,10 @@ def test_engine_accepts_current_typed_config_and_rejects_incomplete_current_conf
     assert not engine.decision.calibration_ready
     assert engine.decision.calibration_version == "identity-unvalidated"
     assert engine.observer.config.eye_authority_mode is False
-    assert engine.observer.config.canonical_foundation_enabled is True
     assert engine.observer.config.project_scene_graph is True
     assert engine.observer.semantic_registry.identity == (
         "83f6f7dda806271c9dadfb78cbeb40ac14c2a0fda71463e65bd07a963e3040c7"
     )
-    assert engine.foundation_version == FOUNDATION_VERSION
-    assert engine.foundation_registry_identity == FOUNDATION_CANONICAL_IDENTITY
     with pytest.raises(TypeError, match="runtime_mode"):
         ContinuousSMCEngine.from_config("configs/model.json")
     with pytest.raises(RuntimeError, match="readiness gate"):
@@ -290,6 +283,14 @@ def test_engine_routes_existing_optional_eye_projection_flags(
     assert engine.observer.config.project_scene_graph is False
     assert engine.observer.config.materialize_event_view is False
     assert engine.observer.config.persist_state_projections is False
+
+    payload["observer"]["project_scene_graph"] = True
+    configured.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(ValueError, match="Scene Graph disabled"):
+        ContinuousSMCEngine.from_config(
+            configured,
+            runtime_mode="development",
+        )
 
     payload["observer"]["project_scene_graph"] = "false"
     configured.write_text(json.dumps(payload), encoding="utf-8")

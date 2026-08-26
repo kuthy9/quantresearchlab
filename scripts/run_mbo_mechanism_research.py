@@ -381,7 +381,6 @@ def _build_eye(model_path: Path) -> tuple[CausalMarketReader, CausalObserver]:
             materialize_event_view=False,
             range_auction_projection_only=False,
             eye_authority_mode=True,
-            canonical_foundation_enabled=True,
             typed_transition_delta_transport=False,
             persist_state_projections=False,
         ),

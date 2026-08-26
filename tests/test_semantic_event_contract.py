@@ -16,6 +16,11 @@ from smc_trader.semantics import (
     SemanticRegistryError,
 )
 
+from .test_event_provenance_contract import (
+    _legacy_range_boundary_candidate,
+    _normalized_bar,
+)
+
 
 def _clock(minutes: int) -> pd.Timestamp:
     return pd.Timestamp("2026-08-19 10:00", tz="America/New_York") + pd.Timedelta(
@@ -386,46 +391,53 @@ def test_canonical_retry_keeps_first_known_strength_after_hot_key_eviction() -> 
     observer.semantic_registry = SemanticRegistry.from_file()
     observer.audit_store = EventStore()
     observer.memory = EventMemory(1, audit_store=observer.audit_store)
-    source_ids = ("candidate-level",)
-    observer.audit_store.append(
-        replace(
-            _event(
-                EventKind.LIQUIDITY_LEVEL_CREATED,
-                _clock(9),
-                Timeframe.M5,
-                "above",
-                21_500.0,
-                0.1,
-            ),
-            event_id=source_ids[0],
-        )
+    range_context, candidate = _legacy_range_boundary_candidate(
+        prefix="canonical-retry",
+        minutes=9,
+        timeframe=Timeframe.M5,
+        side="above",
+        level_id="level-1",
+        price=21_500.0,
     )
+    crossing_bar = _normalized_bar(
+        "canonical-retry-bar",
+        10,
+        timeframe=Timeframe.M5,
+        high=21_501.0,
+        low=21_499.0,
+        close=21_500.0,
+    )
+    observer.audit_store.append_batch(
+        (range_context, candidate, crossing_bar)
+    )
+    source_ids = (candidate.event_id, crossing_bar.event_id)
+    crossing_clock = crossing_bar.known_at
 
     first = observer._append_semantic_atomic(
         EventKind.LEVEL_TOUCHED,
-        _clock(10),
+        crossing_clock,
         Timeframe.M5,
         "above",
         21_500.0,
         0.25,
         source_ids,
         {"level_id": "level-1", "touch_ordinal": 1},
-        event_time=_clock(10),
+        event_time=crossing_clock,
     )
     observer.memory.flush_audit()
     retry = observer._append_semantic_atomic(
         EventKind.LEVEL_TOUCHED,
-        _clock(10),
+        crossing_clock,
         Timeframe.M5,
         "above",
         21_500.0,
         0.75,
         source_ids,
         {"level_id": "level-1", "touch_ordinal": 1},
-        event_time=_clock(10),
+        event_time=crossing_clock,
     )
 
     assert retry == first
     assert retry.strength == 0.25
-    assert len(observer.audit_store) == 2
+    assert len(observer.audit_store) == 4
     assert observer.audit_store.get(first.event_id) == first

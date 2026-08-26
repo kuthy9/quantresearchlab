@@ -29,7 +29,6 @@ from smc_trader.model import (
     to_primitive,
 )
 from smc_trader.observation import ExecutionRealityInput
-from smc_trader.scene_graph import foundation_dol_inventory
 
 from .helpers import session_bars
 
@@ -452,7 +451,7 @@ def test_brain_neutral_capability_is_private_and_failure_atomic(
     )
 
 
-def test_clock_only_close_cannot_reprice_scene_foundation_or_brain(
+def test_clock_only_close_cannot_reprice_scene_market_state_or_brain(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     engine = ContinuousSMCEngine.from_config(
@@ -487,14 +486,6 @@ def test_clock_only_close_cannot_reprice_scene_foundation_or_brain(
     assert clock_only.market_snapshot.price == prior_price
     assert engine.observer.scene_graph._last_price == prior_price
     assert brain_prices == [prior_price]
-    assert (
-        clock_only.market_snapshot.foundation
-        == first.market_snapshot.foundation
-    )
-    assert (
-        clock_only.market_snapshot.foundation_range_locations
-        == first.market_snapshot.foundation_range_locations
-    )
     for timeframe, prior_state in first.market_snapshot.timeframe_states.items():
         assert (
             clock_only.market_snapshot.timeframe_states[timeframe].liquidity
@@ -655,14 +646,18 @@ def test_engine_neutral_state_is_pickle_checkpoint_ready() -> None:
     assert snapshot.observation.execution.source == "checkpoint-test-feed"
     assert snapshot.observation.execution.spread_points == 0.25
     assert engine.last_snapshot is not None
-    foundation = engine.last_snapshot.observation.market_snapshot.foundation
-    assert foundation is None
     market_snapshot = engine.last_snapshot.observation.market_snapshot
     missing_market_schema = market_snapshot.__getstate__()
     missing_market_schema.pop("schema_version")
     with pytest.raises(ValueError, match="market snapshot pickle schema"):
         object.__new__(type(market_snapshot)).__setstate__(
             missing_market_schema
+        )
+    previous_market_schema = market_snapshot.__getstate__()
+    previous_market_schema["schema_version"] = 4
+    with pytest.raises(ValueError, match="market snapshot pickle schema"):
+        object.__new__(type(market_snapshot)).__setstate__(
+            previous_market_schema
         )
     observation_state = snapshot.observation.__getstate__()
     assert observation_state["schema_version"] == 5
@@ -694,9 +689,9 @@ def test_engine_neutral_state_is_pickle_checkpoint_ready() -> None:
             previous_neutral_snapshot
         )
     publisher_state = engine.observer.market_snapshot_publisher.__getstate__()
-    assert publisher_state["_publisher_state_schema_version"] == 4
+    assert publisher_state["_publisher_state_schema_version"] == 5
     previous_publisher = dict(publisher_state)
-    previous_publisher["_publisher_state_schema_version"] = 3
+    previous_publisher["_publisher_state_schema_version"] = 4
     with pytest.raises(ValueError, match="publisher checkpoint schema"):
         object.__new__(type(engine.observer.market_snapshot_publisher)).__setstate__(
             previous_publisher
@@ -704,7 +699,6 @@ def test_engine_neutral_state_is_pickle_checkpoint_ready() -> None:
     replayed = replay_atomic_market_snapshot(
         engine.observer.audit_store.events(),
         semantic_registry_identity=engine.observer.semantic_registry.identity,
-        foundation_records=engine.observer.materialize_foundation_history(),
     )
     assert (
         replayed.replay_payload()
@@ -712,10 +706,10 @@ def test_engine_neutral_state_is_pickle_checkpoint_ready() -> None:
     )
     encoded = pickle.dumps(engine, protocol=pickle.HIGHEST_PROTOCOL)
     resumed = pickle.loads(encoded)
-    assert NEUTRAL_ENGINE_CHECKPOINT_SCHEMA_VERSION == 10
-    assert engine.__getstate__()["_neutral_checkpoint_schema_version"] == 10
+    assert NEUTRAL_ENGINE_CHECKPOINT_SCHEMA_VERSION == 11
+    assert engine.__getstate__()["_neutral_checkpoint_schema_version"] == 11
     previous_engine = engine.__getstate__()
-    previous_engine["_neutral_checkpoint_schema_version"] = 9
+    previous_engine["_neutral_checkpoint_schema_version"] = 10
     with pytest.raises(
         ValueError,
         match="checkpoint neutral market state schema",
@@ -738,15 +732,6 @@ def test_engine_neutral_state_is_pickle_checkpoint_ready() -> None:
         resumed.neutral_market_state.open_market_theses
         is resumed.last_snapshot.belief.global_context.open_market_theses
     )
-    assert (
-        resumed.last_snapshot.observation.market_snapshot.foundation
-        == foundation
-    )
-    drifted = pickle.loads(encoded)
-    drifted._foundation_registry_identity = "0" * 64
-    with pytest.raises(ValueError, match="checkpoint neutral market state schema"):
-        pickle.loads(pickle.dumps(drifted, protocol=pickle.HIGHEST_PROTOCOL))
-
     commitment_tamper = pickle.loads(encoded)
     committed_market = (
         commitment_tamper.last_snapshot.observation.market_snapshot
@@ -881,98 +866,10 @@ def test_engine_neutral_state_is_pickle_checkpoint_ready() -> None:
     resumed_replay = replay_atomic_market_snapshot(
         resumed.observer.audit_store.events(),
         semantic_registry_identity=resumed.observer.semantic_registry.identity,
-        foundation_records=resumed.observer.materialize_foundation_history(),
     )
     assert (
         resumed_replay.replay_payload()
         == resumed.last_snapshot.observation.market_snapshot.replay_payload()
-    )
-
-
-def test_2024_06_engine_foundation_dol_role_and_pool_anchor_replay_exact() -> None:
-    bars = _june_2024_protected_role_and_pool_anchor_bars()
-    engine = ContinuousSMCEngine.from_config(
-        "configs/model.json",
-        runtime_mode="development",
-    )
-    for bar in bars[:26]:
-        engine.on_bar(bar)
-    resumed = pickle.loads(pickle.dumps(engine, protocol=pickle.HIGHEST_PROTOCOL))
-
-    final = None
-    for ordinal, bar in enumerate(bars[26:], start=27):
-        expected = engine.on_bar(bar)
-        actual = resumed.on_bar(bar)
-        assert to_primitive(actual) == to_primitive(expected)
-        final = expected
-        if ordinal != 28:
-            continue
-
-        observation = expected.observation
-        tracker_protected = next(
-            item
-            for item in observation.liquidity_inventory
-            if item.kind == "swing"
-            and item.is_protected_swing
-            and item.price == 18_572.0
-        )
-        foundation_view = next(
-            item
-            for item in foundation_dol_inventory(observation)
-            if item.source_identity == tracker_protected.item_id
-        )
-        assert tracker_protected.structural_rank == "external"
-        # The tracker role appears with the initial structure snapshot.  It
-        # must not rewrite the canonical creation-time DOL rank or masquerade
-        # as a protected assignment before that exact semantic event exists.
-        assert foundation_view.structural_rank == "internal"
-        assert foundation_view.is_protected_swing is False
-        assert (
-            engine.observer._foundation_dol_templates[
-                tracker_protected.item_id
-            ].rank
-            == "internal"
-        )
-        assert not any(
-            record.status.value == "active"
-            and record.payload.get("protected_swing_id")
-            == tracker_protected.item_id.removeprefix("swing:")
-            for record in observation.market_snapshot.foundation.latest_records
-            if record.object_type.value == "structure_generation"
-        )
-
-    assert final is not None
-    observation = final.observation
-    projection = observation.market_snapshot.foundation
-    records = {record.object_id: record for record in projection.latest_records}
-    pool_view = next(
-        item
-        for item in foundation_dol_inventory(observation)
-        if records[item.item_id].payload.get("price_anchor_rule")
-        == "near_side_tradable_zone_boundary_for_nontradable_midpoint"
-    )
-    pool_record = records[pool_view.item_id]
-    anchor = (
-        int(pool_record.payload["price_ticks"])
-        * float(pool_record.payload["tick_size"])
-    )
-    published = next(
-        candidate
-        for state in observation.market_snapshot.timeframe_states.values()
-        for candidate in state.liquidity.candidates
-        if candidate.candidate_id == pool_view.item_id
-    )
-    assert pool_view.foundation_source_kind == "formed_liquidity_pool"
-    assert pool_view.price == published.price == anchor
-
-    replayed = replay_atomic_market_snapshot(
-        engine.observer.audit_store.events(),
-        semantic_registry_identity=engine.observer.semantic_registry.identity,
-        foundation_records=engine.observer.materialize_foundation_history(),
-    )
-    assert (
-        replayed.replay_payload()
-        == observation.market_snapshot.replay_payload()
     )
 
 

@@ -113,7 +113,7 @@ def _event(
         kind=(
             EventKind.TIMEFRAME_STATE_CHANGED
             if projection
-            else (kind or EventKind.LEVEL_TOUCHED)
+            else (kind or EventKind.LIQUIDITY_CONSUMED)
         ),
         observed_at=clock,
         timeframe=timeframe,
@@ -2080,6 +2080,23 @@ def test_store_accepts_closed_authoritative_crossing_chain(
     }
 
 
+def test_store_rejects_orphan_canonical_level_touch() -> None:
+    orphan = _event(
+        "orphan-level-touch",
+        0,
+        canonical=True,
+        kind=EventKind.LEVEL_TOUCHED,
+        details={"level_id": "orphan-level"},
+        source_event_ids=(),
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="authoritative parent contract failed for level_touched",
+    ):
+        EventStore.from_events((orphan,))
+
+
 def test_m1_crossing_binds_higher_timeframe_candidate_explicitly() -> None:
     events = _crossing_chain(
         prefix="cross-scale-candidate",
@@ -3625,15 +3642,15 @@ def test_origin_zone_terminal_state_replay_and_unknown_identity_fail_closed(
         )
 
 
-def test_two_touches_cannot_masquerade_as_qualified_bos() -> None:
-    touch_one = _event("touch-one", 0, canonical=True)
-    touch_two = _event("touch-two", 1, canonical=True)
+def test_two_unrelated_facts_cannot_masquerade_as_qualified_bos() -> None:
+    unrelated_one = _event("unrelated-one", 0, canonical=True)
+    unrelated_two = _event("unrelated-two", 1, canonical=True)
     counterfeit_bos = _event(
         "counterfeit-bos",
         2,
         canonical=True,
         kind=EventKind.QUALIFIED_BOS,
-        source_event_ids=(touch_one.event_id, touch_two.event_id),
+        source_event_ids=(unrelated_one.event_id, unrelated_two.event_id),
     )
     store = EventStore()
 
@@ -3641,7 +3658,7 @@ def test_two_touches_cannot_masquerade_as_qualified_bos() -> None:
         ValueError,
         match="authoritative parent contract failed for qualified_bos",
     ):
-        store.append_batch((touch_one, touch_two, counterfeit_bos))
+        store.append_batch((unrelated_one, unrelated_two, counterfeit_bos))
     assert len(store) == 0
 
 

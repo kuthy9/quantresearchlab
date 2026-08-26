@@ -2,8 +2,6 @@ from __future__ import annotations
 
 from dataclasses import replace
 import copy
-import hashlib
-import json
 import math
 import pickle
 
@@ -12,10 +10,6 @@ import pytest
 
 from smc_trader.causal import CausalMarketReader, ReaderUpdate
 from smc_trader.event_store import EventStore, event_order_key
-from smc_trader.foundation_registry import (
-    FOUNDATION_CANONICAL_IDENTITY,
-    FOUNDATION_VERSION,
-)
 from smc_trader.market_state import (
     MARKET_SNAPSHOT_SCHEMA_VERSION,
     TIMEFRAME_EVENT_REDUCER_SCHEMA_VERSION,
@@ -27,11 +21,8 @@ from smc_trader.market_state import (
     RelationResolver,
     SessionStateReducer,
     TimeframeEventReducer,
-    foundation_record_from_projection_event,
-    foundation_record_projection_event,
     replay_atomic_market_snapshot,
     reduce_timeframe_state,
-    _validate_foundation_authoritative_sources,
 )
 from smc_trader.model import (
     Candle,
@@ -48,27 +39,6 @@ from smc_trader.model import (
     to_primitive,
 )
 from smc_trader.observation import CausalObserver, ObserverConfig
-from smc_trader.semantic_lifecycle import (
-    GenerationLifecycle,
-    RelationGeneration,
-)
-from smc_trader.semantic_foundation import (
-    FoundationProjection,
-    FoundationProjectionReducer,
-    FoundationRecord,
-    FoundationRecordStatus,
-)
-from smc_trader.semantic_zones import (
-    BaseOriginCore,
-    CompatibleStructureKind,
-    FVGStructuralLifecycle,
-    FVGTerminationCause,
-    ZoneEntrySide,
-    ZoneFirstRetest,
-    ZoneObjectKind,
-    qualify_order_block,
-    reduce_fvg_termination,
-)
 
 from .helpers import (
     CORE_TEST_SCALE_REGISTRY_ID,
@@ -167,10 +137,10 @@ def test_timeframe_reducer_owns_only_store_cursor_and_compact_market_state() -> 
     assert "_current_fact_event_ids" not in reducer.__dict__
 
     checkpoint = reducer.__getstate__()
-    assert TIMEFRAME_EVENT_REDUCER_SCHEMA_VERSION == 2
+    assert TIMEFRAME_EVENT_REDUCER_SCHEMA_VERSION == 3
     assert "_current_fact_event_ids" not in checkpoint
     old_checkpoint = dict(checkpoint)
-    old_checkpoint["_reducer_schema_version"] = 1
+    old_checkpoint["_reducer_schema_version"] = 2
     old_checkpoint["_current_fact_event_ids"] = {}
     before = dict(reducer.__dict__)
     with pytest.raises(ValueError, match="checkpoint schema changed"):
@@ -969,1266 +939,6 @@ def test_session_rejects_unanchored_or_new_session_clock_only_atomically() -> No
     assert anchored.__dict__ == before
 
 
-def _foundation_record_history() -> tuple[FoundationRecord, FoundationRecord]:
-    active = FVGStructuralLifecycle(
-        fvg_id="foundation-fvg",
-        source_creation_event_id="foundation-source-created",
-        symbol="NQH5",
-        instrument_id=1,
-        timeframe=Timeframe.M5,
-        created_at=_clock(0),
-        known_at=_clock(0),
-    )
-    terminal = reduce_fvg_termination(
-        active,
-        cause=FVGTerminationCause.CONTRACT_ROLLOVER,
-        known_at=_clock(1),
-        cause_event_ids=("foundation-source-terminal",),
-    )
-    terminal = replace(
-        terminal,
-        terminal_event_id="foundation-source-terminal",
-        terminal_source_event_ids=(
-            "foundation-source-created",
-            "foundation-source-terminal",
-        ),
-    )
-    return FoundationRecord.from_dto(active), FoundationRecord.from_dto(terminal)
-
-
-def _foundation_fvg_source_events() -> tuple[MarketEvent, ...]:
-    """Build the exact canonical ancestry used by foundation replay fixtures."""
-
-    bars: list[MarketEvent] = []
-    for index, minutes in enumerate((-15, -10, -5), start=1):
-        base = _replayable_m1_event(minutes, 100.0 + index * 0.25)
-        evidence = {
-            **dict(base.evidence),
-            "source_data_ids": (f"foundation-m5:{index}",),
-        }
-        bars.append(
-            replace(
-                base,
-                event_id=f"foundation-fvg-bar-{index}",
-                timeframe=Timeframe.M5,
-                details=evidence,
-                evidence=evidence,
-            )
-        )
-    creation = _event(
-        EventKind.FVG_CREATED,
-        0,
-        Timeframe.M5,
-        event_id="foundation-source-created",
-        side="above",
-        price=100.75,
-        direction=Direction.LONG,
-        evidence={"fvg_id": "foundation-fvg"},
-        source_ids=tuple(bar.event_id for bar in bars),
-        zone=(100.25, 100.75),
-        origin=EventOrigin.SEMANTIC_ATOMIC,
-    )
-    return (*bars, creation)
-
-
-def _foundation_m5_bar(
-    minutes: int,
-    *,
-    event_id: str,
-    open_: float,
-    high: float,
-    low: float,
-    close: float,
-) -> MarketEvent:
-    base = _replayable_m1_event(minutes, close)
-    evidence = {
-        **dict(base.evidence),
-        "open": open_,
-        "high": high,
-        "low": low,
-        "close": close,
-        "source_data_ids": (f"source:{event_id}",),
-    }
-    return replace(
-        base,
-        event_id=event_id,
-        timeframe=Timeframe.M5,
-        price=close,
-        details=evidence,
-        evidence=evidence,
-    )
-
-
-def _tamper_foundation_projection_state(
-    event: MarketEvent,
-    *,
-    field: str,
-    value: object,
-) -> MarketEvent:
-    primitive = dict(event.evidence["projection_state"])
-    primitive[field] = value
-    encoded = json.dumps(
-        to_primitive(primitive),
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
-    evidence = {
-        **dict(event.evidence),
-        "projection_state": primitive,
-        "projection_sha256": hashlib.sha256(encoded).hexdigest(),
-    }
-    return replace(event, details=evidence, evidence=evidence)
-
-
-def test_foundation_record_projection_transport_roundtrips_exactly() -> None:
-    active_record, _ = _foundation_record_history()
-
-    event = foundation_record_projection_event(
-        active_record,
-        timeframe=Timeframe.M5,
-        sequence_no=7,
-    )
-
-    assert event.kind is EventKind.FOUNDATION_STATE_CHANGED
-    assert event.origin is EventOrigin.STATE_PROJECTION
-    assert event.semantic_version == SMC_SEMANTIC_VERSION
-    assert event.evidence["canonical_semantic"] is False
-    assert event.evidence["technical_projection"] == "foundation_record"
-    assert event.evidence["state_id"] == active_record.record_id
-    assert event.evidence["projection_state"]["record_id"] == (
-        active_record.record_id
-    )
-    assert event.evidence["projection_state"]["foundation_version"] == (
-        FOUNDATION_VERSION
-    )
-    assert event.evidence["projection_state"]["registry_identity"] == (
-        FOUNDATION_CANONICAL_IDENTITY
-    )
-    assert foundation_record_from_projection_event(event) == active_record
-    assert foundation_record_projection_event(
-        active_record,
-        timeframe=Timeframe.M5,
-        sequence_no=7,
-    ) == event
-
-
-def test_foundation_projection_can_publish_old_warmup_record_at_current_clock() -> None:
-    active_record, _ = _foundation_record_history()
-    published_at = _clock(5)
-    event = foundation_record_projection_event(
-        active_record,
-        timeframe=Timeframe.M5,
-        published_at=published_at,
-        sequence_no=1,
-    )
-
-    assert event.event_time == active_record.known_at
-    assert event.known_at == published_at
-    assert foundation_record_from_projection_event(event) == active_record
-
-    created_sources = _foundation_fvg_source_events()
-    current_bar = _replayable_m1_event(
-        5,
-        100.5,
-        active_timeframes=(Timeframe.M1, Timeframe.M5),
-    )
-    replayed = replay_atomic_market_snapshot(
-        (*created_sources, current_bar, event),
-        semantic_registry_identity="definition-test",
-    )
-
-    assert replayed.asof == published_at
-    assert replayed.foundation is not None
-    assert replayed.foundation.current_records == (active_record,)
-    assert replayed.foundation.record_count == 1
-    assert replayed.foundation.asof == active_record.known_at
-
-
-def test_atomic_foundation_replay_rejects_fvg_creation_kind_substitution() -> None:
-    active_record, _ = _foundation_record_history()
-    created_sources = _foundation_fvg_source_events()
-    wrong_source_id = created_sources[0].event_id
-    payload = dict(active_record.payload)
-    payload["source_creation_event_id"] = wrong_source_id
-    forged = FoundationRecord(
-        object_type=active_record.object_type,
-        object_id=active_record.object_id,
-        status=active_record.status,
-        known_at=active_record.known_at,
-        payload=payload,
-        source_event_ids=(wrong_source_id,),
-    )
-    current_bar = _replayable_m1_event(
-        5,
-        100.5,
-        active_timeframes=(Timeframe.M1, Timeframe.M5),
-    )
-    transport = foundation_record_projection_event(
-        forged,
-        timeframe=Timeframe.M5,
-        published_at=current_bar.known_at,
-        sequence_no=1,
-    )
-
-    with pytest.raises(ValueError, match="FVG creation.*kind"):
-        replay_atomic_market_snapshot(
-            (*created_sources, current_bar, transport),
-            semantic_registry_identity="definition-test",
-        )
-
-
-@pytest.mark.parametrize(
-    ("field", "value"),
-    (
-        ("symbol", "ESH5"),
-        ("instrument_id", 2),
-        ("created_at", _clock(-5).isoformat()),
-    ),
-)
-def test_atomic_foundation_replay_binds_fvg_creation_clock_and_contract(
-    field: str,
-    value: object,
-) -> None:
-    active_record, _ = _foundation_record_history()
-    created_sources = _foundation_fvg_source_events()
-    payload = dict(active_record.payload)
-    payload[field] = value
-    forged = FoundationRecord(
-        object_type=active_record.object_type,
-        object_id=active_record.object_id,
-        status=active_record.status,
-        known_at=active_record.known_at,
-        payload=payload,
-        source_event_ids=active_record.source_event_ids,
-    )
-    transport = foundation_record_projection_event(
-        forged,
-        timeframe=Timeframe.M5,
-        sequence_no=1,
-    )
-
-    with pytest.raises(ValueError, match="FVG creation"):
-        replay_atomic_market_snapshot(
-            (*created_sources, transport),
-            semantic_registry_identity="definition-test",
-        )
-
-
-def test_foundation_transport_rejects_ob_retest_creation_from_sibling_displacement() -> None:
-    core = BaseOriginCore(
-        symbol="NQH5",
-        instrument_id=1,
-        timeframe=Timeframe.M5,
-        direction=Direction.LONG,
-        source_displacement_id="qob-displacement",
-        source_displacement_event_id="qob-displacement-event",
-        anchor_bar_event_ids=("qob-anchor-1", "qob-anchor-2"),
-        anchor_candle_ids=("qob-candle-1", "qob-candle-2"),
-        anchor_completed_at=(_clock(-10), _clock(-5)),
-        lower_bound=99.0,
-        upper_bound=101.0,
-        body_lower_bound=99.25,
-        body_upper_bound=100.75,
-        tick_size=0.25,
-        formed_at=_clock(-5),
-        known_at=_clock(0),
-    )
-    qualified = qualify_order_block(
-        core,
-        source_displacement_id=core.source_displacement_id,
-        source_displacement_event_id=core.source_displacement_event_id,
-        compatible_structure_event_id="qob-structure-event",
-        compatible_structure_kind=CompatibleStructureKind.QUALIFIED_BOS,
-        qualified_at=_clock(0),
-        known_at=_clock(0),
-    )
-    projection = FoundationProjectionReducer.reduce(
-        FoundationProjectionReducer.initial_projection(),
-        FoundationRecord.from_dto(core),
-    )
-    projection = FoundationProjectionReducer.reduce(
-        projection,
-        FoundationRecord.from_dto(qualified),
-    )
-    displacement = _event(
-        EventKind.DISPLACEMENT_OBSERVED,
-        0,
-        Timeframe.M5,
-        event_id=core.source_displacement_event_id,
-        direction=Direction.LONG,
-        evidence={"displacement_id": core.source_displacement_id},
-        origin=EventOrigin.SEMANTIC_ATOMIC,
-    )
-    sibling_creation = _event(
-        EventKind.ORIGIN_ZONE_CREATED,
-        0,
-        Timeframe.M5,
-        event_id="qob-sibling-origin-zone",
-        direction=Direction.LONG,
-        evidence={
-            "origin_zone_id": "legacy-sibling-zone",
-            "source_displacement_id": "sibling-displacement",
-        },
-        source_ids=(displacement.event_id,),
-        zone=(99.0, 101.0),
-        origin=EventOrigin.SEMANTIC_ATOMIC,
-    )
-    interaction = _foundation_m5_bar(
-        5,
-        event_id="qob-first-retest-bar",
-        open_=102.0,
-        high=102.25,
-        low=100.0,
-        close=101.5,
-    )
-    retest = ZoneFirstRetest(
-        object_kind=ZoneObjectKind.QUALIFIED_ORDER_BLOCK,
-        object_id=qualified.qualified_ob_id,
-        creation_event_id=sibling_creation.event_id,
-        departure_source_event_id=displacement.event_id,
-        source_bar_event_id=interaction.event_id,
-        symbol="NQH5",
-        instrument_id=1,
-        timeframe=Timeframe.M5,
-        direction=Direction.LONG,
-        known_at=_clock(5),
-        entry_side=ZoneEntrySide.FROM_ABOVE,
-        fill_fraction=0.5,
-        age_bars=1,
-        age_seconds=300,
-        session="new_york",
-        context_event_ids=(),
-    )
-    exact_creation = replace(
-        sibling_creation,
-        event_id="qob-exact-origin-zone",
-        details={
-            **dict(sibling_creation.evidence),
-            "source_displacement_id": core.source_displacement_id,
-        },
-        evidence={
-            **dict(sibling_creation.evidence),
-            "source_displacement_id": core.source_displacement_id,
-        },
-    )
-    exact_retest = replace(retest, creation_event_id=exact_creation.event_id)
-    _validate_foundation_authoritative_sources(
-        FoundationRecord.from_dto(exact_retest),
-        {
-            displacement.event_id: displacement,
-            exact_creation.event_id: exact_creation,
-            interaction.event_id: interaction,
-        },
-        projection,
-    )
-
-    with pytest.raises(ValueError, match="Qualified OB creation is incompatible"):
-        _validate_foundation_authoritative_sources(
-            FoundationRecord.from_dto(retest),
-            {
-                displacement.event_id: displacement,
-                sibling_creation.event_id: sibling_creation,
-                interaction.event_id: interaction,
-            },
-            projection,
-        )
-
-
-def test_foundation_transport_binds_base_origin_anchor_geometry_and_clocks() -> None:
-    def anchor(
-        minutes: int,
-        *,
-        event_id: str,
-        open_: float,
-        high: float,
-        low: float,
-        close: float,
-    ) -> MarketEvent:
-        bar = _foundation_m5_bar(
-            minutes,
-            event_id=event_id,
-            open_=open_,
-            high=high,
-            low=low,
-            close=close,
-        )
-        evidence = {
-            **dict(bar.evidence),
-            "detector_candle_id": f"candle:{event_id}",
-        }
-        return replace(bar, details=evidence, evidence=evidence)
-
-    first = anchor(
-        -10,
-        event_id="base-origin-anchor-1",
-        open_=100.0,
-        high=101.0,
-        low=99.0,
-        close=100.5,
-    )
-    second = anchor(
-        -5,
-        event_id="base-origin-anchor-2",
-        open_=100.5,
-        high=101.5,
-        low=99.25,
-        close=100.75,
-    )
-    displacement = _event(
-        EventKind.DISPLACEMENT_OBSERVED,
-        0,
-        Timeframe.M5,
-        event_id="base-origin-displacement-event",
-        direction=Direction.LONG,
-        evidence={"displacement_id": "base-origin-displacement"},
-        origin=EventOrigin.SEMANTIC_ATOMIC,
-    )
-    core = BaseOriginCore(
-        symbol="NQH5",
-        instrument_id=1,
-        timeframe=Timeframe.M5,
-        direction=Direction.LONG,
-        source_displacement_id="base-origin-displacement",
-        source_displacement_event_id=displacement.event_id,
-        anchor_bar_event_ids=(first.event_id, second.event_id),
-        anchor_candle_ids=(
-            first.evidence["detector_candle_id"],
-            second.evidence["detector_candle_id"],
-        ),
-        anchor_completed_at=(first.known_at, second.known_at),
-        lower_bound=99.0,
-        upper_bound=101.5,
-        body_lower_bound=100.0,
-        body_upper_bound=100.75,
-        tick_size=0.25,
-        formed_at=second.known_at,
-        known_at=displacement.known_at,
-    )
-    authority = {
-        first.event_id: first,
-        second.event_id: second,
-        displacement.event_id: displacement,
-    }
-    _validate_foundation_authoritative_sources(
-        FoundationRecord.from_dto(core),
-        authority,
-    )
-
-    forged = replace(core, lower_bound=98.75)
-    with pytest.raises(ValueError, match="Base Origin ancestry, clocks, or BAR geometry"):
-        _validate_foundation_authoritative_sources(
-            FoundationRecord.from_dto(forged),
-            authority,
-        )
-
-
-def test_foundation_transport_binds_balance_range_lifecycle_fact() -> None:
-    state = _balance_range()
-    source_member_ids = (
-        *state.lower_source_member_swing_ids,
-        *state.upper_source_member_swing_ids,
-    )
-    evidence = {
-        "range_id": state.range_id,
-        "lifecycle": state.lifecycle.value,
-        "lower_bound": state.lower_bound,
-        "upper_bound": state.upper_bound,
-        "lower_source_zone_id": state.lower_source_zone_id,
-        "upper_source_zone_id": state.upper_source_zone_id,
-        "source_member_swing_ids": source_member_ids,
-    }
-    lifecycle = replace(
-        _event(
-            EventKind.DEALING_RANGE_CREATED,
-            0,
-            Timeframe.H1,
-            event_id="balance-range-created",
-            evidence=evidence,
-            zone=(state.lower_bound, state.upper_bound),
-            origin=EventOrigin.SEMANTIC_ATOMIC,
-        ),
-        observed_at=state.state_started_at,
-        event_time=state.formed_at,
-        known_at=state.state_started_at,
-        source_entity_ids=(
-            state.range_id,
-            state.lower_source_zone_id,
-            state.upper_source_zone_id,
-            *source_member_ids,
-        ),
-    )
-    record = FoundationRecord.from_dto(
-        state,
-        source_event_ids=(lifecycle.event_id,),
-    )
-    _validate_foundation_authoritative_sources(
-        record,
-        {lifecycle.event_id: lifecycle},
-    )
-
-    wrong_evidence = {**evidence, "lower_bound": state.lower_bound - 0.25}
-    forged_lifecycle = replace(
-        lifecycle,
-        details=wrong_evidence,
-        evidence=wrong_evidence,
-    )
-    with pytest.raises(ValueError, match="BalanceRange lifecycle fact"):
-        _validate_foundation_authoritative_sources(
-            record,
-            {forged_lifecycle.event_id: forged_lifecycle},
-        )
-
-
-@pytest.mark.parametrize(
-    "mutation",
-    (
-        {"fill_fraction": 0.75},
-        {"age_bars": 1},
-        {"entry_side": ZoneEntrySide.FROM_BELOW},
-    ),
-)
-def test_atomic_foundation_replay_recomputes_first_retest_metrics(
-    mutation: dict[str, object],
-) -> None:
-    active_record, _ = _foundation_record_history()
-    created_sources = _foundation_fvg_source_events()
-    active_transport = foundation_record_projection_event(
-        active_record,
-        timeframe=Timeframe.M5,
-        sequence_no=1,
-    )
-    departure = _foundation_m5_bar(
-        5,
-        event_id="foundation-retest-departure",
-        open_=100.75,
-        high=101.25,
-        low=100.5,
-        close=101.0,
-    )
-    interaction = _foundation_m5_bar(
-        10,
-        event_id="foundation-retest-interaction",
-        open_=101.0,
-        high=101.25,
-        low=100.5,
-        close=101.0,
-    )
-    valid = ZoneFirstRetest(
-        object_kind="fvg",
-        object_id=active_record.object_id,
-        creation_event_id="foundation-source-created",
-        departure_source_event_id=departure.event_id,
-        source_bar_event_id=interaction.event_id,
-        symbol="NQH5",
-        instrument_id=1,
-        timeframe=Timeframe.M5,
-        direction=Direction.LONG,
-        known_at=_clock(10),
-        entry_side=ZoneEntrySide.FROM_ABOVE,
-        fill_fraction=0.5,
-        age_bars=2,
-        age_seconds=600,
-        session="new_york",
-        context_event_ids=(),
-    )
-    forged = replace(valid, **mutation)
-    forged_record = FoundationRecord.from_dto(forged)
-    final_bar = replace(
-        _replayable_m1_event(
-            10,
-            101.0,
-            active_timeframes=(Timeframe.M1, Timeframe.M5),
-        ),
-        event_id="foundation-retest-current-m1",
-        sequence_no=1,
-    )
-    forged_transport = foundation_record_projection_event(
-        forged_record,
-        timeframe=Timeframe.M5,
-        published_at=_clock(10),
-        sequence_no=2,
-    )
-
-    with pytest.raises(ValueError, match="first-retest causal metrics"):
-        replay_atomic_market_snapshot(
-            (
-                *created_sources,
-                active_transport,
-                departure,
-                interaction,
-                final_bar,
-                forged_transport,
-            ),
-            semantic_registry_identity="definition-test",
-        )
-
-
-def _first_retest_registered_clock_fixture(
-    *,
-    target_known_at: pd.Timestamp,
-    interaction_known_at: pd.Timestamp,
-) -> tuple[FoundationRecord, dict[str, MarketEvent], FoundationProjection]:
-    active = FVGStructuralLifecycle(
-        fvg_id="registered-clock-fvg",
-        source_creation_event_id="registered-clock-fvg-created",
-        symbol="NQH5",
-        instrument_id=1,
-        timeframe=Timeframe.M5,
-        created_at=target_known_at,
-        known_at=target_known_at,
-    )
-    projection = FoundationProjectionReducer.reduce(
-        FoundationProjectionReducer.initial_projection(),
-        FoundationRecord.from_dto(active),
-    )
-    creation = replace(
-        _event(
-            EventKind.FVG_CREATED,
-            0,
-            Timeframe.M5,
-            event_id=active.source_creation_event_id,
-            side="above",
-            price=100.75,
-            direction=Direction.LONG,
-            evidence={"fvg_id": active.fvg_id},
-            zone=(100.25, 100.75),
-            origin=EventOrigin.SEMANTIC_ATOMIC,
-        ),
-        observed_at=target_known_at,
-        event_time=target_known_at,
-        known_at=target_known_at,
-    )
-    departure = replace(
-        _foundation_m5_bar(
-            0,
-            event_id="registered-clock-departure",
-            open_=100.75,
-            high=101.25,
-            low=100.5,
-            close=101.0,
-        ),
-        observed_at=target_known_at,
-        event_time=target_known_at,
-        known_at=target_known_at,
-    )
-    interaction = replace(
-        _foundation_m5_bar(
-            5,
-            event_id="registered-clock-interaction",
-            open_=101.0,
-            high=101.25,
-            low=100.5,
-            close=101.0,
-        ),
-        observed_at=interaction_known_at,
-        event_time=interaction_known_at,
-        known_at=interaction_known_at,
-    )
-    retest = ZoneFirstRetest(
-        object_kind=ZoneObjectKind.FVG,
-        object_id=active.fvg_id,
-        creation_event_id=creation.event_id,
-        departure_source_event_id=departure.event_id,
-        source_bar_event_id=interaction.event_id,
-        symbol="NQH5",
-        instrument_id=1,
-        timeframe=Timeframe.M5,
-        direction=Direction.LONG,
-        known_at=interaction_known_at,
-        entry_side=ZoneEntrySide.FROM_ABOVE,
-        fill_fraction=0.5,
-        age_bars=1,
-        age_seconds=int(
-            (interaction_known_at - target_known_at).total_seconds()
-        ),
-        session="new_york",
-        context_event_ids=(),
-    )
-    authority = {
-        creation.event_id: creation,
-        departure.event_id: departure,
-        interaction.event_id: interaction,
-    }
-    return FoundationRecord.from_dto(retest), authority, projection
-
-
-def test_foundation_first_retest_replay_accepts_registered_memorial_reopen() -> None:
-    record, authority, projection = _first_retest_registered_clock_fixture(
-        target_known_at=pd.Timestamp(
-            "2024-05-27 13:00",
-            tz="America/New_York",
-        ),
-        interaction_known_at=pd.Timestamp(
-            "2024-05-27 18:05",
-            tz="America/New_York",
-        ),
-    )
-
-    _validate_foundation_authoritative_sources(
-        record,
-        authority,
-        projection,
-    )
-
-
-def test_foundation_relation_source_rejects_clock_only_bar() -> None:
-    clock_only = _replayable_m1_event(
-        0,
-        100.0,
-        real_completed=False,
-    )
-    relation = RelationGeneration(
-        relation_generation_id="clock-only-relation",
-        source_relation_id="H1:M5",
-        parent_tf=Timeframe.H1,
-        child_tf=Timeframe.M5,
-        parent_structure_generation_id="parent-structure",
-        child_structure_generation_id="child-structure",
-        role="parent_retracement",
-        lifecycle=GenerationLifecycle.ACTIVE,
-        entered_at=clock_only.known_at,
-        known_at=clock_only.known_at,
-        last_updated_at=clock_only.known_at,
-        observation_count=1,
-        latest_relation_digest="clock-only-relation-digest",
-        source_event_ids=(clock_only.event_id,),
-    )
-
-    with pytest.raises(ValueError, match="Relation Generation source.*exact real BAR"):
-        _validate_foundation_authoritative_sources(
-            FoundationRecord.from_dto(relation),
-            {clock_only.event_id: clock_only},
-        )
-
-
-def test_foundation_first_retest_rejects_clock_only_interaction_bar() -> None:
-    record, authority, projection = _first_retest_registered_clock_fixture(
-        target_known_at=pd.Timestamp(
-            "2024-06-03 10:00",
-            tz="America/New_York",
-        ),
-        interaction_known_at=pd.Timestamp(
-            "2024-06-03 10:05",
-            tz="America/New_York",
-        ),
-    )
-    interaction_id = record.payload["source_bar_event_id"]
-    interaction = authority[interaction_id]
-    forged_evidence = {
-        **dict(interaction.evidence),
-        "real_completed": False,
-        "clock_only": True,
-    }
-    authority[interaction_id] = replace(
-        interaction,
-        details=forged_evidence,
-        evidence=forged_evidence,
-    )
-
-    with pytest.raises(
-        ValueError,
-        match="first-retest interaction BAR.*exact real BAR",
-    ):
-        _validate_foundation_authoritative_sources(
-            record,
-            authority,
-            projection,
-        )
-
-
-@pytest.mark.parametrize(
-    ("target_known_at", "interaction_known_at"),
-    (
-        (
-            pd.Timestamp("2024-05-27 13:00", tz="America/New_York"),
-            pd.Timestamp("2024-05-27 18:10", tz="America/New_York"),
-        ),
-        (
-            pd.Timestamp("2024-06-03 10:00", tz="America/New_York"),
-            pd.Timestamp("2024-06-03 10:10", tz="America/New_York"),
-        ),
-    ),
-)
-def test_foundation_first_retest_replay_rejects_skipped_registered_bucket(
-    target_known_at: pd.Timestamp,
-    interaction_known_at: pd.Timestamp,
-) -> None:
-    record, authority, projection = _first_retest_registered_clock_fixture(
-        target_known_at=target_known_at,
-        interaction_known_at=interaction_known_at,
-    )
-
-    with pytest.raises(ValueError, match="first-retest causal metrics"):
-        _validate_foundation_authoritative_sources(
-            record,
-            authority,
-            projection,
-        )
-
-
-@pytest.mark.parametrize(
-    ("field", "value"),
-    (
-        ("record_id", "foundation-record:" + "0" * 64),
-        ("foundation_version", "unregistered-foundation-version"),
-        ("registry_identity", "0" * 64),
-    ),
-)
-def test_foundation_projection_transport_rejects_rehashed_payload_tamper(
-    field: str,
-    value: object,
-) -> None:
-    active_record, _ = _foundation_record_history()
-    event = foundation_record_projection_event(
-        active_record,
-        timeframe=Timeframe.M5,
-    )
-    tampered = _tamper_foundation_projection_state(
-        event,
-        field=field,
-        value=value,
-    )
-
-    with pytest.raises(ValueError, match="foundation projection"):
-        foundation_record_from_projection_event(tampered)
-
-
-def test_timeframe_reducer_does_not_consume_foundation_projection() -> None:
-    active_record, _ = _foundation_record_history()
-    reducer = _timeframe_reducer(
-        semantic_registry_identity="definition-test",
-        expected_timeframes=(Timeframe.M1,),
-    )
-    first = replace(
-        _replayable_m1_event(
-            0,
-            100.0,
-            active_timeframes=(Timeframe.M1,),
-        ),
-        event_id="foundation-source-created",
-    )
-    reducer.apply(first)
-    before = reducer.states
-
-    projection = foundation_record_projection_event(
-        active_record,
-        timeframe=Timeframe.M5,
-        sequence_no=1,
-    )
-
-    assert reducer.apply(projection) is None
-    assert reducer.states == before
-    assert reducer.cursor == 2
-    assert reducer.event_store.get(projection.event_id) is projection
-
-
-def test_atomic_replay_rejects_projection_only_foundation_source() -> None:
-    active_record, _ = _foundation_record_history()
-    base_bar = replace(
-        _replayable_m1_event(
-            0,
-            100.0,
-            active_timeframes=(Timeframe.M1,),
-        ),
-        event_id="unrelated-normalized-bar",
-    )
-    projection_payload = {"legacy_projection": True}
-    encoded = json.dumps(
-        projection_payload,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
-    false_source = _event(
-        EventKind.TIMEFRAME_STATE_CHANGED,
-        0,
-        Timeframe.M1,
-        event_id="foundation-source-created",
-        sequence_no=1,
-        price=None,
-        evidence={
-            "state_id": Timeframe.M1.value,
-            "projection_state": projection_payload,
-            "projection_sha256": hashlib.sha256(encoded).hexdigest(),
-        },
-        origin=EventOrigin.STATE_PROJECTION,
-    )
-    foundation_event = foundation_record_projection_event(
-        active_record,
-        timeframe=Timeframe.M5,
-        sequence_no=2,
-    )
-
-    with pytest.raises(ValueError, match="unavailable earlier source"):
-        replay_atomic_market_snapshot(
-            (base_bar, false_source, foundation_event),
-            semantic_registry_identity="definition-test",
-        )
-
-
-def test_atomic_replay_rejects_source_after_embedded_record_knowledge() -> None:
-    active_record, _ = _foundation_record_history()
-    late_source = replace(
-        _replayable_m1_event(
-            1,
-            100.0,
-            active_timeframes=(Timeframe.M1,),
-        ),
-        event_id="foundation-source-created",
-    )
-    foundation_event = foundation_record_projection_event(
-        active_record,
-        timeframe=Timeframe.M5,
-        published_at=_clock(2),
-    )
-
-    with pytest.raises(ValueError, match="after embedded record knowledge"):
-        replay_atomic_market_snapshot(
-            (late_source, foundation_event),
-            semantic_registry_identity="definition-test",
-        )
-
-
-def test_cold_foundation_replay_rejects_noncritical_future_source() -> None:
-    active_record, _ = _foundation_record_history()
-    future_bar = replace(
-        _replayable_m1_event(
-            1,
-            100.0,
-            active_timeframes=(Timeframe.M1, Timeframe.M5),
-        ),
-        event_id="foundation-noncritical-future-source",
-    )
-    cold_record = FoundationRecord(
-        object_type=active_record.object_type,
-        object_id=active_record.object_id,
-        status=active_record.status,
-        known_at=active_record.known_at,
-        payload=active_record.payload,
-        source_event_ids=(
-            *active_record.source_event_ids,
-            future_bar.event_id,
-        ),
-    )
-
-    assert future_bar.event_id not in cold_record.payload.get(
-        "context_source_event_ids", ()
-    )
-    events = (*_foundation_fvg_source_events(), future_bar)
-    authoritative = {
-        event.event_id: event
-        for event in events
-        if event.origin
-        in {EventOrigin.NORMALIZED_DATA, EventOrigin.SEMANTIC_ATOMIC}
-    }
-    _validate_foundation_authoritative_sources(
-        cold_record,
-        authoritative,
-    )
-    with pytest.raises(
-        ValueError,
-        match="cold foundation record sources occur after embedded",
-    ):
-        replay_atomic_market_snapshot(
-            events,
-            semantic_registry_identity="definition-test",
-            foundation_records=(cold_record,),
-        )
-
-
-def test_atomic_replay_mixes_legacy_and_foundation_projection_with_history() -> None:
-    active_record, terminal_record = _foundation_record_history()
-    active_timeframes = (Timeframe.M1, Timeframe.M5)
-    created_sources = _foundation_fvg_source_events()
-    terminal_source = _event(
-        EventKind.MARKET_EPOCH_RESET,
-        1,
-        Timeframe.M1,
-        event_id="foundation-source-terminal",
-        price=None,
-        evidence={"reason": "contract_rollover"},
-        origin=EventOrigin.SEMANTIC_ATOMIC,
-    )
-    final_bar = _replayable_m1_event(
-        2,
-        100.5,
-        active_timeframes=active_timeframes,
-    )
-    active_projection = foundation_record_projection_event(
-        active_record,
-        timeframe=Timeframe.M5,
-        sequence_no=1,
-    )
-    terminal_projection = foundation_record_projection_event(
-        terminal_record,
-        timeframe=Timeframe.M5,
-        sequence_no=1,
-    )
-    repeated_superseded_projection = foundation_record_projection_event(
-        active_record,
-        timeframe=Timeframe.M5,
-        published_at=_clock(2),
-        sequence_no=1,
-    )
-    legacy_state = {"legacy_projection": True}
-    legacy_encoded = json.dumps(
-        legacy_state,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
-    legacy_projection = _event(
-        EventKind.TIMEFRAME_STATE_CHANGED,
-        0,
-        Timeframe.M1,
-        event_id="legacy-state-projection",
-        sequence_no=2,
-        price=None,
-        evidence={
-            "state_id": Timeframe.M1.value,
-            "projection_state": legacy_state,
-            "projection_sha256": hashlib.sha256(legacy_encoded).hexdigest(),
-        },
-        origin=EventOrigin.STATE_PROJECTION,
-    )
-    mixed_events = (
-        *created_sources,
-        active_projection,
-        legacy_projection,
-        terminal_source,
-        terminal_projection,
-        final_bar,
-        repeated_superseded_projection,
-    )
-
-    replayed = replay_atomic_market_snapshot(
-        mixed_events,
-        semantic_registry_identity="definition-test",
-    )
-    legacy_only = replay_atomic_market_snapshot(
-        (*created_sources, legacy_projection, terminal_source, final_bar),
-        semantic_registry_identity="definition-test",
-    )
-
-    assert replayed.foundation is not None
-    assert replayed.foundation.current_records == (terminal_record,)
-    assert replayed.foundation.record_count == 2
-    assert "current_records" not in replayed.foundation.identity_payload()
-    assert tuple(
-        item["record_id"]
-        for item in replayed.replay_payload()["foundation"]["current_records"]
-    ) == (terminal_record.record_id,)
-    missing_schema = replayed.__getstate__()
-    missing_schema.pop("schema_version")
-    with pytest.raises(ValueError, match="market snapshot pickle schema changed"):
-        object.__new__(MarketSnapshot).__setstate__(missing_schema)
-    unknown_field = replayed.__getstate__()
-    unknown_field["unknown_field"] = "must-fail-closed"
-    with pytest.raises(ValueError, match="market snapshot pickle schema changed"):
-        object.__new__(MarketSnapshot).__setstate__(unknown_field)
-    previous_snapshot = replayed.__getstate__()
-    previous_snapshot["schema_version"] = 3
-    previous_snapshot["current_facts"] = {}
-    with pytest.raises(ValueError, match="market snapshot pickle schema changed"):
-        object.__new__(MarketSnapshot).__setstate__(previous_snapshot)
-    assert MARKET_SNAPSHOT_SCHEMA_VERSION == 4
-    assert "current_facts" not in replayed.__dict__
-    assert "current_facts" not in replayed.replay_payload()
-    assert tuple(
-        record
-        for record in (active_record, terminal_record)
-        if record.status is FoundationRecordStatus.ACTIVE
-    ) == (active_record,)
-    assert tuple(
-        record
-        for record in (active_record, terminal_record)
-        if record.status is FoundationRecordStatus.TERMINAL
-    ) == (terminal_record,)
-    assert replayed.foundation.active_records == ()
-    assert replayed.foundation.terminal_records == (terminal_record,)
-    assert replayed.foundation.asof == _clock(1)
-    assert replayed.timeframe_states == legacy_only.timeframe_states
-    assert replayed.relations == legacy_only.relations
-    assert replayed.session == legacy_only.session
-    assert legacy_only.foundation is None
-    assert "foundation" in replayed.replay_payload()
-    assert "foundation" not in legacy_only.replay_payload()
-    legacy_primitive = dict(to_primitive(legacy_only))
-    legacy_primitive.pop("foundation")
-    legacy_primitive.pop("foundation_range_locations")
-    expected_legacy_fingerprint = hashlib.sha256(
-        json.dumps(
-            legacy_primitive,
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-    ).hexdigest()
-    assert legacy_only.fingerprint == expected_legacy_fingerprint
-    assert replayed.fingerprint != legacy_only.fingerprint
-
-
-def test_epoch_reset_retains_foundation_history_until_explicit_terminal() -> None:
-    active_record, _ = _foundation_record_history()
-    active_dto = FVGStructuralLifecycle(
-        fvg_id="foundation-fvg",
-        source_creation_event_id="foundation-source-created",
-        symbol="NQH5",
-        instrument_id=1,
-        timeframe=Timeframe.M5,
-        created_at=_clock(0),
-        known_at=_clock(0),
-    )
-    terminal_dto = reduce_fvg_termination(
-        active_dto,
-        cause=FVGTerminationCause.SEMANTIC_RESET,
-        known_at=_clock(1),
-        cause_event_ids=("foundation-reset",),
-    )
-    terminal_dto = replace(
-        terminal_dto,
-        terminal_event_id="foundation-reset",
-        terminal_source_event_ids=(
-            "foundation-source-created",
-            "foundation-reset",
-        ),
-    )
-    terminal_record = FoundationRecord.from_dto(terminal_dto)
-    created_sources = _foundation_fvg_source_events()
-    active_projection = foundation_record_projection_event(
-        active_record,
-        timeframe=Timeframe.M5,
-        sequence_no=1,
-    )
-    reset = _event(
-        EventKind.MARKET_EPOCH_RESET,
-        1,
-        Timeframe.M1,
-        event_id="foundation-reset",
-        price=None,
-        evidence={"reason": "semantic_reset"},
-        origin=EventOrigin.SEMANTIC_ATOMIC,
-    )
-    terminal_projection = foundation_record_projection_event(
-        terminal_record,
-        timeframe=Timeframe.M5,
-        published_at=reset.known_at,
-        sequence_no=1,
-    )
-    new_contract_bar = _replayable_m1_event(
-        2,
-        101.0,
-        active_timeframes=(Timeframe.M1,),
-        symbol="NQM5",
-        instrument_id=2,
-    )
-
-    replayed = replay_atomic_market_snapshot(
-        (
-                *created_sources,
-            active_projection,
-            reset,
-            terminal_projection,
-            new_contract_bar,
-        ),
-        semantic_registry_identity="definition-test",
-    )
-
-    assert replayed.symbol == "NQM5"
-    assert replayed.foundation is not None
-    assert replayed.foundation.current_records == (terminal_record,)
-    assert replayed.foundation.record_count == 2
-    assert active_record.status is FoundationRecordStatus.ACTIVE
-    assert terminal_record.status is FoundationRecordStatus.TERMINAL
-    assert replayed.foundation.latest_records == (terminal_record,)
-
-
-@pytest.mark.parametrize(
-    ("field", "value"),
-    (
-        ("foundation_version", "unregistered-foundation-version"),
-        ("registry_identity", "0" * 64),
-    ),
-)
-def test_market_snapshot_rejects_foundation_registry_or_version_drift(
-    field: str,
-    value: str,
-) -> None:
-    active_record, _ = _foundation_record_history()
-    projection = FoundationProjectionReducer.replay((active_record,))
-    snapshot = replay_atomic_market_snapshot(
-        (
-            replace(
-                _replayable_m1_event(
-                    0,
-                    100.0,
-                    active_timeframes=(Timeframe.M1,),
-                ),
-                event_id="foundation-source-created",
-            ),
-        ),
-        semantic_registry_identity="definition-test",
-    )
-    object.__setattr__(projection, field, value)
-
-    with pytest.raises(ValueError, match="market snapshot identity"):
-        replace(snapshot, foundation=projection)
-
-
-def test_snapshot_identity_stays_constant_size_and_replay_rejects_record_tamper(
-) -> None:
-    active_record, _ = _foundation_record_history()
-    projection = FoundationProjectionReducer.replay((active_record,))
-    snapshot = replay_atomic_market_snapshot(
-        (
-            replace(
-                _replayable_m1_event(
-                    0,
-                    100.0,
-                    active_timeframes=(Timeframe.M1,),
-                ),
-                event_id="foundation-source-created",
-            ),
-        ),
-        semantic_registry_identity="definition-test",
-    )
-    snapshot = replace(snapshot, foundation=projection)
-    fingerprint = snapshot.fingerprint
-    record_id = active_record.record_id
-    object.__setattr__(
-        active_record,
-        "source_event_ids",
-        (*active_record.source_event_ids, "forged-snapshot-source"),
-    )
-
-    assert active_record.record_id == record_id
-    assert snapshot.fingerprint == fingerprint
-    with pytest.raises(ValueError, match="current record identity"):
-        snapshot.replay_payload()
-    with pytest.raises(ValueError, match="current record identity"):
-        FoundationProjectionReducer.checkpoint(projection)
-
-
-def test_market_snapshot_rejects_future_foundation_clock() -> None:
-    active_record, terminal_record = _foundation_record_history()
-    future_projection = FoundationProjectionReducer.replay(
-        (active_record, terminal_record)
-    )
-    snapshot = replay_atomic_market_snapshot(
-        (
-            replace(
-                _replayable_m1_event(
-                    0,
-                    100.0,
-                    active_timeframes=(Timeframe.M1,),
-                ),
-                event_id="foundation-source-created",
-            ),
-        ),
-        semantic_registry_identity="definition-test",
-    )
-
-    with pytest.raises(ValueError, match="market snapshot identity"):
-        replace(snapshot, foundation=future_projection)
-
-
 def test_pure_atomic_reducer_updates_structure_candidate_and_acceptance() -> None:
     protected_assignment_id = "h1-protected-assignment"
     events = (
@@ -2425,6 +1135,151 @@ def test_candidate_replacement_rejects_forged_identity_or_source_kind() -> None:
                 forged,
                 semantic_registry_identity="definition-test",
             )
+
+
+def test_range_invalidation_removes_both_owned_boundaries_only() -> None:
+    events = (
+        _bar_event(0, Timeframe.H1, close=100.0),
+        *(
+            _event(
+                EventKind.LIQUIDITY_LEVEL_CREATED,
+                minute,
+                Timeframe.H1,
+                price=price,
+                side=side,
+                evidence={
+                    "level_id": f"range-1:{side}",
+                    "range_id": "range-1",
+                    "source_kind": "mature_range_boundary",
+                    "source_formed_at": _clock(0).isoformat(),
+                    "source_confirmed_at": _clock(1).isoformat(),
+                },
+                zone=(price, price),
+            )
+            for minute, (side, price) in enumerate(
+                (("below", 95.0), ("above", 105.0)),
+                start=1,
+            )
+        ),
+        _event(
+            EventKind.LIQUIDITY_LEVEL_CREATED,
+            3,
+            Timeframe.H1,
+            price=110.0,
+            side="above",
+            evidence={
+                "level_id": "unrelated-swing",
+                "source_kind": "confirmed_swing",
+            },
+        ),
+    )
+    state = _reduce(events)
+    owned_candidates = tuple(
+        candidate
+        for candidate in state.liquidity.candidates
+        if candidate.owner_id == "range-1"
+    )
+    assert len(owned_candidates) == 2
+    assert {
+        candidate.owner_id for candidate in state.liquidity.candidates
+    } == {"range-1", None}
+    assert all(
+        candidate.lower_bound <= candidate.price <= candidate.upper_bound
+        and candidate.formed_at <= candidate.confirmed_at
+        for candidate in state.liquidity.candidates
+    )
+    below = next(
+        candidate for candidate in owned_candidates if candidate.side == "below"
+    )
+    assert (
+        below.lower_bound,
+        below.upper_bound,
+        below.formed_at,
+        below.confirmed_at,
+        below.owner_id,
+    ) == (95.0, 95.0, _clock(0), _clock(1), "range-1")
+    primitive = to_primitive(below)
+    assert {
+        field: primitive[field]
+        for field in (
+            "lower_bound",
+            "upper_bound",
+            "formed_at",
+            "confirmed_at",
+            "owner_id",
+        )
+    } == {
+        "lower_bound": 95.0,
+        "upper_bound": 95.0,
+        "formed_at": _clock(0).isoformat(),
+        "confirmed_at": _clock(1).isoformat(),
+        "owner_id": "range-1",
+    }
+    assert pickle.loads(pickle.dumps(below)) == below
+    replayed = _reduce(pickle.loads(pickle.dumps(events)))
+    assert replayed.liquidity.candidates == state.liquidity.candidates
+
+    invalidated = reduce_timeframe_state(
+        state,
+        _event(
+            EventKind.DEALING_RANGE_INVALIDATED,
+            4,
+            Timeframe.H1,
+            price=100.0,
+            evidence={"range_id": "range-1"},
+            zone=(95.0, 105.0),
+        ),
+        semantic_registry_identity="definition-test",
+    )
+
+    assert invalidated is not None
+    assert tuple(
+        candidate.candidate_id
+        for candidate in invalidated.liquidity.candidates
+    ) == ("unrelated-swing",)
+
+
+@pytest.mark.parametrize(
+    "field",
+    (
+        "lower_bound",
+        "upper_bound",
+        "formed_at",
+        "confirmed_at",
+        "owner_id",
+    ),
+)
+def test_dol_candidate_current_fields_fail_closed(field: str) -> None:
+    state = _reduce(
+        (
+            _bar_event(0, Timeframe.H1, close=100.0),
+            _event(
+                EventKind.LIQUIDITY_LEVEL_CREATED,
+                1,
+                Timeframe.H1,
+                price=105.0,
+                side="above",
+                evidence={
+                    "level_id": "range-1:above",
+                    "range_id": "range-1",
+                    "source_kind": "mature_range_boundary",
+                    "source_formed_at": _clock(0).isoformat(),
+                    "source_confirmed_at": _clock(1).isoformat(),
+                },
+                zone=(104.0, 106.0),
+            ),
+        )
+    )
+    candidate = state.liquidity.candidates[0]
+    invalid_values = {
+        "lower_bound": candidate.price + 1.0,
+        "upper_bound": candidate.price - 1.0,
+        "formed_at": candidate.confirmed_at + pd.Timedelta(minutes=1),
+        "confirmed_at": candidate.formed_at - pd.Timedelta(minutes=1),
+        "owner_id": "",
+    }
+    with pytest.raises(ValueError, match="DOL candidate view is invalid"):
+        replace(candidate, **{field: invalid_values[field]})
 
 
 def test_protected_swing_rejects_price_only_and_stale_assignment_acceptance() -> None:

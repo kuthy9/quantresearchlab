@@ -25,7 +25,6 @@ from smc_trader.semantic_foundation import (
     FoundationObjectType,
     FoundationProjection,
     FoundationProjectionCheckpoint,
-    FoundationProjectionOwner,
     FoundationProjectionReducer,
     FoundationRecord,
     FoundationRecordLedger,
@@ -777,47 +776,21 @@ def test_projection_indexes_are_derived_pickle_safe_and_history_equivalent() -> 
 
 
 @pytest.mark.parametrize("cached_before_tamper", (False, True))
-def test_transaction_rechecks_bounded_write_set_after_record_byte_tamper(
+def test_cold_reducer_rechecks_record_bytes_after_tamper(
     cached_before_tamper: bool,
 ) -> None:
     record = FoundationRecord.from_dto(_active_fvg())
-    transaction = FoundationProjectionOwner().stage()
-    assert transaction.append(record)
+    projection = FoundationProjectionReducer.initial_projection()
     if cached_before_tamper:
-        transaction.freeze()
+        projection = FoundationProjectionReducer.reduce(projection, record)
     _tamper_record_bytes(record, "payload")
 
     with pytest.raises(ValueError, match="current record identity"):
-        transaction.freeze()
-    with pytest.raises(ValueError, match="current record identity"):
-        transaction.preflight_commit()
-    with pytest.raises(ValueError, match="current record identity"):
-        transaction.delta()
-
-
-def test_transaction_commit_requires_its_exact_successful_preflight() -> None:
-    transaction = FoundationProjectionOwner().stage()
-    assert transaction.append(FoundationRecord.from_dto(_active_fvg()))
-    admitted = transaction.preflight_commit()
-    equal_but_unbound = FoundationProjection(**dict(admitted.__getstate__()))
-    assert equal_but_unbound == admitted
-    assert equal_but_unbound is not admitted
-
-    with pytest.raises(ValueError, match="not bound to this transaction"):
-        transaction.commit(prevalidated=equal_but_unbound)
-    assert transaction.commit(prevalidated=admitted) is admitted
-
-
-def test_preflight_field_tamper_is_rejected_before_delta_materialization() -> None:
-    transaction = FoundationProjectionOwner().stage()
-    assert transaction.append(FoundationRecord.from_dto(_active_fvg()))
-    admitted = transaction.preflight_commit()
-    object.__setattr__(admitted, "current_view_fingerprint", "0" * 64)
-
-    with pytest.raises(ValueError, match="not bound to this transaction"):
-        transaction.delta()
-    with pytest.raises(ValueError, match="not bound to this transaction"):
-        transaction.commit(prevalidated=admitted)
+        (
+            FoundationProjectionReducer.validate_complete(projection)
+            if cached_before_tamper
+            else FoundationProjectionReducer.reduce(projection, record)
+        )
 
 
 def test_incremental_factory_requires_exact_module_capability() -> None:
@@ -849,26 +822,20 @@ def test_incremental_factory_requires_exact_module_capability() -> None:
         )
 
 
-def test_public_owner_rejects_incomplete_graph_but_cold_replay_prefix_works() -> None:
+def test_cold_replay_prefix_is_validated_only_when_complete() -> None:
     active, _, active_interaction, _ = _level_history()
     interaction_record = FoundationRecord.from_dto(active_interaction)
     level_record = FoundationRecord.from_dto(active)
-    incomplete = FoundationProjection(
-        current_records=(interaction_record,),
-        record_count=1,
-        component_fingerprint="0" * 64,
-    )
-
-    with pytest.raises(ValueError, match="registered level"):
-        FoundationProjectionOwner(incomplete)
     prefix = FoundationProjectionReducer.reduce(
         FoundationProjectionReducer.initial_projection(),
         interaction_record,
     )
     assert prefix.current_records == (interaction_record,)
+    with pytest.raises(ValueError, match="registered level"):
+        FoundationProjectionReducer.validate_complete(prefix)
     complete = FoundationProjectionReducer.reduce(prefix, level_record)
     canonical = FoundationProjectionReducer.validate_complete(complete)
-    assert FoundationProjectionOwner(canonical).freeze() == canonical
+    assert canonical == complete
 
 
 def test_cold_boundaries_rebuild_private_caches_and_reject_field_tamper() -> None:
@@ -883,12 +850,6 @@ def test_cold_boundaries_rebuild_private_caches_and_reject_field_tamper() -> Non
     canonical = FoundationProjectionReducer.validate_complete(projection)
     assert canonical is not projection
     assert canonical.current_record_for(
-        FoundationObjectType.FVG_STRUCTURAL_LIFECYCLE,
-        "fvg-1",
-    ) is projection.current_records[0]
-    admitted = FoundationProjectionOwner(projection).freeze()
-    assert admitted is not projection
-    assert admitted.current_record_for(
         FoundationObjectType.FVG_STRUCTURAL_LIFECYCLE,
         "fvg-1",
     ) is projection.current_records[0]
@@ -1370,7 +1331,7 @@ def test_liquidity_level_owner_binding_is_one_time_and_compatible() -> None:
         )
 
 
-def test_structure_revision_revalidates_reverse_dependents_atomically() -> None:
+def test_cold_structure_revision_revalidates_reverse_dependents() -> None:
     active, _, active_interaction, _ = _level_history()
     structure = _structure_owner("hot-structure-owner")
     owned = replace(
@@ -1389,16 +1350,18 @@ def test_structure_revision_revalidates_reverse_dependents_atomically() -> None:
             FoundationRecord.from_dto(owned),
         )
     )
-    owner = FoundationProjectionOwner(projection)
-    before = owner.freeze()
     terminated_structure = _terminated_structure(structure, minute=4)
 
-    blocked = owner.stage()
-    assert blocked.append(FoundationRecord.from_dto(terminated_structure))
+    blocked = FoundationProjectionReducer.reduce(
+        projection,
+        FoundationRecord.from_dto(terminated_structure),
+    )
     with pytest.raises(ValueError, match="confirmed live owner"):
-        blocked.commit()
-    assert owner.generation == 0
-    assert owner.freeze() is before
+        FoundationProjectionReducer.validate_complete(blocked)
+    assert projection.current_record_for(
+        FoundationObjectType.STRUCTURE_GENERATION,
+        structure.generation_id,
+    ).status is FoundationRecordStatus.ACTIVE
 
     retirement_id = "owned-level-retired"
     retired_interaction = replace(
@@ -1422,17 +1385,20 @@ def test_structure_revision_revalidates_reverse_dependents_atomically() -> None:
         retirement_reason="reference_rollover",
         source_event_ids=(*owned.source_event_ids, retirement_id),
     )
-    legal = owner.stage()
+    legal = projection
     for dto in (retired_interaction, retired_level, terminated_structure):
-        assert legal.append(FoundationRecord.from_dto(dto))
-    committed = FoundationProjectionReducer.validate_complete(legal.commit())
+        legal = FoundationProjectionReducer.reduce(
+            legal,
+            FoundationRecord.from_dto(dto),
+        )
+    committed = FoundationProjectionReducer.validate_complete(legal)
     assert committed.current_record_for(
         FoundationObjectType.LIQUIDITY_LEVEL,
         active.level_id,
     ).status is FoundationRecordStatus.TERMINAL
 
 
-def test_structure_revision_revalidates_non_level_reverse_dependent() -> None:
+def test_cold_structure_revision_revalidates_non_level_reverse_dependent() -> None:
     structure = _structure_owner(
         "fvg-structure-owner",
         timeframe=Timeframe.M5,
@@ -1442,22 +1408,20 @@ def test_structure_revision_revalidates_non_level_reverse_dependent() -> None:
         parent_structure_generation_id=structure.generation_id,
         context_source_event_ids=(structure.confirmation_event_id,),
     )
-    owner = FoundationProjectionOwner(
-        FoundationProjectionReducer.replay(
-            (
-                FoundationRecord.from_dto(structure),
-                FoundationRecord.from_dto(fvg),
-            )
+    projection = FoundationProjectionReducer.replay(
+        (
+            FoundationRecord.from_dto(structure),
+            FoundationRecord.from_dto(fvg),
         )
     )
-    transaction = owner.stage()
-    assert transaction.append(
+    revised = FoundationProjectionReducer.reduce(
+        projection,
         FoundationRecord.from_dto(
             _terminated_structure(structure, minute=20)
-        )
+        ),
     )
     with pytest.raises(ValueError, match="confirmed live owner"):
-        transaction.commit()
+        FoundationProjectionReducer.validate_complete(revised)
 
 
 def test_liquidity_interaction_id_must_bind_its_generation_signature() -> None:
@@ -1602,240 +1566,3 @@ def test_liquidity_interaction_path_facts_are_append_only() -> None:
         FoundationProjectionReducer.reduce(projection, rewritten_bars)
     with pytest.raises(ValueError, match="knowledge order"):
         FoundationProjectionReducer.reduce(projection, rolled_back)
-
-
-def test_10k_fixed_object_revisions_keep_hot_projection_and_lifecycle_bounded() -> None:
-    projection_owner = FoundationProjectionOwner()
-    ledger = FoundationRecordLedger()
-    first_projection_bytes = None
-    first_transport_bytes = None
-    for index in range(10_000):
-        updated = _clock(15) + pd.Timedelta(index, unit="min")
-        dto = FVGStructuralLifecycle(
-            fvg_id="fvg-hot-fixed",
-            source_creation_event_id="fvg-hot-created",
-            symbol="NQ",
-            instrument_id=1,
-            timeframe=Timeframe.M1,
-            created_at=_clock(15),
-            known_at=_clock(15),
-            age_bars=index,
-            age_seconds=int((updated - _clock(15)).total_seconds()),
-            last_updated_at=updated,
-        )
-        record = FoundationRecord.from_dto(dto)
-        transaction = projection_owner.stage()
-        assert transaction.append(record)
-        delta = transaction.delta()
-        assert ledger.append(delta.records) == delta
-        transaction.commit()
-        if index == 0:
-            first_projection_bytes = len(pickle.dumps(projection_owner.freeze()))
-            first_transport_bytes = len(
-                json.dumps(
-                    dict(projection_owner.freeze().transport_payload()),
-                    sort_keys=True,
-                ).encode("utf-8")
-            )
-
-    projection = projection_owner.freeze()
-    final_projection_bytes = len(pickle.dumps(projection))
-    final_transport_bytes = len(
-        json.dumps(
-            dict(projection.transport_payload()),
-            sort_keys=True,
-        ).encode("utf-8")
-    )
-    replayed = FoundationProjectionReducer.replay(ledger.materialize())
-    assert projection == replayed
-    assert projection.record_count == ledger.record_count == 10_000
-    assert projection.component_fingerprint == ledger.component_fingerprint
-    assert len(projection.current_records) == 1
-    assert projection.current_records[0].record_id == ledger.materialize()[-1].record_id
-    assert len(projection_owner._current_record_ids) == 1
-    assert all(isinstance(value, str) for value in ledger._records_by_id.values())
-    assert "_generation" not in ledger.__dict__
-    assert final_projection_bytes - first_projection_bytes < 128
-    assert final_transport_bytes - first_transport_bytes < 128
-
-    lifecycle = SemanticLifecycleReducer.initial_state()
-    first_lifecycle_bytes = None
-    clock = _clock(0)
-    for index in range(10_000):
-        transition = NormalizedLifecycleTransition(
-            fact_id=f"fixed-clock:{index}",
-            kind=NormalizedTransitionKind.REAL_BAR_COMPLETED,
-            known_at=clock,
-            timeframe=Timeframe.M1,
-            source_event_ids=(f"fixed-bar:{index}",),
-            payload={
-                "bar_event_id": f"fixed-bar:{index}",
-                "real_completed": True,
-            },
-        )
-        lifecycle = SemanticLifecycleReducer.reduce_hot(
-            lifecycle,
-            transition,
-        )
-        if index == 0:
-            first_lifecycle_bytes = len(pickle.dumps(lifecycle))
-        clock = next_registered_native_completion(
-            clock,
-            timeframe_minutes=1,
-        )
-
-    final_lifecycle_bytes = len(pickle.dumps(lifecycle))
-    restored_lifecycle = SemanticLifecycleReducer.restore(
-        SemanticLifecycleReducer.checkpoint(lifecycle)
-    )
-    assert lifecycle == restored_lifecycle
-    assert not hasattr(lifecycle, "transition_count")
-    assert not hasattr(lifecycle, "applied_transition_fingerprints")
-    assert len(lifecycle.registered_bar_clocks) == 1
-    assert len(lifecycle.real_bar_clocks) == 1
-    assert final_lifecycle_bytes - first_lifecycle_bytes < 128
-
-
-def test_tail_revisions_do_not_rescan_the_complete_current_view(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    initial_records = tuple(
-        FoundationRecord.from_dto(
-            FVGStructuralLifecycle(
-                fvg_id=f"fvg-current-{index}",
-                source_creation_event_id=f"fvg-created-{index}",
-                symbol="NQ",
-                instrument_id=1,
-                timeframe=Timeframe.M1,
-                created_at=_clock(15),
-                known_at=_clock(15),
-            )
-        )
-        for index in range(128)
-    )
-    owner = FoundationProjectionOwner(
-        FoundationProjectionReducer.replay(initial_records)
-    )
-    integrity_batch_sizes: list[int] = []
-    cursor_rebuild_sizes: list[int] = []
-    original_integrity = (
-        foundation_module._require_foundation_record_identity_integrity
-    )
-    original_rebuild = (
-        foundation_module._FoundationCurrentViewHashCursor.rebuild.__func__
-    )
-
-    def counted_integrity(records: tuple[FoundationRecord, ...]) -> None:
-        batch = tuple(records)
-        integrity_batch_sizes.append(len(batch))
-        original_integrity(batch)
-
-    def counted_rebuild(
-        cls: type[object],
-        record_ids: tuple[str, ...],
-        *,
-        _capability: object,
-        foundation_version: str,
-        registry_identity: str,
-    ) -> object:
-        identities = tuple(record_ids)
-        cursor_rebuild_sizes.append(len(identities))
-        return original_rebuild(
-            cls,
-            identities,
-            _capability=_capability,
-            foundation_version=foundation_version,
-            registry_identity=registry_identity,
-        )
-
-    monkeypatch.setattr(
-        foundation_module,
-        "_require_foundation_record_identity_integrity",
-        counted_integrity,
-    )
-    monkeypatch.setattr(
-        foundation_module._FoundationCurrentViewHashCursor,
-        "rebuild",
-        classmethod(counted_rebuild),
-    )
-
-    for revision in range(1, 65):
-        updated = _clock(15) + pd.Timedelta(revision, unit="min")
-        record = FoundationRecord.from_dto(
-            FVGStructuralLifecycle(
-                fvg_id="fvg-current-127",
-                source_creation_event_id="fvg-created-127",
-                symbol="NQ",
-                instrument_id=1,
-                timeframe=Timeframe.M1,
-                created_at=_clock(15),
-                known_at=_clock(15),
-                age_bars=revision,
-                age_seconds=int((updated - _clock(15)).total_seconds()),
-                last_updated_at=updated,
-            )
-        )
-        transaction = owner.stage()
-        assert transaction.append(record)
-        projection = transaction.commit()
-        projection.identity_payload()
-
-    assert integrity_batch_sizes == [1] * 128
-    assert cursor_rebuild_sizes == []
-    projection = owner.freeze()
-
-    integrity_batch_sizes.clear()
-    cursor_rebuild_sizes.clear()
-    for revision in range(65, 73):
-        updated = _clock(15) + pd.Timedelta(revision, unit="min")
-        projection = FoundationProjectionReducer.reduce(
-            projection,
-            FoundationRecord.from_dto(
-                FVGStructuralLifecycle(
-                    fvg_id="fvg-current-127",
-                    source_creation_event_id="fvg-created-127",
-                    symbol="NQ",
-                    instrument_id=1,
-                    timeframe=Timeframe.M1,
-                    created_at=_clock(15),
-                    known_at=_clock(15),
-                    age_bars=revision,
-                    age_seconds=int(
-                        (updated - _clock(15)).total_seconds()
-                    ),
-                    last_updated_at=updated,
-                )
-            ),
-        )
-        projection.identity_payload()
-    assert integrity_batch_sizes == [1] * 16
-    assert cursor_rebuild_sizes == []
-
-    expected_view_fingerprint = foundation_module._canonical_digest(
-        {
-            "current_view_fingerprint_version": (
-                foundation_module.FOUNDATION_CURRENT_VIEW_FINGERPRINT_VERSION
-            ),
-            "foundation_version": projection.foundation_version,
-            "registry_identity": projection.registry_identity,
-            "current_record_ids": tuple(
-                record.record_id for record in projection.current_records
-            ),
-        }
-    )
-    assert projection.current_view_fingerprint == expected_view_fingerprint
-
-    integrity_batch_sizes.clear()
-    cursor_rebuild_sizes.clear()
-    checkpoint = FoundationProjectionReducer.checkpoint(projection)
-    restored_checkpoint = pickle.loads(pickle.dumps(checkpoint))
-    restored = FoundationProjectionReducer.restore(restored_checkpoint)
-    assert restored == projection
-    assert 128 in integrity_batch_sizes
-    assert 128 in cursor_rebuild_sizes
-
-    _tamper_record_bytes(restored.current_records[0], "payload")
-    with pytest.raises(ValueError, match="current record identity"):
-        FoundationProjectionReducer.checkpoint(restored)
-    with pytest.raises(ValueError, match="current record identity"):
-        FoundationProjectionReducer.replay(restored.current_records)

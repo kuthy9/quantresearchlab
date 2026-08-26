@@ -3,7 +3,6 @@ from __future__ import annotations
 import copy
 from collections.abc import Mapping
 from dataclasses import replace
-import math
 import pickle
 from pathlib import Path
 from types import SimpleNamespace
@@ -35,10 +34,6 @@ from smc_trader.model import (
     EventOrigin,
     MarketEvent,
     Timeframe,
-)
-from smc_trader.foundation_registry import (
-    FOUNDATION_CANONICAL_IDENTITY,
-    FOUNDATION_VERSION,
 )
 from smc_trader.observation import ExecutionRealityInput
 from smc_trader.trade_intent import EntryMethod
@@ -85,22 +80,15 @@ def _engine() -> ContinuousSMCEngine:
     )
 
 
-def test_shadow_runtime_bindings_freeze_foundation_registry() -> None:
+def test_shadow_runtime_bindings_do_not_duplicate_foundation_identity() -> None:
     bindings = dict(_bindings())
-    assert bindings["foundation_version"] == FOUNDATION_VERSION
-    assert (
-        bindings["foundation_registry_identity"]
-        == FOUNDATION_CANONICAL_IDENTITY
-    )
-
+    assert {
+        "foundation_version",
+        "foundation_registry_identity",
+    }.isdisjoint(bindings)
     engine = _engine()
-    engine._foundation_registry_identity = "0" * 64
-    with pytest.raises(ShadowLiveError, match="runtime bindings differ"):
-        ShadowLiveRunner(
-            engine=engine,
-            protocol=load_shadow_live_protocol(PROTOCOL_PATH),
-            runtime_bindings=bindings,
-        )
+    assert "_foundation_version" not in engine.__dict__
+    assert "_foundation_registry_identity" not in engine.__dict__
 
 
 def _shadow_approved():
@@ -539,10 +527,10 @@ def test_component_digest_versions_are_explicit_and_old_checkpoints_replay() -> 
 
     current_checkpoint = current.compact_runtime_checkpoint()
     assert current_checkpoint["schema_version"] == (
-        "shadow_compact_runtime_v7"
+        "shadow_compact_runtime_v8"
     )
     previous_checkpoint = copy.deepcopy(current_checkpoint)
-    previous_checkpoint["schema_version"] = "shadow_compact_runtime_v6"
+    previous_checkpoint["schema_version"] = "shadow_compact_runtime_v7"
     with pytest.raises(ShadowLiveError, match="legacy compact"):
         ShadowLiveRunner.from_compact_runtime_checkpoint(
             pickle.loads(pickle.dumps(previous_checkpoint)),
@@ -562,6 +550,24 @@ def test_component_digest_versions_are_explicit_and_old_checkpoints_replay() -> 
         restored_legacy._component_digest_version  # noqa: SLF001
         == SHADOW_LEGACY_COMPONENT_DIGEST_VERSION
     )
+
+
+def test_shadow_rejects_explicit_component_digest_v2() -> None:
+    stale_bindings = tuple(
+        (
+            key,
+            "phase9_shadow_component_digest_v2"
+            if key == "shadow_component_digest_version"
+            else value,
+        )
+        for key, value in _bindings()
+    )
+    with pytest.raises(ShadowLiveError, match="component digest version"):
+        ShadowLiveRunner(
+            engine=_engine(),
+            protocol=load_shadow_live_protocol(PROTOCOL_PATH),
+            runtime_bindings=stale_bindings,
+        )
 
 
 def test_full_shadow_engine9_checkpoint_fails_closed(
@@ -863,114 +869,6 @@ def test_compact_restore_rehydrates_all_engine_derived_indexes() -> None:
             journal_events=checkpoint_journal,
             records=checkpoint_records,
         )
-
-    derived_tamper = copy.deepcopy(checkpoint)
-    adapter = derived_tamper["engine"].observer._foundation_adapter
-    adapter._lifecycle_indexes.clear()  # noqa: SLF001
-    restored = ShadowLiveRunner.from_compact_runtime_checkpoint(
-        derived_tamper,
-        journal_events=checkpoint_journal,
-        records=checkpoint_records,
-    )
-    restored_adapter = restored.engine.observer._foundation_adapter
-    assert restored_adapter._lifecycle_indexes  # noqa: SLF001
-    assert restored.process(_input(36)) == runner.process(_input(36))
-
-    empty_authority = copy.deepcopy(checkpoint)
-    empty_authority["engine"].observer._foundation_adapter = None
-    with pytest.raises(
-        ShadowLiveError,
-        match="compact checkpoint foundation authority differs",
-    ):
-        ShadowLiveRunner.from_compact_runtime_checkpoint(
-            empty_authority,
-            journal_events=checkpoint_journal,
-            records=checkpoint_records,
-        )
-
-def test_foundation_restore_rejects_bound_authority_and_tick_tamper() -> None:
-    runner = ShadowLiveRunner(
-        engine=_engine(),
-        protocol=load_shadow_live_protocol(PROTOCOL_PATH),
-        runtime_bindings=_bindings(),
-    )
-    previous_close = 18_500.0
-    for index in range(120):
-        value = _input(index)
-        close = round(
-            (18_500.0 + 20.0 * math.sin(index * 0.45)) * 4.0
-        ) / 4.0
-        bar = Bar(
-            start=value.bar.start,
-            open=previous_close,
-            high=max(previous_close, close) + 2.0,
-            low=min(previous_close, close) - 2.0,
-            close=close,
-            volume=100.0 + index,
-            symbol="NQM4",
-            instrument_id=13_743,
-        )
-        runner.process(
-            replace(value, bar=bar, execution=_execution(bar))
-        )
-        previous_close = close
-    checkpoint = runner.compact_runtime_checkpoint()
-    journal = runner.journal.events
-    records = runner.records
-
-    store_tamper = copy.deepcopy(checkpoint)
-    adapter = store_tamper["engine"].observer._foundation_adapter
-    adapter._event_store = EventStore()
-    with pytest.raises(ValueError, match="cold authority binding differs"):
-        adapter.checkpoint()
-
-    tick_tamper = copy.deepcopy(checkpoint)
-    observer = tick_tamper["engine"].observer
-    adapter = observer._foundation_adapter
-    adapter.tick_size = 0.125
-    tick_tamper["foundation_authority_digest"] = (
-        adapter.checkpoint().checkpoint_digest
-    )
-    with pytest.raises(
-        ShadowLiveError,
-        match="tick size differs from runtime authority",
-    ):
-        ShadowLiveRunner.from_compact_runtime_checkpoint(
-            tick_tamper,
-            journal_events=journal,
-            records=records,
-        )
-
-    whole_tick_tamper = pickle.loads(pickle.dumps(runner))
-    whole_tick_tamper.engine.observer._foundation_adapter.tick_size = 0.125
-    with pytest.raises(
-        ShadowLiveError,
-        match="tick size differs from runtime authority",
-    ):
-        pickle.loads(pickle.dumps(whole_tick_tamper))
-
-    duplicate_tamper = copy.deepcopy(checkpoint)
-    adapter = duplicate_tamper["engine"].observer._foundation_adapter
-    assert adapter.lifecycle.levels
-    object.__setattr__(
-        adapter.lifecycle,
-        "levels",
-        (*adapter.lifecycle.levels, adapter.lifecycle.levels[-1]),
-    )
-    adapter._rebuild_derived_indexes()
-    duplicate_tamper["foundation_authority_digest"] = (
-        adapter.checkpoint().checkpoint_digest
-    )
-    with pytest.raises(
-        ShadowLiveError,
-        match="compact checkpoint Engine state cannot be revalidated",
-    ):
-        ShadowLiveRunner.from_compact_runtime_checkpoint(
-            duplicate_tamper,
-            journal_events=journal,
-            records=records,
-        )
-
 
 def test_component_digest_final_audit_replays_full_market_payload() -> None:
     valid = ShadowLiveRunner(

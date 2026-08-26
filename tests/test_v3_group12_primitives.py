@@ -3145,11 +3145,11 @@ def _reference_sr_binding_fixture(
         for side in ("resistance", "support")
     ),
 )
-def test_reference_sr_level_binds_exact_published_reference_candidate(
+def test_reference_sr_zone_keeps_underlying_reference_candidate_only(
     family: str,
     zone_side: str,
 ) -> None:
-    observer, candle, _, zone, candidate = _reference_sr_binding_fixture(
+    observer, candle, item, zone, candidate = _reference_sr_binding_fixture(
         family=family,
         zone_side=zone_side,
     )
@@ -3171,26 +3171,30 @@ def test_reference_sr_level_binds_exact_published_reference_candidate(
         for item in observer.memory.recent()
         if item.kind is EventKind.SUPPORT_RESISTANCE_STATE
     )
-    created = observer.memory.audit_event_including_pending(
-        observer._candidate_level_event_ids[zone.zone_id]
-    )
-    assert created is not None
     assert state_event.entity_id == zone.zone_id
     assert state_event.source_ids == zone.source_ids
     assert state_event.details["source_kind"] == family
-    assert created.source_event_ids == (candidate.event_id,)
+    assert zone.zone_id not in observer._candidate_level_event_ids
+    assert (
+        observer._candidate_level_event_ids[item.item_id]
+        == candidate.event_id
+    )
     observer.memory.flush_audit()
-    assert observer.audit_store.get(created.event_id) == created
+    stored = observer.audit_store.get(candidate.event_id)
+    assert stored is not None
+    assert stored.source_event_ids == candidate.source_event_ids
+    assert stored.evidence["level_id"] == item.item_id
 
 
 @pytest.mark.parametrize(
     "mismatch",
     ("missing", "source_ids", "family", "side", "anchor"),
 )
-def test_reference_sr_level_rejects_zero_exact_inventory_sources(
+def test_reference_sr_zone_never_backfills_companion_dol_from_inventory(
     mismatch: str,
 ) -> None:
-    observer, candle, item, zone, _ = _reference_sr_binding_fixture()
+    observer, candle, item, zone, candidate = _reference_sr_binding_fixture()
+    assert candidate is not None
     if mismatch == "missing":
         observer._reference_inventory.clear()
     elif mismatch == "source_ids":
@@ -3211,16 +3215,28 @@ def test_reference_sr_level_rejects_zero_exact_inventory_sources(
             anchor_price=zone.anchor_price + 0.25,
             upper_bound=zone.upper_bound + 0.25,
         )
-    assert item.item_id in observer._reference_inventory or mismatch == "missing"
-    with pytest.raises(ValueError, match="exactly one exact inventory source"):
-        observer._reference_zone_source_event_ids(
-            zone,
-            observed_at=candle.end,
-        )
+    observer._record_frame_events(
+        FrameObservation(
+            timeframe=Timeframe.M1,
+            cutoff=candle.end,
+            bars=1,
+            metrics={"atr": 1.0},
+            support_resistance=(zone,),
+        ),
+        newly_completed=True,
+        event_clock=candle.end,
+    )
+
+    assert zone.zone_id not in observer._candidate_level_event_ids
+    assert (
+        observer._candidate_level_event_ids[item.item_id]
+        == candidate.event_id
+    )
 
 
-def test_reference_sr_level_rejects_ambiguous_inventory_sources() -> None:
-    observer, candle, item, zone, _ = _reference_sr_binding_fixture()
+def test_reference_sr_zone_does_not_merge_underlying_candidates() -> None:
+    observer, candle, item, zone, candidate = _reference_sr_binding_fixture()
+    assert candidate is not None
     duplicate = replace(item, item_id=f"{item.item_id}:duplicate")
     observer._reference_inventory[duplicate.item_id] = duplicate
     duplicate_candidate = observer._append_semantic_atomic(
@@ -3245,24 +3261,45 @@ def test_reference_sr_level_rejects_ambiguous_inventory_sources() -> None:
         duplicate_candidate.event_id
     )
 
-    with pytest.raises(ValueError, match="exactly one exact inventory source"):
-        observer._reference_zone_source_event_ids(
-            zone,
-            observed_at=candle.end,
-        )
+    observer._record_frame_events(
+        FrameObservation(
+            timeframe=Timeframe.M1,
+            cutoff=candle.end,
+            bars=1,
+            metrics={"atr": 1.0},
+            support_resistance=(zone,),
+        ),
+        newly_completed=True,
+        event_clock=candle.end,
+    )
+
+    assert zone.zone_id not in observer._candidate_level_event_ids
+    assert observer._candidate_level_event_ids == {
+        item.item_id: candidate.event_id,
+        duplicate.item_id: duplicate_candidate.event_id,
+    }
 
 
-def test_reference_sr_level_rejects_unpublished_exact_source() -> None:
-    observer, candle, _, zone, candidate = _reference_sr_binding_fixture(
+def test_reference_sr_zone_does_not_create_missing_underlying_candidate() -> None:
+    observer, candle, item, zone, candidate = _reference_sr_binding_fixture(
         publish=False
     )
     assert candidate is None
 
-    with pytest.raises(ValueError, match="source level is not published"):
-        observer._reference_zone_source_event_ids(
-            zone,
-            observed_at=candle.end,
-        )
+    observer._record_frame_events(
+        FrameObservation(
+            timeframe=Timeframe.M1,
+            cutoff=candle.end,
+            bars=1,
+            metrics={"atr": 1.0},
+            support_resistance=(zone,),
+        ),
+        newly_completed=True,
+        event_clock=candle.end,
+    )
+
+    assert item.item_id not in observer._candidate_level_event_ids
+    assert zone.zone_id not in observer._candidate_level_event_ids
 
 
 def test_partial_cold_start_period_never_becomes_previous_session() -> None:

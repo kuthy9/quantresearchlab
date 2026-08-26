@@ -1,14 +1,12 @@
-"""Version-bound projection and cold ledger for foundation-v2 DTOs.
+"""Cold legacy projection and ledger primitives for foundation-v2 DTOs.
 
-The hot :class:`FoundationProjection` retains only the deterministic current
-view, record count, and rolling chain identity.  Immutable revision history
-lives in :class:`FoundationRecordLedger` and is materialized only for an
-explicit checkpoint or cold replay.  Neither layer detects market semantics.
+Immutable revision history lives in :class:`FoundationRecordLedger`.
+``FoundationProjection`` remains only as a cold decoder/replay contract; it is
+not a runtime market-state owner.  Neither layer detects market semantics.
 """
 
 from __future__ import annotations
 
-from collections import ChainMap
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, fields as dataclass_fields
 from enum import Enum
@@ -80,13 +78,10 @@ FOUNDATION_PROJECTION_STATE_SCHEMA_VERSION = 2
 FOUNDATION_PROJECTION_CHECKPOINT_SCHEMA_VERSION = 2
 FOUNDATION_RECORD_LEDGER_SCHEMA_VERSION = 1
 FOUNDATION_RECORD_DELTA_SCHEMA_VERSION = 2
-FOUNDATION_PROJECTION_OWNER_STATE_SCHEMA_VERSION = 1
 
-# These capabilities are call-local implementation authorities, never schema
-# fields or serialized identities.  They keep trusted hot/cold construction
-# paths distinct from public projection admission.
+# This capability is a call-local implementation authority, never a schema
+# field or serialized identity.
 _FOUNDATION_INCREMENTAL_CAPABILITY = object()
-_FOUNDATION_COLD_PREFIX_CAPABILITY = object()
 
 
 class FoundationObjectType(str, Enum):
@@ -2243,7 +2238,7 @@ def _validate_projection_current_graph(
 
 @dataclass(frozen=True)
 class FoundationProjection:
-    """Frozen current view published by the single-writer hot owner."""
+    """Frozen current view reconstructed only by cold legacy replay."""
 
     current_records: tuple[FoundationRecord, ...] = ()
     record_count: int = 0
@@ -2657,19 +2652,83 @@ class FoundationProjectionReducer:
             raise TypeError("projection must be FoundationProjection")
         if not isinstance(record, FoundationRecord):
             raise TypeError("record must be FoundationRecord")
-        owner = FoundationProjectionOwner._from_cold_prefix(
-            projection,
-            _capability=_FOUNDATION_COLD_PREFIX_CAPABILITY,
-        )
-        transaction = owner.stage()
-        if not transaction.append(record):
+        _require_foundation_record_identity_integrity((record,))
+        if record.record_id in projection._current_record_ids_cache:
             return projection
-        frozen = transaction.freeze()
-        # Pure replay permits an owner-first batch prefix to be temporarily
-        # incomplete.  ``replay`` performs the full completeness check after
-        # the complete suffix has been reduced.  The owner is private and
-        # temporary, so no public commit authority is needed here.
-        return frozen
+        if projection.asof is not None and record.known_at < projection.asof:
+            raise ValueError(
+                "foundation records must be appended in knowledge order"
+            )
+
+        latest = dict(projection._latest_records_by_key_cache)
+        key = (record.object_type, record.object_id)
+        previous = latest.get(key)
+        if previous is not None:
+            _validate_object_revision(previous, record)
+        _validate_record_cross_links(
+            latest,
+            record,
+            swing_geometry_views=projection._swing_geometry_views_cache,
+            swing_assignment_incumbents=(
+                projection._swing_assignment_incumbents_cache
+            ),
+        )
+
+        previous_was_last = bool(latest) and next(reversed(latest)) == key
+        latest.pop(key, None)
+        latest[key] = record
+        current_records = projection.current_records
+        view_cursor = projection._current_view_hash_cursor_cache
+        if previous is None:
+            current_records = (*current_records, record)
+            view_cursor = view_cursor.append(record.record_id)
+        elif previous_was_last:
+            current_records = (*current_records[:-1], record)
+            view_cursor = view_cursor.replace_last(record.record_id)
+        else:
+            current_records = tuple(latest.values())
+            view_cursor = _FoundationCurrentViewHashCursor.rebuild(
+                tuple(item.record_id for item in current_records),
+                _capability=_FOUNDATION_INCREMENTAL_CAPABILITY,
+                foundation_version=projection.foundation_version,
+                registry_identity=projection.registry_identity,
+            )
+        current_record_ids = set(projection._current_record_ids_cache)
+        if previous is not None:
+            current_record_ids.discard(previous.record_id)
+        current_record_ids.add(record.record_id)
+        geometry_views = dict(projection._swing_geometry_views_cache)
+        assignment_incumbents = dict(
+            projection._swing_assignment_incumbents_cache
+        )
+        if record.object_type is FoundationObjectType.SWING_GEOMETRY_NODE:
+            geometry_views[record.object_id] = _swing_geometry_view(record)
+        elif (
+            record.object_type
+            is FoundationObjectType.SWING_GEOMETRY_ASSIGNMENT
+        ):
+            assignment_incumbents[
+                str(record.payload.get("child_swing_id"))
+            ] = record
+        return FoundationProjection._from_incremental_state(
+            _capability=_FOUNDATION_INCREMENTAL_CAPABILITY,
+            current_records=current_records,
+            record_count=projection.record_count + 1,
+            component_fingerprint=(
+                _extend_foundation_component_fingerprint(
+                    projection.component_fingerprint,
+                    record.record_id,
+                )
+            ),
+            asof=record.known_at,
+            latest_records_by_key=latest,
+            current_record_ids=current_record_ids,
+            swing_geometry_views=geometry_views,
+            swing_assignment_incumbents=assignment_incumbents,
+            current_view_hash_cursor=view_cursor,
+            foundation_version=projection.foundation_version,
+            registry_identity=projection.registry_identity,
+        )
 
     @classmethod
     def replay(
@@ -2736,460 +2795,6 @@ class FoundationProjectionReducer:
         if checkpoint.checkpoint_id != expected:
             raise ValueError("foundation checkpoint integrity mismatch")
         return canonical
-
-
-class FoundationProjectionOwner:
-    """Single-writer mutable owner; snapshots never expose its containers."""
-
-    def __init__(
-        self,
-        projection: FoundationProjection | None = None,
-    ) -> None:
-        admitted = projection or FoundationProjectionReducer.initial_projection()
-        current = FoundationProjectionReducer.validate_complete(admitted)
-        self._initialize(current)
-
-    def _initialize(self, current: FoundationProjection) -> None:
-        if not isinstance(current, FoundationProjection):
-            raise TypeError("foundation hot owner requires a compact projection")
-        self._latest = dict(current._latest_records_by_key_cache)
-        self._current_record_ids = set(current._current_record_ids_cache)
-        self._record_count = current.record_count
-        self._component_fingerprint = current.component_fingerprint
-        self._asof = current.asof
-        self._geometry_views = dict(current._swing_geometry_views_cache)
-        self._assignment_incumbents = dict(
-            current._swing_assignment_incumbents_cache
-        )
-        self._projection_cache = current
-        self._generation = 0
-
-    @classmethod
-    def _from_cold_prefix(
-        cls,
-        projection: FoundationProjection,
-        *,
-        _capability: object,
-    ) -> "FoundationProjectionOwner":
-        """Build the private pure-replay owner for an incomplete prefix."""
-
-        if (
-            _capability is not _FOUNDATION_COLD_PREFIX_CAPABILITY
-            or type(projection) is not FoundationProjection
-        ):
-            raise ValueError("foundation cold-prefix authority is invalid")
-        owner = object.__new__(cls)
-        owner._initialize(projection)
-        return owner
-
-    @staticmethod
-    def _canonical_projection(
-        projection: FoundationProjection,
-    ) -> FoundationProjection:
-        if not isinstance(projection, FoundationProjection):
-            raise ValueError("foundation projection owner state is invalid")
-        return FoundationProjectionReducer.validate_complete(projection)
-
-    def _require_internal_integrity(self) -> FoundationProjection:
-        canonical = self._canonical_projection(self._projection_cache)
-        rebuilt = type(self)._from_cold_prefix(
-            canonical,
-            _capability=_FOUNDATION_COLD_PREFIX_CAPABILITY,
-        )
-        if (
-            type(self._generation) is not int
-            or self._generation < 0
-            or self._latest != rebuilt._latest
-            or self._current_record_ids != rebuilt._current_record_ids
-            or self._record_count != rebuilt._record_count
-            or self._component_fingerprint != rebuilt._component_fingerprint
-            or self._asof != rebuilt._asof
-            or self._geometry_views != rebuilt._geometry_views
-            or self._assignment_incumbents != rebuilt._assignment_incumbents
-        ):
-            raise ValueError("foundation projection owner internals differ")
-        return canonical
-
-    def __getstate__(self) -> Mapping[str, Any]:
-        return {
-            "schema_version": FOUNDATION_PROJECTION_OWNER_STATE_SCHEMA_VERSION,
-            "projection": self._require_internal_integrity(),
-            "generation": self._generation,
-        }
-
-    def __setstate__(self, state: Mapping[str, Any]) -> None:
-        expected = {"schema_version", "projection", "generation"}
-        if (
-            not isinstance(state, Mapping)
-            or set(state) != expected
-            or state.get("schema_version")
-            != FOUNDATION_PROJECTION_OWNER_STATE_SCHEMA_VERSION
-            or type(state.get("generation")) is not int
-            or state["generation"] < 0
-        ):
-            raise ValueError("foundation projection owner pickle schema changed")
-        canonical = self._canonical_projection(state["projection"])
-        self._initialize(canonical)
-        self._generation = state["generation"]
-
-    @property
-    def record_count(self) -> int:
-        return self._record_count
-
-    @property
-    def component_fingerprint(self) -> str:
-        return self._component_fingerprint
-
-    @property
-    def generation(self) -> int:
-        return self._generation
-
-    def contains(self, record_id: str) -> bool:
-        return record_id in self._current_record_ids
-
-    def freeze(self) -> FoundationProjection:
-        return self._projection_cache
-
-    def stage(self) -> "FoundationProjectionTransaction":
-        return FoundationProjectionTransaction(self)
-
-
-class FoundationProjectionTransaction:
-    """Ordinary bounded write-set over one committed hot owner."""
-
-    def __init__(self, owner: FoundationProjectionOwner) -> None:
-        if not isinstance(owner, FoundationProjectionOwner):
-            raise TypeError("foundation projection transaction requires its owner")
-        self._owner = owner
-        self._base_generation = owner.generation
-        self._records: list[FoundationRecord] = []
-        self._pending_ids: set[str] = set()
-        self._latest_writes: dict[
-            tuple[FoundationObjectType, str], FoundationRecord
-        ] = {}
-        self._geometry_writes: dict[str, _SwingGeometryView] = {}
-        self._assignment_writes: dict[str, FoundationRecord] = {}
-        self._record_count = owner.record_count
-        self._component_fingerprint = owner.component_fingerprint
-        self._asof = owner._asof
-        self._projection_cache: FoundationProjection | None = owner.freeze()
-        self._preflight_projection: FoundationProjection | None = None
-        self._preflight_binding: tuple[object, ...] | None = None
-        self._closed = False
-
-    def _require_fresh(self) -> None:
-        if self._closed:
-            raise ValueError("foundation projection transaction is closed")
-        if self._owner.generation != self._base_generation:
-            raise ValueError("foundation projection transaction is stale")
-
-    def contains(self, record_id: str) -> bool:
-        self._require_fresh()
-        return record_id in self._pending_ids or self._owner.contains(record_id)
-
-    def _require_write_set_identity(self) -> None:
-        _require_foundation_record_identity_integrity(tuple(self._records))
-
-    @staticmethod
-    def _projection_binding(
-        projection: FoundationProjection,
-    ) -> tuple[object, ...]:
-        return (
-            projection.current_records,
-            projection._latest_records_by_key_cache,
-            projection._current_record_ids_cache,
-            projection._swing_geometry_views_cache,
-            projection._swing_assignment_incumbents_cache,
-            projection._current_view_hash_cursor_cache,
-            projection.record_count,
-            projection.component_fingerprint,
-            projection.current_view_fingerprint,
-            projection.asof,
-            projection.foundation_version,
-            projection.registry_identity,
-            projection.schema_version,
-        )
-
-    def _bind_preflight(self, projection: FoundationProjection) -> None:
-        self._preflight_projection = projection
-        self._preflight_binding = self._projection_binding(projection)
-
-    def _require_bound_preflight(
-        self,
-        projection: FoundationProjection,
-    ) -> None:
-        current = self._projection_binding(projection)
-        admitted = self._preflight_binding
-        if (
-            projection is not self._preflight_projection
-            or admitted is None
-            or any(
-                current[index] is not admitted[index]
-                for index in range(6)
-            )
-            or current[6:] != admitted[6:]
-        ):
-            raise ValueError(
-                "foundation prevalidated projection is not bound to this transaction"
-            )
-
-    def _latest_view(self) -> Mapping[tuple[FoundationObjectType, str], FoundationRecord]:
-        return ChainMap(self._latest_writes, self._owner._latest)
-
-    def append(self, record: FoundationRecord) -> bool:
-        self._require_fresh()
-        if not isinstance(record, FoundationRecord):
-            raise TypeError("foundation projection transaction requires a record")
-        _require_foundation_record_identity_integrity((record,))
-        if self.contains(record.record_id):
-            return False
-        if self._asof is not None and record.known_at < self._asof:
-            raise ValueError("foundation records must be appended in knowledge order")
-        latest = self._latest_view()
-        key = (record.object_type, record.object_id)
-        previous = latest.get(key)
-        if previous is not None:
-            _validate_object_revision(previous, record)
-        _validate_record_cross_links(
-            latest,
-            record,
-            swing_geometry_views=ChainMap(
-                self._geometry_writes,
-                self._owner._geometry_views,
-            ),
-            swing_assignment_incumbents=ChainMap(
-                self._assignment_writes,
-                self._owner._assignment_incumbents,
-            ),
-        )
-        self._records.append(record)
-        self._pending_ids.add(record.record_id)
-        self._latest_writes[key] = record
-        if record.object_type is FoundationObjectType.SWING_GEOMETRY_NODE:
-            self._geometry_writes[record.object_id] = _swing_geometry_view(
-                record
-            )
-        elif record.object_type is FoundationObjectType.SWING_GEOMETRY_ASSIGNMENT:
-            child_id = str(record.payload.get("child_swing_id"))
-            self._assignment_writes[child_id] = record
-        self._record_count += 1
-        self._component_fingerprint = _extend_foundation_component_fingerprint(
-            self._component_fingerprint,
-            record.record_id,
-        )
-        self._asof = record.known_at
-        self._projection_cache = None
-        self._preflight_projection = None
-        self._preflight_binding = None
-        return True
-
-    def freeze(self) -> FoundationProjection:
-        self._require_fresh()
-        self._require_write_set_identity()
-        if self._projection_cache is None:
-            latest = dict(self._owner._latest)
-            current_record_ids = set(self._owner._current_record_ids)
-            current_records = self._owner.freeze().current_records
-            view_cursor = (
-                self._owner.freeze()._current_view_hash_cursor_cache
-            )
-            for record in self._records:
-                key = (record.object_type, record.object_id)
-                previous = latest.get(key)
-                previous_was_last = bool(latest) and next(
-                    reversed(latest)
-                ) == key
-                latest.pop(key, None)
-                latest[key] = record
-                if previous is None:
-                    current_records = (*current_records, record)
-                    view_cursor = view_cursor.append(record.record_id)
-                elif previous_was_last:
-                    current_records = (*current_records[:-1], record)
-                    view_cursor = view_cursor.replace_last(record.record_id)
-                else:
-                    current_records = tuple(latest.values())
-                    view_cursor = _FoundationCurrentViewHashCursor.rebuild(
-                        tuple(
-                            item.record_id for item in current_records
-                        ),
-                        _capability=_FOUNDATION_INCREMENTAL_CAPABILITY,
-                        foundation_version=(
-                            self._owner.freeze().foundation_version
-                        ),
-                        registry_identity=(
-                            self._owner.freeze().registry_identity
-                        ),
-                    )
-                if previous is not None:
-                    current_record_ids.discard(previous.record_id)
-                current_record_ids.add(record.record_id)
-            geometry_views = dict(self._owner._geometry_views)
-            geometry_views.update(self._geometry_writes)
-            assignment_incumbents = dict(
-                self._owner._assignment_incumbents
-            )
-            assignment_incumbents.update(self._assignment_writes)
-            self._projection_cache = FoundationProjection._from_incremental_state(
-                _capability=_FOUNDATION_INCREMENTAL_CAPABILITY,
-                current_records=current_records,
-                record_count=self._record_count,
-                component_fingerprint=self._component_fingerprint,
-                asof=self._asof,
-                latest_records_by_key=latest,
-                current_record_ids=current_record_ids,
-                swing_geometry_views=geometry_views,
-                swing_assignment_incumbents=assignment_incumbents,
-                current_view_hash_cursor=view_cursor,
-                foundation_version=self._owner.freeze().foundation_version,
-                registry_identity=self._owner.freeze().registry_identity,
-            )
-        return self._projection_cache
-
-    def delta(self) -> "FoundationRecordDelta":
-        self._require_fresh()
-        self._require_write_set_identity()
-        if self._preflight_projection is not None:
-            self._require_bound_preflight(self._preflight_projection)
-        start_count = self._owner.record_count
-        return FoundationRecordDelta(
-            start_count=start_count,
-            end_count=self._record_count,
-            start_fingerprint=self._owner.component_fingerprint,
-            end_fingerprint=self._component_fingerprint,
-            records=tuple(self._records),
-        )
-
-    def validate_complete(self) -> None:
-        self._require_fresh()
-        self._require_write_set_identity()
-        self._validate_completeness()
-
-    def _validate_completeness(self) -> None:
-        latest = self._latest_view()
-        affected_level_ids: set[str] = set()
-        changed_structure_ids: set[str] = set()
-        changed_level_ids: set[str] = set()
-        for record in self._records:
-            if record.object_type is FoundationObjectType.LIQUIDITY_LEVEL:
-                affected_level_ids.add(record.object_id)
-                changed_level_ids.add(record.object_id)
-            elif (
-                record.object_type
-                is FoundationObjectType.LIQUIDITY_INTERACTION_GENERATION
-            ):
-                affected_level_ids.add(str(record.payload.get("level_id")))
-                _validate_liquidity_interaction_registration(latest, record)
-                previous = self._owner._latest.get(
-                    (record.object_type, record.object_id)
-                )
-                if previous is not None:
-                    affected_level_ids.add(
-                        str(previous.payload.get("level_id"))
-                    )
-            elif (
-                record.object_type
-                is FoundationObjectType.STRUCTURE_GENERATION
-            ):
-                changed_structure_ids.add(record.object_id)
-        for level_id in affected_level_ids:
-            level = latest.get(
-                (FoundationObjectType.LIQUIDITY_LEVEL, level_id)
-            )
-            if level is None:
-                raise ValueError(
-                    "finalized liquidity interaction lacks its registered level"
-                )
-            _validate_liquidity_level_interaction_graph(
-                latest,
-                level,
-                tail_only=True,
-            )
-        if changed_structure_ids or changed_level_ids:
-            structure_reference_fields = (
-                "owner_structure_generation_id",
-                "incumbent_structure_generation_id",
-                "opposite_structure_generation_id",
-                "parent_structure_generation_id",
-                "child_structure_generation_id",
-                "structure_generation_id",
-            )
-            for (object_type, _), record in latest.items():
-                payload = record.payload
-                depends_on_changed_structure = (
-                    bool(changed_structure_ids)
-                    and object_type
-                    is not FoundationObjectType.STRUCTURE_GENERATION
-                    and any(
-                        payload.get(field) in changed_structure_ids
-                        for field in structure_reference_fields
-                    )
-                )
-                depends_on_changed_level = (
-                    bool(changed_level_ids)
-                    and object_type
-                    is FoundationObjectType.LIQUIDITY_CLUSTER
-                    and not changed_level_ids.isdisjoint(
-                        payload.get("member_level_ids", ())
-                    )
-                )
-                if depends_on_changed_structure or depends_on_changed_level:
-                    _validate_current_record_cross_links(latest, record)
-
-    def preflight_commit(self) -> FoundationProjection:
-        """Validate every fallible condition before either authority mutates."""
-
-        frozen = self.freeze()
-        self._validate_completeness()
-        self._bind_preflight(frozen)
-        return frozen
-
-    def commit(
-        self,
-        *,
-        prevalidated: FoundationProjection | None = None,
-    ) -> FoundationProjection:
-        self._require_fresh()
-        if prevalidated is None:
-            frozen = self.preflight_commit()
-        else:
-            self._require_write_set_identity()
-            frozen = prevalidated
-            self._require_bound_preflight(frozen)
-        return self._commit_prevalidated(frozen)
-
-    def _commit_prevalidated(
-        self,
-        frozen: FoundationProjection,
-    ) -> FoundationProjection:
-        """Apply an already checked write-set without another fallible read.
-
-        The adapter calls this only after projection, lifecycle, and cold-ledger
-        preflight have all succeeded.  Keeping the mutation tail validation-free
-        prevents a one-sided cold-ledger commit.
-        """
-
-        self._require_fresh()
-        self._require_bound_preflight(frozen)
-
-        for record in self._records:
-            key = (record.object_type, record.object_id)
-            prior = self._owner._latest.pop(key, None)
-            if prior is not None:
-                self._owner._current_record_ids.discard(prior.record_id)
-            self._owner._latest[key] = record
-            self._owner._current_record_ids.add(record.record_id)
-        self._owner._geometry_views.update(self._geometry_writes)
-        self._owner._assignment_incumbents.update(
-            self._assignment_writes
-        )
-        self._owner._record_count = self._record_count
-        self._owner._component_fingerprint = self._component_fingerprint
-        self._owner._asof = self._asof
-        self._owner._projection_cache = frozen
-        self._owner._generation += 1
-        self._closed = True
-        return frozen
 
 
 @dataclass(frozen=True)
@@ -3476,7 +3081,6 @@ __all__ = [
     "FoundationObjectType",
     "FoundationProjection",
     "FoundationProjectionCheckpoint",
-    "FoundationProjectionOwner",
     "FoundationProjectionReducer",
     "FoundationRecord",
     "FoundationRecordDelta",

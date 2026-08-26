@@ -485,20 +485,13 @@ def test_eye_authority_mode_preserves_all_typed_state_and_internal_memory() -> N
         light_observation = light.observe(light_reader.on_bar(bar))
 
         assert not full_observation.typed_transition_delta_available
-        non_foundation_events = tuple(
-            event
-            for event in light_observation.semantic_events_this_update
-            if event.kind is not EventKind.FOUNDATION_STATE_CHANGED
-        )
-        assert non_foundation_events == (
+        assert light_observation.semantic_events_this_update == (
             full_observation.semantic_events_this_update
         )
-        assert replace(
-            light_observation.market_snapshot,
-            foundation=None,
-            foundation_range_locations={},
-            events_this_update=non_foundation_events,
-        ) == full_observation.market_snapshot
+        assert (
+            light_observation.market_snapshot
+            == full_observation.market_snapshot
+        )
         assert light_observation == replace(
             full_observation,
             execution=light_observation.execution,
@@ -1386,6 +1379,12 @@ def test_structural_cold_zone_is_not_backfilled_as_reference_admission() -> None
         event.lifecycle for event in observer.memory.timeline(key)
     ) == ("broken",)
     assert observer.memory.incomplete_entity_keys() == (key,)
+    observer.memory.flush_audit()
+    assert not any(
+        event.kind is EventKind.LIQUIDITY_LEVEL_CREATED
+        and event.evidence.get("level_id") == zone.zone_id
+        for event in observer.audit_store.events()
+    )
 
 
 def test_eye_authority_mode_keeps_incomplete_clock_anomaly_private(
@@ -1457,8 +1456,8 @@ def test_eye_authority_observer_pickle_resume_matches_uninterrupted() -> None:
     assert resumed.scene_graph.last_asof is None
 
 
-def test_lightweight_event_view_is_rejected_outside_authority_scan() -> None:
-    with pytest.raises(ValueError, match="authority scanner"):
+def test_lightweight_event_view_requires_typed_group4_pipeline() -> None:
+    with pytest.raises(ValueError, match="typed pipeline"):
         CausalObserver(
             ObserverConfig(
                 scale_specs=MODEL_SCALE_SPECS,
@@ -1476,29 +1475,6 @@ def test_eye_authority_mode_rejects_range_auction_projection_only() -> None:
                 eye_authority_mode=True,
             )
         )
-
-
-@pytest.mark.parametrize(
-    "config",
-    (
-        ObserverConfig(
-            scale_specs=MODEL_SCALE_SPECS,
-            canonical_foundation_enabled=True,
-        ),
-        _all_typed_observer_config(
-            range_auction_projection_only=True,
-            canonical_foundation_enabled=True,
-        ),
-    ),
-)
-def test_canonical_foundation_requires_fully_typed_atomic_observer(
-    config: ObserverConfig,
-) -> None:
-    with pytest.raises(
-        ValueError,
-        match="canonical-foundation projection requires all typed protocols",
-    ):
-        CausalObserver(config)
 
 
 def test_eye_authority_mode_rejects_graph_without_event_view() -> None:

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import replace
-import math
 
 import pandas as pd
 import pytest
@@ -9,7 +8,6 @@ import pytest
 from smc_trader.foundation_registry import FOUNDATION_VERSION
 from smc_trader.market_state import (
     BalanceRangeState,
-    LiquidityClusterState,
     StructuralRangeState,
     SwingGeometryNode,
     SwingHierarchyView,
@@ -17,9 +15,7 @@ from smc_trader.market_state import (
     build_structural_legs,
     build_structural_range,
     build_swing_geometry_nodes,
-    dual_range_location,
     terminate_structural_range,
-    update_liquidity_clusters,
     update_swing_geometry_assignments,
     _require_contiguous_native_candles,
 )
@@ -696,82 +692,7 @@ def test_swing_parent_assignments_are_append_only_and_role_independent() -> None
     assert child_history[-1].geometric_depth == 1
 
 
-def test_liquidity_clusters_use_complete_link_and_preserve_sources() -> None:
-    levels = (
-        _level("above-a", "above", 100.0, "swing-a"),
-        _level("above-b", "above", 100.25, "previous-day-high"),
-        _level("above-c", "above", 100.5, "equal-highs"),
-        _level("below-a", "below", 100.0, "swing-low"),
-    )
-
-    update = update_liquidity_clusters(
-        levels,
-        tick_size=0.25,
-        known_at=_clock(15),
-    )
-
-    assert len(update.active) == 1
-    cluster = update.active[0]
-    assert isinstance(cluster, LiquidityClusterState)
-    assert cluster.side == "above"
-    assert cluster.member_level_ids == ("above-a", "above-b")
-    assert cluster.member_source_ids == ("swing-a", "previous-day-high")
-    assert cluster.upper_price - cluster.lower_price == pytest.approx(0.25)
-    assert "above-c" not in cluster.member_level_ids
-    assert "below-a" not in cluster.member_level_ids
-
-    unchanged = update_liquidity_clusters(
-        levels,
-        update.active,
-        tick_size=0.25,
-        known_at=_clock(20),
-    )
-    assert unchanged.started == ()
-    assert unchanged.terminated == ()
-    assert unchanged.active[0].cluster_id == cluster.cluster_id
-    assert unchanged.active[0].updated_at == cluster.updated_at
-
-
-def test_liquidity_membership_change_supersedes_old_cluster() -> None:
-    first_levels = (
-        _level("above-a", "above", 100.0, "swing-a"),
-        _level("above-b", "above", 100.25, "previous-day-high"),
-    )
-    first = update_liquidity_clusters(
-        first_levels,
-        tick_size=0.25,
-        known_at=_clock(15),
-    )
-    replacement_levels = (
-        first_levels[0],
-        _level(
-            "above-new",
-            "above",
-            100.25,
-            "equal-highs",
-            confirmed_minutes=20,
-        ),
-    )
-
-    second = update_liquidity_clusters(
-        replacement_levels,
-        first.active,
-        tick_size=0.25,
-        known_at=_clock(20),
-    )
-
-    assert len(second.active) == len(second.started) == 1
-    assert len(second.terminated) == len(second.supersessions) == 1
-    old = second.terminated[0]
-    new = second.active[0]
-    assert old.cluster_id == first.active[0].cluster_id
-    assert old.termination_reason == "superseded"
-    assert new.cluster_id != old.cluster_id
-    assert new.supersedes_cluster_ids == (old.cluster_id,)
-    assert second.supersessions[0].replacement_cluster_ids == (new.cluster_id,)
-
-
-def test_structural_and_balance_ranges_coexist_with_distinct_locations() -> None:
+def test_structural_and_balance_ranges_remain_distinct_cold_geometries() -> None:
     low = _swing(
         "structural-low",
         SwingSide.LOW,
@@ -801,31 +722,10 @@ def test_structural_and_balance_ranges_coexist_with_distinct_locations() -> None
     assert BalanceRangeState is DealingRangeState
     assert not isinstance(structural, BalanceRangeState)
     assert structural.symbol == balance.symbol == "NQ"
-    location = dual_range_location(
-        102.0,
-        structural_range=structural,
-        balance_range=balance,
-    )
-    assert location.structural_range_id == structural.range_id
-    assert location.balance_range_id == balance.range_id
-    assert location.x_structural_range == pytest.approx(0.6)
-    assert location.x_balance_range == pytest.approx(0.7)
-    assert not math.isclose(
-        location.x_structural_range,
-        location.x_balance_range,
-    )
-
     terminated = terminate_structural_range(
         structural,
         terminated_at=_clock(240),
         reason="structure_generation_terminated",
     )
-    after_termination = dual_range_location(
-        102.0,
-        structural_range=terminated,
-        balance_range=balance,
-    )
-    assert after_termination.structural_range_id is None
-    assert after_termination.x_structural_range is None
-    assert after_termination.balance_range_id == balance.range_id
-    assert after_termination.x_balance_range == pytest.approx(0.7)
+    assert terminated.terminated_at == _clock(240)
+    assert terminated.termination_reason == "structure_generation_terminated"

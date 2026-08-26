@@ -435,7 +435,6 @@ def _build_eye(
             materialize_event_view=False,
             range_auction_projection_only=False,
             eye_authority_mode=True,
-            canonical_foundation_enabled=True,
         ),
         semantic_registry=selection.atomic_registry,
     )

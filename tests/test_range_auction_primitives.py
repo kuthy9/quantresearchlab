@@ -1317,14 +1317,15 @@ def test_observer_records_group4_range_terminal_only_at_boundary_clock(
     base = mature.mature_at + pd.Timedelta(minutes=1)
     inventory = tracker.snapshot().range_boundary_inventory
     _warm_m1(tracker, base=base, inventory=inventory)
+    sweep_bar = _m1(
+        15,
+        base=base,
+        close=100.5,
+        high=101.25,
+        low=99.75,
+    )
     swept_update = tracker.on_completed_update(
-        _m1(
-            15,
-            base=base,
-            close=100.5,
-            high=101.25,
-            low=99.75,
-        ),
+        sweep_bar,
         prior_inventory=inventory,
         liquidity_pools=(),
     )
@@ -1346,10 +1347,19 @@ def test_observer_records_group4_range_terminal_only_at_boundary_clock(
             RangeAuctionUpdate(
                 dealing_ranges=(state,),
                 manipulations=(),
-                range_boundary_inventory=(),
+                range_boundary_inventory=(
+                    inventory
+                    if state.lifecycle is DealingRangeLifecycle.MATURE
+                    else ()
+                ),
                 range_transitions=(state,),
             )
         )
+    sweep_bar_event = observer._append_completed_bar_event(
+        sweep_bar,
+        atr=1.0,
+        data_complete=True,
+    )
     observer._record_group4_events(
         swept_update,
         include_ranges=False,
@@ -1400,6 +1410,39 @@ def test_observer_records_group4_range_terminal_only_at_boundary_clock(
         observer.audit_store.get(event_id) is not None
         for event_id in pending_before_boundary
     )
+    candidate = next(
+        event
+        for event in observer.audit_store.events()
+        if event.kind is EventKind.LIQUIDITY_LEVEL_CREATED
+        and event.evidence.get("level_id")
+        == swept.source_inventory_item_id
+    )
+    touch = next(
+        event
+        for event in observer.audit_store.events()
+        if event.kind is EventKind.LEVEL_TOUCHED
+        and event.timeframe is Timeframe.M1
+        and event.evidence.get("level_id")
+        == swept.source_inventory_item_id
+    )
+    penetration = next(
+        event
+        for event in observer.audit_store.events()
+        if event.kind is EventKind.LEVEL_PENETRATED
+        and event.timeframe is Timeframe.M1
+        and event.evidence.get("level_id")
+        == swept.source_inventory_item_id
+    )
+    assert touch.source_event_ids == (
+        candidate.event_id,
+        sweep_bar_event.event_id,
+    )
+    assert penetration.source_event_ids == (
+        candidate.event_id,
+        touch.event_id,
+        sweep_bar_event.event_id,
+    )
+    assert penetration.evidence["source_kind"] == "mature_range_boundary"
 
     (terminal_range,) = (
         boundary_observation.group4_boundary_range_transitions
@@ -1579,6 +1622,99 @@ def test_cold_sweep_without_prior_atr_is_unclassified_and_advances() -> None:
         liquidity_pools=(),
     )
     assert tracker.last_m1_end == next_bar.end
+
+
+def test_observer_publishes_mature_boundary_crossing_without_prior_atr() -> None:
+    tracker, formed, mature = _mature_range(_protocol())
+    assert mature.mature_at is not None
+    base = mature.mature_at + pd.Timedelta(minutes=1)
+    inventory = tracker.snapshot().range_boundary_inventory
+    tracker.on_completed_update(
+        _m1(0, base=base),
+        prior_inventory=inventory,
+        liquidity_pools=(),
+    )
+    sweep = _m1(
+        1,
+        base=base,
+        close=100.5,
+        high=101.25,
+        low=99.75,
+    )
+    output = tracker.on_completed_update(
+        sweep,
+        prior_inventory=inventory,
+        liquidity_pools=(),
+    )
+    assert output.manipulation_transitions == ()
+    assert output.atr_unready_sweep_item_ids
+
+    observer = CausalObserver(
+        ObserverConfig(
+            structure_protocol=str(GROUP12_PROTOCOL_PATH),
+            liquidity_protocol=str(GROUP12_PROTOCOL_PATH),
+            range_auction_protocol=str(PROTOCOL_PATH),
+            scale_specs=CORE_TEST_SCALE_SPECS,
+            project_scene_graph=False,
+        )
+    )
+    observer.memory.set_clock_coverage_start(formed.formed_at)
+    for state in (formed, mature):
+        observer._record_group4_events(
+            RangeAuctionUpdate(
+                dealing_ranges=(state,),
+                manipulations=(),
+                range_boundary_inventory=(
+                    inventory
+                    if state.lifecycle is DealingRangeLifecycle.MATURE
+                    else ()
+                ),
+                range_transitions=(state,),
+            )
+        )
+    crossing_bar = observer._append_completed_bar_event(
+        sweep,
+        atr=1.0,
+        data_complete=True,
+    )
+    observer._record_group4_events(output, include_ranges=False)
+    observer.memory.flush_audit()
+
+    events = observer.audit_store.events()
+    assert not any(
+        event.kind is EventKind.MANIPULATION_STATE
+        for event in events
+    )
+    for item_id in output.atr_unready_sweep_item_ids:
+        candidate = next(
+            event
+            for event in events
+            if event.kind is EventKind.LIQUIDITY_LEVEL_CREATED
+            and event.evidence.get("level_id") == item_id
+        )
+        touch = next(
+            event
+            for event in events
+            if event.kind is EventKind.LEVEL_TOUCHED
+            and event.evidence.get("level_id") == item_id
+        )
+        penetration = next(
+            event
+            for event in events
+            if event.kind is EventKind.LEVEL_PENETRATED
+            and event.evidence.get("level_id") == item_id
+        )
+        assert touch.source_event_ids == (
+            candidate.event_id,
+            crossing_bar.event_id,
+        )
+        assert penetration.source_event_ids == (
+            candidate.event_id,
+            touch.event_id,
+            crossing_bar.event_id,
+        )
+        assert touch.evidence["range_id"] == mature.range_id
+        assert penetration.evidence["range_id"] == mature.range_id
 
 
 def test_h1_synthetic_bar_advances_only_the_raw_causal_cutoff() -> None:
