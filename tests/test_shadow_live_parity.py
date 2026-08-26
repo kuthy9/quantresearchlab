@@ -15,7 +15,6 @@ import smc_trader.shadow_live as shadow_live_module
 
 from smc_trader.engine import ContinuousSMCEngine
 from smc_trader.event_store import EventStore
-from smc_trader.foundation_adapter import CanonicalFoundationAdapter
 from smc_trader.execution_fsm import (
     ExecutionFact,
     ExecutionFactKind,
@@ -844,8 +843,6 @@ def test_compact_restore_rehydrates_all_engine_derived_indexes() -> None:
 
     derived_tamper = copy.deepcopy(checkpoint)
     adapter = derived_tamper["engine"].observer._foundation_adapter
-    assert adapter._real_bars  # noqa: SLF001
-    adapter._real_bar_by_id.clear()  # noqa: SLF001
     adapter._lifecycle_indexes.clear()  # noqa: SLF001
     restored = ShadowLiveRunner.from_compact_runtime_checkpoint(
         derived_tamper,
@@ -853,20 +850,14 @@ def test_compact_restore_rehydrates_all_engine_derived_indexes() -> None:
         records=checkpoint_records,
     )
     restored_adapter = restored.engine.observer._foundation_adapter
-    assert len(restored_adapter._real_bar_by_id) == len(  # noqa: SLF001
-        restored_adapter._real_bars  # noqa: SLF001
-    )
     assert restored_adapter._lifecycle_indexes  # noqa: SLF001
     assert restored.process(_input(36)) == runner.process(_input(36))
 
     empty_authority = copy.deepcopy(checkpoint)
-    old_adapter = empty_authority["engine"].observer._foundation_adapter
-    empty_authority["engine"].observer._foundation_adapter = type(old_adapter)(
-        tick_size=old_adapter.tick_size
-    )
+    empty_authority["engine"].observer._foundation_adapter = None
     with pytest.raises(
         ShadowLiveError,
-        match="foundation authority differs from published projection",
+        match="foundation authority is missing",
     ):
         ShadowLiveRunner.from_compact_runtime_checkpoint(
             empty_authority,
@@ -874,35 +865,7 @@ def test_compact_restore_rehydrates_all_engine_derived_indexes() -> None:
             records=checkpoint_records,
         )
 
-    canonical_bar_tamper = copy.deepcopy(checkpoint)
-    bar_adapter = canonical_bar_tamper["engine"].observer._foundation_adapter
-    assert bar_adapter._real_bars  # noqa: SLF001
-    bar_adapter._real_bars.clear()  # noqa: SLF001
-    bar_adapter._real_bar_by_id.clear()  # noqa: SLF001
-    canonical_bar_tamper["foundation_authority_digest"] = (
-        bar_adapter.checkpoint().checkpoint_digest
-    )
-    with pytest.raises(
-        ShadowLiveError,
-        match="foundation .* differs",
-    ):
-        ShadowLiveRunner.from_compact_runtime_checkpoint(
-            canonical_bar_tamper,
-            journal_events=checkpoint_journal,
-            records=checkpoint_records,
-        )
-
-    whole_runner_tamper = pickle.loads(pickle.dumps(runner))
-    whole_adapter = whole_runner_tamper.engine.observer._foundation_adapter
-    whole_adapter.lifecycle = type(whole_adapter.lifecycle)()
-    with pytest.raises(
-        ValueError,
-        match="foundation adapter pickle lifecycle owner differs",
-    ):
-        pickle.loads(pickle.dumps(whole_runner_tamper))
-
-
-def test_foundation_restore_rejects_self_consistent_runtime_authority_tamper() -> None:
+def test_foundation_restore_rejects_bound_authority_and_tick_tamper() -> None:
     runner = ShadowLiveRunner(
         engine=_engine(),
         protocol=load_shadow_live_protocol(PROTOCOL_PATH),
@@ -932,65 +895,16 @@ def test_foundation_restore_rejects_self_consistent_runtime_authority_tamper() -
     journal = runner.journal.events
     records = runner.records
 
-    applied_tamper = copy.deepcopy(checkpoint)
-    adapter = applied_tamper["engine"].observer._foundation_adapter
-    manual_id = next(
-        fact_id
-        for fact_id in adapter.lifecycle_fact_fingerprints
-        if fact_id.startswith("observer-boundary-attack:")
-    )
-    adapter._lifecycle_owner._fact_fingerprints[manual_id] = "0" * 64
-    with pytest.raises(ValueError, match="lifecycle owner fact chain differs"):
+    store_tamper = copy.deepcopy(checkpoint)
+    adapter = store_tamper["engine"].observer._foundation_adapter
+    adapter._event_store = EventStore()
+    with pytest.raises(ValueError, match="cold authority binding differs"):
         adapter.checkpoint()
-
-    asof_tamper = copy.deepcopy(checkpoint)
-    adapter = asof_tamper["engine"].observer._foundation_adapter
-    adapter.lifecycle = replace(
-        adapter.lifecycle,
-        asof=pd.Timestamp("2099-01-01T00:00:00Z"),
-    )
-    adapter._lifecycle_owner._state = adapter.lifecycle
-    asof_tamper["foundation_authority_digest"] = (
-        adapter.checkpoint().checkpoint_digest
-    )
-    with pytest.raises(
-        ShadowLiveError,
-        match="foundation authority differs from audit replay",
-    ):
-        ShadowLiveRunner.from_compact_runtime_checkpoint(
-            asof_tamper,
-            journal_events=journal,
-            records=records,
-        )
 
     tick_tamper = copy.deepcopy(checkpoint)
     observer = tick_tamper["engine"].observer
     adapter = observer._foundation_adapter
     adapter.tick_size = 0.125
-    authoritative = tuple(
-        sorted(
-            (
-                event
-                for event in observer.audit_store.events()
-                if event.origin
-                in {
-                    EventOrigin.NORMALIZED_DATA,
-                    EventOrigin.SEMANTIC_ATOMIC,
-                }
-            ),
-            key=lambda event: (
-                event.known_at,
-                event.sequence_no,
-                event.event_id,
-            ),
-        )
-    )
-    false_replay = CanonicalFoundationAdapter(tick_size=0.125)
-    false_replay.consume_batch(authoritative)
-    adapter._real_bars = false_replay._real_bars
-    adapter._real_bar_by_id = false_replay._real_bar_by_id
-    adapter._crossings = false_replay._crossings
-    adapter._structure_bindings = false_replay._structure_bindings
     tick_tamper["foundation_authority_digest"] = (
         adapter.checkpoint().checkpoint_digest
     )
@@ -1021,44 +935,18 @@ def test_foundation_restore_rejects_self_consistent_runtime_authority_tamper() -
         (*adapter.lifecycle.levels, adapter.lifecycle.levels[-1]),
     )
     adapter._rebuild_derived_indexes()
-    with pytest.raises(ValueError, match="lifecycle owner differs"):
-        adapter.checkpoint()
-
-    order_tamper = copy.deepcopy(checkpoint)
-    adapter = order_tamper["engine"].observer._foundation_adapter
-    assert len(adapter.lifecycle.levels) > 1
-    adapter.lifecycle = replace(
-        adapter.lifecycle,
-        levels=tuple(reversed(adapter.lifecycle.levels)),
-    )
-    adapter._lifecycle_owner._state = adapter.lifecycle
-    adapter._rebuild_derived_indexes()
-    order_tamper["foundation_authority_digest"] = (
+    duplicate_tamper["foundation_authority_digest"] = (
         adapter.checkpoint().checkpoint_digest
     )
     with pytest.raises(
         ShadowLiveError,
-        match="foundation lifecycle differs from audit replay",
+        match="compact checkpoint Engine state cannot be revalidated",
     ):
         ShadowLiveRunner.from_compact_runtime_checkpoint(
-            order_tamper,
+            duplicate_tamper,
             journal_events=journal,
             records=records,
         )
-
-    whole_duplicate_tamper = pickle.loads(pickle.dumps(runner))
-    adapter = whole_duplicate_tamper.engine.observer._foundation_adapter
-    object.__setattr__(
-        adapter.lifecycle,
-        "levels",
-        (*adapter.lifecycle.levels, adapter.lifecycle.levels[-1]),
-    )
-    adapter._rebuild_derived_indexes()
-    with pytest.raises(
-        ValueError,
-        match="foundation adapter pickle lifecycle owner differs",
-    ):
-        pickle.loads(pickle.dumps(whole_duplicate_tamper))
 
 
 def test_component_digest_final_audit_replays_full_market_payload() -> None:
@@ -1122,30 +1010,6 @@ def test_real_w1_manual_foundation_transitions_restore_and_continue_exactly() ->
     assert restored.record_fingerprint == runner.record_fingerprint
     assert restored.journal.fingerprint == runner.journal.fingerprint
     assert restored.gateway.submission_attempts == 0
-
-    for prefix in ("relation-observation:", "delivery-observation:"):
-        tampered = copy.deepcopy(checkpoint)
-        adapter = tampered["engine"].observer._foundation_adapter
-        target_id = next(
-            fact_id
-            for fact_id in adapter.lifecycle_fact_fingerprints
-            if fact_id.startswith(prefix)
-        )
-        adapter._lifecycle_owner._fact_fingerprints[target_id] = "0" * 64
-        adapter._rebuild_derived_indexes()
-        tampered["foundation_authority_digest"] = (
-            adapter.checkpoint().checkpoint_digest
-        )
-        with pytest.raises(
-            ShadowLiveError,
-            match="foundation .* differs",
-        ):
-            ShadowLiveRunner.from_compact_runtime_checkpoint(
-                tampered,
-                journal_events=journal,
-                records=records,
-            )
-
 
 def test_execution_fsm_events_are_part_of_the_same_clock_parity_record() -> None:
     approved = _shadow_approved()

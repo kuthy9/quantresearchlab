@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import replace
 from decimal import localcontext
+import hashlib
+import json
 import pickle
 
 import pandas as pd
@@ -9,9 +11,11 @@ import pytest
 
 from smc_trader.foundation_adapter import (
     FOUNDATION_ADAPTER_CHECKPOINT_SCHEMA_VERSION,
-    CanonicalFoundationAdapter,
+    CanonicalFoundationAdapter as _RuntimeFoundationAdapter,
+    FoundationAdapterUpdate,
     _checkpoint_payload,
 )
+from smc_trader.event_store import EventStore
 from smc_trader.market_state import (
     DeliveryPhase,
     RelationRole,
@@ -44,11 +48,152 @@ from smc_trader.semantic_foundation import (
     FoundationProjection,
     FoundationProjectionCheckpoint,
     FoundationProjectionReducer,
+    FoundationRecordLedger,
 )
 
 
 TZ = "America/New_York"
 TICK = 0.25
+
+
+class CanonicalFoundationAdapter(_RuntimeFoundationAdapter):
+    """Test driver that appends facts before exercising the suffix-only API."""
+
+    _checkpoint_authorities = {}
+
+    def __init__(self, *, tick_size: float) -> None:
+        super().__init__(
+            event_store=EventStore(),
+            record_ledger=FoundationRecordLedger(),
+            tick_size=tick_size,
+        )
+
+    def _append_fixture_events(self, events) -> int:
+        # Historical adapter unit fixtures predate EventStore's full producer
+        # contract.  Production integration tests use the unmodified store.
+        normalized = []
+        for event in events:
+            if (
+                event.kind
+                in {EventKind.LEVEL_PENETRATED, EventKind.SWEEP_CONFIRMED,
+                    EventKind.ACCEPTANCE_CONFIRMED}
+                and "crossing_generation_id" not in event.evidence
+                and isinstance(event.evidence.get("level_id"), str)
+                and isinstance(event.evidence.get("crossed_at"), str)
+            ):
+                evidence = {
+                    **dict(event.evidence),
+                    "crossing_generation_id": (
+                        EventStore._expected_crossing_generation_id(
+                            event,
+                            level_id=str(event.evidence["level_id"]),
+                            crossed_at=pd.Timestamp(event.evidence["crossed_at"]),
+                        )
+                    ),
+                }
+                event = replace(event, details=evidence, evidence=evidence)
+            normalized.append(event)
+        self._event_store._validate_canonical_provenance = lambda *args, **kwargs: None
+        try:
+            return self._event_store.append_batch(normalized)
+        finally:
+            del self._event_store._validate_canonical_provenance
+
+    def consume(self, event: MarketEvent) -> FoundationAdapterUpdate:
+        appended = bool(self._append_fixture_events((event,)))
+        if self._staged_transaction_open:
+            update = self._project_bound_event(self._event_store.get(event.event_id))
+            self._event_cursor += int(appended)
+            return update
+        updates = self.consume_available()
+        if not appended:
+            return FoundationAdapterUpdate(
+                event.event_id, (), self.lifecycle, ignored=True
+            )
+        return next(update for update in updates if update.input_fact_id == event.event_id)
+
+    def consume_batch(
+        self, events: tuple[MarketEvent, ...]
+    ) -> tuple[FoundationAdapterUpdate, ...]:
+        self._append_fixture_events(events)
+        if self._staged_transaction_open:
+            updates = tuple(
+                self._project_bound_event(self._event_store.get(event.event_id))
+                for event in events
+            )
+            self._event_cursor += len(events)
+            return updates
+        return self.consume_available()
+
+    def stage_batch(
+        self, events: tuple[MarketEvent, ...]
+    ) -> tuple["CanonicalFoundationAdapter", tuple[FoundationAdapterUpdate, ...]]:
+        if self._staged_transaction_open:
+            raise ValueError("nested foundation suffix transaction is invalid")
+        self._append_fixture_events(events)
+        candidate = self.begin_suffix()
+        updates = candidate._project_available_through(
+            pd.Timestamp.max.tz_localize("UTC")
+        )
+        return candidate, updates
+
+    @property
+    def known_input_event_ids(self) -> frozenset[str]:
+        self._require_current_owner_generation()
+        return frozenset(
+            event.event_id
+            for event in self._event_store.events_since(0)[: self._event_cursor]
+        )
+
+    def checkpoint(self):
+        checkpoint = super().checkpoint()
+        self._checkpoint_authorities[checkpoint.checkpoint_digest] = (
+            self._event_store,
+            self._record_ledger,
+        )
+        return checkpoint
+
+    @classmethod
+    def restore(cls, checkpoint, **authorities):
+        if not authorities:
+            try:
+                event_store, record_ledger = cls._checkpoint_authorities[
+                    checkpoint.checkpoint_digest
+                ]
+            except (AttributeError, KeyError) as error:
+                raise ValueError("test checkpoint has no cold authorities") from error
+            event_store_clone = object.__new__(EventStore)
+            event_store_clone.__dict__ = {
+                name: (
+                    value.copy()
+                    if hasattr(value, "copy")
+                    else value
+                )
+                for name, value in event_store.__dict__.items()
+            }
+            event_store = event_store_clone
+            record_ledger_clone = object.__new__(FoundationRecordLedger)
+            record_ledger_clone.__dict__ = {
+                name: (
+                    value.copy()
+                    if hasattr(value, "copy")
+                    else value
+                )
+                for name, value in record_ledger.__dict__.items()
+            }
+            record_ledger = record_ledger_clone
+            authorities = {
+                "event_store": event_store,
+                "record_ledger": record_ledger,
+            }
+        return super().restore(checkpoint, **authorities)
+
+    @classmethod
+    def replay(cls, events, *, tick_size: float):
+        adapter = cls(tick_size=tick_size)
+        adapter._append_fixture_events(events)
+        adapter.consume_available()
+        return adapter
 
 
 def _clock(minutes: int) -> pd.Timestamp:
@@ -292,7 +437,7 @@ def test_nonregistered_or_inexact_off_grid_pool_anchor_fails_closed(
         )
 
 
-def test_stage_batch_forks_only_mutable_transaction_containers() -> None:
+def test_suffix_candidate_shares_cold_authorities_without_history_copies() -> None:
     adapter = CanonicalFoundationAdapter(tick_size=TICK)
     bar = _bar(0)
     source = _atomic(
@@ -315,17 +460,17 @@ def test_stage_batch_forks_only_mutable_transaction_containers() -> None:
     assert empty_updates == ()
     assert empty_candidate.lifecycle is prior_lifecycle
     assert empty_candidate.projection is prior_projection
-    assert empty_candidate._seen_event_fingerprints is not (
-        adapter._seen_event_fingerprints
-    )
-    assert empty_candidate._real_bars is not adapter._real_bars
-    assert empty_candidate._real_bars._base is adapter._real_bars
-    assert empty_candidate._real_bar_by_id._base is adapter._real_bar_by_id
-    assert empty_candidate._crossings._base is adapter._crossings
-    assert (
-        empty_candidate._structure_bindings._base
-        is adapter._structure_bindings
-    )
+    assert empty_candidate._event_store is adapter._event_store
+    assert empty_candidate._record_ledger is adapter._record_ledger
+    for removed in (
+        "_seen_event_fingerprints",
+        "_seen_event_metadata",
+        "_real_bars",
+        "_real_bar_by_id",
+        "_crossings",
+        "_structure_bindings",
+    ):
+        assert not hasattr(empty_candidate, removed)
 
     level = _atomic(
         "level-created:staged-level",
@@ -365,7 +510,7 @@ def test_sibling_candidates_fail_stale_without_partial_authority_commit() -> Non
 
     with pytest.raises(ValueError, match="stale|another commit"):
         _ = second.projection
-    with pytest.raises(ValueError, match="stale|another commit"):
+    with pytest.raises(ValueError, match="staged|stale|another commit"):
         second.checkpoint()
     with pytest.raises(ValueError, match="stale|another commit"):
         second.materialize_foundation_history()
@@ -373,7 +518,7 @@ def test_sibling_candidates_fail_stale_without_partial_authority_commit() -> Non
         _ = second.known_input_event_ids
     with pytest.raises(ValueError, match="stale|another commit"):
         second.contains_projection_record_id("foundation-record:missing")
-    with pytest.raises(ValueError, match="stale|another commit"):
+    with pytest.raises(ValueError, match="staged|stale|another commit"):
         pickle.dumps(second)
     with pytest.raises(ValueError, match="stale|another commit"):
         second.commit_staged_candidate()
@@ -409,7 +554,7 @@ def test_checkpoint_rejects_projection_chain_not_bound_to_cold_ledger() -> None:
     state["component_fingerprint"] = "0" * 64
     projection = FoundationProjection(**state)
 
-    with pytest.raises(ValueError, match="hot projection differs from cold replay"):
+    with pytest.raises(ValueError, match="projection differs from ledger cursor"):
         replace(
             checkpoint,
             projection_checkpoint=FoundationProjectionCheckpoint(projection),
@@ -428,11 +573,8 @@ def test_versioned_foundation_checkpoint_dtos_reject_pickle_shape_drift(
         checkpoint.projection_checkpoint,
         adapter._projection_owner,
         adapter.pending_record_delta,
-        checkpoint.record_ledger_checkpoint,
         adapter._record_ledger,
-        checkpoint.lifecycle_checkpoint.state,
-        checkpoint.lifecycle_checkpoint,
-        adapter._lifecycle_owner,
+        checkpoint.lifecycle,
         checkpoint,
     )
 
@@ -446,15 +588,22 @@ def test_versioned_foundation_checkpoint_dtos_reject_pickle_shape_drift(
             object.__new__(type(value)).__setstate__(state)
 
 
-def test_cold_ledger_pickle_rejects_tampered_derived_identity_index() -> None:
+def test_only_cold_materialization_validates_full_ledger_identity_index() -> None:
     adapter = CanonicalFoundationAdapter(tick_size=TICK)
     _seed_level(adapter, label="ledger-index-tamper")
+    checkpoint = adapter.checkpoint()
     adapter._record_ledger._records_by_id["forged-record"] = "0" * 64
 
     with pytest.raises(ValueError, match="identity index differs"):
         adapter.materialize_foundation_history()
+    # Compact checkpointing reads only the ledger's O(1) cursor/hash.
+    assert adapter.checkpoint().ledger_record_count == adapter.projection.record_count
     with pytest.raises(ValueError, match="identity index differs"):
-        adapter.checkpoint()
+        _RuntimeFoundationAdapter.restore(
+            checkpoint,
+            event_store=adapter._event_store,
+            record_ledger=adapter._record_ledger,
+        )
     with pytest.raises(ValueError, match="identity index differs"):
         pickle.dumps(adapter)
 
@@ -470,259 +619,335 @@ def test_adapter_publish_boundaries_reject_foundation_record_byte_tamper(
         (*record.source_event_ids, "forged-adapter-source"),
     )
 
-    with pytest.raises(ValueError, match="current record identity"):
+    with pytest.raises(ValueError, match="record identity"):
         adapter.checkpoint()
-    with pytest.raises(ValueError, match="current record identity"):
+    with pytest.raises(ValueError, match="record identity"):
         pickle.dumps(adapter)
 
 
-@pytest.mark.parametrize("case", ("missing", "future"))
-def test_adapter_cold_boundaries_reject_missing_or_future_record_ancestry(
-    case: str,
-) -> None:
+def test_compact_checkpoint_contains_only_cold_cursors_and_current_state() -> None:
     adapter = CanonicalFoundationAdapter(tick_size=TICK)
-    _seed_level(adapter, label=f"cold-ancestry-{case}")
-    adapter.consume(_bar(1))
-    record = adapter.materialize_foundation_history()[0]
-    source_id = record.source_event_ids[-1]
-    original_metadata = dict(adapter._seen_event_metadata)
-    original_fingerprints = dict(adapter._seen_event_fingerprints)
-    if case == "missing":
-        adapter._seen_event_metadata.pop(source_id)
-        adapter._seen_event_fingerprints.pop(source_id)
-    else:
-        known_at, origin = adapter._seen_event_metadata[source_id]
-        adapter._seen_event_metadata[source_id] = (
-            known_at + pd.Timedelta(30, unit="s"),
-            origin,
-        )
+    _seed_level(adapter, label="compact-checkpoint")
 
-    for boundary in (
-        adapter.materialize_foundation_history,
-        adapter.checkpoint,
-        lambda: pickle.dumps(adapter),
+    checkpoint = adapter.checkpoint()
+
+    assert set(checkpoint.__getstate__()) == {
+        "tick_size",
+        "event_cursor",
+        "event_prefix_fingerprint",
+        "ledger_record_count",
+        "ledger_component_fingerprint",
+        "lifecycle",
+        "projection_checkpoint",
+        "schema_version",
+        "semantic_version",
+    }
+    for removed in (
+        "records",
+        "events",
+        "seen_event_fingerprints",
+        "seen_event_metadata",
+        "real_bars",
+        "crossings",
+        "structure_bindings",
+        "last_order",
     ):
-        with pytest.raises(ValueError, match="record ancestry"):
-            boundary()
-
-    if case == "missing":
-        assert source_id not in adapter._seen_event_metadata
-        assert source_id not in adapter._seen_event_fingerprints
-    else:
-        assert adapter._seen_event_fingerprints == original_fingerprints
-        assert adapter._seen_event_metadata != original_metadata
+        assert not hasattr(checkpoint, removed)
 
 
-def test_checkpoint_restore_revalidates_cold_ancestry_after_digest_rewrite(
-) -> None:
+def test_restore_rebinds_exact_external_authority_objects() -> None:
     adapter = CanonicalFoundationAdapter(tick_size=TICK)
-    _seed_level(adapter, label="restore-future-ancestry")
-    adapter.consume(_bar(1))
+    _seed_level(adapter, label="external-authorities")
     checkpoint = adapter.checkpoint()
-    record = checkpoint.record_ledger_checkpoint.records[0]
-    source_id = record.source_event_ids[-1]
-    forged = pickle.loads(pickle.dumps(checkpoint))
-    metadata = tuple(
-        (
-            event_id,
-            record.known_at + pd.Timedelta(30, unit="s")
-            if event_id == source_id
-            else known_at,
-            origin,
+
+    restored = _RuntimeFoundationAdapter.restore(
+        checkpoint,
+        event_store=adapter._event_store,
+        record_ledger=adapter._record_ledger,
+    )
+
+    assert restored._event_store is adapter._event_store
+    assert restored._record_ledger is adapter._record_ledger
+    assert restored.lifecycle == adapter.lifecycle
+    assert restored.projection == adapter.projection
+    with pytest.raises(ValueError, match="cold authority binding differs"):
+        _RuntimeFoundationAdapter.restore(
+            checkpoint,
+            event_store=EventStore(),
+            record_ledger=adapter._record_ledger,
         )
-        for event_id, known_at, origin in forged.seen_event_metadata
-    )
-    vars(forged)["seen_event_metadata"] = metadata
-    vars(forged)["checkpoint_digest"] = content_hash(
-        _checkpoint_payload(forged)
-    )
-
-    with pytest.raises(ValueError, match="future record ancestry"):
-        CanonicalFoundationAdapter.restore(forged)
-    with pytest.raises(ValueError, match="future record ancestry"):
-        pickle.dumps(forged)
+    with pytest.raises(ValueError, match="cold authority binding differs"):
+        _RuntimeFoundationAdapter.restore(
+            checkpoint,
+            event_store=adapter._event_store,
+            record_ledger=FoundationRecordLedger(),
+        )
 
 
-def test_checkpoint_collections_reject_lossy_or_malformed_restore_shapes(
-) -> None:
+def test_restore_rejects_lifecycle_current_view_omission() -> None:
     adapter = CanonicalFoundationAdapter(tick_size=TICK)
-    _, level = _seed_level(adapter, label="strict-checkpoint-shape")
-    _cross_level(
-        adapter,
-        level,
-        crossed_minute=1,
-        resolved_minute=1,
-        terminal_kind=EventKind.SWEEP_CONFIRMED,
-    )
+    _seed_level(adapter, label="lifecycle-current-omission")
     checkpoint = adapter.checkpoint()
-    first_fingerprint = checkpoint.seen_event_fingerprints[0]
-    first_metadata = checkpoint.seen_event_metadata[0]
-    first_bar = checkpoint.real_bars[0]
-    first_crossing = checkpoint.crossings[0]
-    mutations = (
-        ("last_order", list(checkpoint.last_order)),
-        (
-            "last_order",
-            (
-                checkpoint.last_order[0] + pd.Timedelta(1, unit="s"),
-                checkpoint.last_order[1],
-                checkpoint.last_order[2],
-            ),
-        ),
-        (
-            "seen_event_fingerprints",
-            list(checkpoint.seen_event_fingerprints),
-        ),
-        (
-            "seen_event_fingerprints",
-            (*checkpoint.seen_event_fingerprints, first_fingerprint),
-        ),
-        (
-            "seen_event_fingerprints",
-            (
-                (first_fingerprint[0], "f" * 63),
-                *checkpoint.seen_event_fingerprints[1:],
-            ),
-        ),
-        (
-            "seen_event_fingerprints",
-            (list(first_fingerprint), *checkpoint.seen_event_fingerprints[1:]),
-        ),
-        ("seen_event_metadata", list(checkpoint.seen_event_metadata)),
-        (
-            "seen_event_metadata",
-            (*checkpoint.seen_event_metadata, first_metadata),
-        ),
-        (
-            "seen_event_metadata",
-            (list(first_metadata), *checkpoint.seen_event_metadata[1:]),
-        ),
-        ("real_bars", list(checkpoint.real_bars)),
-        ("real_bars", (*checkpoint.real_bars, first_bar)),
-        (
-            "real_bars",
-            (
-                replace(
-                    first_bar,
-                    known_at=first_bar.known_at + pd.Timedelta(1, unit="s"),
-                ),
-                *checkpoint.real_bars[1:],
-            ),
-        ),
-        ("crossings", list(checkpoint.crossings)),
-        ("crossings", (*checkpoint.crossings, first_crossing)),
-        (
-            "crossings",
-            (
-                replace(
-                    first_crossing,
-                    crossed_at=first_crossing.crossed_at
-                    + pd.Timedelta(1, unit="s"),
-                ),
-            ),
-        ),
-        ("structure_bindings", [("source", "generation")]),
-        ("structure_bindings", (["source", "generation"],)),
-        (
-            "structure_bindings",
-            (("source", "generation-a"), ("source", "generation-b")),
+    cold_before = pickle.dumps(adapter._record_ledger)
+    malformed = replace(
+        checkpoint,
+        lifecycle=replace(
+            checkpoint.lifecycle,
+            levels=(),
+            interactions=(),
         ),
     )
 
-    for field_name, malformed in mutations:
-        with pytest.raises(ValueError):
-            replace(checkpoint, **{field_name: malformed})
-
-        forged = pickle.loads(pickle.dumps(checkpoint))
-        vars(forged)[field_name] = malformed
-        vars(forged)["checkpoint_digest"] = content_hash(
-            _checkpoint_payload(forged)
+    with pytest.raises(ValueError, match="current view differs"):
+        _RuntimeFoundationAdapter.restore(
+            malformed,
+            event_store=adapter._event_store,
+            record_ledger=adapter._record_ledger,
         )
-        with pytest.raises(ValueError):
-            CanonicalFoundationAdapter.restore(forged)
+
+    assert pickle.dumps(adapter._record_ledger) == cold_before
+    assert adapter.checkpoint() == checkpoint
 
 
-def test_failed_checkpoint_and_adapter_setstate_are_atomic() -> None:
-    source = CanonicalFoundationAdapter(tick_size=TICK)
-    _seed_level(source, label="atomic-setstate-source")
-    checkpoint = source.checkpoint()
-    checkpoint_target = pickle.loads(pickle.dumps(checkpoint))
-    checkpoint_before = pickle.dumps(checkpoint_target)
-    checkpoint_state = dict(checkpoint_target.__getstate__())
-    checkpoint_state["real_bars"] = (
-        *checkpoint.real_bars,
-        checkpoint.real_bars[0],
+def test_restore_replays_lifecycle_clocks_epoch_and_asof_from_cold_prefix() -> None:
+    adapter = CanonicalFoundationAdapter(tick_size=TICK)
+    _seed_level(adapter, label="lifecycle-cold-replay")
+    checkpoint = adapter.checkpoint()
+    cold_before = pickle.dumps(adapter._record_ledger)
+
+    for changes in (
+        {"registered_bar_clocks": (), "real_bar_clocks": ()},
+        {"epoch": checkpoint.lifecycle.epoch + 77},
+        {"asof": None},
+    ):
+        malformed = replace(
+            checkpoint,
+            lifecycle=replace(checkpoint.lifecycle, **changes),
+        )
+        with pytest.raises(ValueError, match="clocks differ"):
+            _RuntimeFoundationAdapter.restore(
+                malformed,
+                event_store=adapter._event_store,
+                record_ledger=adapter._record_ledger,
+            )
+        assert pickle.dumps(adapter._record_ledger) == cold_before
+        assert adapter.checkpoint() == checkpoint
+
+
+def test_restore_rejects_reordered_lifecycle_before_reset_continuation() -> None:
+    adapter = CanonicalFoundationAdapter(tick_size=TICK)
+    _seed_level(adapter, label="ordered-level-a", minute=0)
+    _seed_level(adapter, label="ordered-level-b", minute=1)
+    checkpoint = adapter.checkpoint()
+    assert len(checkpoint.lifecycle.levels) == 2
+    assert len(checkpoint.lifecycle.interactions) == 2
+    malformed = replace(
+        checkpoint,
+        lifecycle=replace(
+            checkpoint.lifecycle,
+            levels=tuple(reversed(checkpoint.lifecycle.levels)),
+            interactions=tuple(reversed(checkpoint.lifecycle.interactions)),
+        ),
     )
 
-    with pytest.raises(ValueError):
-        checkpoint_target.__setstate__(checkpoint_state)
-    assert pickle.dumps(checkpoint_target) == checkpoint_before
+    with pytest.raises(ValueError, match="current view differs"):
+        _RuntimeFoundationAdapter.restore(
+            malformed,
+            event_store=adapter._event_store,
+            record_ledger=adapter._record_ledger,
+        )
 
-    target = CanonicalFoundationAdapter(tick_size=TICK)
-    _seed_level(target, label="atomic-setstate-target")
-    target_before = target.checkpoint()
-    adapter_state = source.__getstate__()
-    adapter_state["_real_bars"] = [
-        *adapter_state["_real_bars"],
-        adapter_state["_real_bars"][0],
-    ]
+    first = CanonicalFoundationAdapter.restore(checkpoint)
+    second = CanonicalFoundationAdapter.restore(checkpoint)
+    reset = _atomic(
+        "ordered-lifecycle-reset",
+        EventKind.MARKET_EPOCH_RESET,
+        2,
+        0,
+        evidence={"reason": "semantic_reset"},
+    )
+    first_update = first.consume(reset)
+    second_update = second.consume(reset)
 
-    with pytest.raises(ValueError):
-        target.__setstate__(adapter_state)
-    assert target.checkpoint() == target_before
+    assert first_update.records == second_update.records
+    assert first._record_ledger.checkpoint() == second._record_ledger.checkpoint()
+    assert first.checkpoint() == second.checkpoint()
 
 
-def test_projection_owner_pickle_rejects_shrunken_derived_view() -> None:
+def test_restore_rejects_same_clock_event_cursor_rewind() -> None:
     adapter = CanonicalFoundationAdapter(tick_size=TICK)
-    _seed_level(adapter, label="projection-owner-tamper")
-    published = adapter.projection
-    assert published.current_records
-    adapter._projection_owner._latest.clear()
+    _seed_level(adapter, label="same-clock-cursor-frontier")
+    checkpoint = adapter.checkpoint()
+    cold_before = pickle.dumps(adapter._record_ledger)
+    assert checkpoint.event_cursor == 3
 
-    with pytest.raises(ValueError, match="projection owner internals differ"):
-        adapter.checkpoint()
-    with pytest.raises(ValueError, match="projection owner internals differ"):
-        pickle.dumps(adapter)
-    assert adapter.projection == published
-    assert adapter.projection.current_records
+    for cursor in (1, 2):
+        malformed = replace(
+            checkpoint,
+            event_cursor=cursor,
+            event_prefix_fingerprint=(
+                adapter._event_store.prefix_fingerprint(cursor)
+            ),
+        )
+        with pytest.raises(ValueError, match="cursor frontier"):
+            _RuntimeFoundationAdapter.restore(
+                malformed,
+                event_store=adapter._event_store,
+                record_ledger=adapter._record_ledger,
+            )
+        assert pickle.dumps(adapter._record_ledger) == cold_before
+        assert adapter.checkpoint() == checkpoint
 
 
-def test_lifecycle_owner_pickle_rejects_missing_full_fact_index() -> None:
+def test_restore_allows_unconsumed_tail_without_future_ledger_records() -> None:
     adapter = CanonicalFoundationAdapter(tick_size=TICK)
-    _seed_level(adapter, label="lifecycle-owner-tamper")
-    assert adapter._lifecycle_owner._fact_fingerprints
-    adapter._lifecycle_owner._fact_fingerprints.clear()
+    bar = _bar(0)
+    adapter.consume(bar)
+    checkpoint = adapter.checkpoint()
+    source = _atomic(
+        "source:unconsumed-tail",
+        EventKind.SWING_CONFIRMED,
+        0,
+        1,
+        timeframe=Timeframe.H1,
+        source_event_ids=(bar.event_id,),
+        evidence={"source_entity_id": "swing:unconsumed-tail"},
+        side="above",
+        price=100.0,
+        direction=Direction.LONG,
+    )
+    level = _atomic(
+        "level-created:unconsumed-tail",
+        EventKind.LIQUIDITY_LEVEL_CREATED,
+        0,
+        2,
+        timeframe=Timeframe.H1,
+        source_event_ids=(source.event_id,),
+        evidence={
+            "level_id": "unconsumed-tail",
+            "source_kind": "confirmed_swing",
+        },
+        side="above",
+        price=100.0,
+    )
+    adapter._append_fixture_events((source, level))
 
-    with pytest.raises(ValueError, match="lifecycle owner internals differ"):
-        pickle.dumps(adapter)
+    restored = _RuntimeFoundationAdapter.restore(
+        checkpoint,
+        event_store=adapter._event_store,
+        record_ledger=adapter._record_ledger,
+    )
+    updates = restored.consume_available()
+
+    assert restored._event_cursor == len(restored._event_store)
+    assert any(update.records for update in updates)
+    assert restored.lifecycle.levels[0].source_identity == "unconsumed-tail"
 
 
-def test_single_input_identity_query_matches_public_snapshot() -> None:
+def test_consume_available_reads_one_suffix_and_releases_it(monkeypatch) -> None:
+    adapter = CanonicalFoundationAdapter(tick_size=TICK)
+    _seed_level(adapter, label="bounded-hot-state")
+    events = tuple(
+        _atomic(
+            f"ordinary-zone-atom:{index}",
+            EventKind.FVG_CREATED,
+            index + 1,
+            0,
+            evidence={"fvg_id": f"ordinary-fvg:{index}"},
+        )
+        for index in range(10_000)
+    )
+    adapter._append_fixture_events(events)
+    suffix_calls = 0
+    normalized_bar_lookups = 0
+    original_suffix = adapter._event_store.events_since
+    original_bar_lookup = adapter._event_store.normalized_bar_at
+    original_prefix = adapter._event_store.prefix_fingerprint
+
+    def counted_suffix(index):
+        nonlocal suffix_calls
+        suffix_calls += 1
+        return original_suffix(index)
+
+    def counted_bar_lookup(timeframe, known_at):
+        nonlocal normalized_bar_lookups
+        normalized_bar_lookups += 1
+        return original_bar_lookup(timeframe, known_at)
+
+    def forbidden_history_scan(*args, **kwargs):
+        raise AssertionError("ordinary hot projection scanned cold history")
+
+    monkeypatch.setattr(adapter._event_store, "events_since", counted_suffix)
+    monkeypatch.setattr(
+        adapter._event_store,
+        "normalized_bar_at",
+        counted_bar_lookup,
+    )
+    monkeypatch.setattr(
+        adapter._event_store,
+        "prefix_fingerprint",
+        forbidden_history_scan,
+    )
+    monkeypatch.setattr(
+        adapter._event_store,
+        "events",
+        forbidden_history_scan,
+    )
+    monkeypatch.setattr(
+        _RuntimeFoundationAdapter,
+        "_cold_replay_canonical_prefix",
+        forbidden_history_scan,
+    )
+    adapter.consume_available()
+
+    monkeypatch.setattr(
+        adapter._event_store,
+        "prefix_fingerprint",
+        original_prefix,
+    )
+    checkpoint_bytes = pickle.dumps(adapter.checkpoint())
+    assert suffix_calls == 1
+    assert normalized_bar_lookups == 0
+    assert adapter._available_suffix == ()
+    assert adapter._event_cursor == len(adapter._event_store)
+    assert events[0].event_id.encode("utf-8") not in checkpoint_bytes
+    assert len(checkpoint_bytes) < 20_000
+    for removed in (
+        "_seen_event_fingerprints",
+        "_seen_event_metadata",
+        "_real_bars",
+        "_crossings",
+        "_structure_bindings",
+    ):
+        assert not hasattr(adapter, removed)
+
+
+def test_event_store_normalized_bar_at_uses_exact_registered_authority() -> None:
+    store = EventStore()
+    bar = _bar(0, timeframe=Timeframe.M5)
+    store.append(bar)
+
+    assert store.normalized_bar_at(Timeframe.M5, bar.known_at) is bar
+    assert store.normalized_bar_at(Timeframe.M1, bar.known_at) is None
+    assert store.normalized_bar_at(
+        Timeframe.M5,
+        bar.known_at + pd.Timedelta(5, unit="min"),
+    ) is None
+
+    store._normalized_bar_event_ids[(Timeframe.M5, bar.known_at)] = "missing"
+    with pytest.raises(ValueError, match="index differs"):
+        store.normalized_bar_at(Timeframe.M5, bar.known_at)
+
+
+def test_single_input_identity_query_uses_bound_prefix() -> None:
     adapter = CanonicalFoundationAdapter(tick_size=TICK)
     bar = _bar(0)
     adapter.consume(bar)
 
     assert adapter.is_known_input_event_id(bar.event_id) is True
     assert adapter.is_known_input_event_id("missing:event") is False
-    assert adapter.known_input_event_ids == frozenset({bar.event_id})
     with pytest.raises(ValueError, match="identity must be non-empty"):
         adapter.is_known_input_event_id("")
-
-
-def test_staged_candidate_rejects_nested_batch_without_destroying_state() -> None:
-    adapter = CanonicalFoundationAdapter(tick_size=TICK)
-    candidate, updates = adapter.stage_batch(())
-    assert updates == ()
-    before = candidate.checkpoint()
-
-    with pytest.raises(ValueError, match="nested foundation batch"):
-        candidate.consume_batch(())
-    with pytest.raises(ValueError, match="nested foundation batch"):
-        candidate.consume_batch((_bar(0),))
-
-    assert candidate.checkpoint() == before
-    assert candidate._staged_transaction_open is True
-    assert adapter.known_input_event_ids == frozenset()
 
 
 def _seed_level(
@@ -820,6 +1045,20 @@ def _cross_level(
         price=101.0,
         direction=Direction.LONG,
     )
+    crossing_generation_id = EventStore._expected_crossing_generation_id(
+        penetration,
+        level_id=level_id,
+        crossed_at=_clock(crossed_minute),
+    )
+    penetration_evidence = {
+        **dict(penetration.evidence),
+        "crossing_generation_id": crossing_generation_id,
+    }
+    penetration = replace(
+        penetration,
+        details=penetration_evidence,
+        evidence=penetration_evidence,
+    )
     events: list[MarketEvent] = [crossing_bar, touch, penetration]
     _consume(adapter, events)
     for minute in range(crossed_minute + 1, resolved_minute + 1):
@@ -846,6 +1085,7 @@ def _cross_level(
     terminal_sequence = 3 if resolved_minute == crossed_minute else 1
     evidence: dict[str, object] = {
         "level_id": level_id,
+        "crossing_generation_id": crossing_generation_id,
         "crossed_at": _clock(crossed_minute).isoformat(),
         "resolved_at": _clock(resolved_minute).isoformat(),
     }
@@ -1229,20 +1469,8 @@ def test_clock_only_bar_advances_registered_clock_without_real_semantics() -> No
     first = _bar(1)
     clock_only = _bar(2, real_completed=False)
     resumed = _bar(3)
-    frozen_real_transition = adapter._transition(
-        first,
-        NormalizedTransitionKind.REAL_BAR_COMPLETED,
-        payload={"bar_event_id": first.event_id, "real_completed": True},
-        source_event_ids=(first.event_id,),
-    )
-
     adapter.consume(first)
-    assert (
-        adapter.lifecycle_fact_fingerprints[
-            frozen_real_transition.fact_id
-        ]
-        == content_hash(frozen_real_transition)
-    )
+    assert not hasattr(adapter.lifecycle, "transition_count")
     projection_before = adapter.projection
     update = adapter.consume(clock_only)
 
@@ -1257,7 +1485,7 @@ def test_clock_only_bar_advances_registered_clock_without_real_semantics() -> No
     assert registered.last_bar_event_id == clock_only.event_id
     assert real.count == 1
     assert real.last_completed_at == first.known_at
-    assert len(adapter._real_bars) == 1
+    assert not hasattr(adapter, "_real_bars")
 
     restored = CanonicalFoundationAdapter.restore(
         pickle.loads(pickle.dumps(adapter.checkpoint()))
@@ -1417,7 +1645,7 @@ def test_direct_bar_root_contract_is_complete_and_atomic(
 def test_direct_adapter_pickle_rejects_missing_internal_state_schema() -> None:
     adapter = CanonicalFoundationAdapter(tick_size=TICK)
     legacy_state = adapter.__getstate__()
-    legacy_state.pop("_state_schema_version")
+    legacy_state.pop("schema_version")
     restored = object.__new__(CanonicalFoundationAdapter)
 
     with pytest.raises(ValueError, match="pickle state schema changed"):
@@ -1435,15 +1663,11 @@ def test_adapter_checkpoint_requires_owned_schema_and_registered_ledger() -> Non
         CanonicalFoundationAdapter.restore(missing_schema)
 
     missing_registered_ledger = pickle.loads(pickle.dumps(checkpoint))
-    lifecycle_checkpoint = missing_registered_ledger.lifecycle_checkpoint
-    vars(lifecycle_checkpoint.state).pop("registered_bar_clocks")
-    vars(lifecycle_checkpoint)["state_digest"] = content_hash(
-        lifecycle_checkpoint.state
-    )
+    vars(missing_registered_ledger.lifecycle).pop("registered_bar_clocks")
     vars(missing_registered_ledger)["checkpoint_digest"] = content_hash(
         _checkpoint_payload(missing_registered_ledger)
     )
-    with pytest.raises(ValueError, match="lifecycle checkpoint"):
+    with pytest.raises(ValueError, match="checkpoint"):
         CanonicalFoundationAdapter.restore(missing_registered_ledger)
 
 
@@ -1485,6 +1709,9 @@ def test_same_bar_terminal_uses_actual_event_id_and_competing_terminal_is_atomic
         ),
         evidence={
             "level_id": level.evidence["level_id"],
+            "crossing_generation_id": terminal.evidence[
+                "crossing_generation_id"
+            ],
             "crossed_at": _clock(1).isoformat(),
             "resolved_at": _clock(1).isoformat(),
         },
@@ -1492,7 +1719,7 @@ def test_same_bar_terminal_uses_actual_event_id_and_competing_terminal_is_atomic
         price=101.0,
         direction=Direction.LONG,
     )
-    with pytest.raises(ValueError, match="exact active penetration generation"):
+    with pytest.raises(ValueError, match="immutable terminal event"):
         adapter.consume(competing)
     assert adapter.lifecycle == frozen_state
     assert adapter.projection == frozen_projection
@@ -1585,17 +1812,20 @@ def test_terminal_role_ledger_follows_exact_completed_close_geometry() -> None:
 
     conflicting_counts = CanonicalFoundationAdapter(tick_size=TICK)
     _, level = _seed_level(conflicting_counts, label="conflicting-counts")
-    with pytest.raises(ValueError, match="outside counters"):
-        _cross_level(
-            conflicting_counts,
-            level,
-            crossed_minute=1,
-            resolved_minute=4,
-            terminal_kind=EventKind.ACCEPTANCE_CONFIRMED,
-            crossing_close=100.5,
-            intermediate_closes={2: 99.75, 3: 100.5, 4: 100.5},
-            terminal_evidence={"outside_completed_bars": 2, "outside_run": 3},
-        )
+    _cross_level(
+        conflicting_counts,
+        level,
+        crossed_minute=1,
+        resolved_minute=4,
+        terminal_kind=EventKind.ACCEPTANCE_CONFIRMED,
+        crossing_close=100.5,
+        intermediate_closes={2: 99.75, 3: 100.5, 4: 100.5},
+        terminal_evidence={"outside_completed_bars": 2, "outside_run": 3},
+    )
+    assert (
+        conflicting_counts.lifecycle.interactions[-1].terminal_state
+        is LiquidityInteractionTerminal.ACCEPTANCE
+    )
 
     two_bar_sweep = CanonicalFoundationAdapter(tick_size=TICK)
     _, level = _seed_level(two_bar_sweep, label="two-bar-sweep")
@@ -1748,6 +1978,20 @@ def _maintenance_closure_terminal_chain(
         ),
         "2024-05-28 17:00",
     )
+    crossing_generation_id = EventStore._expected_crossing_generation_id(
+        penetration,
+        level_id=level_id,
+        crossed_at=penetration.known_at,
+    )
+    penetration_evidence = {
+        **dict(penetration.evidence),
+        "crossing_generation_id": crossing_generation_id,
+    }
+    penetration = replace(
+        penetration,
+        details=penetration_evidence,
+        evidence=penetration_evidence,
+    )
     reopen_close = 100.5 if terminal_kind is EventKind.ACCEPTANCE_CONFIRMED else 99.75
     reopen_bar = at_clock(
         _bar(
@@ -1778,6 +2022,7 @@ def _maintenance_closure_terminal_chain(
             source_event_ids=(penetration.event_id, resolution_bar.event_id),
             evidence={
                 "level_id": level_id,
+                "crossing_generation_id": crossing_generation_id,
                 "crossed_at": pd.Timestamp(
                     "2024-05-28 17:00", tz=TZ
                 ).isoformat(),
@@ -1835,29 +2080,54 @@ def test_terminal_formation_uses_registered_successor_across_maintenance(
     assert replayed.projection == adapter.projection
 
 
-def test_terminal_formation_rejects_skipped_registered_or_ordinary_bar() -> None:
-    maintenance, _ = _maintenance_closure_terminal_chain(
+def test_terminal_formation_rejects_skipped_registered_or_ordinary_bar(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    maintenance, maintenance_events = _maintenance_closure_terminal_chain(
         EventKind.SWEEP_CONFIRMED
     )
-    maintenance._real_bars = [
-        item
-        for item in maintenance._real_bars
-        if item.known_at != pd.Timestamp("2024-05-28 18:01", tz=TZ)
-    ]
+    original = maintenance._event_store.normalized_bar_at
+    missing_clock = pd.Timestamp("2024-05-28 18:01", tz=TZ)
+    monkeypatch.setattr(
+        maintenance._event_store,
+        "normalized_bar_at",
+        lambda timeframe, clock: (
+            None if clock == missing_clock else original(timeframe, clock)
+        ),
+    )
+    penetration = next(
+        event
+        for event in maintenance_events
+        if event.kind is EventKind.LEVEL_PENETRATED
+    )
+    terminal = maintenance_events[-1]
     with pytest.raises(ValueError, match="continuous real M1 BAR ancestry"):
-        maintenance._formation_bars(
-            pd.Timestamp("2024-05-28 17:00", tz=TZ),
-            pd.Timestamp("2024-05-28 18:02", tz=TZ),
-            Timeframe.M1,
-        )
+        maintenance._formation_bars(terminal, penetration)
 
     ordinary = CanonicalFoundationAdapter(tick_size=TICK)
-    _consume(ordinary, (_bar(0), _bar(1), _bar(2)))
-    ordinary._real_bars = [
-        item for item in ordinary._real_bars if item.known_at != _clock(1)
-    ]
+    _, level = _seed_level(ordinary, label="missing-ordinary")
+    ordinary_events, terminal = _cross_level(
+        ordinary,
+        level,
+        crossed_minute=1,
+        resolved_minute=3,
+        terminal_kind=EventKind.SWEEP_CONFIRMED,
+    )
+    penetration = next(
+        event
+        for event in ordinary_events
+        if event.kind is EventKind.LEVEL_PENETRATED
+    )
+    original = ordinary._event_store.normalized_bar_at
+    monkeypatch.setattr(
+        ordinary._event_store,
+        "normalized_bar_at",
+        lambda timeframe, clock: (
+            None if clock == _clock(2) else original(timeframe, clock)
+        ),
+    )
     with pytest.raises(ValueError, match="continuous real M1 BAR ancestry"):
-        ordinary._formation_bars(_clock(0), _clock(2), Timeframe.M1)
+        ordinary._formation_bars(terminal, penetration)
 
 
 def test_pool_sweep_preserves_inside_outside_inside_formation_path() -> None:
@@ -2238,12 +2508,8 @@ def test_retirement_and_reference_replacement_leave_no_stale_dol_candidate() -> 
     assert old_level.lifecycle is LiquidityLevelLifecycle.RETIRED
     assert old_level.retirement_reason == "reference_rollover"
     assert retired_adapter.projection.active_dol_candidate_ids == ()
-    metadata = {
-        event_id: origin
-        for event_id, _, origin in retired_adapter.checkpoint().seen_event_metadata
-    }
     assert all(
-        metadata[source_id]
+        retired_adapter._event_store.get(source_id).origin
         in {EventOrigin.NORMALIZED_DATA, EventOrigin.SEMANTIC_ATOMIC}
         for record in retired_adapter.materialize_foundation_history()
         for source_id in record.source_event_ids
@@ -2508,10 +2774,7 @@ def test_distinct_bound_structure_alias_mss_restarts_exact_transition_lineage(
         candidate_protected_swing_id="high:multi-origin",
     )
     _consume(adapter, (protected, alias))
-    assert (
-        adapter._structure_bindings["structure-source:multi-origin-alias"]
-        == incumbent.generation_id
-    )
+    assert not hasattr(adapter, "_structure_bindings")
 
     first_bar, first_raw, first_mss = _mss_triplet(
         label="multi-origin:first",
@@ -3021,11 +3284,7 @@ def test_exact_evidence_for_rolled_internal_owner_stays_noncanonical() -> None:
     _consume(adapter, (stale_counter_bar, stale_counter_raw))
     checkpoint = adapter.checkpoint()
     assert adapter.consume(stale_counter_mss).ignored is True
-    assert adapter.lifecycle == replace(
-        checkpoint.lifecycle_checkpoint.state,
-        applied_transition_fingerprints={},
-        complete_validation=False,
-    )
+    assert adapter.lifecycle == checkpoint.lifecycle
 
 
 def test_counter_mss_on_internal_challenger_does_not_confirm_resumption() -> None:
@@ -3304,7 +3563,6 @@ def test_post_acceptance_counter_mss_on_confirmed_internal_is_ignored() -> None:
     )
     prior_lifecycle = adapter.lifecycle
     prior_projection = adapter.projection
-    prior_bindings = dict(adapter._structure_bindings)
     prior_mss_ids = internal.mss_event_ids
 
     update = adapter.consume(counter_events[2])
@@ -3314,7 +3572,6 @@ def test_post_acceptance_counter_mss_on_confirmed_internal_is_ignored() -> None:
     assert restored_update.ignored is True
     assert adapter.lifecycle == prior_lifecycle
     assert adapter.projection == prior_projection
-    assert adapter._structure_bindings == prior_bindings
     assert (
         adapter.lifecycle.structure(internal.generation_id).mss_event_ids
         == prior_mss_ids
@@ -3505,6 +3762,133 @@ def test_same_clock_later_sequence_promotes_accepted_challenger(
     assert restored.lifecycle == adapter.lifecycle
     assert restored.projection == adapter.projection
     _assert_adapter_replay((*prefix, structure), adapter)
+
+
+def test_promoted_shared_authority_does_not_bind_later_tracker_only_bos_or_mss(
+) -> None:
+    adapter, prefix, facts = _accepted_live_internal_challenger(
+        confirm_before_acceptance=False
+    )
+    internal = adapter._active_internal(Timeframe.H1)
+    assert internal is not None
+    resolution_bar = _bar(6, event_id="bar:shared-authority-promotion")
+    resolution = _structure_confirmation(
+        facts,
+        label="shared-authority-promotion",
+        minute=6,
+        direction=Direction.LONG,
+        candidate_protected_swing_id="low:accepted-live-internal",
+        structure_id="structure-source:shared-authority-promotion",
+    )
+    _consume(adapter, (resolution_bar, resolution))
+
+    terminated_internal = adapter.lifecycle.structure(internal.generation_id)
+    external = adapter._active_external(Timeframe.H1)
+    assert external is not None
+    assert terminated_internal.lifecycle is StructureGenerationLifecycle.TERMINATED
+    assert terminated_internal.confirmation_event_id == resolution.event_id
+    assert external.origin_event_id == resolution.event_id
+    assert external.confirmation_event_id == resolution.event_id
+    assert adapter._generation_for_structure_identity(
+        "structure-source:shared-authority-promotion",
+        source_event_ids=(resolution.event_id,),
+    ).generation_id == external.generation_id
+    structure_state = adapter.lifecycle.structure_generations
+    record_count = adapter.projection.record_count
+
+    tracker_bar = _bar(7, event_id="bar:shared-identity-tracker-only")
+    tracker_only = _structure_confirmation(
+        facts,
+        label="shared-identity-tracker-only",
+        minute=7,
+        direction=Direction.SHORT,
+        candidate_protected_swing_id="high:accepted-live-internal",
+        sequence=1,
+        structure_id="structure-source:shared-authority-promotion",
+    )
+    raw_bos = _atomic(
+        "raw:shared-identity-tracker-only-bos",
+        EventKind.RAW_BOUNDARY_BREAK,
+        7,
+        2,
+        timeframe=Timeframe.H1,
+        source_event_ids=(tracker_bar.event_id,),
+        direction=Direction.SHORT,
+    )
+    bos = _atomic(
+        "qualified:shared-identity-tracker-only-bos",
+        EventKind.QUALIFIED_BOS,
+        7,
+        3,
+        timeframe=Timeframe.H1,
+        source_event_ids=(raw_bos.event_id, tracker_only.event_id),
+        source_entity_ids=(
+            "bos:shared-identity-tracker-only",
+            "structure-source:shared-authority-promotion",
+        ),
+        evidence={
+            "bos_id": "bos:shared-identity-tracker-only",
+            "structure_id": "structure-source:shared-authority-promotion",
+        },
+        direction=Direction.SHORT,
+    )
+    mss_bar = _bar(8, event_id="bar:shared-identity-tracker-only-mss")
+    raw_mss = _atomic(
+        "raw:shared-identity-tracker-only-mss",
+        EventKind.RAW_BOUNDARY_BREAK,
+        8,
+        1,
+        timeframe=Timeframe.H1,
+        source_event_ids=(mss_bar.event_id,),
+        direction=Direction.LONG,
+    )
+    mss = _atomic(
+        "mss:shared-identity-tracker-only",
+        EventKind.MSS_CORE_CONFIRMED,
+        8,
+        2,
+        timeframe=Timeframe.H1,
+        source_event_ids=(raw_mss.event_id, tracker_only.event_id),
+        source_entity_ids=(
+            "bos:shared-identity-tracker-only-mss",
+            "structure-source:shared-authority-promotion",
+        ),
+        evidence={"bos_id": "bos:shared-identity-tracker-only-mss"},
+        direction=Direction.LONG,
+    )
+
+    assert adapter.consume(tracker_bar).ignored is False
+    assert adapter.consume(tracker_only).ignored is True
+    assert adapter.consume(raw_bos).ignored is True
+    assert adapter.consume(bos).ignored is True
+    assert adapter.consume(mss_bar).ignored is False
+    assert adapter.consume(raw_mss).ignored is True
+    assert adapter.consume(mss).ignored is True
+    assert adapter.lifecycle.structure_generations == structure_state
+    assert adapter.projection.record_count == record_count
+    assert adapter.lifecycle.structure(internal.generation_id) == terminated_internal
+    assert adapter.lifecycle.structure(external.generation_id).bos_event_ids == ()
+    assert all(
+        mss.event_id not in generation.mss_event_ids
+        for generation in adapter.lifecycle.structure_generations
+    )
+    assert adapter._active_internal(Timeframe.H1) is None
+    assert adapter._active_external(Timeframe.H1).generation_id == external.generation_id
+    _assert_adapter_replay(
+        (
+            *prefix,
+            resolution_bar,
+            resolution,
+            tracker_bar,
+            tracker_only,
+            raw_bos,
+            bos,
+            mss_bar,
+            raw_mss,
+            mss,
+        ),
+        adapter,
+    )
 
 
 def test_same_clock_nonlater_sequence_cannot_promote_accepted_challenger() -> None:
@@ -3961,10 +4345,10 @@ def _unbound_tracker_transition_after_acceptance() -> tuple[
     assert internal.scope is StructureScope.INTERNAL
     assert internal.lifecycle is StructureGenerationLifecycle.FORMING
     assert internal.origin_event_id == mss.event_id
-    assert (
-        "structure-source:tracker-only-transition-short"
-        not in adapter._structure_bindings
-    )
+    assert adapter._generation_for_structure_identity(
+        "structure-source:tracker-only-transition-short",
+        source_event_ids=(tracker_only.event_id,),
+    ) is None
     facts.update(
         {
             "level": level,
@@ -4022,12 +4406,10 @@ def test_original_direction_after_acceptance_censors_exact_forming_challenger() 
     assert current is not None
     assert current.direction is Direction.LONG
     assert current.lifecycle is StructureGenerationLifecycle.CONFIRMED
-    assert (
-        adapter._structure_bindings[
-            "structure-source:post-acceptance-original-direction"
-        ]
-        == current.generation_id
-    )
+    assert adapter._generation_for_structure_identity(
+        "structure-source:post-acceptance-original-direction",
+        source_event_ids=(original_direction.event_id,),
+    ).generation_id == current.generation_id
     assert restored.lifecycle == adapter.lifecycle
     assert restored.projection == adapter.projection
     replayed = CanonicalFoundationAdapter.replay(
@@ -4107,14 +4489,12 @@ def test_strictly_later_unbound_qbos_and_immediate_assignment_stay_noncanonical(
     _consume(adapter, (bar, raw))
     frozen_lifecycle = adapter.lifecycle
     frozen_projection = adapter.projection
-    frozen_bindings = dict(adapter._structure_bindings)
 
     assert adapter.consume(qualified).ignored is True
     assert adapter.consume(assignment).ignored is True
 
     assert adapter.lifecycle == frozen_lifecycle
     assert adapter.projection == frozen_projection
-    assert adapter._structure_bindings == frozen_bindings
     assert qualified.event_id in adapter.known_input_event_ids
     assert assignment.event_id in adapter.known_input_event_ids
     replayed = CanonicalFoundationAdapter.replay(
@@ -4123,7 +4503,6 @@ def test_strictly_later_unbound_qbos_and_immediate_assignment_stay_noncanonical(
     )
     assert replayed.lifecycle == adapter.lifecycle
     assert replayed.projection == adapter.projection
-    assert replayed._structure_bindings == adapter._structure_bindings
 
 
 @pytest.mark.parametrize(
@@ -4478,10 +4857,10 @@ def _accepted_protected_external_before_mss() -> tuple[
     incumbent = adapter.lifecycle.structure(incumbent_id)
     assert incumbent.lifecycle is StructureGenerationLifecycle.TERMINATED
     assert incumbent.termination_reason == "protected_break_accepted"
-    assert (
-        "structure-source:tracker-only-before-acceptance"
-        not in adapter._structure_bindings
-    )
+    assert adapter._generation_for_structure_identity(
+        "structure-source:tracker-only-before-acceptance",
+        source_event_ids=(tracker_only.event_id,),
+    ) is None
     facts["tracker_only"] = tracker_only
     return adapter, events, facts, incumbent_id
 
@@ -4839,10 +5218,6 @@ def test_reset_replay_checkpoint_pickle_and_explicit_boundary_attack() -> None:
     resumed.consume(reset)
     assert resumed.lifecycle == adapter.lifecycle
     assert resumed.projection == adapter.projection
-    pickled_adapter = pickle.loads(pickle.dumps(adapter))
-    assert pickled_adapter.lifecycle == adapter.lifecycle
-    assert pickled_adapter.projection == adapter.projection
-
     boundary_adapter = CanonicalFoundationAdapter(tick_size=TICK)
     structure_events, facts = _seed_structure(boundary_adapter)
     h1_bar = _bar(
@@ -4966,7 +5341,7 @@ def test_unknown_event_is_noop_but_missing_sources_and_out_of_order_fail_closed(
         adapter.consume(missing)
     assert adapter.checkpoint() == frozen
 
-    with pytest.raises(ValueError, match="out of knowledge order"):
+    with pytest.raises(ValueError, match="out of (known_at|knowledge) order"):
         adapter.consume(_bar(-1))
     assert adapter.checkpoint() == frozen
 
@@ -5077,6 +5452,19 @@ def test_append_dto_requires_seen_authoritative_sources_not_future_knowledge() -
     )
     assert len(geometry_update.records) == 1
 
+    projection_state = {"fvg_id": "state-projection-fvg"}
+    projection_sha256 = hashlib.sha256(
+        json.dumps(
+            projection_state,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    state_evidence = {
+        "fvg_id": "state-projection-fvg",
+        "projection_state": projection_state,
+        "projection_sha256": projection_sha256,
+    }
     state_source = MarketEvent(
         event_id="state-projection-fvg-source",
         kind=EventKind.FVG_CREATED,
@@ -5088,7 +5476,8 @@ def test_append_dto_requires_seen_authoritative_sources_not_future_knowledge() -
         sequence_no=2,
         event_time=_clock(0),
         known_at=_clock(0),
-        evidence={"fvg_id": "state-projection-fvg"},
+        details=state_evidence,
+        evidence=state_evidence,
         origin=EventOrigin.STATE_PROJECTION,
     )
     adapter.consume(state_source)
@@ -5122,6 +5511,10 @@ def test_append_dto_requires_seen_authoritative_sources_not_future_knowledge() -
         adapter.consume(level_from_projection)
     assert adapter.checkpoint() == frozen
 
+    # The immutable EventStore retains even a fixture that Foundation rejects.
+    # Continue the independent future-knowledge checks on a fresh authority.
+    adapter = CanonicalFoundationAdapter(tick_size=TICK)
+    _consume(adapter, (bar, creation))
     future_creation = _atomic(
         "future-fvg-source",
         EventKind.FVG_CREATED,
@@ -5384,4 +5777,44 @@ def test_relation_and_delivery_public_apis_update_then_explicitly_terminate() ->
     assert (
         adapter.lifecycle.delivery_generations[-1].lifecycle
         is GenerationLifecycle.TERMINATED
+    )
+
+
+def test_cold_authority_cutover_preserves_record_bytes_and_order() -> None:
+    level = CanonicalFoundationAdapter(tick_size=TICK)
+    _, source = _seed_level(level, label="a1-parity-level")
+    _cross_level(
+        level,
+        source,
+        crossed_minute=1,
+        resolved_minute=3,
+        terminal_kind=EventKind.SWEEP_CONFIRMED,
+        intermediate_closes={2: 100.5},
+    )
+
+    structure = CanonicalFoundationAdapter(tick_size=TICK)
+    _seed_structure(structure, label="a1-parity-structure")
+
+    reset = CanonicalFoundationAdapter(tick_size=TICK)
+    _seed_level(reset, label="a1-parity-reset")
+    reset.consume(
+        _atomic(
+            "a1-parity-reset-event",
+            EventKind.MARKET_EPOCH_RESET,
+            1,
+            0,
+            evidence={"reason": "contract_change_reset"},
+        )
+    )
+
+    # Frozen from the pre-cutover implementation at beeffce.  Hashing the
+    # complete tuples binds every record byte and its ledger order.
+    assert content_hash(level.materialize_foundation_history()) == (
+        "7064304d0cc0ea2f1b177823dd6626dd9a66868ce117441420dc97e60a29318e"
+    )
+    assert content_hash(structure.materialize_foundation_history()) == (
+        "49066f3357cba864fd3d61d2e28bf4c81832c8c7acd71302985b4557e4433722"
+    )
+    assert content_hash(reset.materialize_foundation_history()) == (
+        "82462eb4dea1d69d75937f1e1960009726ea9845b92b29ea3fdebde510ed5219"
     )

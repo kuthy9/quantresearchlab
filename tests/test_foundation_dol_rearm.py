@@ -11,7 +11,6 @@ from smc_trader.dol_ranking import (
     _feature_values,
     load_dol_ranking_protocol,
 )
-from smc_trader.foundation_adapter import CanonicalFoundationAdapter
 from smc_trader.market_state import (
     DOLCandidateView,
     MarketSnapshot,
@@ -52,6 +51,7 @@ from smc_trader.semantic_lifecycle import (
 
 from .helpers import market_observation, replace_market_observation
 from .test_foundation_adapter import (
+    CanonicalFoundationAdapter,
     TICK,
     _bar,
     _clock,

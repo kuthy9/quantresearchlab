@@ -1581,7 +1581,8 @@ def test_boundary_attack_is_strict_immutable_and_directional() -> None:
     checkpoint = SemanticLifecycleReducer.checkpoint(state)
     restored = SemanticLifecycleReducer.restore(checkpoint)
     assert restored == state
-    assert SemanticLifecycleReducer.reduce(restored, attack) == state
+    with pytest.raises(ValueError, match="duplicate an attack BAR"):
+        SemanticLifecycleReducer.reduce(restored, attack)
     duplicate_semantic_bar = replace(attack, fact_id="duplicate-attack-input")
     with pytest.raises(ValueError, match="duplicate an attack BAR"):
         SemanticLifecycleReducer.reduce(state, duplicate_semantic_bar)
@@ -1612,7 +1613,7 @@ def test_boundary_attack_is_strict_immutable_and_directional() -> None:
         SemanticLifecycleReducer.reduce(state, close_break)
 
 
-def test_checkpoint_resume_and_duplicate_replay_are_deterministic() -> None:
+def test_checkpoint_resume_is_deterministic_without_hot_replay_history() -> None:
     create = _fact(
         NormalizedTransitionKind.LIQUIDITY_LEVEL_CREATED,
         0,
@@ -1664,7 +1665,6 @@ def test_checkpoint_resume_and_duplicate_replay_are_deterministic() -> None:
         (touch, penetration), initial_state=restored
     )
     assert resumed == full
-    assert SemanticLifecycleReducer.reduce(resumed, penetration) == resumed
     with pytest.raises(ValueError, match="checkpoint"):
         replace(checkpoint, state_digest="0" * 64)
     with pytest.raises(ValueError, match="checkpoint"):

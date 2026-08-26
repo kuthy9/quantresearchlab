@@ -3845,6 +3845,29 @@ class EventStore:
     def get(self, event_id: str) -> MarketEvent | None:
         return self._by_id.get(event_id)
 
+    def normalized_bar_at(
+        self,
+        timeframe: Timeframe,
+        known_at: pd.Timestamp,
+    ) -> MarketEvent | None:
+        """Return the exact normalized BAR registered at one native clock."""
+
+        native_timeframe = Timeframe(timeframe)
+        clock = aware_timestamp(known_at, name="normalized_bar_at.known_at")
+        event_id = self._normalized_bar_event_ids.get((native_timeframe, clock))
+        if event_id is None:
+            return None
+        event = self._by_id.get(event_id)
+        if (
+            event is None
+            or event.kind is not EventKind.BAR_COMPLETED
+            or event.origin is not EventOrigin.NORMALIZED_DATA
+            or event.timeframe is not native_timeframe
+            or event.known_at != clock
+        ):
+            raise ValueError("normalized BAR index differs from EventStore history")
+        return event
+
     def event_digest(self, event_id: str) -> str:
         """Return the exact immutable digest for one committed event."""
 

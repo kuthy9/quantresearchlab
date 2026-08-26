@@ -125,6 +125,7 @@ from .semantic_foundation import (
     FoundationObjectType,
     FoundationProjectionReducer,
     FoundationRecord,
+    FoundationRecordLedger,
 )
 from .semantic_lifecycle import (
     GenerationLifecycle,
@@ -2296,7 +2297,11 @@ class CausalObserver:
         # Compatibility observers keep their historical snapshot/fingerprint
         # contract unless either path opts in.
         self._foundation_adapter = (
-            CanonicalFoundationAdapter(tick_size=self.config.tick_size)
+            CanonicalFoundationAdapter(
+                event_store=self.audit_store,
+                record_ledger=FoundationRecordLedger(),
+                tick_size=self.config.tick_size,
+            )
             if (
                 self.config.eye_authority_mode
                 or self.config.canonical_foundation_enabled
@@ -8124,7 +8129,7 @@ class CausalObserver:
     ):
         if self._foundation_adapter is None:
             raise RuntimeError("foundation staging requires Eye authority mode")
-        candidate: CanonicalFoundationAdapter | None = None
+        candidate = self._foundation_adapter.begin_suffix()
         authoritative = tuple(
             sorted(
                 (
@@ -8229,6 +8234,7 @@ class CausalObserver:
                     *plans_by_clock,
                     *events_by_clock,
                     *retirements_by_clock,
+                    *(event.known_at for event in candidate._available_suffix),
                 }
             )
         )
@@ -8246,11 +8252,7 @@ class CausalObserver:
             clock_events = tuple(
                 sorted(events_by_clock.get(clock, ()), key=event_order_key)
             )
-            candidate, _ = (
-                self._foundation_adapter
-                if candidate is None
-                else candidate
-            ).stage_batch(clock_events)
+            candidate._project_available_through(clock)
             self._foundation_reference_retirement(
                 adapter=candidate,
                 known_at=clock,
@@ -8352,12 +8354,6 @@ class CausalObserver:
                 contextual_fvg_transitions.extend(
                     expired.fvg_structural_transitions
                 )
-
-        if candidate is None:
-            # A real observation normally contributes at least its normalized
-            # M1 BAR.  Keep the helper total for compatibility fixtures whose
-            # complete plan is empty without mutating the committed adapter.
-            candidate, _ = self._foundation_adapter.stage_batch(())
 
         reset_in_update = any(
             event.kind is EventKind.MARKET_EPOCH_RESET

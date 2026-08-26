@@ -1,14 +1,12 @@
-"""Causal adapter from authoritative v1.2 facts to foundation-v2 reducers.
+"""Causal projection from one v1.2 EventStore into one Foundation ledger.
 
-The adapter does not detect market semantics and does not own an event store.
-It validates the already-published v1.2 facts, builds the explicit normalized
-inputs required by :mod:`semantic_lifecycle`, and projects only the resulting
-immutable DTO revisions through :mod:`semantic_foundation`.
+The adapter detects no market semantics.  It consumes only the unread suffix
+of its bound atomic authority, builds normalized lifecycle inputs, and appends
+immutable Foundation revisions to its bound cold ledger.
 """
 
 from __future__ import annotations
 
-from collections.abc import MutableMapping
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 from fractions import Fraction
@@ -18,6 +16,7 @@ from typing import Any, Iterable, Mapping, Sequence
 import pandas as pd
 
 from .foundation_registry import FOUNDATION_VERSION
+from .event_store import EventStore
 from .market_clock import (
     next_registered_native_completion,
     validate_registered_native_bar_root,
@@ -36,6 +35,7 @@ from .model import (
     ticks_to_price,
 )
 from .semantic_foundation import (
+    FoundationObjectType,
     FoundationProjection,
     FoundationProjectionCheckpoint,
     FoundationProjectionOwner,
@@ -43,20 +43,18 @@ from .semantic_foundation import (
     FoundationRecord,
     FoundationRecordDelta,
     FoundationRecordLedger,
-    FoundationRecordLedgerCheckpoint,
 )
 from .semantic_lifecycle import (
     GenerationLifecycle,
-    LifecycleCheckpoint,
     LiquidityInteractionLifecycle,
     LiquidityInteractionTerminal,
     LiquidityLevelLifecycle,
     NormalizedLifecycleTransition,
     NormalizedTransitionKind,
     REARMABLE_LIQUIDITY_SOURCE_KINDS,
-    SemanticLifecycleOwner,
     SemanticLifecycleReducer,
     SemanticLifecycleState,
+    StructureGeneration,
     StructureGenerationLifecycle,
     StructureScope,
     StructureTransitionLifecycle,
@@ -132,8 +130,8 @@ _TIMEFRAME_INTERVAL = {
     Timeframe.H1: pd.Timedelta(1, unit="h"),
     Timeframe.H4: pd.Timedelta(4, unit="h"),
 }
-FOUNDATION_ADAPTER_CHECKPOINT_SCHEMA_VERSION = 3
-FOUNDATION_ADAPTER_STATE_SCHEMA_VERSION = 3
+FOUNDATION_ADAPTER_CHECKPOINT_SCHEMA_VERSION = 4
+FOUNDATION_ADAPTER_STATE_SCHEMA_VERSION = 4
 _LOWER_HEX_DIGITS = frozenset("0123456789abcdef")
 
 
@@ -231,37 +229,6 @@ class _RealBarFact:
 
 
 @dataclass(frozen=True)
-class _CrossingBinding:
-    source_level_id: str
-    foundation_level_id: str
-    generation_id: str
-    crossed_at: pd.Timestamp
-    penetration_event_id: str
-    penetration_bar_event_id: str
-
-    def __post_init__(self) -> None:
-        object.__setattr__(
-            self,
-            "crossed_at",
-            aware_timestamp(
-                self.crossed_at,
-                name="foundation_adapter.crossing.crossed_at",
-            ),
-        )
-        if any(
-            not isinstance(value, str) or not value
-            for value in (
-                self.source_level_id,
-                self.foundation_level_id,
-                self.generation_id,
-                self.penetration_event_id,
-                self.penetration_bar_event_id,
-            )
-        ):
-            raise ValueError("foundation crossing binding is invalid")
-
-
-@dataclass(frozen=True)
 class FoundationAdapterUpdate:
     input_fact_id: str
     records: tuple[FoundationRecord, ...]
@@ -286,301 +253,33 @@ def _is_sha256_hex(value: object) -> bool:
     )
 
 
-def _validate_checkpoint_event_indexes(
-    *,
-    last_order: object,
-    seen_event_fingerprints: object,
-    seen_event_metadata: object,
-) -> dict[str, tuple[pd.Timestamp, EventOrigin]]:
-    """Validate the exact, lossless input identity checkpoint shape."""
-
-    if type(seen_event_fingerprints) is not tuple:
-        raise ValueError(
-            "foundation adapter checkpoint event fingerprints must be a tuple"
-        )
-    fingerprints_by_id: dict[str, str] = {}
-    for item in seen_event_fingerprints:
-        if type(item) is not tuple or len(item) != 2:
-            raise ValueError(
-                "foundation adapter checkpoint event fingerprint shape is invalid"
-            )
-        event_id, fingerprint = item
-        if (
-            type(event_id) is not str
-            or not event_id.strip()
-            or not _is_sha256_hex(fingerprint)
-            or event_id in fingerprints_by_id
-        ):
-            raise ValueError(
-                "foundation adapter checkpoint event fingerprints are invalid"
-            )
-        fingerprints_by_id[event_id] = fingerprint
-
-    if type(seen_event_metadata) is not tuple:
-        raise ValueError(
-            "foundation adapter checkpoint event metadata must be a tuple"
-        )
-    metadata_by_id: dict[str, tuple[pd.Timestamp, EventOrigin]] = {}
-    for item in seen_event_metadata:
-        if type(item) is not tuple or len(item) != 3:
-            raise ValueError(
-                "foundation adapter checkpoint event metadata shape is invalid"
-            )
-        event_id, known_at, origin = item
-        if (
-            type(event_id) is not str
-            or not event_id.strip()
-            or type(known_at) is not pd.Timestamp
-            or known_at.tz is None
-            or type(origin) is not EventOrigin
-            or event_id in metadata_by_id
-        ):
-            raise ValueError(
-                "foundation adapter checkpoint event metadata is invalid"
-            )
-        metadata_by_id[event_id] = (known_at, origin)
-
-    if metadata_by_id.keys() != fingerprints_by_id.keys():
-        raise ValueError(
-            "foundation adapter checkpoint event indexes disagree"
-        )
-    if last_order is None:
-        if metadata_by_id:
-            raise ValueError(
-                "foundation adapter checkpoint lacks its final input order"
-            )
-        return metadata_by_id
-    if type(last_order) is not tuple or len(last_order) != 3:
-        raise ValueError("foundation adapter checkpoint last order is invalid")
-    known_at, sequence_no, event_id = last_order
-    if (
-        type(known_at) is not pd.Timestamp
-        or known_at.tz is None
-        or type(sequence_no) is not int
-        or sequence_no < 0
-        or type(event_id) is not str
-        or not event_id.strip()
-        or event_id not in metadata_by_id
-        or metadata_by_id[event_id][0] != known_at
-        or any(clock > known_at for clock, _ in metadata_by_id.values())
-    ):
-        raise ValueError("foundation adapter checkpoint last order is invalid")
-    return metadata_by_id
-
-
-def _validate_checkpoint_record_ancestry(
-    records: object,
-    *,
-    metadata_by_id: Mapping[str, tuple[pd.Timestamp, EventOrigin]],
-) -> None:
-    """Bind every cold Foundation revision to causally prior v1.2 facts."""
-
-    if type(records) is not tuple:
-        raise ValueError("foundation adapter cold records must be a tuple")
-    for record in records:
-        if not isinstance(record, FoundationRecord):
-            raise ValueError("foundation adapter cold record is invalid")
-        for source_id in record.source_event_ids:
-            metadata = metadata_by_id.get(source_id)
-            if (
-                metadata is None
-                or metadata[1] not in _DTO_SOURCE_ORIGINS
-                or metadata[0] > record.known_at
-            ):
-                raise ValueError(
-                    "foundation adapter checkpoint contains unknown, "
-                    "non-authoritative, or future record ancestry"
-                )
-
-
-def _validate_checkpoint_real_bars(
-    real_bars: object,
-    *,
-    metadata_by_id: Mapping[str, tuple[pd.Timestamp, EventOrigin]],
-    last_order: tuple[pd.Timestamp, int, str] | None,
-) -> dict[str, _RealBarFact]:
-    if type(real_bars) is not tuple:
-        raise ValueError("foundation adapter checkpoint real BARs must be a tuple")
-    by_id: dict[str, _RealBarFact] = {}
-    native_clocks: set[tuple[Timeframe, pd.Timestamp]] = set()
-    for item in real_bars:
-        if (
-            type(item) is not _RealBarFact
-            or type(item.event_id) is not str
-            or not item.event_id.strip()
-            or type(item.timeframe) is not Timeframe
-            or type(item.known_at) is not pd.Timestamp
-            or item.known_at.tz is None
-            or any(
-                type(value) is not int
-                for value in (
-                    item.high_ticks,
-                    item.low_ticks,
-                    item.close_ticks,
-                )
-            )
-            or item.low_ticks > item.close_ticks
-            or item.close_ticks > item.high_ticks
-        ):
-            raise ValueError("foundation adapter checkpoint real BAR is invalid")
-        key = (item.timeframe, item.known_at)
-        metadata = metadata_by_id.get(item.event_id)
-        if (
-            item.event_id in by_id
-            or key in native_clocks
-            or metadata != (item.known_at, EventOrigin.NORMALIZED_DATA)
-            or last_order is None
-            or item.known_at > last_order[0]
-        ):
-            raise ValueError(
-                "foundation adapter checkpoint real BAR identity/clock is invalid"
-            )
-        by_id[item.event_id] = item
-        native_clocks.add(key)
-    return by_id
-
-
-def _validate_checkpoint_crossings(
-    crossings: object,
-    *,
-    metadata_by_id: Mapping[str, tuple[pd.Timestamp, EventOrigin]],
-    real_bars_by_id: Mapping[str, _RealBarFact],
-    last_order: tuple[pd.Timestamp, int, str] | None,
-) -> None:
-    if type(crossings) is not tuple:
-        raise ValueError("foundation adapter checkpoint crossings must be a tuple")
-    keys: set[tuple[str, pd.Timestamp]] = set()
-    for item in crossings:
-        if (
-            type(item) is not _CrossingBinding
-            or type(item.source_level_id) is not str
-            or not item.source_level_id.strip()
-            or type(item.foundation_level_id) is not str
-            or not item.foundation_level_id.strip()
-            or type(item.generation_id) is not str
-            or not item.generation_id.strip()
-            or type(item.crossed_at) is not pd.Timestamp
-            or item.crossed_at.tz is None
-            or type(item.penetration_event_id) is not str
-            or not item.penetration_event_id.strip()
-            or type(item.penetration_bar_event_id) is not str
-            or not item.penetration_bar_event_id.strip()
-        ):
-            raise ValueError("foundation adapter checkpoint crossing is invalid")
-        key = (item.source_level_id, item.crossed_at)
-        penetration_metadata = metadata_by_id.get(item.penetration_event_id)
-        bar_metadata = metadata_by_id.get(item.penetration_bar_event_id)
-        bar = real_bars_by_id.get(item.penetration_bar_event_id)
-        if (
-            key in keys
-            or last_order is None
-            or item.crossed_at > last_order[0]
-            or penetration_metadata
-            != (item.crossed_at, EventOrigin.SEMANTIC_ATOMIC)
-            or bar_metadata
-            != (item.crossed_at, EventOrigin.NORMALIZED_DATA)
-            or bar is None
-            or bar.known_at != item.crossed_at
-        ):
-            raise ValueError(
-                "foundation adapter checkpoint crossing identity/clock is invalid"
-            )
-        keys.add(key)
-
-
-def _validate_checkpoint_structure_bindings(
-    structure_bindings: object,
-) -> None:
-    if type(structure_bindings) is not tuple:
-        raise ValueError(
-            "foundation adapter checkpoint structure bindings must be a tuple"
-        )
-    source_ids: set[str] = set()
-    for item in structure_bindings:
-        if type(item) is not tuple or len(item) != 2:
-            raise ValueError(
-                "foundation adapter checkpoint structure binding shape is invalid"
-            )
-        source_id, generation_id = item
-        if (
-            type(source_id) is not str
-            or not source_id.strip()
-            or type(generation_id) is not str
-            or not generation_id.strip()
-            or source_id in source_ids
-        ):
-            raise ValueError(
-                "foundation adapter checkpoint structure bindings are invalid"
-            )
-        source_ids.add(source_id)
-
-
-def _validate_checkpoint_collections(
-    *,
-    last_order: object,
-    seen_event_fingerprints: object,
-    seen_event_metadata: object,
-    real_bars: object,
-    crossings: object,
-    structure_bindings: object,
-    records: object,
-) -> None:
-    metadata_by_id = _validate_checkpoint_event_indexes(
-        last_order=last_order,
-        seen_event_fingerprints=seen_event_fingerprints,
-        seen_event_metadata=seen_event_metadata,
-    )
-    _validate_checkpoint_record_ancestry(
-        records,
-        metadata_by_id=metadata_by_id,
-    )
-    real_bars_by_id = _validate_checkpoint_real_bars(
-        real_bars,
-        metadata_by_id=metadata_by_id,
-        last_order=last_order,
-    )
-    _validate_checkpoint_crossings(
-        crossings,
-        metadata_by_id=metadata_by_id,
-        real_bars_by_id=real_bars_by_id,
-        last_order=last_order,
-    )
-    _validate_checkpoint_structure_bindings(structure_bindings)
-
-
 def _checkpoint_payload(checkpoint: "FoundationAdapterCheckpoint") -> Mapping[str, Any]:
     return {
         "schema_version": checkpoint.schema_version,
         "tick_size": checkpoint.tick_size,
-        "lifecycle_digest": checkpoint.lifecycle_checkpoint.state_digest,
+        "event_cursor": checkpoint.event_cursor,
+        "event_prefix_fingerprint": checkpoint.event_prefix_fingerprint,
+        "ledger_record_count": checkpoint.ledger_record_count,
+        "ledger_component_fingerprint": checkpoint.ledger_component_fingerprint,
+        "lifecycle": checkpoint.lifecycle,
         "projection_checkpoint_id": (
             checkpoint.projection_checkpoint.checkpoint_id
         ),
-        "record_ledger_checkpoint_id": (
-            checkpoint.record_ledger_checkpoint.checkpoint_id
-        ),
-        "last_order": checkpoint.last_order,
-        "seen_event_fingerprints": checkpoint.seen_event_fingerprints,
-        "seen_event_metadata": checkpoint.seen_event_metadata,
-        "real_bars": checkpoint.real_bars,
-        "crossings": checkpoint.crossings,
-        "structure_bindings": checkpoint.structure_bindings,
         "semantic_version": checkpoint.semantic_version,
     }
 
 
 @dataclass(frozen=True)
 class FoundationAdapterCheckpoint:
+    """Compact cursor/current-state checkpoint over external cold authorities."""
+
     tick_size: float
-    lifecycle_checkpoint: LifecycleCheckpoint
+    event_cursor: int
+    event_prefix_fingerprint: str
+    ledger_record_count: int
+    ledger_component_fingerprint: str
+    lifecycle: SemanticLifecycleState
     projection_checkpoint: FoundationProjectionCheckpoint
-    record_ledger_checkpoint: FoundationRecordLedgerCheckpoint
-    last_order: tuple[pd.Timestamp, int, str] | None
-    seen_event_fingerprints: tuple[tuple[str, str], ...]
-    seen_event_metadata: tuple[tuple[str, pd.Timestamp, EventOrigin], ...]
-    real_bars: tuple[_RealBarFact, ...]
-    crossings: tuple[_CrossingBinding, ...]
-    structure_bindings: tuple[tuple[str, str], ...]
     schema_version: int = FOUNDATION_ADAPTER_CHECKPOINT_SCHEMA_VERSION
     semantic_version: str = FOUNDATION_VERSION
     checkpoint_digest: str = field(init=False)
@@ -593,57 +292,33 @@ class FoundationAdapterCheckpoint:
             or isinstance(self.tick_size, bool)
             or not math.isfinite(float(self.tick_size))
             or self.tick_size <= 0.0
-            or not isinstance(self.lifecycle_checkpoint, LifecycleCheckpoint)
+            or type(self.event_cursor) is not int
+            or self.event_cursor < 0
+            or type(self.ledger_record_count) is not int
+            or self.ledger_record_count < 0
+            or not _is_sha256_hex(self.event_prefix_fingerprint)
+            or not _is_sha256_hex(self.ledger_component_fingerprint)
+            or not isinstance(self.lifecycle, SemanticLifecycleState)
+            or "schema_version" not in vars(self.lifecycle)
+            or "registered_bar_clocks" not in vars(self.lifecycle)
+            or "applied_transition_fingerprints" in vars(self.lifecycle)
+            or "transition_count" in vars(self.lifecycle)
             or not isinstance(
                 self.projection_checkpoint, FoundationProjectionCheckpoint
-            )
-            or not isinstance(
-                self.record_ledger_checkpoint,
-                FoundationRecordLedgerCheckpoint,
             )
             or self.semantic_version != FOUNDATION_VERSION
         ):
             raise ValueError("foundation adapter checkpoint is invalid")
-        lifecycle = SemanticLifecycleReducer.restore(
-            self.lifecycle_checkpoint
-        )
         projection = FoundationProjectionReducer.restore(
             self.projection_checkpoint
         )
-        validated_ledger_checkpoint = FoundationRecordLedgerCheckpoint(
-            records=self.record_ledger_checkpoint.records,
-            record_count=self.record_ledger_checkpoint.record_count,
-            component_fingerprint=(
-                self.record_ledger_checkpoint.component_fingerprint
-            ),
-            schema_version=self.record_ledger_checkpoint.schema_version,
-        )
         if (
-            validated_ledger_checkpoint.checkpoint_id
-            != self.record_ledger_checkpoint.checkpoint_id
+            projection.record_count != self.ledger_record_count
+            or projection.component_fingerprint
+            != self.ledger_component_fingerprint
         ):
             raise ValueError(
-                "foundation adapter cold-ledger checkpoint integrity mismatch"
-            )
-        _validate_checkpoint_collections(
-            last_order=self.last_order,
-            seen_event_fingerprints=self.seen_event_fingerprints,
-            seen_event_metadata=self.seen_event_metadata,
-            real_bars=self.real_bars,
-            crossings=self.crossings,
-            structure_bindings=self.structure_bindings,
-            records=self.record_ledger_checkpoint.records,
-        )
-        replayed_projection = FoundationProjectionReducer.replay(
-            self.record_ledger_checkpoint.records
-        )
-        if replayed_projection != projection:
-            raise ValueError(
-                "foundation adapter checkpoint hot projection differs from cold replay"
-            )
-        if lifecycle != self.lifecycle_checkpoint.state:
-            raise ValueError(
-                "foundation adapter lifecycle checkpoint restore differs"
+                "foundation adapter current projection differs from ledger cursor"
             )
 
     def __post_init__(self) -> None:
@@ -663,15 +338,12 @@ class FoundationAdapterCheckpoint:
             raise ValueError("foundation adapter checkpoint integrity mismatch")
         return {
             "tick_size": self.tick_size,
-            "lifecycle_checkpoint": self.lifecycle_checkpoint,
+            "event_cursor": self.event_cursor,
+            "event_prefix_fingerprint": self.event_prefix_fingerprint,
+            "ledger_record_count": self.ledger_record_count,
+            "ledger_component_fingerprint": self.ledger_component_fingerprint,
+            "lifecycle": self.lifecycle,
             "projection_checkpoint": self.projection_checkpoint,
-            "record_ledger_checkpoint": self.record_ledger_checkpoint,
-            "last_order": self.last_order,
-            "seen_event_fingerprints": self.seen_event_fingerprints,
-            "seen_event_metadata": self.seen_event_metadata,
-            "real_bars": self.real_bars,
-            "crossings": self.crossings,
-            "structure_bindings": self.structure_bindings,
             "schema_version": self.schema_version,
             "semantic_version": self.semantic_version,
         }
@@ -679,15 +351,12 @@ class FoundationAdapterCheckpoint:
     def __setstate__(self, state: Mapping[str, Any]) -> None:
         expected = {
             "tick_size",
-            "lifecycle_checkpoint",
+            "event_cursor",
+            "event_prefix_fingerprint",
+            "ledger_record_count",
+            "ledger_component_fingerprint",
+            "lifecycle",
             "projection_checkpoint",
-            "record_ledger_checkpoint",
-            "last_order",
-            "seen_event_fingerprints",
-            "seen_event_metadata",
-            "real_bars",
-            "crossings",
-            "structure_bindings",
             "schema_version",
             "semantic_version",
         }
@@ -699,148 +368,6 @@ class FoundationAdapterCheckpoint:
         candidate.__post_init__()
         self.__dict__.clear()
         self.__dict__.update(candidate.__dict__)
-
-
-class _AppendOnlyOverlay(MutableMapping[str, Any]):
-    """Small transactional write overlay over one committed dictionary."""
-
-    def __init__(self, base: dict[str, Any]) -> None:
-        if not isinstance(base, dict):
-            raise TypeError("foundation overlay base must be committed")
-        self._base = base
-        self._writes: dict[str, Any] = {}
-
-    def __getitem__(self, key: str) -> Any:
-        if key in self._writes:
-            return self._writes[key]
-        return self._base[key]
-
-    def __setitem__(self, key: str, value: Any) -> None:
-        current = self.get(key)
-        if current is not None and current != value:
-            raise ValueError("foundation append-only index conflicts")
-        self._writes[key] = value
-
-    def __delitem__(self, key: str) -> None:
-        raise TypeError("foundation append-only index cannot delete")
-
-    def __iter__(self):
-        yield from self._base
-        yield from (
-            key for key in self._writes if key not in self._base
-        )
-
-    def __len__(self) -> int:
-        return len(self._base) + sum(
-            key not in self._base for key in self._writes
-        )
-
-    def commit(self) -> dict[str, Any]:
-        self._base.update(self._writes)
-        return self._base
-
-
-class _ListWriteSet:
-    """Bounded append/clear suffix over one committed list."""
-
-    def __init__(self, base: list[Any]) -> None:
-        if not isinstance(base, list):
-            raise TypeError("foundation list write-set base must be committed")
-        self._base = base
-        self._suffix: list[Any] = []
-        self._cleared = False
-
-    def __iter__(self):
-        if not self._cleared:
-            yield from self._base
-        yield from self._suffix
-
-    def __reversed__(self):
-        yield from reversed(self._suffix)
-        if not self._cleared:
-            yield from reversed(self._base)
-
-    def __len__(self) -> int:
-        return (0 if self._cleared else len(self._base)) + len(self._suffix)
-
-    def __getitem__(self, key):
-        if isinstance(key, slice):
-            return tuple(self)[key]
-        length = len(self)
-        index = key if key >= 0 else length + key
-        base_length = 0 if self._cleared else len(self._base)
-        if index < 0 or index >= length:
-            raise IndexError("foundation list write-set index out of range")
-        return self._base[index] if index < base_length else self._suffix[index - base_length]
-
-    def append(self, value: Any) -> None:
-        self._suffix.append(value)
-
-    def clear(self) -> None:
-        self._cleared = True
-        self._suffix.clear()
-
-    def commit(self) -> list[Any]:
-        if self._cleared:
-            self._base.clear()
-        self._base.extend(self._suffix)
-        return self._base
-
-
-class _MappingWriteSet(MutableMapping[Any, Any]):
-    """Bounded mutable mapping overlay with explicit reset semantics."""
-
-    def __init__(self, base: dict[Any, Any]) -> None:
-        if not isinstance(base, dict):
-            raise TypeError("foundation mapping write-set base must be committed")
-        self._base = base
-        self._writes: dict[Any, Any] = {}
-        self._deleted: set[Any] = set()
-        self._cleared = False
-
-    def __getitem__(self, key: Any) -> Any:
-        if key in self._writes:
-            return self._writes[key]
-        if self._cleared or key in self._deleted:
-            raise KeyError(key)
-        return self._base[key]
-
-    def __setitem__(self, key: Any, value: Any) -> None:
-        self._deleted.discard(key)
-        self._writes[key] = value
-
-    def __delitem__(self, key: Any) -> None:
-        if key not in self:
-            raise KeyError(key)
-        self._writes.pop(key, None)
-        if not self._cleared:
-            self._deleted.add(key)
-
-    def __iter__(self):
-        if not self._cleared:
-            yield from (
-                key
-                for key in self._base
-                if key not in self._deleted and key not in self._writes
-            )
-        yield from self._writes
-
-    def __len__(self) -> int:
-        return sum(1 for _ in self)
-
-    def clear(self) -> None:
-        self._cleared = True
-        self._deleted.clear()
-        self._writes.clear()
-
-    def commit(self) -> dict[Any, Any]:
-        if self._cleared:
-            self._base.clear()
-        else:
-            for key in self._deleted:
-                self._base.pop(key, None)
-        self._base.update(self._writes)
-        return self._base
 
 
 class CanonicalFoundationAdapter:
@@ -855,34 +382,54 @@ class CanonicalFoundationAdapter:
         "delivery_generations",
         "boundary_attacks",
     )
+    _LIFECYCLE_RECORD_TYPES = frozenset(
+        {
+            FoundationObjectType.LIQUIDITY_LEVEL,
+            FoundationObjectType.LIQUIDITY_INTERACTION_GENERATION,
+            FoundationObjectType.STRUCTURE_GENERATION,
+            FoundationObjectType.STRUCTURE_TRANSITION,
+            FoundationObjectType.RELATION_GENERATION,
+            FoundationObjectType.DELIVERY_PHASE_GENERATION,
+            FoundationObjectType.BOUNDARY_ATTACK,
+        }
+    )
 
-    def __init__(self, *, tick_size: float) -> None:
+    def __init__(
+        self,
+        *,
+        event_store: EventStore,
+        record_ledger: FoundationRecordLedger,
+        tick_size: float,
+    ) -> None:
         if (
             isinstance(tick_size, bool)
             or not math.isfinite(float(tick_size))
             or float(tick_size) <= 0.0
         ):
             raise ValueError("foundation adapter tick_size must be positive")
+        if type(event_store) is not EventStore:
+            raise TypeError("foundation adapter requires the authoritative EventStore")
+        if event_store.semantic_version != SMC_SEMANTIC_VERSION:
+            raise ValueError("foundation EventStore semantic version differs")
+        if type(record_ledger) is not FoundationRecordLedger:
+            raise TypeError("foundation adapter requires one external record ledger")
+        if record_ledger.record_count != 0:
+            raise ValueError("new foundation adapter requires an empty record ledger")
         self.tick_size = float(tick_size)
-        self._lifecycle_owner = SemanticLifecycleOwner()
-        self._lifecycle_transaction = None
-        self.lifecycle = self._lifecycle_owner.freeze()
-        self._lifecycle_generation_seen = self._lifecycle_owner.generation
+        self._event_store = event_store
+        self._record_ledger = record_ledger
+        self._event_cursor = 0
+        self._last_order: tuple[pd.Timestamp, int, str] | None = None
+        self.lifecycle = SemanticLifecycleReducer.initial_state()
         initial_projection = FoundationProjectionReducer.initial_projection()
         self._projection_owner = FoundationProjectionOwner(initial_projection)
         self._owner_generation_seen = self._projection_owner.generation
         self._projection_transaction = None
-        self._record_ledger = FoundationRecordLedger()
-        self._last_order: tuple[pd.Timestamp, int, str] | None = None
-        self._seen_event_fingerprints: dict[str, str] = {}
-        self._seen_event_metadata: dict[
-            str, tuple[pd.Timestamp, EventOrigin]
-        ] = {}
-        self._real_bars: list[_RealBarFact] = []
-        self._crossings: dict[tuple[str, pd.Timestamp], _CrossingBinding] = {}
-        self._structure_bindings: dict[str, str] = {}
         self._state_schema_version = FOUNDATION_ADAPTER_STATE_SCHEMA_VERSION
         self._staged_transaction_open = False
+        self._available_suffix = ()
+        self._available_offset = 0
+        self._projecting_event_id = None
         self._rebuild_derived_indexes()
 
     @property
@@ -914,34 +461,30 @@ class CanonicalFoundationAdapter:
         return transaction.delta()
 
     def materialize_foundation_history(self) -> tuple[FoundationRecord, ...]:
-        """Explicit cold-ledger reader; never called by the per-clock path."""
+        """Explicitly materialize the one external cold ledger."""
 
         self._require_current_owner_generation()
-        records = self._record_ledger.checkpoint().records
-        self._checkpoint_collection_payload(records=records)
-        return records
-
-    @property
-    def lifecycle_fact_fingerprints(self) -> Mapping[str, str]:
-        """Cold audit view of exact normalized fact identities."""
-
-        self._require_current_owner_generation()
-        transaction = self._lifecycle_transaction
-        if transaction is None:
-            return self._lifecycle_owner.fact_fingerprints()
-        checkpoint = transaction.checkpoint()
-        return checkpoint.state.applied_transition_fingerprints
+        self._require_bound_authorities()
+        return self._record_ledger.checkpoint().records
 
     def _require_current_owner_generation(self) -> None:
-        if (
-            self._owner_generation_seen != self._projection_owner.generation
-            or self._lifecycle_generation_seen
-            != self._lifecycle_owner.generation
-        ):
+        if self._owner_generation_seen != self._projection_owner.generation:
             raise ValueError("foundation adapter is stale after another commit")
 
+    def _require_bound_authorities(self) -> None:
+        if (
+            type(self._event_store) is not EventStore
+            or type(self._record_ledger) is not FoundationRecordLedger
+            or self._event_store.semantic_version != SMC_SEMANTIC_VERSION
+            or self._event_cursor > len(self._event_store)
+            or self._record_ledger.record_count != self.projection.record_count
+            or self._record_ledger.component_fingerprint
+            != self.projection.component_fingerprint
+        ):
+            raise ValueError("foundation adapter cold authority binding differs")
+
     def _rebuild_derived_indexes(self) -> None:
-        """Rebuild non-authoritative lookup/delta indexes from frozen state."""
+        """Rebuild current-object indexes without materializing history."""
 
         self._lifecycle_indexes = {
             name: {
@@ -950,239 +493,59 @@ class CanonicalFoundationAdapter:
             }
             for name in self._LIFECYCLE_COLLECTION_ORDER
         }
-        self._real_bar_by_id = {
-            item.event_id: item for item in self._real_bars
-        }
-        if len(self._real_bar_by_id) != len(self._real_bars):
-            raise ValueError("foundation real BAR identities are duplicated")
 
-    def _checkpoint_collection_payload(
-        self,
-        *,
-        records: tuple[FoundationRecord, ...],
-    ) -> dict[str, object]:
-        """Return one validated, lossless serialization of adapter indexes."""
-
-        committed = (
-            self._projection_transaction is None
-            and self._lifecycle_transaction is None
-        )
-        if committed and (
-            type(self._seen_event_fingerprints) is not dict
-            or type(self._seen_event_metadata) is not dict
-            or type(self._real_bars) is not list
-            or type(self._crossings) is not dict
-            or type(self._structure_bindings) is not dict
-        ):
-            raise ValueError("foundation adapter committed container shape is invalid")
-
-        fingerprint_items = tuple(self._seen_event_fingerprints.items())
-        metadata_items: list[tuple[object, object, object]] = []
-        for event_id, metadata in self._seen_event_metadata.items():
-            if type(metadata) is not tuple or len(metadata) != 2:
-                raise ValueError(
-                    "foundation adapter event metadata value shape is invalid"
-                )
-            metadata_items.append((event_id, metadata[0], metadata[1]))
-
-        crossing_items: list[_CrossingBinding] = []
-        for key, item in self._crossings.items():
-            if (
-                type(key) is not tuple
-                or len(key) != 2
-                or type(item) is not _CrossingBinding
-                or key != (item.source_level_id, item.crossed_at)
-            ):
-                raise ValueError(
-                    "foundation adapter crossing index key is invalid"
-                )
-            crossing_items.append(item)
-
-        structure_bindings = tuple(self._structure_bindings.items())
-        payload: dict[str, object] = {
-            "last_order": self._last_order,
-            "seen_event_fingerprints": fingerprint_items,
-            "seen_event_metadata": tuple(metadata_items),
-            "real_bars": tuple(self._real_bars),
-            "crossings": tuple(crossing_items),
-            "structure_bindings": structure_bindings,
-        }
-        _validate_checkpoint_collections(
-            **payload,
-            records=records,
-        )
-        return {
-            "last_order": payload["last_order"],
-            "seen_event_fingerprints": tuple(
-                sorted(fingerprint_items, key=lambda item: item[0])
-            ),
-            "seen_event_metadata": tuple(
-                sorted(metadata_items, key=lambda item: item[0])
-            ),
-            "real_bars": payload["real_bars"],
-            "crossings": tuple(
-                sorted(
-                    crossing_items,
-                    key=lambda item: (
-                        item.crossed_at,
-                        item.source_level_id,
-                        item.penetration_event_id,
-                    ),
-                )
-            ),
-            "structure_bindings": tuple(
-                sorted(structure_bindings, key=lambda item: item[0])
-            ),
-        }
-
-    def __getstate__(self) -> dict[str, Any]:
-        self._require_current_owner_generation()
-        if (
-            self._projection_transaction is not None
-            or self._lifecycle_transaction is not None
-            or self._staged_transaction_open
-        ):
+    def __getstate__(self) -> Mapping[str, Any]:
+        if self._staged_transaction_open or self._projection_transaction is not None:
             raise ValueError("foundation staged adapter cannot be pickled")
-        if self.lifecycle != self._lifecycle_owner.freeze():
-            raise ValueError(
-                "foundation adapter pickle lifecycle owner differs"
-            )
-        self.checkpoint()
-        state = dict(self.__dict__)
-        state["_state_schema_version"] = FOUNDATION_ADAPTER_STATE_SCHEMA_VERSION
-        state.pop("_lifecycle_indexes", None)
-        state.pop("_real_bar_by_id", None)
-        state.pop("_staged_transaction_open", None)
-        state.pop("_projection_transaction", None)
-        state.pop("_lifecycle_transaction", None)
-        return state
+        return {
+            "schema_version": FOUNDATION_ADAPTER_STATE_SCHEMA_VERSION,
+            "checkpoint": self.checkpoint(),
+            "event_store": self._event_store,
+            "record_ledger": self._record_ledger,
+        }
 
     def __setstate__(self, state: Mapping[str, Any]) -> None:
         expected = {
-            "tick_size",
-            "lifecycle",
-            "_lifecycle_owner",
-            "_lifecycle_generation_seen",
-            "_projection_owner",
-            "_owner_generation_seen",
-            "_record_ledger",
-            "_last_order",
-            "_seen_event_fingerprints",
-            "_seen_event_metadata",
-            "_real_bars",
-            "_crossings",
-            "_structure_bindings",
-            "_state_schema_version",
+            "schema_version",
+            "checkpoint",
+            "event_store",
+            "record_ledger",
         }
         if (
             not isinstance(state, Mapping)
             or set(state) != expected
-            or state.get("_state_schema_version")
+            or state.get("schema_version")
             != FOUNDATION_ADAPTER_STATE_SCHEMA_VERSION
         ):
             raise ValueError("foundation adapter pickle state schema changed")
-        if (
-            type(state["_seen_event_fingerprints"]) is not dict
-            or type(state["_seen_event_metadata"]) is not dict
-            or type(state["_real_bars"]) is not list
-            or type(state["_crossings"]) is not dict
-            or type(state["_structure_bindings"]) is not dict
-        ):
-            raise ValueError("foundation adapter pickle container shape is invalid")
-        candidate = object.__new__(type(self))
-        candidate.tick_size = state["tick_size"]
-        candidate.lifecycle = state["lifecycle"]
-        candidate._lifecycle_generation_seen = state[
-            "_lifecycle_generation_seen"
-        ]
-        candidate._owner_generation_seen = state["_owner_generation_seen"]
-        candidate._last_order = state["_last_order"]
-        candidate._seen_event_fingerprints = dict(
-            state["_seen_event_fingerprints"]
+        restored = type(self).restore(
+            state["checkpoint"],
+            event_store=state["event_store"],
+            record_ledger=state["record_ledger"],
         )
-        candidate._seen_event_metadata = dict(state["_seen_event_metadata"])
-        candidate._real_bars = list(state["_real_bars"])
-        candidate._crossings = dict(state["_crossings"])
-        candidate._structure_bindings = dict(state["_structure_bindings"])
-        candidate._state_schema_version = state["_state_schema_version"]
-        candidate._projection_transaction = None
-        candidate._lifecycle_transaction = None
-        candidate._staged_transaction_open = False
-        if (
-            type(state["_projection_owner"]) is not FoundationProjectionOwner
-            or type(state["_record_ledger"]) is not FoundationRecordLedger
-            or type(state["_lifecycle_owner"]) is not SemanticLifecycleOwner
-        ):
-            raise ValueError("foundation adapter pickle authority is invalid")
-        projection_owner_state = state["_projection_owner"].__getstate__()
-        projection_owner = object.__new__(FoundationProjectionOwner)
-        projection_owner.__setstate__(projection_owner_state)
-        lifecycle_owner_state = state["_lifecycle_owner"].__getstate__()
-        lifecycle_owner = object.__new__(SemanticLifecycleOwner)
-        lifecycle_owner.__setstate__(lifecycle_owner_state)
-        record_ledger_state = state["_record_ledger"].__getstate__()
-        record_ledger = object.__new__(FoundationRecordLedger)
-        record_ledger.__setstate__(record_ledger_state)
-        candidate._projection_owner = projection_owner
-        candidate._lifecycle_owner = lifecycle_owner
-        candidate._record_ledger = record_ledger
-        replayed_projection = FoundationProjectionReducer.replay(
-            candidate._record_ledger.materialize()
-        )
-        if replayed_projection != candidate._projection_owner.freeze():
-            raise ValueError("foundation adapter pickle cold replay differs")
-        if candidate.lifecycle != candidate._lifecycle_owner.freeze():
-            raise ValueError("foundation adapter pickle lifecycle owner differs")
-        if (
-            candidate._lifecycle_generation_seen
-            != candidate._lifecycle_owner.generation
-        ):
-            raise ValueError("foundation adapter pickle lifecycle generation differs")
-        if candidate._owner_generation_seen != candidate._projection_owner.generation:
-            raise ValueError("foundation adapter pickle owner generation differs")
-        candidate._rebuild_derived_indexes()
-        candidate.checkpoint()
         self.__dict__.clear()
-        self.__dict__.update(candidate.__dict__)
+        self.__dict__.update(restored.__dict__)
 
     def _transaction_candidate(self) -> "CanonicalFoundationAdapter":
-        """Stage bounded suffix/overlay writes over one committed owner.
+        """Stage one bounded suffix over shared cold authorities."""
 
-        Lifecycle/projection DTOs remain frozen.  BAR, crossing, binding, and
-        identity containers receive only this clock's writes; the base is
-        updated after all authority preflights succeed.
-        """
-
+        self._require_current_owner_generation()
         candidate = object.__new__(type(self))
         candidate.tick_size = self.tick_size
+        candidate._event_store = self._event_store
+        candidate._record_ledger = self._record_ledger
+        candidate._event_cursor = self._event_cursor
+        candidate._last_order = self._last_order
         candidate.lifecycle = self.lifecycle
-        candidate._lifecycle_owner = self._lifecycle_owner
-        candidate._lifecycle_transaction = self._lifecycle_owner.stage()
-        candidate._lifecycle_generation_seen = self._lifecycle_generation_seen
         candidate._projection_owner = self._projection_owner
-        self._require_current_owner_generation()
         candidate._projection_transaction = self._projection_owner.stage()
         candidate._owner_generation_seen = self._owner_generation_seen
-        candidate._record_ledger = self._record_ledger
-        candidate._last_order = self._last_order
-        candidate._seen_event_fingerprints = _AppendOnlyOverlay(
-            self._seen_event_fingerprints
-        )
-        candidate._seen_event_metadata = _AppendOnlyOverlay(
-            self._seen_event_metadata
-        )
-        candidate._real_bars = _ListWriteSet(self._real_bars)
-        candidate._crossings = _MappingWriteSet(self._crossings)
-        candidate._structure_bindings = _MappingWriteSet(
-            self._structure_bindings
-        )
         candidate._state_schema_version = FOUNDATION_ADAPTER_STATE_SCHEMA_VERSION
-        # Inner lifecycle indexes are immutable snapshots.  A changed reducer
-        # collection installs a fresh index, so an outer-only copy preserves
-        # transaction rollback without rescanning/copying every collection.
         candidate._lifecycle_indexes = dict(self._lifecycle_indexes)
-        candidate._real_bar_by_id = _MappingWriteSet(self._real_bar_by_id)
         candidate._staged_transaction_open = False
+        candidate._available_suffix = ()
+        candidate._available_offset = 0
+        candidate._projecting_event_id = None
         return candidate
 
     def _mutation_candidate(
@@ -1199,10 +562,11 @@ class CanonicalFoundationAdapter:
             raise ValueError("foundation staged transaction is not open")
         if self._projection_transaction is None:
             raise ValueError("foundation staged projection transaction is missing")
+        if self._available_offset != len(self._available_suffix):
+            raise ValueError("foundation unread suffix remains unprojected")
         self._projection_transaction.validate_complete()
-        if self._lifecycle_transaction is None:
-            raise ValueError("foundation staged lifecycle transaction is missing")
-        self._lifecycle_transaction.preflight_commit()
+        self._available_suffix = ()
+        self._available_offset = 0
         self._staged_transaction_open = False
 
     def _commit_candidate(self, candidate: "CanonicalFoundationAdapter") -> None:
@@ -1212,68 +576,33 @@ class CanonicalFoundationAdapter:
             raise ValueError("foundation transaction cannot commit itself")
         self._require_current_owner_generation()
         candidate._commit_projection_transaction()
-        candidate._commit_append_only_overlays()
-        candidate._commit_container_write_sets()
         self.__dict__.clear()
         self.__dict__.update(candidate.__dict__)
 
-    def _commit_append_only_overlays(self) -> None:
-        if isinstance(self._seen_event_fingerprints, _AppendOnlyOverlay):
-            self._seen_event_fingerprints = (
-                self._seen_event_fingerprints.commit()
-            )
-        if isinstance(self._seen_event_metadata, _AppendOnlyOverlay):
-            self._seen_event_metadata = self._seen_event_metadata.commit()
-
-    def _commit_container_write_sets(self) -> None:
-        if isinstance(self._real_bars, _ListWriteSet):
-            self._real_bars = self._real_bars.commit()
-        if isinstance(self._real_bar_by_id, _MappingWriteSet):
-            self._real_bar_by_id = self._real_bar_by_id.commit()
-        if isinstance(self._crossings, _MappingWriteSet):
-            self._crossings = self._crossings.commit()
-        if isinstance(self._structure_bindings, _MappingWriteSet):
-            self._structure_bindings = self._structure_bindings.commit()
-
     def commit_staged_candidate(self) -> None:
-        """Publish append-only index writes after the wider audit commits."""
+        """Publish one suffix after the wider observer transaction succeeds."""
 
         if self._staged_transaction_open:
             raise ValueError("foundation staged transaction is still open")
-        if not isinstance(
-            self._seen_event_fingerprints,
-            _AppendOnlyOverlay,
-        ) or not isinstance(self._seen_event_metadata, _AppendOnlyOverlay):
-            raise ValueError("foundation staged transaction is already committed")
         self._commit_projection_transaction()
-        self._commit_append_only_overlays()
-        self._commit_container_write_sets()
 
     def _commit_projection_transaction(self) -> None:
         transaction = self._projection_transaction
         if transaction is None:
             raise ValueError("foundation projection transaction is missing")
-        lifecycle_transaction = self._lifecycle_transaction
-        if lifecycle_transaction is None:
-            raise ValueError("foundation lifecycle transaction is missing")
         self._require_current_owner_generation()
         frozen = transaction.preflight_commit()
-        lifecycle_frozen = lifecycle_transaction.preflight_commit()
         delta = transaction.delta()
         ledger_delta = self._record_ledger.preview_append(delta.records)
         if ledger_delta != delta:
             raise ValueError("foundation hot/cold record cursors diverged")
         self._record_ledger.commit_prevalidated(ledger_delta)
         transaction._commit_prevalidated(frozen)
-        lifecycle_transaction._commit_prevalidated(lifecycle_frozen)
-        self.lifecycle = lifecycle_frozen
         self._owner_generation_seen = self._projection_owner.generation
-        self._lifecycle_generation_seen = self._lifecycle_owner.generation
         self._projection_transaction = None
-        self._lifecycle_transaction = None
 
     def contains_projection_record_id(self, record_id: str) -> bool:
-        """Query the projection's derived immutable identity index."""
+        """Query one current/cold Foundation record identity."""
 
         self._require_current_owner_generation()
         if not isinstance(record_id, str) or not record_id:
@@ -1292,20 +621,34 @@ class CanonicalFoundationAdapter:
     def _event_order(event: MarketEvent) -> tuple[pd.Timestamp, int, str]:
         return event.known_at, event.sequence_no, event.event_id
 
-    @property
-    def known_input_event_ids(self) -> frozenset[str]:
-        """Return the immutable identities already accepted as v1.2 inputs."""
+    def _consumed_event(self, event_id: str) -> MarketEvent | None:
+        event = self._event_store.get(event_id)
+        if (
+            event is None
+            or (
+                event.event_id != self._projecting_event_id
+                and (
+                    self._last_order is None
+                    or self._event_order(event) > self._last_order
+                )
+            )
+        ):
+            return None
+        return event
 
-        self._require_current_owner_generation()
-        return frozenset(self._seen_event_fingerprints)
+    def _consumed_metadata(
+        self,
+        event_id: str,
+    ) -> tuple[pd.Timestamp, EventOrigin] | None:
+        event = self._consumed_event(event_id)
+        return None if event is None else (event.known_at, event.origin)
 
     def is_known_input_event_id(self, event_id: str) -> bool:
-        """Return whether one exact v1.2 input identity was accepted."""
+        """Query the bound EventStore prefix without materializing an ID set."""
 
-        self._require_current_owner_generation()
         if not isinstance(event_id, str) or not event_id:
-            raise ValueError("foundation input event identity must be non-empty")
-        return event_id in self._seen_event_fingerprints
+            raise ValueError("input event identity must be non-empty")
+        return self._consumed_event(event_id) is not None
 
     def _validated_seen_sources(
         self,
@@ -1322,19 +665,19 @@ class CanonicalFoundationAdapter:
             or len(sources) != len(set(sources))
         ):
             raise ValueError(f"{name} requires unique non-empty source event ids")
+        resolved = tuple(self._consumed_event(identity) for identity in sources)
         missing = tuple(
             identity
-            for identity in sources
-            if identity not in self._seen_event_metadata
+            for identity, event in zip(sources, resolved, strict=True)
+            if event is None
         )
         if missing:
             raise ValueError(f"{name} cites unseen source events: {missing}")
+        events = tuple(event for event in resolved if event is not None)
         if known_at is not None:
             clock = aware_timestamp(known_at, name=f"{name}.known_at")
             future = tuple(
-                identity
-                for identity in sources
-                if self._seen_event_metadata[identity][0] > clock
+                event.event_id for event in events if event.known_at > clock
             )
             if future:
                 raise ValueError(
@@ -1342,9 +685,9 @@ class CanonicalFoundationAdapter:
                 )
         if require_dto_authority:
             non_authoritative = tuple(
-                identity
-                for identity in sources
-                if self._seen_event_metadata[identity][1] not in _DTO_SOURCE_ORIGINS
+                event.event_id
+                for event in events
+                if event.origin not in _DTO_SOURCE_ORIGINS
             )
             if non_authoritative:
                 raise ValueError(
@@ -1386,7 +729,7 @@ class CanonicalFoundationAdapter:
         unknown = tuple(
             identity
             for identity in sources
-            if identity not in self._seen_event_fingerprints
+            if self._consumed_event(identity) is None
         )
         if unknown:
             raise ValueError(
@@ -1428,18 +771,6 @@ class CanonicalFoundationAdapter:
             source_event_ids=sources,
             payload=payload,
             sequence_no=event.sequence_no,
-        )
-
-    @staticmethod
-    def _state_objects(state: SemanticLifecycleState) -> tuple[object, ...]:
-        return (
-            *state.levels,
-            *state.interactions,
-            *state.structure_generations,
-            *state.structure_transitions,
-            *state.relation_generations,
-            *state.delivery_generations,
-            *state.boundary_attacks,
         )
 
     @staticmethod
@@ -1511,10 +842,6 @@ class CanonicalFoundationAdapter:
                 if old.get(key) != item
             )
             self._lifecycle_indexes[name] = new
-        # Do not materialize the complete accepted-event key set for every
-        # lifecycle transition.  The two exact authorities are already
-        # immutable for this projection step: the adapter's accepted-event
-        # index plus the small same-batch allowance.
         additional_allowed = frozenset(additional_known_ids)
         transaction = self._projection_transaction
         if transaction is None:
@@ -1522,11 +849,22 @@ class CanonicalFoundationAdapter:
         records: list[FoundationRecord] = []
         for item in changed:
             record = FoundationProjectionReducer.record_from_dto(item)
+            sources = tuple(
+                self._event_store.get(identity)
+                for identity in record.source_event_ids
+            )
             missing = tuple(
                 identity
-                for identity in record.source_event_ids
-                if identity not in self._seen_event_fingerprints
-                and identity not in additional_allowed
+                for identity, event in zip(
+                    record.source_event_ids,
+                    sources,
+                    strict=True,
+                )
+                if event is None
+                or (
+                    identity not in additional_allowed
+                    and self._consumed_event(identity) is None
+                )
             )
             if missing:
                 raise ValueError(
@@ -1534,10 +872,10 @@ class CanonicalFoundationAdapter:
                     f"{missing}"
                 )
             non_authoritative = tuple(
-                identity
-                for identity in record.source_event_ids
-                if self._seen_event_metadata[identity][1]
-                not in _DTO_SOURCE_ORIGINS
+                event.event_id
+                for event in sources
+                if event is not None
+                and event.origin not in _DTO_SOURCE_ORIGINS
             )
             if non_authoritative:
                 raise ValueError(
@@ -1561,12 +899,9 @@ class CanonicalFoundationAdapter:
         additional_known_ids: Sequence[str] = (),
     ) -> tuple[FoundationRecord, ...]:
         before = self.lifecycle
-        transaction = self._lifecycle_transaction
-        if transaction is None:
-            raise RuntimeError("foundation lifecycle write lacks a transaction")
         state = before
         for transition in transitions:
-            state = transaction.reduce(transition)
+            state = SemanticLifecycleReducer.reduce_hot(state, transition)
         records = self._project_delta(
             before,
             state,
@@ -1576,7 +911,34 @@ class CanonicalFoundationAdapter:
         return records
 
     def _bar_by_id(self, event_id: str) -> _RealBarFact | None:
-        return self._real_bar_by_id.get(event_id)
+        event = self._consumed_event(event_id)
+        if (
+            event is None
+            or event.kind is not EventKind.BAR_COMPLETED
+            or event.origin is not EventOrigin.NORMALIZED_DATA
+        ):
+            return None
+        real_completed, _ = validate_registered_native_bar_root(
+            timeframe=event.timeframe,
+            event_time=event.event_time,
+            known_at=event.known_at,
+            evidence=event.evidence,
+        )
+        if not real_completed:
+            return None
+        high = event.evidence.get("high")
+        low = event.evidence.get("low")
+        close = event.evidence.get("close", event.price)
+        if any(value is None for value in (high, low, close)):
+            raise ValueError("real BAR lacks frozen high/low/close")
+        return _RealBarFact(
+            event_id=event.event_id,
+            timeframe=event.timeframe,
+            known_at=event.known_at,
+            high_ticks=price_to_ticks(high, self.tick_size, name="BAR high"),
+            low_ticks=price_to_ticks(low, self.tick_size, name="BAR low"),
+            close_ticks=price_to_ticks(close, self.tick_size, name="BAR close"),
+        )
 
     def _source_bar(self, event: MarketEvent) -> _RealBarFact:
         candidates = tuple(
@@ -1633,6 +995,130 @@ class CanonicalFoundationAdapter:
             raise ValueError("multiple active internal generations are impossible")
         return active[0] if active else None
 
+    def _generation_for_structure_identity(
+        self,
+        structure_identity: str,
+        *,
+        source_event_ids: Sequence[str] = (),
+    ):
+        """Resolve exact ancestry against current Structure-owner candidates."""
+
+        aliases = self._structure_direction_ancestry(
+            structure_identity,
+            source_event_ids=source_event_ids,
+        )
+        if len(aliases) > 1:
+            raise ValueError("Structure identity has ambiguous canonical atoms")
+        if not aliases:
+            return None
+        alias = next(iter(aliases.values()))
+        current = [
+            self._active_external(alias.timeframe),
+            self._active_internal(alias.timeframe),
+        ]
+        transition = self._started_transition(alias.timeframe)
+        if transition is not None:
+            incumbent = self._lifecycle_indexes[
+                "structure_generations"
+            ].get(
+                (
+                    StructureGeneration,
+                    transition.incumbent_structure_generation_id,
+                )
+            )
+            if incumbent is None:
+                raise ValueError(
+                    "current Structure transition references an unknown generation"
+                )
+            current.append(incumbent)
+        current_by_id = {
+            generation.generation_id: generation
+            for generation in current
+            if generation is not None
+        }
+        candidates = dict(current_by_id)
+        if alias.direction in {Direction.LONG, Direction.SHORT}:
+            try:
+                origin_swing_id = self._structure_origin_swing_id(alias)
+            except ValueError:
+                pass
+            else:
+                generation_id = canonical_semantic_id(
+                    "structure-generation",
+                    alias.timeframe.value,
+                    StructureScope.EXTERNAL.value,
+                    alias.direction.value,
+                    alias.known_at,
+                    alias.event_id,
+                    origin_swing_id,
+                )
+                generation = self._lifecycle_indexes[
+                    "structure_generations"
+                ].get((StructureGeneration, generation_id))
+                if generation is not None:
+                    candidates[generation_id] = generation
+        eligible = tuple(
+            generation
+            for generation in candidates.values()
+            if (
+                (origin := self._consumed_event(generation.origin_event_id))
+                is not None
+            )
+            and self._event_order(origin) <= self._event_order(alias)
+            if generation.timeframe is alias.timeframe
+            and generation.direction is alias.direction
+            and generation.started_at <= alias.known_at
+            and (
+                generation.terminated_at is None
+                or alias.known_at <= generation.terminated_at
+            )
+        )
+        exact = tuple(
+            generation
+            for generation in eligible
+            if alias.event_id
+            in {
+                generation.origin_event_id,
+                generation.confirmation_event_id,
+            }
+        )
+        selected = exact or tuple(
+            generation
+            for generation in eligible
+            if generation.generation_id in current_by_id
+        )
+        if len(selected) > 1:
+            raise ValueError("Structure identity has ambiguous current owners")
+        return selected[0] if selected else None
+
+    def _structure_direction_ancestry(
+        self,
+        structure_identity: str,
+        *,
+        source_event_ids: Sequence[str],
+    ) -> dict[str, MarketEvent]:
+        """Return exact local StructureDirection ancestors without owner state."""
+
+        pending = list(source_event_ids)
+        visited: set[str] = set()
+        aliases: dict[str, MarketEvent] = {}
+        while pending:
+            event_id = pending.pop()
+            if event_id in visited:
+                continue
+            visited.add(event_id)
+            event = self._consumed_event(event_id)
+            if event is None:
+                continue
+            if (
+                event.kind is EventKind.STRUCTURE_DIRECTION_CONFIRMED
+                and event.evidence.get("structure_id") == structure_identity
+            ):
+                aliases[event.event_id] = event
+                continue
+            pending.extend(event.source_event_ids)
+        return aliases
+
     def _started_transition(self, timeframe: Timeframe):
         active = tuple(
             item
@@ -1682,10 +1168,6 @@ class CanonicalFoundationAdapter:
             low_ticks=price_to_ticks(low, self.tick_size, name="BAR low"),
             close_ticks=price_to_ticks(close, self.tick_size, name="BAR close"),
         )
-        if self._bar_by_id(bar.event_id) is not None:
-            raise ValueError("real BAR identity repeats with a new input fact")
-        self._real_bars.append(bar)
-        self._real_bar_by_id[bar.event_id] = bar
         # Same-source registered levels rearm from the first strictly later real
         # interaction-TF BAR whose completed close has departed at least one
         # tick in the registered direction.  This is a pure lifecycle rule:
@@ -1734,11 +1216,9 @@ class CanonicalFoundationAdapter:
             payload={"reason": reason},
             source_event_ids=(event.event_id,),
         )
-        records = self._apply((transition,), additional_known_ids=(event.event_id,))
-        self._real_bars.clear()
-        self._real_bar_by_id.clear()
-        self._crossings.clear()
-        return records
+        return self._apply(
+            (transition,), additional_known_ids=(event.event_id,)
+        )
 
     def _consume_level_created(
         self, event: MarketEvent
@@ -1819,7 +1299,7 @@ class CanonicalFoundationAdapter:
                 not isinstance(replaced_id, str)
                 or not isinstance(replacement_event_id, str)
                 or replacement_event_id not in event.context_event_ids
-                or replacement_event_id not in self._seen_event_fingerprints
+                or self._consumed_event(replacement_event_id) is None
             ):
                 raise ValueError("liquidity replacement provenance is invalid")
             prior = self._level(replaced_id)
@@ -1885,7 +1365,6 @@ class CanonicalFoundationAdapter:
             raise ValueError("penetration event price is not the exact BAR extreme")
         if penetration_ticks < 1:
             raise ValueError("penetration must cross the level by at least one tick")
-        interaction = self.lifecycle.interaction(level.active_generation_id)
         transition = self._transition(
             event,
             NormalizedTransitionKind.LIQUIDITY_PENETRATED,
@@ -1898,56 +1377,48 @@ class CanonicalFoundationAdapter:
                 "close_ticks": bar.close_ticks,
             },
         )
-        records = self._apply((transition,), additional_known_ids=(event.event_id,))
-        key = (source_level_id, crossed_at)
-        binding = _CrossingBinding(
-            source_level_id=source_level_id,
-            foundation_level_id=level.level_id,
-            generation_id=interaction.generation_id,
-            crossed_at=crossed_at,
-            penetration_event_id=event.event_id,
-            penetration_bar_event_id=bar.event_id,
+        return self._apply(
+            (transition,), additional_known_ids=(event.event_id,)
         )
-        prior = self._crossings.get(key)
-        if prior is not None and prior != binding:
-            raise ValueError("one crossing clock has conflicting penetration")
-        self._crossings[key] = binding
-        return records
 
     def _formation_bars(
         self,
-        crossed_at: pd.Timestamp,
-        resolved_at: pd.Timestamp,
-        timeframe: Timeframe,
+        event: MarketEvent,
+        penetration: MarketEvent,
     ) -> tuple[_RealBarFact, ...]:
-        interaction_tf = Timeframe(timeframe)
-        bars = tuple(
-            item
-            for item in self._real_bars
-            if item.timeframe is interaction_tf
-            and crossed_at <= item.known_at <= resolved_at
-        )
+        crossed_at = penetration.known_at
+        resolved_at = event.known_at
+        penetration_bar = self._source_bar(penetration)
+        resolution_bar = self._source_bar(event)
+        resolved: list[_RealBarFact] = []
+        clock = crossed_at
+        while clock <= resolved_at:
+            event_at_clock = self._event_store.normalized_bar_at(
+                Timeframe.M1, clock
+            )
+            bar = (
+                None
+                if event_at_clock is None
+                else self._bar_by_id(event_at_clock.event_id)
+            )
+            if bar is None:
+                raise ValueError(
+                    "crossing formation lacks a continuous real M1 BAR ancestry"
+                )
+            resolved.append(bar)
+            clock = next_registered_native_completion(
+                clock,
+                timeframe_minutes=1,
+                anchor_minute=0,
+            )
+        bars = tuple(resolved)
         if (
             not bars
-            or bars[0].known_at != crossed_at
-            or bars[-1].known_at != resolved_at
-            or any(
-                right.known_at
-                != next_registered_native_completion(
-                    left.known_at,
-                    timeframe_minutes=int(
-                        _TIMEFRAME_INTERVAL[interaction_tf]
-                        / pd.Timedelta(1, unit="min")
-                    ),
-                    anchor_minute=(
-                        18 * 60 if interaction_tf is Timeframe.H4 else 0
-                    ),
-                )
-                for left, right in zip(bars, bars[1:])
-            )
+            or bars[0] != penetration_bar
+            or bars[-1] != resolution_bar
         ):
             raise ValueError(
-                "crossing formation lacks a continuous real M1 BAR ancestry"
+                "crossing terminal lacks its exact local canonical BAR ancestry"
             )
         return bars
 
@@ -2037,8 +1508,28 @@ class CanonicalFoundationAdapter:
         )
         if resolved_at != event.known_at or crossed_at > resolved_at:
             raise ValueError("terminal crossing clocks are inconsistent")
-        binding = self._crossings.get((source_level_id, crossed_at))
-        if binding is None and level.active_generation_id is None:
+        penetration_events = tuple(
+            source
+            for event_id in event.source_event_ids
+            if (source := self._consumed_event(event_id)) is not None
+            and source.kind is EventKind.LEVEL_PENETRATED
+        )
+        if len(penetration_events) != 1:
+            raise ValueError("terminal lacks one canonical penetration parent")
+        penetration = penetration_events[0]
+        if (
+            penetration.evidence.get("level_id") != source_level_id
+            or penetration.known_at != crossed_at
+        ):
+            raise ValueError("terminal penetration parent identity differs")
+        bound_interactions = tuple(
+            interaction
+            for interaction in self.lifecycle.interactions
+            if interaction.level_id == level.level_id
+            and interaction.first_penetration_at == crossed_at
+            and penetration.event_id in interaction.source_event_ids
+        )
+        if not bound_interactions and level.active_generation_id is None:
             # The v1.2 tracker may immediately open another crossing after a
             # same-bar Sweep.  Canonical same-level rearm requires a strictly
             # later real BAR that first departs the level by one tick.  Its
@@ -2046,7 +1537,7 @@ class CanonicalFoundationAdapter:
             # the later legacy terminal remains atomic history but cannot
             # terminalize the already immutable canonical generation.
             return ()
-        if binding is None and level.active_generation_id is not None:
+        if not bound_interactions and level.active_generation_id is not None:
             active_interaction = self.lifecycle.interaction(
                 level.active_generation_id
             )
@@ -2061,13 +1552,10 @@ class CanonicalFoundationAdapter:
                 # The old terminal still predates Generation N's armed clock,
                 # so it cannot be borrowed by that new immutable generation.
                 return ()
-        if (
-            binding is not None
-            and binding.foundation_level_id == level.level_id
-            and binding.penetration_event_id in event.source_event_ids
-            and level.active_generation_id is None
-        ):
-            bound_interaction = self.lifecycle.interaction(binding.generation_id)
+        if len(bound_interactions) > 1:
+            raise ValueError("terminal penetration parent binds multiple generations")
+        if bound_interactions and level.active_generation_id is None:
+            bound_interaction = bound_interactions[0]
             if (
                 bound_interaction.lifecycle
                 is LiquidityInteractionLifecycle.TERMINAL
@@ -2087,20 +1575,13 @@ class CanonicalFoundationAdapter:
                 # are deliberately rejected by the check below.
                 return ()
         if (
-            binding is None
-            or binding.foundation_level_id != level.level_id
-            or binding.penetration_event_id not in event.source_event_ids
-            or level.active_generation_id != binding.generation_id
+            len(bound_interactions) != 1
+            or level.active_generation_id
+            != bound_interactions[0].generation_id
         ):
             raise ValueError("terminal lacks its exact active penetration generation")
-        interaction = self.lifecycle.interaction(binding.generation_id)
-        bars = self._formation_bars(
-            crossed_at,
-            resolved_at,
-            interaction.interaction_timeframe,
-        )
-        if binding.penetration_bar_event_id != bars[0].event_id:
-            raise ValueError("terminal BAR ancestry does not start at penetration")
+        interaction = bound_interactions[0]
+        bars = self._formation_bars(event, penetration)
         terminal_bar = self._source_bar(event)
         if terminal_bar.event_id != bars[-1].event_id:
             raise ValueError("terminal does not cite its exact resolution BAR")
@@ -2109,33 +1590,6 @@ class CanonicalFoundationAdapter:
             if event.kind is EventKind.SWEEP_CONFIRMED
             else NormalizedTransitionKind.LIQUIDITY_ACCEPTANCE_TERMINAL
         )
-        if terminal_kind is NormalizedTransitionKind.LIQUIDITY_ACCEPTANCE_TERMINAL:
-            outside = tuple(
-                item.close_ticks > level.upper_bound_ticks
-                if level.side == "above"
-                else item.close_ticks < level.lower_bound_ticks
-                for item in bars
-            )
-            outside_completed_bars = sum(outside)
-            outside_suffix_bars = 0
-            for value in reversed(outside):
-                if not value:
-                    break
-                outside_suffix_bars += 1
-            expected_counts = {
-                "outside_completed_bars": outside_completed_bars,
-                "outside_run": outside_suffix_bars,
-            }
-            for evidence_field, expected in expected_counts.items():
-                asserted = event.evidence.get(evidence_field)
-                if asserted is not None and (
-                    type(asserted) is not int
-                    or asserted < 1
-                    or asserted != expected
-                ):
-                    raise ValueError(
-                        "Acceptance outside counters conflict with exact BAR ancestry"
-                    )
         (
             bar_ids,
             roles,
@@ -2199,7 +1653,7 @@ class CanonicalFoundationAdapter:
             or not isinstance(assignment_event_id, str)
             or not assignment_event_id
             or assignment_event_id not in event.context_event_ids
-            or assignment_event_id not in self._seen_event_fingerprints
+            or self._consumed_event(assignment_event_id) is None
             or level.source_identity
             not in {protected_swing_id, f"swing:{protected_swing_id}"}
         ):
@@ -2308,8 +1762,7 @@ class CanonicalFoundationAdapter:
         """Use monotonic input order for a same-clock causal successor."""
 
         if (
-            prior_event_id not in self._seen_event_fingerprints
-            or self._seen_event_metadata.get(prior_event_id)
+            self._consumed_metadata(prior_event_id)
             != (prior_known_at, EventOrigin.SEMANTIC_ATOMIC)
         ):
             return False
@@ -2512,7 +1965,6 @@ class CanonicalFoundationAdapter:
         transition = self._started_transition(event.timeframe)
         if incumbent is not None:
             if event.direction is incumbent.direction:
-                self._structure_bindings[structure_id] = incumbent.generation_id
                 transitions: list[NormalizedLifecycleTransition] = []
                 if internal is not None:
                     transitions.append(
@@ -2547,7 +1999,6 @@ class CanonicalFoundationAdapter:
             # only release of that external scope.
             if internal is None or internal.direction is not event.direction:
                 return ()
-            self._structure_bindings[structure_id] = internal.generation_id
             if internal.lifecycle is StructureGenerationLifecycle.FORMING:
                 confirmed = self._internal_confirmation_transition(
                     event, internal
@@ -2604,7 +2055,7 @@ class CanonicalFoundationAdapter:
                 == transition.protected_acceptance_event_id
                 and accepted_incumbent.terminated_at is not None
                 and transition.updated_at == accepted_incumbent.terminated_at
-                and self._seen_event_metadata.get(
+                and self._consumed_metadata(
                     transition.protected_acceptance_event_id
                 )
                 == (
@@ -2635,7 +2086,6 @@ class CanonicalFoundationAdapter:
         for fact in transitions:
             provisional = SemanticLifecycleReducer.reduce_hot(provisional, fact)
         new_generation = provisional.structure_generations[-1]
-        self._structure_bindings[structure_id] = new_generation.generation_id
         if transition is not None:
             if event.direction is transition.challenger_direction:
                 if (
@@ -2746,7 +2196,7 @@ class CanonicalFoundationAdapter:
             transition.incumbent_structure_generation_id
         )
         acceptance_id = transition.protected_acceptance_event_id
-        acceptance_metadata = self._seen_event_metadata.get(acceptance_id)
+        acceptance_metadata = self._consumed_metadata(acceptance_id)
         if (
             incumbent.scope is not StructureScope.EXTERNAL
             or incumbent.timeframe is not event.timeframe
@@ -2789,9 +2239,9 @@ class CanonicalFoundationAdapter:
                 or tuple(event.source_entity_ids)
                 != (bos_id, structure_identity)
                 or len(sources) != 2
-                or self._seen_event_metadata.get(sources[0])
+                or self._consumed_metadata(sources[0])
                 != (event.known_at, EventOrigin.SEMANTIC_ATOMIC)
-                or self._seen_event_metadata.get(sources[1])
+                or self._consumed_metadata(sources[1])
                 != (internal.started_at, EventOrigin.SEMANTIC_ATOMIC)
             ):
                 return False
@@ -2818,13 +2268,12 @@ class CanonicalFoundationAdapter:
                     protected_swing_id,
                 )
                 or len(sources) != 3
-                or self._seen_event_metadata.get(sources[0])
+                or self._consumed_metadata(sources[0])
                 != (event.known_at, EventOrigin.SEMANTIC_ATOMIC)
                 or any(
-                    self._seen_event_metadata.get(source_id) is None
-                    or self._seen_event_metadata[source_id][0] > event.known_at
-                    or self._seen_event_metadata[source_id][1]
-                    is not EventOrigin.SEMANTIC_ATOMIC
+                    (metadata := self._consumed_metadata(source_id)) is None
+                    or metadata[0] > event.known_at
+                    or metadata[1] is not EventOrigin.SEMANTIC_ATOMIC
                     for source_id in sources[1:]
                 )
             ):
@@ -2840,7 +2289,11 @@ class CanonicalFoundationAdapter:
     ) -> tuple[FoundationRecord, ...]:
         self._require_prior_sources(event)
         structure_identity = self._structure_evidence_identity(event)
-        generation_id = self._structure_bindings.get(structure_identity)
+        generation = self._generation_for_structure_identity(
+            structure_identity,
+            source_event_ids=event.source_event_ids,
+        )
+        generation_id = None if generation is None else generation.generation_id
         external = self._active_external(event.timeframe)
         if generation_id is None and self._is_exact_unbound_transition_evidence(
             event,
@@ -2997,7 +2450,7 @@ class CanonicalFoundationAdapter:
             or incumbent.protected_acceptance_event_id != acceptance_id
             or incumbent.terminated_at is None
             or transition.updated_at != incumbent.terminated_at
-            or self._seen_event_metadata.get(acceptance_id)
+            or self._consumed_metadata(acceptance_id)
             != (incumbent.terminated_at, EventOrigin.SEMANTIC_ATOMIC)
             or not (
                 transition.started_at
@@ -3007,9 +2460,9 @@ class CanonicalFoundationAdapter:
             )
             or len(sources) != 2
             or sources[1] != internal.confirmation_event_id
-            or self._seen_event_metadata.get(sources[0])
+            or self._consumed_metadata(sources[0])
             != (event.known_at, EventOrigin.SEMANTIC_ATOMIC)
-            or self._seen_event_metadata.get(sources[1])
+            or self._consumed_metadata(sources[1])
             != (internal.confirmed_at, EventOrigin.SEMANTIC_ATOMIC)
         ):
             return False
@@ -3019,7 +2472,13 @@ class CanonicalFoundationAdapter:
         self._require_prior_sources(event)
         incumbent = self._active_external(event.timeframe)
         origin_identity = self._mss_origin_identity(event)
-        source_generation_id = self._structure_bindings.get(origin_identity)
+        source_generation = self._generation_for_structure_identity(
+            origin_identity,
+            source_event_ids=event.source_event_ids,
+        )
+        source_generation_id = (
+            None if source_generation is None else source_generation.generation_id
+        )
         if (
             source_generation_id is not None
             and self._is_exact_post_acceptance_internal_counter_mss(
@@ -3041,7 +2500,14 @@ class CanonicalFoundationAdapter:
             # An MSS against a tracker-only opposite Structure does not oppose
             # the canonical incumbent and cannot confirm its resumption.
             return ()
-        if source_generation_id is None and incumbent is None:
+        if (
+            source_generation_id is None
+            and incumbent is None
+            and self._structure_direction_ancestry(
+                origin_identity,
+                source_event_ids=event.source_event_ids,
+            )
+        ):
             terminated_external = tuple(
                 generation
                 for generation in self.lifecycle.structure_generations
@@ -3179,65 +2645,51 @@ class CanonicalFoundationAdapter:
             additional_known_ids=(event.event_id,),
         )
 
-    def _consume_inplace(self, event: MarketEvent) -> FoundationAdapterUpdate:
+    def _project_bound_event(self, event: MarketEvent) -> FoundationAdapterUpdate:
         if not isinstance(event, MarketEvent):
             raise TypeError("foundation adapter accepts MarketEvent input")
-        fingerprint = content_hash(event)
-        previous = self._seen_event_fingerprints.get(event.event_id)
-        if previous is not None:
-            if previous != fingerprint:
-                raise ValueError("MarketEvent identity conflicts with adapter history")
-            return FoundationAdapterUpdate(
-                event.event_id, (), self.lifecycle, ignored=True
-            )
+        if self._event_store.get(event.event_id) != event:
+            raise ValueError("foundation suffix event differs from EventStore authority")
         order = self._event_order(event)
         if self._last_order is not None and order <= self._last_order:
             raise ValueError("foundation adapter input is out of knowledge order")
         self._require_authoritative_event(event)
-        # Register causal metadata inside the transactional candidate before
-        # projection, so every emitted record can fail closed on legacy
-        # ancestry.  A rejected handler discards this candidate wholesale.
-        self._seen_event_metadata[event.event_id] = (
-            event.known_at,
-            event.origin,
-        )
+        self._projecting_event_id = event.event_id
+        try:
+            if event.kind is EventKind.BAR_COMPLETED:
+                records = self._consume_bar(event)
+            elif event.kind is EventKind.MARKET_EPOCH_RESET:
+                self._require_prior_sources(event, allow_empty=True)
+                records = self._consume_reset(event)
+            elif event.kind is EventKind.LIQUIDITY_LEVEL_CREATED:
+                records = self._consume_level_created(event)
+            elif event.kind is EventKind.LEVEL_TOUCHED:
+                records = self._consume_touch(event)
+            elif event.kind is EventKind.LEVEL_PENETRATED:
+                records = self._consume_penetration(event)
+            elif event.kind in {
+                EventKind.SWEEP_CONFIRMED,
+                EventKind.ACCEPTANCE_CONFIRMED,
+            }:
+                records = self._consume_terminal(event)
+            elif event.kind is EventKind.LIQUIDITY_RETIRED:
+                # Legacy transport is audit-visible but not Foundation ancestry.
+                records = ()
+            elif event.kind is EventKind.STRUCTURE_DIRECTION_CONFIRMED:
+                records = self._consume_structure_direction(event)
+            elif event.kind is EventKind.QUALIFIED_BOS:
+                records = self._consume_structure_evidence(event, "bos")
+            elif event.kind is EventKind.PROTECTED_SWING_ASSIGNED:
+                records = self._consume_structure_evidence(
+                    event, "protected_swing_assignment"
+                )
+            elif event.kind is EventKind.MSS_CORE_CONFIRMED:
+                records = self._consume_mss(event)
+            else:
+                records = ()
+        finally:
+            self._projecting_event_id = None
 
-        if event.kind is EventKind.BAR_COMPLETED:
-            records = self._consume_bar(event)
-        elif event.kind is EventKind.MARKET_EPOCH_RESET:
-            self._require_prior_sources(event, allow_empty=True)
-            records = self._consume_reset(event)
-        elif event.kind is EventKind.LIQUIDITY_LEVEL_CREATED:
-            records = self._consume_level_created(event)
-        elif event.kind is EventKind.LEVEL_TOUCHED:
-            records = self._consume_touch(event)
-        elif event.kind is EventKind.LEVEL_PENETRATED:
-            records = self._consume_penetration(event)
-        elif event.kind in {
-            EventKind.SWEEP_CONFIRMED,
-            EventKind.ACCEPTANCE_CONFIRMED,
-        }:
-            records = self._consume_terminal(event)
-        elif event.kind is EventKind.LIQUIDITY_RETIRED:
-            # v1.2 publishes this lifecycle transport as LEGACY_TRANSPORT.
-            # Keep its input order/identity visible, but never let it become
-            # canonical foundation ancestry.  ``retire_level`` requires an
-            # exact current normalized/atomic source fact instead.
-            records = ()
-        elif event.kind is EventKind.STRUCTURE_DIRECTION_CONFIRMED:
-            records = self._consume_structure_direction(event)
-        elif event.kind is EventKind.QUALIFIED_BOS:
-            records = self._consume_structure_evidence(event, "bos")
-        elif event.kind is EventKind.PROTECTED_SWING_ASSIGNED:
-            records = self._consume_structure_evidence(
-                event, "protected_swing_assignment"
-            )
-        elif event.kind is EventKind.MSS_CORE_CONFIRMED:
-            records = self._consume_mss(event)
-        else:
-            records = ()
-
-        self._seen_event_fingerprints[event.event_id] = fingerprint
         self._last_order = order
         return FoundationAdapterUpdate(
             event.event_id,
@@ -3246,62 +2698,45 @@ class CanonicalFoundationAdapter:
             ignored=not records and event.kind is not EventKind.BAR_COMPLETED,
         )
 
-    def consume(self, event: MarketEvent) -> FoundationAdapterUpdate:
-        """Atomically consume one knowledge-ordered v1.2 fact.
+    def begin_suffix(self) -> "CanonicalFoundationAdapter":
+        """Open one wide transaction over the bound store's unread suffix."""
 
-        A target lifecycle change fails closed when the current projection has
-        Observer-owned derived dependents.  Use :meth:`stage_batch`, append the
-        matching dependent revisions, then seal and commit that wide batch.
-        """
-
-        candidate, owned = self._mutation_candidate()
-        update = candidate._consume_inplace(event)
-        if owned:
-            self._commit_candidate(candidate)
-        return update
-
-    def stage_batch(
-        self,
-        events: Sequence[MarketEvent],
-    ) -> tuple[
-        "CanonicalFoundationAdapter",
-        tuple[FoundationAdapterUpdate, ...],
-    ]:
-        """Return an uncommitted atomic candidate and its batch updates.
-
-        The production Observer can add downstream DTOs to this candidate and
-        retain it only after the wider event-store audit succeeds.  That keeps
-        rollback semantics without checkpointing and rebuilding the complete
-        append-only adapter history on every clock.
-        """
-
-        if isinstance(events, (str, bytes)):
-            raise TypeError("foundation adapter batch requires MarketEvent inputs")
-        batch = tuple(events)
         if self._staged_transaction_open:
-            updates = tuple(
-                self._consume_inplace(event) for event in batch
-            )
-            return self, updates
+            raise ValueError("nested foundation suffix transaction is invalid")
+        self._require_bound_authorities()
         candidate = self._transaction_candidate()
         candidate._staged_transaction_open = True
-        updates = tuple(candidate._consume_inplace(event) for event in batch)
-        return candidate, updates
+        candidate._available_suffix = self._event_store.events_since(
+            self._event_cursor
+        )
+        candidate._available_offset = 0
+        return candidate
 
-    def consume_batch(
+    def _project_available_through(
         self,
-        events: Sequence[MarketEvent],
+        known_at: pd.Timestamp,
     ) -> tuple[FoundationAdapterUpdate, ...]:
-        """Atomically consume a knowledge-ordered fact batch with one copy.
+        """Project the next contiguous suffix clocks through ``known_at``."""
 
-        This is only a transaction boundary around ``consume`` semantics; it
-        does not introduce a second buffer, detector, or event store.  Any
-        rejected fact discards all earlier candidate updates in the batch.
-        """
+        if not self._staged_transaction_open:
+            raise ValueError("foundation suffix transaction is not open")
+        clock = aware_timestamp(known_at, name="foundation suffix clock")
+        updates: list[FoundationAdapterUpdate] = []
+        while self._available_offset < len(self._available_suffix):
+            event = self._available_suffix[self._available_offset]
+            if event.known_at > clock:
+                break
+            update = self._project_bound_event(event)
+            self._available_offset += 1
+            self._event_cursor += 1
+            updates.append(update)
+        return tuple(updates)
 
-        if self._staged_transaction_open:
-            raise ValueError("nested foundation batch transaction is invalid")
-        candidate, updates = self.stage_batch(events)
+    def consume_available(self) -> tuple[FoundationAdapterUpdate, ...]:
+        """Atomically project the one unread EventStore suffix."""
+
+        candidate = self.begin_suffix()
+        updates = candidate._project_available_through(pd.Timestamp.max.tz_localize("UTC"))
         candidate.seal_staged_candidate()
         self._commit_candidate(candidate)
         return updates
@@ -3330,10 +2765,10 @@ class CanonicalFoundationAdapter:
         if prior_generation_id is None:
             raise ValueError("rearm level lacks its prior terminal generation")
         prior = self.lifecycle.interaction(prior_generation_id)
-        latest_bar = next(
+        latest_clock = next(
             (
                 item
-                for item in reversed(self._real_bars)
+                for item in self.lifecycle.real_bar_clocks
                 if item.timeframe is prior.interaction_timeframe
             ),
             None,
@@ -3341,7 +2776,8 @@ class CanonicalFoundationAdapter:
         if (
             bar is None
             or bar.timeframe is not prior.interaction_timeframe
-            or bar != latest_bar
+            or latest_clock is None
+            or latest_clock.last_bar_event_id != bar.event_id
         ):
             raise ValueError(
                 "rearm departure must cite the latest real interaction-TF BAR"
@@ -3450,8 +2886,10 @@ class CanonicalFoundationAdapter:
         invalid_origins = tuple(
             identity
             for identity in sources
-            if self._seen_event_metadata[identity][1]
-            not in _RETIREMENT_SOURCE_ORIGINS
+            if (
+                metadata := self._consumed_metadata(identity)
+            ) is None
+            or metadata[1] not in _RETIREMENT_SOURCE_ORIGINS
         )
         if invalid_origins:
             raise ValueError(
@@ -3512,7 +2950,7 @@ class CanonicalFoundationAdapter:
         missing = tuple(
             identity
             for identity in fact.source_event_ids
-            if identity not in self._seen_event_fingerprints
+            if self._consumed_event(identity) is None
         )
         if missing:
             raise ValueError(f"boundary attack cites unseen inputs: {missing}")
@@ -3856,54 +3294,194 @@ class CanonicalFoundationAdapter:
         return update
 
     def checkpoint(self) -> FoundationAdapterCheckpoint:
+        if self._staged_transaction_open or self._projection_transaction is not None:
+            raise ValueError("foundation staged adapter cannot be checkpointed")
         self._require_current_owner_generation()
-        self._projection_owner.__getstate__()
-        if self.lifecycle != self._lifecycle_owner.freeze():
-            raise ValueError("foundation adapter lifecycle owner differs")
+        self._require_bound_authorities()
         projection = self.projection
         projection_checkpoint = FoundationProjectionReducer.checkpoint(
             projection
         )
-        cold_records = self._record_ledger.checkpoint().records
-        if self._projection_transaction is not None:
-            cold_records = (
-                *cold_records,
-                *self._projection_transaction.delta().records,
-            )
-        ledger_checkpoint = FoundationRecordLedgerCheckpoint(
-            records=cold_records,
-            record_count=projection.record_count,
-            component_fingerprint=projection.component_fingerprint,
-        )
-        collection_payload = self._checkpoint_collection_payload(
-            records=ledger_checkpoint.records
-        )
         return FoundationAdapterCheckpoint(
             tick_size=self.tick_size,
-            lifecycle_checkpoint=(
-                self._lifecycle_owner.checkpoint()
-                if self._lifecycle_transaction is None
-                else self._lifecycle_transaction.checkpoint()
+            event_cursor=self._event_cursor,
+            event_prefix_fingerprint=self._event_store.prefix_fingerprint(
+                self._event_cursor
             ),
+            ledger_record_count=self._record_ledger.record_count,
+            ledger_component_fingerprint=(
+                self._record_ledger.component_fingerprint
+            ),
+            lifecycle=self.lifecycle,
             projection_checkpoint=projection_checkpoint,
-            record_ledger_checkpoint=ledger_checkpoint,
-            last_order=collection_payload["last_order"],
-            seen_event_fingerprints=collection_payload[
-                "seen_event_fingerprints"
-            ],
-            seen_event_metadata=collection_payload["seen_event_metadata"],
-            real_bars=collection_payload["real_bars"],
-            crossings=collection_payload["crossings"],
-            structure_bindings=collection_payload["structure_bindings"],
         )
+
+    @staticmethod
+    def _cold_replay_canonical_prefix(
+        *,
+        event_store: EventStore,
+        event_cursor: int,
+        tick_size: float,
+    ) -> tuple[
+        SemanticLifecycleState,
+        tuple[FoundationRecord, ...],
+        frozenset[str],
+    ]:
+        """Replay the bound atomic prefix through the production reducer path."""
+
+        replay_ledger = FoundationRecordLedger()
+        replay = CanonicalFoundationAdapter(
+            event_store=event_store,
+            record_ledger=replay_ledger,
+            tick_size=tick_size,
+        )
+        candidate = replay.begin_suffix()
+        prefix = candidate._available_suffix[:event_cursor]
+        candidate._available_suffix = prefix
+        candidate._project_available_through(
+            pd.Timestamp.max.tz_localize("UTC")
+        )
+        candidate.seal_staged_candidate()
+        candidate.commit_staged_candidate()
+        return (
+            candidate.lifecycle,
+            replay_ledger.checkpoint().records,
+            frozenset(event.event_id for event in prefix),
+        )
+
+    @staticmethod
+    def _validate_cold_replay(
+        *,
+        event_store: EventStore,
+        event_cursor: int,
+        tick_size: float,
+        record_ledger: FoundationRecordLedger,
+        projection: FoundationProjection,
+        lifecycle: SemanticLifecycleState,
+    ) -> None:
+        ledger_checkpoint = record_ledger.checkpoint()
+        replayed = FoundationProjectionReducer.replay(
+            ledger_checkpoint.records
+        )
+        if replayed != projection:
+            raise ValueError("foundation cold ledger replay differs from checkpoint")
+        canonical_lifecycle, canonical_records, consumed_event_ids = (
+            CanonicalFoundationAdapter._cold_replay_canonical_prefix(
+                event_store=event_store,
+                event_cursor=event_cursor,
+                tick_size=tick_size,
+            )
+        )
+        external_lifecycle_records = tuple(
+            record
+            for record in ledger_checkpoint.records
+            if record.object_type
+            in CanonicalFoundationAdapter._LIFECYCLE_RECORD_TYPES
+        )
+        canonical_lifecycle_records = tuple(
+            record
+            for record in canonical_records
+            if record.object_type
+            in CanonicalFoundationAdapter._LIFECYCLE_RECORD_TYPES
+        )
+        if any(
+            source_event_id not in consumed_event_ids
+            for record in ledger_checkpoint.records
+            for source_event_id in record.source_event_ids
+        ):
+            raise ValueError(
+                "foundation cold ledger crosses its EventStore cursor frontier"
+            )
+        external_position = 0
+        for canonical_record in canonical_lifecycle_records:
+            while (
+                external_position < len(external_lifecycle_records)
+                and external_lifecycle_records[external_position]
+                != canonical_record
+            ):
+                external_position += 1
+            if external_position == len(external_lifecycle_records):
+                raise ValueError(
+                    "foundation canonical cold replay differs from ledger records"
+                )
+            external_position += 1
+        lifecycle_record_types = (
+            FoundationObjectType.STRUCTURE_GENERATION,
+            FoundationObjectType.LIQUIDITY_INTERACTION_GENERATION,
+            FoundationObjectType.LIQUIDITY_LEVEL,
+            FoundationObjectType.STRUCTURE_TRANSITION,
+            FoundationObjectType.RELATION_GENERATION,
+            FoundationObjectType.DELIVERY_PHASE_GENERATION,
+            FoundationObjectType.BOUNDARY_ATTACK,
+        )
+        for collection_name, object_type in zip(
+            CanonicalFoundationAdapter._LIFECYCLE_COLLECTION_ORDER,
+            lifecycle_record_types,
+            strict=True,
+        ):
+            lifecycle_records = tuple(
+                FoundationProjectionReducer.record_from_dto(item)
+                for item in getattr(lifecycle, collection_name)
+            )
+            current_by_id = {
+                record.object_id: record
+                for record in projection.current_records
+                if record.object_type is object_type
+            }
+            first_seen_ids = tuple(
+                dict.fromkeys(
+                    record.object_id
+                    for record in ledger_checkpoint.records
+                    if record.object_type is object_type
+                )
+            )
+            projection_records = tuple(
+                current_by_id[object_id] for object_id in first_seen_ids
+            )
+            if lifecycle_records != projection_records:
+                raise ValueError(
+                    "foundation lifecycle current view differs from cold ledger"
+                )
+        expected_asof = max(
+            (
+                clock
+                for clock in (
+                    canonical_lifecycle.asof,
+                    *(
+                        record.known_at
+                        for record in external_lifecycle_records
+                    ),
+                )
+                if clock is not None
+            ),
+            default=None,
+        )
+        if (
+            lifecycle.registered_bar_clocks
+            != canonical_lifecycle.registered_bar_clocks
+            or lifecycle.real_bar_clocks
+            != canonical_lifecycle.real_bar_clocks
+            or lifecycle.epoch != canonical_lifecycle.epoch
+            or lifecycle.asof != expected_asof
+        ):
+            raise ValueError(
+                "foundation lifecycle clocks differ from canonical cold replay"
+            )
 
     @classmethod
     def restore(
         cls,
         checkpoint: FoundationAdapterCheckpoint,
+        *,
+        event_store: EventStore,
+        record_ledger: FoundationRecordLedger,
     ) -> "CanonicalFoundationAdapter":
         if type(checkpoint) is not FoundationAdapterCheckpoint:
             raise TypeError("adapter restore requires FoundationAdapterCheckpoint")
+        if type(event_store) is not EventStore:
+            raise TypeError("adapter restore requires the authoritative EventStore")
+        if type(record_ledger) is not FoundationRecordLedger:
+            raise TypeError("adapter restore requires the authoritative record ledger")
         if (
             "schema_version" not in vars(checkpoint)
             or "checkpoint_digest" not in vars(checkpoint)
@@ -3916,52 +3494,50 @@ class CanonicalFoundationAdapter:
             _checkpoint_payload(checkpoint)
         ):
             raise ValueError("foundation adapter checkpoint integrity mismatch")
-        adapter = cls(tick_size=checkpoint.tick_size)
-        adapter._lifecycle_owner = SemanticLifecycleOwner.restore(
-            checkpoint.lifecycle_checkpoint
-        )
-        adapter._lifecycle_transaction = None
-        adapter.lifecycle = adapter._lifecycle_owner.freeze()
-        adapter._lifecycle_generation_seen = (
-            adapter._lifecycle_owner.generation
-        )
+        if (
+            event_store.semantic_version != SMC_SEMANTIC_VERSION
+            or checkpoint.event_cursor > len(event_store)
+            or event_store.prefix_fingerprint(checkpoint.event_cursor)
+            != checkpoint.event_prefix_fingerprint
+            or record_ledger.record_count != checkpoint.ledger_record_count
+            or record_ledger.component_fingerprint
+            != checkpoint.ledger_component_fingerprint
+        ):
+            raise ValueError("foundation adapter cold authority binding differs")
         projection = FoundationProjectionReducer.restore(
             checkpoint.projection_checkpoint
         )
-        adapter._record_ledger = FoundationRecordLedger.restore(
-            checkpoint.record_ledger_checkpoint
+        cls._validate_cold_replay(
+            event_store=event_store,
+            event_cursor=checkpoint.event_cursor,
+            tick_size=checkpoint.tick_size,
+            record_ledger=record_ledger,
+            projection=projection,
+            lifecycle=checkpoint.lifecycle,
         )
+        adapter = object.__new__(cls)
+        adapter.tick_size = checkpoint.tick_size
+        adapter._event_store = event_store
+        adapter._record_ledger = record_ledger
+        adapter._event_cursor = checkpoint.event_cursor
+        adapter.lifecycle = checkpoint.lifecycle
         adapter._projection_owner = FoundationProjectionOwner(projection)
         adapter._owner_generation_seen = adapter._projection_owner.generation
         adapter._projection_transaction = None
-        adapter._last_order = checkpoint.last_order
-        adapter._seen_event_fingerprints = dict(
-            checkpoint.seen_event_fingerprints
+        adapter._last_order = (
+            None
+            if checkpoint.event_cursor == 0
+            else adapter._event_order(
+                event_store.events_since(checkpoint.event_cursor - 1)[0]
+            )
         )
-        adapter._seen_event_metadata = {
-            event_id: (known_at, origin)
-            for event_id, known_at, origin in checkpoint.seen_event_metadata
-        }
-        adapter._real_bars = list(checkpoint.real_bars)
-        adapter._crossings = {
-            (item.source_level_id, item.crossed_at): item
-            for item in checkpoint.crossings
-        }
-        adapter._structure_bindings = dict(checkpoint.structure_bindings)
+        adapter._state_schema_version = FOUNDATION_ADAPTER_STATE_SCHEMA_VERSION
+        adapter._staged_transaction_open = False
+        adapter._available_suffix = ()
+        adapter._available_offset = 0
+        adapter._projecting_event_id = None
         adapter._rebuild_derived_indexes()
         adapter.checkpoint()
-        return adapter
-
-    @classmethod
-    def replay(
-        cls,
-        events: Sequence[MarketEvent],
-        *,
-        tick_size: float,
-    ) -> "CanonicalFoundationAdapter":
-        adapter = cls(tick_size=tick_size)
-        for event in events:
-            adapter.consume(event)
         return adapter
 
 

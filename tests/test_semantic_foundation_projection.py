@@ -40,7 +40,6 @@ from smc_trader.semantic_lifecycle import (
     LiquidityLevelLifecycle,
     NormalizedLifecycleTransition,
     NormalizedTransitionKind,
-    SemanticLifecycleOwner,
     SemanticLifecycleReducer,
     StructureGeneration,
     StructureGenerationLifecycle,
@@ -1659,7 +1658,7 @@ def test_10k_fixed_object_revisions_keep_hot_projection_and_lifecycle_bounded() 
     assert final_projection_bytes - first_projection_bytes < 128
     assert final_transport_bytes - first_transport_bytes < 128
 
-    lifecycle_owner = SemanticLifecycleOwner()
+    lifecycle = SemanticLifecycleReducer.initial_state()
     first_lifecycle_bytes = None
     clock = _clock(0)
     for index in range(10_000):
@@ -1674,24 +1673,24 @@ def test_10k_fixed_object_revisions_keep_hot_projection_and_lifecycle_bounded() 
                 "real_completed": True,
             },
         )
-        transaction = lifecycle_owner.stage()
-        transaction.reduce(transition)
-        transaction.commit()
+        lifecycle = SemanticLifecycleReducer.reduce_hot(
+            lifecycle,
+            transition,
+        )
         if index == 0:
-            first_lifecycle_bytes = len(pickle.dumps(lifecycle_owner.freeze()))
+            first_lifecycle_bytes = len(pickle.dumps(lifecycle))
         clock = next_registered_native_completion(
             clock,
             timeframe_minutes=1,
         )
 
-    lifecycle = lifecycle_owner.freeze()
     final_lifecycle_bytes = len(pickle.dumps(lifecycle))
-    restored_lifecycle = SemanticLifecycleOwner.restore(
-        lifecycle_owner.checkpoint()
-    ).freeze()
+    restored_lifecycle = SemanticLifecycleReducer.restore(
+        SemanticLifecycleReducer.checkpoint(lifecycle)
+    )
     assert lifecycle == restored_lifecycle
-    assert lifecycle.transition_count == 10_000
-    assert lifecycle.applied_transition_fingerprints == {}
+    assert not hasattr(lifecycle, "transition_count")
+    assert not hasattr(lifecycle, "applied_transition_fingerprints")
     assert len(lifecycle.registered_bar_clocks) == 1
     assert len(lifecycle.real_bar_clocks) == 1
     assert final_lifecycle_bytes - first_lifecycle_bytes < 128

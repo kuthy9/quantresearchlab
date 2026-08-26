@@ -9,7 +9,6 @@ import pandas as pd
 import pytest
 
 from smc_trader.causal import CausalMarketReader
-from smc_trader.foundation_adapter import CanonicalFoundationAdapter
 from smc_trader.market_state import (
     SwingGeometryNode,
     dual_range_location,
@@ -46,6 +45,7 @@ from .test_foundation_adapter import _atomic as _adapter_atomic
 from .test_foundation_adapter import _clock as _adapter_clock
 from .test_foundation_adapter import _cross_level
 from .test_foundation_adapter import _seed_level
+from .test_foundation_adapter import CanonicalFoundationAdapter
 from .test_observer import _all_typed_observer_config, _tick_aligned_bars
 from .test_semantic_foundation_geometry import _balance_range, _swing
 
