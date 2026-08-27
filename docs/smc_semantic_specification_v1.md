@@ -329,7 +329,7 @@ formal runner exists and validates without opening data by default, but the
 current template has no bound non-zero intent ledger or minute source, is not
 frozen, and has no empirical result. The authoritative end-to-end handoff
 remains open. The current Phase 9 harness is `phase9_shadow_live_v1.3` with
-`shadow_compact_runtime_v4` and `phase9_shadow_component_digest_v2`.
+`shadow_compact_runtime_v8` and `phase9_shadow_component_digest_v3`.
 Earlier deterministic parity ran behind `NullExecutionGateway`; its 6,900-clock
 historical cold-start input and exact 200-clock checkpoint/resume/cold-replay
 prefix are retained evidence for the earlier path/model bindings

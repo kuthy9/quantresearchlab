@@ -427,7 +427,7 @@ def _build_eye(
             displacement_protocol=str(ROOT / raw["displacement_protocol"]),
             zone_protocol=str(ROOT / raw["zone_protocol"]),
             range_auction_protocol=str(ROOT / raw["range_auction_protocol"]),
-            interaction_protocol=str(ROOT / raw["group5_protocol"]),
+            interaction_protocol=str(ROOT / raw["interaction_protocol"]),
             persist_state_projections=False,
             semantic_registry=str(selection.atomic_registry.source_path),
             scale_specs=specs,
@@ -2954,7 +2954,7 @@ def _load_contract_and_registry(
         "displacement_protocol": "displacement_protocol",
         "zone_protocol": "group3_protocol",
         "range_auction_protocol": "group4_protocol",
-        "group5_protocol": "group5_protocol",
+        "interaction_protocol": "group5_protocol",
     }
     for model_field, binding_name in model_bindings.items():
         label = observer.get(model_field)

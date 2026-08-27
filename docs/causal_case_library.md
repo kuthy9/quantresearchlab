@@ -231,7 +231,7 @@ flags on unfilled or censored paths.
 Checkpoint/resume pickles the recorder inside the existing replay checkpoint.
 The run identity, exact Arrow schema fingerprints, shard hashes, row counts and
 contiguous shard indices are all verified before resume/finalization.
-Recorder schema 8 and causal-case protocol 1.7 bind the deterministic Scene
+Recorder schema 8 and causal-case protocol 1.8 bind the deterministic Scene
 projection together with the outcome-selection and censoring rules above;
 schema-7 artifacts and Brain runner-state schema 14 fail closed rather than
 resuming under the schema-8/runner-state-15 identities.

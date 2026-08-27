@@ -374,7 +374,7 @@ def _build_eye(model_path: Path) -> tuple[CausalMarketReader, CausalObserver]:
             displacement_protocol=str(ROOT / raw["displacement_protocol"]),
             zone_protocol=str(ROOT / raw["zone_protocol"]),
             range_auction_protocol=str(ROOT / raw["range_auction_protocol"]),
-            interaction_protocol=str(ROOT / raw["group5_protocol"]),
+            interaction_protocol=str(ROOT / raw["interaction_protocol"]),
             semantic_registry=str(selection.atomic_registry.source_path),
             scale_specs=specs,
             project_scene_graph=False,

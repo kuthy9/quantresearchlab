@@ -1,11 +1,16 @@
 # Current SMC Refactor Implementation Status
 
-Status date: 2026-08-25
+Status date: 2026-08-26
 Runtime semantic identity: `smc_semantics_v1.2`
 Canonical foundation identity: `smc_semantic_foundation_v2.0`
 Canonical foundation registry identity: `ac04636919931d774309a0c306764fdf8eb53aee41df0f31d4d94e5b9125732b`
 
-This is the current implementation-versus-plan authority. The
+This is the current implementation-versus-plan authority. Its 2026-08-26
+revision corrected stale schema/protocol/identity bindings and the Foundation
+hot-state description against the checked-in code; the per-item consolidation
+disposition and the evidence behind those corrections are in the
+[Eye/Brain consolidation audit](eye_brain_consolidation_audit_2026-08-26.md).
+The
 [Phase 2–5 completion report](phase_2_5_completion_report.md) remains the
 immutable historical report for the January 2024 v1.1 diagnostic; its sample
 counts, 24.04% matched-control coverage, and zero E3–E6 chain are baseline
@@ -45,12 +50,12 @@ registry/identity, then verifies that Foundation declares v1.2 as its parent.
 There is no `smc_semantics_v2.0` runtime and no synthetic full-stack version.
 `ContinuousSMCEngine` derives the internal projection gate from the validated
 pair and freezes the existing identities into Engine, Shadow, and checkpoint
-state. The current combined Engine checkpoint schema is 7; older schemas fail
+state. The current combined Engine checkpoint schema is 11; older schemas fail
 closed on restore into the current Observation, Foundation, and Neutral-state
-contracts. `MarketObservation` schema 3 publishes the canonical physical
-`InteractionUpdate`; `MarketSnapshot` remains schema 2. Shadow uses
-`phase9_shadow_live_v1.3`, compact checkpoint `shadow_compact_runtime_v4`, and
-component digest `phase9_shadow_component_digest_v2`. These
+contracts. `MarketObservation` schema 5 publishes the canonical physical
+`InteractionUpdate` (schema 2); `MarketSnapshot` is schema 5. Shadow uses
+`phase9_shadow_live_v1.3`, compact checkpoint `shadow_compact_runtime_v8`, and
+component digest `phase9_shadow_component_digest_v3`. These
 bindings grant no empirical, Brain, Trade Intent, execution, or live authority.
 
 The current model schema is 4. Its observer configuration selects
@@ -65,15 +70,16 @@ zone/reacceptance physical state, ordered physical milestones, and raw
 `qualified` flag. A single stateless Brain interpreter derives legacy entry
 sequence/setup vocabulary for playbook and risk consumers while retaining the
 frozen IDs. Legacy Group-5 fields live only in the explicit `group5.py`
-cold-reader adapter. They are absent from the schema-3 `MarketObservation`
-dataclass, constructor, exact pickle surface, and primitive transport; the
+cold-reader adapter. Schema 3 first removed them from the `MarketObservation`
+dataclass, constructor, exact pickle surface, and primitive transport, and the
+current schema-5 contract still excludes them; the
 canonical Observation carries only `interaction_update`. Interaction protocol,
 reducer, and DTO classes are internal-module imports and are not package-root
 exports. Historical case artifacts remain frozen evidence and are not accepted
 by current loaders. Current case artifacts no longer retain old slots:
 CausalCase
-schema 8/protocol 1.7 stores exact 15-key per-update raw Interaction payloads
-and an 11-key delta-only aggregate; MarketCase schema 2/protocol 1.3 stores the
+schema 8/protocol 1.8 stores exact 15-key per-update raw Interaction payloads
+and an 11-key delta-only aggregate; MarketCase schema 2/protocol 1.4 stores the
 same nine raw Interaction collections in its single-clock row. Brain runner
 state schema 15 and MarketCase runner state schema 8 reject older identities.
 The hash-bound historical `configs/data_splits.json` is unchanged; new
@@ -85,18 +91,30 @@ identity. Raw paths own physical custody only. The Brain module owns the sole
 aligned/opposed terminal-role classifier, so Neutral neither reinterprets
 MicroBreak facts nor maintains a parallel reason table.
 
-The compact-state migration is now implemented. `EventStore` owns
-atomic history; one append-only, in-memory `FoundationRecordLedger` owns full
-Foundation revisions. Hot Foundation state keeps the current logical-object
-view, required indexes, counts, current-view/rolling hashes, and lifecycle
-`fact_id → fingerprint` identities instead of full revision/transition DTO
-histories. Snapshot fingerprint/replay transport uses the compact view. Adapter
-transactions stage bounded suffix/write overlays over BAR, crossing, binding,
-and index containers and reject stale sibling commits. Production emits zero
-`FOUNDATION_STATE_CHANGED` events; its strict decoder remains legacy-read-only.
-Cold replay and checkpoint restore rebuild and compare the hot view. The cold
-ledger is still in memory, and an explicit checkpoint materializes its full
-history; it is not yet an external durable ledger.
+The compact-state migration is complete, and the hot Foundation projection
+authority has since been removed entirely. `EventStore` is the sole atomic
+history authority and `MarketSnapshot` is the sole current-market-view
+authority; neither carries a `FoundationRecord`, a Foundation revision list, or
+a Foundation current-view hash. `smc_trader/foundation_adapter.py` no longer
+exists, the Engine no longer carries `_foundation_version` or
+`_foundation_registry_identity` in its checkpoint state, and no runtime module
+constructs `FoundationProjection`, `FoundationProjectionReducer`, or
+`FoundationRecordLedger`. Production emits zero `FOUNDATION_STATE_CHANGED`
+events; `market_state.foundation_record_from_projection_event` remains the only
+strict, legacy-read-only decoder for historical journals.
+
+Foundation v2 therefore survives as three things and nothing else: the
+hash-bound `smc_semantic_foundation_v2.0` registry identity validated by
+`semantic_selection`; `foundation_version`-stamped Structural Leg evidence
+produced by `market_state.build_structural_legs` on the hot path; and a set of
+cold definition/replay modules (`semantic_foundation.py`,
+`semantic_lifecycle.py`, `semantic_zones.py`, and the geometry/cluster/range
+builders in `market_state.py`) whose only current consumers are their focused
+tests. Those definitions are deliberately retained, not deleted, but they are
+not a second lifecycle or state authority and must not be described as hot
+state. See the
+[Eye/Brain consolidation audit](eye_brain_consolidation_audit_2026-08-26.md)
+for the item-by-item disposition.
 
 ### Simplification audit and retained migration debt
 
@@ -308,8 +326,8 @@ Phase 9 has a `phase9_shadow_live_v1.3` no-submission parity runner with exact
 execution/account evidence, immutable evidence identities, frozen instrument
 mapping, fail-stop journal/failure/gateway parity, and
 `NullExecutionGateway`. Its current compact runner checkpoint is
-`shadow_compact_runtime_v4`, and its component digest is
-`phase9_shadow_component_digest_v2`. A retained tick-normalized schema-v2,
+`shadow_compact_runtime_v8`, and its component digest is
+`phase9_shadow_component_digest_v3`. A retained tick-normalized schema-v2,
 6,900-clock June Week-1 cold-start input was materialized (6,899 real plus one
 synthetic; SHA-256
 `fd9e48850d1657cf369e3e617e3e8b464790e9823f48c79b01f65bfc111a46e4`).
@@ -382,7 +400,7 @@ rolling OOF, or sealed OOS.
 
 | Phase | Status | What is present | What remains |
 |---|---|---|---|
-| 1. Auditable foundation | **Complete for the active v1.2 plus additive-v2 path** | Causal clocks, exact tick admission, hash-bound semantic identities, immutable events/store, source-kind and cross-object validation, lifecycle uniqueness, production config admission, Engine checkpoint-schema-6 restore, compact hot-state/cold-ledger replay, fingerprints, and determinism tests. Phase 9 pickles the complete runner, including the active Hypothesis Manager ledger. | The Foundation cold ledger remains in memory, and a directly queryable belief-update archive across retired scopes is not persisted; registered input journals can replay both. |
+| 1. Auditable foundation | **Complete for the active v1.2 plus additive-v2 path** | Causal clocks, exact tick admission, hash-bound semantic identities, immutable events/store, source-kind and cross-object validation, lifecycle uniqueness, production config admission, Engine checkpoint-schema-11 restore, compact hot-state/cold-ledger replay, fingerprints, and determinism tests. Phase 9 pickles the complete runner, including the active Hypothesis Manager ledger. | The Foundation cold ledger remains in memory, and a directly queryable belief-update archive across retired scopes is not persisted; registered input journals can replay both. |
 | 2. Core atomic semantics | **v1.2 producer plus additive foundation-v2 lifecycle complete** | Existing Swing/candidate/touch/penetration/Sweep/Acceptance/Raw Break/FVG/Displacement producers are unchanged. Foundation v2 adds complete Structural Leg paths, same-level rearm, level retirement, competing interaction terminals, boundary attack, and multi-bar formation ancestry. | No arbitrary time TTL or new tutorial SMC detector was added. Any empirical expiry threshold still requires a later study/version. |
 | 3. Derived structure | **Foundation definitions complete; empirical value untested** | Persistent internal/external Structure Generations and transitions, Base Origin Core versus Qualified OB, Structural versus Balance Range, and Delivery Phase Generation are independently represented. MSS starts or updates a forming challenger; it cannot itself confirm an opposite regime. | Range extension remains undefined. Foundation definitions do not validate predictive value or retroactively change v1.2 artifacts. |
 | 4. Timeframe and relation state | **Complete with distinct geometry and relation generations** | Timeframe/Session/Snapshot and role hierarchy remain; Foundation v2 adds geometric Swing assignments, dual range locations, and persistent cross-timeframe Relation Generations. | Outcome value is not implied by deterministic nesting or relation state and remains an empirical question. |
@@ -390,7 +408,7 @@ rolling OOF, or sealed OOS.
 | 6. MBO mechanism | **Complete for the registered two-week development study** | Primary week plus the preregistered underpowered extension passed engineering/data/statistical audit. Phase 7 allowlist: `acceptance_continuation`, `displacement_impact`; no Week 3. | Keep underpowered Sweep/MSS and the unsupported historical FVG first-concrete-lifecycle proxy excluded. A true first-retest estimand requires a new preregistration. This association result is not causal, OOS, model-fit, or trading authority. |
 | 7. Trading Brain | **Current-scope shadow lifecycle/interfaces integrated; fitted model not admitted** | Neutral state owns the canonical OpenMarketThesis tuple and Brain reuses it. Exact facts map to per-path falsification/winners; dependency guards, DOL ranking, fitted-artifact-only no-target projection, Signal Policy, Trade Intent, and loaders fail closed. The read-only checker verifies 7,381 Phase 6 rows and reports 13 blockers without fitting or writing. Equal priors and zero increments/decay remain neutral. | Preregister scope-rollover retirement/archive semantics; bind and execute the already-frozen June W4 design; narrow final Brain input to `MarketSnapshot + events`; fit, validate, load, and admit path/DOL/outcome artifacts. Pre-horizon per-path expiry/hazard/prior reversion also need separate definitions and fitted temporal evidence. |
 | 8. Execution Research | **Standalone FSM, evaluator, and formal runner complete; study/vertical gates not passed** | Seven entry methods can be compared under one frozen intent. Evaluator v1.1 separates entry GTT from analysis end, cancels a remainder when the target resolves before its pending fill, keeps primary-pair eligibility independent of secondary censoring, and rejects off-grid stop/target prices. The v2 runner enforces provenance, variant evaluability/censoring, no-clobber outputs, and validate-only default behavior. | Resolve the six current run-template blockers: produce and bind a non-zero intent/research-case ledger and minute source, register outputs and experiment identity, freeze and execute the paired study, then connect exact risk-approved intents to the FSM. |
-| 9. Shadow Live | **Deterministic parity harness implemented; current operational gate not passed** | v1.3/compact-v4/digest-v2 bind exact evidence/state identities. The 6,900-clock and Foundation 200-row receipts remain historical under their recorded pre-current bindings. The read-only capacity preflight evaluates historical evidence only and grants no run authority. | Re-freeze and rematerialize any new prefix or complete 6,900-clock rehearsal under the final source snapshot; preregister operational metrics, remove the full-week nonlinear capacity residual, then run the real-time multi-day no-order pilot. |
+| 9. Shadow Live | **Deterministic parity harness implemented; current operational gate not passed** | v1.3/compact-v8/digest-v3 bind exact evidence/state identities. The 6,900-clock and Foundation 200-row receipts remain historical under their recorded pre-current bindings. The read-only capacity preflight evaluates historical evidence only and grants no run authority. | Re-freeze and rematerialize any new prefix or complete 6,900-clock rehearsal under the final source snapshot; preregister operational metrics, remove the full-week nonlinear capacity residual, then run the real-time multi-day no-order pilot. |
 | Final OOS | **Not opened** | Split and sealed-holdout governance exist. | Open only after the vertical chain is stable and preregistered acceptance conditions are met. |
 
 ## Architecture-target conformance
@@ -411,7 +429,7 @@ The complete target state is **not** reached:
 | Brain | Neutral state is the single OpenMarketThesis authority and Brain reuses it; current-scope lifecycle and admission interfaces are executable, but the final sole-input boundary, scope retirement archive, fitted probabilities, and non-zero intents are absent. |
 | Signal Research | Full registered diagnostic executed; sparse later chains and empty controls prohibit fitting or semantic promotion. |
 | Execution Research | Order FSM, seven-entry-method core, provenance/variant contracts, and formal v2 runner exist. The current run template has six unresolved bindings and no non-zero ledger or empirical result. |
-| Shadow Live | The v1.3/compact-v4/digest-v2 harness is implemented, but existing 200/6,900-clock receipts bind earlier runtime/config bytes. A new frozen parity run, operational metrics, full-week capacity closure, and a real-time multi-day pilot are absent. |
+| Shadow Live | The v1.3/compact-v8/digest-v3 harness is implemented, but existing 200/6,900-clock receipts bind earlier runtime/config bytes. A new frozen parity run, operational metrics, full-week capacity closure, and a real-time multi-day pilot are absent. |
 | OOF/OOS/live execution | Intentionally unopened and unauthorized until the preceding vertical gates pass. |
 
 ## Remaining plan goals
@@ -626,7 +644,7 @@ and [result](../../experiments/results/smc_semantics_v1_2_2024_06_phase6_mbo_wee
   without opening data by default. The current run template still has six
   blockers; the empirical study and vertical TradeIntent-to-FSM handoff are not
   complete.
-- Phase 9: the v1.3/compact-v4/digest-v2 deterministic harness is implemented.
+- Phase 9: the v1.3/compact-v8/digest-v3 deterministic harness is implemented.
   Existing checkpoint/resume/cold-replay and Foundation 200-clock receipts are
   exact only for their historical bindings; no current-runtime parity receipt,
   capacity-safe 6,900-clock replay, operational metrics, or real-time multi-day

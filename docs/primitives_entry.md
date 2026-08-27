@@ -498,10 +498,11 @@ legacy import shim. The Eye-side schema exposes raw `MicroBreakFact` and
 physical milestone paths only. Aligned/opposed classification, path success,
 setup qualification, entry method, SL/TP, and TradeIntent are Brain-owned.
 Historical `MicroBOSReference` and interpreted path names exist only in the
-explicit `group5.py` cold-reader adapter and are not serialized by
-`MarketObservation` schema 3. Schema 3 removes the former Group-5 availability,
+explicit `group5.py` cold-reader adapter and are not serialized by the current
+`MarketObservation` contract. Schema 3 removed the former Group-5 availability,
 current-state, transition, and boundary fields from the canonical dataclass and
-exact pickle shape; all current consumers read its sole `interaction_update`.
+exact pickle shape, and the current schema-5 contract still excludes them; all
+current consumers read its sole `interaction_update`.
 `InteractionProtocol`, `InteractionSemantics`, and `InteractionUpdate` remain
 explicit internal-module imports rather than package-root public exports.
 `InteractionUpdate` has an exact schema-1 pickle and artifact contract. Its

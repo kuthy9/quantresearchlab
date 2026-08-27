@@ -9,6 +9,47 @@ runners in `scripts/`. Tests use `tests/test_*.py`. Frozen study contracts and
 results live in `experiments/`; current explanations and receipts live in
 `docs/` and `docs/evidence/`.
 
+## Runtime Architecture
+
+One data entry, one Eye entry, one history authority, one current view:
+
+```text
+Bar
+ └─ CausalMarketReader        causal.py            data normalizer
+     └─ CausalObserver        observation.py       semantic event engine
+         ├─ structure.py / liquidity.py / displacement.py
+         ├─ zone.py           (canonical owner of the former "Group 3")
+         ├─ range_auction.py  (canonical owner of the former "Group 4")
+         ├─ interaction.py    (Eye half of the former "Group 5")
+         ├─ event_store.py    EventStore — complete atomic history
+         └─ market_state.py   MarketSnapshotPublisher
+             ├─ TimeframeEventReducer → TimeframeState
+             ├─ RelationResolver      → RelationState
+             └─ SessionStateReducer   → SessionState
+                 └─ MarketSnapshot    — current market view
+ └─ ContinuousSMCEngine       engine.py            orchestration
+     ├─ brain_entry_sequence.py  Brain interpretation of Eye facts
+     ├─ neutral projection       one OpenMarketThesis per clock
+     ├─ playbooks.py             PlaybookBrain.update(...)
+     └─ decision.py → risk.py    sole runtime action authority
+```
+
+`scene_graph.py`, `eye_statistics.py`, `visualization.py`, `shadow_*`,
+`*_research*`, `causal_cases.py` and `market_cases.py` are optional projections
+and research consumers. They must never become a second market-state authority.
+
+Naming rule: `Zone`, `RangeAuction` and `Interaction` are the public concepts.
+`Group3`/`Group4`/`Group5` and `Phase 4/5/6` survive only as historical or
+internal migration names — in `group3.py`/`group4.py`/`group5.py` pickle shims,
+in `MarketObservation` field names, and in frozen research-manifest binding
+keys. Do not introduce them anywhere new.
+
+The item-by-item consolidation state, retained debt and registered next steps
+are in
+[docs/refactor/eye_brain_consolidation_audit_2026-08-26.md](docs/refactor/eye_brain_consolidation_audit_2026-08-26.md);
+the current implementation-versus-plan authority is
+[docs/refactor/current_implementation_status.md](docs/refactor/current_implementation_status.md).
+
 ## Build, Test, and Development Commands
 
 Create the environment with `uv sync --extra test`; there is no compile step.
@@ -18,7 +59,9 @@ Create the environment with `uv sync --extra test`; there is no compile step.
   groups are excluded by `pyproject.toml`.
 - `.venv/bin/python -m pytest -m 'research_runner or research_orchestration' -q -p no:cacheprovider`
   runs bounded study, publication, and operational-contract tests separately.
-- `.venv/bin/python -m pytest tests/test_foundation_adapter.py -q -p no:cacheprovider`
+  These are excluded from the default loop, so run them after touching a
+  research runner, a manifest template, or a runtime identity binding.
+- `.venv/bin/python -m pytest tests/test_semantic_foundation_projection.py -q -p no:cacheprovider`
   runs a focused contract file.
 - `git diff --check` catches whitespace errors before commit.
 
@@ -35,12 +78,30 @@ No formatter is configured; match adjacent code and group imports.
 
 ## Runtime Authority Boundaries
 
-`EventStore` owns atomic history; the in-memory Foundation ledger owns
-Foundation revisions. Hot projections and snapshots carry current views,
-counts, indexes, and rolling hashes—not full revision history. Do not restore
-production `FOUNDATION_STATE_CHANGED` emission; its decoder is legacy-read-only.
-The configured action authority remains `legacy_decision_risk_compat` until one
-registered TradeIntent-to-FSM migration replaces it.
+`EventStore` owns the complete atomic history; `MarketSnapshot` owns the current
+market view. Hot projections and snapshots carry current views, counts, indexes,
+and rolling hashes — not full revision history.
+
+Foundation v2 is no longer a runtime component. `foundation_adapter.py` was
+removed, no runtime module constructs `FoundationProjection`,
+`FoundationProjectionReducer` or `FoundationRecordLedger`, and the Engine
+carries no Foundation version in its checkpoint state. Foundation survives as
+the hash-bound `smc_semantic_foundation_v2.0` registry identity, as
+`foundation_version`-stamped Structural Leg evidence, and as cold definition
+modules (`semantic_foundation.py`, `semantic_lifecycle.py`, `semantic_zones.py`,
+and the geometry/cluster/range builders in `market_state.py`) whose only
+consumers are their focused tests. Retain those definitions; do not present them
+as hot state and do not build a second lifecycle engine beside them.
+
+Do not restore production `FOUNDATION_STATE_CHANGED` emission; its decoder is
+legacy-read-only. The configured action authority remains
+`legacy_decision_risk_compat` until one registered TradeIntent-to-FSM migration
+replaces it; `engine.py` rejects a non-zero `TradeIntent` before Decision/Risk.
+
+Never create a second history, state, thesis, lifecycle, or execution authority.
+A compatibility decoder or adapter may exist, but it may not become a production
+authority, and it must not be what a research contract attests: bind runtime
+provenance to the module that actually implements the semantics, not to a shim.
 
 ## Testing Guidelines
 

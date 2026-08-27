@@ -43,16 +43,31 @@ detectors and reducers were retained.
 normalized BAR + canonical v1.2 atomic facts
                       |
                       v
-       CanonicalFoundationAdapter
-              |                     |
-              v                     v
- FoundationRecordLedger     compact FoundationProjection
- (in-memory revisions;      (current view/count/
- checkpoint materializes)    rolling hashes)
+        EventStore (sole atomic history)
                       |
                       v
- MarketSnapshot.foundation / deterministic replay
+   MarketStateReducer -> MarketSnapshot (sole current view)
+                      |
+                      +--> foundation_version-stamped Structural Leg
+                      |    evidence (hot path)
+                      |
+                      +--> cold definition/replay modules:
+                           semantic_foundation.py, semantic_lifecycle.py,
+                           semantic_zones.py, market_state geometry/
+                           cluster/range builders (focused tests only)
 ```
+
+**Runtime disposition (2026-08-26).** The former `CanonicalFoundationAdapter`,
+`FoundationRecordLedger`, and hot `FoundationProjection` path have been removed
+from the runtime. `smc_trader/foundation_adapter.py` no longer exists, the
+Engine no longer carries a Foundation version or registry identity in its
+checkpoint state, and `MarketSnapshot` has no `foundation` slot. Every
+definition below remains the registered semantic authority and is unchanged;
+what changed is that its executable form is now a cold definition/replay layer
+plus the compact projections already folded into `market_state.py`, not a
+second hot state authority. The paragraphs in this section that describe hot
+adapter/ledger mechanics are retained below only as the historical record of
+that migration.
 
 The adapter is not a detector. It can consume only exact normalized-data or
 semantic-atomic facts already admitted by the immutable event store. Technical
@@ -75,11 +90,13 @@ derived compatibility detail, not a second configuration authority. This pair
 does not create `smc_semantics_v2.0` or any composite semantic identity. Engine
 and Shadow retain their existing version/identity receipt fields, and the
 model-config byte hash remains part of runtime identity. The current combined
-Engine checkpoint schema is 7; earlier checkpoints fail closed on restore into
+Engine checkpoint schema is 11; earlier checkpoints fail closed on restore into
 the current Observation, Foundation, and Neutral-state contracts.
 
-The compact migration separates history from hot state. `EventStore`
-owns atomic events; one append-only, in-memory `FoundationRecordLedger` owns all
+The compact migration (historical) separated history from hot state, and the
+hot half has since been removed entirely; read the following paragraph as the
+record of that intermediate state, not as current runtime. `EventStore`
+owns atomic events; one append-only, in-memory `FoundationRecordLedger` owned all
 Foundation revisions. Hot `FoundationProjection` publishes only current logical
 records, total count, current-view fingerprint, and append-chain fingerprint.
 Lifecycle hot state keeps current objects, exact fact fingerprints, count, and

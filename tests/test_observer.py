@@ -219,7 +219,7 @@ def test_direct_eye_defaults_to_no_scene_graph_projection() -> None:
     assert observer.config.project_scene_graph is False
     assert observation.scene_revision_id is None
     assert observer.last_scene_delta is None
-    assert observer.scene_graph.last_asof is None
+    assert observer.scene_graph is None
 
 
 def test_scene_delta_clone_matches_validated_replace_without_revalidating_payload(
@@ -1453,7 +1453,7 @@ def test_eye_authority_observer_pickle_resume_matches_uninterrupted() -> None:
     assert resumed_observation == baseline_observation
     assert resumed.memory.__dict__ == baseline.memory.__dict__
     assert resumed.last_scene_delta is None
-    assert resumed.scene_graph.last_asof is None
+    assert resumed.scene_graph is None
 
 
 def test_lightweight_event_view_requires_typed_group4_pipeline() -> None:

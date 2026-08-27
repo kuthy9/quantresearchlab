@@ -912,7 +912,7 @@ def load_frozen_phase6_contract(
         "runtime_displacement_observer": repository / "smc_trader/displacement_observer.py",
         "runtime_group3": repository / "smc_trader/zone.py",
         "runtime_group4": repository / "smc_trader/range_auction.py",
-        "runtime_group5": repository / "smc_trader/group5.py",
+        "runtime_group5": repository / "smc_trader/interaction.py",
         "runtime_scene_graph": repository / "smc_trader/scene_graph.py",
         "runtime_validation": repository / "smc_trader/validation.py",
         "pyproject": repository / "pyproject.toml",
@@ -927,7 +927,7 @@ def load_frozen_phase6_contract(
         "displacement_protocol": repository / "configs/primitives_displacement.json",
         "group3_protocol": repository / "configs/primitives_zones.json",
         "group4_protocol": repository / "configs/primitives_range.json",
-        "group5_protocol": repository / "configs/primitives_entry.json",
+        "group5_protocol": repository / "configs/primitives_interaction.json",
     }
     for name, expected in expected_protocol_paths.items():
         if paths[name] != expected.resolve():
@@ -958,7 +958,7 @@ def load_frozen_phase6_contract(
         ("displacement_protocol", "displacement_protocol"),
         ("zone_protocol", "group3_protocol"),
         ("range_auction_protocol", "group4_protocol"),
-        ("group5_protocol", "group5_protocol"),
+        ("interaction_protocol", "group5_protocol"),
     ):
         label = observer.get(field)
         if (

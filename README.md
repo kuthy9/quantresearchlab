@@ -275,7 +275,11 @@ from the `smc_semantics_v1.2` semantic identity):
 - [`configs/primitives_zones.json`](configs/primitives_zones.json): FVG and order-block zones;
 - [`configs/primitives_range.json`](configs/primitives_range.json): accumulation, dealing range and manipulation;
 - [`configs/primitives_interaction.json`](configs/primitives_interaction.json): current hot physical zone interaction, reclaim/hold, raw micro-break and ordered-milestone contract;
-- [`configs/primitives_entry.json`](configs/primitives_entry.json): frozen historical Group5 composite identity for cold artifacts and registered research runners, not current runtime wiring.
+- [`configs/primitives_entry.json`](configs/primitives_entry.json): frozen historical
+  Group5 composite identity. It is bound only by already-frozen manifests, frozen
+  case artifacts and the hash-bound `configs/data_splits.json` authority-scan
+  profiles. It is not current runtime wiring, and the current research manifest
+  templates bind `configs/primitives_interaction.json` instead.
 
 Current primitive protocol status:
 

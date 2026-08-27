@@ -69,13 +69,9 @@ deterministic TimeframeState reducers + SessionState
         ↓
 independent parent/child RelationState
         ↓
-CanonicalFoundationAdapter
-        ├── in-memory FoundationRecordLedger (immutable revision history)
-        └── compact Foundation current view + rolling identities
-                         ↓
-MarketSnapshot (atomic authority + compact replay projection)
+MarketSnapshot (atomic event-reducer authority + compact replay projection)
         ├── versioned factual StructuralOutcomeEngine (research output,
-        │   not MarketSnapshot/FoundationRecord state)
+        │   not MarketSnapshot state)
         ───── optional existing development-trader downstream ─────
 Temporal Market Scene Graph + GlobalMarketContext
         ↓
@@ -152,31 +148,31 @@ the selected atomic version. It does not mint a composite or “full-stack v2”
 identity. Engine construction loads this pair once and derives the internal
 Foundation-enabled flag; Engine, Shadow, and checkpoint state freeze and
 compare the existing version/identity fields. The current combined Engine
-checkpoint schema is 7; earlier schemas are rejected rather than restored into
+checkpoint schema is 11; earlier schemas are rejected rather than restored into
 an incompatible Observation, Foundation, or Neutral-state contract.
 
 ### Hot-state boundary
 
-`EventStore` is the sole authoritative atomic history. A separate,
-append-only in-memory `FoundationRecordLedger` is the single owner of immutable
-Foundation revisions and materializes full history only for explicit
-checkpoint or cold replay. Hot `FoundationProjection` state keeps the current
-logical-object view, total record count, current-view hash, and append-chain
-hash. Lifecycle state keeps current objects, `fact_id → fingerprint`, count,
-and rolling hash rather than full `AppliedTransition` DTO history.
+`EventStore` is the sole authoritative atomic history and `MarketSnapshot` is
+the sole current-market-view authority. There is no hot Foundation projection:
+`smc_trader/foundation_adapter.py` was removed, no runtime module constructs
+`FoundationProjection`, `FoundationProjectionReducer` or
+`FoundationRecordLedger`, and the Engine no longer carries a Foundation version
+or registry identity in its checkpoint state. `MarketSnapshot` fingerprinting
+and replay transport serialize only the compact current view and component
+identities; publishing an immutable view still copies current tuple/map
+references, bounded by live logical objects.
 
-`MarketSnapshot` fingerprinting and replay transport serialize only that
-compact current view and component identities. The adapter stages per-clock
-BAR/crossing/binding/index mutations in suffix/write overlays and rejects stale
-sibling commits. Tail revisions update hashes and affected indexes from their
-write set; checkpoint, pickle, transport, and cold replay retain full validation.
-Publishing an immutable view still copies current tuple/map references, bounded
-by live logical objects. Production emits no `FOUNDATION_STATE_CHANGED`; its
-enum, encoder helper, and strict decoder remain read-only compatibility seams
-for historical journals. Cold replay validates exact sources and reconstructs
-the hot projection. The cold ledger is still in memory and its checkpoint
-necessarily materializes full revision history; external durable archival
-remains separate work. Formal Signal and MBO research runners remain Eye-only.
+Production emits no `FOUNDATION_STATE_CHANGED`; its enum, encoder helper, and
+`market_state.foundation_record_from_projection_event` decoder remain read-only
+compatibility seams for historical journals. Foundation v2 now persists only as
+the hash-bound `smc_semantic_foundation_v2.0` registry identity in
+`semantic_selection`, as `foundation_version`-stamped Structural Leg evidence,
+and as cold definition modules (`semantic_foundation.py`,
+`semantic_lifecycle.py`, `semantic_zones.py`, and the geometry/cluster/range
+builders in `market_state.py`) exercised only by their focused tests. Those
+definitions are retained on purpose; they are not a second lifecycle or state
+authority. Formal Signal and MBO research runners remain Eye-only.
 
 `ContinuousSMCEngine` has one incremental trader path, and its trader replay
 calls that same engine. The frozen Phase 5 diagnostic is deliberately a
@@ -629,8 +625,8 @@ registered state digests; and the journal prefix. Duplicate identical feed IDs
 are idempotent, conflicting identity/content or causal-order violations fail
 stop, and the first failure becomes terminal evidence.
 
-Its current compact runner checkpoint is `shadow_compact_runtime_v4`, and its
-component identity is `phase9_shadow_component_digest_v2`. Every run requires
+Its current compact runner checkpoint is `shadow_compact_runtime_v8`, and its
+component identity is `phase9_shadow_component_digest_v3`. Every run requires
 the exact `ContinuousSMCEngine` and exact
 `NullExecutionGateway` classes, so an external submission attempt fails and is
 included in parity state. Cold replay and checkpoint restart compare records,

@@ -20,10 +20,7 @@ from typing import TYPE_CHECKING, Any, Iterable, Mapping, Sequence
 import pandas as pd
 
 from .event_store import EventStore
-from .foundation_registry import (
-    FOUNDATION_CANONICAL_IDENTITY,
-    FOUNDATION_VERSION,
-)
+from .foundation_registry import FOUNDATION_VERSION
 from .market_clock import (
     expected_trading_minutes,
     next_registered_native_completion,

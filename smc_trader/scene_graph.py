@@ -42,7 +42,6 @@ from .model import (
     GlobalConflictEvidence,
     GlobalConflictRole,
     GlobalMarketContext,
-    LiquidityInventoryItem,
     LiquidityInventoryLifecycle,
     LiquidityPoolLifecycle,
     ManipulationLifecycle,

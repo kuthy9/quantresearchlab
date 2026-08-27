@@ -119,7 +119,7 @@ RUNTIME_CODE_FILES = (
     "smc_trader/eye_statistics.py",
     "smc_trader/zone.py",
     "smc_trader/range_auction.py",
-    "smc_trader/group5.py",
+    "smc_trader/interaction.py",
     "smc_trader/io.py",
     "smc_trader/liquidity.py",
     "smc_trader/market_clock.py",

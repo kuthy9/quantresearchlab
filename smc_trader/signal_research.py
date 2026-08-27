@@ -42,7 +42,7 @@ REQUIRED_RUNTIME_CODE_BINDINGS: Mapping[str, str] = MappingProxyType(
         "runtime_displacement_observer": "smc_trader/displacement_observer.py",
         "runtime_group3": "smc_trader/zone.py",
         "runtime_group4": "smc_trader/range_auction.py",
-        "runtime_group5": "smc_trader/group5.py",
+        "runtime_group5": "smc_trader/interaction.py",
         "runtime_scene_graph": "smc_trader/scene_graph.py",
         "runtime_signal_research": "smc_trader/signal_research.py",
         "runtime_validation": "smc_trader/validation.py",

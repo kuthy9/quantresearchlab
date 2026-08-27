@@ -962,6 +962,11 @@ class ContinuousSMCEngine:
             raise RuntimeError(
                 "scene graph compaction requires a completed Engine snapshot"
             )
+        if self.observer.scene_graph is None:
+            raise RuntimeError(
+                "scene graph compaction requires an enabled Scene Graph "
+                "projection"
+            )
 
         identities: set[str] = set()
 

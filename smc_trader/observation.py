@@ -70,7 +70,6 @@ from .model import (
     MarketEvent,
     MarketObservation,
     OrderBlockLifecycle,
-    PathSequenceStep,
     PathSequenceLifecycle,
     PathSequenceState,
     StructureLifecycle,
@@ -82,7 +81,6 @@ from .model import (
     SMC_SEMANTIC_VERSION,
     candle_identity,
     clamp,
-    price_to_ticks,
     to_primitive,
     typed_event_entity_key,
 )
@@ -2009,7 +2007,14 @@ class CausalObserver:
         ):
             raise ValueError("observer scale registry is invalid")
         self._scale_registry_id = scale_registry_id(self.scale_specs)
-        self.scene_graph = TemporalMarketSceneGraph()
+        # The Scene Graph is an optional research/visualization projection, not
+        # an Eye state authority.  A graph-free Eye must not allocate, carry or
+        # checkpoint a second market-state container it never updates.
+        self.scene_graph: TemporalMarketSceneGraph | None = (
+            TemporalMarketSceneGraph()
+            if self.config.project_scene_graph
+            else None
+        )
         self.last_scene_delta: SceneGraphDelta | None = None
         displacement_protocol = (
             DisplacementProtocol.from_file(
@@ -9444,6 +9449,10 @@ class CausalObserver:
             )
             raise
         if self.config.project_scene_graph:
+            if self.scene_graph is None:
+                raise RuntimeError(
+                    "scene-graph projection is enabled without a graph"
+                )
             try:
                 self.last_scene_delta = self.scene_graph.update(observation)
                 observation = observation._with_scene_delta(
