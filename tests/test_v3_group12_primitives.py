@@ -52,9 +52,9 @@ from smc_trader.observation import (
     ObserverConfig,
     _atr,
     _candle_structure,
-    _event,
     _strict_prior_atr,
 )
+from smc_trader.semantic_event_emitter import _event
 from smc_trader.playbooks import _visible_levels
 from smc_trader.risk import _visible_level_ids
 from smc_trader.structure import StructureConfig, StructureTracker
@@ -171,7 +171,7 @@ def _append_authoritative_high_swing_root(
         ),
     )
     bar_event_ids = tuple(
-        observer._append_completed_bar_event(
+        observer._emitter._append_completed_bar_event(
             candle,
             atr=1.0,
             data_complete=True,
@@ -180,7 +180,7 @@ def _append_authoritative_high_swing_root(
     )
     pivot = window[1]
     confirmed_at = window[-1].end
-    event = observer._append_semantic_atomic(
+    event = observer._emitter._append_semantic_atomic(
         EventKind.SWING_CONFIRMED,
         confirmed_at,
         Timeframe.M1,
@@ -205,7 +205,7 @@ def _append_authoritative_high_swing_root(
         event_time=pivot.start,
         source_entity_ids=(swing_id,),
     )
-    observer._confirmed_swing_event_ids[swing_id] = event.event_id
+    observer._emitter._confirmed_swing_event_ids[swing_id] = event.event_id
     return event
 
 
@@ -272,17 +272,17 @@ def test_confirmed_swing_crossing_key_is_timeframe_scoped_and_resolves() -> None
         failure_reason="close_beyond_swing",
     )
     level_id = f"swing:{swing.swing_id}"
-    generation_id = observer._crossing_generation_id(
+    generation_id = observer._emitter._crossing_generation_id(
         level_id=level_id,
         timeframe=Timeframe.M1,
         crossed_at=crossed_at,
     )
-    m1_key = observer._penetration_key(
+    m1_key = observer._emitter._penetration_key(
         level_id=level_id,
         timeframe=Timeframe.M1,
         crossed_at=crossed_at,
     )
-    m5_key = observer._penetration_key(
+    m5_key = observer._emitter._penetration_key(
         level_id=level_id,
         timeframe=Timeframe.M5,
         crossed_at=crossed_at,
@@ -313,14 +313,14 @@ def test_confirmed_swing_crossing_key_is_timeframe_scoped_and_resolves() -> None
         ),
     )
     swing_bar_event_ids = tuple(
-        observer._append_completed_bar_event(
+        observer._emitter._append_completed_bar_event(
             candle,
             atr=1.0,
             data_complete=True,
         ).event_id
         for candle in swing_window
     )
-    swing_root = observer._append_semantic_atomic(
+    swing_root = observer._emitter._append_semantic_atomic(
         EventKind.SWING_CONFIRMED,
         swing.confirmed_at,
         Timeframe.M1,
@@ -353,12 +353,12 @@ def test_confirmed_swing_crossing_key_is_timeframe_scoped_and_resolves() -> None
         low=99.5,
         close=100.25,
     )
-    break_bar_event = observer._append_completed_bar_event(
+    break_bar_event = observer._emitter._append_completed_bar_event(
         break_bar,
         atr=1.0,
         data_complete=True,
     )
-    candidate = observer._append_semantic_atomic(
+    candidate = observer._emitter._append_semantic_atomic(
         EventKind.LIQUIDITY_LEVEL_CREATED,
         swing.confirmed_at,
         Timeframe.M1,
@@ -377,7 +377,7 @@ def test_confirmed_swing_crossing_key_is_timeframe_scoped_and_resolves() -> None
         zone=(swing.price, swing.price),
         source_entity_ids=(level_id, swing.swing_id),
     )
-    touch = observer._append_semantic_atomic(
+    touch = observer._emitter._append_semantic_atomic(
         EventKind.LEVEL_TOUCHED,
         crossed_at,
         Timeframe.M1,
@@ -392,7 +392,7 @@ def test_confirmed_swing_crossing_key_is_timeframe_scoped_and_resolves() -> None
         event_time=crossed_at,
         zone=(swing.price, swing.price),
     )
-    penetration = observer._append_semantic_atomic(
+    penetration = observer._emitter._append_semantic_atomic(
         EventKind.LEVEL_PENETRATED,
         crossed_at,
         Timeframe.M1,
@@ -410,9 +410,9 @@ def test_confirmed_swing_crossing_key_is_timeframe_scoped_and_resolves() -> None
         event_time=crossed_at,
         zone=(swing.price, swing.price),
     )
-    observer._penetration_event_ids[m1_key] = penetration.event_id
-    observer._confirmed_swing_event_ids[swing.swing_id] = swing_root.event_id
-    observer._candidate_level_event_ids[level_id] = candidate.event_id
+    observer._emitter._penetration_event_ids[m1_key] = penetration.event_id
+    observer._emitter._confirmed_swing_event_ids[swing.swing_id] = swing_root.event_id
+    observer._emitter._candidate_level_event_ids[level_id] = candidate.event_id
     crossing_frame = FrameObservation(
         timeframe=Timeframe.M1,
         cutoff=crossed_at,
@@ -421,15 +421,16 @@ def test_confirmed_swing_crossing_key_is_timeframe_scoped_and_resolves() -> None
         ready=True,
         swings=(swing,),
     )
-    observer._record_frame_events(
+    observer._emitter._record_frame_events(
         crossing_frame,
         True,
         event_clock=crossed_at,
+            prior=observer._prior,
     )
-    penetration_event_id = observer._penetration_event_ids.get(m1_key)
+    penetration_event_id = observer._emitter._penetration_event_ids.get(m1_key)
     assert penetration_event_id is not None
-    observer._penetration_event_ids[m5_key] = "other-timeframe-penetration"
-    assert generation_id not in observer._terminal_crossing_events
+    observer._emitter._penetration_event_ids[m5_key] = "other-timeframe-penetration"
+    assert generation_id not in observer._emitter._terminal_crossing_events
 
     synthetic_resolution = _candle(
         5,
@@ -439,20 +440,21 @@ def test_confirmed_swing_crossing_key_is_timeframe_scoped_and_resolves() -> None
         close=100.0,
         synthetic=True,
     )
-    synthetic_root = observer._append_completed_bar_event(
+    synthetic_root = observer._emitter._append_completed_bar_event(
         synthetic_resolution,
         atr=1.0,
         data_complete=True,
     )
-    observer._record_frame_events(
+    observer._emitter._record_frame_events(
         replace(crossing_frame, cutoff=synthetic_resolution.end),
         True,
         event_clock=synthetic_resolution.end,
+            prior=observer._prior,
     )
-    assert generation_id not in observer._terminal_crossing_events
+    assert generation_id not in observer._emitter._terminal_crossing_events
     assert synthetic_root.event_id in {
         event_id
-        for _, event_id in observer._bar_event_ids_by_timeframe[
+        for _, event_id in observer._emitter._bar_event_ids_by_timeframe[
             Timeframe.M1
         ]
     }
@@ -460,7 +462,7 @@ def test_confirmed_swing_crossing_key_is_timeframe_scoped_and_resolves() -> None
         ValueError,
         match="no exact completed-bar source",
     ):
-        observer._bar_event_id_at(
+        observer._emitter._bar_event_id_at(
             Timeframe.M1,
             synthetic_resolution.end,
         )
@@ -472,17 +474,18 @@ def test_confirmed_swing_crossing_key_is_timeframe_scoped_and_resolves() -> None
         low=99.75,
         close=100.25,
     )
-    observer._append_completed_bar_event(
+    observer._emitter._append_completed_bar_event(
         resolution_bar,
         atr=1.0,
         data_complete=True,
     )
-    observer._record_frame_events(
+    observer._emitter._record_frame_events(
         replace(crossing_frame, cutoff=resolution_bar.end),
         True,
         event_clock=resolution_bar.end,
+            prior=observer._prior,
     )
-    terminal = observer._terminal_crossing_events.get(generation_id)
+    terminal = observer._emitter._terminal_crossing_events.get(generation_id)
 
     assert terminal is not None
     assert terminal.kind is EventKind.ACCEPTANCE_CONFIRMED
@@ -502,7 +505,7 @@ def test_confirmed_swing_crossing_key_is_timeframe_scoped_and_resolves() -> None
         ValueError,
         match="conflicting terminal resolutions",
     ):
-        observer._append_crossing_resolution(
+        observer._emitter._append_crossing_resolution(
             EventKind.ACCEPTANCE_CONFIRMED,
             resolution_bar.end + pd.Timedelta(minutes=1),
             Timeframe.M1,
@@ -514,6 +517,7 @@ def test_confirmed_swing_crossing_key_is_timeframe_scoped_and_resolves() -> None
             direction=Direction.LONG,
             crossed_at=crossed_at,
             zone=(swing.price, swing.price),
+            known_at=resolution_bar.end + pd.Timedelta(minutes=1),
         )
 
 
@@ -1031,7 +1035,7 @@ def test_descriptive_compression_does_not_create_a_legacy_event() -> None:
         "compression": 0.7,
         "atr": 1.0,
     }
-    observer._record_frame_events(
+    observer._emitter._record_frame_events(
         FrameObservation(
             timeframe=Timeframe.M5,
             cutoff=mixed_cutoff,
@@ -1040,13 +1044,14 @@ def test_descriptive_compression_does_not_create_a_legacy_event() -> None:
         ),
         newly_completed=True,
         event_clock=real_cutoff,
+            prior=observer._prior,
     )
     assert observer.memory.recent() == ()
     with pytest.raises(
         ValueError,
         match="frame event clock cannot exceed the observation cutoff",
     ):
-        observer._record_frame_events(
+        observer._emitter._record_frame_events(
             FrameObservation(
                 timeframe=Timeframe.M5,
                 cutoff=mixed_cutoff,
@@ -1055,6 +1060,7 @@ def test_descriptive_compression_does_not_create_a_legacy_event() -> None:
             ),
             newly_completed=True,
             event_clock=mixed_cutoff + pd.Timedelta(minutes=1),
+                    prior=observer._prior,
         )
 
 
@@ -1284,7 +1290,7 @@ def test_forming_structure_identity_and_failure_clock_are_frozen() -> None:
     observer = CausalObserver(
         ObserverConfig(scale_specs=CORE_TEST_SCALE_SPECS)
     )
-    observer._record_frame_events(
+    observer._emitter._record_frame_events(
         FrameObservation(
             timeframe=Timeframe.M1,
             cutoff=short_state.formation_failed_at,
@@ -1293,6 +1299,7 @@ def test_forming_structure_identity_and_failure_clock_are_frozen() -> None:
             structures=(short_state,),
         ),
         newly_completed=True,
+            prior=observer._prior,
     )
     failed_event = next(
         item
@@ -1452,7 +1459,7 @@ def test_pending_bos_cannot_hide_raw_break_strength() -> None:
     observer = CausalObserver(
         ObserverConfig(scale_specs=CORE_TEST_SCALE_SPECS)
     )
-    observer._record_frame_events(
+    observer._emitter._record_frame_events(
         FrameObservation(
             timeframe=Timeframe.M1,
             cutoff=resolved_at,
@@ -1461,8 +1468,9 @@ def test_pending_bos_cannot_hide_raw_break_strength() -> None:
             structure_breaks=(pending,),
         ),
         newly_completed=True,
+            prior=observer._prior,
     )
-    observer._record_frame_events(
+    observer._emitter._record_frame_events(
         FrameObservation(
             timeframe=Timeframe.M1,
             cutoff=resolved_at,
@@ -1471,6 +1479,7 @@ def test_pending_bos_cannot_hide_raw_break_strength() -> None:
             structure_breaks=(confirmed,),
         ),
         newly_completed=True,
+            prior=observer._prior,
     )
     events = {
         item.lifecycle: item
@@ -2364,7 +2373,7 @@ def test_reference_candidate_publishes_at_admission_with_exact_extreme_bars() ->
     equal_extrema = reference_candle("2025-01-06 17:59", 103.0, 97.0)
     admission = reference_candle("2025-01-06 18:00", 102.0, 98.0)
     for candle in (first, extrema, equal_extrema, admission):
-        observer._append_completed_bar_event(
+        observer._emitter._append_completed_bar_event(
             candle,
             atr=1.0,
             data_complete=True,
@@ -2435,7 +2444,7 @@ def test_reference_candidate_replacement_is_explicit_and_not_duplicated() -> Non
         "2025-01-06 18:00", 102.0, 98.0
     )
     for candle in (first_session_tail, first_admission):
-        observer._append_completed_bar_event(
+        observer._emitter._append_completed_bar_event(
             candle,
             atr=1.0,
             data_complete=True,
@@ -2458,7 +2467,7 @@ def test_reference_candidate_replacement_is_explicit_and_not_duplicated() -> Non
     second_admission = reference_candle(
         "2025-01-07 18:00", 104.0, 96.0
     )
-    observer._append_completed_bar_event(
+    observer._emitter._append_completed_bar_event(
         second_admission,
         atr=1.0,
         data_complete=True,
@@ -2554,7 +2563,7 @@ def test_reference_candidate_cold_bootstrap_keeps_latest_and_reset_clears() -> N
         reference_candle("2025-01-07 18:00", 103.0, 97.0),
     )
     for candle in candles:
-        observer._append_completed_bar_event(
+        observer._emitter._append_completed_bar_event(
             candle,
             atr=1.0,
             data_complete=True,
@@ -2596,14 +2605,14 @@ def test_reference_candidate_cold_bootstrap_keeps_latest_and_reset_clears() -> N
     assert observer._reference_periods == {}
     assert observer._reference_inventory == {}
     assert observer._reference_candidate_sources == {}
-    assert observer._candidate_level_event_ids == {}
+    assert observer._emitter._candidate_level_event_ids == {}
     assert all(
         not events
-        for events in observer._bar_event_ids_by_timeframe.values()
+        for events in observer._emitter._bar_event_ids_by_timeframe.values()
     )
     assert all(
         not events
-        for events in observer._real_bar_event_ids_by_timeframe.values()
+        for events in observer._emitter._real_bar_event_ids_by_timeframe.values()
     )
 
 
@@ -3044,13 +3053,13 @@ def _reference_sr_binding_fixture(
         close=99.0,
     )
     observer.memory.observe_minute(extreme)
-    extreme_bar = observer._append_completed_bar_event(
+    extreme_bar = observer._emitter._append_completed_bar_event(
         extreme,
         atr=1.0,
         data_complete=True,
     )
     observer.memory.observe_minute(admission)
-    admission_bar = observer._append_completed_bar_event(
+    admission_bar = observer._emitter._append_completed_bar_event(
         admission,
         atr=1.0,
         data_complete=True,
@@ -3082,7 +3091,7 @@ def _reference_sr_binding_fixture(
     observer._reference_inventory[item.item_id] = item
     candidate = None
     if publish:
-        candidate = observer._append_semantic_atomic(
+        candidate = observer._emitter._append_semantic_atomic(
             EventKind.LIQUIDITY_LEVEL_CREATED,
             admission.end,
             Timeframe.M1,
@@ -3108,7 +3117,7 @@ def _reference_sr_binding_fixture(
             zone=(item.price, item.price),
             source_entity_ids=(item.item_id, *item.source_ids),
         )
-        observer._candidate_level_event_ids[item.item_id] = candidate.event_id
+        observer._emitter._candidate_level_event_ids[item.item_id] = candidate.event_id
     zone = SupportResistanceState(
         zone_id=f"reference-zone:{family}:{suffix}",
         timeframe=Timeframe.M1,
@@ -3154,7 +3163,7 @@ def test_reference_sr_zone_keeps_underlying_reference_candidate_only(
         zone_side=zone_side,
     )
     assert candidate is not None
-    observer._record_frame_events(
+    observer._emitter._record_frame_events(
         FrameObservation(
             timeframe=Timeframe.M1,
             cutoff=candle.end,
@@ -3164,6 +3173,7 @@ def test_reference_sr_zone_keeps_underlying_reference_candidate_only(
         ),
         newly_completed=True,
         event_clock=candle.end,
+            prior=observer._prior,
     )
 
     state_event = next(
@@ -3174,9 +3184,9 @@ def test_reference_sr_zone_keeps_underlying_reference_candidate_only(
     assert state_event.entity_id == zone.zone_id
     assert state_event.source_ids == zone.source_ids
     assert state_event.details["source_kind"] == family
-    assert zone.zone_id not in observer._candidate_level_event_ids
+    assert zone.zone_id not in observer._emitter._candidate_level_event_ids
     assert (
-        observer._candidate_level_event_ids[item.item_id]
+        observer._emitter._candidate_level_event_ids[item.item_id]
         == candidate.event_id
     )
     observer.memory.flush_audit()
@@ -3215,7 +3225,7 @@ def test_reference_sr_zone_never_backfills_companion_dol_from_inventory(
             anchor_price=zone.anchor_price + 0.25,
             upper_bound=zone.upper_bound + 0.25,
         )
-    observer._record_frame_events(
+    observer._emitter._record_frame_events(
         FrameObservation(
             timeframe=Timeframe.M1,
             cutoff=candle.end,
@@ -3225,11 +3235,12 @@ def test_reference_sr_zone_never_backfills_companion_dol_from_inventory(
         ),
         newly_completed=True,
         event_clock=candle.end,
+            prior=observer._prior,
     )
 
-    assert zone.zone_id not in observer._candidate_level_event_ids
+    assert zone.zone_id not in observer._emitter._candidate_level_event_ids
     assert (
-        observer._candidate_level_event_ids[item.item_id]
+        observer._emitter._candidate_level_event_ids[item.item_id]
         == candidate.event_id
     )
 
@@ -3239,7 +3250,7 @@ def test_reference_sr_zone_does_not_merge_underlying_candidates() -> None:
     assert candidate is not None
     duplicate = replace(item, item_id=f"{item.item_id}:duplicate")
     observer._reference_inventory[duplicate.item_id] = duplicate
-    duplicate_candidate = observer._append_semantic_atomic(
+    duplicate_candidate = observer._emitter._append_semantic_atomic(
         EventKind.LIQUIDITY_LEVEL_CREATED,
         candle.end,
         Timeframe.M1,
@@ -3257,11 +3268,11 @@ def test_reference_sr_zone_does_not_merge_underlying_candidates() -> None:
         zone=(duplicate.price, duplicate.price),
         source_entity_ids=(duplicate.item_id, *duplicate.source_ids),
     )
-    observer._candidate_level_event_ids[duplicate.item_id] = (
+    observer._emitter._candidate_level_event_ids[duplicate.item_id] = (
         duplicate_candidate.event_id
     )
 
-    observer._record_frame_events(
+    observer._emitter._record_frame_events(
         FrameObservation(
             timeframe=Timeframe.M1,
             cutoff=candle.end,
@@ -3271,10 +3282,11 @@ def test_reference_sr_zone_does_not_merge_underlying_candidates() -> None:
         ),
         newly_completed=True,
         event_clock=candle.end,
+            prior=observer._prior,
     )
 
-    assert zone.zone_id not in observer._candidate_level_event_ids
-    assert observer._candidate_level_event_ids == {
+    assert zone.zone_id not in observer._emitter._candidate_level_event_ids
+    assert observer._emitter._candidate_level_event_ids == {
         item.item_id: candidate.event_id,
         duplicate.item_id: duplicate_candidate.event_id,
     }
@@ -3286,7 +3298,7 @@ def test_reference_sr_zone_does_not_create_missing_underlying_candidate() -> Non
     )
     assert candidate is None
 
-    observer._record_frame_events(
+    observer._emitter._record_frame_events(
         FrameObservation(
             timeframe=Timeframe.M1,
             cutoff=candle.end,
@@ -3296,10 +3308,11 @@ def test_reference_sr_zone_does_not_create_missing_underlying_candidate() -> Non
         ),
         newly_completed=True,
         event_clock=candle.end,
+            prior=observer._prior,
     )
 
-    assert item.item_id not in observer._candidate_level_event_ids
-    assert zone.zone_id not in observer._candidate_level_event_ids
+    assert item.item_id not in observer._emitter._candidate_level_event_ids
+    assert zone.zone_id not in observer._emitter._candidate_level_event_ids
 
 
 def test_partial_cold_start_period_never_becomes_previous_session() -> None:
@@ -3914,9 +3927,10 @@ def test_observer_pool_event_projection_and_timeline_wiring() -> None:
         metrics={},
         liquidity_pools=(formed,),
     )
-    observer._record_frame_events(
+    observer._emitter._record_frame_events(
         formation_frame,
         newly_completed=True,
+            prior=observer._prior,
     )
     sweep_candle = _candle(
         2,
@@ -3925,12 +3939,12 @@ def test_observer_pool_event_projection_and_timeline_wiring() -> None:
         low=100.5,
         close=101.0,
     )
-    observer._append_completed_bar_event(
+    observer._emitter._append_completed_bar_event(
         sweep_candle,
         atr=1.0,
         data_complete=True,
     )
-    observer._append_projected_pool_sweep_events(
+    observer._emitter._append_projected_pool_sweep_events(
         inventory,
         sweep_candle,
         atr=1.0,
@@ -3942,15 +3956,16 @@ def test_observer_pool_event_projection_and_timeline_wiring() -> None:
         low=100.5,
         close=101.0,
     )
-    observer._append_completed_bar_event(
+    observer._emitter._append_completed_bar_event(
         resolution_candle,
         atr=1.0,
         data_complete=True,
     )
-    observer._append_projected_pool_resolution_event(
+    observer._emitter._append_projected_pool_resolution_event(
         inventory,
         resolution_candle,
         crossed_at=sweep_candle.end,
+            range_auction_tracker=observer._range_auction_tracker,
     )
     observer.memory.flush_audit()
     terminal = next(
@@ -4123,7 +4138,7 @@ def test_zone_visibility_retires_stale_evidence_and_pins_unresolved_pool() -> No
                     transition_reason="capacity_eviction",
             )
             first_retired_zone_id = retired[0].zone_id
-            overflow_observer._record_frame_events(
+            overflow_observer._emitter._record_frame_events(
                 FrameObservation(
                     timeframe=Timeframe.M1,
                     cutoff=BASE + pd.Timedelta(minutes=9),
@@ -4132,6 +4147,7 @@ def test_zone_visibility_retires_stale_evidence_and_pins_unresolved_pool() -> No
                     support_resistance=zones,
                 ),
                 newly_completed=True,
+                            prior=overflow_observer._prior,
             )
             first_retired_event_id = next(
                 item.event_id
@@ -4739,7 +4755,7 @@ def test_terminal_event_duration_closes_and_broken_zone_remains_open() -> None:
     tested_observer = CausalObserver(
         ObserverConfig(scale_specs=CORE_TEST_SCALE_SPECS)
     )
-    tested_observer._record_frame_events(
+    tested_observer._emitter._record_frame_events(
         FrameObservation(
             timeframe=Timeframe.M1,
             cutoff=tested_at,
@@ -4748,6 +4764,7 @@ def test_terminal_event_duration_closes_and_broken_zone_remains_open() -> None:
             support_resistance=(tested,),
         ),
         newly_completed=True,
+            prior=tested_observer._prior,
     )
     event_count = len(tested_observer.memory._events)
     third_touch_at = BASE + pd.Timedelta(minutes=2)
@@ -4759,7 +4776,7 @@ def test_terminal_event_duration_closes_and_broken_zone_remains_open() -> None:
         age_bars=2,
         total_touch_count=3,
     )
-    tested_observer._record_frame_events(
+    tested_observer._emitter._record_frame_events(
         FrameObservation(
             timeframe=Timeframe.M1,
             cutoff=third_touch_at,
@@ -4768,6 +4785,7 @@ def test_terminal_event_duration_closes_and_broken_zone_remains_open() -> None:
             support_resistance=(updated_tested,),
         ),
         newly_completed=True,
+            prior=tested_observer._prior,
     )
     assert updated_tested.touch_count == 3
     assert len(tested_observer.memory._events) == event_count + 1
@@ -4813,7 +4831,7 @@ def test_terminal_event_duration_closes_and_broken_zone_remains_open() -> None:
     observer = CausalObserver(
         ObserverConfig(scale_specs=CORE_TEST_SCALE_SPECS)
     )
-    observer._record_frame_events(frame, newly_completed=True)
+    observer._emitter._record_frame_events(frame, newly_completed=True, prior=observer._prior)
     broken_event = next(
         item
         for item in observer.memory.recent()
@@ -4826,9 +4844,10 @@ def test_terminal_event_duration_closes_and_broken_zone_remains_open() -> None:
     assert durations[broken_event.event_id] == 4
 
     count = len(observer.memory._events)
-    observer._record_frame_events(
+    observer._emitter._record_frame_events(
         replace(frame, cutoff=broken_at + pd.Timedelta(minutes=1)),
         newly_completed=False,
+            prior=observer._prior,
     )
     assert len(observer.memory._events) == count
 
@@ -4839,7 +4858,7 @@ def test_terminal_event_duration_closes_and_broken_zone_remains_open() -> None:
         retired_at=retired_at,
         transition_reason=SUPPORT_RESISTANCE_RETIREMENT_REASON,
     )
-    observer._record_frame_events(
+    observer._emitter._record_frame_events(
         replace(
             frame,
             cutoff=retired_at,
@@ -4847,6 +4866,7 @@ def test_terminal_event_duration_closes_and_broken_zone_remains_open() -> None:
             support_resistance=(retired,),
         ),
         newly_completed=True,
+            prior=observer._prior,
     )
     retired_event = next(
         item
@@ -5000,14 +5020,14 @@ def test_projection_dedupe_expiry_does_not_rewrite_retained_lifecycle() -> None:
         metrics={},
         swings=(swing,),
     )
-    observer._record_frame_events(frame, newly_completed=True)
+    observer._emitter._record_frame_events(frame, newly_completed=True, prior=observer._prior)
     original = observer.memory._entity_timelines[
         "swing:long-retained-swing"
     ][0]
 
-    observer._known_level_ids.clear()
-    observer._known_level_order.clear()
-    observer._record_frame_events(
+    observer._emitter._known_level_ids.clear()
+    observer._emitter._known_level_order.clear()
+    observer._emitter._record_frame_events(
         replace(
             frame,
             cutoff=swing.confirmed_at + pd.Timedelta(minutes=1),
@@ -5015,6 +5035,7 @@ def test_projection_dedupe_expiry_does_not_rewrite_retained_lifecycle() -> None:
             swings=(replace(swing, age_bars=99),),
         ),
         newly_completed=True,
+            prior=observer._prior,
     )
     assert observer.memory._entity_timelines[
         "swing:long-retained-swing"

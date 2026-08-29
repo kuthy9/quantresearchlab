@@ -15,7 +15,7 @@
     "atomic_definition_identity": "83f6f7dda806271c9dadfb78cbeb40ac14c2a0fda71463e65bd07a963e3040c7",
     "foundation_projection_version": "smc_semantic_foundation_v2.0",
     "foundation_registry": "semantics/foundation_v2_0.yaml",
-    "foundation_registry_identity": "ac04636919931d774309a0c306764fdf8eb53aee41df0f31d4d94e5b9125732b"
+    "foundation_registry_identity": "0c49da28e103f0515d3eb93ab03e8659e334d2477449f5174df3b5e8b0b84cc6"
   },
   "playbook_registry": "configs/playbooks.json",
   "path_hypotheses": {

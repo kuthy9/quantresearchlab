@@ -30,6 +30,7 @@ from .artifact_stream import (
 from .foundation_registry import FOUNDATION_VERSION
 from .market_clock import validate_registered_native_bar_root
 from .model import (
+    bar_evidence_coverage,
     Direction,
     EventKind,
     EventOrigin,
@@ -149,14 +150,6 @@ _SWING_WINDOW_SPANS: Mapping[Timeframe, int] = {
     Timeframe.H1: 2,
     Timeframe.M15: 2,
     Timeframe.M5: 2,
-    Timeframe.M1: 1,
-}
-
-_TIMEFRAME_MINUTES: Mapping[Timeframe, int] = {
-    Timeframe.H4: 240,
-    Timeframe.H1: 60,
-    Timeframe.M15: 15,
-    Timeframe.M5: 5,
     Timeframe.M1: 1,
 }
 
@@ -1363,14 +1356,20 @@ class EventStore:
         *,
         timeframe: Timeframe | None = None,
         contract: str,
+        allow_densified: bool = False,
     ) -> None:
+        coverage = bar_evidence_coverage(bar.evidence)
+        real = (
+            coverage.admits_definitional_path
+            if allow_densified
+            else coverage.admits_atr_window
+        )
         if (
             bar.kind is not EventKind.BAR_COMPLETED
             or bar.origin is not EventOrigin.NORMALIZED_DATA
             or (timeframe is not None and bar.timeframe is not timeframe)
             or bar.event_time != bar.known_at
-            or bar.evidence.get("real_completed") is not True
-            or bar.evidence.get("clock_only") is not False
+            or not real
         ):
             raise ValueError(
                 f"authoritative {contract} requires an exact real normalized "
@@ -1702,11 +1701,18 @@ class EventStore:
             for event_id in event.context_event_ids[14:]
         )
         all_bound_bars = (*atr_bars, *path_bars)
-        for bar in all_bound_bars:
+        for bar in atr_bars:
             EventStore._require_real_normalized_bar(
                 bar,
                 timeframe=event.timeframe,
                 contract="foundation structural leg",
+            )
+        for bar in path_bars:
+            EventStore._require_real_normalized_bar(
+                bar,
+                timeframe=event.timeframe,
+                contract="foundation structural leg",
+                allow_densified=True,
             )
         if any(
             bar.evidence.get("symbol") != symbol
@@ -1729,11 +1735,6 @@ class EventStore:
                 "foundation structural leg BAR ancestry must be ordered and unique"
             )
 
-        interval = pd.Timedelta(
-            int(_TIMEFRAME_MINUTES[event.timeframe]),
-            unit="min",
-        )
-        path_terminal = end_clock + interval
         eligible_bars = tuple(
             sorted(
                 (
@@ -1744,8 +1745,9 @@ class EventStore:
                     and candidate.semantic_version == event.semantic_version
                     and candidate.timeframe is event.timeframe
                     and candidate.event_time == candidate.known_at
-                    and candidate.evidence.get("real_completed") is True
-                    and candidate.evidence.get("clock_only") is False
+                    and bar_evidence_coverage(
+                        candidate.evidence
+                    ).admits_definitional_path
                     and candidate.evidence.get("symbol") == symbol
                     and candidate.evidence.get("instrument_id") == instrument_id
                 ),
@@ -1755,8 +1757,33 @@ class EventStore:
                 ),
             )
         )
+        # The registered session calendar truncates and restarts timeframe
+        # buckets around the daily maintenance break, so a swing's pivot BAR is
+        # the next real bar after its pivot clock, not one arithmetic stride
+        # later.  Deriving both endpoint clocks from the eligible sequence keeps
+        # this contract in agreement with the producer, which builds the path
+        # from the candles it actually observed.
+        start_pivot_terminal = next(
+            (bar.known_at for bar in eligible_bars if bar.known_at > start_clock),
+            None,
+        )
+        path_terminal = next(
+            (bar.known_at for bar in eligible_bars if bar.known_at > end_clock),
+            None,
+        )
+        if start_pivot_terminal is None or path_terminal is None:
+            raise ValueError(
+                "foundation structural leg endpoint lacks the completed BAR "
+                "that closes its pivot"
+            )
+        # The path may cross a densified no-trade bar, but ATR may not: the
+        # producer selects its fourteen strict-prior bars from real ones only,
+        # and this contract has to reach past the same bars it does.
         eligible_prior = tuple(
-            bar for bar in eligible_bars if bar.known_at <= start_clock
+            bar
+            for bar in eligible_bars
+            if bar.known_at <= start_clock
+            and bar_evidence_coverage(bar.evidence).admits_atr_window
         )
         expected_atr_bars = eligible_prior[-14:]
         expected_path_bars = tuple(
@@ -1824,7 +1851,7 @@ class EventStore:
             != EventStore._authoritative_clock(start, "pivot_end")
             or end_pivot_bar.known_at
             != EventStore._authoritative_clock(end, "pivot_end")
-            or start_pivot_bar.known_at != start_clock + interval
+            or start_pivot_bar.known_at != start_pivot_terminal
             or end_pivot_bar.known_at != path_terminal
             or event.known_at != end.known_at
         ):

@@ -9,7 +9,8 @@ import pytest
 
 from smc_trader.event_store import EventStore
 from smc_trader.model import EventKind, SMC_SEMANTIC_VERSION, Timeframe
-from smc_trader.observation import CausalObserver, EventMemory, _event
+from smc_trader.event_memory import EventMemory
+from smc_trader.semantic_event_emitter import SemanticEventEmitter, _event
 from smc_trader.semantics import (
     SEMANTIC_EVENT_BINDING_STATUSES,
     SemanticRegistry,
@@ -387,10 +388,10 @@ def test_production_event_identity_is_bound_to_semantic_version() -> None:
 
 
 def test_canonical_retry_keeps_first_known_strength_after_hot_key_eviction() -> None:
-    observer = object.__new__(CausalObserver)
-    observer.semantic_registry = SemanticRegistry.from_file()
-    observer.audit_store = EventStore()
-    observer.memory = EventMemory(1, audit_store=observer.audit_store)
+    emitter = object.__new__(SemanticEventEmitter)
+    emitter.semantic_registry = SemanticRegistry.from_file()
+    emitter.audit_store = EventStore()
+    emitter.memory = EventMemory(1, audit_store=emitter.audit_store)
     range_context, candidate = _legacy_range_boundary_candidate(
         prefix="canonical-retry",
         minutes=9,
@@ -407,13 +408,13 @@ def test_canonical_retry_keeps_first_known_strength_after_hot_key_eviction() -> 
         low=21_499.0,
         close=21_500.0,
     )
-    observer.audit_store.append_batch(
+    emitter.audit_store.append_batch(
         (range_context, candidate, crossing_bar)
     )
     source_ids = (candidate.event_id, crossing_bar.event_id)
     crossing_clock = crossing_bar.known_at
 
-    first = observer._append_semantic_atomic(
+    first = emitter._append_semantic_atomic(
         EventKind.LEVEL_TOUCHED,
         crossing_clock,
         Timeframe.M5,
@@ -424,8 +425,8 @@ def test_canonical_retry_keeps_first_known_strength_after_hot_key_eviction() -> 
         {"level_id": "level-1", "touch_ordinal": 1},
         event_time=crossing_clock,
     )
-    observer.memory.flush_audit()
-    retry = observer._append_semantic_atomic(
+    emitter.memory.flush_audit()
+    retry = emitter._append_semantic_atomic(
         EventKind.LEVEL_TOUCHED,
         crossing_clock,
         Timeframe.M5,
@@ -439,5 +440,5 @@ def test_canonical_retry_keeps_first_known_strength_after_hot_key_eviction() -> 
 
     assert retry == first
     assert retry.strength == 0.25
-    assert len(observer.audit_store) == 4
-    assert observer.audit_store.get(first.event_id) == first
+    assert len(emitter.audit_store) == 4
+    assert emitter.audit_store.get(first.event_id) == first

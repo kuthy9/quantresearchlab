@@ -2549,7 +2549,7 @@ def test_bootstrap_bar_completeness_uses_timeframe_readiness_not_atr_window(
         scale_registry_id=CORE_TEST_SCALE_REGISTRY_ID,
     )
 
-    observer._append_available_bar_events(update, histories, frames)
+    observer._emitter._append_available_bar_events(update, histories, frames)
     observer.memory.flush_audit()
     latest_m5 = tuple(
         event
@@ -3519,7 +3519,6 @@ def test_synthetic_no_trade_minute_is_replayable_clock_only_root() -> None:
     assert first is not None and synthetic is not None
     assert updates[1].completed_1m.close == 90.0
     assert synthetic.price == synthetic_observation.price == first.price == 100.0
-    assert observer.scene_graph._last_price == first.price
     synthetic_root = next(
         event
         for event in synthetic_observation.semantic_events_this_update

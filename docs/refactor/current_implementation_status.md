@@ -1,9 +1,9 @@
 # Current SMC Refactor Implementation Status
 
-Status date: 2026-08-26
+Status date: 2026-08-27
 Runtime semantic identity: `smc_semantics_v1.2`
 Canonical foundation identity: `smc_semantic_foundation_v2.0`
-Canonical foundation registry identity: `ac04636919931d774309a0c306764fdf8eb53aee41df0f31d4d94e5b9125732b`
+Canonical foundation registry identity: `0c49da28e103f0515d3eb93ab03e8659e334d2477449f5174df3b5e8b0b84cc6`
 
 This is the current implementation-versus-plan authority. Its 2026-08-26
 revision corrected stale schema/protocol/identity bindings and the Foundation
@@ -50,7 +50,7 @@ registry/identity, then verifies that Foundation declares v1.2 as its parent.
 There is no `smc_semantics_v2.0` runtime and no synthetic full-stack version.
 `ContinuousSMCEngine` derives the internal projection gate from the validated
 pair and freezes the existing identities into Engine, Shadow, and checkpoint
-state. The current combined Engine checkpoint schema is 11; older schemas fail
+state. The current combined Engine checkpoint schema is 12; older schemas fail
 closed on restore into the current Observation, Foundation, and Neutral-state
 contracts. `MarketObservation` schema 5 publishes the canonical physical
 `InteractionUpdate` (schema 2); `MarketSnapshot` is schema 5. Shadow uses
@@ -400,7 +400,7 @@ rolling OOF, or sealed OOS.
 
 | Phase | Status | What is present | What remains |
 |---|---|---|---|
-| 1. Auditable foundation | **Complete for the active v1.2 plus additive-v2 path** | Causal clocks, exact tick admission, hash-bound semantic identities, immutable events/store, source-kind and cross-object validation, lifecycle uniqueness, production config admission, Engine checkpoint-schema-11 restore, compact hot-state/cold-ledger replay, fingerprints, and determinism tests. Phase 9 pickles the complete runner, including the active Hypothesis Manager ledger. | The Foundation cold ledger remains in memory, and a directly queryable belief-update archive across retired scopes is not persisted; registered input journals can replay both. |
+| 1. Auditable foundation | **Complete for the active v1.2 plus additive-v2 path** | Causal clocks, exact tick admission, hash-bound semantic identities, immutable events/store, source-kind and cross-object validation, lifecycle uniqueness, production config admission, Engine checkpoint-schema-12 restore, compact hot-state/cold-ledger replay, fingerprints, and determinism tests. Phase 9 pickles the complete runner, including the active Hypothesis Manager ledger. | The Foundation cold ledger remains in memory, and a directly queryable belief-update archive across retired scopes is not persisted; registered input journals can replay both. |
 | 2. Core atomic semantics | **v1.2 producer plus additive foundation-v2 lifecycle complete** | Existing Swing/candidate/touch/penetration/Sweep/Acceptance/Raw Break/FVG/Displacement producers are unchanged. Foundation v2 adds complete Structural Leg paths, same-level rearm, level retirement, competing interaction terminals, boundary attack, and multi-bar formation ancestry. | No arbitrary time TTL or new tutorial SMC detector was added. Any empirical expiry threshold still requires a later study/version. |
 | 3. Derived structure | **Foundation definitions complete; empirical value untested** | Persistent internal/external Structure Generations and transitions, Base Origin Core versus Qualified OB, Structural versus Balance Range, and Delivery Phase Generation are independently represented. MSS starts or updates a forming challenger; it cannot itself confirm an opposite regime. | Range extension remains undefined. Foundation definitions do not validate predictive value or retroactively change v1.2 artifacts. |
 | 4. Timeframe and relation state | **Complete with distinct geometry and relation generations** | Timeframe/Session/Snapshot and role hierarchy remain; Foundation v2 adds geometric Swing assignments, dual range locations, and persistent cross-timeframe Relation Generations. | Outcome value is not implied by deterministic nesting or relation state and remains an empirical question. |

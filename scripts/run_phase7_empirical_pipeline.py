@@ -119,7 +119,7 @@ PREREGISTRATION = (
     / "experiments/manifests/phase7_foundation_v2_empirical_preregistration.yaml"
 )
 FOUNDATION_IDENTITY = (
-    "ac04636919931d774309a0c306764fdf8eb53aee41df0f31d4d94e5b9125732b"
+    "0c49da28e103f0515d3eb93ab03e8659e334d2477449f5174df3b5e8b0b84cc6"
 )
 PATH_PROTOCOL_FINGERPRINT = (
     "d897635cb91fc1cb84647f41eb4c5a6b8a06d05d2e44a1b3471e8e9ff67b0482"

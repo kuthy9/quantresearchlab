@@ -15,7 +15,7 @@ if str(ROOT) not in sys.path:
 
 from smc_trader.causal import CausalMarketReader  # noqa: E402
 from smc_trader.io import iter_completed_bars, load_ohlcv  # noqa: E402
-from smc_trader.scene_graph import parse_scale_specs  # noqa: E402
+from smc_trader.scale_registry import parse_scale_specs  # noqa: E402
 from smc_trader.validation import load_validation_protocol  # noqa: E402
 
 

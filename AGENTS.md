@@ -16,11 +16,17 @@ One data entry, one Eye entry, one history authority, one current view:
 ```text
 Bar
  └─ CausalMarketReader        causal.py            data normalizer
+     ├─ market_clock.py       registered session calendar
+     └─ scale_registry.py     ScaleSpec / scale_registry_id
      └─ CausalObserver        observation.py       semantic event engine
          ├─ structure.py / liquidity.py / displacement.py
          ├─ zone.py           (canonical owner of the former "Group 3")
          ├─ range_auction.py  (canonical owner of the former "Group 4")
          ├─ interaction.py    (Eye half of the former "Group 5")
+         ├─ semantic_event_emitter.py
+         │                    SemanticEventEmitter — sole event emitter and
+         │                    owner of the cross-detector ancestry index
+         ├─ event_memory.py   bounded causal working set
          ├─ event_store.py    EventStore — complete atomic history
          └─ market_state.py   MarketSnapshotPublisher
              ├─ TimeframeEventReducer → TimeframeState
@@ -28,15 +34,28 @@ Bar
              └─ SessionStateReducer   → SessionState
                  └─ MarketSnapshot    — current market view
  └─ ContinuousSMCEngine       engine.py            orchestration
+     ├─ scene_graph.py           Engine-owned research/visualisation view
+     ├─ execution.py             execution-reality scoring
      ├─ brain_entry_sequence.py  Brain interpretation of Eye facts
      ├─ neutral projection       one OpenMarketThesis per clock
      ├─ playbooks.py             PlaybookBrain.update(...)
      └─ decision.py → risk.py    sole runtime action authority
 ```
 
-`scene_graph.py`, `eye_statistics.py`, `visualization.py`, `shadow_*`,
+The Eye imports no downstream module. `scene_graph.py` is owned by
+`ContinuousSMCEngine`, which advances it over one completed Eye observation and
+stamps the resulting `scene_*` delta identities; a graph failure poisons the
+observer through `CausalObserver.mark_terminal_failure` because the reducers
+have already advanced. `execution.py` owns `ExecutionRealityInput`, the
+cost/fillability score and the inert not-evaluated value; the Eye only
+transports the result. `eye_statistics.py`, `visualization.py`, `shadow_*`,
 `*_research*`, `causal_cases.py` and `market_cases.py` are optional projections
-and research consumers. They must never become a second market-state authority.
+and research consumers. None of them may become a second market-state
+authority.
+
+`EventStore` is the Eye's internal history authority and is not part of the
+package's public surface. Research and replay tools that need read-only event
+lineage import `smc_trader.event_store` directly.
 
 Naming rule: `Zone`, `RangeAuction` and `Interaction` are the public concepts.
 `Group3`/`Group4`/`Group5` and `Phase 4/5/6` survive only as historical or

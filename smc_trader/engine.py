@@ -49,10 +49,12 @@ from .signal_policy import (
     load_signal_policy_protocol,
 )
 from .risk import RiskLimits, StructuralRiskEngine
+from .scale_registry import parse_scale_specs
 from .scene_graph import (
+    SceneGraphDelta,
+    TemporalMarketSceneGraph,
     build_neutral_market_state,
     build_open_market_theses,
-    parse_scale_specs,
     update_global_market_context,
 )
 from .semantics import load_semantic_selection
@@ -67,7 +69,7 @@ _REQUIRED_PRIMITIVE_PROTOCOLS = (
 )
 _LIVE_READINESS_TOKEN = object()
 RUNTIME_ACTION_POLICY_SCHEMA_VERSION = 2
-NEUTRAL_ENGINE_CHECKPOINT_SCHEMA_VERSION = 11
+NEUTRAL_ENGINE_CHECKPOINT_SCHEMA_VERSION = 12
 MODEL_SCHEMA_VERSION = 4
 ACTION_PIPELINE_SCHEMA_VERSION = 1
 LEGACY_ACTION_PIPELINE_MODE = "legacy_decision_risk_compat"
@@ -160,6 +162,8 @@ class ContinuousSMCEngine:
         {
             "reader",
             "observer",
+            "scene_graph",
+            "last_scene_delta",
             "brain",
             "decision",
             "risk",
@@ -183,6 +187,7 @@ class ContinuousSMCEngine:
         decision: UtilityDecisionLayer,
         risk: StructuralRiskEngine,
         runtime_mode: str,
+        scene_graph: TemporalMarketSceneGraph | None = None,
         action_pipeline_mode: str,
         action_disabled_playbooks: Iterable[Playbook | str] = (),
         _readiness_token: object | None = None,
@@ -201,6 +206,11 @@ class ContinuousSMCEngine:
             )
         self.reader = reader
         self.observer = observer
+        # The Scene Graph is an Engine-side research/visualisation
+        # projection over one completed Eye observation.  The Eye neither
+        # owns nor imports it.
+        self.scene_graph = scene_graph
+        self.last_scene_delta: SceneGraphDelta | None = None
         self.brain = brain
         self.decision = decision
         self.risk = risk
@@ -736,6 +746,11 @@ class ContinuousSMCEngine:
         engine = cls(
             reader=reader,
             observer=observer,
+            scene_graph=(
+                TemporalMarketSceneGraph()
+                if observer.config.project_scene_graph
+                else None
+            ),
             brain=brain,
             decision=decision,
             risk=risk,
@@ -810,8 +825,8 @@ class ContinuousSMCEngine:
             observation,
             brain_observation=brain_observation,
         )
-        scene_graph = self.observer.scene_graph
-        scene_delta = self.observer.last_scene_delta
+        scene_graph = self.scene_graph
+        scene_delta = self.last_scene_delta
         if neutral_market_state is not None:
             belief = self.brain.update(
                 brain_observation,
@@ -873,7 +888,7 @@ class ContinuousSMCEngine:
             raise RuntimeError(
                 "Engine entry mode cannot change after full evaluation"
             )
-        if not self.observer.config.project_scene_graph:
+        if self.scene_graph is None:
             raise RuntimeError(
                 "neutral-only Engine requires Scene Graph projection"
             )
@@ -902,7 +917,41 @@ class ContinuousSMCEngine:
         execution: ExecutionRealityInput | None,
     ) -> MarketObservation:
         update = self.reader.on_bar(bar)
-        return self.observer.observe(update, execution)
+        observation = self.observer.observe(update, execution)
+        return self._project_scene_graph(observation)
+
+    def _project_scene_graph(
+        self,
+        observation: MarketObservation,
+    ) -> MarketObservation:
+        """Advance the Engine-side Scene Graph over one Eye observation.
+
+        The Eye has already committed this clock when this runs, so a graph
+        failure must poison the observer rather than leave a half-advanced Eye
+        available for the next bar.
+        """
+
+        if self.scene_graph is None:
+            self.last_scene_delta = None
+            return observation
+        try:
+            delta = self.scene_graph.update(observation)
+        except Exception:
+            self.observer.mark_terminal_failure(
+                "scene-graph projection failed after semantic reducers "
+                "advanced; discard this observer and resume from the "
+                "last checkpoint"
+            )
+            raise
+        self.last_scene_delta = delta
+        return observation._with_scene_delta(
+            scene_revision_id=delta.revision_id,
+            scene_added_node_ids=delta.added_node_ids,
+            scene_revised_node_ids=delta.revised_node_ids,
+            scene_added_edge_ids=delta.added_edge_ids,
+            scene_revised_edge_ids=delta.revised_edge_ids,
+            scene_resolution_event_ids=delta.resolution_event_ids,
+        )
 
     def _project_neutral(
         self,
@@ -910,8 +959,8 @@ class ContinuousSMCEngine:
         *,
         brain_observation: BrainObservationView | None = None,
     ) -> tuple[GlobalMarketContext | None, NeutralMarketState | None]:
-        scene_graph = self.observer.scene_graph
-        scene_delta = self.observer.last_scene_delta
+        scene_graph = self.scene_graph
+        scene_delta = self.last_scene_delta
         if scene_graph is None or scene_delta is None:
             return None, None
         raw_global_context = update_global_market_context(
@@ -962,7 +1011,7 @@ class ContinuousSMCEngine:
             raise RuntimeError(
                 "scene graph compaction requires a completed Engine snapshot"
             )
-        if self.observer.scene_graph is None:
+        if self.scene_graph is None:
             raise RuntimeError(
                 "scene graph compaction requires an enabled Scene Graph "
                 "projection"
@@ -1026,7 +1075,7 @@ class ContinuousSMCEngine:
         if neutral is not None:
             collect(to_primitive(neutral.market_episodes))
             collect(to_primitive(neutral.open_market_theses))
-        return self.observer.scene_graph.compact_runtime_history(
+        return self.scene_graph.compact_runtime_history(
             snapshot.observation,
             protected_source_ids=tuple(sorted(identities)),
         )

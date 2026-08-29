@@ -52,7 +52,7 @@
   },
   "experiment_id": "foundation_v2_2024_06_phase45_w1_comparison_v1",
   "foundation_registry": "semantics/foundation_v2_0.yaml",
-  "foundation_registry_identity": "ac04636919931d774309a0c306764fdf8eb53aee41df0f31d4d94e5b9125732b",
+  "foundation_registry_identity": "0c49da28e103f0515d3eb93ab03e8659e334d2477449f5174df3b5e8b0b84cc6",
   "foundation_version": "smc_semantic_foundation_v2.0",
   "frozen_at": "2026-08-23T00:00:00-04:00",
   "frozen_before_run": true,

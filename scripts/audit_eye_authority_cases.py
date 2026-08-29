@@ -30,6 +30,7 @@ from scripts.run_eye_authority_scan import (  # noqa: E402
 from smc_trader.causal import CausalMarketReader  # noqa: E402
 from smc_trader.io import iter_completed_bars, load_ohlcv  # noqa: E402
 from smc_trader.observation import CausalObserver  # noqa: E402
+from smc_trader.scene_graph import TemporalMarketSceneGraph  # noqa: E402
 from smc_trader.visualization import (  # noqa: E402
     DecisionVisualizer,
     VisualArtifact,
@@ -1195,6 +1196,9 @@ def _replay_selected_cases(
     for window in windows:
         reader = CausalMarketReader(scale_specs=config.scale_specs)
         observer = CausalObserver(config)
+        # The Eye publishes market facts only; this audit owns the Scene Graph
+        # projection it renders, exactly as the Engine does.
+        scene_graph = TemporalMarketSceneGraph()
         loaded = load_ohlcv(source_path, start=window.start, end=window.end)
         _validate_loaded_source(loaded, expected_path=source_path)
         by_clock: dict[pd.Timestamp, list[Mapping[str, Any]]] = {}
@@ -1209,6 +1213,22 @@ def _replay_selected_cases(
         ):
             update = reader.on_bar(bar)
             observation = observer.observe(update)
+            try:
+                delta = scene_graph.update(observation)
+            except Exception:
+                observer.mark_terminal_failure(
+                    "scene-graph projection failed after semantic reducers "
+                    "advanced; discard this observer"
+                )
+                raise
+            observation = observation._with_scene_delta(
+                scene_revision_id=delta.revision_id,
+                scene_added_node_ids=delta.added_node_ids,
+                scene_revised_node_ids=delta.revised_node_ids,
+                scene_added_edge_ids=delta.added_edge_ids,
+                scene_revised_edge_ids=delta.revised_edge_ids,
+                scene_resolution_event_ids=delta.resolution_event_ids,
+            )
             selected = by_clock.get(observation.asof, ())
             for case in selected:
                 case_id = str(case["case_id"])
@@ -1222,7 +1242,7 @@ def _replay_selected_cases(
                         image_path,
                         case_id=case_id,
                         case_entity_id=str(case["entity_id"]),
-                        scene_graph=observer.scene_graph,
+                        scene_graph=scene_graph,
                     )
                 except Exception as exc:  # per-case result, not a silent pass
                     image_path.unlink(missing_ok=True)
@@ -1230,7 +1250,7 @@ def _replay_selected_cases(
                 records[case_id] = transmission_record(
                     case,
                     observation,
-                    observer.scene_graph,
+                    scene_graph,
                     artifact,
                     event_memory=observer.memory,
                     visualization_error=visual_error,

@@ -44,7 +44,7 @@ from smc_trader.observation import (  # noqa: E402
     CausalObserver,
     ObserverConfig,
 )
-from smc_trader.scene_graph import parse_scale_specs  # noqa: E402
+from smc_trader.scale_registry import parse_scale_specs  # noqa: E402
 from smc_trader.validation import load_validation_protocol  # noqa: E402
 
 

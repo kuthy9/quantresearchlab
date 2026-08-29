@@ -1275,7 +1275,7 @@ def _neutral_canonical_store(
     from smc_trader.causal import CausalMarketReader
     from smc_trader.io import iter_completed_bars, load_ohlcv
     from smc_trader.market_representation import normalize_timeframe
-    from smc_trader.scene_graph import parse_scale_specs
+    from smc_trader.scale_registry import parse_scale_specs
 
     if not cases:
         raise RepresentationDataError("neutral dataset requires at least one case")

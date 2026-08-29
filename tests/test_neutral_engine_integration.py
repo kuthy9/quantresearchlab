@@ -134,6 +134,9 @@ def _legacy_engine_step(
     account = AccountState(equity=100_000.0)
     update = engine.reader.on_bar(bar)
     observation = engine.observer.observe(update, None)
+    # Scene Graph projection is Engine-owned, so the oracle advances it here
+    # exactly as ``_observe_bar`` does.
+    observation = engine._project_scene_graph(observation)
     if {
         "contract_change_history_reset",
         "data_gap_history_reset",
@@ -142,8 +145,8 @@ def _legacy_engine_step(
     belief = engine.brain.update(
         observation,
         position=account.position,
-        scene_graph=engine.observer.scene_graph,
-        scene_delta=engine.observer.last_scene_delta,
+        scene_graph=engine.scene_graph,
+        scene_delta=engine.last_scene_delta,
     )
     decision = engine.decision.decide(observation, belief, account)
     risk = engine.risk.review(decision, observation, account)
@@ -398,8 +401,8 @@ def test_brain_rejects_malformed_precomputed_neutral_state(
     with pytest.raises(ValueError, match="precomputed neutral"):
         engine.brain.update(
             observation,
-            scene_graph=engine.observer.scene_graph,
-            scene_delta=engine.observer.last_scene_delta,
+            scene_graph=engine.scene_graph,
+            scene_delta=engine.last_scene_delta,
             _precomputed_neutral_state=malformed,  # type: ignore[arg-type]
             _neutral_authority_capability=(
                 playbooks_module._NEUTRAL_AUTHORITY_CAPABILITY
@@ -423,8 +426,8 @@ def test_brain_neutral_capability_is_private_and_failure_atomic(
     before = pickle.dumps(engine.brain, protocol=pickle.HIGHEST_PROTOCOL)
     before_manager = engine.brain.hypothesis_manager
     kwargs = {
-        "scene_graph": engine.observer.scene_graph,
-        "scene_delta": engine.observer.last_scene_delta,
+        "scene_graph": engine.scene_graph,
+        "scene_delta": engine.last_scene_delta,
     }
     if case == "missing":
         kwargs["_precomputed_neutral_state"] = neutral
@@ -484,7 +487,7 @@ def test_clock_only_close_cannot_reprice_scene_market_state_or_brain(
     assert synthetic.close == raw_synthetic_price != prior_price
     assert clock_only.observation.price == prior_price
     assert clock_only.market_snapshot.price == prior_price
-    assert engine.observer.scene_graph._last_price == prior_price
+    assert engine.scene_graph._last_price == prior_price
     assert brain_prices == [prior_price]
     for timeframe, prior_state in first.market_snapshot.timeframe_states.items():
         assert (
@@ -706,8 +709,8 @@ def test_engine_neutral_state_is_pickle_checkpoint_ready() -> None:
     )
     encoded = pickle.dumps(engine, protocol=pickle.HIGHEST_PROTOCOL)
     resumed = pickle.loads(encoded)
-    assert NEUTRAL_ENGINE_CHECKPOINT_SCHEMA_VERSION == 11
-    assert engine.__getstate__()["_neutral_checkpoint_schema_version"] == 11
+    assert NEUTRAL_ENGINE_CHECKPOINT_SCHEMA_VERSION == 12
+    assert engine.__getstate__()["_neutral_checkpoint_schema_version"] == 12
     previous_engine = engine.__getstate__()
     previous_engine["_neutral_checkpoint_schema_version"] = 10
     with pytest.raises(
@@ -1007,10 +1010,9 @@ def test_neutral_only_entry_requires_scene_graph_before_reader_advances(
         "configs/model.json",
         runtime_mode="development",
     )
-    engine.observer.config = replace(
-        engine.observer.config,
-        project_scene_graph=False,
-    )
+    # Scene Graph ownership belongs to the Engine, so a graph-free neutral
+    # Engine is expressed by dropping the Engine's projection.
+    engine.scene_graph = None
 
     def forbidden(*_args, **_kwargs):
         raise AssertionError("neutral-only preflight advanced the reader")

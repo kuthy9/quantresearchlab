@@ -2971,8 +2971,8 @@ def test_scene_graph_compaction_preserves_each_engine_snapshot_and_recorder(
             result = compact.compact_scene_graph_runtime()
             compaction_counts.append(int(result["after"]["nodes"]))
     assert compaction_counts
-    assert compact.observer.scene_graph.revision_id == (
-        baseline.observer.scene_graph.revision_id
+    assert compact.scene_graph.revision_id == (
+        baseline.scene_graph.revision_id
     )
     assert compact.brain.current is not None
     assert to_primitive(compact.brain.current) == to_primitive(
@@ -3080,14 +3080,14 @@ def test_scene_graph_compaction_preserves_nonempty_market_recorder_rows() -> Non
         source_bar=source_bar,
         source_row_ordinal=source_ordinal - 1,
         replay_update_ordinal=source_ordinal - 1,
-        scene_graph=baseline.observer.scene_graph,
+        scene_graph=baseline.scene_graph,
     )
     compact_recorder.observe(
         with_episode(compact_snapshot),
         source_bar=source_bar,
         source_row_ordinal=source_ordinal - 1,
         replay_update_ordinal=source_ordinal - 1,
-        scene_graph=compact.observer.scene_graph,
+        scene_graph=compact.scene_graph,
     )
     baseline_rows = tuple(
         row.to_dict() for row in baseline_recorder.drain_input_rows()
@@ -3340,7 +3340,7 @@ def test_scene_graph_compaction_checkpoint_resume_matches_uninterrupted(
     assert checkpoint_compaction["runs"] >= 1
     assert checkpoint_state[
         "replay"
-    ].engine.observer.scene_graph.history_retention_floor is not None
+    ].engine.scene_graph.history_retention_floor is not None
 
     resumed = _run(
         _command(source, resumed_output, resume=True, **common)
@@ -4141,7 +4141,7 @@ def test_market_case_input_is_minimal_resumable_and_row_exact(
     assert checkpoint_compaction["last_result"] is not None
     assert checkpoint_state[
         "replay"
-    ].engine.observer.scene_graph.history_retention_floor is not None
+    ].engine.scene_graph.history_retention_floor is not None
     assert isinstance(
         checkpoint_state["market_cases"],
         MarketEpisodeCaseRecorder,

@@ -39,7 +39,7 @@ from smc_trader.model import (
     TradePlan,
     ticks_to_price,
 )
-from smc_trader.scene_graph import parse_scale_specs, scale_registry_id
+from smc_trader.scale_registry import parse_scale_specs, scale_registry_id
 
 
 TZ = "America/New_York"

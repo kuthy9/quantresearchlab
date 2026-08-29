@@ -15,6 +15,12 @@ ancestry. Those records do not rename or rewrite the primitives below.
 - Every primitive consumes only completed candles from its own timeframe.
 - Candles containing synthetic minutes advance the market clock but do not
   change swing, structure, zone, pool, ATR, or semantic age.
+- The one exception is the Foundation-v2 geometry layer: since 2026-08-28 a
+  densified no-trade bar is admitted into a structural-leg path and a swing
+  geometry window, so that a structure spanning a no-trade minute stays
+  representable. The object records how much of it was synthesized in
+  `synthetic_path_minutes` / `synthetic_window_minutes`, and ATR ancestry is
+  still selected from `real_completed` bars only.
 - Frame metrics, readiness, bar ages, bootstrap ATR and event-memory
   durations use only `real_completed` candles. The raw completed tail may
   advance the frame cutoff and expose candle provenance, but cannot change

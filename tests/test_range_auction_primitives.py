@@ -36,8 +36,8 @@ from smc_trader.model import (
 from smc_trader.observation import (
     CausalObserver,
     ObserverConfig,
-    _event,
 )
+from smc_trader.semantic_event_emitter import _event
 from smc_trader.playbooks import _visible_levels
 from smc_trader.risk import _visible_level_ids
 
@@ -879,9 +879,10 @@ def test_manipulation_candidate_and_failure_enter_event_memory() -> None:
         prior_inventory=(consumed,),
         liquidity_pools=(),
     )
-    observer._record_group4_events(
+    observer._emitter._record_group4_events(
         candidate_update,
         include_ranges=False,
+            prior=observer._prior,
     )
     candidate = candidate_update.manipulations[-1]
     observer._prior = SimpleNamespace(manipulations=(candidate,))
@@ -891,9 +892,10 @@ def test_manipulation_candidate_and_failure_enter_event_memory() -> None:
         prior_inventory=(consumed,),
         liquidity_pools=(),
     )
-    observer._record_group4_events(
+    observer._emitter._record_group4_events(
         failed_update,
         include_ranges=False,
+            prior=observer._prior,
     )
 
     revisions = tuple(
@@ -1343,7 +1345,7 @@ def test_observer_records_group4_range_terminal_only_at_boundary_clock(
     observer._range_auction_tracker = tracker
     observer.memory.set_clock_coverage_start(formed.formed_at)
     for state in (formed, mature):
-        observer._record_group4_events(
+        observer._emitter._record_group4_events(
             RangeAuctionUpdate(
                 dealing_ranges=(state,),
                 manipulations=(),
@@ -1353,16 +1355,18 @@ def test_observer_records_group4_range_terminal_only_at_boundary_clock(
                     else ()
                 ),
                 range_transitions=(state,),
-            )
+            ),
+            prior=observer._prior,
         )
-    sweep_bar_event = observer._append_completed_bar_event(
+    sweep_bar_event = observer._emitter._append_completed_bar_event(
         sweep_bar,
         atr=1.0,
         data_complete=True,
     )
-    observer._record_group4_events(
+    observer._emitter._record_group4_events(
         swept_update,
         include_ranges=False,
+            prior=observer._prior,
     )
     range_key = f"range:{mature.range_id}"
     manipulation_key = f"manipulation:{swept.manipulation_id}"
@@ -1660,7 +1664,7 @@ def test_observer_publishes_mature_boundary_crossing_without_prior_atr() -> None
     )
     observer.memory.set_clock_coverage_start(formed.formed_at)
     for state in (formed, mature):
-        observer._record_group4_events(
+        observer._emitter._record_group4_events(
             RangeAuctionUpdate(
                 dealing_ranges=(state,),
                 manipulations=(),
@@ -1670,14 +1674,15 @@ def test_observer_publishes_mature_boundary_crossing_without_prior_atr() -> None
                     else ()
                 ),
                 range_transitions=(state,),
-            )
+            ),
+            prior=observer._prior,
         )
-    crossing_bar = observer._append_completed_bar_event(
+    crossing_bar = observer._emitter._append_completed_bar_event(
         sweep,
         atr=1.0,
         data_complete=True,
     )
-    observer._record_group4_events(output, include_ranges=False)
+    observer._emitter._record_group4_events(output, include_ranges=False, prior=observer._prior)
     observer.memory.flush_audit()
 
     events = observer.audit_store.events()
@@ -2055,9 +2060,10 @@ def test_same_clock_event_sequence_matches_the_frozen_causal_order() -> None:
     observer = CausalObserver(
         ObserverConfig(scale_specs=CORE_TEST_SCALE_SPECS)
     )
-    observer._record_group4_events(
+    observer._emitter._record_group4_events(
         update,
         include_ranges=False,
+            prior=observer._prior,
     )
     observer.memory.append(
         _event(
@@ -2088,7 +2094,7 @@ def test_same_clock_event_sequence_matches_the_frozen_causal_order() -> None:
         state_started_at=swept.swept_at,
         last_updated_at=swept.swept_at,
     )
-    observer._record_group4_events(
+    observer._emitter._record_group4_events(
         RangeAuctionUpdate(
             dealing_ranges=(same_clock_range,),
             manipulations=(),
@@ -2097,6 +2103,7 @@ def test_same_clock_event_sequence_matches_the_frozen_causal_order() -> None:
         ),
         include_resolutions=False,
         include_creations=False,
+            prior=observer._prior,
     )
     observer.memory.append(
         _event(

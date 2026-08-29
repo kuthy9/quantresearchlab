@@ -33,6 +33,7 @@ from smc_trader.model import (
     Timeframe,
 )
 from smc_trader.observation import CausalObserver, ObserverConfig
+from smc_trader.semantic_event_emitter import SemanticEventEmitter
 from smc_trader.semantics import SemanticRegistry
 
 from .helpers import CORE_TEST_SCALE_SPECS
@@ -117,7 +118,7 @@ def _assign_protected_swing(
     direction: Direction,
     timeframe: Timeframe = Timeframe.M5,
 ) -> MarketEvent:
-    assignment = observer._append_semantic_atomic(
+    assignment = observer._emitter._append_semantic_atomic(
         EventKind.PROTECTED_SWING_ASSIGNED,
         _clock(event_minutes),
         timeframe,
@@ -139,7 +140,7 @@ def _assign_protected_swing(
             swing_id,
         ),
     )
-    observer._protected_swing_event_ids[swing_id] = assignment.event_id
+    observer._emitter._protected_swing_event_ids[swing_id] = assignment.event_id
     return assignment
 
 
@@ -155,7 +156,7 @@ def _append_protected_crossing_terminal(
     source_timeframe: Timeframe | None = None,
 ) -> MarketEvent:
     side = "above" if direction is Direction.LONG else "below"
-    return observer._append_crossing_resolution(
+    return observer._emitter._append_crossing_resolution(
         kind,
         _clock(resolved_minutes),
         timeframe,
@@ -176,6 +177,7 @@ def _append_protected_crossing_terminal(
         },
         direction=direction,
         crossed_at=_clock(crossed_minutes),
+        known_at=_clock(resolved_minutes),
     )
 
 
@@ -285,36 +287,36 @@ def _record_continuation_break(
         post_break_state=BOSPostBreakState.PENDING,
     )
 
-    observer._confirmed_swing_event_ids.update(
+    observer._emitter._confirmed_swing_event_ids.update(
         {
             origin_id: f"{origin_id}:event",
             target_id: f"{target_id}:event",
         }
     )
-    observer._structural_leg_event_ids[leg_id] = f"{leg_id}:event"
-    observer._structure_direction_event_ids[structure_id] = (
+    observer._emitter._structural_leg_event_ids[leg_id] = f"{leg_id}:event"
+    observer._emitter._structure_direction_event_ids[structure_id] = (
         f"{structure_id}:event"
     )
-    observer._bar_event_ids_by_candle_id[break_bar_id] = (
+    observer._emitter._bar_event_ids_by_candle_id[break_bar_id] = (
         f"{break_bar_id}:event"
     )
-    observer._bar_close_by_candle_id[break_bar_id] = (
+    observer._emitter._bar_close_by_candle_id[break_bar_id] = (
         target_price + 0.25
         if direction is Direction.LONG
         else target_price - 0.25
     )
-    observer._real_bar_event_ids_by_timeframe[timeframe].append(
+    observer._emitter._real_bar_event_ids_by_timeframe[timeframe].append(
         (resolved_at, f"{break_bar_id}:event")
     )
-    observer._known_level_ids.update(
+    observer._emitter._known_level_ids.update(
         {
             (origin_id, SwingLifecycle.CONFIRMED),
             (target_id, SwingLifecycle.CONFIRMED),
         }
     )
-    observer._known_structural_leg_ids.add(leg_id)
+    observer._emitter._known_structural_leg_ids.add(leg_id)
     before = len(observer.memory._audit_pending)
-    observer._record_frame_events(
+    observer._emitter._record_frame_events(
         FrameObservation(
             timeframe=timeframe,
             cutoff=resolved_at,
@@ -325,6 +327,7 @@ def _record_continuation_break(
             structural_legs=(leg,),
         ),
         newly_completed=True,
+            prior=observer._prior,
     )
     return tuple(observer.memory._audit_pending[before:])
 
@@ -475,7 +478,7 @@ def test_exact_protected_acceptance_releases_only_its_assignment_generation(
         first_assignment.event_id
     )
     assert first.context_event_ids == (first_assignment.event_id,)
-    assert swing_id not in observer._protected_swing_event_ids
+    assert swing_id not in observer._emitter._protected_swing_event_ids
 
     second = _append_protected_crossing_terminal(
         observer,
@@ -508,7 +511,7 @@ def test_exact_protected_acceptance_releases_only_its_assignment_generation(
         next_assignment.event_id
     )
     assert third.context_event_ids == (next_assignment.event_id,)
-    assert swing_id not in observer._protected_swing_event_ids
+    assert swing_id not in observer._emitter._protected_swing_event_ids
 
 
 def test_non_terminal_protected_crossings_do_not_release_the_assignment() -> None:
@@ -541,7 +544,7 @@ def test_non_terminal_protected_crossings_do_not_release_the_assignment() -> Non
     assert same_direction_acceptance.context_event_ids == (
         assignment.event_id,
     )
-    assert observer._protected_swing_event_ids[swing_id] == assignment.event_id
+    assert observer._emitter._protected_swing_event_ids[swing_id] == assignment.event_id
 
 
 def test_wrong_timeframe_protected_context_does_not_release_the_assignment() -> None:
@@ -564,7 +567,7 @@ def test_wrong_timeframe_protected_context_does_not_release_the_assignment() -> 
     )
 
     assert acceptance.context_event_ids == (assignment.event_id,)
-    assert observer._protected_swing_event_ids[swing_id] == assignment.event_id
+    assert observer._emitter._protected_swing_event_ids[swing_id] == assignment.event_id
 
 
 def test_m1_acceptance_releases_its_exact_h1_candidate_owner_assignment() -> None:
@@ -590,7 +593,7 @@ def test_m1_acceptance_releases_its_exact_h1_candidate_owner_assignment() -> Non
 
     assert acceptance.evidence["source_timeframe"] == Timeframe.H1.value
     assert acceptance.evidence["protected_swing_event_id"] == assignment.event_id
-    assert swing_id not in observer._protected_swing_event_ids
+    assert swing_id not in observer._emitter._protected_swing_event_ids
 
 
 def test_stale_protected_acceptance_cannot_clear_a_new_assignment(
@@ -604,7 +607,7 @@ def test_stale_protected_acceptance_cannot_clear_a_new_assignment(
         event_minutes=0,
         direction=Direction.LONG,
     )
-    next_assignment = observer._append_semantic_atomic(
+    next_assignment = observer._emitter._append_semantic_atomic(
         EventKind.PROTECTED_SWING_ASSIGNED,
         _clock(1),
         Timeframe.M5,
@@ -626,14 +629,14 @@ def test_stale_protected_acceptance_cannot_clear_a_new_assignment(
             swing_id,
         ),
     )
-    append = observer._append_semantic_atomic
+    append = observer._emitter._append_semantic_atomic
 
     def append_then_reassign(*args: object, **kwargs: object) -> MarketEvent:
         event = append(*args, **kwargs)
-        observer._protected_swing_event_ids[swing_id] = next_assignment.event_id
+        observer._emitter._protected_swing_event_ids[swing_id] = next_assignment.event_id
         return event
 
-    monkeypatch.setattr(observer, "_append_semantic_atomic", append_then_reassign)
+    monkeypatch.setattr(observer._emitter, "_append_semantic_atomic", append_then_reassign)
 
     acceptance = _append_protected_crossing_terminal(
         observer,
@@ -646,7 +649,7 @@ def test_stale_protected_acceptance_cannot_clear_a_new_assignment(
     assert acceptance.evidence["protected_swing_event_id"] == (
         stale_assignment.event_id
     )
-    assert observer._protected_swing_event_ids[swing_id] == (
+    assert observer._emitter._protected_swing_event_ids[swing_id] == (
         next_assignment.event_id
     )
 
@@ -666,7 +669,7 @@ def test_failed_protected_acceptance_append_keeps_the_assignment(
     def fail_append(*args: object, **kwargs: object) -> MarketEvent:
         raise RuntimeError("injected append failure")
 
-    monkeypatch.setattr(observer, "_append_semantic_atomic", fail_append)
+    monkeypatch.setattr(observer._emitter, "_append_semantic_atomic", fail_append)
 
     with pytest.raises(RuntimeError, match="injected append failure"):
         _append_protected_crossing_terminal(
@@ -677,8 +680,8 @@ def test_failed_protected_acceptance_append_keeps_the_assignment(
             direction=Direction.SHORT,
         )
 
-    assert observer._protected_swing_event_ids[swing_id] == assignment.event_id
-    assert observer._terminal_crossing_events == {}
+    assert observer._emitter._protected_swing_event_ids[swing_id] == assignment.event_id
+    assert observer._emitter._terminal_crossing_events == {}
 
 
 def test_future_protected_assignment_cannot_backfill_crossing_context() -> None:
@@ -703,8 +706,8 @@ def test_future_protected_assignment_cannot_backfill_crossing_context() -> None:
             direction=Direction.SHORT,
         )
 
-    assert observer._protected_swing_event_ids[swing_id] == assignment.event_id
-    assert observer._terminal_crossing_events == {}
+    assert observer._emitter._protected_swing_event_ids[swing_id] == assignment.event_id
+    assert observer._emitter._terminal_crossing_events == {}
 
 
 def test_opposite_continuation_keeps_raw_fact_without_rewriting_live_regime(
@@ -750,7 +753,7 @@ def test_exact_acceptance_releases_then_allows_reverse_continuation() -> None:
         resolved_minutes=2,
         direction=Direction.SHORT,
     )
-    assert "live-low" not in observer._protected_swing_event_ids
+    assert "live-low" not in observer._emitter._protected_swing_event_ids
 
     emitted = _record_continuation_break(
         observer,
@@ -764,7 +767,7 @@ def test_exact_acceptance_releases_then_allows_reverse_continuation() -> None:
     assert by_kind[EventKind.QUALIFIED_BOS].direction is Direction.SHORT
     replacement = by_kind[EventKind.PROTECTED_SWING_ASSIGNED]
     assert replacement.direction is Direction.SHORT
-    assert observer._protected_swing_event_ids == {
+    assert observer._emitter._protected_swing_event_ids == {
         "released-short:origin": replacement.event_id
     }
 
@@ -807,7 +810,7 @@ def test_same_direction_continuation_replaces_protection_monotonically(
     replacement = assignments[0]
     assert replacement.event_id != prior.event_id
     assert replacement.price == origin_price
-    assert observer._protected_swing_event_ids == {
+    assert observer._emitter._protected_swing_event_ids == {
         f"reinforce-{direction.value}:origin": replacement.event_id
     }
 
@@ -832,7 +835,7 @@ def test_same_direction_continuation_cannot_loosen_live_protection() -> None:
 
     assert EventKind.QUALIFIED_BOS in kinds
     assert EventKind.PROTECTED_SWING_ASSIGNED not in kinds
-    assert observer._protected_swing_event_ids == {
+    assert observer._emitter._protected_swing_event_ids == {
         "prior-low": prior.event_id
     }
 
@@ -861,7 +864,7 @@ def test_protected_assignment_custody_is_independent_across_timeframes() -> None
         if event.kind is EventKind.PROTECTED_SWING_ASSIGNED
     )
 
-    assert observer._protected_swing_event_ids == {
+    assert observer._emitter._protected_swing_event_ids == {
         "h1-live-low": h1_assignment.event_id,
         "m5-short:origin": m5_assignment.event_id,
     }
@@ -877,14 +880,14 @@ def test_failed_reinforcement_append_preserves_exact_live_custody(
         event_minutes=0,
         direction=Direction.LONG,
     )
-    original_append = observer._append_semantic_atomic
+    original_append = observer._emitter._append_semantic_atomic
 
     def fail_assignment(*args: object, **kwargs: object) -> MarketEvent:
         if args and args[0] is EventKind.PROTECTED_SWING_ASSIGNED:
             raise RuntimeError("injected protected-assignment append failure")
         return original_append(*args, **kwargs)
 
-    monkeypatch.setattr(observer, "_append_semantic_atomic", fail_assignment)
+    monkeypatch.setattr(observer._emitter, "_append_semantic_atomic", fail_assignment)
 
     with pytest.raises(RuntimeError, match="injected protected-assignment"):
         _record_continuation_break(
@@ -895,7 +898,7 @@ def test_failed_reinforcement_append_preserves_exact_live_custody(
             target_price=110.0,
         )
 
-    assert observer._protected_swing_event_ids == {
+    assert observer._emitter._protected_swing_event_ids == {
         "prior-low": prior.event_id
     }
 
@@ -1071,9 +1074,9 @@ def test_v1_1_artifacts_remain_byte_stable_and_explicitly_loadable() -> None:
 
 
 def test_reserved_and_compatibility_events_fail_closed_at_atomic_emitter() -> None:
-    observer = object.__new__(CausalObserver)
-    observer.semantic_registry = SemanticRegistry.from_file()
-    by_kind = observer.semantic_registry.event_binding_by_kind
+    emitter = object.__new__(SemanticEventEmitter)
+    emitter.semantic_registry = SemanticRegistry.from_file()
+    by_kind = emitter.semantic_registry.event_binding_by_kind
     expected = {
         EventKind.FVG_TOUCHED: "compatibility_alias_not_emitted",
         EventKind.ORIGIN_ZONE_TOUCHED: "compatibility_alias_not_emitted",
@@ -1088,7 +1091,7 @@ def test_reserved_and_compatibility_events_fail_closed_at_atomic_emitter() -> No
             ValueError,
             match="canonical semantic emitter rejects non-emitted event kind",
         ):
-            observer._append_semantic_atomic(
+            emitter._append_semantic_atomic(
                 kind,
                 _clock(0),
                 Timeframe.M5,

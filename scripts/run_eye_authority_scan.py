@@ -37,7 +37,7 @@ from smc_trader.io import LoadedOHLCV, iter_completed_bars, load_ohlcv  # noqa: 
 from smc_trader.market_clock import is_registered_trading_minute  # noqa: E402
 from smc_trader.model import MarketObservation, Timeframe, to_primitive  # noqa: E402
 from smc_trader.observation import CausalObserver, ObserverConfig  # noqa: E402
-from smc_trader.scene_graph import parse_scale_specs  # noqa: E402
+from smc_trader.scale_registry import parse_scale_specs  # noqa: E402
 from smc_trader.validation import load_validation_protocol  # noqa: E402
 
 

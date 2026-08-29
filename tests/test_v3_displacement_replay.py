@@ -557,7 +557,7 @@ def test_synthetic_terminal_rejects_incomplete_m1_constituent_index() -> None:
         )
 
     with pytest.raises(ValueError, match="five contiguous unique M1 roots"):
-        observer._synthetic_m1_context_event_ids_for_m5_terminal(
+        observer._emitter._synthetic_m1_context_event_ids_for_m5_terminal(
             terminal_clock
         )
 

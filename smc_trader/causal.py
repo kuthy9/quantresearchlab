@@ -13,7 +13,7 @@ from .market_clock import (
     scheduled_gap_kind,
 )
 from .model import Bar, Candle, Timeframe, ticks_to_price
-from .scene_graph import ScaleSpec, scale_registry_id
+from .scale_registry import ScaleSpec, scale_registry_id
 
 
 class CausalClockError(RuntimeError):

@@ -89,6 +89,16 @@ reducer, Brain, or study before `known_at`. Canonical order is
 semantic identity, ordered atomic events, initial state, and reducer code,
 replay must produce identical events, state, and fingerprints.
 
+A market clock recorded inside evidence is never a substitute for `known_at`.
+A crossing terminal (`SWEEP_CONFIRMED`, `ACCEPTANCE_CONFIRMED`) carries three
+distinct clocks: `event_time` is the crossing, `evidence["resolved_at"]` is the
+market clock that decided the outcome, and `known_at` is the observation clock
+at which the Eye could first derive the terminal. When a reducer only reaches
+its verdict on a later observation, `known_at` is that later clock — stamping
+the market clock instead backdates the terminal behind ancestry it is required
+to cite. A generation's `resolved_at` is frozen once recorded; its `known_at`
+is the first clock it was knowable at and may never move earlier.
+
 Research temporal proximity is not semantic ancestry. Scene-Graph `PRECEDES`
 may remain visible as a diagnostic edge, but it is excluded from canonical
 causal/open-thesis closure and action connectivity. It never enters

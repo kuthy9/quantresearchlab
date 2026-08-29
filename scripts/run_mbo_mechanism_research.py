@@ -62,7 +62,7 @@ from smc_trader.model import (  # noqa: E402
     Timeframe,
 )
 from smc_trader.observation import CausalObserver, ObserverConfig  # noqa: E402
-from smc_trader.scene_graph import parse_scale_specs  # noqa: E402
+from smc_trader.scale_registry import parse_scale_specs  # noqa: E402
 from smc_trader.semantics import load_semantic_selection  # noqa: E402
 from smc_trader.signal_research import resolve_source_lineage_tokens  # noqa: E402
 

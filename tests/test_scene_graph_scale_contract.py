@@ -8,6 +8,7 @@ import pandas as pd
 import pytest
 
 from smc_trader.causal import CausalMarketReader
+from smc_trader.engine import ContinuousSMCEngine
 from smc_trader.model import (
     Bar,
     CandleStructureState,
@@ -2802,9 +2803,19 @@ def test_observer_transfers_revised_edge_ids_into_observation() -> None:
         revision_id="scene:test-revision",
         revised_edge_ids=("edge:closed-test",),
     )
-    observer.scene_graph = SimpleNamespace(update=lambda observation: delta)
+    # The Eye publishes an unstamped observation; the Engine owns the graph and
+    # stamps its delta onto that exact object.
     observation = observer.observe(update)
-    assert observation.scene_revised_edge_ids == ("edge:closed-test",)
+    assert observation.scene_revision_id is None
+
+    engine = object.__new__(ContinuousSMCEngine)
+    engine.observer = observer
+    engine.scene_graph = SimpleNamespace(update=lambda observation: delta)
+    engine.last_scene_delta = None
+    projected = engine._project_scene_graph(observation)
+
+    assert engine.last_scene_delta is delta
+    assert projected.scene_revised_edge_ids == ("edge:closed-test",)
 
 
 def test_scene_delta_canonicalizes_unordered_revised_edge_identities() -> None:

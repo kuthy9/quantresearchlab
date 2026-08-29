@@ -1,9 +1,9 @@
 # Canonical Semantic Foundation v2
 
-Status date: 2026-08-25
+Status date: 2026-08-28
 Foundation identity: `smc_semantic_foundation_v2.0`
 Parent atomic identity: `smc_semantics_v1.2`
-Canonical-JSON registry identity SHA-256: `ac04636919931d774309a0c306764fdf8eb53aee41df0f31d4d94e5b9125732b`
+Canonical-JSON registry identity SHA-256: `0c49da28e103f0515d3eb93ab03e8659e334d2477449f5174df3b5e8b0b84cc6`
 
 This document is the implementation authority for the canonical semantic
 foundation layered over the immutable v1.2 atomic event stream. It completes
@@ -158,10 +158,18 @@ The existing leg ID remains stable. A foundation-v2 leg additionally freezes:
 - `amplitude_ticks`, `amplitude_points`, and `amplitude_atr`;
 - `close_efficiency` and `extreme_path_efficiency`;
 - close MAE and wick MAE;
-- inclusive native real-bar duration and wall-clock seconds;
+- inclusive native registered-bar duration and wall-clock seconds;
 - the complete ordered native path BAR ancestry;
+- `synthetic_path_minutes`, the densified no-trade minutes inside that path;
 - `ATR_at_leg_start`, calculated from exactly 14 strictly prior real completed
   native bars, plus those 14 source IDs.
+
+Since 2026-08-28 the path admits a densified no-trade bar so a leg spanning a
+no-trade minute stays representable; `synthetic_path_minutes` is zero exactly
+when every admitted bar carried real price discovery. ATR ancestry is
+unaffected — it is still drawn from `real_completed` bars only, because a
+no-trade bar has zero true range. Swing Geometry carries the same marker as
+`synthetic_window_minutes`.
 
 Cold-prefix compatibility objects without both a frozen ATR value and its full
 14-bar ancestry remain v1.2 records and cannot masquerade as v2.

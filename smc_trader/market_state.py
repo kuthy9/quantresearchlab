@@ -29,6 +29,7 @@ from .market_clock import (
     validate_registered_native_bar_root,
 )
 from .model import (
+    candle_coverage,
     BOSLifecycle,
     BOSScope,
     Candle,
@@ -209,6 +210,9 @@ class SwingGeometryNode:
     upper_bound: float
     known_at: pd.Timestamp
     source_candle_ids: tuple[str, ...]
+    # Densified no-trade minutes inside the definitional window; see
+    # ``StructuralLegState.synthetic_path_minutes``.
+    synthetic_window_minutes: int = 0
     foundation_version: str = FOUNDATION_VERSION
 
     def __post_init__(self) -> None:
@@ -2529,7 +2533,7 @@ def _require_contiguous_native_candles(
 
     expected_minutes = _NATIVE_TIMEFRAME_MINUTES[Timeframe(timeframe)]
     if not candles:
-        raise ValueError(f"{object_name} lacks native-duration real BARs")
+        raise ValueError(f"{object_name} lacks native-duration BARs")
     for candle in candles:
         try:
             registered_start, registered_end = registered_native_bar_bounds(
@@ -2539,7 +2543,7 @@ def _require_contiguous_native_candles(
             )
         except ValueError as error:
             raise ValueError(
-                f"{object_name} lacks native-duration real BARs"
+                f"{object_name} lacks native-duration BARs"
             ) from error
         registered_minutes = expected_trading_minutes(
             registered_start,
@@ -2547,15 +2551,13 @@ def _require_contiguous_native_candles(
         )
         if (
             candle.timeframe is not timeframe
-            or not candle.real_completed
-            or candle.synthetic_minutes != 0
+            or not candle_coverage(candle).admits_definitional_path
             or candle.start != registered_start
             or candle.end != registered_end
             or candle.expected_minutes != registered_minutes
             or candle.observed_minutes != registered_minutes
-            or candle.real_minutes != registered_minutes
         ):
-            raise ValueError(f"{object_name} lacks native-duration real BARs")
+            raise ValueError(f"{object_name} lacks native-duration BARs")
     try:
         contiguous = all(
             next_registered_native_completion(
@@ -2601,7 +2603,7 @@ def build_swing_geometry_nodes(
                 (
                     candle
                     for candle in candles
-                    if candle.real_completed
+                    if candle_coverage(candle).admits_definitional_path
                     and candle.timeframe is swing.timeframe
                     and candle.symbol == swing.symbol
                     and candle.instrument_id == swing.instrument_id
@@ -2647,6 +2649,9 @@ def build_swing_geometry_nodes(
                 source_candle_ids=tuple(
                     candle_identity(candle, tick_size=tick_size)
                     for candle in window
+                ),
+                synthetic_window_minutes=sum(
+                    int(candle.synthetic_minutes) for candle in window
                 ),
             )
         )
@@ -2895,7 +2900,8 @@ def build_structural_legs(
             (
                 candle
                 for candle in candles
-                if candle.real_completed and candle.timeframe is timeframe
+                if candle_coverage(candle).admits_definitional_path
+                and candle.timeframe is timeframe
                 and (
                     contract is None
                     or (candle.symbol, candle.instrument_id) == contract
@@ -3002,6 +3008,7 @@ def build_structural_legs(
             candle
             for candle in native_by_end[:prior_count]
             if candle.end <= anchor.pivot_start
+            and candle_coverage(candle).admits_atr_window
         )
         if len(prior_candles) < atr_period:
             atr_result = None
@@ -3147,6 +3154,9 @@ def build_structural_legs(
                     candle_identity(candle, tick_size=grid) for candle in path
                 ),
                 "atr_source_candle_ids": foundation_atr_sources,
+                "synthetic_path_minutes": sum(
+                    int(candle.synthetic_minutes) for candle in path
+                ),
                 "foundation_version": FOUNDATION_VERSION,
             }
         output.append(

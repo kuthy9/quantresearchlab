@@ -6115,7 +6115,7 @@ def _streamed_main(args: argparse.Namespace) -> None:
         replay_state = state.get("replay")
         engine_state = getattr(replay_state, "engine", None)
         snapshot = getattr(engine_state, "last_snapshot", None)
-        graph = getattr(getattr(engine_state, "observer", None), "scene_graph", None)
+        graph = getattr(engine_state, "scene_graph", None)
         if (
             snapshot is None
             or snapshot.observation.asof != asof
@@ -6792,7 +6792,7 @@ def _streamed_main(args: argparse.Namespace) -> None:
                         source_bar=bar,
                         source_row_ordinal=int(state["source_rows_consumed"]),
                         replay_update_ordinal=int(state["processed_bars"]),
-                        scene_graph=replay.engine.observer.scene_graph,
+                        scene_graph=replay.engine.scene_graph,
                     )
                 if (
                     market_cases is not None
@@ -6803,7 +6803,7 @@ def _streamed_main(args: argparse.Namespace) -> None:
                         source_bar=bar,
                         source_row_ordinal=int(state["source_rows_consumed"]),
                         replay_update_ordinal=int(state["processed_bars"]),
-                        scene_graph=replay.engine.observer.scene_graph,
+                        scene_graph=replay.engine.scene_graph,
                     )
                 if (
                     shadow_outcomes is not None
@@ -6869,7 +6869,7 @@ def _streamed_main(args: argparse.Namespace) -> None:
                             source_bar=bar,
                             source_row_ordinal=int(state["source_rows_consumed"]),
                             replay_update_ordinal=int(state["processed_bars"]),
-                            scene_graph=replay.engine.observer.scene_graph,
+                            scene_graph=replay.engine.scene_graph,
                         )
                         append_stream(
                             "causal_case_input_shards",
@@ -6886,7 +6886,7 @@ def _streamed_main(args: argparse.Namespace) -> None:
                                 state["source_rows_consumed"]
                             ),
                             replay_update_ordinal=int(state["processed_bars"]),
-                            scene_graph=replay.engine.observer.scene_graph,
+                            scene_graph=replay.engine.scene_graph,
                         )
                         append_stream(
                             "market_case_input_shards",

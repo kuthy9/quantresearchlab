@@ -17,7 +17,7 @@ from typing import Any, Mapping
 FOUNDATION_VERSION = "smc_semantic_foundation_v2.0"
 PARENT_ATOMIC_VERSION = "smc_semantics_v1.2"
 FOUNDATION_CANONICAL_IDENTITY = (
-    "ac04636919931d774309a0c306764fdf8eb53aee41df0f31d4d94e5b9125732b"
+    "0c49da28e103f0515d3eb93ab03e8659e334d2477449f5174df3b5e8b0b84cc6"
 )
 _DEFAULT_PATH = Path("semantics/foundation_v2_0.yaml")
 _ROOT_KEYS = frozenset(

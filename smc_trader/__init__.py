@@ -1,8 +1,13 @@
-"""Causal continuous SMC trader, product version 1."""
+"""Causal continuous SMC trader, product version 1.
+
+The public surface is the Trading Eye's published market view plus the
+runtime entry points that consume it.  ``EventStore`` is the Eye's internal
+history authority and is deliberately not exported here; import
+``smc_trader.event_store`` directly when a research or replay tool needs
+read-only access to event lineage."""
 
 from .engine import ContinuousSMCEngine
 from .execution_fsm import ExecutionFSM, RiskApprovedTradeIntent
-from .event_store import EventStore
 from .market_state import (
     MarketSnapshot,
     MarketSnapshotAuthority,
@@ -26,7 +31,6 @@ __all__ = [
     "ContinuousSMCEngine",
     "Direction",
     "ExecutionFSM",
-    "EventStore",
     "MarketSnapshot",
     "MarketSnapshotAuthority",
     "Playbook",

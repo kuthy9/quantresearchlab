@@ -20,6 +20,7 @@ from smc_trader.market_state import (
     _require_contiguous_native_candles,
 )
 from smc_trader.model import (
+    BarCoverage,
     Candle,
     DealingRangeLifecycle,
     DealingRangeState,
@@ -32,6 +33,8 @@ from smc_trader.model import (
     SwingRelation,
     SwingSide,
     Timeframe,
+    bar_evidence_coverage,
+    candle_coverage,
     candle_identity,
 )
 
@@ -729,3 +732,172 @@ def test_structural_and_balance_ranges_remain_distinct_cold_geometries() -> None
     )
     assert terminated.terminated_at == _clock(240)
     assert terminated.termination_reason == "structure_generation_terminated"
+
+
+def _densified_candle(
+    index: int,
+    *,
+    timeframe: Timeframe = Timeframe.M5,
+    open_: float = 100.0,
+    high: float = 101.0,
+    low: float = 99.0,
+    close: float = 100.0,
+    synthetic_minutes: int = 1,
+) -> Candle:
+    """One native candle whose bucket contains a densified no-trade minute."""
+
+    real = _candle(
+        index,
+        timeframe=timeframe,
+        open_=open_,
+        high=high,
+        low=low,
+        close=close,
+    )
+    return replace(
+        real,
+        synthetic_minutes=synthetic_minutes,
+        real_minutes=real.observed_minutes - synthetic_minutes,
+    )
+
+
+def test_structural_leg_path_admits_a_densified_no_trade_bar() -> None:
+    warmup = tuple(_candle(index) for index in range(14))
+    path = (
+        _candle(14, open_=100.0, high=101.0, low=99.0, close=100.0),
+        _densified_candle(15, open_=100.0, high=102.0, low=98.5, close=99.5),
+        _candle(16, open_=99.5, high=103.0, low=99.25, close=102.0),
+        _candle(17, open_=102.0, high=104.0, low=101.0, close=103.0),
+    )
+    low = _swing("leg-low", SwingSide.LOW, 99.0, path[0].start, path[1].end)
+    high = _swing(
+        "leg-high",
+        SwingSide.HIGH,
+        104.0,
+        path[-1].start,
+        path[-1].end + pd.Timedelta(5, unit="min"),
+    )
+
+    leg = build_structural_legs(
+        Timeframe.M5,
+        (low, high),
+        (*warmup, *path),
+        tick_size=0.25,
+    )[0]
+
+    assert leg.foundation_version == FOUNDATION_VERSION
+    assert leg.synthetic_path_minutes == 1
+    assert leg.duration_bars == 4
+    assert leg.path_candle_ids == tuple(
+        candle_identity(candle, tick_size=0.25) for candle in path
+    )
+
+
+def test_structural_leg_atr_ancestry_still_cites_only_real_bars() -> None:
+    # A densified bar sits immediately before the leg, inside the ATR window.
+    warmup = (
+        *(_candle(index) for index in range(14)),
+        _densified_candle(14),
+    )
+    path = (
+        _candle(15, open_=100.0, high=101.0, low=99.0, close=100.0),
+        _candle(16, open_=100.0, high=102.0, low=98.5, close=99.5),
+        _candle(17, open_=99.5, high=103.0, low=99.25, close=102.0),
+        _candle(18, open_=102.0, high=104.0, low=101.0, close=103.0),
+    )
+    low = _swing("leg-low", SwingSide.LOW, 99.0, path[0].start, path[1].end)
+    high = _swing(
+        "leg-high",
+        SwingSide.HIGH,
+        104.0,
+        path[-1].start,
+        path[-1].end + pd.Timedelta(5, unit="min"),
+    )
+
+    leg = build_structural_legs(
+        Timeframe.M5,
+        (low, high),
+        (*warmup, *path),
+        tick_size=0.25,
+    )[0]
+
+    densified_id = candle_identity(warmup[-1], tick_size=0.25)
+    assert densified_id not in leg.atr_source_candle_ids
+    assert len(leg.atr_source_candle_ids) == 14
+    assert leg.atr_source_candle_ids == tuple(
+        candle_identity(candle, tick_size=0.25) for candle in warmup[:14]
+    )
+
+
+def test_swing_geometry_window_admits_a_densified_no_trade_bar() -> None:
+    candles = (
+        _candle(0),
+        _candle(1, high=105.0),
+        _densified_candle(2),
+    )
+    swing = _swing(
+        "densified-geometry",
+        SwingSide.HIGH,
+        105.0,
+        candles[1].start,
+        candles[-1].end,
+    )
+
+    node = build_swing_geometry_nodes((swing,), candles, tick_size=0.25)[0]
+
+    assert node.synthetic_window_minutes == 1
+    assert node.source_candle_ids == tuple(
+        candle_identity(candle, tick_size=0.25) for candle in candles
+    )
+
+
+@pytest.mark.parametrize(
+    ("synthetic_minutes", "complete", "expected"),
+    (
+        (0, True, BarCoverage.REAL),
+        (1, True, BarCoverage.DENSIFIED),
+        (5, True, BarCoverage.DENSIFIED),
+        (0, False, BarCoverage.INCOMPLETE),
+        (1, False, BarCoverage.INCOMPLETE),
+    ),
+)
+def test_one_rule_classifies_bar_coverage(
+    synthetic_minutes: int,
+    complete: bool,
+    expected: BarCoverage,
+) -> None:
+    """Producer and contract read one admission rule, not two copies of it."""
+
+    minutes = _minutes(Timeframe.M5)
+    base = _candle(0, timeframe=Timeframe.M5)
+    candle = replace(
+        base,
+        complete=complete,
+        observed_minutes=minutes if complete else minutes - 1,
+        real_minutes=(minutes if complete else minutes - 1) - synthetic_minutes,
+        synthetic_minutes=synthetic_minutes,
+    )
+
+    assert candle_coverage(candle) == expected
+    # the same shape, described the way a BAR event's evidence describes it
+    assert bar_evidence_coverage(
+        {
+            "real_completed": candle.real_completed,
+            "clock_only": not candle.real_completed,
+            "complete": candle.complete,
+            "observed_minutes": candle.observed_minutes,
+            "expected_minutes": candle.expected_minutes,
+            "real_minutes": candle.real_minutes,
+            "synthetic_minutes": candle.synthetic_minutes,
+        }
+    ) == expected
+
+
+def test_definitional_path_and_atr_admission_follow_the_coverage_rule() -> None:
+    assert BarCoverage.REAL.admits_definitional_path is True
+    assert BarCoverage.DENSIFIED.admits_definitional_path is True
+    assert BarCoverage.INCOMPLETE.admits_definitional_path is False
+
+    assert BarCoverage.REAL.admits_atr_window is True
+    assert BarCoverage.DENSIFIED.admits_atr_window is False
+    assert BarCoverage.INCOMPLETE.admits_atr_window is False

@@ -1,4 +1,11 @@
-"""Causal top-of-book adapter for execution-reality observations."""
+"""Execution-reality inputs, scoring, and the causal top-of-book adapter.
+
+The Trading Eye publishes deterministic market facts only. Everything in this
+module is execution-layer interpretation of broker/feed reality: the input
+contract a caller supplies, the deterministic cost/fillability score derived
+from it, and the inert value used by runs that do not evaluate execution at
+all. The Eye transports the result; it never derives it.
+"""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -6,8 +13,105 @@ import math
 
 import pandas as pd
 
-from .model import Direction, aware_timestamp
-from .observation import ExecutionRealityInput
+from .model import Direction, ExecutionObservation, aware_timestamp, clamp
+
+
+@dataclass(frozen=True)
+class ExecutionRealityInput:
+    spread_points: float | None = None
+    expected_slippage_points: float = 0.25
+    commission_per_contract_per_side: float = 2.25
+    quantity: int = 1
+    deadline: pd.Timestamp | None = None
+    data_age_seconds: float = 0.0
+    size_available: float | None = None
+    source: str = "missing"
+    bid: float | None = None
+    ask: float | None = None
+    bid_size: float | None = None
+    ask_size: float | None = None
+    depth_imbalance: float | None = None
+    anomalies: tuple[str, ...] = ()
+
+
+def observe_execution_reality(
+    reality: ExecutionRealityInput,
+    *,
+    asof: pd.Timestamp,
+    tick_size: float,
+    point_value: float,
+) -> ExecutionObservation:
+    """Score one causal execution-reality input at one decision clock."""
+
+    anomalies = list(reality.anomalies)
+    spread = reality.spread_points
+    if spread is None:
+        spread = tick_size
+        anomalies.append("spread_missing_used_one_tick")
+    if reality.source.startswith("constant"):
+        anomalies.append("execution_constant_assumption")
+    if spread < 0:
+        raise ValueError("spread cannot be negative")
+    if reality.quantity <= 0:
+        raise ValueError("execution quantity must be positive")
+    commission_points = (
+        2.0 * reality.commission_per_contract_per_side / point_value
+    )
+    cost = float(spread + 2.0 * reality.expected_slippage_points + commission_points)
+    if reality.deadline is None:
+        minutes = 24 * 60
+        anomalies.append("deadline_missing")
+    else:
+        deadline = pd.Timestamp(reality.deadline)
+        if deadline.tzinfo is None:
+            raise ValueError("execution deadline must be timezone aware")
+        minutes = int((deadline - asof).total_seconds() // 60)
+    spread_ticks = spread / tick_size
+    spread_score = math.exp(-0.18 * max(0.0, spread_ticks - 1.0))
+    freshness = math.exp(-max(0.0, reality.data_age_seconds) / 30.0)
+    deadline_score = clamp(max(0.0, minutes) / 20.0)
+    size_score = (
+        1.0
+        if reality.size_available is None
+        else clamp(reality.size_available / max(1, reality.quantity))
+    )
+    fillability = clamp(spread_score * freshness * max(0.25, deadline_score) * size_score)
+    if reality.data_age_seconds > 60:
+        anomalies.append("stale_market_data")
+    if minutes <= 0:
+        anomalies.append("deadline_elapsed")
+    return ExecutionObservation(
+        spread_points=float(spread),
+        expected_slippage_points=float(reality.expected_slippage_points),
+        expected_round_trip_cost_points=cost,
+        minutes_to_deadline=minutes,
+        fillability=fillability,
+        data_age_seconds=float(reality.data_age_seconds),
+        size_available=reality.size_available,
+        anomalies=tuple(anomalies),
+        source=reality.source,
+        bid=reality.bid,
+        ask=reality.ask,
+        bid_size=reality.bid_size,
+        ask_size=reality.ask_size,
+        depth_imbalance=reality.depth_imbalance,
+    )
+
+
+def execution_not_evaluated() -> ExecutionObservation:
+    """Return an inert contract value for Eye-only semantic replay."""
+
+    return ExecutionObservation(
+        spread_points=0.0,
+        expected_slippage_points=0.0,
+        expected_round_trip_cost_points=0.0,
+        minutes_to_deadline=0,
+        fillability=0.0,
+        data_age_seconds=0.0,
+        size_available=None,
+        anomalies=(),
+        source="not_evaluated",
+    )
 
 
 @dataclass(frozen=True)
@@ -96,4 +200,10 @@ class TopOfBookExecutionProvider:
         )
 
 
-__all__ = ["TopOfBook", "TopOfBookExecutionProvider"]
+__all__ = [
+    "ExecutionRealityInput",
+    "TopOfBook",
+    "TopOfBookExecutionProvider",
+    "execution_not_evaluated",
+    "observe_execution_reality",
+]

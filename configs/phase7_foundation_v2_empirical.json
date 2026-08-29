@@ -12,7 +12,7 @@
   "semantic_bindings": {
     "foundation_registry": "semantics/foundation_v2_0.yaml",
     "foundation_registry_sha256": "dfc4cb29f98fc5015628927e97c725eb491b99f244f154e51552e5950daf927c",
-    "foundation_identity": "ac04636919931d774309a0c306764fdf8eb53aee41df0f31d4d94e5b9125732b",
+    "foundation_identity": "0c49da28e103f0515d3eb93ab03e8659e334d2477449f5174df3b5e8b0b84cc6",
     "input_path_protocol": "configs/path_hypotheses.json",
     "input_path_protocol_sha256": "d897635cb91fc1cb84647f41eb4c5a6b8a06d05d2e44a1b3471e8e9ff67b0482",
     "input_path_protocol_fingerprint": "d897635cb91fc1cb84647f41eb4c5a6b8a06d05d2e44a1b3471e8e9ff67b0482",

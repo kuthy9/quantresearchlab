@@ -455,10 +455,17 @@ def _with_evidence(
     return replace(event, details=evidence, evidence=evidence)
 
 
-def _foundation_structural_leg_contract() -> tuple[
+def _foundation_structural_leg_contract(
+    *,
+    session_gap_minutes: int = 0,
+) -> tuple[
     MarketEvent,
     dict[str, MarketEvent],
 ]:
+    # The registered calendar truncates the bucket that closes at the daily
+    # maintenance break and restarts one gap later, so the BAR closing a pivot
+    # can sit more than one stride after the pivot clock.
+    gap = session_gap_minutes
     prior_bars = tuple(
         _normalized_bar(
             f"foundation-prior-{minute}",
@@ -474,7 +481,7 @@ def _foundation_structural_leg_contract() -> tuple[
     path_bars = (
         _normalized_bar(
             "foundation-path-15",
-            15,
+            15 + gap,
             timeframe=Timeframe.M1,
             open_=100.0,
             high=101.0,
@@ -483,7 +490,7 @@ def _foundation_structural_leg_contract() -> tuple[
         ),
         _normalized_bar(
             "foundation-path-16",
-            16,
+            16 + gap,
             timeframe=Timeframe.M1,
             open_=100.0,
             high=102.0,
@@ -492,7 +499,7 @@ def _foundation_structural_leg_contract() -> tuple[
         ),
         _normalized_bar(
             "foundation-path-17",
-            17,
+            17 + gap,
             timeframe=Timeframe.M1,
             open_=99.5,
             high=103.0,
@@ -501,7 +508,7 @@ def _foundation_structural_leg_contract() -> tuple[
         ),
         _normalized_bar(
             "foundation-path-18",
-            18,
+            18 + gap,
             timeframe=Timeframe.M1,
             open_=102.0,
             high=105.0,
@@ -511,7 +518,7 @@ def _foundation_structural_leg_contract() -> tuple[
     )
     confirmation_bar = _normalized_bar(
         "foundation-confirmation-19",
-        19,
+        19 + gap,
         timeframe=Timeframe.M1,
         open_=104.0,
         high=104.5,
@@ -520,7 +527,7 @@ def _foundation_structural_leg_contract() -> tuple[
     )
     start_swing = _event(
         "foundation-start-swing",
-        16,
+        16 + gap,
         canonical=True,
         kind=EventKind.SWING_CONFIRMED,
         timeframe=Timeframe.M1,
@@ -538,11 +545,11 @@ def _foundation_structural_leg_contract() -> tuple[
             "side": "low",
             "relation": "none",
             "pivot_start": _clock(14).isoformat(),
-            "pivot_end": _clock(15).isoformat(),
+            "pivot_end": _clock(15 + gap).isoformat(),
             "prominence_atr": 1.0,
             "legacy_same_side_magnitude_atr": 0.0,
             "confirmation_delay_bars": 1,
-            "confirmation_delay_minutes": 2,
+            "confirmation_delay_minutes": 2 + gap,
             "nesting_depth": 0,
             "semantic_rank": "micro",
             "delta_ticks": 0,
@@ -550,13 +557,13 @@ def _foundation_structural_leg_contract() -> tuple[
     )
     end_swing = _event(
         "foundation-end-swing",
-        19,
+        19 + gap,
         canonical=True,
         kind=EventKind.SWING_CONFIRMED,
         timeframe=Timeframe.M1,
         side="above",
         price=105.0,
-        event_time_minutes=17,
+        event_time_minutes=17 + gap,
         source_event_ids=(
             path_bars[2].event_id,
             path_bars[3].event_id,
@@ -567,8 +574,8 @@ def _foundation_structural_leg_contract() -> tuple[
             "source_entity_id": "foundation-end",
             "side": "high",
             "relation": "none",
-            "pivot_start": _clock(17).isoformat(),
-            "pivot_end": _clock(18).isoformat(),
+            "pivot_start": _clock(17 + gap).isoformat(),
+            "pivot_end": _clock(18 + gap).isoformat(),
             "prominence_atr": 1.0,
             "legacy_same_side_magnitude_atr": 0.0,
             "confirmation_delay_bars": 1,
@@ -586,14 +593,14 @@ def _foundation_structural_leg_contract() -> tuple[
     )
     leg = _event(
         "foundation-structural-leg",
-        19,
+        19 + gap,
         canonical=True,
         kind=EventKind.STRUCTURAL_LEG_CREATED,
         timeframe=Timeframe.M1,
         direction=Direction.LONG,
         side="above",
         price=105.0,
-        event_time_minutes=17,
+        event_time_minutes=17 + gap,
         source_event_ids=(start_swing.event_id, end_swing.event_id),
         source_data_ids=(*atr_candle_ids, *path_candle_ids),
         source_entity_ids=(
@@ -609,7 +616,7 @@ def _foundation_structural_leg_contract() -> tuple[
             "start_swing_id": "foundation-start",
             "end_swing_id": "foundation-end",
             "start_event_time": _clock(14).isoformat(),
-            "end_event_time": _clock(17).isoformat(),
+            "end_event_time": _clock(17 + gap).isoformat(),
             "start_price": 98.0,
             "end_price": 105.0,
             "start_close": 100.0,
@@ -619,8 +626,8 @@ def _foundation_structural_leg_contract() -> tuple[
             "amplitude_atr": 3.5,
             "atr_at_leg_start": 2.0,
             "duration_bars": 4,
-            "duration_minutes": 3,
-            "duration_seconds": 180,
+            "duration_minutes": 3 + gap,
+            "duration_seconds": 180 + gap * 60,
             "efficiency": 0.8,
             "close_efficiency": 0.8,
             "extreme_path_efficiency": 1.0,
@@ -837,6 +844,20 @@ def test_foundation_structural_leg_rejects_wrong_timeframe_or_future_bar(
 
     with pytest.raises(ValueError, match=match):
         validate_canonical_event(forged, available_events=available)
+
+
+def test_foundation_structural_leg_spans_a_truncated_session_bucket() -> None:
+    """A leg stays valid when a session break widens the endpoint stride."""
+
+    leg, available = _foundation_structural_leg_contract(session_gap_minutes=3)
+    start = available[leg.source_event_ids[0]]
+    pivot_bar = available[start.source_event_ids[1]]
+
+    # the BAR closing the start pivot is four minutes after the pivot clock,
+    # not the one arithmetic stride the contract used to assume
+    assert pivot_bar.known_at - start.event_time == pd.Timedelta(minutes=4)
+
+    validate_canonical_event(leg, available_events=available)
 
 
 def test_foundation_structural_leg_rejects_endpoint_swing_pivot_drift() -> None:
@@ -3882,3 +3903,137 @@ def test_explicit_source_namespaces_roundtrip_through_bound_journal(
     assert restored_child.source_data_ids == ("ohlcv-row:2",)
     assert restored_child.source_entity_ids == ("candidate-level:1",)
     assert restored_child.context_event_ids == (context.event_id,)
+
+
+def _swap_bar(
+    leg: MarketEvent,
+    available: dict[str, MarketEvent],
+    *,
+    seed: str,
+    replacement: MarketEvent,
+) -> MarketEvent:
+    """Replace one cited BAR root in place, keeping every other citation."""
+
+    detector_id = f"detector:{seed}"
+    old = next(
+        event
+        for event in available.values()
+        if event.kind is EventKind.BAR_COMPLETED
+        and event.evidence.get("detector_candle_id") == detector_id
+    )
+    del available[old.event_id]
+    available[replacement.event_id] = replacement
+    return replace(
+        leg,
+        context_event_ids=tuple(
+            replacement.event_id if value == old.event_id else value
+            for value in leg.context_event_ids
+        ),
+    )
+
+
+def test_foundation_structural_leg_path_admits_a_densified_no_trade_bar() -> None:
+    leg, available = _foundation_structural_leg_contract()
+    densified = _normalized_bar(
+        "foundation-path-16",
+        16,
+        timeframe=Timeframe.M1,
+        open_=100.0,
+        high=102.0,
+        low=98.5,
+        close=99.5,
+        real_completed=False,
+    )
+    admitted = _swap_bar(
+        leg, available, seed="foundation-path-16", replacement=densified
+    )
+
+    validate_canonical_event(admitted, available_events=available)
+
+
+def test_foundation_structural_leg_atr_ancestry_rejects_a_densified_bar() -> None:
+    leg, available = _foundation_structural_leg_contract()
+    densified = _normalized_bar(
+        "foundation-prior-7",
+        7,
+        timeframe=Timeframe.M1,
+        open_=100.0,
+        high=101.0,
+        low=99.0,
+        close=100.0,
+        real_completed=False,
+    )
+    forged = _swap_bar(
+        leg, available, seed="foundation-prior-7", replacement=densified
+    )
+
+    with pytest.raises(ValueError, match="real normalized BAR root"):
+        validate_canonical_event(forged, available_events=available)
+
+
+def test_foundation_structural_leg_atr_window_skips_a_densified_prior_bar() -> None:
+    """The ATR window reaches past a densified bar, exactly as the producer does."""
+
+    leg, available = _foundation_structural_leg_contract()
+    # one extra real bar so a real 14-bar window still exists once minute 7 is
+    # densified, mirroring the producer reaching one bar further back
+    extra = _normalized_bar(
+        "foundation-prior-0",
+        0,
+        timeframe=Timeframe.M1,
+        open_=100.0,
+        high=101.0,
+        low=99.0,
+        close=100.0,
+    )
+    available[extra.event_id] = extra
+    densified = _normalized_bar(
+        "foundation-prior-7",
+        7,
+        timeframe=Timeframe.M1,
+        open_=100.0,
+        high=101.0,
+        low=99.0,
+        close=100.0,
+        real_completed=False,
+    )
+    stale = next(
+        event
+        for event in available.values()
+        if event.evidence.get("detector_candle_id") == "detector:foundation-prior-7"
+    )
+    del available[stale.event_id]
+    available[densified.event_id] = densified
+
+    atr_bars = tuple(
+        sorted(
+            (
+                event
+                for event in available.values()
+                if event.kind is EventKind.BAR_COMPLETED
+                and event.evidence.get("real_completed") is True
+                and event.known_at <= _clock(14)
+            ),
+            key=lambda event: event.known_at,
+        )
+    )[-14:]
+    assert len(atr_bars) == 14
+    path_ids = tuple(leg.context_event_ids[14:])
+    admitted = _with_evidence(
+        replace(
+            leg,
+            context_event_ids=(
+                *(bar.event_id for bar in atr_bars),
+                *path_ids,
+            ),
+            source_data_ids=(
+                *(str(bar.evidence["detector_candle_id"]) for bar in atr_bars),
+                *leg.source_data_ids[14:],
+            ),
+        ),
+        atr_source_candle_ids=tuple(
+            str(bar.evidence["detector_candle_id"]) for bar in atr_bars
+        ),
+    )
+
+    validate_canonical_event(admitted, available_events=available)

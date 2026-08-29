@@ -534,8 +534,8 @@ def test_first_pullback_rejection_draw_and_event_memory_are_source_bound() -> No
     observer = CausalObserver(
         ObserverConfig(scale_specs=CORE_TEST_SCALE_SPECS)
     )
-    observer._record_interaction_events(created_canonical)
-    observer._record_interaction_events(resolved_canonical)
+    observer._emitter._record_interaction_events(created_canonical)
+    observer._emitter._record_interaction_events(resolved_canonical)
     assert any(
         event.kind is EventKind.ENTRY_PATH_STEP
         for event in observer.memory.recent()
@@ -567,7 +567,7 @@ def test_first_pullback_rejection_draw_and_event_memory_are_source_bound() -> No
     assert failed.path_sequences[0].lifecycle is PathSequenceLifecycle.CLOSED
     assert failed.path_sequences[0].transition_reason == "location_left"
     assert reducer._last_canonical is not None
-    observer._record_interaction_events(reducer._last_canonical)
+    observer._emitter._record_interaction_events(reducer._last_canonical)
     observer.memory.sync_retained_entity_timelines(
         (timeline_key,),
         asof=failure_bar.end,

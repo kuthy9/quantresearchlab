@@ -940,6 +940,89 @@ class Bar:
         )
 
 
+class BarCoverage(str, Enum):
+    """How completely one native bar's bucket was actually observed.
+
+    A no-trade minute carries no vendor record, so the reader synthesizes it to
+    keep the registered clock whole.  That bar still covers its whole bucket and
+    is not the same thing as one that never observed its minutes.  Both the
+    producer that builds a definitional path and the contract that re-validates
+    it decide admission from this one classification, so the two cannot drift
+    apart.
+    """
+
+    REAL = "real"
+    DENSIFIED = "densified"
+    INCOMPLETE = "incomplete"
+
+    @property
+    def admits_definitional_path(self) -> bool:
+        """A v2 definitional path needs full bucket coverage, real or not."""
+
+        return self is not BarCoverage.INCOMPLETE
+
+    @property
+    def admits_atr_window(self) -> bool:
+        """ATR needs real price discovery: a no-trade bar has no true range."""
+
+        return self is BarCoverage.REAL
+
+
+def classify_bar_coverage(
+    *,
+    complete: object,
+    observed_minutes: object,
+    expected_minutes: object,
+    real_minutes: object,
+    synthetic_minutes: object,
+) -> BarCoverage:
+    """Classify one bar's coverage from its minute accounting alone."""
+
+    if complete is not True:
+        return BarCoverage.INCOMPLETE
+    values = (observed_minutes, expected_minutes, real_minutes, synthetic_minutes)
+    if not all(isinstance(value, int) and not isinstance(value, bool) for value in values):
+        return BarCoverage.INCOMPLETE
+    observed, expected, real, synthetic = values
+    if observed != expected or real + synthetic != observed or synthetic < 0:
+        return BarCoverage.INCOMPLETE
+    return BarCoverage.REAL if synthetic == 0 else BarCoverage.DENSIFIED
+
+
+def candle_coverage(candle: "Candle") -> BarCoverage:
+    """Classify a producer-side candle."""
+
+    return classify_bar_coverage(
+        complete=candle.complete,
+        observed_minutes=candle.observed_minutes,
+        expected_minutes=candle.expected_minutes,
+        real_minutes=candle.real_minutes,
+        synthetic_minutes=candle.synthetic_minutes,
+    )
+
+
+def bar_evidence_coverage(evidence: Mapping[str, object]) -> BarCoverage:
+    """Classify a BAR event from the evidence it transports.
+
+    A real root records neither its minute accounting nor ``complete``; the
+    emitter adds those only when the bar is not real, so an absent accounting
+    with ``real_completed`` true is a fully real bar.
+    """
+
+    if (
+        evidence.get("real_completed") is True
+        and evidence.get("clock_only") is False
+    ):
+        return BarCoverage.REAL
+    return classify_bar_coverage(
+        complete=evidence.get("complete"),
+        observed_minutes=evidence.get("observed_minutes"),
+        expected_minutes=evidence.get("expected_minutes"),
+        real_minutes=evidence.get("real_minutes"),
+        synthetic_minutes=evidence.get("synthetic_minutes"),
+    )
+
+
 @dataclass(frozen=True)
 class Candle:
     timeframe: Timeframe
@@ -1292,6 +1375,10 @@ class StructuralLegState:
     wick_mae_atr: float | None = None
     path_candle_ids: tuple[str, ...] = ()
     atr_source_candle_ids: tuple[str, ...] = ()
+    # Densified no-trade minutes inside the path.  Zero means every admitted
+    # bar carried real price discovery; a consumer that needs the historical
+    # real-only guarantee filters on this being zero.
+    synthetic_path_minutes: int = 0
     foundation_version: str | None = None
 
     def __post_init__(self) -> None:

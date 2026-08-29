@@ -18,7 +18,7 @@
   },
   "protocol_binding": {
     "path": "configs/phase7_foundation_v2_empirical.json",
-    "sha256": "0af7f448d632d0a9392ab536ea1335daeb6350e63a0aedc73edc62f3635d1973"
+    "sha256": "78d63b26e31cc1c619391785d278e924ad62225e29ba2aba319e281c3ef63750"
   },
   "implementation_bindings": {
     "probability_cohorts": {
@@ -38,7 +38,7 @@
     "foundation_registry": {
       "path": "semantics/foundation_v2_0.yaml",
       "sha256": "dfc4cb29f98fc5015628927e97c725eb491b99f244f154e51552e5950daf927c",
-      "identity": "ac04636919931d774309a0c306764fdf8eb53aee41df0f31d4d94e5b9125732b"
+      "identity": "0c49da28e103f0515d3eb93ab03e8659e334d2477449f5174df3b5e8b0b84cc6"
     },
     "path_protocol": {
       "path": "configs/path_hypotheses.json",

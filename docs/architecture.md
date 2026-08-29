@@ -130,15 +130,40 @@ they are not five duplicate same-named stacks:
 
 | Layer | Current implementation | Contract |
 |---|---|---|
-| Data Normalizer | `CausalMarketReader`, `_TimeframeAggregator`, and normalized-root publication in `CausalObserver` | Accept one completed M1 clock, distinguish real/clock-only/no-trade data, and complete higher frames without future data. |
-| Semantic Event Engine | `CausalObserver` plus `EventStore` | Emit preregistered v1.2 atomic facts; Foundation v2 projects admitted facts and is not another detector. |
+| Data Normalizer | `CausalMarketReader` and `_TimeframeAggregator` (`causal.py`), the registered session calendar (`market_clock.py`), the scale contract (`scale_registry.py`), and normalized-root publication in `CausalObserver` | Accept one completed M1 clock, reject off-grid prices before any state advances, distinguish real/clock-only/no-trade data, surface every clock defect explicitly, and complete higher frames without future data. |
+| Semantic Event Engine | `CausalObserver` plus the typed detectors (`structure.py`, `liquidity.py`, `displacement.py`, `zone.py`, `range_auction.py`, `interaction.py`), `semantic_event_emitter.py`, `event_memory.py` and `EventStore` | Detectors own registered state; `CausalObserver` orchestrates one clock; `SemanticEventEmitter` is the single canonical emitter and the sole owner of the cross-detector event-ancestry index that binds every semantic fact to its normalized BAR root. |
 | Timeframe State Reducer | pure `reduce_timeframe_state()` and `TimeframeEventReducer` | Reduce ordered normalized/atomic events into independent deterministic timeframe state. |
 | Cross-Timeframe Relation Resolver | `RelationResolver` owned by `MarketSnapshotPublisher` | Compute parent/child relations without allowing child votes to rewrite parent authority. |
-| Market Snapshot Publisher | `MarketSnapshotPublisher` | Publish timeframe, relation, session, event-delta, and Foundation views at one causal clock. |
+| Market Snapshot Publisher | `MarketSnapshotPublisher` | Publish timeframe, relation, session and event-delta views at one causal clock. |
 
 `CausalObserver` is the event-engine facade; the publisher owns the relation,
 session, and snapshot assembly seam. Creating additional pipelines solely to
 match these labels would split authority rather than simplify it.
+
+`SemanticEventEmitter` (`semantic_event_emitter.py`) is the only place a
+`MarketEvent` is minted for the Eye. It holds the canonical atomic append path,
+the crossing-terminal and protected-assignment custody rules, and the whole
+cross-detector ancestry index, so the observer no longer carries emission state
+alongside orchestration state. The observer passes it the clock and the
+detector state each emission needs; the emitter never reaches back into the
+observer. A crossing terminal separates the two clocks it depends on: evidence
+`resolved_at` keeps the market clock that decided the crossing, while `known_at`
+is the observation clock at which the Eye could first derive the terminal. They
+differ whenever a reducer only reaches its verdict on a later observation, and
+conflating them backdated a terminal behind ancestry it is required to cite.
+
+The Eye imports no downstream module. `scale_registry.py` owns `ScaleSpec`,
+`parse_scale_specs` and `scale_registry_id`, so neither the reader nor the
+observer imports the optional Scene Graph in order to describe its own scales;
+`scene_graph.py` re-exports those names only so historical pickles resolve to
+the same class objects. `execution.py` owns `ExecutionRealityInput`, the
+cost/fillability score and the inert not-evaluated value, so the Eye transports
+an execution observation without deriving one. `ContinuousSMCEngine` owns the
+`TemporalMarketSceneGraph`, advances it over one completed Eye observation, and
+stamps the resulting `scene_*` delta identities onto that observation; a graph
+failure calls `CausalObserver.mark_terminal_failure` because the reducers have
+already committed the clock. `EventStore` is the Eye's internal history
+authority and is not exported from the package root.
 
 Production construction is explicit and fail closed. One root
 `semantic_selection` chooses the atomic `smc_semantics_v1.2` registry and the
@@ -148,7 +173,7 @@ the selected atomic version. It does not mint a composite or “full-stack v2”
 identity. Engine construction loads this pair once and derives the internal
 Foundation-enabled flag; Engine, Shadow, and checkpoint state freeze and
 compare the existing version/identity fields. The current combined Engine
-checkpoint schema is 11; earlier schemas are rejected rather than restored into
+checkpoint schema is 12; earlier schemas are rejected rather than restored into
 an incompatible Observation, Foundation, or Neutral-state contract.
 
 ### Hot-state boundary
@@ -229,6 +254,10 @@ particular:
   the first completed-data availability clock; no consumer may use an event
   before `known_at`;
 - `observed_at` is the compatibility alias of `known_at` and must equal it;
+- a neighbouring bar clock is derived from the completed BAR sequence, never as
+  `clock + timeframe_interval`: the registered session calendar truncates the
+  bucket that closes at the daily maintenance break and restarts one gap later,
+  so an arithmetic stride disagrees with the producer at every break;
 - event identity and one EventMemory are bound to one `semantic_version`;
 - semantic details/evidence are immutable after construction;
 - bounded EventMemory is the hot view, while `EventStore` is the

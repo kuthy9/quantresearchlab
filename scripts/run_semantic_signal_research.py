@@ -45,7 +45,7 @@ from smc_trader.model import (  # noqa: E402
     to_primitive,
 )
 from smc_trader.observation import CausalObserver, ObserverConfig  # noqa: E402
-from smc_trader.scene_graph import parse_scale_specs  # noqa: E402
+from smc_trader.scale_registry import parse_scale_specs  # noqa: E402
 from smc_trader.semantics import (  # noqa: E402
     SemanticRegistry,
     load_semantic_selection,

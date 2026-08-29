@@ -35,10 +35,10 @@ from smc_trader.observation import (
     EventMemory,
     ExecutionRealityInput,
     ObserverConfig,
-    _event,
     _typed_native_transitions_or_baseline,
     _typed_state_delta_from_cache,
 )
+from smc_trader.semantic_event_emitter import _event
 
 from .helpers import (
     MODEL_SCALE_SPECS,
@@ -218,8 +218,8 @@ def test_direct_eye_defaults_to_no_scene_graph_projection() -> None:
 
     assert observer.config.project_scene_graph is False
     assert observation.scene_revision_id is None
-    assert observer.last_scene_delta is None
-    assert observer.scene_graph is None
+    assert not hasattr(observer, "scene_graph")
+    assert not hasattr(observer, "last_scene_delta")
 
 
 def test_scene_delta_clone_matches_validated_replace_without_revalidating_payload(
@@ -1205,7 +1205,7 @@ def test_reference_zone_same_admission_prefix_is_causal_and_not_recent() -> None
             candle,
             append_retirement_events=True,
         )
-        observer._append_completed_bar_event(
+        observer._emitter._append_completed_bar_event(
             candle,
             atr=1.0,
             data_complete=True,
@@ -1217,7 +1217,7 @@ def test_reference_zone_same_admission_prefix_is_causal_and_not_recent() -> None
         if item.kind == "previous_session_high"
     )
     reference_event = observer.memory.audit_event_including_pending(
-        observer._candidate_level_event_ids[reference_level.item_id]
+        observer._emitter._candidate_level_event_ids[reference_level.item_id]
     )
     assert reference_event is not None
     assert reference_event.known_at == reference_admission.end
@@ -1248,7 +1248,7 @@ def test_reference_zone_same_admission_prefix_is_causal_and_not_recent() -> None
             close=100.75,
         ),
     ):
-        observer._append_completed_bar_event(
+        observer._emitter._append_completed_bar_event(
             candle,
             atr=1.0,
             data_complete=True,
@@ -1282,7 +1282,7 @@ def test_reference_zone_same_admission_prefix_is_causal_and_not_recent() -> None
         metadata_observed_at=broken_at,
         source_ids=reference_level.source_ids,
     )
-    observer._record_frame_events(
+    observer._emitter._record_frame_events(
         FrameObservation(
             timeframe=Timeframe.M1,
             cutoff=broken_at,
@@ -1292,6 +1292,7 @@ def test_reference_zone_same_admission_prefix_is_causal_and_not_recent() -> None
         ),
         newly_completed=True,
         event_clock=broken_at,
+            prior=observer._prior,
     )
     key = f"zone:{zone.zone_id}"
     observer.memory.sync_retained_entity_timelines(
@@ -1358,7 +1359,7 @@ def test_structural_cold_zone_is_not_backfilled_as_reference_admission() -> None
         source_kind="structural_swing",
         metadata_observed_at=broken_at,
     )
-    observer._record_frame_events(
+    observer._emitter._record_frame_events(
         FrameObservation(
             timeframe=Timeframe.M1,
             cutoff=broken_at,
@@ -1368,6 +1369,7 @@ def test_structural_cold_zone_is_not_backfilled_as_reference_admission() -> None
         ),
         newly_completed=True,
         event_clock=broken_at,
+            prior=observer._prior,
     )
     key = f"zone:{zone.zone_id}"
     observer.memory.sync_retained_entity_timelines(
@@ -1452,8 +1454,8 @@ def test_eye_authority_observer_pickle_resume_matches_uninterrupted() -> None:
 
     assert resumed_observation == baseline_observation
     assert resumed.memory.__dict__ == baseline.memory.__dict__
-    assert resumed.last_scene_delta is None
-    assert resumed.scene_graph is None
+    assert not hasattr(resumed, "last_scene_delta")
+    assert not hasattr(resumed, "scene_graph")
 
 
 def test_lightweight_event_view_requires_typed_group4_pipeline() -> None:
@@ -1531,7 +1533,7 @@ def test_eye_authority_mode_can_materialize_memory_and_scene_graph() -> None:
         observation.retained_entity_timelines
         == observer.memory.entity_timelines()
     )
-    assert observation.scene_revision_id == observer.scene_graph.revision_id
+    assert observation.scene_revision_id is None
 
 
 def test_group4_disposition_can_reference_prior_inventory_only() -> None:
@@ -1687,7 +1689,7 @@ def test_projected_pool_state_overrides_preprojection_snapshot(
     # directly, without its two canonical Swing parents.  Mark its candidate
     # as already recorded so the fixture does not manufacture an invalid
     # authoritative liquidity event; provenance is covered independently.
-    observer._candidate_level_event_ids[visible.item_id] = (
+    observer._emitter._candidate_level_event_ids[visible.item_id] = (
         "projection-cache-existing-candidate"
     )
 
