@@ -257,7 +257,6 @@ _HOT_STATE_KINDS = frozenset(
 _SCENE_EVENT_KIND_TO_NODE_KIND: Mapping[EventKind, str] = {
     EventKind.SWING_STATE: "swing",
     EventKind.STRUCTURE_STATE: "structure",
-    EventKind.BOS_STATE: "bos",
     EventKind.BOS_POST_BREAK_STATE: "bos_post_break",
     EventKind.STRUCTURE_BREAK: "bos",
     EventKind.STRUCTURE_BREAK_FAILED: "bos",
@@ -3550,15 +3549,23 @@ class TemporalMarketSceneGraph:
                 yield from cached
                 return
             values: list[tuple[str, SceneEdge]] = []
-            for edge_id in self._outgoing.get(node_id, ()):
+            # Adjacency is stored in sets, whose iteration order changes with
+            # the interpreter's hash seed and with the insertion history a
+            # pickle round trip rebuilds.  A caller that reads the first
+            # neighbour -- the path search does -- would otherwise get a
+            # different answer from the same event log in a different process.
+            for edge_id in sorted(self._outgoing.get(node_id, ())):
                 edge = edge_by_id.get(edge_id)
                 if edge is not None and edge.lifecycle == "active":
                     values.append((edge.target_node_id, edge))
-            for edge_id in self._incoming.get(node_id, ()):
+            for edge_id in sorted(self._incoming.get(node_id, ())):
                 edge = edge_by_id.get(edge_id)
                 if edge is not None and edge.lifecycle == "active":
                     values.append((edge.source_node_id, edge))
-            for edge in self._current_path_block_edges.values():
+            for edge in sorted(
+                self._current_path_block_edges.values(),
+                key=lambda item: item.edge_id,
+            ):
                 if edge.source_node_id == node_id:
                     values.append((edge.target_node_id, edge))
                 elif edge.target_node_id == node_id:
@@ -3567,13 +3574,13 @@ class TemporalMarketSceneGraph:
             cache[node_id] = cached
             yield from cached
             return
-        for edge_id in self._outgoing.get(node_id, ()):
+        for edge_id in sorted(self._outgoing.get(node_id, ())):
             edge = edge_by_id.get(edge_id)
             if edge is None:
                 continue
             if edge.lifecycle == "active":
                 yield edge.target_node_id, edge
-        for edge_id in self._incoming.get(node_id, ()):
+        for edge_id in sorted(self._incoming.get(node_id, ())):
             edge = edge_by_id.get(edge_id)
             if edge is None:
                 continue

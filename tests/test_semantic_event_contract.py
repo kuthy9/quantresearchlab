@@ -70,9 +70,12 @@ def test_registered_v1_concepts_have_all_five_preregistration_sections() -> None
         "protected_swing",
         "mss_core",
         "fvg",
-        "order_block_origin_zone",
-        "active_dealing_range",
+        "base_origin_core",
+        "qualified_origin_zone",
+        "structural_range",
+        "balance_range",
         "premium_discount_irl_erl",
+        "structure_regime",
         "delivery_phase",
         "dol_candidate",
     } <= set(registry.concepts)
@@ -91,7 +94,7 @@ def test_registered_v1_concepts_have_all_five_preregistration_sections() -> None
     } == set(registry.concepts)
 
 
-def test_v1_2_event_bindings_match_the_emitted_and_reserved_surface() -> None:
+def test_v1_3_event_bindings_match_the_emitted_and_reserved_surface() -> None:
     registry = SemanticRegistry.from_file()
     by_kind = registry.event_binding_by_kind
 
@@ -110,17 +113,23 @@ def test_v1_2_event_bindings_match_the_emitted_and_reserved_surface() -> None:
         EventKind.PROTECTED_SWING_ASSIGNED,
         EventKind.MSS_CORE_CONFIRMED,
         EventKind.FVG_CREATED,
+        EventKind.FVG_FIRST_RETEST,
         EventKind.FVG_PARTIALLY_FILLED,
         EventKind.FVG_MIDPOINT_TOUCHED,
         EventKind.FVG_FULLY_FILLED,
         EventKind.FVG_INVALIDATED,
         EventKind.DEALING_RANGE_CREATED,
-        EventKind.DEALING_RANGE_ACTIVATED,
+        EventKind.BALANCE_RANGE_OBSERVED,
+        EventKind.BALANCE_RANGE_MATURED,
         EventKind.DEALING_RANGE_INVALIDATED,
         EventKind.DEALING_RANGE_REPLACED,
-        EventKind.ORIGIN_ZONE_CREATED,
+        EventKind.BASE_ORIGIN_CORE_CREATED,
+        EventKind.QUALIFIED_ORIGIN_ZONE_CREATED,
         EventKind.ORIGIN_ZONE_MITIGATED,
         EventKind.ORIGIN_ZONE_INVALIDATED,
+        EventKind.DELIVERY_PHASE_ENTERED,
+        EventKind.DELIVERY_PHASE_UPDATED,
+        EventKind.DELIVERY_PHASE_EXITED,
     }
     assert by_kind[EventKind.FVG_TOUCHED].status == (
         "compatibility_alias_not_emitted"
@@ -133,6 +142,8 @@ def test_v1_2_event_bindings_match_the_emitted_and_reserved_surface() -> None:
     for kind in (
         EventKind.DELIVERY_PHASE_CHANGED,
         EventKind.ORIGIN_ZONE_TOUCHED,
+        EventKind.ORIGIN_ZONE_CREATED,
+        EventKind.DEALING_RANGE_ACTIVATED,
     ):
         assert by_kind[kind].status == "compatibility_alias_not_emitted"
     assert {
@@ -141,6 +152,7 @@ def test_v1_2_event_bindings_match_the_emitted_and_reserved_surface() -> None:
         if binding.status == "snapshot_derived"
     } == {
         "premium_discount_irl_erl",
+        "structure_regime",
         "delivery_phase",
         "dol_candidate",
     }
@@ -195,7 +207,7 @@ def test_v1_preregistration_matches_executable_semantic_boundaries() -> None:
     expiry = parameters["fvg_expiry_bars"]
     assert expiry["value"] is None
     assert expiry["status"] == (
-        "reserved_explicit_event_only_no_v1_2_detector_age_threshold"
+        "reserved_explicit_event_only_no_v1_3_detector_age_threshold"
     )
     fvg_definition = registry.concepts["fvg"].operational_definition
     assert "no age-based expiry threshold" in fvg_definition
@@ -207,31 +219,38 @@ def test_v1_preregistration_matches_executable_semantic_boundaries() -> None:
     ] == 1
     assert acceptance["range_manipulation_real_1m_outside_closes"] == 2
     range_definition = registry.concepts[
-        "active_dealing_range"
+        "structural_range"
     ].operational_definition
     assert "first completed H1 close strictly outside" in range_definition
     assert "no M-bar hold is claimed" in range_definition
 
     extension = parameters["dealing_range_extension"]
     assert extension["value"] is None
-    assert extension["status"] == "reserved_not_emitted_v1_2"
+    assert extension["status"] == "reserved_not_emitted_v1_3"
     assert "DEALING_RANGE_EXTENDED is reserved" in range_definition
 
     phase_definition = registry.concepts["delivery_phase"].operational_definition
-    assert "snapshot-derived deterministic dimension" in phase_definition
-    assert "not a canonical transition event" in phase_definition
-    assert "volatility-compression inputs are not implemented" in phase_definition
-    assert "DELIVERY_PHASE_CHANGED is a compatibility projection alias" in (
-        registry.concepts["delivery_phase"].existing_binding
-    )
-    assert registry.semantic_version == "smc_semantics_v1.2"
+    assert "entered/updated/exited lifecycle" in phase_definition
+    assert "not a value recomputed each bar" in phase_definition
+    assert (
+        "Range-extension and volatility-compression are not v1.3 phase inputs"
+    ) in phase_definition
+    phase_binding = registry.concepts["delivery_phase"].existing_binding
+    assert "DELIVERY_PHASE_CHANGED is a compatibility projection alias" in phase_binding
+    # The binding has to say which of the three lifecycle kinds are live and
+    # on what cadence, so the definition cannot imply a per-bar stream.
+    assert (
+        "an update only when a registered phase input moves while the phase"
+        " does not"
+    ) in phase_binding
+    assert registry.semantic_version == "smc_semantics_v1.3"
 
 
 def test_registry_and_parameters_must_share_one_semantic_version(tmp_path) -> None:
     registry = SemanticRegistry.from_file()
     payload = registry.parameters.source_path.read_text(encoding="utf-8").replace(
         SMC_SEMANTIC_VERSION,
-        "smc_semantics_v1.3",
+        "smc_semantics_v1.4",
     )
     changed = tmp_path / "parameters.yaml"
     changed.write_text(payload, encoding="utf-8")
@@ -411,6 +430,12 @@ def test_canonical_retry_keeps_first_known_strength_after_hot_key_eviction() -> 
     emitter.audit_store.append_batch(
         (range_context, candidate, crossing_bar)
     )
+    # Production records the completed bar through the same memory before any
+    # semantic event derived from it, so the bar owns sequence 0 at that clock
+    # and its derived events follow.  Without this the emitted event ties the
+    # bar on (known_at, sequence_no) and canonical order falls back to the
+    # content-addressed event_id.
+    emitter.memory.append(crossing_bar, include_in_recent=False, audit=False)
     source_ids = (candidate.event_id, crossing_bar.event_id)
     crossing_clock = crossing_bar.known_at
 
@@ -442,3 +467,30 @@ def test_canonical_retry_keeps_first_known_strength_after_hot_key_eviction() -> 
     assert retry.strength == 0.25
     assert len(emitter.audit_store) == 4
     assert emitter.audit_store.get(first.event_id) == first
+
+
+def test_bos_lifecycle_is_carried_by_its_terminal_kinds_only() -> None:
+    """A pending BOS is already stated by RAW_BOUNDARY_BREAK's absence of a terminal.
+
+    ``bos_state`` was an unregistered transport that only ever carried
+    ``pending`` and was cited by nothing, so the BOS timeline now begins at its
+    terminal kinds instead of duplicating what the structure-break events say.
+    """
+
+    from smc_trader.event_memory import EventMemory
+    from smc_trader.model import BOSLifecycle
+
+    initial = EventMemory._COMPLETE_INITIAL_LIFECYCLES["bos"]
+    transitions = EventMemory._TIMELINE_TRANSITIONS["bos"]
+
+    assert BOSLifecycle.PENDING.value not in initial
+    assert BOSLifecycle.PENDING.value not in transitions
+    assert initial == frozenset(
+        {BOSLifecycle.CONFIRMED.value, BOSLifecycle.FAILED.value}
+    )
+
+
+def test_bos_state_is_not_an_emittable_event_kind() -> None:
+    """Nothing may emit the retired pending-BOS transport."""
+
+    assert not hasattr(EventKind, "BOS_STATE")

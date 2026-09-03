@@ -262,10 +262,6 @@ from the `smc_semantics_v1.2` semantic identity):
 - [`docs/refactor/dol_belief_temporal_supplement.md`](docs/refactor/dol_belief_temporal_supplement.md):
   correlated-evidence, temporal/branching, historical FVG lifecycle, and
   2024-06 joint-data boundary;
-- [`configs/phase7_probability_fit_admission.json`](configs/phase7_probability_fit_admission.json):
-  read-only Phase 7 fit-readiness contract; the checker inspects the 7,381-row
-  Phase 6 compact evidence bundle, reports 13 blockers, writes no artifact, and
-  does not fit a model;
 - [`configs/signal_policy.json`](configs/signal_policy.json): fail-closed Signal Policy and Trade Intent admission rules;
 - [`configs/execution_research_v1.json`](configs/execution_research_v1.json): Phase 8 execution-research protocol configuration;
 - [`configs/shadow_live_v1.json`](configs/shadow_live_v1.json): Phase 9 no-submission parity protocol;

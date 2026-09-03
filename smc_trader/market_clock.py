@@ -154,6 +154,10 @@ def special_session_close(timestamp: pd.Timestamp) -> pd.Timestamp | None:
     return _special_session_close_for_date(local.date())
 
 
+# Minute-keyed rather than session-keyed, so the bound is sized for a replay
+# window rather than a calendar of days.  The frozen calendar makes every one
+# of these a pure function; LRU eviction keeps a long live run bounded.
+@lru_cache(maxsize=131072)
 def registered_native_bar_bounds(
     minute_start: pd.Timestamp,
     *,
@@ -262,6 +266,7 @@ def _session_bounds(label: date) -> tuple[pd.Timestamp, pd.Timestamp] | None:
     return None
 
 
+@lru_cache(maxsize=131072)
 def is_registered_trading_minute(timestamp: pd.Timestamp) -> bool:
     """Return whether an OHLCV interval start is inside registered NQ hours."""
 
@@ -440,6 +445,7 @@ def validate_completed_bar_header(
     return real_completed, clock_only
 
 
+@lru_cache(maxsize=131072)
 def next_registered_native_completion(
     prior_completed_at: pd.Timestamp,
     *,

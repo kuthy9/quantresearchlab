@@ -612,6 +612,7 @@ def _foundation_structural_leg_contract(
             bar.event_id for bar in (*prior_bars, *path_bars)
         ),
         details={
+            "path_class": "internal",
             "leg_id": "foundation-leg",
             "start_swing_id": "foundation-start",
             "end_swing_id": "foundation-end",
@@ -997,6 +998,7 @@ def _authoritative_phase23_chain() -> tuple[MarketEvent, ...]:
         source_event_ids=(swing_left.event_id, swing_right.event_id),
         source_entity_ids=("leg-a", "swing-a", "swing-b"),
         details={
+            "path_class": "internal",
             "leg_id": "leg-a",
             "start_swing_id": "swing-a",
             "end_swing_id": "swing-b",
@@ -1336,6 +1338,7 @@ def _second_short_protected_assignment(
         source_event_ids=(high_swing.event_id, low_swing.event_id),
         source_entity_ids=("leg-c", "swing-b", "swing-c"),
         details={
+            "path_class": "internal",
             "leg_id": "leg-c",
             "start_swing_id": "swing-b",
             "end_swing_id": "swing-c",
@@ -1451,6 +1454,7 @@ def _origin_zone_terminal_chain(
         evidence=anchor_payload,
         source_data_ids=("data:origin-anchor",),
     )
+    _kind_by_id = {event.event_id: event.kind for event in events}
     zone_id = "origin-zone-1"
     created_payload = {
         "origin_zone_id": zone_id,
@@ -1459,21 +1463,57 @@ def _origin_zone_terminal_chain(
         "source_displacement_id": "displacement-1",
         "source_bos_id": "bos-1",
     }
-    created = _event(
-        "origin-zone",
+    # v1.3 publishes the frozen geometry and its qualification as two facts at
+    # one clock, so the terminal cites the qualified zone rather than a single
+    # merged creation event.
+    core = _event(
+        "base-origin-core",
         13,
         canonical=True,
-        kind=EventKind.ORIGIN_ZONE_CREATED,
-        source_event_ids=events[-1].source_event_ids,
+        kind=EventKind.BASE_ORIGIN_CORE_CREATED,
+        source_event_ids=tuple(
+            event_id
+            for event_id in events[-1].source_event_ids
+            if _kind_by_id[event_id] is EventKind.BAR_COMPLETED
+        ),
         source_data_ids=("data:origin-anchor",),
-        source_entity_ids=(zone_id, "displacement-1", "bos-1"),
-        details=created_payload,
+        source_entity_ids=(zone_id,),
+        details={
+            "base_origin_core_id": zone_id,
+            "geometry": "frozen_group3_order_block_range",
+            "locating_impulse_id": "displacement-1",
+        },
         price=100.0,
         zone=(99.0, 101.0),
         direction=Direction.LONG,
         side="below",
     )
-    events[-1] = created
+    created = _event(
+        "origin-zone",
+        13,
+        canonical=True,
+        kind=EventKind.QUALIFIED_ORIGIN_ZONE_CREATED,
+        source_event_ids=(
+            core.event_id,
+            *(
+                event_id
+                for event_id in events[-1].source_event_ids
+                if _kind_by_id[event_id] is not EventKind.BAR_COMPLETED
+            ),
+        ),
+        source_entity_ids=(zone_id, "displacement-1", "bos-1"),
+        details={
+            **created_payload,
+            "base_origin_core_id": zone_id,
+            "base_origin_core_event_id": core.event_id,
+        },
+        price=100.0,
+        zone=(99.0, 101.0),
+        direction=Direction.LONG,
+        side="below",
+    )
+    events[-1] = core
+    events.append(created)
     invalidated = kind is EventKind.ORIGIN_ZONE_INVALIDATED
     terminal_bar_payload = {
         "open": 100.0,
@@ -1603,7 +1643,7 @@ def _external_range_chain(
         "range-activated",
         21,
         canonical=True,
-        kind=EventKind.DEALING_RANGE_ACTIVATED,
+        kind=EventKind.BALANCE_RANGE_MATURED,
         timeframe=Timeframe.H1,
         details={"range_id": "range-1"},
         zone=(90.0, 110.0),
@@ -2601,19 +2641,24 @@ def test_reference_zone_candidate_binds_exact_completed_period_point_parent(
 def test_legacy_v1_2_source_free_reference_zone_candidate_remains_replayable(
 ) -> None:
     *_, context, candidate = _reference_zone_candidate_with_point_parent()
+    # The replay seam is pinned to the exact historical version, so the legacy
+    # payload has to say v1.2 rather than inherit whatever is current.
+    legacy_version = "smc_semantics_v1.2"
+    legacy_context = replace(context, semantic_version=legacy_version)
     legacy = replace(
         candidate,
+        semantic_version=legacy_version,
         source_ids=(),
         source_event_ids=(),
     )
 
-    assert EventStore.from_events((context, legacy)).events() == (
-        context,
-        legacy,
-    )
+    assert EventStore.from_events(
+        (legacy_context, legacy),
+        semantic_version=legacy_version,
+    ).events() == (legacy_context, legacy)
 
-    future_version = "smc_semantics_v1.3"
-    future_context = replace(context, semantic_version=future_version)
+    future_version = "smc_semantics_v1.4"
+    future_context = replace(legacy_context, semantic_version=future_version)
     future_legacy = replace(legacy, semantic_version=future_version)
     with pytest.raises(ValueError, match="source-free compatibility"):
         EventStore.from_events(
@@ -3466,8 +3511,8 @@ def test_crossing_parent_contract_does_not_reclassify_legacy_terminal(
         ),
         (EventKind.FVG_CREATED, ("bar-left", "bar-middle")),
         (
-            EventKind.ORIGIN_ZONE_CREATED,
-            ("displacement", "bar-left"),
+            EventKind.QUALIFIED_ORIGIN_ZONE_CREATED,
+            ("displacement", "raw-break"),
         ),
     ),
 )
@@ -3777,7 +3822,7 @@ def test_external_range_invalidation_requires_complete_parent_chain() -> None:
     activated = next(
         event
         for event in events
-        if event.kind is EventKind.DEALING_RANGE_ACTIVATED
+        if event.kind is EventKind.BALANCE_RANGE_MATURED
     )
     bar = next(event for event in events if event.event_id == "range-break-bar")
     invalidated = next(

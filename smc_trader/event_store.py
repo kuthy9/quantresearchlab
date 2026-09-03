@@ -120,22 +120,32 @@ _EXACT_AUTHORITATIVE_SOURCE_KINDS: Mapping[
     ),
 }
 
-_ORIGIN_ZONE_SOURCE_KINDS = frozenset(
+# A base origin core is geometry: it cites the candles it froze and nothing
+# else.  Qualification is a separate, append-only fact that binds that core to
+# the displacement and structure break which qualified it, so the core stays
+# readable on its own and is never backdated.
+_BASE_ORIGIN_CORE_SOURCE_KINDS = frozenset(
     {
-        EventKind.DISPLACEMENT_OBSERVED,
-        EventKind.RAW_BOUNDARY_BREAK,
         EventKind.BAR_COMPLETED,
     }
 )
 
+_ORIGIN_ZONE_SOURCE_KINDS = frozenset(
+    {
+        EventKind.BASE_ORIGIN_CORE_CREATED,
+        EventKind.DISPLACEMENT_OBSERVED,
+        EventKind.RAW_BOUNDARY_BREAK,
+    }
+)
+
 _ORIGIN_ZONE_TERMINAL_SOURCE_KINDS = (
-    EventKind.ORIGIN_ZONE_CREATED,
+    EventKind.QUALIFIED_ORIGIN_ZONE_CREATED,
     EventKind.BAR_COMPLETED,
 )
 
 _RANGE_INVALIDATION_SOURCE_KINDS = (
     EventKind.DEALING_RANGE_CREATED,
-    EventKind.DEALING_RANGE_ACTIVATED,
+    EventKind.BALANCE_RANGE_MATURED,
     EventKind.BAR_COMPLETED,
     EventKind.ACCEPTANCE_CONFIRMED,
 )
@@ -1154,7 +1164,26 @@ class EventStore:
                     ),
                 )
 
-        if event.kind is EventKind.ORIGIN_ZONE_CREATED:
+        if event.kind is EventKind.BASE_ORIGIN_CORE_CREATED:
+            actual_counts = Counter(parent.kind for parent in source_parents)
+            if (
+                actual_counts[EventKind.BAR_COMPLETED] < 1
+                or any(
+                    kind not in _BASE_ORIGIN_CORE_SOURCE_KINDS
+                    for kind in actual_counts
+                )
+            ):
+                raise ValueError(
+                    "authoritative parent contract failed for "
+                    f"{event.kind.value}: a base origin core cites only the "
+                    "completed candles whose geometry it froze"
+                )
+            EventStore._require_authoritative_parent_origins(
+                event,
+                source_parents,
+            )
+
+        if event.kind is EventKind.QUALIFIED_ORIGIN_ZONE_CREATED:
             actual_counts = Counter(parent.kind for parent in source_parents)
             missing = tuple(
                 kind
@@ -1176,8 +1205,8 @@ class EventStore:
                 raise ValueError(
                     "authoritative parent contract failed for "
                     f"{event.kind.value}: requires at least one "
-                    "displacement_observed, raw_boundary_break, and "
-                    "bar_completed source; "
+                    "base_origin_core_created, displacement_observed, and "
+                    "raw_boundary_break source; "
                     f"missing={[kind.value for kind in missing]}, "
                     f"unexpected={[kind.value for kind in unexpected]}"
                 )
@@ -2389,10 +2418,10 @@ class EventStore:
                     "state projection"
                 )
         elif source_kind == "mature_range_boundary":
-            if parent_kinds != (EventKind.DEALING_RANGE_ACTIVATED,):
+            if parent_kinds != (EventKind.BALANCE_RANGE_MATURED,):
                 raise ValueError(
                     "authoritative mature-range candidate requires its exact "
-                    "activated range parent"
+                    "matured balance-range parent"
                 )
             range_id = EventStore._required_authoritative_text(
                 source_parents[0],
@@ -2411,7 +2440,7 @@ class EventStore:
             if source_parents:
                 if len(source_parents) != 1 or parent_kinds[0] not in {
                     EventKind.BAR_COMPLETED,
-                    EventKind.DEALING_RANGE_ACTIVATED,
+                    EventKind.BALANCE_RANGE_MATURED,
                 }:
                     raise ValueError(
                         "authoritative range-boundary candidate parent is "
@@ -3536,7 +3565,7 @@ class EventStore:
             source_parents,
         )
         parent_by_kind = {parent.kind: parent for parent in source_parents}
-        created = parent_by_kind[EventKind.ORIGIN_ZONE_CREATED]
+        created = parent_by_kind[EventKind.QUALIFIED_ORIGIN_ZONE_CREATED]
         transition_bar = parent_by_kind[EventKind.BAR_COMPLETED]
 
         created_parents = EventStore._authoritative_source_parents(
@@ -3558,7 +3587,7 @@ class EventStore:
         ):
             raise ValueError(
                 "authoritative origin-zone terminal contract references "
-                "an invalid ORIGIN_ZONE_CREATED parent"
+                "an invalid QUALIFIED_ORIGIN_ZONE_CREATED parent"
             )
         EventStore._require_authoritative_parent_origins(
             created,
@@ -3625,10 +3654,27 @@ class EventStore:
         transition_scope = EventStore._origin_zone_bar_scope(
             transition_bar
         )
-        anchor_bars = tuple(
-            parent
-            for parent in created_parents
-            if parent.kind is EventKind.BAR_COMPLETED
+        # The anchor candles now hang off the base origin core rather than
+        # off the qualification, so the scope check follows that one hop.
+        core = next(
+            (
+                parent
+                for parent in created_parents
+                if parent.kind is EventKind.BASE_ORIGIN_CORE_CREATED
+            ),
+            None,
+        )
+        anchor_bars = (
+            ()
+            if core is None
+            else tuple(
+                parent
+                for parent in EventStore._authoritative_source_parents(
+                    core,
+                    available_events=available_events,
+                )
+                if parent.kind is EventKind.BAR_COMPLETED
+            )
         )
         if (
             not anchor_bars
@@ -3749,7 +3795,7 @@ class EventStore:
         )
         for kind in (
             EventKind.DEALING_RANGE_CREATED,
-            EventKind.DEALING_RANGE_ACTIVATED,
+            EventKind.BALANCE_RANGE_MATURED,
             EventKind.ACCEPTANCE_CONFIRMED,
         ):
             parent = parent_by_kind[kind]

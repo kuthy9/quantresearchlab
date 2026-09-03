@@ -366,7 +366,7 @@ def test_snapshot_projection_replays_to_same_hierarchical_state() -> None:
         )
 
     first_bar = m1(first_start, 100.0)
-    _, first_events = publisher.publish(
+    _, first_events, _ = publisher.publish(
         asof=first_bar.end,
         symbol="NQH5",
         instrument_id=1,
@@ -378,7 +378,7 @@ def test_snapshot_projection_replays_to_same_hierarchical_state() -> None:
         anomalies=(),
     )
     second_bar = m1(first_bar.end, 100.25)
-    snapshot, second_events = publisher.publish(
+    snapshot, second_events, _ = publisher.publish(
         asof=second_bar.end,
         symbol="NQH5",
         instrument_id=1,

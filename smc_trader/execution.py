@@ -8,12 +8,18 @@ all. The Eye transports the result; it never derives it.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import math
 
 import pandas as pd
 
-from .model import Direction, ExecutionObservation, aware_timestamp, clamp
+from .model import (
+    Direction,
+    ExecutionObservation,
+    aware_timestamp,
+    clamp,
+    execution_not_evaluated,
+)
 
 
 @dataclass(frozen=True)
@@ -32,6 +38,45 @@ class ExecutionRealityInput:
     ask_size: float | None = None
     depth_imbalance: float | None = None
     anomalies: tuple[str, ...] = ()
+
+
+# The cost model used when nothing was observed.  These are assumptions, not
+# measurements, and they are named here rather than hidden in a default
+# argument so that changing them is a visible edit.
+ASSUMED_EXECUTION_MODEL = ExecutionRealityInput(
+    spread_points=None,
+    expected_slippage_points=0.25,
+    commission_per_contract_per_side=2.25,
+    quantity=1,
+    source="assumed_default",
+)
+
+
+def assumed_execution_model(
+    *,
+    asof: pd.Timestamp,
+    tick_size: float,
+    point_value: float,
+) -> ExecutionObservation:
+    """Score the registered assumptions when no execution reality was observed.
+
+    The result is deliberately indistinguishable in shape from an observed one
+    so consumers need no special case, and deliberately distinguishable in
+    provenance -- ``source`` says ``assumed_default`` and the anomaly says so
+    again -- so nobody mistakes a constant for a measurement.  Only execution
+    research and P&L simulation should consume it.
+    """
+
+    observation = observe_execution_reality(
+        ASSUMED_EXECUTION_MODEL,
+        asof=asof,
+        tick_size=tick_size,
+        point_value=point_value,
+    )
+    return replace(
+        observation,
+        anomalies=(*observation.anomalies, "execution_assumed_default_model"),
+    )
 
 
 def observe_execution_reality(
@@ -95,22 +140,6 @@ def observe_execution_reality(
         bid_size=reality.bid_size,
         ask_size=reality.ask_size,
         depth_imbalance=reality.depth_imbalance,
-    )
-
-
-def execution_not_evaluated() -> ExecutionObservation:
-    """Return an inert contract value for Eye-only semantic replay."""
-
-    return ExecutionObservation(
-        spread_points=0.0,
-        expected_slippage_points=0.0,
-        expected_round_trip_cost_points=0.0,
-        minutes_to_deadline=0,
-        fillability=0.0,
-        data_age_seconds=0.0,
-        size_available=None,
-        anomalies=(),
-        source="not_evaluated",
     )
 
 

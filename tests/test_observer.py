@@ -30,10 +30,10 @@ from smc_trader.model import (
     Timeframe,
     to_primitive,
 )
+from smc_trader.execution import ExecutionRealityInput
 from smc_trader.observation import (
     CausalObserver,
     EventMemory,
-    ExecutionRealityInput,
     ObserverConfig,
     _typed_native_transitions_or_baseline,
     _typed_state_delta_from_cache,
@@ -198,15 +198,6 @@ def test_observer_exposes_all_requested_descriptive_primitives() -> None:
         assert frame.ready
         assert columns <= set(frame.metrics)
         assert frame.cutoff <= observation.asof
-
-
-def test_missing_deadline_remains_visible_to_risk_layer() -> None:
-    reader = CausalMarketReader(scale_specs=CORE_TEST_SCALE_SPECS)
-    update = reader.on_bar(session_bars(1)[0])
-    observation = CausalObserver(
-        ObserverConfig(scale_specs=CORE_TEST_SCALE_SPECS)
-    ).observe(update)
-    assert "deadline_missing" in observation.anomalies
 
 
 def test_direct_eye_defaults_to_no_scene_graph_projection() -> None:
@@ -1557,22 +1548,6 @@ def test_group4_disposition_can_reference_prior_inventory_only() -> None:
     assert "prior-inventory-only" not in {
         item.item_id for item in projected.liquidity_inventory
     }
-
-
-def test_invalid_execution_reality_fails_before_observer_mutation() -> None:
-    reader = CausalMarketReader(scale_specs=CORE_TEST_SCALE_SPECS)
-    update = reader.on_bar(session_bars(1)[0])
-    observer = CausalObserver(
-        ObserverConfig(scale_specs=CORE_TEST_SCALE_SPECS)
-    )
-    with pytest.raises(ValueError, match="spread cannot be negative"):
-        observer.observe(
-            update,
-            ExecutionRealityInput(spread_points=-0.25),
-        )
-    assert observer._prior is None
-    assert observer.memory.last_minute_end is None
-    assert observer.memory.clock_coverage_start is None
 
 
 def test_warmed_plain_minute_reuses_unchanged_liquidity_snapshots(

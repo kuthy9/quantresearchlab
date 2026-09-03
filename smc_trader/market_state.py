@@ -65,7 +65,7 @@ if TYPE_CHECKING:
     from .semantic_foundation import FoundationRecord
 
 
-MARKET_SNAPSHOT_SCHEMA_VERSION = 5
+MARKET_SNAPSHOT_SCHEMA_VERSION = 7
 TIMEFRAME_EVENT_REDUCER_SCHEMA_VERSION = 3
 
 
@@ -77,6 +77,105 @@ class DeliveryPhase(str, Enum):
     TRANSITION = "transition"
 
 
+class StructureScope(str, Enum):
+    """Which structural claim a generation belongs to."""
+
+    INTERNAL = "internal"
+    EXTERNAL = "external"
+
+
+@dataclass(frozen=True)
+class StructureGenerationState:
+    """One continuous structural claim on one timeframe and scope.
+
+    A generation opens when a direction is confirmed, absorbs every qualified
+    BOS and MSS core observed while its protected swing holds, and ends when
+    that protection is accepted through or the direction reverses.  Consumers
+    reference ``generation_id`` so that a phase, a relation or a DOL candidate
+    spanning several breaks still names one parent.
+    """
+
+    generation_id: str
+    timeframe: Timeframe
+    scope: StructureScope
+    direction: Direction
+    started_at: pd.Timestamp
+    confirmed_at: pd.Timestamp | None = None
+    origin_event_id: str | None = None
+    protected_swing_id: str | None = None
+    bos_event_ids: tuple[str, ...] = ()
+    mss_event_ids: tuple[str, ...] = ()
+    terminated_at: pd.Timestamp | None = None
+    termination_reason: str | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "timeframe", Timeframe(self.timeframe))
+        object.__setattr__(self, "scope", StructureScope(self.scope))
+        object.__setattr__(self, "direction", Direction(self.direction))
+        for name in ("bos_event_ids", "mss_event_ids"):
+            object.__setattr__(self, name, tuple(getattr(self, name)))
+        for name in ("started_at", "confirmed_at", "terminated_at"):
+            value = getattr(self, name)
+            if value is not None:
+                object.__setattr__(
+                    self,
+                    name,
+                    aware_timestamp(value, name=f"structure_generation.{name}"),
+                )
+        if (
+            not self.generation_id
+            or (self.terminated_at is None) != (self.termination_reason is None)
+            or (
+                self.terminated_at is not None
+                and self.terminated_at < self.started_at
+            )
+            or len(set(self.bos_event_ids)) != len(self.bos_event_ids)
+            or len(set(self.mss_event_ids)) != len(self.mss_event_ids)
+        ):
+            raise ValueError("structure generation state is invalid")
+
+    @property
+    def is_active(self) -> bool:
+        return self.terminated_at is None
+
+
+@dataclass(frozen=True)
+class DeliveryPhaseOccupancy:
+    """One continuous stay in a delivery phase on one timeframe."""
+
+    phase: DeliveryPhase
+    entered_at: pd.Timestamp
+    entered_bar_ordinal: int
+    previous_phase: DeliveryPhase | None
+    origin_event_id: str | None
+    parent_structure_generation_id: str | None
+    inputs: tuple[object, ...]
+    observation_count: int = 1
+
+
+@dataclass(frozen=True)
+class DeliveryPhaseTransition:
+    """What the Eye publishes about a phase occupancy on one bar."""
+
+    kind: EventKind
+    timeframe: Timeframe
+    phase: DeliveryPhase
+    known_at: pd.Timestamp
+    price: float
+    entered_at: pd.Timestamp
+    age_bars: int
+    observation_count: int
+    previous_phase: DeliveryPhase | None
+    next_phase: DeliveryPhase | None
+    origin_event_id: str | None
+    parent_structure_generation_id: str | None
+    structure_regime: Direction | None
+    active_leg_direction: Direction | None
+    protected_swing_intact: bool | None
+    range_available: bool
+    source_event_ids: tuple[str, ...]
+
+
 class RelationRole(str, Enum):
     ALIGNED_EXPANSION = "aligned_expansion"
     PARENT_RETRACEMENT = "parent_retracement"
@@ -84,6 +183,91 @@ class RelationRole(str, Enum):
     PARENT_TRANSITION = "parent_transition"
     BALANCE_INSIDE_PARENT = "balance_inside_parent"
     UNRESOLVED = "unresolved"
+
+
+@dataclass(frozen=True)
+class RelationGenerationState:
+    """One continuous occupancy of a cross-timeframe relation.
+
+    ``RelationState`` is recomputed on every completed minute, so a parent
+    retracement that holds for fifty bars yields fifty identical rows.  Treating
+    those as independent observations is pseudo-replication: it counts one
+    market fact fifty times.  A generation is the experimental unit instead --
+    it opens when a role is established under a named pair of structural
+    claims, counts the observations it spanned, and closes when the role or
+    either structural claim changes.
+    """
+
+    generation_id: str
+    relation_id: str
+    parent_tf: Timeframe
+    child_tf: Timeframe
+    role: RelationRole
+    entered_at: pd.Timestamp
+    updated_at: pd.Timestamp
+    observation_count: int = 1
+    parent_structure_generation_id: str | None = None
+    child_structure_generation_id: str | None = None
+    terminated_at: pd.Timestamp | None = None
+    termination_reason: str | None = None
+    next_role: RelationRole | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "parent_tf", Timeframe(self.parent_tf))
+        object.__setattr__(self, "child_tf", Timeframe(self.child_tf))
+        object.__setattr__(self, "role", RelationRole(self.role))
+        if self.next_role is not None:
+            object.__setattr__(self, "next_role", RelationRole(self.next_role))
+        for name in ("entered_at", "updated_at", "terminated_at"):
+            value = getattr(self, name)
+            if value is not None:
+                object.__setattr__(
+                    self,
+                    name,
+                    aware_timestamp(value, name=f"relation_generation.{name}"),
+                )
+        if (
+            not self.generation_id
+            or not self.relation_id
+            or self.parent_tf is self.child_tf
+            or type(self.observation_count) is not int
+            or self.observation_count < 1
+            or self.updated_at < self.entered_at
+            or (self.terminated_at is None) != (self.termination_reason is None)
+            or (
+                self.terminated_at is not None
+                and self.terminated_at < self.entered_at
+            )
+            # A successor role is evidence of a role change and of nothing
+            # else; a claim that ended because its structure ended has no
+            # successor to name.
+            or (
+                self.next_role is not None
+                and (
+                    self.termination_reason != "role_changed"
+                    or self.next_role is self.role
+                )
+            )
+            or (
+                self.termination_reason == "role_changed"
+                and self.next_role is None
+            )
+        ):
+            raise ValueError("relation generation state is invalid")
+
+    @property
+    def is_active(self) -> bool:
+        return self.terminated_at is None
+
+    @property
+    def signature(self) -> tuple[str | None, str | None, str]:
+        """What must hold for this occupancy to still be the same one."""
+
+        return (
+            self.parent_structure_generation_id,
+            self.child_structure_generation_id,
+            self.role.value,
+        )
 
 
 class MarketSnapshotAuthority(str, Enum):
@@ -161,10 +345,29 @@ class SwingHierarchyView:
     semantic_rank: SwingRank
     nesting_depth: int
     assignments: tuple[SwingRankAssignment, ...]
+    # The definitional bar window this Swing was confirmed from, frozen at
+    # confirmation.  Geometric nesting is decided from these four numbers and
+    # nothing else -- never from the role the Swing happens to be playing.
+    window_start: pd.Timestamp | None = None
+    window_end: pd.Timestamp | None = None
+    window_low: float | None = None
+    window_high: float | None = None
+    geometric_parent_id: str | None = None
+    geometric_depth: int = 0
+    child_ids: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "timeframe", Timeframe(self.timeframe))
         object.__setattr__(self, "semantic_rank", SwingRank(self.semantic_rank))
+        object.__setattr__(self, "child_ids", tuple(self.child_ids))
+        for name in ("window_start", "window_end"):
+            value = getattr(self, name)
+            if value is not None:
+                object.__setattr__(
+                    self,
+                    name,
+                    aware_timestamp(value, name=f"swing_hierarchy.{name}"),
+                )
         assignments = tuple(self.assignments)
         object.__setattr__(self, "assignments", assignments)
         if (
@@ -188,12 +391,55 @@ class SwingHierarchyView:
             or self.nesting_depth != _SWING_RANK_DEPTH[maximum.rank]
         ):
             raise ValueError("swing hierarchy summary disagrees with assignments")
+        window = (
+            self.window_start,
+            self.window_end,
+            self.window_low,
+            self.window_high,
+        )
+        if any(value is None for value in window) != all(
+            value is None for value in window
+        ):
+            raise ValueError("swing hierarchy window is partially known")
+        if (
+            type(self.geometric_depth) is not int
+            or self.geometric_depth < 0
+            # A root has no parent and a child is never its own parent.
+            or (self.geometric_parent_id is None) != (self.geometric_depth == 0)
+            or self.geometric_parent_id == self.swing_id
+            or self.swing_id in self.child_ids
+            or len(set(self.child_ids)) != len(self.child_ids)
+        ):
+            raise ValueError("swing geometric nesting is invalid")
+        if self.window_start is not None and (
+            self.window_start >= self.window_end
+            or not 0.0 < float(self.window_low) <= float(self.window_high)
+        ):
+            raise ValueError("swing hierarchy window is invalid")
+        if self.window_start is None and self.geometric_parent_id is not None:
+            raise ValueError("swing without a window cannot be nested")
 
     @property
     def role_depth(self) -> int:
         """Return causal semantic-role depth, never geometric nesting depth."""
 
         return self.nesting_depth
+
+    @property
+    def lower_bound(self) -> float | None:
+        return self.window_low
+
+    @property
+    def upper_bound(self) -> float | None:
+        return self.window_high
+
+    @property
+    def duration_seconds(self) -> int:
+        return int((self.window_end - self.window_start).total_seconds())
+
+    @property
+    def price_span(self) -> float:
+        return float(self.window_high - self.window_low)
 
 
 @dataclass(frozen=True)
@@ -476,6 +722,12 @@ class PriceZoneView:
             raise ValueError("market-state zone view is invalid")
 
 
+# A level in one of these states still exists and still has an identity, but
+# it is not currently resting liquidity: it was taken, and has not yet been
+# offered again.
+_DISARMED_LEVEL_LIFECYCLES = frozenset({"disarmed", "rearmable"})
+
+
 @dataclass(frozen=True)
 class DOLCandidateView:
     candidate_id: str
@@ -497,9 +749,34 @@ class DOLCandidateView:
     path_obstacle_ids: tuple[str, ...] = ()
     range_role: LiquidityRangeRole = LiquidityRangeRole.UNRESOLVED
     normalized_location_in_range: float | None = None
+    # A level outlives the sweep that takes it.  The ordinal counts how many
+    # times this same identity has been armed, so a level tested four times is
+    # four generations of one level rather than four unrelated levels.
+    generation_ordinal: int = 1
+    disarmed_at: pd.Timestamp | None = None
+    rearm_departure: float | None = None
+    rearm_departure_bar_event_id: str | None = None
+
+    @property
+    def generation_id(self) -> str:
+        return f"{self.candidate_id}_generation_{self.generation_ordinal:04d}"
+
+    @property
+    def is_armed(self) -> bool:
+        """Whether this level is currently offered as resting liquidity."""
+
+        return self.lifecycle not in _DISARMED_LEVEL_LIFECYCLES
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "timeframe", Timeframe(self.timeframe))
+        if self.disarmed_at is not None:
+            object.__setattr__(
+                self,
+                "disarmed_at",
+                aware_timestamp(
+                    self.disarmed_at, name="dol_candidate.disarmed_at"
+                ),
+            )
         object.__setattr__(
             self,
             "formed_at",
@@ -542,6 +819,27 @@ class DOLCandidateView:
             )
             or type(self.age_bars) is not int
             or self.age_bars < 0
+            or type(self.generation_ordinal) is not int
+            or self.generation_ordinal < 1
+            # A later generation only exists because an earlier one was swept.
+            or (self.generation_ordinal > 1 and self.disarmed_at is None)
+            or (self.rearm_departure is None)
+            != (self.rearm_departure_bar_event_id is None)
+            or (
+                self.rearm_departure is not None
+                and (
+                    not math.isfinite(float(self.rearm_departure))
+                    or float(self.rearm_departure) <= 0.0
+                )
+            )
+            or (
+                self.lifecycle in _DISARMED_LEVEL_LIFECYCLES
+                and self.disarmed_at is None
+            )
+            or (
+                self.lifecycle == "rearmable"
+                and self.rearm_departure is None
+            )
             or (
                 self.distance_atr is not None
                 and not math.isfinite(float(self.distance_atr))
@@ -926,6 +1224,17 @@ class MarketSnapshot:
     labels: tuple[str, ...]
     event_count: int
     event_prefix_fingerprint: str
+    # Keyed by generation_id so a phase, a relation or a DOL candidate can name
+    # one continuous structural claim instead of its latest break.  A snapshot
+    # rebuilt from the event log alone carries none.
+    structure_generations: Mapping[str, StructureGenerationState] = field(
+        default_factory=dict
+    )
+    # Keyed by generation_id.  One row per continuous relation occupancy, so a
+    # study can use the episode as its experimental unit instead of the bar.
+    relation_generations: Mapping[str, RelationGenerationState] = field(
+        default_factory=dict
+    )
     authority: MarketSnapshotAuthority = (
         MarketSnapshotAuthority.LEGACY_UNSPECIFIED
     )
@@ -941,6 +1250,16 @@ class MarketSnapshot:
         relations = FrozenDict(self.relations)
         object.__setattr__(self, "timeframe_states", states)
         object.__setattr__(self, "relations", relations)
+        object.__setattr__(
+            self,
+            "structure_generations",
+            FrozenDict(self.structure_generations),
+        )
+        object.__setattr__(
+            self,
+            "relation_generations",
+            FrozenDict(self.relation_generations),
+        )
         object.__setattr__(self, "events_this_update", tuple(self.events_this_update))
         object.__setattr__(self, "labels", tuple(self.labels))
         object.__setattr__(
@@ -990,6 +1309,8 @@ class MarketSnapshot:
             "labels",
             "event_count",
             "event_prefix_fingerprint",
+            "structure_generations",
+            "relation_generations",
             "authority",
             "schema_version",
         }
@@ -1054,6 +1375,7 @@ _TIMEFRAME_REDUCER_KINDS = frozenset(
         EventKind.ACCEPTANCE_CONFIRMED,
         EventKind.DISPLACEMENT_OBSERVED,
         EventKind.FVG_CREATED,
+        EventKind.FVG_FIRST_RETEST,
         EventKind.FVG_PARTIALLY_FILLED,
         EventKind.FVG_MIDPOINT_TOUCHED,
         EventKind.FVG_FULLY_FILLED,
@@ -1068,24 +1390,39 @@ _TIMEFRAME_REDUCER_KINDS = frozenset(
         EventKind.DEALING_RANGE_EXTENDED,
         EventKind.DEALING_RANGE_INVALIDATED,
         EventKind.DEALING_RANGE_REPLACED,
+        EventKind.BALANCE_RANGE_OBSERVED,
+        EventKind.BALANCE_RANGE_MATURED,
         EventKind.ORIGIN_ZONE_CREATED,
+        EventKind.BASE_ORIGIN_CORE_CREATED,
+        EventKind.QUALIFIED_ORIGIN_ZONE_CREATED,
         EventKind.ORIGIN_ZONE_TOUCHED,
         EventKind.ORIGIN_ZONE_MITIGATED,
         EventKind.ORIGIN_ZONE_INVALIDATED,
+        EventKind.DELIVERY_PHASE_ENTERED,
+        EventKind.DELIVERY_PHASE_UPDATED,
+        EventKind.DELIVERY_PHASE_EXITED,
     }
 )
 
-# The reducer accepts only the atomic kinds emitted by the v1.2 semantic
+# The reducer accepts only the atomic kinds emitted by the v1.3 semantic
 # registry plus the journal-level epoch reset.  Reserved compatibility kinds
 # remain readable in EventStore but cannot acquire atomic authority here.
+# FVG_FIRST_RETEST is admitted as an authoritative fact but has no branch
+# below: it records what was true at the first re-entry and never revises the
+# compact current view, which the fill observation on the same bar owns.
+# BASE_ORIGIN_CORE_CREATED is admitted the same way: the compact view tracks
+# the qualified origin zone, while the bare geometry stays readable as a fact
+# the Brain interprets.  The retired ORIGIN_ZONE_CREATED keeps no authority.
 _CANONICAL_ATOMIC_KINDS = frozenset(
     (
         _TIMEFRAME_REDUCER_KINDS
         - {
             EventKind.BAR_COMPLETED,
             EventKind.FVG_EXPIRED,
+            EventKind.ORIGIN_ZONE_CREATED,
             EventKind.ORIGIN_ZONE_TOUCHED,
             EventKind.DEALING_RANGE_EXTENDED,
+            EventKind.DEALING_RANGE_ACTIVATED,
         }
     )
     | {
@@ -1235,8 +1572,14 @@ def _liquidity_state(
     values = tuple(
         sorted(candidates, key=lambda item: (item.price, item.candidate_id))
     )
-    above = tuple(item for item in values if item.side == "above")
-    below = tuple(item for item in values if item.side == "below")
+    # ``candidates`` keeps every level the timeframe knows about, including the
+    # ones a sweep disarmed; only armed levels are published as inventory.
+    above = tuple(
+        item for item in values if item.side == "above" and item.is_armed
+    )
+    below = tuple(
+        item for item in values if item.side == "below" and item.is_armed
+    )
     return TimeframeLiquidityState(
         unswept_bsl=tuple(item.price for item in above),
         unswept_ssl=tuple(item.price for item in below),
@@ -1245,6 +1588,62 @@ def _liquidity_state(
         recently_swept_ids=tuple(dict.fromkeys(recently_swept_ids)),
         candidates=values,
     )
+
+
+def _advance_level_rearm(
+    item: DOLCandidateView,
+    *,
+    close: float,
+    bar_event_id: str,
+) -> DOLCandidateView:
+    """Carry a disarmed level towards being offered again.
+
+    Two observable facts, no tunable threshold.  The level is *left behind*
+    when a close is strictly outside its own band on the side it was offered
+    from -- a swept high is left behind by closing below it -- and it is
+    *offered again* on the first close that comes back inside that reach.  The
+    recorded departure is the extreme, so a still-receding close extends the
+    distance price must return from rather than arming the level early.
+    """
+
+    if item.lifecycle not in _DISARMED_LEVEL_LIFECYCLES:
+        return item
+    departure = (
+        item.lower_bound - close
+        if item.side == "above"
+        else close - item.upper_bound
+    )
+    if item.lifecycle == "disarmed":
+        if departure <= 0.0:
+            return item
+        return replace(
+            item,
+            lifecycle="rearmable",
+            rearm_departure=float(departure),
+            rearm_departure_bar_event_id=bar_event_id,
+        )
+    reach = float(item.rearm_departure)
+    if departure > reach:
+        return replace(
+            item,
+            rearm_departure=float(departure),
+            rearm_departure_bar_event_id=bar_event_id,
+        )
+    if departure == reach:
+        return item
+    return replace(
+        item,
+        lifecycle="rearmed",
+        generation_ordinal=item.generation_ordinal + 1,
+    )
+
+
+# A structural range locates price whenever it exists and price has not
+# closed outside it.  ``active``/``mature`` are the balance claim's spellings
+# and are included because a balanced range is still a structural one.
+_LOCATING_RANGE_LIFECYCLES = frozenset(
+    {"created", "forming", "extended", "replaced", "active", "mature"}
+)
 
 
 def _candidate_range_membership(
@@ -1256,9 +1655,11 @@ def _candidate_range_membership(
     active = bool(
         range_state.range_id is not None
         and range_state.range_kind == "active_dealing_range"
-        # ``mature`` is the compatibility projection spelling of the
-        # canonical atomic lifecycle ``active``.
-        and range_state.lifecycle in {"active", "mature"}
+        # Location is the interval's own arithmetic, so a registered
+        # structural range answers it from creation.  ``active``/``mature``
+        # additionally assert the separate balance claim; requiring them here
+        # made a two-sided-test statistic a precondition for premium/discount.
+        and range_state.lifecycle in _LOCATING_RANGE_LIFECYCLES
         and range_state.low is not None
         and range_state.high is not None
     )
@@ -1340,6 +1741,217 @@ def _swing_hierarchy_targets(
     return rank, tuple(dict.fromkeys(targets))
 
 
+def _swing_confirmation_window(
+    event: MarketEvent,
+) -> dict[str, object]:
+    """Read the frozen definitional window off a confirmation event."""
+
+    evidence = event.evidence
+    if any(
+        key not in evidence
+        for key in ("window_start", "window_end", "window_low", "window_high")
+    ):
+        # Historical journals predate the frozen window; such a swing simply
+        # has no geometry rather than an invented one.
+        return {}
+    return {
+        "window_start": aware_timestamp(
+            pd.Timestamp(evidence["window_start"]),
+            name="swing_hierarchy.window_start",
+        ),
+        "window_end": aware_timestamp(
+            pd.Timestamp(evidence["window_end"]),
+            name="swing_hierarchy.window_end",
+        ),
+        "window_low": float(evidence["window_low"]),
+        "window_high": float(evidence["window_high"]),
+    }
+
+
+class SwingGeometryTree:
+    """The cross-timeframe geometric nesting tree, maintained incrementally.
+
+    Re-deriving the whole tree on every bar is quadratic in a population that
+    only grows: three days of real data spent 70% of the replay inside it.  The
+    work is instead done once per confirmed Swing, and it is bounded by the new
+    Swing's own window rather than by all history -- the only nodes a new
+    window can adopt are the ones that fit inside it.
+
+    Adoption has to be retroactive.  A Swing's enclosing higher-timeframe
+    window is confirmed at or after the Swing it contains, so an append-only
+    assignment would leave almost everything a root.
+    """
+
+    __slots__ = ("_nodes", "_parent", "_children", "_depth", "_index")
+
+    def __init__(self) -> None:
+        self._nodes: dict[str, SwingHierarchyView] = {}
+        self._parent: dict[str, str | None] = {}
+        self._children: dict[str, list[str]] = {}
+        self._depth: dict[str, int] = {}
+        # Per timeframe, swing ids ordered by window_start.  Windows on one
+        # timeframe all share a length, so this orders window_end too.
+        self._index: dict[Timeframe, list[str]] = {}
+
+    def clear(self) -> None:
+        self._nodes.clear()
+        self._parent.clear()
+        self._children.clear()
+        self._depth.clear()
+        self._index.clear()
+
+    def snapshot(self) -> dict[str, object]:
+        """A rollback point that does not copy the history it protects.
+
+        Only the containers are copied.  Every value they hold is either a
+        frozen view or a string, and nothing here is ever mutated in place, so
+        sharing the values restores exactly as much state as copying them --
+        without paying for the whole Swing population on every bar.
+        """
+
+        return {
+            "_nodes": dict(self._nodes),
+            "_parent": dict(self._parent),
+            "_children": {key: list(value) for key, value in self._children.items()},
+            "_depth": dict(self._depth),
+            "_index": {key: list(value) for key, value in self._index.items()},
+        }
+
+    def restore(self, state: Mapping[str, object]) -> None:
+        for name, value in state.items():
+            setattr(self, name, value)
+
+    def view_of(self, swing: SwingHierarchyView) -> SwingHierarchyView:
+        """Return ``swing`` carrying its settled place in the tree."""
+
+        parent_id = self._parent.get(swing.swing_id)
+        depth = self._depth.get(swing.swing_id, 0)
+        children = tuple(sorted(self._children.get(swing.swing_id, ())))
+        if (
+            swing.geometric_parent_id == parent_id
+            and swing.geometric_depth == depth
+            and swing.child_ids == children
+        ):
+            return swing
+        return replace(
+            swing,
+            geometric_parent_id=parent_id,
+            geometric_depth=depth,
+            child_ids=children,
+        )
+
+    def _starts(self, timeframe: Timeframe) -> list[pd.Timestamp]:
+        return [
+            self._nodes[swing_id].window_start
+            for swing_id in self._index.get(timeframe, ())
+        ]
+
+    def _tightest(self, left: str | None, right: str) -> str:
+        if left is None:
+            return right
+        return min(
+            (left, right),
+            key=lambda name: _tightest_parent_key(self._nodes[name]),
+        )
+
+    def _find_parent(self, child: SwingHierarchyView) -> str | None:
+        best: str | None = None
+        for timeframe, order in self._index.items():
+            if not order:
+                continue
+            starts = self._starts(timeframe)
+            cursor = bisect_right(starts, child.window_start) - 1
+            while cursor >= 0:
+                candidate = self._nodes[order[cursor]]
+                # Equal-length windows on one timeframe end in the same order
+                # they start, so once a candidate ends too early none earlier
+                # can reach this child.
+                if candidate.window_end < child.window_end:
+                    break
+                if candidate.swing_id != child.swing_id and _window_contains(
+                    candidate, child
+                ):
+                    best = self._tightest(best, candidate.swing_id)
+                cursor -= 1
+        return best
+
+    def _adoptable(self, parent: SwingHierarchyView) -> list[str]:
+        """Ids whose window fits inside ``parent``: a contiguous slice."""
+
+        adopted: list[str] = []
+        for timeframe, order in self._index.items():
+            if not order:
+                continue
+            starts = self._starts(timeframe)
+            cursor = bisect_left(starts, parent.window_start)
+            while cursor < len(order):
+                candidate = self._nodes[order[cursor]]
+                if candidate.window_end > parent.window_end:
+                    break
+                if candidate.swing_id != parent.swing_id and _window_contains(
+                    parent, candidate
+                ):
+                    adopted.append(candidate.swing_id)
+                cursor += 1
+        return adopted
+
+    def _reparent(self, child_id: str, parent_id: str | None) -> None:
+        incumbent = self._parent.get(child_id)
+        if incumbent == parent_id:
+            return
+        if incumbent is not None:
+            siblings = self._children.get(incumbent)
+            if siblings is not None and child_id in siblings:
+                siblings.remove(child_id)
+        self._parent[child_id] = parent_id
+        if parent_id is not None:
+            self._children.setdefault(parent_id, []).append(child_id)
+
+    def _resettle_depths(self, roots: Iterable[str]) -> set[str]:
+        """Repair depths below ``roots``; the subtree bounds the work."""
+
+        touched: set[str] = set()
+        pending = list(roots)
+        while pending:
+            swing_id = pending.pop()
+            parent_id = self._parent.get(swing_id)
+            depth = 0 if parent_id is None else self._depth.get(parent_id, 0) + 1
+            if self._depth.get(swing_id) == depth and swing_id in touched:
+                continue
+            self._depth[swing_id] = depth
+            touched.add(swing_id)
+            pending.extend(self._children.get(swing_id, ()))
+        return touched
+
+    def admit(self, swing: SwingHierarchyView) -> set[str]:
+        """Place one newly confirmed Swing; return every id whose place moved."""
+
+        if swing.window_start is None or swing.swing_id in self._nodes:
+            return set()
+        self._nodes[swing.swing_id] = swing
+        order = self._index.setdefault(swing.timeframe, [])
+        starts = self._starts(swing.timeframe)
+        order.insert(
+            bisect_right(starts, swing.window_start), swing.swing_id
+        )
+        self._children.setdefault(swing.swing_id, [])
+
+        moved = {swing.swing_id}
+        self._reparent(swing.swing_id, self._find_parent(swing))
+        for candidate_id in self._adoptable(swing):
+            incumbent = self._parent.get(candidate_id)
+            if incumbent is not None and (
+                _tightest_parent_key(self._nodes[incumbent])
+                <= _tightest_parent_key(swing)
+            ):
+                continue
+            self._reparent(candidate_id, swing.swing_id)
+            moved.add(candidate_id)
+            if incumbent is not None:
+                moved.add(incumbent)
+        return moved | self._resettle_depths(moved)
+
+
 def _swing_hierarchy_transition(
     hierarchy: tuple[SwingHierarchyView, ...],
     event: MarketEvent,
@@ -1373,6 +1985,7 @@ def _swing_hierarchy_transition(
                 semantic_rank=rank,
                 nesting_depth=_SWING_RANK_DEPTH[rank],
                 assignments=(assignment,),
+                **_swing_confirmation_window(event),
             )
             continue
         if any(
@@ -1480,7 +2093,7 @@ def _leg_from_event(event: MarketEvent) -> StructuralLegState:
             evidence["max_retracement_points"]
         ),
         max_retracement_atr=float(evidence["max_retracement_atr"]),
-        rank=SwingRank(str(evidence.get("rank", "internal"))),
+        path_class=SwingRank(str(evidence["path_class"])),
         source_swing_ids=(
             str(evidence["start_swing_id"]),
             str(evidence["end_swing_id"]),
@@ -1588,18 +2201,22 @@ def reduce_timeframe_state(
             )
         range_state = _range_at_price(range_state, close)
         candidates = tuple(
-            replace(
-                item,
-                age_bars=item.age_bars + 1,
-                distance_atr=(
-                    None
-                    if atr is None or atr <= 0.0
-                    else (
-                        (item.price - close) / atr
-                        if item.side == "above"
-                        else (close - item.price) / atr
-                    )
+            _advance_level_rearm(
+                replace(
+                    item,
+                    age_bars=item.age_bars + 1,
+                    distance_atr=(
+                        None
+                        if atr is None or atr <= 0.0
+                        else (
+                            (item.price - close) / atr
+                            if item.side == "above"
+                            else (close - item.price) / atr
+                        )
+                    ),
                 ),
+                close=close,
+                bar_event_id=event.event_id,
             )
             for item in liquidity.candidates
         )
@@ -1884,8 +2501,10 @@ def reduce_timeframe_state(
         )
         liquidity = _liquidity_state(
             tuple(
+                # A disarmed level is not re-armed by being touched; only a
+                # recorded departure and return can offer it again.
                 replace(item, lifecycle=lifecycle)
-                if item.candidate_id == level_id
+                if item.candidate_id == level_id and item.is_armed
                 else item
                 for item in liquidity.candidates
             ),
@@ -1893,14 +2512,26 @@ def reduce_timeframe_state(
         )
     elif event.kind is EventKind.SWEEP_CONFIRMED:
         level_id = str(event.evidence.get("level_id", ""))
+        # The sweep closes this generation of the level; the level itself
+        # survives, disarmed, so a later re-approach is recognisably the same
+        # level rather than a brand-new identity at the same price.
         retained = tuple(
-            item
+            replace(
+                item,
+                lifecycle="disarmed",
+                disarmed_at=event.known_at,
+                rearm_departure=None,
+                rearm_departure_bar_event_id=None,
+            )
+            if item.candidate_id == level_id
+            else item
             for item in liquidity.candidates
-            if item.candidate_id != level_id
         )
         swept = liquidity.recently_swept_ids
         if level_id:
-            swept = (*swept, level_id)[-32:]
+            swept = tuple(
+                dict.fromkeys((*swept, level_id))
+            )[-32:]
         liquidity = _liquidity_state(retained, swept)
     elif event.kind in {
         EventKind.FVG_CREATED,
@@ -1934,7 +2565,7 @@ def reduce_timeframe_state(
             ),
         )
     elif event.kind in {
-        EventKind.ORIGIN_ZONE_CREATED,
+        EventKind.QUALIFIED_ORIGIN_ZONE_CREATED,
         EventKind.ORIGIN_ZONE_TOUCHED,
         EventKind.ORIGIN_ZONE_MITIGATED,
         EventKind.ORIGIN_ZONE_INVALIDATED,
@@ -1955,7 +2586,7 @@ def reduce_timeframe_state(
         )
     elif event.kind in {
         EventKind.DEALING_RANGE_CREATED,
-        EventKind.DEALING_RANGE_ACTIVATED,
+        EventKind.BALANCE_RANGE_MATURED,
         EventKind.DEALING_RANGE_EXTENDED,
         EventKind.DEALING_RANGE_REPLACED,
     }:
@@ -1977,7 +2608,9 @@ def reduce_timeframe_state(
             location_label="equilibrium",
             lifecycle={
                 EventKind.DEALING_RANGE_CREATED: "created",
-                EventKind.DEALING_RANGE_ACTIVATED: "active",
+                # The compact view calls a range active once its balance claim
+                # matures; the structural interval itself never "activates".
+                EventKind.BALANCE_RANGE_MATURED: "active",
                 EventKind.DEALING_RANGE_EXTENDED: "extended",
                 EventKind.DEALING_RANGE_REPLACED: "replaced",
             }[event.kind],
@@ -2039,6 +2672,18 @@ def reduce_timeframe_state(
         swing_hierarchy=hierarchy,
     )
 
+
+# The delivery-phase lifecycle is derived from the snapshot the publisher has
+# just built, so it can only be appended after that publication.  It is a
+# physical fact, not projection transport, and it is consumed in the same
+# update so the reducer cursor still covers every committed physical event.
+_DELIVERY_PHASE_TAIL_KINDS = frozenset(
+    {
+        EventKind.DELIVERY_PHASE_ENTERED,
+        EventKind.DELIVERY_PHASE_UPDATED,
+        EventKind.DELIVERY_PHASE_EXITED,
+    }
+)
 
 _CURRENT_STATE_PROJECTION_KINDS = frozenset(
     {
@@ -2217,11 +2862,16 @@ class TimeframeEventReducer:
         self,
         *,
         projection_only: bool = False,
+        delivery_phase_only: bool = False,
     ) -> tuple[MarketEvent, ...]:
         """Consume one committed suffix atomically without scanning history."""
 
         if type(projection_only) is not bool:
             raise TypeError("projection-only suffix flag must be boolean")
+        if type(delivery_phase_only) is not bool:
+            raise TypeError("delivery-phase suffix flag must be boolean")
+        if projection_only and delivery_phase_only:
+            raise ValueError("a suffix is either projection or delivery phase")
         suffix = self.event_store.events_since(self._cursor)
         if not suffix:
             self._store_prefix_fingerprint = self.event_store.fingerprint()
@@ -2239,6 +2889,13 @@ class TimeframeEventReducer:
             ):
                 raise ValueError(
                     "timeframe reducer projection tail contains a physical fact"
+                )
+            if delivery_phase_only and not (
+                event.origin is EventOrigin.SEMANTIC_ATOMIC
+                and event.kind in _DELIVERY_PHASE_TAIL_KINDS
+            ):
+                raise ValueError(
+                    "timeframe reducer delivery tail contains a foreign event"
                 )
             staged._consume_committed(event, store_index=offset)
         staged._cursor = self._cursor + len(suffix)
@@ -2277,6 +2934,13 @@ class TimeframeEventReducer:
         if event.kind is EventKind.FOUNDATION_STATE_CHANGED:
             # This retired transport is interpreted only by its dedicated
             # cold decoder.  It never changes the current MarketState view.
+            return
+        if event.kind in _DELIVERY_PHASE_TAIL_KINDS:
+            # The delivery-phase lifecycle is derived from the state this
+            # reducer publishes.  Reducing it back in would be circular, and
+            # counting it would make a clock-only minute look like it carried
+            # market events.  The cursor still advances past it, so the
+            # checkpoint contract keeps covering every committed fact.
             return
         if event.origin is EventOrigin.LEGACY_TRANSPORT:
             if (
@@ -2658,6 +3322,29 @@ def build_swing_geometry_nodes(
     return tuple(values)
 
 
+def _window_contains(parent, child) -> bool:
+    """The whole geometric rule: containment in time and in price.
+
+    Nothing about direction, rank, role or outcome enters here.  A strictly
+    longer window is required so that two coincident windows can never adopt
+    each other and no cycle is representable.
+    """
+
+    return (
+        parent.window_start <= child.window_start
+        and parent.window_end >= child.window_end
+        and parent.lower_bound <= child.lower_bound
+        and parent.upper_bound >= child.upper_bound
+        and parent.duration_seconds > child.duration_seconds
+    )
+
+
+def _tightest_parent_key(node) -> tuple[int, float, str]:
+    """The nearest enclosing window wins; ties break on identity."""
+
+    return (node.duration_seconds, node.price_span, node.swing_id)
+
+
 def _geometric_parent(
     child: SwingGeometryNode,
     nodes: Sequence[SwingGeometryNode],
@@ -2668,24 +3355,9 @@ def _geometric_parent(
         if parent.swing_id != child.swing_id
         and parent.symbol == child.symbol
         and parent.instrument_id == child.instrument_id
-        and parent.window_start <= child.window_start
-        and parent.window_end >= child.window_end
-        and parent.lower_bound <= child.lower_bound
-        and parent.upper_bound >= child.upper_bound
-        and parent.duration_seconds > child.duration_seconds
+        and _window_contains(parent, child)
     )
-    return (
-        None
-        if not candidates
-        else min(
-            candidates,
-            key=lambda item: (
-                item.duration_seconds,
-                item.price_span,
-                item.swing_id,
-            ),
-        )
-    )
+    return None if not candidates else min(candidates, key=_tightest_parent_key)
 
 
 def update_swing_geometry_assignments(
@@ -2920,7 +3592,15 @@ def build_structural_legs(
     native_by_end = tuple(
         sorted(native_candles, key=lambda candle: (candle.end, candle.start))
     )
-    native_ends = tuple(candle.end for candle in native_by_end)
+    # ATR ancestry admits real bars only, and every leg asks for the same
+    # prefix of them.  Applying the shared coverage rule once here turns a
+    # per-leg scan of the whole history into a bisect on this array.
+    atr_by_end = tuple(
+        candle
+        for candle in native_by_end
+        if candle_coverage(candle).admits_atr_window
+    )
+    atr_ends = tuple(candle.end for candle in atr_by_end)
     del protected_swing_ids, structural_swing_ids
     frozen_atr = dict(frozen_start_atr_by_swing_id or {})
     frozen_atr_sources = {
@@ -3003,13 +3683,9 @@ def build_structural_legs(
             if direction is Direction.LONG
             else max(0.0, max(float(item.high) for item in path) - float(anchor.price))
         )
-        prior_count = bisect_right(native_ends, anchor.pivot_start)
-        prior_candles = tuple(
-            candle
-            for candle in native_by_end[:prior_count]
-            if candle.end <= anchor.pivot_start
-            and candle_coverage(candle).admits_atr_window
-        )
+        prior_candles = atr_by_end[
+            : bisect_right(atr_ends, anchor.pivot_start)
+        ]
         if len(prior_candles) < atr_period:
             atr_result = None
         else:
@@ -3126,7 +3802,7 @@ def build_structural_legs(
                 "structural leg lacks positive integer-tick amplitude"
             )
         source_ids = (anchor.swing_id, current.swing_id)
-        rank = SwingRank.MICRO if len(path) <= 2 else SwingRank.INTERNAL
+        path_class = SwingRank.MICRO if len(path) <= 2 else SwingRank.INTERNAL
         raw_id = "|".join(
             (
                 SMC_SEMANTIC_VERSION,
@@ -3183,7 +3859,7 @@ def build_structural_legs(
                 efficiency=close_efficiency,
                 max_retracement_points=max_retracement,
                 max_retracement_atr=max_retracement / atr0,
-                rank=rank,
+                path_class=path_class,
                 source_swing_ids=source_ids,
                 **foundation_values,
             )
@@ -3597,7 +4273,7 @@ class MarketSnapshotPublisher:
         (Timeframe.M15, Timeframe.M5),
         (Timeframe.M5, Timeframe.M1),
     )
-    _STATE_SCHEMA_VERSION = 5
+    _STATE_SCHEMA_VERSION = 7
     _PICKLE_FIELDS = frozenset(
         {
             "semantic_registry_identity",
@@ -3611,6 +4287,15 @@ class MarketSnapshotPublisher:
             "_last_real_m1_price",
             "_last_real_m1_event_id",
             "_boundary_reset_pending",
+            "_delivery_occupancies",
+            "_structure_generations",
+            "_structure_generation_ordinals",
+            "_relation_generations",
+            "_relation_generation_ordinals",
+            "_swing_geometry",
+            "_swing_hierarchy_sizes",
+            "_retired_relation_generations",
+            "_real_m1_bar_ordinal",
             "_publisher_state_schema_version",
         }
     )
@@ -3647,6 +4332,29 @@ class MarketSnapshotPublisher:
         self._last_real_m1_price: float | None = None
         self._last_real_m1_event_id: str | None = None
         self._boundary_reset_pending = False
+        self._delivery_occupancies: dict[
+            Timeframe,
+            DeliveryPhaseOccupancy,
+        ] = {}
+        self._structure_generations: dict[
+            tuple[Timeframe, StructureScope],
+            StructureGenerationState,
+        ] = {}
+        self._structure_generation_ordinals: dict[
+            tuple[Timeframe, StructureScope],
+            int,
+        ] = {}
+        self._relation_generations: dict[str, RelationGenerationState] = {}
+        self._relation_generation_ordinals: dict[str, int] = {}
+        self._swing_geometry = SwingGeometryTree()
+        self._swing_hierarchy_sizes: dict[Timeframe, int] = {}
+        # Closed on the current bar only, so a terminated occupancy is
+        # published exactly once alongside the successor that replaced it.
+        self._retired_relation_generations: tuple[
+            RelationGenerationState,
+            ...,
+        ] = ()
+        self._real_m1_bar_ordinal = 0
         self._publisher_state_schema_version = self._STATE_SCHEMA_VERSION
 
     @property
@@ -3657,6 +4365,11 @@ class MarketSnapshotPublisher:
         """Advance past projection transport committed after publication."""
 
         return self._event_reducer.consume_available(projection_only=True)
+
+    def _consume_committed_delivery_phase_tail(self) -> tuple[MarketEvent, ...]:
+        """Advance past the phase lifecycle committed after publication."""
+
+        return self._event_reducer.consume_available(delivery_phase_only=True)
 
     def __getstate__(self) -> dict[str, object]:
         state = dict(self.__dict__)
@@ -3770,6 +4483,445 @@ class MarketSnapshotPublisher:
             self._boundary_reset_pending = True
         self._clear_epoch_projections()
 
+    def _advance_delivery_phases(
+        self,
+        states: Mapping[Timeframe, TimeframeState],
+        *,
+        asof: pd.Timestamp,
+        price: float,
+        ordered_events: Sequence[MarketEvent],
+        base_ids_by_timeframe: Mapping[Timeframe, tuple[str, ...]],
+    ) -> tuple[DeliveryPhaseTransition, ...]:
+        """Turn the per-bar phase label into an entered/updated/exited stay.
+
+        Regime and phase stay two independent dimensions here: the regime is
+        carried alongside the phase as evidence and never decides it.  An
+        update is published only when a registered phase input moved while the
+        phase itself did not, so a quiet bar publishes nothing.
+        """
+
+        self._advance_structure_generations(
+            states,
+            asof=asof,
+            ordered_events=ordered_events,
+        )
+        transitions: list[DeliveryPhaseTransition] = []
+        for timeframe in self._ORDER:
+            state = states.get(timeframe)
+            if state is None:
+                continue
+            phase = state.delivery.phase
+            regime = state.structure.external_direction
+            active_leg = state.delivery.active_leg_direction
+            protected = state.structure.protected_swing_intact
+            range_available = bool(
+                state.range.range_id is not None
+                and state.range.lifecycle
+                not in {"broken", "invalidated"}
+            )
+            inputs = (
+                regime,
+                active_leg,
+                protected,
+                range_available,
+            )
+            source_ids = base_ids_by_timeframe.get(timeframe, ())
+            external = self._structure_generations.get(
+                (timeframe, StructureScope.EXTERNAL)
+            )
+            parent = (
+                None
+                if external is None or not external.is_active
+                else external.generation_id
+            )
+            current = self._delivery_occupancies.get(timeframe)
+            if current is not None and current.phase is phase:
+                if current.inputs == inputs:
+                    continue
+                updated = replace(
+                    current,
+                    inputs=inputs,
+                    observation_count=current.observation_count + 1,
+                )
+                self._delivery_occupancies[timeframe] = updated
+                transitions.append(
+                    DeliveryPhaseTransition(
+                        kind=EventKind.DELIVERY_PHASE_UPDATED,
+                        timeframe=timeframe,
+                        phase=phase,
+                        known_at=asof,
+                        price=price,
+                        entered_at=updated.entered_at,
+                        age_bars=(
+                            self._real_m1_bar_ordinal
+                            - updated.entered_bar_ordinal
+                        ),
+                        observation_count=updated.observation_count,
+                        previous_phase=updated.previous_phase,
+                        next_phase=None,
+                        origin_event_id=updated.origin_event_id,
+                        parent_structure_generation_id=(
+                            updated.parent_structure_generation_id
+                        ),
+                        structure_regime=regime,
+                        active_leg_direction=active_leg,
+                        protected_swing_intact=protected,
+                        range_available=range_available,
+                        source_event_ids=source_ids,
+                    )
+                )
+                continue
+            if current is not None:
+                transitions.append(
+                    DeliveryPhaseTransition(
+                        kind=EventKind.DELIVERY_PHASE_EXITED,
+                        timeframe=timeframe,
+                        phase=current.phase,
+                        known_at=asof,
+                        price=price,
+                        entered_at=current.entered_at,
+                        age_bars=(
+                            self._real_m1_bar_ordinal
+                            - current.entered_bar_ordinal
+                        ),
+                        observation_count=current.observation_count,
+                        previous_phase=current.previous_phase,
+                        next_phase=phase,
+                        origin_event_id=current.origin_event_id,
+                        parent_structure_generation_id=(
+                            current.parent_structure_generation_id
+                        ),
+                        structure_regime=regime,
+                        active_leg_direction=active_leg,
+                        protected_swing_intact=protected,
+                        range_available=range_available,
+                        source_event_ids=source_ids,
+                    )
+                )
+            origin = self._delivery_origin_event_id(
+                timeframe,
+                ordered_events=ordered_events,
+                source_ids=source_ids,
+            )
+            entered = DeliveryPhaseOccupancy(
+                phase=phase,
+                entered_at=asof,
+                entered_bar_ordinal=self._real_m1_bar_ordinal,
+                previous_phase=None if current is None else current.phase,
+                origin_event_id=origin,
+                parent_structure_generation_id=parent,
+                inputs=inputs,
+            )
+            self._delivery_occupancies[timeframe] = entered
+            transitions.append(
+                DeliveryPhaseTransition(
+                    kind=EventKind.DELIVERY_PHASE_ENTERED,
+                    timeframe=timeframe,
+                    phase=phase,
+                    known_at=asof,
+                    price=price,
+                    entered_at=asof,
+                    age_bars=0,
+                    observation_count=1,
+                    previous_phase=entered.previous_phase,
+                    next_phase=None,
+                    origin_event_id=origin,
+                    parent_structure_generation_id=parent,
+                    structure_regime=regime,
+                    active_leg_direction=active_leg,
+                    protected_swing_intact=protected,
+                    range_available=range_available,
+                    source_event_ids=source_ids,
+                )
+            )
+        return tuple(transitions)
+
+    def _advance_structure_generations(
+        self,
+        states: Mapping[Timeframe, TimeframeState],
+        *,
+        asof: pd.Timestamp,
+        ordered_events: Sequence[MarketEvent],
+    ) -> None:
+        """Open, extend and close one structural claim per timeframe and scope.
+
+        A generation is not a break.  Every qualified BOS and MSS core observed
+        while a claim holds is absorbed into it, so a phase or a relation that
+        spans four breaks still names one parent.  The claim ends when its
+        protected swing is accepted through or the direction reverses; it does
+        not silently restart under the same identity.
+        """
+
+        breaks_by_timeframe: dict[Timeframe, list[MarketEvent]] = {}
+        for event in ordered_events:
+            if event.kind in _STRUCTURE_CHANGE_KINDS:
+                breaks_by_timeframe.setdefault(event.timeframe, []).append(event)
+
+        for timeframe in self._ORDER:
+            state = states.get(timeframe)
+            if state is None:
+                continue
+            events = breaks_by_timeframe.get(timeframe, ())
+            for scope in (StructureScope.EXTERNAL, StructureScope.INTERNAL):
+                direction = (
+                    state.structure.external_direction
+                    if scope is StructureScope.EXTERNAL
+                    else state.structure.internal_direction
+                )
+                # Only the external claim owns a protected swing; an internal
+                # claim ends on direction change alone.
+                protection_failed = (
+                    scope is StructureScope.EXTERNAL
+                    and state.structure.protected_swing_intact is False
+                )
+                self._advance_one_structure_generation(
+                    timeframe,
+                    scope,
+                    direction=direction,
+                    protection_failed=protection_failed,
+                    protected_swing_id=(
+                        state.structure.protected_low_id
+                        if direction is Direction.LONG
+                        else state.structure.protected_high_id
+                    ),
+                    asof=asof,
+                    events=events,
+                )
+
+    def _advance_one_structure_generation(
+        self,
+        timeframe: Timeframe,
+        scope: StructureScope,
+        *,
+        direction: Direction | None,
+        protection_failed: bool,
+        protected_swing_id: str | None,
+        asof: pd.Timestamp,
+        events: Sequence[MarketEvent],
+    ) -> None:
+        key = (timeframe, scope)
+        current = self._structure_generations.get(key)
+        if current is not None and current.is_active:
+            # Accepting through the protected swing also clears the external
+            # direction, so both conditions fire on the same bar.  Name the
+            # cause rather than the effect it erased.
+            if protection_failed:
+                self._structure_generations[key] = replace(
+                    current,
+                    terminated_at=asof,
+                    termination_reason="protected_swing_accepted_through",
+                )
+                current = None
+            elif direction is not current.direction:
+                self._structure_generations[key] = replace(
+                    current,
+                    terminated_at=asof,
+                    termination_reason="direction_reversed",
+                )
+                current = None
+        elif current is not None:
+            current = None
+
+        if direction is None or protection_failed:
+            return
+
+        if current is None:
+            origin = next(
+                (event for event in events if event.timeframe is timeframe),
+                None,
+            )
+            if origin is None:
+                # A structural claim with no originating event on this bar is
+                # not well founded.  The direction is already visible in the
+                # timeframe state; wait for the break that establishes it
+                # rather than minting an identity with no ancestry.
+                return
+            ordinal = self._structure_generation_ordinals.get(key, 0) + 1
+            self._structure_generation_ordinals[key] = ordinal
+            self._structure_generations[key] = StructureGenerationState(
+                generation_id=(
+                    f"{timeframe.value}_{scope.value}_generation_{ordinal:04d}"
+                ),
+                timeframe=timeframe,
+                scope=scope,
+                direction=direction,
+                started_at=asof,
+                confirmed_at=asof,
+                origin_event_id=origin.event_id,
+                protected_swing_id=protected_swing_id,
+            )
+            current = self._structure_generations[key]
+
+        bos = tuple(
+            event.event_id
+            for event in events
+            if event.kind is EventKind.QUALIFIED_BOS
+            and event.event_id not in current.bos_event_ids
+        )
+        mss = tuple(
+            event.event_id
+            for event in events
+            if event.kind is EventKind.MSS_CORE_CONFIRMED
+            and event.event_id not in current.mss_event_ids
+        )
+        if bos or mss or protected_swing_id != current.protected_swing_id:
+            self._structure_generations[key] = replace(
+                current,
+                bos_event_ids=(*current.bos_event_ids, *bos),
+                mss_event_ids=(*current.mss_event_ids, *mss),
+                protected_swing_id=(
+                    protected_swing_id or current.protected_swing_id
+                ),
+            )
+
+    def _snapshot_projection_payloads(self) -> dict[str, Mapping[str, Any]]:
+        """A rollback point for the projection payloads, without a deep copy.
+
+        Each payload is a primitive built fresh by ``to_primitive`` and is only
+        ever compared or replaced wholesale -- never edited in place -- so the
+        mapping is the only thing that has to be copied.
+        """
+
+        return dict(self._last_projection_payloads)
+
+    def _settle_swing_geometry(
+        self,
+        states: Mapping[Timeframe, TimeframeState],
+    ) -> Mapping[Timeframe, TimeframeState]:
+        """Give every confirmed Swing its place in one cross-timeframe tree.
+
+        The tree cannot live inside a single timeframe: every Swing on a
+        timeframe is confirmed from a window of the same length, so none can
+        enclose another.  Only newly confirmed Swings do any work, and a quiet
+        bar does none at all.
+        """
+
+        moved: set[str] = set()
+        for timeframe, state in states.items():
+            # A hierarchy only ever grows, so an unchanged length is an exact
+            # "nothing was confirmed here" test.  Without it every bar walks
+            # the whole population again, which is the cost the incremental
+            # tree exists to avoid.
+            hierarchy = state.swing_hierarchy
+            if len(hierarchy) == self._swing_hierarchy_sizes.get(timeframe):
+                continue
+            self._swing_hierarchy_sizes[timeframe] = len(hierarchy)
+            for swing in hierarchy:
+                moved |= self._swing_geometry.admit(swing)
+        if not moved:
+            return states
+        updated: dict[Timeframe, TimeframeState] = {}
+        for timeframe, state in states.items():
+            hierarchy = tuple(
+                self._swing_geometry.view_of(swing)
+                for swing in state.swing_hierarchy
+            )
+            if hierarchy == state.swing_hierarchy:
+                updated[timeframe] = state
+                continue
+            settled = replace(state, swing_hierarchy=hierarchy)
+            updated[timeframe] = settled
+            # Persist the settled views so the reducer carries them forward and
+            # a bar that confirms nothing re-derives nothing.
+            self._event_reducer.states[timeframe] = settled
+        return updated
+
+    def _active_structure_generation_id(
+        self,
+        timeframe: Timeframe,
+        scope: StructureScope,
+    ) -> str | None:
+        generation = self._structure_generations.get((timeframe, scope))
+        if generation is None or not generation.is_active:
+            return None
+        return generation.generation_id
+
+    def _advance_relation_generations(
+        self,
+        relations: Mapping[str, RelationState],
+        *,
+        asof: pd.Timestamp,
+    ) -> None:
+        """Turn the per-bar relation row into one countable occupancy.
+
+        Must run after ``_advance_structure_generations``: an occupancy is
+        defined by the structural claims it sits between, so a relation whose
+        role text is unchanged but whose parent claim was replaced is a new
+        occupancy, not a continuation of the old one.
+        """
+
+        retired: list[RelationGenerationState] = []
+        for relation_id, relation in relations.items():
+            # A relation compares the parent's external claim with the child's
+            # internal one; those are exactly the two generations it spans.
+            parent_generation = self._active_structure_generation_id(
+                relation.parent_tf, StructureScope.EXTERNAL
+            )
+            child_generation = self._active_structure_generation_id(
+                relation.child_tf, StructureScope.INTERNAL
+            )
+            signature = (parent_generation, child_generation, relation.role.value)
+            current = self._relation_generations.get(relation_id)
+            if current is not None:
+                if current.signature == signature:
+                    self._relation_generations[relation_id] = replace(
+                        current,
+                        updated_at=asof,
+                        observation_count=current.observation_count + 1,
+                    )
+                    continue
+                if current.role is not relation.role:
+                    reason: str = "role_changed"
+                    successor: RelationRole | None = relation.role
+                elif current.parent_structure_generation_id != parent_generation:
+                    reason, successor = "parent_structure_terminated", None
+                else:
+                    reason, successor = "child_structure_terminated", None
+                retired.append(
+                    replace(
+                        current,
+                        terminated_at=asof,
+                        termination_reason=reason,
+                        next_role=successor,
+                    )
+                )
+            ordinal = self._relation_generation_ordinals.get(relation_id, 0) + 1
+            self._relation_generation_ordinals[relation_id] = ordinal
+            self._relation_generations[relation_id] = RelationGenerationState(
+                generation_id=f"{relation_id}_generation_{ordinal:04d}",
+                relation_id=relation_id,
+                parent_tf=relation.parent_tf,
+                child_tf=relation.child_tf,
+                role=relation.role,
+                entered_at=asof,
+                updated_at=asof,
+                parent_structure_generation_id=parent_generation,
+                child_structure_generation_id=child_generation,
+            )
+        self._retired_relation_generations = tuple(retired)
+
+    @staticmethod
+    def _delivery_origin_event_id(
+        timeframe: Timeframe,
+        *,
+        ordered_events: Sequence[MarketEvent],
+        source_ids: tuple[str, ...],
+    ) -> str | None:
+        """The most specific same-bar cause available for this entry.
+
+        A structure change on this timeframe is the strongest claim the Eye can
+        make; otherwise the entry cites the last fact it saw for the timeframe
+        on this bar, and nothing at all when there was none.
+        """
+
+        for event in reversed(ordered_events):
+            if (
+                event.timeframe is timeframe
+                and event.kind in _STRUCTURE_CHANGE_KINDS
+            ):
+                return event.event_id
+        return source_ids[-1] if source_ids else None
+
     def _clear_epoch_projections(self) -> None:
         self._session = SessionStateReducer()
         self._last_projection_payloads.clear()
@@ -3777,6 +4929,14 @@ class MarketSnapshotPublisher:
         self._formal_structures.clear()
         self._last_real_m1_price = None
         self._last_real_m1_event_id = None
+        self._delivery_occupancies.clear()
+        self._structure_generations.clear()
+        self._relation_generations.clear()
+        self._retired_relation_generations = ()
+        self._swing_geometry.clear()
+        self._swing_hierarchy_sizes.clear()
+        # Ordinals keep counting across an epoch reset so a generation identity
+        # is never reused for a different structural claim.
         # Do not clear the authoritative event DAG out of band.  A boundary
         # update may first publish terminal facts for the prior epoch; the
         # immutable MARKET_EPOCH_RESET event then resets the reducer in
@@ -4608,7 +5768,11 @@ class MarketSnapshotPublisher:
         displacement: DisplacementObservation | None,
         anomalies: Sequence[str],
         emit_projection_events: bool = True,
-    ) -> tuple[MarketSnapshot, tuple[MarketEvent, ...]]:
+    ) -> tuple[
+        MarketSnapshot,
+        tuple[MarketEvent, ...],
+        tuple[DeliveryPhaseTransition, ...],
+    ]:
         """Publish one suffix with bounded hot-state failure atomicity."""
 
         reducer_state = {
@@ -4626,9 +5790,7 @@ class MarketSnapshotPublisher:
         }
         publisher_state = {
             "_session": copy.deepcopy(self._session),
-            "_last_projection_payloads": copy.deepcopy(
-                self._last_projection_payloads
-            ),
+            "_last_projection_payloads": self._snapshot_projection_payloads(),
             "_last_projection_event_ids": dict(
                 self._last_projection_event_ids
             ),
@@ -4636,6 +5798,19 @@ class MarketSnapshotPublisher:
             "_last_real_m1_price": self._last_real_m1_price,
             "_last_real_m1_event_id": self._last_real_m1_event_id,
             "_boundary_reset_pending": self._boundary_reset_pending,
+            "_delivery_occupancies": dict(self._delivery_occupancies),
+            "_structure_generations": dict(self._structure_generations),
+            "_structure_generation_ordinals": dict(
+                self._structure_generation_ordinals
+            ),
+            "_relation_generations": dict(self._relation_generations),
+            "_swing_geometry": self._swing_geometry.snapshot(),
+            "_swing_hierarchy_sizes": dict(self._swing_hierarchy_sizes),
+            "_relation_generation_ordinals": dict(
+                self._relation_generation_ordinals
+            ),
+            "_retired_relation_generations": self._retired_relation_generations,
+            "_real_m1_bar_ordinal": self._real_m1_bar_ordinal,
         }
         try:
             return self._publish_committed_suffix(
@@ -4654,6 +5829,9 @@ class MarketSnapshotPublisher:
             for name, value in reducer_state.items():
                 setattr(self._event_reducer, name, value)
             for name, value in publisher_state.items():
+                if name == "_swing_geometry":
+                    self._swing_geometry.restore(value)
+                    continue
                 setattr(self, name, value)
             raise
 
@@ -4670,7 +5848,11 @@ class MarketSnapshotPublisher:
         displacement: DisplacementObservation | None,
         anomalies: Sequence[str],
         emit_projection_events: bool,
-    ) -> tuple[MarketSnapshot, tuple[MarketEvent, ...]]:
+    ) -> tuple[
+        MarketSnapshot,
+        tuple[MarketEvent, ...],
+        tuple[DeliveryPhaseTransition, ...],
+    ]:
         if type(emit_projection_events) is not bool:
             raise ValueError("projection-event emission flag must be boolean")
         if not frames or any(
@@ -4737,6 +5919,7 @@ class MarketSnapshotPublisher:
                 if m1_candle.real_completed:
                     self._last_real_m1_price = float(m1_candle.close)
                     self._last_real_m1_event_id = event.event_id
+                    self._real_m1_bar_ordinal += 1
                 elif self._last_real_m1_price is None:
                     raise RuntimeError(
                         "atomic clock-only M1 root requires a prior real "
@@ -4753,6 +5936,7 @@ class MarketSnapshotPublisher:
             if completed_1m.real_completed:
                 self._last_real_m1_price = float(completed_1m.close)
                 self._last_real_m1_event_id = None
+                self._real_m1_bar_ordinal += 1
             elif self._last_real_m1_price is None:
                 raise RuntimeError(
                     "clock-only M1 candle requires a prior real M1 price "
@@ -4830,6 +6014,7 @@ class MarketSnapshotPublisher:
                     )
             states = projected_states
             authority = MarketSnapshotAuthority.FRAME_PROJECTION
+        states = self._settle_swing_geometry(states)
         relations = self._relation_resolver.resolve(
             states,
             price=effective_price,
@@ -4854,6 +6039,14 @@ class MarketSnapshotPublisher:
             )
             for timeframe in states
         }
+        delivery_transitions = self._advance_delivery_phases(
+            states,
+            asof=asof,
+            price=effective_price,
+            ordered_events=ordered_events,
+            base_ids_by_timeframe=base_ids_by_timeframe,
+        )
+        self._advance_relation_generations(relations, asof=asof)
         projection_events: list[MarketEvent] = []
         if emit_projection_events:
             timeframe_event_ids: dict[Timeframe, str] = {}
@@ -4930,6 +6123,17 @@ class MarketSnapshotPublisher:
             semantic_registry_identity=self.semantic_registry_identity,
             timeframe_states=states,
             relations=relations,
+            structure_generations={
+                generation.generation_id: generation
+                for generation in self._structure_generations.values()
+            },
+            relation_generations={
+                generation.generation_id: generation
+                for generation in (
+                    *self._retired_relation_generations,
+                    *self._relation_generations.values(),
+                )
+            },
             session=session,
             events_this_update=tuple((*ordered_events, *projection_events)),
             labels=labels,
@@ -4939,7 +6143,7 @@ class MarketSnapshotPublisher:
         )
         if self.atomic_authority and has_epoch_reset:
             self._boundary_reset_pending = False
-        return snapshot, tuple(projection_events)
+        return snapshot, tuple(projection_events), delivery_transitions
 
 
 def replay_atomic_market_snapshot(
@@ -5122,6 +6326,10 @@ __all__ = [
     "BalanceRangeState",
     "DOLCandidateView",
     "DeliveryPhase",
+    "DeliveryPhaseOccupancy",
+    "StructureGenerationState",
+    "StructureScope",
+    "DeliveryPhaseTransition",
     "HierarchicalReplayState",
     "LiquidityClusterState",
     "LiquidityClusterSupersession",
@@ -5131,6 +6339,7 @@ __all__ = [
     "MarketSnapshotPublisher",
     "MARKET_SNAPSHOT_SCHEMA_VERSION",
     "PriceZoneView",
+    "RelationGenerationState",
     "RelationRole",
     "RelationResolver",
     "RelationState",

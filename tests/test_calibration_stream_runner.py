@@ -66,7 +66,10 @@ from smc_trader.model import (
     Timeframe,
     to_primitive,
 )
-from smc_trader.observation import EventMemory, ExecutionRealityInput
+from smc_trader.execution import ExecutionRealityInput
+from smc_trader.observation import (
+    EventMemory,
+)
 from smc_trader.scene_graph import (
     TemporalMarketSceneGraph,
     _is_terminal,

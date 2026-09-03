@@ -14,7 +14,7 @@ from smc_trader.io import (
     load_ohlcv,
 )
 from smc_trader.model import AccountState, Direction, Timeframe
-from smc_trader.observation import ExecutionRealityInput
+from smc_trader.execution import ExecutionRealityInput
 
 from .helpers import session_bars
 
@@ -341,3 +341,74 @@ def test_parquet_window_is_pushed_into_source_read(
         ("ts", ">=", timestamps[1]),
         ("ts", "<", timestamps[3]),
     ]
+
+
+def test_engine_surfaces_missing_execution_deadline_to_the_risk_layer() -> None:
+    """Execution scoring is Engine-owned, and its anomalies still reach risk."""
+
+    engine = ContinuousSMCEngine.from_config(
+        "configs/model.json",
+        runtime_mode="development",
+    )
+
+    snapshot = engine.on_bar(session_bars(1)[0])
+
+    assert "deadline_missing" in snapshot.observation.anomalies
+    assert snapshot.observation.execution.source == "assumed_default"
+
+
+def test_invalid_execution_reality_fails_before_the_eye_is_entered() -> None:
+    """A bad reality input is rejected while the Eye is still untouched."""
+
+    engine = ContinuousSMCEngine.from_config(
+        "configs/model.json",
+        runtime_mode="development",
+    )
+
+    with pytest.raises(ValueError, match="spread cannot be negative"):
+        engine.on_bar(
+            session_bars(1)[0],
+            execution=ExecutionRealityInput(spread_points=-0.25),
+        )
+
+    observer = engine.observer
+    assert observer._prior is None
+    assert observer.memory.last_minute_end is None
+    assert observer.memory.clock_coverage_start is None
+
+
+def test_engine_labels_an_unobserved_execution_as_an_assumed_model() -> None:
+    """With no broker/feed input there is nothing observed, only assumed."""
+
+    engine = ContinuousSMCEngine.from_config(
+        "configs/model.json",
+        runtime_mode="development",
+    )
+
+    snapshot = engine.on_bar(session_bars(1)[0])
+    execution = snapshot.observation.execution
+
+    assert execution.source == "assumed_default"
+    assert "execution_assumed_default_model" in execution.anomalies
+
+
+def test_engine_labels_a_supplied_execution_as_observed() -> None:
+    """A real input keeps the caller's own provenance label."""
+
+    engine = ContinuousSMCEngine.from_config(
+        "configs/model.json",
+        runtime_mode="development",
+    )
+
+    snapshot = engine.on_bar(
+        session_bars(1)[0],
+        execution=ExecutionRealityInput(
+            spread_points=0.25,
+            source="top_of_book",
+            size_available=10.0,
+        ),
+    )
+    execution = snapshot.observation.execution
+
+    assert execution.source == "top_of_book"
+    assert "execution_assumed_default_model" not in execution.anomalies

@@ -30,6 +30,7 @@ from .model import (
     OrderBlockAttemptOutcome,
     OrderBlockFunnelSnapshot,
     OrderBlockLifecycle,
+    BaseOriginCoreState,
     OrderBlockState,
     Timeframe,
     aware_timestamp,
@@ -126,6 +127,9 @@ class ZoneUpdate:
     fvg_transitions: tuple[FairValueGapState, ...] = ()
     order_block_transitions: tuple[OrderBlockState, ...] = ()
     order_block_funnel: tuple[OrderBlockFunnelSnapshot, ...] = ()
+    # Cores locked by an impulse on this bar, published before -- and whether
+    # or not -- anything qualifies them.
+    base_origin_cores: tuple[BaseOriginCoreState, ...] = ()
     boundary_reason: str | None = None
 
     def __post_init__(self) -> None:
@@ -135,6 +139,7 @@ class ZoneUpdate:
             "fvg_transitions",
             "order_block_transitions",
             "order_block_funnel",
+            "base_origin_cores",
         ):
             object.__setattr__(self, name, tuple(getattr(self, name)))
         if (
@@ -255,6 +260,7 @@ class CausalZoneTracker:
             "_episode_membership",
             "_active_transition_ids",
             "_ob_candidates",
+            "_base_origin_cores",
             "_fair_value_gaps",
             "_fvg_order",
             "_order_blocks",
@@ -293,6 +299,7 @@ class CausalZoneTracker:
             str,
             _FrozenOrderBlockCandidate | None,
         ] = {}
+        self._base_origin_cores: dict[str, BaseOriginCoreState] = {}
         self._fair_value_gaps: dict[str, FairValueGapState] = {}
         self._fvg_order: deque[str] = deque()
         self._order_blocks: dict[str, OrderBlockState] = {}
@@ -399,6 +406,7 @@ class CausalZoneTracker:
             self._active_transition_ids
         )
         candidate._ob_candidates = dict(self._ob_candidates)
+        candidate._base_origin_cores = dict(self._base_origin_cores)
         candidate._fair_value_gaps = dict(self._fair_value_gaps)
         candidate._fvg_order = deque(self._fvg_order)
         candidate._order_blocks = dict(self._order_blocks)
@@ -450,6 +458,7 @@ class CausalZoneTracker:
         fvg_transitions: Iterable[FairValueGapState] = (),
         order_block_transitions: Iterable[OrderBlockState] = (),
         order_block_funnel: Iterable[OrderBlockFunnelSnapshot] = (),
+        base_origin_cores: Iterable[BaseOriginCoreState] = (),
         *,
         boundary_reason: str | None = None,
     ) -> ZoneUpdate:
@@ -460,6 +469,7 @@ class CausalZoneTracker:
             fvg_transitions=tuple(fvg_transitions),
             order_block_transitions=tuple(order_block_transitions),
             order_block_funnel=tuple(order_block_funnel),
+            base_origin_cores=tuple(base_origin_cores),
             boundary_reason=boundary_reason,
         )
 
@@ -575,6 +585,7 @@ class CausalZoneTracker:
         self._episode_membership.clear()
         self._active_transition_ids.clear()
         self._ob_candidates.clear()
+        self._base_origin_cores.clear()
         if clear_identity:
             self._identity = None
 
@@ -1167,7 +1178,80 @@ class CausalZoneTracker:
             ),
         )
         self._ob_candidates[state.entity_id] = candidate
+        # The geometry is complete the moment the impulse locks it.  Publish
+        # it now, with no knowledge of whether a break will ever qualify it --
+        # waiting for the break would make every core the Eye ever saw one
+        # that already worked.
+        self._base_origin_cores[
+            self._base_origin_core_id(state, cluster_ids, candle)
+        ] = self._base_origin_core(
+            state,
+            candidate,
+            candle=candle,
+            observed_at=candle.end,
+        )
         return candidate
+
+    def _base_origin_core_id(
+        self,
+        state,
+        cluster_ids: tuple[str, ...],
+        candle: Candle,
+    ) -> str:
+        """Identity of the frozen candles, never of the break that used them."""
+
+        return _identity(
+            "base-origin-core-v1",
+            self.protocol.protocol_hash,
+            candle.symbol,
+            candle.instrument_id,
+            Timeframe.M5,
+            state.direction,
+            *cluster_ids,
+            state.entity_id,
+        )
+
+    def _base_origin_core(
+        self,
+        state,
+        candidate: "_FrozenOrderBlockCandidate",
+        *,
+        candle: Candle,
+        observed_at: pd.Timestamp,
+    ) -> BaseOriginCoreState:
+        anchor = candidate.candle
+        lower_bound = min(float(item.low) for item in candidate.cluster)
+        upper_bound = max(float(item.high) for item in candidate.cluster)
+        return BaseOriginCoreState(
+            base_origin_core_id=self._base_origin_core_id(
+                state, candidate.cluster_ids, candle
+            ),
+            protocol_hash=self.protocol.protocol_hash,
+            symbol=candle.symbol,
+            instrument_id=int(candle.instrument_id),
+            timeframe=Timeframe.M5,
+            direction=state.direction,
+            source_displacement_id=state.entity_id,
+            source_displacement_transition_id=(
+                candidate.source_displacement_transition_identity
+            ),
+            anchor_candle_id=candidate.candle_id,
+            anchor_candle_ids=candidate.cluster_ids,
+            anchor_start=candidate.cluster[0].start,
+            anchor_end=anchor.end,
+            lower_bound=lower_bound,
+            upper_bound=upper_bound,
+            body_lower_bound=min(
+                min(float(item.open), float(item.close))
+                for item in candidate.cluster
+            ),
+            body_upper_bound=max(
+                max(float(item.open), float(item.close))
+                for item in candidate.cluster
+            ),
+            midpoint=(lower_bound + upper_bound) / 2.0,
+            observed_at=observed_at,
+        )
 
     def _remember_membership(
         self,
@@ -1477,6 +1561,11 @@ class CausalZoneTracker:
             source_bos_resolved_at=bos.resolved_at,
             source_bos_break_bar_id=bos.break_bar_id,
             source_bos_mss_qualified=bos.mss_qualified,
+            base_origin_core_id=self._base_origin_core_id(
+                source,
+                candidate.cluster_ids,
+                candle,
+            ),
             anchor_candle_id=candidate.candle_id,
             anchor_candle_ids=candidate.cluster_ids,
             anchor_start=anchor.start,
@@ -1530,6 +1619,7 @@ class CausalZoneTracker:
         candle_id = self._candle_id(candle)
         fvg_transitions = self._advance_fvgs(candle)
         order_block_transitions = self._advance_order_blocks(candle)
+        known_cores = set(self._base_origin_cores)
         self._freeze_new_displacement_sources(
             candle,
             candle_id,
@@ -1562,6 +1652,11 @@ class CausalZoneTracker:
             fvg_transitions,
             order_block_transitions,
             (order_block_funnel,),
+            tuple(
+                core
+                for core_id, core in self._base_origin_cores.items()
+                if core_id not in known_cores
+            ),
         )
         self._mark_terminals_exposed()
         return output

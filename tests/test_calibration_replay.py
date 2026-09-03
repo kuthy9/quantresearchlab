@@ -15,7 +15,7 @@ from smc_trader.calibration_replay import (
 from smc_trader.engine import ContinuousSMCEngine
 from smc_trader.io import iter_completed_bars
 from smc_trader.model import Bar, EngineSnapshot, to_primitive
-from smc_trader.observation import ExecutionRealityInput
+from smc_trader.execution import ExecutionRealityInput
 from smc_trader.simulation import SequentialPortfolio, SequentialReplay
 from smc_trader.risk import StructuralRiskEngine
 

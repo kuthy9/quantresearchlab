@@ -48,7 +48,7 @@ def test_foundation_registry_rejects_material_drift(
     value: object,
 ) -> None:
     payload = json.loads(
-        Path("semantics/foundation_v2_0.yaml").read_text(encoding="utf-8")
+        Path("semantics/foundation_v2_1.yaml").read_text(encoding="utf-8")
     )
     payload[path[0]][path[1]] = value
     target = tmp_path / "foundation.json"
@@ -67,7 +67,7 @@ def test_foundation_registry_rejects_unenumerated_nested_drift(
     tmp_path: Path,
 ) -> None:
     payload = json.loads(
-        Path("semantics/foundation_v2_0.yaml").read_text(encoding="utf-8")
+        Path("semantics/foundation_v2_1.yaml").read_text(encoding="utf-8")
     )
     payload["first_reinteraction"]["future_selected_override"] = True
     target = tmp_path / "foundation.json"

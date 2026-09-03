@@ -34,7 +34,7 @@ from smc_trader.artifact_stream import (  # noqa: E402
 from smc_trader.calibration_replay import ReplayCheckpointStore  # noqa: E402
 from smc_trader.engine import ContinuousSMCEngine  # noqa: E402
 from smc_trader.model import AccountState, Bar, to_primitive  # noqa: E402
-from smc_trader.observation import ExecutionRealityInput  # noqa: E402
+from smc_trader.execution import ExecutionRealityInput
 from smc_trader.shadow_live import (  # noqa: E402
     SHADOW_LIVE_AUTHORITY,
     NullExecutionGateway,

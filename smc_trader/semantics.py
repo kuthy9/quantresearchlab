@@ -425,7 +425,7 @@ class SemanticRegistry:
     @classmethod
     def from_file(
         cls,
-        source: str | Path = "semantics/registry_v1_2.yaml",
+        source: str | Path = "semantics/registry_v1_3.yaml",
         *,
         required_version: str = SMC_SEMANTIC_VERSION,
         expected_definition_identity: (

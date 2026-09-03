@@ -25,3 +25,7 @@ experiments/results/*.jsonl
 !experiments/results/smc_semantics_v1_2_2024_06_phase6_mbo_week2_extension_v3.episodes.jsonl
 !experiments/results/smc_semantics_v1_2_2024_06_phase6_mbo_week2_extension_v3.matched_pairs.jsonl
 !experiments/results/smc_semantics_v1_2_2024_06_phase6_mbo_week2_extension_v3.unmatched.jsonl
+
+# coverage artefacts
+.coverage
+.coverage.*

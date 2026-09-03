@@ -22,7 +22,7 @@ from smc_trader.calibration import (
 )
 from smc_trader.brain_calibration import BrainCalibrationRecorder
 from smc_trader.decision import UtilityDecisionLayer
-from smc_trader.group5 import CausalGroup5Reducer, Group5Protocol
+from .legacy_group5 import CausalGroup5Reducer, Group5Protocol
 from smc_trader.model import (
     Action,
     ActionUtility,

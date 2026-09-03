@@ -1,3 +1,8 @@
+> **Partly superseded.** The Phase-7 empirical pipeline audited here
+> (`run_phase7_empirical_pipeline.py`, `probability_cohorts/fit/admission.py`,
+> `signal_outcome_fit.py`, `configs/phase7_*.json` and its preregistration)
+> has since been removed; references to those files are historical.
+
 # Trading Eye / Brain Consolidation Audit — 2026-08-26
 
 This is a repository audit of the Eye/Brain consolidation and
@@ -617,6 +622,93 @@ Replay parity after the convergence is byte-identical to the pre-convergence
 run on the 1,300-bar prefix, and the full `2022-02` month still replays all
 27,360 bars.
 
+### The Eye stops deriving execution reality
+
+`observation.py` was the last Eye module importing a downstream layer. It took
+an `ExecutionRealityInput`, *scored* it through `observe_execution_reality`, and
+published the result — which is exactly what `execution.py`'s own module
+docstring forbids: "The Eye transports the result; it never derives it."
+
+On 2026-08-29 the derivation moved to its caller:
+
+* `CausalObserver.observe(update, execution: ExecutionObservation | None)` now
+  transports an already-scored value and keeps only its own invariant — an
+  eye-authority observer must not be handed one. When none is supplied it
+  carries the inert `execution_not_evaluated()` value.
+* `ContinuousSMCEngine._score_execution` does the scoring, immediately before
+  the Eye is entered, so an invalid input still fails before any observer
+  mutation — now more strongly, because the observer is never entered at all.
+* `execution_not_evaluated()` moved to `model.py` beside the
+  `ExecutionObservation` it constructs; `execution.py` re-exports it, so that
+  module's public surface is unchanged.
+* Thirteen modules that imported `ExecutionRealityInput` through the Eye's
+  re-export now import it from `execution.py`, its real home.
+
+Eye-authority replay never runs through the Engine — those callers drive
+`CausalObserver` directly — so `_score_execution` always scores, and no engine
+needs to know about that mode.
+
+`tests/test_eye_module_boundary.py` now asserts the property permanently: none
+of the eighteen Eye modules may import `decision`, `engine`, `execution`,
+`execution_fsm`, `playbooks`, `risk`, `scene_graph` or `simulation`.
+
+Two observer tests that exercised the derivation moved to the Engine, where the
+behaviour now lives, rather than being deleted.
+
+**Evidence.** The 1,300-bar Eye replay is byte-identical, and the Engine still
+derives exactly what it derived before — `expected_round_trip_cost_points`
+0.975, `source` `missing`, `minutes_to_deadline` 1440.
+
+### Why a full replay takes hours
+
+Measured, not estimated. Per-bar Eye latency grows linearly with accumulated
+history, which makes a whole-month replay quadratic:
+
+| bars | event store | mean ms | p50 | p95 | max |
+|---|---|---|---|---|---|
+| 0–999 | 1 | 44.4 | 35.7 | 92.5 | 141.8 |
+| 2,000–2,999 | 24,667 | 90.3 | 94.6 | 175.5 | 257.0 |
+| 5,000–5,999 | 63,783 | 149.8 | 136.1 | 322.0 | 510.9 |
+
+The reader is negligible: 0.4% of the time against the observer's 99.6%.
+
+`cProfile` at a 40k-event store attributes it to four places:
+
+| Share | Where | Why |
+|---|---|---|
+| 30% | `build_structural_legs` | rebuilds every leg on every bar |
+| 14% | `_require_contiguous_native_candles` | 21,930 calls per 400 bars |
+| — | `registered_native_bar_bounds`, `next_registered_native_completion` | 128k and 52k calls, uncached pure functions over a frozen calendar |
+| 25% | `dataclasses.replace` (799k calls), `deepcopy` (5.4M) | the cost of immutability |
+
+Instrumenting `build_structural_legs` over 4,000 bars shows the shape plainly:
+
+```
+calls                    2,641
+confirmed swings scanned   283,065   (107.2 per call)
+legs actually kept         218,677   ( 82.8 per call)
+candles scanned          2,198,416   (832.4 per call)
+```
+
+Every call rescans ~832 candles and rebuilds ~83 legs, though at most a couple
+change per bar. The `output[-128:]` cap discards only 22.7%, so the cap is not
+the waste — the **full recomputation** is. Every other detector in the Eye is
+an incremental `CausalXTracker`; this one alone is not.
+
+Two candidate fixes, measured rather than assumed:
+
+* Memoising the two frozen-calendar functions: **12.4%** faster (115.9 → 101.5
+  ms/bar) with a byte-identical event-store fingerprint, confirming purity.
+* Making leg construction incremental: addresses the 30%, and is the only fix
+  that changes the growth curve rather than its constant.
+
+**Does this threaten live trading?** Not at M1 cadence: one bar per 60s against
+150 ms of work is 0.25% duty cycle. The real exposures are that
+`EventStore._events` is an unbounded list (only `EventMemory` is capped, at
+512), that restart warm-up replays history quadratically, and that tail latency
+is already 511 ms at 64k events. Sub-minute cadence or multi-symbol operation
+would make it binding.
+
 ## 4. Deliberately not done, and why
 
 | Candidate | Reason |
@@ -670,7 +762,11 @@ run on the 1,300-bar prefix, and the full `2022-02` month still replays all
    distinction — while the confirmed and failed outcomes travel as separate
    `structure_break` and `structure_break_failed` kinds. Either `bos_state`
    should carry its terminal transitions or it is redundant transport.
-11. **`TradeIntent → RiskApproval → FSM` vertical migration.** Explicitly out of
+11. **Make structural-leg construction incremental.** It is the last detector
+   in the Eye that fully recomputes instead of reducing, and it is 30% of
+   replay time. Section 4 carries the measurement. Behaviour must stay
+   byte-identical, so it needs parity evidence of its own.
+12. **`TradeIntent → RiskApproval → FSM` vertical migration.** Explicitly out of
    scope here and must be separately registered and validated.
 
 ## 6. Verification performed
@@ -701,6 +797,9 @@ Commands were run with
 | Per-bar Eye latency (measured) | 44 ms at an empty store, 150 ms at 64k events; grows linearly with history |
 | Replay cost split | reader 0.4%, observer 99.6% |
 | Mutation check on this round's new tests | 9 of 11 catch a distinct defect; 2 were strictly subsumed and removed |
+| Eye reverse dependencies on downstream layers | **0** of 18 modules, asserted by `tests/test_eye_module_boundary.py` |
+| Eye replay parity after the execution seam moved | 1,300-bar fingerprint byte-identical; Engine still derives 0.975 |
+| Calendar memoisation trial | 12.4% faster, identical fingerprint (not applied) |
 | `2022-02` Eye replay, 1,300 bars, after the structural-leg contract fix | identical fingerprint `63570ff885b0661847a85e3e871a84f6f0a2edfa231f5d332bfdd7617e9a2536` |
 | New session-gap regression test against the restored arithmetic clause | fails with the original replay error; passes with the fix |
 | **Whole suite after the structural-leg contract fix (`-m ""`)** | **2,610 passed, 1 skipped, 0 failed** |

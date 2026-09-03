@@ -360,6 +360,7 @@ def _hierarchy_events() -> tuple[MarketEvent, ...]:
         direction=Direction.LONG,
         source_event_ids=(first.event_id, second.event_id),
         evidence={
+            "path_class": "internal",
             "leg_id": "leg-a-b",
             "start_swing_id": "swing-a",
             "end_swing_id": "swing-b",
@@ -961,7 +962,7 @@ def test_structural_leg_rank_does_not_backfill_future_authority() -> None:
     )
 
     assert baseline == future_authority
-    assert baseline[0].rank is SwingRank.INTERNAL
+    assert baseline[0].path_class is SwingRank.INTERNAL
 
 
 def test_candidate_irl_erl_requires_an_active_same_timeframe_range() -> None:
@@ -992,8 +993,10 @@ def test_candidate_irl_erl_requires_an_active_same_timeframe_range() -> None:
         zone=(90.0, 110.0),
         origin=EventOrigin.LEGACY_TRANSPORT,
     )
+    # v1.3 activates the range through the balance-maturity fact; the
+    # location lifecycle no longer carries an activation of its own.
     activated = _event(
-        EventKind.DEALING_RANGE_ACTIVATED,
+        EventKind.BALANCE_RANGE_MATURED,
         5,
         event_id="range-active",
         price=100.0,
@@ -1022,10 +1025,14 @@ def test_candidate_irl_erl_requires_an_active_same_timeframe_range() -> None:
         semantic_registry_identity="v1.2-eye-test",
     )
     assert forming is not None
-    assert all(
-        item.range_role is LiquidityRangeRole.UNRESOLVED
-        for item in forming.liquidity.candidates
-    )
+    # v1.3: the structural interval locates price from creation.  Waiting for
+    # the balance claim made a two-sided-test statistic a precondition for
+    # arithmetic the interval could already do.
+    forming_by_id = {
+        item.candidate_id: item for item in forming.liquidity.candidates
+    }
+    assert forming_by_id["inside"].range_role is LiquidityRangeRole.IRL
+    assert forming_by_id["inside"].normalized_location_in_range == 0.5
     active = reduce_timeframe_state(
         forming,
         activated,
@@ -1069,8 +1076,8 @@ def test_v1_1_artifacts_remain_byte_stable_and_explicitly_loadable() -> None:
         V1_1_PARAMETERS_SHA256
     )
     current = SemanticRegistry.from_file()
-    assert current.semantic_version == SMC_SEMANTIC_VERSION == "smc_semantics_v1.2"
-    assert ObserverConfig().semantic_registry == "semantics/registry_v1_2.yaml"
+    assert current.semantic_version == SMC_SEMANTIC_VERSION == "smc_semantics_v1.3"
+    assert ObserverConfig().semantic_registry == "semantics/registry_v1_3.yaml"
 
 
 def test_reserved_and_compatibility_events_fail_closed_at_atomic_emitter() -> None:

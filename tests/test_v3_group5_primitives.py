@@ -10,7 +10,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from smc_trader.group5 import CausalGroup5Reducer, Group5Protocol
+from .legacy_group5 import CausalGroup5Reducer, Group5Protocol
 from smc_trader.model import (
     BOSLifecycle,
     BOSPostBreakState,

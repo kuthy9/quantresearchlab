@@ -12,7 +12,7 @@ import pandas as pd
 
 from .execution import TopOfBook, TopOfBookExecutionProvider
 from .model import Bar, aware_timestamp
-from .observation import ExecutionRealityInput
+from .execution import ExecutionRealityInput
 
 
 F_LAST = 128

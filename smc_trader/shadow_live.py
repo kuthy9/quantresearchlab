@@ -41,7 +41,7 @@ from .model import (
     SMC_SEMANTIC_VERSION,
     to_primitive,
 )
-from .observation import ExecutionRealityInput
+from .execution import ExecutionRealityInput
 from .semantics import load_semantic_selection
 
 

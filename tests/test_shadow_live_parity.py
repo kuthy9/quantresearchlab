@@ -35,7 +35,7 @@ from smc_trader.model import (
     MarketEvent,
     Timeframe,
 )
-from smc_trader.observation import ExecutionRealityInput
+from smc_trader.execution import ExecutionRealityInput
 from smc_trader.trade_intent import EntryMethod
 from smc_trader.shadow_live import (
     NullExecutionGateway,

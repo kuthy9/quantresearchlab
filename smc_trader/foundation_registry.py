@@ -14,12 +14,12 @@ from types import MappingProxyType
 from typing import Any, Mapping
 
 
-FOUNDATION_VERSION = "smc_semantic_foundation_v2.0"
-PARENT_ATOMIC_VERSION = "smc_semantics_v1.2"
+FOUNDATION_VERSION = "smc_semantic_foundation_v2.1"
+PARENT_ATOMIC_VERSION = "smc_semantics_v1.3"
 FOUNDATION_CANONICAL_IDENTITY = (
-    "0c49da28e103f0515d3eb93ab03e8659e334d2477449f5174df3b5e8b0b84cc6"
+    "69428dbfd2a9b2aa19f0254391fca2da17aedb8d0206829572e69c0cc212a715"
 )
-_DEFAULT_PATH = Path("semantics/foundation_v2_0.yaml")
+_DEFAULT_PATH = Path("semantics/foundation_v2_1.yaml")
 _ROOT_KEYS = frozenset(
     {
         "schema_version",

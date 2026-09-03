@@ -1,5 +1,12 @@
 # Repository File Inventory and Consolidation Audit
 
+> **Superseded in part.** This is a frozen census taken at `4f180d2`. The
+> Phase-7 empirical pipeline it lists (`scripts/run_phase7_empirical_pipeline.py`,
+> `scripts/check_phase7_probability_readiness.py`, the two `configs/phase7_*.json`
+> files, its preregistration manifest, and `smc_trader/probability_cohorts.py`,
+> `probability_fit.py`, `probability_admission.py`, `signal_outcome_fit.py`) has
+> since been removed; those rows describe files that no longer exist.
+
 - Repository: current Git worktree (`.`)
 - Frozen read-only snapshot: `4f180d2`
 - Generated: `2026-08-25T05:12:43.326957+00:00`

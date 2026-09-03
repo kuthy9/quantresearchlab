@@ -1,0 +1,306 @@
+{
+  "schema_version": 1,
+  "foundation_version": "smc_semantic_foundation_v2.1",
+  "parent_atomic_semantic_version": "smc_semantics_v1.3",
+  "status": "canonical_preregistered_not_empirically_validated_not_trading_authority",
+  "purpose": "Versioned lifecycle, geometry, relation, retest, ancestry and factual outcome projection over immutable v1.3 atomic market facts.",
+  "vocabulary_policy": {
+    "canonical_objects": [
+      "confirmed_swing",
+      "swing_geometry_nesting",
+      "swing_role_assignment",
+      "structural_leg",
+      "candidate_liquidity_level",
+      "liquidity_cluster",
+      "liquidity_interaction_generation",
+      "touch",
+      "penetration_or_boundary_attack",
+      "sweep_or_rejection",
+      "acceptance",
+      "raw_boundary_break",
+      "qualified_bos",
+      "mss_core",
+      "protected_swing_assignment",
+      "structure_generation",
+      "structure_transition",
+      "displacement_episode",
+      "fair_value_gap",
+      "base_origin_core_or_qualified_order_block",
+      "structural_range",
+      "balance_range",
+      "delivery_phase_generation",
+      "cross_timeframe_relation_generation"
+    ],
+    "derived_attributes_not_events": [
+      "hh_hl_lh_ll",
+      "premium_discount",
+      "irl_erl",
+      "dol_candidate"
+    ],
+    "experimental_only_by_default": [
+      "breaker_block",
+      "mitigation_block",
+      "ote",
+      "unicorn",
+      "liquidity_void",
+      "bpr"
+    ],
+    "promotion_rule": "written_definition_then_leakage_and_replay_validation_then_construct_study_then_matched_controls_then_incremental_information_then_validation_then_versioned_promotion"
+  },
+  "common_generation_contract": {
+    "required_fields": [
+      "generation_id",
+      "started_at",
+      "known_at",
+      "updated_at",
+      "terminated_at",
+      "termination_reason",
+      "semantic_version"
+    ],
+    "clock_order": "started_at_lte_known_at_lte_updated_at_lte_terminated_at_when_terminal",
+    "terminal_immutable": true,
+    "silent_disappearance_forbidden": true,
+    "reset_requires_terminal_record": true
+  },
+  "structural_leg": {
+    "path_end": "target_swing_pivot_bar",
+    "atr_reference": "strictly_prior_real_completed_native_bars_before_leg_start",
+    "atr_period": 14,
+    "duration_bars": "inclusive_registered_completed_native_bars",
+    "duration_seconds": "wall_clock_seconds_between_source_pivot_starts",
+    "close_efficiency": "abs(end_close_minus_start_close)_div_sum_abs_consecutive_close_deltas",
+    "extreme_path_efficiency": "swing_amplitude_div_sum_abs_consecutive_directional_extreme_deltas",
+    "close_mae": "maximum_adverse_close_excursion_from_start_close",
+    "wick_mae": "maximum_adverse_wick_excursion_from_origin_swing_extreme",
+    "path_admits_densified_no_trade_bars": true,
+    "synthetic_path_minutes": "sum_of_densified_no_trade_minutes_across_admitted_path_bars",
+    "full_path_bar_lineage_required": true
+  },
+  "swing_geometry": {
+    "envelope": "registered_completed_definitional_pivot_through_confirmation_bar_window",
+    "window_admits_densified_no_trade_bars": true,
+    "synthetic_window_minutes": "sum_of_densified_no_trade_minutes_across_admitted_window_bars",
+    "parent_rule": "strictly_larger_time_window_and_time_and_price_containment",
+    "parent_tie_break": [
+      "minimum_enclosing_duration",
+      "minimum_price_span",
+      "parent_swing_id"
+    ],
+    "late_parent_rule": "append_new_assignment_that_supersedes_prior_assignment_without_rewriting_prior_snapshot",
+    "role_depth_independent": true
+  },
+  "liquidity_cluster": {
+    "membership_side_rule": "same_side_only",
+    "coordinate": "candidate_point_price",
+    "merge_tolerance_ticks": 1,
+    "linkage": "complete_link",
+    "minimum_members": 2,
+    "source_identities_preserved": true,
+    "strength_inference_forbidden": true,
+    "membership_change": "terminal_old_cluster_as_superseded_then_start_new_cluster"
+  },
+  "liquidity_level_lifecycle": {
+    "states": [
+      "active",
+      "disarmed",
+      "rearmable",
+      "rearmed",
+      "retired",
+      "archived"
+    ],
+    "acceptance": "permanently_retire_same_source_generation",
+    "sweep": "disarm_then_allow_explicit_rearm",
+    "rearm_minimum_real_bars": 1,
+    "rearm_minimum_departure_ticks": 1,
+    "rearm_requires_explicit_prior_generation_id": true,
+    "same_clock_rearm_forbidden": true,
+    "tradable_zone_projection": "continuous_v1_3_zone_is_projected_inward_to_lower_ceil_and_upper_floor_ticks_without_binary_or_decimal_context_rounding_exact_tick_event_prices_remain_the_anchor_a_nontradable_exact_formed_pool_midpoint_uses_the_near_side_tradable_boundary_without_rewriting_the_source_midpoint",
+    "rearm_policy_by_source_family": {
+      "rearmable_candidate_sources": {
+        "source_kinds": [
+          "confirmed_swing",
+          "structural_swing",
+          "previous_session_high",
+          "previous_session_low",
+          "previous_day_high",
+          "previous_day_low",
+          "previous_week_high",
+          "previous_week_low",
+          "range_boundary",
+          "mature_range_boundary"
+        ],
+        "after_sweep": "same_source_identity_may_rearm_after_strictly_later_real_interaction_bar_closes_at_least_one_tick_beyond_the_frozen_tradable_zone_toward_the_non_target_side",
+        "after_acceptance": "permanent_retirement"
+      },
+      "formed_pool_sources": {
+        "source_kinds": [
+          "formed_liquidity_pool",
+          "formed_pool",
+          "equal_highs",
+          "equal_lows"
+        ],
+        "after_terminal": "never_rearm_same_source_identity_new_confirmed_swing_members_must_create_a_new_pool_source_generation"
+      }
+    },
+    "reference_retirement": "registered_session_day_or_week_rollover",
+    "swing_retirement": "source_swing_retired_or_superseded_structure_generation_terminated_contract_reset_or_acceptance",
+    "range_boundary_retirement": "source_range_replaced_or_terminated_contract_reset_or_acceptance",
+    "range_boundary_retirement_reason": "source_range_terminated",
+    "active_target_exclusion": "retired_or_archived_levels_must_be_absent_from_dol_candidates_density_and_target_map",
+    "reset": "archive_after_explicit_terminal_record"
+  },
+  "liquidity_interaction": {
+    "states": [
+      "armed",
+      "touched",
+      "penetrated",
+      "sweep",
+      "acceptance",
+      "unresolved",
+      "censored",
+      "expired"
+    ],
+    "competing_terminal_outcomes": [
+      "sweep",
+      "acceptance"
+    ],
+    "reset_terminal": "censored",
+    "level_retirement_terminal": "expired",
+    "arbitrary_ttl_forbidden": true
+  },
+  "structure_generation": {
+    "scopes": [
+      "internal",
+      "external"
+    ],
+    "external_termination_reasons": [
+      "protected_break_accepted",
+      "scope_rollover",
+      "contract_rollover",
+      "data_reset",
+      "semantic_reset",
+      "superseded"
+    ],
+    "detector_close_break_is_terminal_authority": false,
+    "mss_confirms_opposite_generation": false
+  },
+  "structure_transition": {
+    "states": [
+      "started",
+      "confirmed",
+      "failed",
+      "censored"
+    ],
+    "start_evidence": "mss_core_against_active_generation",
+    "confirmation_evidence": "exact_protected_acceptance_then_opposite_structure_generation_confirmation",
+    "failure_evidence": "strictly_later_qualified_bos_for_the_confirmed_incumbent_terminates_a_forming_internal_challenger_and_fails_the_transition_raw_boundary_break_is_insufficient",
+    "reset_terminal": "censored"
+  },
+  "relation_generation": {
+    "identity_signature": "parent_structure_generation_id_plus_child_structure_generation_id_plus_relation_role",
+    "same_signature": "update_existing_generation",
+    "changed_signature": "terminate_then_start",
+    "termination_reasons": [
+      "child_realigned",
+      "parent_invalidated",
+      "parent_rollover",
+      "relation_reclassified",
+      "contract_reset",
+      "data_reset",
+      "semantic_reset"
+    ]
+  },
+  "delivery_phase_generation": {
+    "identity_signature": "parent_structure_generation_id_plus_phase",
+    "same_signature": "update_age_and_extrema",
+    "changed_signature": "terminate_then_start",
+    "same_clock_updates": "coalesce_before_transition",
+    "snapshot_classifier_reused": true
+  },
+  "ranges": {
+    "structural_range": "frozen_opposite_structural_swing_geometry_bound_to_structure_generation",
+    "balance_range": "existing_group4_mature_balance_detector_rebound_without_algorithm_rewrite",
+    "may_coexist": true,
+    "premium_discount_authority": "structural_range",
+    "balance_location_is_separate": true
+  },
+  "origin_zone": {
+    "base_origin_core": "frozen_full_range_of_preregistered_opposing_candle_or_cluster_at_displacement_start",
+    "qualified_order_block": "exact_base_core_plus_active_displacement_plus_compatible_qualified_bos_or_mss",
+    "future_outcome_may_select_geometry": false
+  },
+  "first_reinteraction": {
+    "native_timeframe_completed_bar": true,
+    "strictly_later_than_creation": true,
+    "creation_may_precede_departure": true,
+    "retest_requires_strictly_later_observed_departure": true,
+    "native_bar_census": "strictly_contiguous_from_object_known_at_or_last_observed_bar_missing_clock_requires_explicit_censor_and_cannot_emit_first_retest",
+    "boundary_equality_counts": true,
+    "gap_open_inside_counts": true,
+    "emit_once_per_object_generation": true,
+    "future_outcome_fields_forbidden": [
+      "eventual_midpoint_touch",
+      "eventual_full_fill",
+      "eventual_invalidation",
+      "eventual_continuation"
+    ]
+  },
+  "fvg_expiry": {
+    "bar_ttl": null,
+    "continuous_age_fields": [
+      "age_bars",
+      "age_seconds"
+    ],
+    "age_observation_rule": "continuous_age_is_updated_in_native_runtime_state_and_frozen_on_creation_first_retest_or_terminal_records_elapsed_waiting_bars_are_temporal_observations_not_definitional_ancestry",
+    "allowed_expiry_reasons": [
+      "parent_structure_terminated",
+      "structural_range_replaced",
+      "contract_rollover",
+      "semantic_reset"
+    ],
+    "price_close_through_is": "invalidated",
+    "data_gap_is": "censored",
+    "session_rollover_default": "no_expiry"
+  },
+  "multi_bar_ancestry": {
+    "terminal_specific_roles": {
+      "same_bar_sweep": [
+        "penetration",
+        "reentry",
+        "hold",
+        "confirmation"
+      ],
+      "later_sweep": "penetration_then_all_intermediate_outside_holds_then_first_inside_reentry_then_optional_inside_holds_then_confirmation",
+      "reentered_pool_sweep": "penetration_may_close_inside_then_each_strictly_later_outside_to_inside_change_is_recorded_as_reentry_all_other_intermediate_bars_are_holds_and_terminal_confirmation_must_close_inside",
+      "direct_acceptance": "penetration_with_outside_close_then_all_later_outside_holds_then_confirmation",
+      "reentered_pool_acceptance": "penetration_with_inside_close_then_reentry_then_every_strictly_later_preterminal_bar_preserved_as_hold_and_final_registered_contiguous_outside_suffix_then_confirmation"
+    },
+    "variable_length": true,
+    "intermediate_hold_bars_may_repeat_role": true,
+    "all_real_interaction_timeframe_bars_from_penetration_through_confirmation_required": true,
+    "short_window_role_rule": "one_real_sweep_bar_may_repeat_across_penetration_reentry_hold_confirmation_two_bar_sweep_or_acceptance_does_not_invent_a_hold_role",
+    "all_constituent_bars_known_by_terminal": true,
+    "formation_window_ends_at_terminal_known_at": true,
+    "response_window_starts_strictly_after_terminal_known_at": true,
+    "temporal_relation_is_ancestry": false
+  },
+  "structural_outcome": {
+    "fact_terminals": [
+      "target_first",
+      "invalidation_first",
+      "ambiguous_same_bar",
+      "censored"
+    ],
+    "scan_starts_strictly_after_observation_start_known_at": true,
+    "native_completed_bar_census": "strictly_contiguous_from_the_first_expected_native_bar_any_missing_clock_censors_before_later_bars",
+    "same_bar_unknown_order": "ambiguous_same_bar",
+    "execution_conservative_projection_is_separate": true,
+    "deterministic_identity": true
+  },
+  "authority": {
+    "eye_action_authority": false,
+    "brain_probability_authority": false,
+    "trading_authority": false,
+    "empirical_validation_claim": false
+  }
+}

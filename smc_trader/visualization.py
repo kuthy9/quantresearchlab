@@ -654,7 +654,6 @@ def _event_markers(
         EventKind.SWING_FORMED: "#7c3aed",
         EventKind.SWING_STATE: "#7c3aed",
         EventKind.STRUCTURE_STATE: "#1d4ed8",
-        EventKind.BOS_STATE: "#60a5fa",
         EventKind.BOS_POST_BREAK_STATE: "#3b82f6",
         EventKind.SUPPORT_RESISTANCE_STATE: "#0f766e",
         EventKind.LIQUIDITY_POOL_STATE: "#a21caf",

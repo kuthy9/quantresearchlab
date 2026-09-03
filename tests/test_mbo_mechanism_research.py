@@ -911,9 +911,9 @@ def test_raw_and_fvg_descendants_of_synthetic_terminal_are_blocked() -> None:
 @pytest.mark.parametrize(
     ("label", "origin", "kind"),
     (
-        ("legacy_bos", EventOrigin.LEGACY_TRANSPORT, EventKind.BOS_STATE),
+        ("legacy_structure", EventOrigin.LEGACY_TRANSPORT, EventKind.STRUCTURE_STATE),
         ("legacy_fvg", EventOrigin.LEGACY_TRANSPORT, EventKind.FVG_STATE),
-        ("projection", EventOrigin.STATE_PROJECTION, EventKind.BOS_STATE),
+        ("projection", EventOrigin.STATE_PROJECTION, EventKind.STRUCTURE_STATE),
         ("normalized", EventOrigin.NORMALIZED_DATA, EventKind.BAR_COMPLETED),
     ),
 )

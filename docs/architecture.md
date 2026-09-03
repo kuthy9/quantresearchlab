@@ -6,12 +6,12 @@ Document schema: **1**
 
 This document describes the incremental/development data path and later
 subsystem ownership. Live mode currently fails closed.
-The current Eye semantic identity is `smc_semantics_v1.2`; its exact executable
+The current Eye semantic identity is `smc_semantics_v1.3`; its exact executable
 and reserved surface is recorded in the
 [semantic specification](smc_semantic_specification_v1.md). The Phase 2–4
 producer/state surface is executable within that frozen boundary; round-two
 review distinguishes this from completion of every target definition.
-The additive `smc_semantic_foundation_v2.0` projection now completes the
+The additive `smc_semantic_foundation_v2.1` projection now completes the
 registered geometry, generation, lifecycle, relation, transition, first-
 reinteraction, ancestry, and factual-outcome layer over those immutable facts.
 See the
@@ -156,9 +156,12 @@ The Eye imports no downstream module. `scale_registry.py` owns `ScaleSpec`,
 `parse_scale_specs` and `scale_registry_id`, so neither the reader nor the
 observer imports the optional Scene Graph in order to describe its own scales;
 `scene_graph.py` re-exports those names only so historical pickles resolve to
-the same class objects. `execution.py` owns `ExecutionRealityInput`, the
-cost/fillability score and the inert not-evaluated value, so the Eye transports
-an execution observation without deriving one. `ContinuousSMCEngine` owns the
+the same class objects. `execution.py` owns `ExecutionRealityInput` and the
+cost/fillability score, and `model.py` owns the inert not-evaluated value
+beside the `ExecutionObservation` it constructs, so the Eye transports an
+execution observation without deriving one; `ContinuousSMCEngine._score_execution`
+derives it. `tests/test_eye_module_boundary.py` asserts that no Eye module
+imports a downstream layer. `ContinuousSMCEngine` owns the
 `TemporalMarketSceneGraph`, advances it over one completed Eye observation, and
 stamps the resulting `scene_*` delta identities onto that observation; a graph
 failure calls `CausalObserver.mark_terminal_failure` because the reducers have
@@ -166,8 +169,8 @@ already committed the clock. `EventStore` is the Eye's internal history
 authority and is not exported from the package root.
 
 Production construction is explicit and fail closed. One root
-`semantic_selection` chooses the atomic `smc_semantics_v1.2` registry and the
-additive `smc_semantic_foundation_v2.0` registry, including both identities.
+`semantic_selection` chooses the atomic `smc_semantics_v1.3` registry and the
+additive `smc_semantic_foundation_v2.1` registry, including both identities.
 The strict loader requires the Foundation registry's parent version to equal
 the selected atomic version. It does not mint a composite or “full-stack v2”
 identity. Engine construction loads this pair once and derives the internal
@@ -191,7 +194,7 @@ references, bounded by live logical objects.
 Production emits no `FOUNDATION_STATE_CHANGED`; its enum, encoder helper, and
 `market_state.foundation_record_from_projection_event` decoder remain read-only
 compatibility seams for historical journals. Foundation v2 now persists only as
-the hash-bound `smc_semantic_foundation_v2.0` registry identity in
+the hash-bound `smc_semantic_foundation_v2.1` registry identity in
 `semantic_selection`, as `foundation_version`-stamped Structural Leg evidence,
 and as cold definition modules (`semantic_foundation.py`,
 `semantic_lifecycle.py`, `semantic_zones.py`, and the geometry/cluster/range
@@ -224,10 +227,33 @@ available at that clock. v1.2 additionally maintains append-only Swing role
 assignments and same-timeframe IRL/ERL target membership as deterministic state
 projections.
 Round-two v1.2 hardening makes raw-price tick admission and immutable-event
-source/lifecycle authority fail closed. The legacy role-depth Swing projection
-and H1 balance-range detector remain unchanged. Additive foundation v2 now
-projects a separate geometric nesting model and Structural Range over those
-facts; it does not silently change the v1.2 detector meanings.
+source/lifecycle authority fail closed.
+
+v1.3 promotes six of those facts from per-bar rows to lifecycle entities the
+snapshot publishes alongside the states:
+
+- `MarketSnapshot.structure_generations` — one continuous structural claim per
+  timeframe and scope, absorbing every BOS and MSS while its protected swing
+  holds. Delivery phases and relations cite the generation, not the last break.
+- `MarketSnapshot.relation_generations` — one continuous occupancy per
+  cross-timeframe relation, keyed by
+  `(parent_structure_generation_id, child_structure_generation_id, role)` and
+  carrying `observation_count`, so a role held across many bars is one episode.
+- `DOLCandidateView.generation_ordinal` — a swept level is disarmed rather than
+  deleted, and is re-armed as the next generation of the same identity once
+  price has left it behind and come back.
+- `SwingHierarchyView.geometric_parent_id` / `geometric_depth` / `child_ids` —
+  the geometric nesting tree, settled across every timeframe at once from
+  window containment alone, fully independent of `semantic_rank`.
+- `BaseOriginCoreState` — frozen impulse geometry published on the bar that
+  locks it, before and independently of any qualification.
+- The structural interval locates price from creation; the balance claim is a
+  separate, gated fact that can be abandoned without ending the interval.
+
+The legacy role-depth Swing projection and the H1 balance-range detector rule
+itself remain unchanged. Additive foundation v2 remains the cold definition of
+the same nesting model and Structural Range; the hot entities above are the
+v1.3 projections of those definitions, not a second authority.
 
 ## Eyes and Scene Graph
 

@@ -901,3 +901,99 @@ def test_definitional_path_and_atr_admission_follow_the_coverage_rule() -> None:
     assert BarCoverage.REAL.admits_atr_window is True
     assert BarCoverage.DENSIFIED.admits_atr_window is False
     assert BarCoverage.INCOMPLETE.admits_atr_window is False
+
+
+def test_structural_leg_path_class_names_what_the_formula_measures() -> None:
+    """The leg field measures its own path length, not a swing's rank."""
+
+    warmup = tuple(_candle(index) for index in range(14))
+    two_bar = (
+        _candle(14, open_=100.0, high=101.0, low=99.0, close=100.0),
+        _candle(15, open_=100.0, high=104.0, low=99.5, close=103.0),
+    )
+    low = _swing("pc-low", SwingSide.LOW, 99.0, two_bar[0].start, two_bar[1].end)
+    high = _swing(
+        "pc-high",
+        SwingSide.HIGH,
+        104.0,
+        two_bar[-1].start,
+        two_bar[-1].end + pd.Timedelta(5, unit="min"),
+    )
+
+    leg = build_structural_legs(
+        Timeframe.M5,
+        (low, high),
+        (*warmup, *two_bar),
+        tick_size=0.25,
+    )[0]
+
+    assert leg.path_class is SwingRank.MICRO
+    assert not hasattr(leg, "rank")
+
+
+def test_leg_decoder_fails_closed_on_a_missing_path_class() -> None:
+    """A leg payload without path_class is a defect, not an 'internal' leg.
+
+    Every other field in the decoder is a strict lookup; silently defaulting
+    this one would turn an unreadable payload into a plausible-looking leg.
+    """
+
+    from smc_trader.market_state import _leg_from_event
+    from smc_trader.model import EventKind
+    from smc_trader.semantic_event_emitter import _event
+
+    warmup = tuple(_candle(index) for index in range(14))
+    path = (
+        _candle(14, open_=100.0, high=101.0, low=99.0, close=100.0),
+        _candle(15, open_=100.0, high=102.0, low=98.5, close=99.5),
+        _candle(16, open_=99.5, high=103.0, low=99.25, close=102.0),
+        _candle(17, open_=102.0, high=104.0, low=101.0, close=103.0),
+    )
+    low = _swing("dec-low", SwingSide.LOW, 99.0, path[0].start, path[1].end)
+    high = _swing(
+        "dec-high",
+        SwingSide.HIGH,
+        104.0,
+        path[-1].start,
+        path[-1].end + pd.Timedelta(5, unit="min"),
+    )
+    leg = build_structural_legs(
+        Timeframe.M5,
+        (low, high),
+        (*warmup, *path),
+        tick_size=0.25,
+    )[0]
+
+    evidence = {
+        "leg_id": leg.leg_id,
+        "start_swing_id": leg.start_swing_id,
+        "end_swing_id": leg.end_swing_id,
+        "start_event_time": leg.start_event_time.isoformat(),
+        "end_event_time": leg.end_event_time.isoformat(),
+        "start_price": leg.start_price,
+        "end_price": leg.end_price,
+        "start_close": leg.start_close,
+        "end_close": leg.end_close,
+        "amplitude_points": leg.amplitude_points,
+        "amplitude_atr": leg.amplitude_atr,
+        "duration_bars": leg.duration_bars,
+        "duration_minutes": leg.duration_minutes,
+        "efficiency": leg.efficiency,
+        "max_retracement_points": leg.max_retracement_points,
+        "max_retracement_atr": leg.max_retracement_atr,
+    }
+    event = _event(
+        EventKind.STRUCTURAL_LEG_CREATED,
+        leg.known_at,
+        Timeframe.M5,
+        "above",
+        leg.end_price,
+        0.5,
+        (),
+        evidence,
+        direction=Direction.LONG,
+        event_time=leg.end_event_time,
+    )
+
+    with pytest.raises(KeyError, match="path_class"):
+        _leg_from_event(event)

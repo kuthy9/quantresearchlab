@@ -14,7 +14,7 @@ import pandas as pd
 from .engine import ContinuousSMCEngine
 from .io import iter_completed_bars
 from .model import AccountState, Bar
-from .observation import ExecutionRealityInput
+from .execution import ExecutionRealityInput
 from .simulation import ReplayStep, SequentialPortfolio
 
 

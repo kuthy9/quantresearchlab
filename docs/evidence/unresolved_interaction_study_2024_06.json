@@ -1,0 +1,242 @@
+{
+  "book_features": {
+    "acceptance": {
+      "far_size": {
+        "mean": 2.7336,
+        "median": 2.0,
+        "n": 9016,
+        "p25": 2.0,
+        "p75": 3.0,
+        "stdev": 2.4565
+      },
+      "far_top5": {
+        "mean": 23.4474,
+        "median": 21.0,
+        "n": 9016,
+        "p25": 17.0,
+        "p75": 28.0,
+        "stdev": 9.4505
+      },
+      "near_far_ratio": {
+        "mean": 1.3996,
+        "median": 1.0,
+        "n": 9016,
+        "p25": 0.5,
+        "p75": 2.0,
+        "stdev": 1.3753
+      },
+      "near_size": {
+        "mean": 2.7685,
+        "median": 2.0,
+        "n": 9016,
+        "p25": 2.0,
+        "p75": 3.0,
+        "stdev": 2.2036
+      },
+      "near_top5": {
+        "mean": 25.8009,
+        "median": 23.0,
+        "n": 9016,
+        "p25": 18.0,
+        "p75": 30.0,
+        "stdev": 10.8803
+      },
+      "signed_depth_imbalance": {
+        "mean": -0.0432,
+        "median": -0.037,
+        "n": 9016,
+        "p25": -0.1579,
+        "p75": 0.0741,
+        "stdev": 0.181
+      },
+      "spread_ticks": {
+        "mean": 2.3246,
+        "median": 2.0,
+        "n": 9016,
+        "p25": 2.0,
+        "p75": 3.0,
+        "stdev": 1.759
+      },
+      "timeframe_is_m1": {
+        "mean": 0.8749,
+        "median": 1.0,
+        "n": 9016,
+        "p25": 1.0,
+        "p75": 1.0,
+        "stdev": 0.3308
+      },
+      "total_top5": {
+        "mean": 49.2483,
+        "median": 45.0,
+        "n": 9016,
+        "p25": 37.0,
+        "p75": 59.0,
+        "stdev": 17.28
+      }
+    },
+    "sweep": {
+      "far_size": {
+        "mean": 2.674,
+        "median": 2.0,
+        "n": 9479,
+        "p25": 1.0,
+        "p75": 3.0,
+        "stdev": 2.1514
+      },
+      "far_top5": {
+        "mean": 23.5352,
+        "median": 21.0,
+        "n": 9479,
+        "p25": 17.0,
+        "p75": 29.0,
+        "stdev": 9.7608
+      },
+      "near_far_ratio": {
+        "mean": 1.3184,
+        "median": 1.0,
+        "n": 9479,
+        "p25": 0.5,
+        "p75": 1.75,
+        "stdev": 1.1913
+      },
+      "near_size": {
+        "mean": 2.6332,
+        "median": 2.0,
+        "n": 9479,
+        "p25": 1.0,
+        "p75": 3.0,
+        "stdev": 1.9625
+      },
+      "near_top5": {
+        "mean": 23.9653,
+        "median": 22.0,
+        "n": 9479,
+        "p25": 17.0,
+        "p75": 29.0,
+        "stdev": 9.6787
+      },
+      "signed_depth_imbalance": {
+        "mean": -0.0102,
+        "median": 0.0,
+        "n": 9479,
+        "p25": -0.125,
+        "p75": 0.1077,
+        "stdev": 0.1754
+      },
+      "spread_ticks": {
+        "mean": 2.3026,
+        "median": 2.0,
+        "n": 9479,
+        "p25": 2.0,
+        "p75": 3.0,
+        "stdev": 1.0518
+      },
+      "timeframe_is_m1": {
+        "mean": 0.9477,
+        "median": 1.0,
+        "n": 9479,
+        "p25": 1.0,
+        "p75": 1.0,
+        "stdev": 0.2227
+      },
+      "total_top5": {
+        "mean": 47.5005,
+        "median": 43.0,
+        "n": 9479,
+        "p25": 35.0,
+        "p75": 58.0,
+        "stdev": 16.5915
+      }
+    },
+    "unresolved": {
+      "far_size": {
+        "mean": 2.6447,
+        "median": 2.0,
+        "n": 4793,
+        "p25": 1.0,
+        "p75": 3.0,
+        "stdev": 2.3362
+      },
+      "far_top5": {
+        "mean": 22.8832,
+        "median": 20.0,
+        "n": 4793,
+        "p25": 17.0,
+        "p75": 27.0,
+        "stdev": 9.1649
+      },
+      "near_far_ratio": {
+        "mean": 1.4219,
+        "median": 1.0,
+        "n": 4793,
+        "p25": 0.5,
+        "p75": 2.0,
+        "stdev": 1.3938
+      },
+      "near_size": {
+        "mean": 2.7651,
+        "median": 2.0,
+        "n": 4793,
+        "p25": 2.0,
+        "p75": 3.0,
+        "stdev": 2.372
+      },
+      "near_top5": {
+        "mean": 25.5203,
+        "median": 23.0,
+        "n": 4793,
+        "p25": 18.0,
+        "p75": 30.0,
+        "stdev": 10.4545
+      },
+      "signed_depth_imbalance": {
+        "mean": -0.0521,
+        "median": -0.05,
+        "n": 4793,
+        "p25": -0.1628,
+        "p75": 0.0649,
+        "stdev": 0.1788
+      },
+      "spread_ticks": {
+        "mean": 2.3175,
+        "median": 2.0,
+        "n": 4793,
+        "p25": 2.0,
+        "p75": 3.0,
+        "stdev": 1.4508
+      },
+      "timeframe_is_m1": {
+        "mean": 0.9998,
+        "median": 1.0,
+        "n": 4793,
+        "p25": 1.0,
+        "p75": 1.0,
+        "stdev": 0.0144
+      },
+      "total_top5": {
+        "mean": 48.4035,
+        "median": 44.0,
+        "n": 4793,
+        "p25": 37.0,
+        "p75": 58.0,
+        "stdev": 16.6944
+      }
+    }
+  },
+  "penetrations": {
+    "by_outcome": {
+      "acceptance": 9082,
+      "sweep": 9574,
+      "unresolved": 4832
+    },
+    "right_censored_unresolved": 0,
+    "total_classified": 23488,
+    "without_a_book_row": 200
+  },
+  "window": {
+    "bars_replayed": 27720,
+    "end": "2024-07-01",
+    "last_bar_end": "2024-07-01 00:00:00-04:00",
+    "start": "2024-06-01"
+  }
+}

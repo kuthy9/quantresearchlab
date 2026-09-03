@@ -4,7 +4,7 @@ import pandas as pd
 
 from smc_trader.brain_entry_sequence import brain_observation_view
 from smc_trader.decision import UtilityDecisionLayer
-from smc_trader.group5 import CausalGroup5Reducer
+from .legacy_group5 import CausalGroup5Reducer
 from smc_trader.model import (
     Candle,
     DealingRangeLifecycle,

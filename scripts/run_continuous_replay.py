@@ -83,7 +83,7 @@ from smc_trader.mbo import (  # noqa: E402
     MinuteExecutionRealityStore,
     assert_mbo_source_allowed,
 )
-from smc_trader.observation import ExecutionRealityInput  # noqa: E402
+from smc_trader.execution import ExecutionRealityInput
 from smc_trader.playbooks import (  # noqa: E402
     _open_thesis_supports_playbook,
 )

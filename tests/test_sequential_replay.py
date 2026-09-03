@@ -12,7 +12,7 @@ from smc_trader.model import (
 )
 from smc_trader.risk import StructuralRiskEngine
 from smc_trader.simulation import SequentialPortfolio, SequentialReplay
-from smc_trader.observation import ExecutionRealityInput
+from smc_trader.execution import ExecutionRealityInput
 
 from .test_v4_typed_vertical import (
     _dfp_fixture,

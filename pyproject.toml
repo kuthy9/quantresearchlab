@@ -29,6 +29,6 @@ testpaths = ["tests"]
 addopts = "-q -m 'not historical_frozen and not research_runner and not research_orchestration'"
 markers = [
   "historical_frozen: immutable historical release/governance checks that require their archived runtime",
-  "research_runner: bounded Phase 7-9 runner and publication contracts run separately from daily semantic tests",
+  "research_runner: bounded Phase 8-9 runner and publication contracts run separately from daily semantic tests",
   "research_orchestration: bounded semantic or MBO study orchestration tests run separately from daily model tests",
 ]

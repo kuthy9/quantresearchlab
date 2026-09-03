@@ -46,9 +46,11 @@ The Eye imports no downstream module. `scene_graph.py` is owned by
 `ContinuousSMCEngine`, which advances it over one completed Eye observation and
 stamps the resulting `scene_*` delta identities; a graph failure poisons the
 observer through `CausalObserver.mark_terminal_failure` because the reducers
-have already advanced. `execution.py` owns `ExecutionRealityInput`, the
-cost/fillability score and the inert not-evaluated value; the Eye only
-transports the result. `eye_statistics.py`, `visualization.py`, `shadow_*`,
+have already advanced. `execution.py` owns `ExecutionRealityInput` and the
+cost/fillability score; `model.py` owns the inert not-evaluated value beside
+`ExecutionObservation`; `ContinuousSMCEngine._score_execution` derives the
+score and the Eye only transports the result. That boundary is enforced by
+`tests/test_eye_module_boundary.py`. `eye_statistics.py`, `visualization.py`, `shadow_*`,
 `*_research*`, `causal_cases.py` and `market_cases.py` are optional projections
 and research consumers. None of them may become a second market-state
 authority.
@@ -105,7 +107,7 @@ Foundation v2 is no longer a runtime component. `foundation_adapter.py` was
 removed, no runtime module constructs `FoundationProjection`,
 `FoundationProjectionReducer` or `FoundationRecordLedger`, and the Engine
 carries no Foundation version in its checkpoint state. Foundation survives as
-the hash-bound `smc_semantic_foundation_v2.0` registry identity, as
+the hash-bound `smc_semantic_foundation_v2.1` registry identity, as
 `foundation_version`-stamped Structural Leg evidence, and as cold definition
 modules (`semantic_foundation.py`, `semantic_lifecycle.py`, `semantic_zones.py`,
 and the geometry/cluster/range builders in `market_state.py`) whose only
@@ -142,4 +144,4 @@ Do not open sealed holdouts, overwrite hash-bound artifacts, weaken no-clobber
 checks, or imply causal, profitability, trading, or live authority. Old frozen
 receipts remain historical; refreeze a new identity instead of editing them.
 
-Keep the two semantic identities explicit: atomic events use `smc_semantics_v1.2`; the additive `smc_semantic_foundation_v2.0` projection declares v1.2 as its parent. Do not describe this pairing as a unified full-stack v2 protocol.
+Keep the two semantic identities explicit: atomic events use `smc_semantics_v1.3`; the additive `smc_semantic_foundation_v2.1` projection declares v1.3 as its parent. Do not describe this pairing as a unified full-stack v2 protocol.

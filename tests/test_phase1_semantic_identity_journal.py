@@ -109,6 +109,7 @@ def test_definition_identity_binds_registry_parameters_protocols_and_split() -> 
     )
     assert set(identity.primitive_protocol_sha256) == {
         "configs/primitives_displacement.json",
+        "configs/primitives_interaction.json",
         "configs/primitives_range.json",
         "configs/primitives_structure_liquidity.json",
         "configs/primitives_zones.json",

@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+import pandas as pd
 import pytest
 
 from smc_trader.calibration import (
@@ -168,7 +169,7 @@ def test_engine_accepts_current_typed_config_and_rejects_incomplete_current_conf
     assert engine.observer.config.eye_authority_mode is False
     assert engine.observer.config.project_scene_graph is True
     assert engine.observer.semantic_registry.identity == (
-        "83f6f7dda806271c9dadfb78cbeb40ac14c2a0fda71463e65bd07a963e3040c7"
+        "f2f70377f10c0715256882370ad69fb60fb33d80e606472533387c8ffb32dc9f"
     )
     with pytest.raises(TypeError, match="runtime_mode"):
         ContinuousSMCEngine.from_config("configs/model.json")
@@ -329,6 +330,12 @@ def test_engine_runtime_action_policy_is_explicit_deterministic_and_fail_closed(
         normalize_action_disabled_playbooks(("not_a_playbook",))
 
 
+def _stub_bar() -> SimpleNamespace:
+    """A bar stub carrying only the clock the Engine reads off it."""
+
+    return SimpleNamespace(end=pd.Timestamp("2024-06-03 09:30", tz="America/New_York"))
+
+
 def test_engine_snapshot_retains_raw_belief_while_decision_gets_policy_view() -> None:
     lsr = SimpleNamespace(playbook=LSR)
     dfp = SimpleNamespace(playbook=DFP)
@@ -350,6 +357,7 @@ def test_engine_snapshot_retains_raw_belief_while_decision_gets_policy_view() ->
         reader=SimpleNamespace(on_bar=lambda _bar: SimpleNamespace()),
         observer=SimpleNamespace(
             observe=lambda _update, _execution: observation,
+            config=SimpleNamespace(tick_size=0.25, point_value=20.0),
             scene_graph=SimpleNamespace(),
             last_scene_delta=None,
         ),
@@ -366,7 +374,7 @@ def test_engine_snapshot_retains_raw_belief_while_decision_gets_policy_view() ->
         action_disabled_playbooks=(LSR,),
     )
 
-    snapshot = engine.on_bar(SimpleNamespace())
+    snapshot = engine.on_bar(_stub_bar())
 
     assert snapshot.belief is raw_belief
     decision_belief = captured["belief"]
@@ -387,7 +395,7 @@ def test_engine_snapshot_retains_raw_belief_while_decision_gets_policy_view() ->
         "Decision must not run after non-zero TradeIntent rejection"
     )
     with pytest.raises(RuntimeError, match="rejects non-zero TradeIntent"):
-        engine.on_bar(SimpleNamespace())
+        engine.on_bar(_stub_bar())
 
 
 def test_engine_live_mode_has_one_fail_closed_release_gate(

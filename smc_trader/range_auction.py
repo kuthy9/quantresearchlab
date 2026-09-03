@@ -14,6 +14,7 @@ from typing import Iterable, Sequence
 import pandas as pd
 
 from .model import (
+    BALANCE_CLAIM_ABANDONED,
     Candle,
     DealingRangeLifecycle,
     DealingRangeState,
@@ -156,6 +157,7 @@ class RangeAuctionProtocol:
             ),
             protocol_version=payload["protocol_version"],
         )
+
 
 
 @dataclass(frozen=True)
@@ -737,6 +739,15 @@ class CausalRangeAuctionTracker:
         self._sync_range_inventory(terminal)
         return terminal
 
+    def _balance_claim_open(self, state: DealingRangeState) -> bool:
+        """Whether this candidate is still being tested for balance."""
+
+        return (
+            state.lifecycle is DealingRangeLifecycle.FORMING
+            and state.transition_reason != BALANCE_CLAIM_ABANDONED
+            and state.range_id in self._range_work
+        )
+
     def _advance_live_range(
         self,
         candle: Candle,
@@ -748,7 +759,10 @@ class CausalRangeAuctionTracker:
             return None, None
         lower = zones_by_id.get(state.lower_source_zone_id)
         upper = zones_by_id.get(state.upper_source_zone_id)
-        if state.lifecycle is DealingRangeLifecycle.MATURE:
+        if (
+            state.lifecycle is DealingRangeLifecycle.MATURE
+            or not self._balance_claim_open(state)
+        ):
             updated = replace(
                 state,
                 last_updated_at=candle.end,
@@ -864,17 +878,22 @@ class CausalRangeAuctionTracker:
             statistics["candidate_real_h1_bars"]
             >= self.protocol.maximum_forming_real_h1_bars
         ):
-            terminal = replace(
+            # The candidate ran out of room to prove balance.  That verdict
+            # belongs to the balance claim alone: the structural interval is
+            # still an interval and still locates price, so it stays FORMING
+            # and is only ended by price closing outside it.
+            abandoned = replace(
                 state,
                 **update_fields,
-                lifecycle=DealingRangeLifecycle.BROKEN,
-                broken_at=candle.end,
                 state_started_at=candle.end,
-                transition_reason="maturity_deadline_elapsed",
+                transition_reason=BALANCE_CLAIM_ABANDONED,
             )
-            self._ranges[state.range_id] = terminal
+            self._ranges[state.range_id] = abandoned
             self._range_work.pop(state.range_id, None)
-            return terminal, gate_evaluation
+            # Not a transition of the range entity: its lifecycle is still
+            # FORMING and was already recorded at creation.  Only the balance
+            # claim ended, and the funnel diagnostic carries that verdict.
+            return None, gate_evaluation
         updated = replace(
             state,
             **update_fields,

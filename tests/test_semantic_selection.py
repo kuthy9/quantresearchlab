@@ -27,15 +27,15 @@ def _selection() -> dict[str, object]:
 def test_selection_keeps_two_identities_and_parent_binding() -> None:
     selection = load_semantic_selection(_selection(), root=ROOT)
 
-    assert selection.atomic_semantics_version == "smc_semantics_v1.2"
+    assert selection.atomic_semantics_version == "smc_semantics_v1.3"
     assert selection.atomic_definition_identity == (
-        "83f6f7dda806271c9dadfb78cbeb40ac14c2a0fda71463e65bd07a963e3040c7"
+        "f2f70377f10c0715256882370ad69fb60fb33d80e606472533387c8ffb32dc9f"
     )
     assert selection.foundation_projection_version == (
-        "smc_semantic_foundation_v2.0"
+        "smc_semantic_foundation_v2.1"
     )
     assert selection.foundation_registry_identity == (
-        "0c49da28e103f0515d3eb93ab03e8659e334d2477449f5174df3b5e8b0b84cc6"
+        "69428dbfd2a9b2aa19f0254391fca2da17aedb8d0206829572e69c0cc212a715"
     )
     assert selection.parent_atomic_semantics_version == (
         selection.atomic_semantics_version
@@ -124,5 +124,5 @@ def test_engine_injects_the_single_loaded_atomic_registry(
 
     assert len(calls) == 1
     assert engine.observer.semantic_registry.identity == (
-        "83f6f7dda806271c9dadfb78cbeb40ac14c2a0fda71463e65bd07a963e3040c7"
+        "f2f70377f10c0715256882370ad69fb60fb33d80e606472533387c8ffb32dc9f"
     )

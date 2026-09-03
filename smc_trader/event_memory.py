@@ -40,6 +40,11 @@ from .model import (
 
 class EventMemory:
     _GROUP4_CREATION_SEQUENCE_FLOOR = 1_000_000
+    # The delivery-phase lifecycle is derived from the published
+    # snapshot, so it is appended after every other fact and after the
+    # projection transport of the same clock.  Its floor keeps canonical
+    # order equal to that append order.
+    _DELIVERY_PHASE_SEQUENCE_FLOOR = 3_000_000
     _TIMELINE_TRANSITIONS: Mapping[
         str,
         Mapping[str, frozenset[str]],
@@ -71,12 +76,6 @@ class EventMemory:
             StructureLifecycle.FORMATION_FAILED.value: frozenset(),
         },
         "bos": {
-            BOSLifecycle.PENDING.value: frozenset(
-                {
-                    BOSLifecycle.CONFIRMED.value,
-                    BOSLifecycle.FAILED.value,
-                }
-            ),
             BOSLifecycle.CONFIRMED.value: frozenset(),
             BOSLifecycle.FAILED.value: frozenset(),
         },
@@ -191,7 +190,7 @@ class EventMemory:
     _TIMELINE_LIMITS: Mapping[str, int] = {
         "swing": 3,
         "structure": 3,
-        "bos": 2,
+        "bos": 1,
         "zone": 5,
         "pool": 3,
         "fvg": 4,
@@ -203,7 +202,9 @@ class EventMemory:
     _COMPLETE_INITIAL_LIFECYCLES: Mapping[str, frozenset[str]] = {
         "swing": frozenset({SwingLifecycle.FORMING.value}),
         "structure": frozenset({StructureLifecycle.FORMING.value}),
-        "bos": frozenset({BOSLifecycle.PENDING.value}),
+        "bos": frozenset(
+            {BOSLifecycle.CONFIRMED.value, BOSLifecycle.FAILED.value}
+        ),
         "zone": frozenset(
             {SupportResistanceLifecycle.ACTIVE.value}
         ),

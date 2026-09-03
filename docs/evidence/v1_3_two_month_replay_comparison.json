@@ -1,0 +1,219 @@
+{
+  "baselines": [
+    "docs/evidence/eye_event_statistics_2022_02.json",
+    "docs/evidence/eye_event_statistics_2022_03.json"
+  ],
+  "generated_for": "item 12 of the v1.3 semantic work",
+  "model": "configs/model.json",
+  "months": {
+    "2022-02": {
+      "bars_replayed": 27360,
+      "changed": {
+        "balance_range_observed": {
+          "v1_2": 0,
+          "v1_3": 1
+        },
+        "base_origin_core_created": {
+          "v1_2": 0,
+          "v1_3": 43
+        },
+        "bos_state": {
+          "v1_2": 15748,
+          "v1_3": 0
+        },
+        "delivery_phase_entered": {
+          "v1_2": 0,
+          "v1_3": 7953
+        },
+        "delivery_phase_exited": {
+          "v1_2": 0,
+          "v1_3": 7948
+        },
+        "delivery_phase_updated": {
+          "v1_2": 0,
+          "v1_3": 3420
+        },
+        "fvg_first_retest": {
+          "v1_2": 0,
+          "v1_3": 1031
+        },
+        "origin_zone_created": {
+          "v1_2": 43,
+          "v1_3": 0
+        },
+        "qualified_origin_zone_created": {
+          "v1_2": 0,
+          "v1_3": 43
+        }
+      },
+      "event_counts_v1_3": {
+        "acceptance_confirmed": 10238,
+        "balance_range_observed": 1,
+        "bar_completed": 35230,
+        "base_origin_core_created": 43,
+        "bos_post_break_state": 4378,
+        "dealing_range_created": 40,
+        "dealing_range_invalidated": 39,
+        "dealing_range_replaced": 39,
+        "dealing_range_state": 79,
+        "delivery_phase_entered": 7953,
+        "delivery_phase_exited": 7948,
+        "delivery_phase_updated": 3420,
+        "displacement_observed": 2697,
+        "entry_path_state": 3690,
+        "entry_path_step": 6610,
+        "fvg_created": 1044,
+        "fvg_first_retest": 1031,
+        "fvg_fully_filled": 543,
+        "fvg_invalidated": 469,
+        "fvg_midpoint_touched": 322,
+        "fvg_partially_filled": 292,
+        "fvg_state": 2670,
+        "level_penetrated": 25563,
+        "level_touched": 25837,
+        "liquidity_consumed": 7232,
+        "liquidity_level_created": 15000,
+        "liquidity_pool_state": 6131,
+        "liquidity_retired": 84,
+        "liquidity_sweep": 6750,
+        "manipulation_state": 4151,
+        "mss_core_confirmed": 1763,
+        "order_block_state": 119,
+        "origin_zone_invalidated": 5,
+        "origin_zone_mitigated": 35,
+        "protected_swing_assigned": 222,
+        "qualified_bos": 1066,
+        "qualified_origin_zone_created": 43,
+        "raw_boundary_break": 4380,
+        "structural_leg_created": 10081,
+        "structure_break": 4380,
+        "structure_break_failed": 11361,
+        "structure_direction_confirmed": 2272,
+        "structure_state": 9013,
+        "support_resistance_state": 37374,
+        "sweep_confirmed": 10188,
+        "swing_confirmed": 12933,
+        "swing_state": 71690
+      },
+      "last_bar_end": "2022-03-01 00:00:00-05:00",
+      "unchanged_kind_count": 40,
+      "v1_2": {
+        "foundation_version": "smc_semantic_foundation_v2.0",
+        "semantic_version": "smc_semantics_v1.2"
+      },
+      "v1_3": {
+        "atomic_identity": "7f4e790bfcd43e9a7077e738cb33be4e2f6f1a4731c219a947c7807d23b3aa7f",
+        "event_prefix_fingerprint": "7612e56975cb9ea55af10e39ab00324d830efdbd27b5042dce816af80e26333c",
+        "events_total": 356449,
+        "foundation_version": "smc_semantic_foundation_v2.1",
+        "semantic_version": "smc_semantics_v1.3"
+      }
+    },
+    "2022-03": {
+      "bars_replayed": 31740,
+      "changed": {
+        "balance_range_observed": {
+          "v1_2": 0,
+          "v1_3": 1
+        },
+        "base_origin_core_created": {
+          "v1_2": 0,
+          "v1_3": 57
+        },
+        "bos_state": {
+          "v1_2": 17676,
+          "v1_3": 0
+        },
+        "delivery_phase_entered": {
+          "v1_2": 0,
+          "v1_3": 9004
+        },
+        "delivery_phase_exited": {
+          "v1_2": 0,
+          "v1_3": 8994
+        },
+        "delivery_phase_updated": {
+          "v1_2": 0,
+          "v1_3": 3731
+        },
+        "fvg_first_retest": {
+          "v1_2": 0,
+          "v1_3": 1234
+        },
+        "origin_zone_created": {
+          "v1_2": 57,
+          "v1_3": 0
+        },
+        "qualified_origin_zone_created": {
+          "v1_2": 0,
+          "v1_3": 57
+        }
+      },
+      "event_counts_v1_3": {
+        "acceptance_confirmed": 11264,
+        "balance_range_observed": 1,
+        "bar_completed": 40870,
+        "base_origin_core_created": 57,
+        "bos_post_break_state": 5071,
+        "dealing_range_created": 41,
+        "dealing_range_invalidated": 40,
+        "dealing_range_replaced": 39,
+        "dealing_range_state": 81,
+        "delivery_phase_entered": 9004,
+        "delivery_phase_exited": 8994,
+        "delivery_phase_updated": 3731,
+        "displacement_observed": 3067,
+        "entry_path_state": 4123,
+        "entry_path_step": 7385,
+        "fvg_created": 1275,
+        "fvg_first_retest": 1234,
+        "fvg_fully_filled": 658,
+        "fvg_invalidated": 560,
+        "fvg_midpoint_touched": 391,
+        "fvg_partially_filled": 366,
+        "fvg_state": 3250,
+        "level_penetrated": 28540,
+        "level_touched": 28852,
+        "liquidity_consumed": 8042,
+        "liquidity_level_created": 16772,
+        "liquidity_pool_state": 6623,
+        "liquidity_retired": 84,
+        "liquidity_sweep": 7519,
+        "manipulation_state": 4486,
+        "market_epoch_reset": 1,
+        "mss_core_confirmed": 2036,
+        "order_block_state": 154,
+        "origin_zone_invalidated": 4,
+        "origin_zone_mitigated": 51,
+        "protected_swing_assigned": 263,
+        "qualified_bos": 1195,
+        "qualified_origin_zone_created": 57,
+        "raw_boundary_break": 5072,
+        "structural_leg_created": 11309,
+        "structure_break": 5072,
+        "structure_break_failed": 12597,
+        "structure_direction_confirmed": 2589,
+        "structure_state": 10326,
+        "support_resistance_state": 42013,
+        "sweep_confirmed": 11499,
+        "swing_confirmed": 14537,
+        "swing_state": 83461
+      },
+      "last_bar_end": "2022-04-01 00:00:00-04:00",
+      "unchanged_kind_count": 41,
+      "v1_2": {
+        "foundation_version": "smc_semantic_foundation_v2.0",
+        "semantic_version": "smc_semantics_v1.2"
+      },
+      "v1_3": {
+        "atomic_identity": "7f4e790bfcd43e9a7077e738cb33be4e2f6f1a4731c219a947c7807d23b3aa7f",
+        "event_prefix_fingerprint": "f7dcf104a8e48a421735505ef13e88d3b8af77f568ccaf77630809421dea27b7",
+        "events_total": 404656,
+        "foundation_version": "smc_semantic_foundation_v2.1",
+        "semantic_version": "smc_semantics_v1.3"
+      }
+    }
+  },
+  "source": "data/processed/nq_1m_previous_session_front_v2_3_2017_2026.parquet",
+  "study": "v1.3 versus v1.2 two-month Eye replay comparison"
+}

@@ -16,6 +16,7 @@ from smc_trader.range_auction import (
     RangeAuctionUpdate,
 )
 from smc_trader.model import (
+    BALANCE_CLAIM_ABANDONED,
     Bar,
     Candle,
     DealingRangeLifecycle,
@@ -540,7 +541,13 @@ def test_mature_range_owns_a_same_price_sweep_over_a_local_pool() -> None:
     assert pool.pool_id in manipulation.coincident_source_ids
 
 
-def test_forming_deadline_includes_the_terminal_h1_bar() -> None:
+def test_the_forming_deadline_ends_the_balance_claim_not_the_interval() -> None:
+    """v1.3: running out of room to balance costs the balance claim only.
+
+    The structural interval is still an interval and still locates price, so
+    it stays live and is ended only by a close outside it.
+    """
+
     tracker = CausalRangeAuctionTracker(_protocol())
     zones = (_zone("support"), _zone("resistance"))
     _warm_h1(tracker)
@@ -557,12 +564,20 @@ def test_forming_deadline_includes_the_terminal_h1_bar() -> None:
         )
 
     assert output is not None
-    terminal = output.dealing_ranges[-1]
-    assert terminal.lifecycle is DealingRangeLifecycle.BROKEN
-    assert terminal.transition_reason == "maturity_deadline_elapsed"
-    assert terminal.candidate_real_h1_bars == 24
-    assert terminal.age_h1_bars == 23
-    assert terminal.broken_at == _h1(37).end
+    # Abandoning the balance claim is not a lifecycle transition of the range
+    # entity: it is still FORMING, and FORMING was already recorded when the
+    # range was created.  Publishing it again makes the typed entity timeline
+    # record one lifecycle twice, which real data reaches within days.
+    assert output.range_transitions == ()
+    abandoned = output.dealing_ranges[-1]
+    assert abandoned.lifecycle is DealingRangeLifecycle.FORMING
+    assert abandoned.transition_reason == BALANCE_CLAIM_ABANDONED
+    assert abandoned.candidate_real_h1_bars == 24
+    assert abandoned.age_h1_bars == 23
+    assert abandoned.broken_at is None
+    assert abandoned.mature_at is None
+    # The interval still knows where it is.
+    assert abandoned.lower_bound < abandoned.midpoint < abandoned.upper_bound
 
 
 def test_cold_existing_range_pair_waits_for_a_new_source_identity() -> None:

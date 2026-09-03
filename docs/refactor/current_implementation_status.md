@@ -1,9 +1,12 @@
 # Current SMC Refactor Implementation Status
 
 Status date: 2026-08-27
-Runtime semantic identity: `smc_semantics_v1.2`
-Canonical foundation identity: `smc_semantic_foundation_v2.0`
-Canonical foundation registry identity: `0c49da28e103f0515d3eb93ab03e8659e334d2477449f5174df3b5e8b0b84cc6`
+Runtime semantic identity: `smc_semantics_v1.3`
+Canonical foundation identity: `smc_semantic_foundation_v2.1`
+Canonical foundation registry identity: `69428dbfd2a9b2aa19f0254391fca2da17aedb8d0206829572e69c0cc212a715`
+Atomic registry identity: `f2f70377f10c0715256882370ad69fb60fb33d80e606472533387c8ffb32dc9f`
+The frozen `smc_semantics_v1.2` / `smc_semantic_foundation_v2.0` pair remains
+the identity of every historical artifact below; it is not the runtime.
 
 This is the current implementation-versus-plan authority. Its 2026-08-26
 revision corrected stale schema/protocol/identity bindings and the Foundation
@@ -45,8 +48,8 @@ reuses the existing detectors and event store; it is not a parallel Eye. The
 Eye does not select a unique DOL or make a trade decision.
 
 The checked-in model has one strict `semantic_selection` object. It selects the
-atomic v1.2 registry/identity and the additive Foundation v2.0
-registry/identity, then verifies that Foundation declares v1.2 as its parent.
+atomic v1.3 registry/identity and the additive Foundation v2.1
+registry/identity, then verifies that Foundation declares v1.3 as its parent.
 There is no `smc_semantics_v2.0` runtime and no synthetic full-stack version.
 `ContinuousSMCEngine` derives the internal projection gate from the validated
 pair and freezes the existing identities into Engine, Shadow, and checkpoint
@@ -104,7 +107,7 @@ events; `market_state.foundation_record_from_projection_event` remains the only
 strict, legacy-read-only decoder for historical journals.
 
 Foundation v2 therefore survives as three things and nothing else: the
-hash-bound `smc_semantic_foundation_v2.0` registry identity validated by
+hash-bound `smc_semantic_foundation_v2.1` registry identity validated by
 `semantic_selection`; `foundation_version`-stamped Structural Leg evidence
 produced by `market_state.build_structural_legs` on the hot path; and a set of
 cold definition/replay modules (`semantic_foundation.py`,
@@ -130,10 +133,42 @@ The removed `signal_empirical_admission` module had no runtime or script
 consumer; its tests exercised only that module. It was nevertheless the sole,
 never-integrated converter from research fit/receipt objects to production-
 shape artifact payloads, so no equivalent converter is claimed to remain.
-Research-side closed admission receipts remain owned by
-`run_phase7_empirical_pipeline.py`, and production artifact validation/loading
-remains owned by `signal_policy.py`. A future rolling-OOF admission must add one
+The Phase-7 empirical pipeline that owned research-side closed admission
+receipts has since been removed as unreached over-engineering (see below);
+production artifact validation/loading remains owned by `signal_policy.py`. A future rolling-OOF admission must add one
 explicitly governed conversion path rather than silently reviving this module.
+
+The three numbered-group import shims were removed: `smc_trader/group3.py`
+and `smc_trader/group4.py` had no importer anywhere in the repository, and
+`smc_trader/group5.py` was imported only by four test modules. Group 5's
+interpreted-shape adapter moved to `tests/legacy_group5.py`, where its only
+consumers already lived; the two tests that asserted the shims' own pickle and
+alias contracts were removed with them. The v1.3 preregistration's stale
+`smc_trader.group3.CausalGroup3Tracker` / `CausalGroup4Tracker` source pointers
+now name `smc_trader.zone.CausalZoneTracker` and
+`smc_trader.range_auction.CausalRangeAuctionTracker`, which changed the atomic
+definition identity accordingly.
+
+The Phase-7 empirical pipeline was removed as unreached over-engineering:
+`scripts/run_phase7_empirical_pipeline.py`,
+`scripts/check_phase7_probability_readiness.py`,
+`configs/phase7_foundation_v2_empirical.json`,
+`configs/phase7_probability_fit_admission.json`,
+`experiments/manifests/phase7_foundation_v2_empirical_preregistration.yaml`,
+`smc_trader/probability_cohorts.py`, `smc_trader/probability_fit.py`,
+`smc_trader/probability_admission.py`, `smc_trader/signal_outcome_fit.py`, and
+their four tests. Its preregistration was frozen against
+`smc_semantic_foundation_v2.0` with status
+`preregistered_implementation_only_cohorts_not_materialized_models_not_fitted`:
+no cohort was ever materialized and no model was ever fitted, and after the
+v1.3/foundation-v2.1 switch the runner refused the live model config outright.
+No `smc_trader` module imported any of the removed modules, so the Eye, Brain,
+and Execution paths are untouched. The Brain's own Phase-7 surface --
+`path_belief.py`, `playbooks.py`, `signal_policy.py`,
+`configs/path_hypotheses.json`, `configs/dol_probability.json` and the three
+`tests/test_phase7_*.py` files that exercise them -- was kept, because those
+are live modules that only carry the phase name. A future probability layer
+must be preregistered again rather than restored from git.
 
 The removed Phase-8 readiness checker and two old templates were consumed only
 by their old tests, documentation, and one another; the fail-closed v2 runner
@@ -378,7 +413,7 @@ rolling OOF, or sealed OOS.
 | 1. Eye / Brain / Executor definitions | **Complete as ownership definitions** | Eye publishes facts; Brain owns hypotheses/ranking/intent; Executor owns orders and positions. Shadow/research ownership is implemented while action admission remains closed. |
 | 2. Event-sourced hierarchical state | **Implemented with separate role and geometric hierarchy** | Immutable normalized and semantic events reduce into dimensioned `TimeframeState`; Foundation v2 adds an append-only Swing containment tree without changing v1.2 role depth. There is no combinatorial master enum. |
 | 3. Semantic provenance | **Producer implemented; immutable-store authority hardened in round 2** | `event_time`, `known_at`, version, immutable evidence, separated source namespaces, causal ancestry, deterministic ordering, crossing terminal uniqueness, and canonical cross-links are enforced. Frozen artifacts are not rewritten. |
-| 4. Preregistered semantics | **v1.2 atomic and foundation-v2 contracts implemented** | Runtime binds `registry_v1_2.yaml`/`parameters_v1_2.yaml` and the hash-bound additive `foundation_v2_0.yaml`. Reserved v1.2 aliases and `FOUNDATION_STATE_CHANGED` are non-emitted; Foundation records live in their separate cold ledger and compact projection. The legacy event decoder grants no atomic authority. |
+| 4. Preregistered semantics | **v1.3 atomic and foundation-v2.1 contracts implemented** | Runtime binds `registry_v1_3.yaml`/`parameters_v1_3.yaml` and the hash-bound additive `foundation_v2_1.yaml`. 31 canonical emitted kinds: v1.2's 25 plus `FVG_FIRST_RETEST`, the three `DELIVERY_PHASE_*` lifecycle kinds, `BASE_ORIGIN_CORE_CREATED`, `QUALIFIED_ORIGIN_ZONE_CREATED`, `BALANCE_RANGE_OBSERVED` and `BALANCE_RANGE_MATURED`, minus the retired `ORIGIN_ZONE_CREATED` and `DEALING_RANGE_ACTIVATED`. Reserved v1.3 aliases and `FOUNDATION_STATE_CHANGED` are non-emitted; Foundation records live in their separate cold ledger and compact projection. The legacy event decoder grants no atomic authority. |
 | 5. Eye organization | **Complete within the reused codebase** | Existing normalizer/detectors feed the event store, reducers, relation/session state, and snapshot publisher; no parallel Eye stack was created. |
 | 6. Parent/child rules | **Complete for authority isolation and geometric nesting** | Only parent events change parent facts; child opposition remains evidence until the parent's own invalidation. The separate geometric tree uses only time/price containment and never BOS, protected role, or future importance. |
 | 7. Independent relation object | **Complete with generation lifecycle** | `RelationState` remains the deterministic classifier; Foundation v2 binds it to persistent parent/child Structure Generations so unchanged snapshots update one generation rather than create independent samples. |
@@ -512,16 +547,21 @@ the highest causally known assignment; historical Swing events and Legs are
 never rewritten with future authority.
 
 Here the legacy `nesting_depth` field remains the frozen depth of that causal
-structural-role assignment (`micro=0` through `external=3`). Foundation v2
-adds a different `geometric_depth` and append-only parent assignment based only
-on exact time/price containment. Neither depth is evidence that the other is
+structural-role assignment (`micro=0` through `external=3`). v1.3 publishes a
+different `geometric_depth`, `geometric_parent_id` and `child_ids` on the same
+`SwingHierarchyView`, decided only by containment of the definitional window in
+time and in price. The tree is settled over every timeframe at once, because
+two swings on one timeframe are confirmed from windows of equal length and can
+never enclose each other. Neither depth is evidence that the other is
 important, and no empirical threshold is inferred from the geometry.
 
 IRL/ERL is an executable deterministic candidate classification, not a new
-semantic event. Against the same-timeframe active/mature dealing range, strict
-interior candidates are `irl`, boundary or outside candidates are `erl`, and
-membership is `unresolved` when no active range is available. Continuous
-`normalized_location_in_range` is retained where defined.
+semantic event. Against the same-timeframe structural range, strict interior
+candidates are `irl`, boundary or outside candidates are `erl`, and membership
+is `unresolved` when no range is available. Continuous
+`normalized_location_in_range` is retained where defined. In v1.3 the range
+locates price from creation: the balance claim (`BALANCE_RANGE_MATURED`) is a
+separate fact and is no longer a precondition for the location arithmetic.
 
 The following five `EventKind` values remain intentionally outside canonical
 v1.2 emission:
@@ -540,6 +580,24 @@ v1.2 emission:
 The canonical semantic emitter rejects a registry-bound semantic kind unless
 its binding is `canonical_emitted`. Retaining an enum value or reducer import
 path is not an emission claim.
+
+## v1.3 lifecycle entities
+
+`MarketSnapshot` now publishes `structure_generations` and
+`relation_generations`; `DOLCandidateView` carries `generation_ordinal` with a
+disarm/rearm lifecycle; `SwingHierarchyView` carries the geometric tree;
+`ZoneUpdate` carries `base_origin_cores`, published on the bar the impulse
+locks them rather than at qualification; and every crossing terminal carries
+`constituent_bar_ids`, `penetration_bar_id`, `reentry_bar_id`, `hold_bar_id`
+and `outside_close_ids`. Definitions and the level taxonomy are in
+`docs/refactor/preregistered_semantics_v1_3_2026-08-31.md`; measured effects
+over 2022-02 and 2022-03 are in
+`docs/evidence/v1_3_structure_reading_2022_0{2,3}.json`.
+
+None of these entities change a detector rule. They give an existing fact an
+identity and a life so that a consumer counts episodes instead of bars; the
+counts of every registered event kind are unaffected except where the v1.2→v1.3
+table already records a rename or split.
 
 ## Research result boundary
 

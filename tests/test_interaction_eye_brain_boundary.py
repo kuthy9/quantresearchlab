@@ -8,7 +8,7 @@ import pandas as pd
 import pytest
 
 import smc_trader
-import smc_trader.group5 as legacy_group5
+from . import legacy_group5
 from smc_trader.brain_entry_sequence import (
     brain_interaction_view,
     brain_observation_view,
@@ -226,7 +226,6 @@ def test_eye_publishes_raw_break_and_brain_owns_qualification() -> None:
     assert not hasattr(fact, "qualified")
     assert not hasattr(update, "micro_bos_references")
     assert not hasattr(update, "path_sequences")
-    assert legacy_group5.__all__ == ()
     assert physical_path.steps[-1].kind == "micro_break_observed"
     assert physical_path.transition_reason == (
         "first_strict_micro_break_observed"
@@ -829,37 +828,3 @@ def test_legacy_boundary_adapter_rebuilds_censored_micro_step() -> None:
     assert path.steps[-1].kind == "micro_bos_simultaneous"
 
 
-def test_legacy_reducer_pickle_rejects_baseline_state_without_semantics(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    reducer = legacy_group5.CausalGroup5Reducer(
-        InteractionProtocol.from_file(LEGACY_PROTOCOL_PATH)
-    )
-    current = pickle.loads(pickle.dumps(reducer))
-    assert current.snapshot() == reducer.snapshot()
-
-    current_getstate = legacy_group5.CausalGroup5Reducer.__getstate__
-    monkeypatch.setattr(
-        legacy_group5.CausalGroup5Reducer,
-        "__getstate__",
-        lambda _self: {
-            "_last_canonical": None,
-            "_last_legacy": None,
-        },
-    )
-    baseline_payload = pickle.dumps(reducer)
-    monkeypatch.setattr(
-        legacy_group5.CausalGroup5Reducer,
-        "__getstate__",
-        current_getstate,
-    )
-    with pytest.raises(ValueError, match="replay canonical events"):
-        pickle.loads(baseline_payload)
-
-    exact_state = dict(reducer.__getstate__())
-    exact_state["legacy_extra"] = ()
-    with pytest.raises(ValueError, match="replay canonical events"):
-        legacy_group5.CausalGroup5Reducer.__setstate__(
-            object.__new__(legacy_group5.CausalGroup5Reducer),
-            exact_state,
-        )

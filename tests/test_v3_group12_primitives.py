@@ -5220,14 +5220,14 @@ def test_retained_entity_timeline_namespaces_and_order_fail_closed() -> None:
             confirmed_at=clock,
         ),
         _event(
-            EventKind.BOS_STATE,
+            EventKind.STRUCTURE_BREAK,
             clock,
             Timeframe.M1,
             "above",
             101.0,
             0.4,
             entity_id="same",
-            lifecycle=BOSLifecycle.PENDING.value,
+            lifecycle=BOSLifecycle.CONFIRMED.value,
             formed_at=clock,
         ),
         _event(

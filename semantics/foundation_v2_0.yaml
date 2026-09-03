@@ -66,20 +66,16 @@
     "path_end": "target_swing_pivot_bar",
     "atr_reference": "strictly_prior_real_completed_native_bars_before_leg_start",
     "atr_period": 14,
-    "duration_bars": "inclusive_registered_completed_native_bars",
+    "duration_bars": "inclusive_real_completed_native_bars",
     "duration_seconds": "wall_clock_seconds_between_source_pivot_starts",
     "close_efficiency": "abs(end_close_minus_start_close)_div_sum_abs_consecutive_close_deltas",
     "extreme_path_efficiency": "swing_amplitude_div_sum_abs_consecutive_directional_extreme_deltas",
     "close_mae": "maximum_adverse_close_excursion_from_start_close",
     "wick_mae": "maximum_adverse_wick_excursion_from_origin_swing_extreme",
-    "path_admits_densified_no_trade_bars": true,
-    "synthetic_path_minutes": "sum_of_densified_no_trade_minutes_across_admitted_path_bars",
     "full_path_bar_lineage_required": true
   },
   "swing_geometry": {
-    "envelope": "registered_completed_definitional_pivot_through_confirmation_bar_window",
-    "window_admits_densified_no_trade_bars": true,
-    "synthetic_window_minutes": "sum_of_densified_no_trade_minutes_across_admitted_window_bars",
+    "envelope": "real_completed_definitional_pivot_through_confirmation_bar_window",
     "parent_rule": "strictly_larger_time_window_and_time_and_price_containment",
     "parent_tie_break": [
       "minimum_enclosing_duration",

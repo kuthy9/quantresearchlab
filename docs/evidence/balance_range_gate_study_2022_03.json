@@ -1,0 +1,94 @@
+{
+  "matured": 0,
+  "observed_distributions": {
+    "bilateral_touches": {
+      "max": 2.0,
+      "mean": 1.0244,
+      "median": 1.0,
+      "min": 1.0,
+      "n": 41,
+      "p25": 1.0,
+      "p75": 1.0
+    },
+    "compression": {
+      "max": 4.3057,
+      "mean": 1.4302,
+      "median": 1.0,
+      "min": 0.4697,
+      "n": 41,
+      "p25": 1.0,
+      "p75": 1.621
+    },
+    "duration": {
+      "max": 24.0,
+      "mean": 10.4146,
+      "median": 7.0,
+      "min": 1.0,
+      "n": 41,
+      "p25": 3.0,
+      "p75": 18.0
+    },
+    "inside_close_fraction": {
+      "max": 1.0,
+      "mean": 0.8156,
+      "median": 0.875,
+      "min": 0.5,
+      "n": 41,
+      "p25": 0.6667,
+      "p75": 0.9474
+    },
+    "midpoint_crossing": {
+      "max": 7.0,
+      "mean": 1.0488,
+      "median": 0.0,
+      "min": 0.0,
+      "n": 41,
+      "p25": 0.0,
+      "p75": 2.0
+    },
+    "width": {
+      "max": 7.4091,
+      "mean": 4.0856,
+      "median": 3.9911,
+      "min": 1.4541,
+      "n": 41,
+      "p25": 3.2792,
+      "p75": 4.8714
+    }
+  },
+  "ranges_observed": 41,
+  "registered_thresholds": {
+    "bilateral_touches": 2.0,
+    "compression": 0.8,
+    "duration": 8.0,
+    "inside_close_fraction": 0.8,
+    "midpoint_crossing": 2.0,
+    "width": 4.0
+  },
+  "sole_blocking_gate": {},
+  "terminal_reasons": {
+    "close_beyond_frozen_range": 35,
+    "maturity_deadline_elapsed": 5,
+    "source_pair_selected": 1
+  },
+  "unmet_gate_counts": {
+    "bilateral_touches": 40,
+    "compression": 37,
+    "duration": 21,
+    "inside_close_fraction": 13,
+    "midpoint_crossing": 30,
+    "width": 20
+  },
+  "unmet_gates_per_range": {
+    "2": 4,
+    "3": 16,
+    "4": 4,
+    "5": 13,
+    "6": 4
+  },
+  "window": {
+    "bars_replayed": 31740,
+    "end": "2022-04-01",
+    "start": "2022-03-01"
+  }
+}

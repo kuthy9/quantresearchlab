@@ -22,7 +22,7 @@ if TYPE_CHECKING:
     from .market_state import MarketSnapshot
 
 
-SMC_SEMANTIC_VERSION = "smc_semantics_v1.2"
+SMC_SEMANTIC_VERSION = "smc_semantics_v1.3"
 MARKET_OBSERVATION_SCHEMA_VERSION = 5
 ENGINE_SNAPSHOT_SCHEMA_VERSION = 4
 NEUTRAL_ENGINE_SNAPSHOT_SCHEMA_VERSION = 4
@@ -307,6 +307,7 @@ class EventKind(str, Enum):
     ACCEPTANCE_CONFIRMED = "acceptance_confirmed"
     DISPLACEMENT_OBSERVED = "displacement_observed"
     FVG_CREATED = "fvg_created"
+    FVG_FIRST_RETEST = "fvg_first_retest"
     FVG_TOUCHED = "fvg_touched"
     FVG_PARTIALLY_FILLED = "fvg_partially_filled"
     FVG_MIDPOINT_TOUCHED = "fvg_midpoint_touched"
@@ -319,12 +320,19 @@ class EventKind(str, Enum):
     PROTECTED_SWING_ASSIGNED = "protected_swing_assigned"
     MSS_CORE_CONFIRMED = "mss_core_confirmed"
     DEALING_RANGE_CREATED = "dealing_range_created"
+    BALANCE_RANGE_OBSERVED = "balance_range_observed"
+    BALANCE_RANGE_MATURED = "balance_range_matured"
     DEALING_RANGE_ACTIVATED = "dealing_range_activated"
     DEALING_RANGE_EXTENDED = "dealing_range_extended"
     DEALING_RANGE_INVALIDATED = "dealing_range_invalidated"
     DEALING_RANGE_REPLACED = "dealing_range_replaced"
     DELIVERY_PHASE_CHANGED = "delivery_phase_changed"
+    DELIVERY_PHASE_ENTERED = "delivery_phase_entered"
+    DELIVERY_PHASE_UPDATED = "delivery_phase_updated"
+    DELIVERY_PHASE_EXITED = "delivery_phase_exited"
     ORIGIN_ZONE_CREATED = "origin_zone_created"
+    BASE_ORIGIN_CORE_CREATED = "base_origin_core_created"
+    QUALIFIED_ORIGIN_ZONE_CREATED = "qualified_origin_zone_created"
     ORIGIN_ZONE_TOUCHED = "origin_zone_touched"
     ORIGIN_ZONE_MITIGATED = "origin_zone_mitigated"
     ORIGIN_ZONE_INVALIDATED = "origin_zone_invalidated"
@@ -337,7 +345,6 @@ class EventKind(str, Enum):
     SWING_FORMED = "swing_formed"
     SWING_STATE = "swing_state"
     STRUCTURE_STATE = "structure_state"
-    BOS_STATE = "bos_state"
     BOS_POST_BREAK_STATE = "bos_post_break_state"
     SUPPORT_RESISTANCE_STATE = "support_resistance_state"
     LIQUIDITY_POOL_STATE = "liquidity_pool_state"
@@ -1358,7 +1365,9 @@ class StructuralLegState:
     efficiency: float
     max_retracement_points: float
     max_retracement_atr: float
-    rank: SwingRank = SwingRank.INTERNAL
+    # Named for what it measures: how long the leg's own bar path is, which
+    # is independent of any role a swing later takes on.
+    path_class: SwingRank = SwingRank.INTERNAL
     source_swing_ids: tuple[str, str] = ("", "")
     # Foundation-v2 path metrics are additive so frozen v1.2 event payloads
     # remain readable.  A leg produced by the foundation builder populates
@@ -1388,7 +1397,7 @@ class StructuralLegState:
                 name,
                 aware_timestamp(getattr(self, name), name=f"leg.{name}"),
             )
-        object.__setattr__(self, "rank", SwingRank(self.rank))
+        object.__setattr__(self, "path_class", SwingRank(self.path_class))
         source_ids = tuple(self.source_swing_ids)
         object.__setattr__(self, "source_swing_ids", source_ids)
         path_candle_ids = tuple(self.path_candle_ids)
@@ -2623,6 +2632,12 @@ class RangeFormationFunnelSnapshot:
             raise ValueError("range maturity gate diagnostic is invalid")
 
 
+# A candidate that never balanced has lost its balance claim and nothing else.
+# The structural interval keeps locating price until price closes outside it.
+BALANCE_CLAIM_ABANDONED = "balance_claim_abandoned"
+
+
+
 @dataclass(frozen=True)
 class DealingRangeState:
     """One H1 accumulation candidate and its frozen mature range."""
@@ -2943,13 +2958,28 @@ class DealingRangeState:
         if self.transition_reason == "":
             raise ValueError("dealing-range transition reason cannot be empty")
         if self.lifecycle is DealingRangeLifecycle.FORMING:
+            # A candidate that ran out of room to prove balance keeps its
+            # structural interval: the balance claim ended, the interval did
+            # not.  Such a range legitimately restarts its state clock and
+            # carries the deadline's bar count.
+            abandoned = (
+                self.transition_reason == BALANCE_CLAIM_ABANDONED
+            )
             if (
                 self.mature_at is not None
                 or self.broken_at is not None
-                or self.state_started_at != self.formed_at
-                or self.candidate_real_h1_bars >= 24
+                or (
+                    self.state_started_at != self.formed_at
+                    if not abandoned
+                    else self.state_started_at < self.formed_at
+                )
+                or (not abandoned and self.candidate_real_h1_bars >= 24)
                 or self.transition_reason
-                not in {None, "source_pair_selected"}
+                not in {
+                    None,
+                    "source_pair_selected",
+                    BALANCE_CLAIM_ABANDONED,
+                }
             ):
                 raise ValueError("forming dealing-range lifecycle is inconsistent")
         elif self.lifecycle is DealingRangeLifecycle.MATURE:
@@ -3775,6 +3805,64 @@ class FairValueGapState:
 
 
 @dataclass(frozen=True)
+class BaseOriginCoreState:
+    """The frozen opposite candles an impulse left behind, and nothing else.
+
+    Published the moment the impulse locks them.  A core carries no order-block
+    reading and no break: it is true whether or not the impulse went on to
+    displace and break structure, which is exactly why it can be counted
+    without hindsight.
+    """
+
+    base_origin_core_id: str
+    protocol_hash: str
+    symbol: str
+    instrument_id: int
+    timeframe: Timeframe
+    direction: Direction
+    source_displacement_id: str
+    source_displacement_transition_id: str
+    anchor_candle_id: str
+    anchor_candle_ids: tuple[str, ...]
+    anchor_start: pd.Timestamp
+    anchor_end: pd.Timestamp
+    lower_bound: float
+    upper_bound: float
+    body_lower_bound: float
+    body_upper_bound: float
+    midpoint: float
+    observed_at: pd.Timestamp
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "timeframe", Timeframe(self.timeframe))
+        object.__setattr__(self, "direction", Direction(self.direction))
+        object.__setattr__(
+            self, "anchor_candle_ids", tuple(self.anchor_candle_ids)
+        )
+        if (
+            not self.base_origin_core_id
+            or not self.protocol_hash
+            or not self.symbol
+            or type(self.instrument_id) is not int
+            or self.instrument_id < 0
+            or not self.source_displacement_id
+            or not self.source_displacement_transition_id
+            or not self.anchor_candle_id
+            or self.anchor_candle_id not in self.anchor_candle_ids
+            or len(set(self.anchor_candle_ids)) != len(self.anchor_candle_ids)
+            or self.anchor_start >= self.anchor_end
+            # The core may never cite a bar the clock has not reached.
+            or self.anchor_end > self.observed_at
+            or not 0.0 < self.lower_bound <= self.upper_bound
+            or not self.lower_bound <= self.body_lower_bound
+            or not self.body_upper_bound <= self.upper_bound
+            or self.body_lower_bound > self.body_upper_bound
+            or self.midpoint != (self.lower_bound + self.upper_bound) / 2.0
+        ):
+            raise ValueError("base origin core state is invalid")
+
+
+@dataclass(frozen=True)
 class OrderBlockState:
     """A frozen pre-BOS candle linked to qualified displacement and BOS."""
 
@@ -3826,6 +3914,8 @@ class OrderBlockState:
     mitigated_at: pd.Timestamp | None = None
     failed_at: pd.Timestamp | None = None
     transition_reason: str | None = None
+    # The geometry this zone qualified, published earlier by the impulse.
+    base_origin_core_id: str | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -5952,7 +6042,6 @@ class MarketEvent:
 _TYPED_EVENT_ENTITY_PREFIXES: Mapping[EventKind, str] = {
     EventKind.SWING_STATE: "swing",
     EventKind.STRUCTURE_STATE: "structure",
-    EventKind.BOS_STATE: "bos",
     EventKind.STRUCTURE_BREAK: "bos",
     EventKind.STRUCTURE_BREAK_FAILED: "bos",
     EventKind.SUPPORT_RESISTANCE_STATE: "zone",
@@ -6456,6 +6545,27 @@ class DisplacementObservation:
             for name, value in self.current_metrics
         ):
             raise ValueError("current displacement metrics are invalid")
+
+
+def execution_not_evaluated() -> "ExecutionObservation":
+    """The inert execution value an Eye-only replay transports.
+
+    The Eye never derives execution reality; when a caller supplies none this
+    is what the observation carries, and ``source`` says so plainly rather than
+    presenting a default-derived score as if it had been observed.
+    """
+
+    return ExecutionObservation(
+        spread_points=0.0,
+        expected_slippage_points=0.0,
+        expected_round_trip_cost_points=0.0,
+        minutes_to_deadline=0,
+        fillability=0.0,
+        data_age_seconds=0.0,
+        size_available=None,
+        anomalies=(),
+        source="not_evaluated",
+    )
 
 
 @dataclass(frozen=True)

@@ -28,7 +28,7 @@ from smc_trader.model import (
     Timeframe,
     to_primitive,
 )
-from smc_trader.observation import ExecutionRealityInput
+from smc_trader.execution import ExecutionRealityInput
 
 from .helpers import session_bars
 
@@ -133,9 +133,12 @@ def _legacy_engine_step(
 
     account = AccountState(equity=100_000.0)
     update = engine.reader.on_bar(bar)
-    observation = engine.observer.observe(update, None)
-    # Scene Graph projection is Engine-owned, so the oracle advances it here
-    # exactly as ``_observe_bar`` does.
+    # Execution scoring and Scene Graph projection are both Engine-owned, so
+    # the oracle advances them here exactly as ``_observe_bar`` does.
+    observation = engine.observer.observe(
+        update,
+        engine._score_execution(None, bar=bar),
+    )
     observation = engine._project_scene_graph(observation)
     if {
         "contract_change_history_reset",
@@ -692,7 +695,7 @@ def test_engine_neutral_state_is_pickle_checkpoint_ready() -> None:
             previous_neutral_snapshot
         )
     publisher_state = engine.observer.market_snapshot_publisher.__getstate__()
-    assert publisher_state["_publisher_state_schema_version"] == 5
+    assert publisher_state["_publisher_state_schema_version"] == 7
     previous_publisher = dict(publisher_state)
     previous_publisher["_publisher_state_schema_version"] = 4
     with pytest.raises(ValueError, match="publisher checkpoint schema"):

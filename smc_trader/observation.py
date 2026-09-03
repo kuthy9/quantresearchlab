@@ -18,11 +18,6 @@ from .displacement_observer import (
     CausalDisplacementEye,
 )
 from .event_memory import EventMemory
-from .execution import (
-    ExecutionRealityInput,
-    execution_not_evaluated,
-    observe_execution_reality,
-)
 from .event_store import EventStore
 from .zone import (
     CausalZoneTracker,
@@ -47,6 +42,8 @@ from .liquidity import (
     LiquidityProtocolError,
 )
 from .model import (
+    ExecutionObservation,
+    execution_not_evaluated,
     BOSLifecycle,
     BOSScope,
     BreakOfStructureState,
@@ -104,7 +101,7 @@ class ObserverConfig:
     zone_protocol: str | None = None
     range_auction_protocol: str | None = None
     interaction_protocol: str | None = None
-    semantic_registry: str = "semantics/registry_v1_2.yaml"
+    semantic_registry: str = "semantics/registry_v1_3.yaml"
     scale_specs: tuple[ScaleSpec, ...] = ()
     # Scene Graph is an optional downstream research view, not part of the
     # causal Eye publication path. Full Engine composition opts in explicitly.
@@ -1776,8 +1773,11 @@ class CausalObserver:
                 )
             )
             keys.update(
+                # A pending BOS has no lifecycle history yet: its timeline
+                # begins at the terminal that resolves it.
                 f"bos:{item.bos_id}"
                 for item in frame.structure_breaks
+                if item.lifecycle is not BOSLifecycle.PENDING
             )
             keys.update(
                 f"zone:{item.zone_id}"
@@ -2671,8 +2671,14 @@ class CausalObserver:
     def observe(
         self,
         update: ReaderUpdate,
-        reality: ExecutionRealityInput | None = None,
+        execution: ExecutionObservation | None = None,
     ) -> MarketObservation:
+        """Reduce one reader update into deterministic market facts.
+
+        ``execution`` is transported, never derived: scoring broker/feed
+        reality is the execution layer's job, and the Eye only carries the
+        result so a downstream consumer reads one observation.
+        """
         if self._terminal_failure is not None:
             raise RuntimeError(self._terminal_failure)
         audit_start = len(self.audit_store)
@@ -2693,19 +2699,12 @@ class CausalObserver:
             raise ValueError(
                 "reader and observer scale registry contracts disagree"
             )
-        if self.config.eye_authority_mode:
-            if reality is not None:
-                raise ValueError(
-                    "eye-authority mode does not evaluate execution reality"
-                )
-            execution = execution_not_evaluated()
-        else:
-            execution = observe_execution_reality(
-                reality or ExecutionRealityInput(),
-                asof=update.asof,
-                tick_size=self.config.tick_size,
-                point_value=self.config.point_value,
+        if self.config.eye_authority_mode and execution is not None:
+            raise ValueError(
+                "eye-authority mode does not evaluate execution reality"
             )
+        if execution is None:
+            execution = execution_not_evaluated()
         if self.memory.clock_coverage_start is None:
             m1_history = tuple(
                 update.histories.get(Timeframe.M1, ())
@@ -3473,7 +3472,11 @@ class CausalObserver:
         anomalies.extend(execution.anomalies)
         try:
             self.memory.flush_audit()
-            market_snapshot, projection_events = (
+            (
+                market_snapshot,
+                projection_events,
+                delivery_transitions,
+            ) = (
                 self.market_snapshot_publisher.publish(
                     asof=update.asof,
                     symbol=update.completed_1m.symbol,
@@ -3502,6 +3505,15 @@ class CausalObserver:
             if self.config.persist_state_projections:
                 self.memory.flush_audit()
             self.market_snapshot_publisher._consume_committed_projection_tail()
+            # The delivery-phase lifecycle is an atomic fact rather than
+            # technical projection transport, so it is published whether or
+            # not state projections are persisted, and it is appended after
+            # the projection tail so the reducer never sees a physical fact in
+            # that tail.  The next completed bar reduces it in stream order.
+            self._emitter._record_delivery_phase_events(delivery_transitions)
+            self.memory.flush_audit()
+            if delivery_transitions:
+                self.market_snapshot_publisher._consume_committed_delivery_phase_tail()
             semantic_events = self.audit_store.events_since(audit_start)
             market_snapshot = replace(
                 market_snapshot,
@@ -3816,6 +3828,5 @@ class CausalObserver:
 __all__ = [
     "CausalObserver",
     "EventMemory",
-    "ExecutionRealityInput",
     "ObserverConfig",
 ]

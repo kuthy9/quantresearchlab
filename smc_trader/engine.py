@@ -18,6 +18,7 @@ from .dol_probability import (
     load_dol_probability_protocol,
 )
 from .model import (
+    ExecutionObservation,
     AccountState,
     Bar,
     EngineSnapshot,
@@ -30,9 +31,13 @@ from .model import (
     Timeframe,
     to_primitive,
 )
+from .execution import (
+    ExecutionRealityInput,
+    assumed_execution_model,
+    observe_execution_reality,
+)
 from .observation import (
     CausalObserver,
-    ExecutionRealityInput,
     ObserverConfig,
 )
 from .playbooks import (
@@ -917,8 +922,41 @@ class ContinuousSMCEngine:
         execution: ExecutionRealityInput | None,
     ) -> MarketObservation:
         update = self.reader.on_bar(bar)
-        observation = self.observer.observe(update, execution)
+        observation = self.observer.observe(
+            update,
+            self._score_execution(execution, bar=bar),
+        )
         return self._project_scene_graph(observation)
+
+    def _score_execution(
+        self,
+        reality: ExecutionRealityInput | None,
+        *,
+        bar: Bar,
+    ) -> ExecutionObservation:
+        """Score broker/feed reality here, so the Eye only transports it.
+
+        Eye-authority replay never runs through the Engine — those callers
+        drive ``CausalObserver`` directly and receive the inert value — so this
+        always scores, and the Eye rejects the result if that ever changes.
+
+        Nothing observed means nothing to observe: with no input the registered
+        assumption is scored and labelled as an assumption, rather than a
+        default-filled input being passed off as broker reality.
+        """
+
+        tick_size = self.observer.config.tick_size
+        point_value = self.observer.config.point_value
+        if reality is None:
+            return assumed_execution_model(
+                asof=bar.end, tick_size=tick_size, point_value=point_value
+            )
+        return observe_execution_reality(
+            reality,
+            asof=bar.end,
+            tick_size=tick_size,
+            point_value=point_value,
+        )
 
     def _project_scene_graph(
         self,

@@ -97,7 +97,8 @@ def _publish(
     **kwargs: object,
 ) -> tuple[MarketSnapshot, tuple[MarketEvent, ...]]:
     publisher.event_store.append_batch(semantic_events)
-    return publisher.publish(**kwargs)
+    snapshot, projection_events, _ = publisher.publish(**kwargs)
+    return snapshot, projection_events
 
 
 def _reducer_hot_state(reducer: TimeframeEventReducer) -> bytes:

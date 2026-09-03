@@ -3037,3 +3037,45 @@ def test_runtime_compaction_retains_current_and_materialized_terminal_state(
     assert terminal.node_id not in delta.added_node_ids
     assert hot.node_id not in delta.added_node_ids
     assert result["after"]["nodes"] <= result["before"]["nodes"]
+
+
+def test_neighbor_order_is_stable_across_processes_and_resumes() -> None:
+    """Adjacency is stored in sets, so its order must be imposed, not inherited.
+
+    ``_neighbors`` feeds a breadth-first path search that returns the first
+    route it reaches.  While the yield order followed set iteration, two equally
+    short routes were separated by nothing but the interpreter's hash seed, so
+    the same event log could read out a different path in a different process
+    -- and a resumed graph could disagree with the one it was pickled from.
+    """
+
+    graph = TemporalMarketSceneGraph()
+    asof = _clock("2025-01-06 10:00")
+    source = graph.add_node(
+        _node("order-source", "structure", Timeframe.H1, asof)
+    )
+    # Names chosen so insertion order, alphabetical order and hash order are
+    # all different; only an imposed order survives a pickle round trip.
+    for name in ("zeta", "alpha", "mu", "beta", "omega"):
+        target = graph.add_node(
+            _node(f"order-{name}", "displacement", Timeframe.M5, asof)
+        )
+        graph.add_edge(
+            SceneEdge(
+                edge_id=f"edge:order-{name}",
+                source_node_id=source.node_id,
+                relation=SceneEdgeKind.ALIGNS_WITH,
+                target_node_id=target.node_id,
+                observed_at=asof,
+                source_ids=(source.node_id, target.node_id),
+            )
+        )
+
+    observed = tuple(graph._neighbors(source.node_id))
+    assert [edge.edge_id for _, edge in observed] == sorted(
+        edge.edge_id for _, edge in observed
+    )
+
+    resumed = pickle.loads(pickle.dumps(graph))
+    resumed.__dict__.pop("_current_neighbors_cache")
+    assert tuple(resumed._neighbors(source.node_id)) == observed

@@ -1,14 +1,19 @@
-# SMC Semantic Specification: v1.2 atomic layer + foundation v2
+# SMC Semantic Specification: v1.3 atomic layer + foundation v2.1
 
-The current runtime semantic identity is `smc_semantics_v1.2`. Its
+The current runtime semantic identity is `smc_semantics_v1.3`. Its
 machine-readable authority is
-[`semantics/registry_v1_2.yaml`](../semantics/registry_v1_2.yaml), with frozen
+[`semantics/registry_v1_3.yaml`](../semantics/registry_v1_3.yaml), with frozen
 or deliberately unthresholded parameters in
-[`semantics/parameters_v1_2.yaml`](../semantics/parameters_v1_2.yaml).
+[`semantics/parameters_v1_3.yaml`](../semantics/parameters_v1_3.yaml).
+The frozen [`registry_v1_2.yaml`](../semantics/registry_v1_2.yaml) and
+[`parameters_v1_2.yaml`](../semantics/parameters_v1_2.yaml) remain the identity
+of every v1.2 artifact and are no longer the runtime. Sections below that still
+say "v1.2" describe detector behaviour v1.3 inherits unchanged; the v1.3 delta
+is stated in the next section.
 
 The current additive object/lifecycle projection is
-`smc_semantic_foundation_v2.0`, bound to the v1.2 atomic stream by
-[`semantics/foundation_v2_0.yaml`](../semantics/foundation_v2_0.yaml). Its
+`smc_semantic_foundation_v2.1`, bound to the v1.3 atomic stream by
+[`semantics/foundation_v2_1.yaml`](../semantics/foundation_v2_1.yaml). Its
 human-readable authority is the
 [Canonical Semantic Foundation v2](refactor/canonical_semantic_foundation_v2.md).
 It adds no parallel detector and does not rewrite a v1.2 `MarketEvent` or any
@@ -17,8 +22,8 @@ strict decoder remain only for legacy technical replay transport and grant no
 atomic-market or trading authority. Foundation revision history lives in its
 separate in-memory ledger, while snapshots carry a compact current projection.
 The checked-in model selects both authorities through one strict
-`semantic_selection`: atomic v1.2 version/path/definition identity and
-Foundation v2.0 version/path/registry identity. Construction loads the pair
+`semantic_selection`: atomic v1.3 version/path/definition identity and
+Foundation v2.1 version/path/registry identity. Construction loads the pair
 once and requires the Foundation parent to equal the atomic version; missing,
 unknown, extra, or mismatched fields fail closed. The Observer's enable flag is
 derived internally. This does not define a unified `smc_semantics_v2.0`.
@@ -31,6 +36,86 @@ resume into the current Observation, Foundation, and Neutral-state contracts.
 v1.1 definitions required to verify the historical January 2024 protocol-v2
 artifact. A v1.1 result does not establish v1.2 behavior, and a v1.2 runtime
 does not retroactively upgrade a v1.1 event ledger.
+
+## What v1.3 changed
+
+v1.3 keeps every canonical emitted EventKind of v1.2 byte-identical. It changes
+identity, naming and reservation only:
+
+- **Object identity split.** `active_dealing_range` became `structural_range`
+  (frozen anchors, location, normalized_location, Premium/Discount, IRL/ERL) and
+  `balance_range` (two-sided testing, midpoint crossings, inside fraction,
+  compression, maturity). `order_block_origin_zone` became `base_origin_core`
+  (geometry only) and `qualified_origin_zone` (core + active displacement +
+  qualified BOS). Order-block interpretation belongs to the Brain.
+- **`structure_regime` is now a registered concept** and is snapshot-derived. It
+  and `delivery_phase` are two independent dimensions; neither is derived from
+  the other. Every phase fact carries the regime beside it as evidence, never
+  as its cause.
+- **`delivery_phase` is an entered/updated/exited lifecycle and is emitted.**
+  `MarketSnapshotPublisher` tracks one occupancy per timeframe. An entry
+  freezes `entered_at`, `age_bars` (real completed M1 bars since entry),
+  `origin_event`, `parent_structure_generation` and `previous_phase`; an exit
+  names `next_phase`. `DELIVERY_PHASE_UPDATED` is published **only** when a
+  registered phase input (`structure_regime`, `active_leg_direction`,
+  `protected_swing_intact`, range availability) moves while the phase itself
+  does not, so a quiet bar publishes nothing and the phase stream stays far
+  below one event per bar. `parent_structure_generation` is the event id of the
+  most recent `STRUCTURE_DIRECTION_CONFIRMED` / `QUALIFIED_BOS` /
+  `MSS_CORE_CONFIRMED` on that timeframe: the hot path carries no separate
+  generation object, and this is the causal anchor a generation id would hash.
+  The three kinds are admitted to the reducer and are recorded as seen without
+  being reduced back into the state they were derived from.
+- **The Origin Zone is split and `ORIGIN_ZONE_CREATED` is retired.** At one
+  clock the Eye publishes `BASE_ORIGIN_CORE_CREATED` (frozen candle geometry
+  plus the impulse identity that located it, citing only its anchor bars) and
+  then `QUALIFIED_ORIGIN_ZONE_CREATED` (that core plus the active displacement
+  and the qualified BOS). Origin-zone terminals cite the qualified zone. The
+  compact current view tracks the qualified zone; the bare geometry stays
+  readable as a fact the Brain interprets. The detector materialises the core
+  only when the BOS confirms, so publishing it earlier would be a Group-3
+  protocol change and was not made.
+- **The Dealing Range is split and `DEALING_RANGE_ACTIVATED` is retired.**
+  `DEALING_RANGE_CREATED` / `_INVALIDATED` / `_REPLACED` remain the structural
+  range's location lifecycle. `BALANCE_RANGE_OBSERVED` is published once per
+  range, carrying `lower_touch_count`, `upper_touch_count`,
+  `midpoint_crossings`, `inside_close_fraction`, `compression_ratio`,
+  `candidate_real_h1_bars` and `age_h1_bars`, as soon as both frozen boundaries
+  have been tested at least `balance_range_boundary_touches_each` (2) times --
+  one touch per side is structural, because a range's source pair is built from
+  tested zones. `BALANCE_RANGE_MATURED` replaces the old activation at the
+  maturity transition and is what the compact view now calls an active range.
+  The Group-4 detector surfaces no intra-forming update, so the observation
+  clock is the range's next registered transition rather than the second
+  boundary test itself; moving it earlier is a Group-4 protocol change.
+  Failing to balance no longer costs the location.
+- **`FVG_FIRST_RETEST` is emitted.** Exactly one per gap, on the first bar
+  where price re-enters the frozen gap, published before the revisable fill
+  observation it shares that bar with. It freezes `fill_depth_at_entry`,
+  `age_bars`, `age_seconds`, the entry lifecycle and reason, the formation
+  qualification, the session, the source displacement, and
+  `approach_speed_atr` = the distance still separating the last completed M5
+  close from the near edge, divided by that entry bar's causal ATR. Partial,
+  mitigated and invalidated all require entry, so the first of them is the
+  first re-entry; the reserved age-based expiry is not an entry. The Group-3
+  protocol lists MBO among its prohibited inputs, so the event carries no book
+  evidence. It is admitted to the reducer as an authoritative fact but has no
+  reducer branch: it never revises the compact current view.
+- **`FVG_EXPIRED`, `DEALING_RANGE_EXTENDED` remain reserved**, and
+  `FVG_TOUCHED`, `ORIGIN_ZONE_TOUCHED`, `ORIGIN_ZONE_CREATED`,
+  `DEALING_RANGE_ACTIVATED` and `DELIVERY_PHASE_CHANGED` are compatibility
+  aliases that are not emitted.
+- **`bos_state` was removed.** It was an unregistered transport carrying only
+  `pending`, already stated by the absence of a terminal on
+  `RAW_BOUNDARY_BREAK`. The BOS timeline now begins at `CONFIRMED`/`FAILED`.
+- **Structural Leg `rank` became `path_class`**, and the lookup is strict: a
+  missing key now fails instead of silently defaulting.
+- **Densified no-trade bars are admitted into definitional paths** with
+  `synthetic_path_minutes` / `synthetic_window_minutes` markers, under one
+  shared `BarCoverage` admission rule.
+
+Phase 7 stays preregistered against `smc_semantic_foundation_v2.0` and refuses
+the current model config; running it under v1.3 requires a new preregistration.
 
 New event studies must start from a separately frozen manifest and fail closed
 when a required semantic identity, parameter, code/data hash, input census, or

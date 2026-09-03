@@ -33,8 +33,8 @@ governance artifacts during ordinary development.
   critical serialized source ID resolves to its registered event kind,
   timeframe, entity, and causal clock.
 - [ ] The production model has one exact `semantic_selection`: atomic
-  `smc_semantics_v1.2` plus Foundation
-  `smc_semantic_foundation_v2.0`, both registry paths and identities, and a
+  `smc_semantics_v1.3` plus Foundation
+  `smc_semantic_foundation_v2.1`, both registry paths and identities, and a
   Foundation parent equal to the atomic version. Engine construction
   strict-loads the pair once; Engine/Shadow/checkpoint state freezes and
   compares the existing identities. Missing, unknown, mismatched, or
