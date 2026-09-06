@@ -376,7 +376,7 @@ Shadow bytes that preceded the compact-state/action-policy migration. Both are
 historical engineering evidence for their exact source snapshots; neither is a
 current-runtime parity receipt. The single detailed historical
 [release-verification table](canonical_semantic_foundation_v2.md#replay-test-and-empirical-boundary)
-and its [machine receipt](../evidence/phase9_foundation_v2_prefix_200_receipt.json)
+and its machine receipt (retired 2026-09-06 with the local `inputs/`/`outputs/` payload)
 record that older bounded file-parity result. A new parity claim requires a new
 frozen runtime/config identity. It does not complete or rematerialize the
 6,900-clock input and is not a real-time pilot.

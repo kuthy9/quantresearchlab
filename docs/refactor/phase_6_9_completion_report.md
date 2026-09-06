@@ -35,7 +35,7 @@ current model, Foundation, Shadow, input, and live/cold fingerprints are frozen
 in the single
 [Foundation release-verification table](canonical_semantic_foundation_v2.md#replay-test-and-empirical-boundary)
 and the separate
-[current machine receipt](../evidence/phase9_foundation_v2_prefix_200_receipt.json).
+current machine receipt (retired 2026-09-06 with the local `inputs/`/`outputs/` payload).
 The temporary result bundle is not a committed or portable evidence artifact.
 
 ## Phase 6: completed MBO study
@@ -310,7 +310,7 @@ hash-bound input journal can replay and reconstruct it.
 The bounded evidence is local and non-portable: `inputs/` and `outputs/` are
 Git-ignored, and the independent cold runner was audited in memory rather than
 retained as a second result bundle. A small versionable
-[evidence receipt](../evidence/phase9_week1_flat_v2_prefix_receipt.json) records
+evidence receipt (retired 2026-09-06 with the local `inputs/`/`outputs/` payload) recorded
 the local paths, hashes, counts, parity identities, and explicit non-live
 limits without promoting the ignored payloads. The receipt binds the earlier
 path/model identities `5213b3d6…` and `4214da19…`; the current global

@@ -573,7 +573,7 @@ the Phase-7 preregistration was repaired in the same pass
 (`0af7f448d632…` → `78d63b26e31c…`); the manifest's own hash chain stays intact.
 
 One artifact deliberately keeps `ac04636919931d77…`:
-`docs/evidence/phase9_foundation_v2_prefix_200_receipt.json`. Unlike the
+`docs/evidence/phase9_foundation_v2_prefix_200_receipt.json` (retired 2026-09-06 with the local `inputs/`/`outputs/` payload). Unlike the
 manifests it records a run that actually happened — 200 rows, 200/200 parity,
 fixed record and journal fingerprints — so the old identity is simply the true
 answer to "what did that run execute against". Nothing validates against the

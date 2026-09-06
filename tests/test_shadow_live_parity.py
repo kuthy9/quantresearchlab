@@ -894,43 +894,6 @@ def test_component_digest_final_audit_replays_full_market_payload() -> None:
     )
 
 
-@pytest.mark.historical_frozen
-def test_real_w1_manual_foundation_transitions_restore_and_continue_exactly() -> None:
-    from itertools import islice
-
-    from scripts.run_shadow_file_pilot import iter_shadow_clock_file
-
-    values = tuple(
-        islice(
-            iter_shadow_clock_file(
-                ROOT / "inputs/phase9_w1_foundation_v3_7465a04.jsonl"
-            ),
-            101,
-        )
-    )
-    runner = ShadowLiveRunner(
-        engine=_engine(),
-        protocol=load_shadow_live_protocol(PROTOCOL_PATH),
-        runtime_bindings=_bindings(),
-    )
-    for value in values[:100]:
-        runner.process(value)
-
-    whole = pickle.loads(pickle.dumps(runner))
-    assert whole.engine.last_snapshot == runner.engine.last_snapshot
-    journal = runner.journal.events
-    records = runner.records
-    checkpoint = runner.compact_runtime_checkpoint()
-    restored = ShadowLiveRunner.from_compact_runtime_checkpoint(
-        pickle.loads(pickle.dumps(checkpoint)),
-        journal_events=journal,
-        records=records,
-    )
-    assert restored.process(values[100]) == runner.process(values[100])
-    assert restored.record_fingerprint == runner.record_fingerprint
-    assert restored.journal.fingerprint == runner.journal.fingerprint
-    assert restored.gateway.submission_attempts == 0
-
 def test_execution_fsm_events_are_part_of_the_same_clock_parity_record() -> None:
     approved = _shadow_approved()
     source_fsm = ExecutionFSM(approved)

@@ -6,6 +6,13 @@
 > files, its preregistration manifest, and `smc_trader/probability_cohorts.py`,
 > `probability_fit.py`, `probability_admission.py`, `signal_outcome_fit.py`) has
 > since been removed; those rows describe files that no longer exist.
+>
+> **Superseded further (2026-09-06).** `README.md`,
+> `docs/evidence/phase9_foundation_v2_prefix_200_receipt.json` and
+> `docs/evidence/phase9_week1_flat_v2_prefix_receipt.json` were removed, as were
+> the untracked `inputs/`, `outputs/` and `archive/` payloads. Their rows below,
+> and every "referenced by `README.md`" attribution, are retained as the frozen
+> census record rather than rewritten.
 
 - Repository: current Git worktree (`.`)
 - Frozen read-only snapshot: `4f180d2`
@@ -466,6 +473,6 @@ Large JSONL results and audit receipts are not overengineering merely because th
 
 - `.git/`: Git object database, refs and worktree metadata; inspect only through Git commands.
 - `.venv/`: reproducible environment derived from `uv.lock`; disposable/rebuildable, never model evidence.
-- `data/`, `inputs/`, `outputs/` and other `.gitignore` payloads: governed by manifests/receipts despite being untracked; not garbage by default.
+- `data/` and other `.gitignore` payloads: governed by manifests/receipts despite being untracked; not garbage by default. (`inputs/`, `outputs/` and `archive/` were deleted on 2026-09-06 and no longer exist.)
 - Sealed holdouts: authority boundary; deliberately unopened.
 - Active formal-run temporary state under `/private/tmp`: deliberately untouched.
