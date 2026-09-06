@@ -21,7 +21,7 @@ Retest research object. Foundation v2 requires an exact object generation,
 strictly later observed departure, one native completed-bar return, and an
 outcome-blind frozen information set; evidence from either definition cannot be
 silently transferred to the other. See the
-[`foundation specification`](refactor/canonical_semantic_foundation_v2.1.md).
+[`foundation specification`](canonical_semantic_foundation_v2.1.md).
 
 Group 5 closes four legacy semantic gaps with one incremental reducer:
 

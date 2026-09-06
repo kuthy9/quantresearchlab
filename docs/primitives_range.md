@@ -14,7 +14,7 @@ This contract freezes the causal meaning of:
 
 This file is the retained v1.2 Group-4/Mature Balance Range contract. Its
 `DealingRangeState` name is not Structural Range authority. The additive
-[`smc_semantic_foundation_v2.1`](refactor/canonical_semantic_foundation_v2.1.md)
+[`smc_semantic_foundation_v2.1`](canonical_semantic_foundation_v2.1.md)
 projection preserves this identity as `BalanceRange` and publishes a separate
 Structure-Generation-owned `StructuralRange`; the two may coexist and have
 independent normalized locations.

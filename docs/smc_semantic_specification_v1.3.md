@@ -15,7 +15,7 @@ The current additive object/lifecycle projection is
 `smc_semantic_foundation_v2.1`, bound to the v1.3 atomic stream by
 [`semantics/foundation_v2_1.yaml`](../semantics/foundation_v2_1.yaml). Its
 human-readable authority is the
-[Canonical Semantic Foundation v2.1](refactor/canonical_semantic_foundation_v2.1.md).
+[Canonical Semantic Foundation v2.1](canonical_semantic_foundation_v2.1.md).
 It adds no parallel detector and does not rewrite a v1.2 `MarketEvent` or any
 frozen experiment. Production emits no `FOUNDATION_STATE_CHANGED`; the enum and
 strict decoder remain only for legacy technical replay transport and grant no
@@ -464,7 +464,7 @@ prefix are retained evidence for the earlier path/model bindings
 so that output remains historical. A separate Foundation-enabled Engine run
 passed the same exact 200-row prefix under later, but now also historical,
 model/registry bindings; its detailed boundary is in the
-[Foundation release table](refactor/canonical_semantic_foundation_v2.1.md#replay-test-and-empirical-boundary).
+[Foundation release table](canonical_semantic_foundation_v2.1.md#replay-test-and-empirical-boundary).
 The read-only 6,900-clock capacity preflight still verifies the historical
 `COMPLETED.json` to checkpoint-manifest SHA binding, finds that receipt's
 historical/current identity mismatch, and explicitly withholds full-run
@@ -478,4 +478,4 @@ and `outputs/`; both directories, and the Phase 6–9 gate report that listed
 their paths, hashes, commands and no-replace publication rules, were removed on
 2026-09-06.
 See the
-[current implementation status](refactor/current_implementation_status.md).
+[current implementation status](current_implementation_status.md).

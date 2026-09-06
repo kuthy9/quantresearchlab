@@ -12,7 +12,7 @@ reinteraction, ancestry, and factual outcome contracts. It does not add a
 trading signal, fit a probability model, or grant action authority.
 
 The machine-readable authority is
-[`semantics/foundation_v2_1.yaml`](../../semantics/foundation_v2_1.yaml), and
+[`semantics/foundation_v2_1.yaml`](../semantics/foundation_v2_1.yaml), and
 `smc_trader/foundation_registry.py` fails closed unless the loaded file carries
 exactly the version, parent version and identity printed above. Changing any
 registered definition requires a new semantic version and a new registry

@@ -59,10 +59,10 @@ parent does not equal the selected atomic version.
 | 2024-06-01 → 07-01 | NQ 1m OHLCV + MBO top-of-book | 27,720 | crossing-generation outcomes against the book |
 
 Machine-readable:
-[`v1_3_two_month_replay_comparison.json`](../evidence/v1_3_two_month_replay_comparison.json),
-[`balance_range_gate_study_2022_02.json`](../evidence/balance_range_gate_study_2022_02.json),
-[`balance_range_gate_study_2022_03.json`](../evidence/balance_range_gate_study_2022_03.json),
-[`unresolved_interaction_study_2024_06.json`](../evidence/unresolved_interaction_study_2024_06.json).
+[`v1_3_two_month_replay_comparison.json`](evidence/v1_3_two_month_replay_comparison.json),
+[`balance_range_gate_study_2022_02.json`](evidence/balance_range_gate_study_2022_02.json),
+[`balance_range_gate_study_2022_03.json`](evidence/balance_range_gate_study_2022_03.json),
+[`unresolved_interaction_study_2024_06.json`](evidence/unresolved_interaction_study_2024_06.json).
 
 ## The 20 registered concepts
 

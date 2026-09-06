@@ -66,11 +66,11 @@ in `MarketObservation` field names, and in frozen research-manifest binding
 keys. Do not introduce them anywhere new.
 
 The current implementation-versus-plan authority is
-[docs/refactor/current_implementation_status.md](docs/refactor/current_implementation_status.md);
+[docs/current_implementation_status.md](docs/current_implementation_status.md);
 the registered semantic definitions are
-[docs/refactor/preregistered_semantics_v1_3_2026-08-31.md](docs/refactor/preregistered_semantics_v1_3_2026-08-31.md)
+[docs/preregistered_semantics_v1_3_2026-08-31.md](docs/preregistered_semantics_v1_3_2026-08-31.md)
 for the atomic layer and
-[docs/refactor/canonical_semantic_foundation_v2.1.md](docs/refactor/canonical_semantic_foundation_v2.1.md)
+[docs/canonical_semantic_foundation_v2.1.md](docs/canonical_semantic_foundation_v2.1.md)
 for the Foundation projection.
 
 ## Build, Test, and Development Commands

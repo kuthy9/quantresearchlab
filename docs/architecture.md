@@ -8,20 +8,20 @@ This document describes the incremental/development data path and later
 subsystem ownership. Live mode currently fails closed.
 The current Eye semantic identity is `smc_semantics_v1.3`; its exact executable
 and reserved surface is recorded in the
-[semantic specification](smc_semantic_specification_v1.md). The Phase 2–4
+[semantic specification](smc_semantic_specification_v1.3.md). The Phase 2–4
 producer/state surface is executable within that frozen boundary; round-two
 review distinguishes this from completion of every target definition.
 The additive `smc_semantic_foundation_v2.1` projection now completes the
 registered geometry, generation, lifecycle, relation, transition, first-
 reinteraction, ancestry, and factual-outcome layer over those immutable facts.
 See the
-[foundation specification](refactor/canonical_semantic_foundation_v2.1.md).
+[foundation specification](canonical_semantic_foundation_v2.1.md).
 It reuses the existing detectors and immutable store; it is not a parallel Eye
 or a new action path.
 The current implementation-versus-plan matrix is recorded separately in the
-[current implementation status](refactor/current_implementation_status.md), and
+[current implementation status](current_implementation_status.md), and
 the registered atomic definitions in the
-[v1.3 preregistered semantics](refactor/preregistered_semantics_v1_3_2026-08-31.md).
+[v1.3 preregistered semantics](preregistered_semantics_v1_3_2026-08-31.md).
 The historical Phase 2–5, Phase 6–9, DOL/Belief/Temporal and round-two-review
 documents were removed on 2026-09-06; their still-current conclusions live in
 those two documents. Executable coverage is never treated as predictive
@@ -703,7 +703,7 @@ model and Shadow configuration. Both outputs remain historical evidence for
 their exact source snapshots: the compact runtime, action-policy, and Shadow
 schema changes require a new frozen identity before another parity claim. See
 the historical
-[release-verification table](refactor/canonical_semantic_foundation_v2.1.md#replay-test-and-empirical-boundary).
+[release-verification table](canonical_semantic_foundation_v2.1.md#replay-test-and-empirical-boundary).
 That result closed only its bound prefix. A new prefix or complete 6,900-clock
 rehearsal must be rematerialized, and neither is a real-time pilot.
 The current protocol tests deterministic equality and fail-stop behavior; it
@@ -763,7 +763,7 @@ projection from explicit typed link specifications and retains every qualifying
 sibling edge. That utility does not alter this frozen linear r2 protocol and is
 not itself evidence that any branching relationship is stable.
 See the
-[current implementation status](refactor/current_implementation_status.md).
+[current implementation status](current_implementation_status.md).
 
 Phase 6 is a different, completed MBO mechanism study. Its frozen primary week
 triggered the preregistered underpowered extension; the final two-week result

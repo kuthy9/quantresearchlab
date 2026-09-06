@@ -192,7 +192,7 @@ recoverability before deletion.
 The isolated three-config/three-CLI/three-test Neutral-B2 audit island and the
 non-authoritative prompt PDF were subsequently retired as one receipt-bound
 cleanup. Their exact preimage hashes and recovery command are preserved in the
-[retirement receipt](../evidence/neutral_b2_retirement_receipt.md). No runtime,
+[retirement receipt](evidence/neutral_b2_retirement_receipt.md). No runtime,
 current manifest, result, evidence, data, input, or output payload was deleted.
 
 The identical Week-1 bytes at `inputs/phase9_week1_flat_v2.jsonl` and
@@ -452,7 +452,7 @@ rolling OOF, or sealed OOS.
 ## Architecture-target conformance
 
 The former non-authoritative prompt PDF was retired under the
-[cleanup receipt](../evidence/neutral_b2_retirement_receipt.md). Its relevant
+[cleanup receipt](evidence/neutral_b2_retirement_receipt.md). Its relevant
 engineering invariants are now stated in repository-owned architecture and
 semantic contracts: causal `known_at`, immutable
 events, deterministic replay, parent/child isolation, Eye/Brain/Execution
@@ -637,13 +637,13 @@ silently rebound again.
 The two comparison wrappers, their no-input comparator, and their dedicated
 tests have therefore been retired. The exact preimage hashes and recovery
 command are in the
-[tooling retirement receipt](../evidence/foundation_comparison_tooling_retirement_2026-08-25.md).
+[tooling retirement receipt](evidence/foundation_comparison_tooling_retirement_2026-08-25.md).
 The generic semantic and MBO research runners remain; the historical manifests
 above remain unchanged and are not redirected to those generic runners.
 
 The separately frozen v1.2 protocol-v3 r2 development diagnostic completed.
-Its [manifest](../../experiments/manifests/smc_semantics_v1_2_2024_01_phase5_diagnostic_v3_r2.yaml)
-and [result](../../experiments/results/smc_semantics_v1_2_2024_01_phase5_diagnostic_v3_r2.json)
+Its [manifest](../experiments/manifests/smc_semantics_v1_2_2024_01_phase5_diagnostic_v3_r2.yaml)
+and [result](../experiments/results/smc_semantics_v1_2_2024_01_phase5_diagnostic_v3_r2.json)
 bind a complete 36,000-clock run, 30,477 real diagnostic bars, 157,802 atomic
 events, and six audit ledgers. Episode counts are E1–E6 =
 1,124 / 317 / 17 / 1 / 1 / 0. Quiet and non-sweep controls matched 372 and 62
@@ -676,8 +676,8 @@ Signal Research library can now project deterministic typed branching episodes
 without inferring missing edges or probabilities, but the frozen protocol-v3
 r2 result remains a linear historical diagnostic and supplies no branching
 evidence.
-See the final [manifest](../../experiments/manifests/smc_semantics_v1_2_2024_06_phase6_mbo_week2_extension_v3.yaml)
-and [result](../../experiments/results/smc_semantics_v1_2_2024_06_phase6_mbo_week2_extension_v3.json).
+See the final [manifest](../experiments/manifests/smc_semantics_v1_2_2024_06_phase6_mbo_week2_extension_v3.yaml)
+and [result](../experiments/results/smc_semantics_v1_2_2024_06_phase6_mbo_week2_extension_v3.json).
 
 ## Authority summary
 
