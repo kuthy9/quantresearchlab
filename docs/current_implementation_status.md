@@ -191,9 +191,10 @@ recoverability before deletion.
 
 The isolated three-config/three-CLI/three-test Neutral-B2 audit island and the
 non-authoritative prompt PDF were subsequently retired as one receipt-bound
-cleanup. Their exact preimage hashes and recovery command are preserved in the
-[retirement receipt](evidence/neutral_b2_retirement_receipt.md). No runtime,
-current manifest, result, evidence, data, input, or output payload was deleted.
+cleanup. The receipt that preserved their preimage hashes and recovery command
+was itself removed on 2026-09-06. No runtime,
+current manifest, result, evidence, data, input, or output payload was deleted
+by that cleanup.
 
 The identical Week-1 bytes at `inputs/phase9_week1_flat_v2.jsonl` and
 `inputs/phase9_w1_foundation_v3_7465a04.jsonl` remain deliberately addressable:
@@ -451,8 +452,8 @@ rolling OOF, or sealed OOS.
 
 ## Architecture-target conformance
 
-The former non-authoritative prompt PDF was retired under the
-[cleanup receipt](evidence/neutral_b2_retirement_receipt.md). Its relevant
+The former non-authoritative prompt PDF was retired under a cleanup receipt that
+has since been removed. Its relevant
 engineering invariants are now stated in repository-owned architecture and
 semantic contracts: causal `known_at`, immutable
 events, deterministic replay, parent/child isolation, Eye/Brain/Execution
@@ -635,9 +636,8 @@ comparison must use a new experiment identity, versioned manifest path and
 silently rebound again.
 
 The two comparison wrappers, their no-input comparator, and their dedicated
-tests have therefore been retired. The exact preimage hashes and recovery
-command are in the
-[tooling retirement receipt](evidence/foundation_comparison_tooling_retirement_2026-08-25.md).
+tests have therefore been retired. The tooling retirement receipt that recorded
+their preimage hashes and recovery command was removed on 2026-09-06.
 The generic semantic and MBO research runners remain; the historical manifests
 above remain unchanged and are not redirected to those generic runners.
 
