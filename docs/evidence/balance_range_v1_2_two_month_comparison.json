@@ -1,0 +1,45 @@
+{
+  "title": "balance_range_v1.2 two-month replay comparison",
+  "date": "2026-09-05",
+  "change": "Balance evidence moved from the source S/R zone's structural touch count to price interaction with the frozen boundary, counted in distinct test generations. Sub-protocol balance_range_v1.2; global semantic version unchanged at smc_semantics_v1.3; no registered threshold value moved.",
+  "atomic_definition_identity": {
+    "before": "6fb41a75080b0095c176a87ef95df2d134a3c4e88dc3fe332e67eee81b5de1c2",
+    "after": "7ca182b26418be6b7ecbceb62c581a2064f65bed663e0a704fde0c596de7d134"
+  },
+  "group4_protocol_sha256": {
+    "before": "9c5334e52bacd19a896cb326e02c77a3be4f932e9b09579929fdce7d9ccdbdf4",
+    "after": "68dbc01dbc8d7e7d190a149bd59929f1dec4b34d31d14c7ef1dc65e8d7e5b8db"
+  },
+  "note_on_fingerprints": "The store fingerprint binds the atomic definition identity, so it changes whenever the protocol does. It is not evidence that the event stream moved; the kind-by-kind comparison below is.",
+  "months": {
+    "2022-02": {
+      "bars_replayed": 27360,
+      "total_events_before": 356944,
+      "total_events_after": 356943,
+      "fingerprint_after": "30d4726b8a6334c80b04a9467e0d0fa7c9e76b3c1a6d435eb3f5ae7f7e71334b",
+      "event_kinds_compared": 47,
+      "event_kinds_changed": {
+        "balance_range_observed": {
+          "before": 1,
+          "after": 0
+        }
+      },
+      "dealing_range_lifecycles": {
+        "forming": 25,
+        "broken": 24
+      }
+    },
+    "2022-03": {
+      "bars_replayed": 31740,
+      "total_events_before": 405240,
+      "total_events_after": 405240,
+      "fingerprint_after": "8d9d8ddaa73a342105d2247700afec4e2ebfd0de7338cb6147d5d32ba8e0e2a6",
+      "event_kinds_compared": 47,
+      "event_kinds_changed": {},
+      "dealing_range_lifecycles": {
+        "forming": 27,
+        "broken": 26
+      }
+    }
+  }
+}

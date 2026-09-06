@@ -169,7 +169,7 @@ def test_engine_accepts_current_typed_config_and_rejects_incomplete_current_conf
     assert engine.observer.config.eye_authority_mode is False
     assert engine.observer.config.project_scene_graph is True
     assert engine.observer.semantic_registry.identity == (
-        "f2f70377f10c0715256882370ad69fb60fb33d80e606472533387c8ffb32dc9f"
+        "7ca182b26418be6b7ecbceb62c581a2064f65bed663e0a704fde0c596de7d134"
     )
     with pytest.raises(TypeError, match="runtime_mode"):
         ContinuousSMCEngine.from_config("configs/model.json")

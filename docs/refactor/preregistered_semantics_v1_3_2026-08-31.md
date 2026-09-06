@@ -2,7 +2,7 @@
 
 Status date: 2026-08-31
 Atomic identity: `smc_semantics_v1.3` ·
-`f2f70377f10c0715256882370ad69fb60fb33d80e606472533387c8ffb32dc9f`
+`7ca182b26418be6b7ecbceb62c581a2064f65bed663e0a704fde0c596de7d134`
 Foundation identity: `smc_semantic_foundation_v2.1` ·
 `69428dbfd2a9b2aa19f0254391fca2da17aedb8d0206829572e69c0cc212a715`
 Status: `preregistered_development_contract_not_oos_trading_authority`
@@ -287,9 +287,14 @@ A candidate that reaches 24 real H1 bars without maturing is terminalized with
 two-touch standard. **None** matured, in either month, and
 `sole_blocking_gate` is empty in both: no range was ever one gate away.
 
+These are the pre-`balance_range_v1.2` numbers, and the first row is the gate
+under its old evidence and old name — `bilateral_touches`, counting the source
+zone's structural touches. It is now `bilateral_price_tests`. The rest of the
+table is unaffected by that change.
+
 | gate | threshold | unmet 2022-02 | unmet 2022-03 | observed median (02 / 03) |
 |---|---|---:|---:|---|
-| bilateral_touches | ≥ 2 | 39/40 | 40/41 | 1.0 / 1.0 (max 2.0) |
+| bilateral_touches (old evidence) | ≥ 2 | 39/40 | 40/41 | 1.0 / 1.0 (max 2.0) |
 | compression | ≤ 0.8 | 37/40 | 37/41 | 1.0 / 1.0 |
 | midpoint_crossing | ≥ 2 | 34/40 | 30/41 | 0.0 / 0.0 |
 | width | ≤ 4.0 | 22/40 | 20/41 | 4.14 / 3.99 |
@@ -542,62 +547,309 @@ earlier runs and because one of them was a live correctness bug.
    state. Measured over the same 4,000 bars: **883 s → 473 s, 1.9× faster**, and
    the per-bar cost now grows 5.5× rather than 7.8× across that range.
 
+## Two v1.3 defects closed after the first two-month replay
+
+Both were recorded above as known problems of v1.3 and are now fixed. Neither
+moves a registered threshold: `balance_range_boundary_touches_each` is still 2,
+and no Group-4 maturity gate was touched. The atomic definition identity moves
+anyway, because the parameter file records both changes, so the freeze policy's
+drift detector still reports them rather than hiding them.
+
+### 1. `BALANCE_RANGE_OBSERVED` was unreachable, for two stacked reasons
+
+Both months reported `balance_observed: 0`. The diagnosis took two passes,
+because fixing the first cause exposed a second one underneath it that the
+first had been hiding.
+
+**The clock.** Group 4 recomputes every balance statistic on **every completed
+H1 bar** and writes them straight back onto the live range, but only a
+*lifecycle change* ever reached the emitter. A candidate that simply keeps
+forming has no next transition, so the earliest clock at which the Eye could
+say "both boundaries have now been tested" was, for most ranges, the transition
+that destroys them. The two clocks that did exist are exactly the two at which
+the count cannot have moved: formation is where the count is 1 by construction,
+and breaking is price leaving the interval, which is not a touch. Instrumenting
+every evaluation over six days (13 evaluations across 7 ranges) found `lower`
+was **1 in all 13** and `upper` 1 in 12 and 2 in one.
+
+The observation clock is now every completed H1 bar on which the range is live.
+Re-instrumented over 4,000 bars that turned 2 evaluation clocks per range into
+**1,841 evaluations across 6 ranges**, up to 13 distinct H1 clocks for a single
+range — and changed the result not at all. Every one of the 1,841 still read
+`(1, 1)`.
+
+**The evidence.** The counter could not move, and not because the market was
+quiet. Boundary touches were read from the source S/R zone's
+`total_touch_count`, and `_update_reference_contacts` skips
+`source_kind == "structural_swing"` zones outright — which is precisely the
+kind Group 4 builds range boundaries from. For those zones the only path that
+increments is `_add_touch`, which fires when *another confirmed swing* forms
+inside the zone. Price trading into the boundary, however many times, never
+counted. Measured over 2022-02: of 18 H1 zones the detector saw, **17 peaked at
+one touch for life** and one reached two; of the 9 ever consumed as a range
+boundary, **all 9 stayed at one**. A second confirmed H1 swing landing inside
+one narrow band during a range's 8–24 bar life is rare by construction, so the
+registered standard of 2 was unreachable in principle rather than merely
+demanding.
+
+That `continue` is deliberate, not a slip: it separates structural zones from
+reference zones. So the fix is not to delete it but to give balance its own
+evidence, which is what `balance_range_v1.2` does — see below. The structural
+touch count is untouched and keeps its meaning; it still feeds
+`boundary_test_strength` and the scene graph, and it travels beside the balance
+evidence on every `BALANCE_RANGE_OBSERVED` so a consumer can tell the two
+apart.
+
+### 1b. `balance_range_v1.2`: what a boundary test is
+
+Moving the clock proved the clock was not the binding constraint, so the
+evidence itself was re-registered. The sub-protocol carries its own version and
+the global semantic version stays at `smc_semantics_v1.3`, because no
+registered threshold moved: the two-sided standard is still 2, and no maturity
+gate parameter was tuned.
+
+A **test** is a completed H1 bar reaching into a boundary's tolerance band,
+
+    eps = max(1 tick, 0.25 x the ATR known before that bar)
+
+classified `touch_only`, `shallow_penetration`, `deep_penetration` or
+`close_outside`, escalating to the deepest reached. A **generation** is one
+continuous visit: price must leave the band before the next test can open, so a
+run of bars hugging a level counts once rather than once per bar.
+`close_outside` remains the range's own invalidation and is not a second
+concept. The maturity gate `bilateral_touches` became `bilateral_price_tests`
+and reads these generations; `boundary_test_strength` and the scene graph keep
+reading the structural touch count, which is untouched.
+
+The band is sized correctly, which had to be checked before any conclusion
+about rarity — an over-wide band would keep price permanently in-band, never
+close a generation, and produce the same "everything stuck at 1" signature as a
+rare phenomenon. Measured over 6,000 bars of 2022-02:
+
+| | min | median | max |
+|---|---:|---:|---:|
+| band / range width | 0.021 | **0.056** | 0.157 |
+| band (points) | 8.85 | 21.86 | 32.79 |
+| range width (points) | 131 | 442 | 474 |
+| prior H1 ATR (points) | 35.4 | 87.4 | 131.2 |
+
+In-band occupancy was 10 of 61 live H1 evaluations on the upper boundary and 5
+of 61 on the lower. Generations close constantly; the band is not the problem.
+
+### What the two months then said
+
+Each month was replayed alone, through the Eye-authority configuration, and
+compared kind by kind against the same month replayed immediately before this
+change.
+
+| | 2022-02 | 2022-03 |
+|---|---|---|
+| bars | 27,360 | 31,740 |
+| wall time | 3h36m (12,972 s) | 2h48m (10,092 s) |
+| total events | 356,943 | 405,240 |
+| **event kinds whose count changed** | **1 of 47** | **0 of 47** |
+| `balance_range_observed` | 1 → **0** | 0 → 0 |
+| `balance_range_matured` | 0 → 0 | 0 → 0 |
+| range lifecycles | forming 25 / broken 24, unchanged | forming 27 / broken 26, unchanged |
+
+Across two months and 762,000 events, exactly one event changed. The store
+fingerprint moves in both months regardless, because it binds the atomic
+definition identity and that identity necessarily changed with the protocol —
+it is not evidence that the stream moved, and the kind-by-kind comparison is.
+
+The one event moved *down*. That is the
+intended semantics rather than a regression: February's single observation came
+from a range whose source zone happened to gain a second confirmed swing, which
+under `balance_range_v1.2` is not evidence that price tested the boundary. The
+old counter was not merely late, it was counting the wrong thing.
+
+**Balance remains unreachable in this data, and the reason is now measured
+rather than inferred.** The per-bar record shows price *traversing* ranges
+rather than oscillating inside them: over 6,000 bars, 6 of the 10 recorded test
+generations were `close_outside` — the interaction that ends the range. One
+candidate spent thirteen consecutive live H1 bars 300+ points below its upper
+boundary and 25-90 points above its lower one, never reaching either band.
+
+The arithmetic says this is structural, not incidental. Median range width is
+442 points against a median H1 ATR of 87, so width/ATR is about **5.1** —
+already past the registered `maximum_width_atr_at_formation` of 4.0, which is
+why the width gate was unmet in 22 of 40 ranges before any of this. Testing
+both sides twice inside a 24-bar window would need roughly 4 x 442 = 1,768
+points of traversal, about 0.85 ATR of net directional travel every hour for a
+day.
+
+This reads as a candidate-selection problem, and that was the first
+conclusion drawn here. **It did not survive its own control.** Measuring the
+same evidence on arbitrary rolling H1 windows — intervals no filter has
+touched — gives a bilateral revisit rate of 4.06%. Group 4's ranges behave like
+arbitrary windows, and at that base rate a run of zeroes is exactly what a
+sample this size produces. Balance is rare in this market; the width arithmetic
+above describes *why* two-sided trade is uncommon at H1, not a defect in how
+Group 4 picks intervals. See
+`docs/evidence/balance_candidate_hypotheses_2026-09-05.md` for the three-arm
+comparison that settles this, and for the one generator that does beat the base
+rate.
+
+### 2. The hot Swing set grew for the life of the process
+
+`swing_hierarchy` kept every confirmed Swing forever, so
+`TimeframeState.__post_init__`, the rank projection onto live liquidity, the
+geometry settle and `to_primitive` all walked a population proportional to
+elapsed bars. A month therefore cost O(bars²) however cheap any single step
+became.
+
+A Swing leaves the hot set once nothing can still read it. Exactly two reads
+can reach an older Swing, and both were measured over 2022-02:
+
+| read | maximum reach | behaviour |
+|---|---:|---|
+| a later rank assignment naming an older Swing | **4** Swings back | flat across 3,500 bars |
+| the geometry tree's retroactive adoption | **447** Swings back | plateaued from bar 2,500 |
+
+The geometric reach is bounded by the span of the largest enabled timeframe's
+confirmation window, not by history, which is why it plateaus rather than
+grows. `swing_hierarchy_hot_retention` is registered at **2048** per timeframe:
+500× the assignment reach and 4.6× the geometric one. The complete role history
+stays in the immutable event stream, exactly as it already does for
+`structural_legs`.
+
+Two supporting changes were needed and are worth recording:
+
+- **The settle short circuit had to stop being a length test.** While the
+  hierarchy grew forever, "the tuple got longer" was an exact "this timeframe
+  confirmed nothing" test. Once the hot set is bounded its length stops
+  changing while Swings keep arriving, so that test would have silently stopped
+  admitting every Swing confirmed after the bound was reached. It is now tuple
+  identity, which the reducer already guarantees for an event that confirms
+  nothing.
+- **The per-bar rollback point no longer copies the tree.** Defect 3 above
+  replaced a deep copy with a shallow one, which was far cheaper but still
+  proportional to the whole Swing population on every bar. The tree now
+  journals the entries a publish is about to overwrite and replays them
+  backwards, so undoing one bar costs what that bar changed. `_starts` is
+  maintained beside the id order for the same reason: the bisect that bounds
+  every parent search used to rebuild it from every node.
+
+### What the bound does and does not change
+
+Replaying the same bars with the hot set bounded and unbounded, through the
+Eye-authority configuration (`persist_state_projections=False`), 1,200 bars at
+a deliberately punitive retention of 64:
+
+| | unbounded | bounded (64) |
+|---|---:|---:|
+| canonical semantic events | 15,224 | 15,224 |
+| events present in only one arm | — | **0** |
+| shared events differing in `strength` | — | **0** |
+| event id order | — | **identical, position by position** |
+
+So the bound changes no semantic fact the Eye publishes. It does change the
+**state projection** events, necessarily and by construction: those are a hash
+of the reduced state itself, and `swing_hierarchy` is part of that state. A
+3,000-bar run through `ContinuousSMCEngine` (which persists projections by
+default) returns an identical event count of 70,859 in both arms with a
+different `event_prefix_fingerprint` for exactly that reason. An identical
+count with a different fingerprint is the signature of projection transport
+moving, not of a detector moving.
+
+## The Structural Range lifecycle drops its balance-derived states
+
+**Date: 2026-09-06.** `DealingRangeLifecycle` was `forming -> mature -> broken`
+and is now `active -> broken`. `BALANCE_RANGE_MATURED` moves to
+`reserved_not_emitted`. No Group-4 candidate selection rule changed, no
+threshold moved, and no new detector was built.
+
+### Why
+
+`mature` was a grade the interval earned by balancing, and `forming` meant it
+had not earned one yet, so 96% of ranges were recorded as having failed. The
+three-arm comparison removed the grounds for that: 0 of 84 ranges reached a
+two-sided test, an arbitrary rolling H1 window reaches one 4.06% of the time,
+and the 95% interval on the range arm (0, 4.37%) still contains the base rate.
+The grade was recording a failure that was not occurring.
+
+### What the range keeps
+
+`created` is the event and `active` is the state. A range is a location from
+the moment it is created, so a separate `CREATED` lifecycle state would have
+zero duration and no observation could ever catch it; the birth is published as
+`DEALING_RANGE_CREATED` and the state it enters is `ACTIVE`. Exactly two range
+transitions exist per range — creation and break — and the entity timeline is
+now `("active", "broken")` rather than `("forming", "mature", "broken")`.
+
+Balance evidence is untouched. It is still collected on every completed H1 bar
+and still published once per range as `BALANCE_RANGE_OBSERVED`. When it meets
+the registered standard the claim *settles*, which is recorded on the range as
+the `balance_claim_confirmed` reason and the `balance_confirmed_at` clock
+(previously `mature_at`) and is deliberately **not** a transition: the interval
+is the same location it was on the bar before.
+
+### Two defects the change exposed
+
+1. **Boundary promotion lost its publisher.** The candidate liquidity levels a
+   settled claim mints were emitted from inside the `MATURE` transition. With
+   no such transition the inventory was still built but the levels were never
+   published, so inventory and event stream would have diverged silently.
+   Promotion now runs as its own pass over the live population
+   (`_record_confirmed_range_boundaries`), anchored on the range's creation
+   event — which is the truer provenance anyway: a boundary descends from the
+   interval that froze it, not from the claim that promoted it. The event
+   store's contract was updated to require `DEALING_RANGE_CREATED` as that
+   parent instead of `BALANCE_RANGE_MATURED`.
+2. **A broken range kept supplying Brain context.** `lifecycle is MATURE` had
+   carried two meanings at once — the claim is confirmed *and* the range is
+   alive — and replacing it with `balance_confirmed_at is not None` silently
+   dropped the second, because that clock survives the break. Three call sites
+   in `playbooks.py` now test both. This is the failure mode of splitting an
+   enum whose members carried more than one fact: every meaning has to be
+   written out again explicitly.
+
 ## Known semantic problems
 
-1. **The balance claim cannot be reached, and the cause is structural rather
-   than a threshold.** Both months report `balance_observed: 0` and
-   `balance_matured: 0`. Instrumenting every evaluation over six days (13
-   evaluations across 7 ranges) shows why, and neither reason is a gate value:
-
-   - **The gate is only ever evaluated at birth and at death.** A range's only
-     registered transitions are formation and breaking — the month's counts
-     agree exactly (25 created + 24 invalidated = 49 `dealing_range_state`
-     events) — and the observed lifecycles are `forming` (7) and `broken` (6),
-     nothing between. There is no intra-forming update to hang an observation
-     on, so a range that *did* get tested twice a side mid-life has no clock at
-     which to say so.
-   - **At those two clocks the count cannot have moved.** Boundary touches are
-     read from the source S/R zone's `total_touch_count`. The registry states
-     the consequence itself — "a range whose source pair exists always has at
-     least one touch per side and that alone is structure rather than evidence
-     of balance" — which is exactly why the threshold is 2: the second touch is
-     the evidence. But formation is where the count is 1 by construction, and
-     breaking is price leaving the interval, which is not a touch. Observed
-     distribution over the six days: `lower` was **1 in all 13** evaluations,
-     `upper` was 1 in 12 and 2 in one.
-
-   The registry already records the cause as a known limitation: "The Group-4
-   detector publishes no intra-forming update, so the observation clock is that
-   next registered transition rather than the second boundary test itself;
-   moving it earlier is a Group-4 protocol change." So this is not an
-   implementation that fails to do what it declares — it is a declared concept
-   whose clock makes it unreachable in practice. Tuning
-   `balance_range_boundary_touches_each` would not change that, and it was
-   correctly out of scope. The structural half of task 10 is done and measured
-   (25 and 27 intervals locate price from creation, which they could not do
-   under v1.2); **the balance half remains unverified, because a detector that
-   never fires cannot be said to work.**
-2. **`BALANCE_RANGE_OBSERVED` is published one transition late.** The detector
-   has no intra-forming update to hang it on. Given problem 1 this has not been
-   observable in production data.
-3. **UNRESOLVED penetrations (20.6% of crossings) have no registered concept**,
+1. **Balance is a maturity state of an object that does not exhibit it, and
+   width is not the reason.** After `balance_range_v1.2` the detector records
+   real evidence, but no range reached two test generations on both sides in
+   either month. A width-stratified study of all 52 ranges
+   (`docs/evidence/structural_range_width_strata_2026-09-05.md`) tested the
+   obvious explanation and falsified it: `P(bilateral)` is **0 in every
+   stratum** from ≤2 ATR to >5 ATR, with no gradient, and the single-sided rate
+   moves the wrong way — `upper ≥2` *rises* with width. Median lifetime rises
+   monotonically with width (2.0 → 12.0 H1 bars), so the narrowest ranges are
+   the ones that die fastest rather than the ones that get tested. Even the far
+   weaker "touch each side once, ever" is met by only 9 of 52. 50 of 52 ranges
+   ended with `close_beyond_frozen_range`, and 40 of the 71 recorded
+   interaction generations were `close_outside` — the interaction that destroys
+   the range. Price transits these intervals at every width instead of
+   oscillating inside them. This is consistent with Structural Range and
+   Balance Range being separate market objects, and with the forced
+   parent → maturity relation measuring a property the object does not have.
+   Removing that relation is a semantic change and is not attempted here. The
+   band itself was checked and is not the constraint (median 5.6% of range
+   width, in-band on 12% of live bars). A later three-arm comparison
+   (`docs/evidence/balance_candidate_hypotheses_2026-09-05.md`) put numbers on
+   it: an arbitrary rolling H1 window shows a bilateral revisit 4.06% of the
+   time, an independent shape scan 8.36%, and the Structural Range 0 of 84 with
+   an upper bound of 4.37%. Balance is simply rare; the Structural Range is not
+   worse than random at finding it, only no better, and the shape scan is
+   separated from both. Decoupling is supported but not cleanly, because a
+   window's extremes are touched by construction and a frozen boundary is not.
+2. **UNRESOLVED penetrations (20.6% of crossings) have no registered concept**,
    by design, because their signature is the non-occurrence of a future event.
-4. **`FVG_EXPIRED` and `DEALING_RANGE_EXTENDED` remain reserved** with no
+3. **`FVG_EXPIRED` and `DEALING_RANGE_EXTENDED` remain reserved** with no
    detector rule in either version. `fvg_expiry_bars` is registered with
    `value: null`: v1.3 does not infer expiry from age, and no threshold will be
    set until the retest statistics show high-age gaps approaching a random
    baseline.
-5. **The Eye's hot state still grows without bound.** Sampled every 500 bars:
-   `swing_hierarchy` (and with it the geometry population) grows linearly and
-   forever — 231 nodes at 500 bars, 1,875 at 4,000 — as does the event store
-   (6,188 → 51,535) and the liquidity candidate set (91 → 785). `event_memory`
-   is correctly capped at 512 and `structural_legs` is bounded, so the
-   accumulators are identifiable rather than diffuse. Because `to_primitive` and
-   `TimeframeState.__post_init__` walk the whole Swing population on every
-   published bar, per-bar cost stays proportional to history even after defect 3
-   was fixed, making a month O(bars²). Bounding `swing_hierarchy` would change
-   v1.2 behaviour and is not attempted here.
-6. **`smc_trader/model.py` imports Brain modules** (`path_belief`,
+4. **The event store and the liquidity candidate set still grow without
+   bound.** Sampled every 500 bars, the event store went 6,188 → 51,535 and
+   the liquidity candidate set 91 → 785 across 4,000 bars. `event_memory` is
+   capped at 512, `structural_legs` is bounded, and `swing_hierarchy` is now
+   bounded too (below), so the remaining accumulators are identifiable rather
+   than diffuse. The Swing geometry tree also still retains every node it ever
+   admitted: that is memory and checkpoint size only — no per-bar step walks
+   it any more — and it is deliberate, because evicting a node is the one thing
+   that could change a later geometric adoption.
+5. **`smc_trader/model.py` imports Brain modules** (`path_belief`,
    `dol_probability`, `dol_ranking`). It is a shared type module, not an
    Eye-only module, and the layering test does not catch this.
 

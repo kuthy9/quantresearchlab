@@ -3772,9 +3772,9 @@ def _lsr_optional_range_context(
         state
         for state in observation.frame(Timeframe.H1).dealing_ranges
         if (
-            state.lifecycle is DealingRangeLifecycle.MATURE
-            and state.mature_at is not None
-            and state.mature_at <= manipulation.swept_at
+            state.lifecycle is DealingRangeLifecycle.ACTIVE
+            and state.balance_confirmed_at is not None
+            and state.balance_confirmed_at <= manipulation.swept_at
             and state.range_id in crossed_ids
         )
     )
@@ -3853,7 +3853,7 @@ def _lsr_optional_range_context(
                 )
                 - source_boundary
             ),
-            context.dealing_range.mature_at,
+            context.dealing_range.balance_confirmed_at,
             context.dealing_range.range_id,
         ),
     )
@@ -4917,7 +4917,8 @@ def _select_favr_context(
         state
         for state in ranges.values()
         if (
-            state.lifecycle is DealingRangeLifecycle.MATURE
+            state.lifecycle is DealingRangeLifecycle.ACTIVE
+            and state.balance_confirmed_at is not None
             and state.range_id not in manipulated_range_ids
         )
     )
@@ -4925,7 +4926,7 @@ def _select_favr_context(
         return None, None
     selected = max(
         mature,
-        key=lambda state: (state.mature_at, state.range_id),
+        key=lambda state: (state.balance_confirmed_at, state.range_id),
     )
     return selected, None
 
@@ -5160,8 +5161,8 @@ def _typed_favr(
     )
     mature = bool(
         dealing_range is not None
-        and dealing_range.lifecycle is DealingRangeLifecycle.MATURE
-        and dealing_range.mature_at is not None
+        and dealing_range.lifecycle is DealingRangeLifecycle.ACTIVE
+        and dealing_range.balance_confirmed_at is not None
     )
     range_reaccepted = bool(
         mature
@@ -5269,7 +5270,7 @@ def _typed_favr(
     setup_clock = (
         manipulation.swept_at
         if manipulation is not None
-        else None if dealing_range is None else dealing_range.mature_at
+        else None if dealing_range is None else dealing_range.balance_confirmed_at
     )
     episode_identity = (
         None if manipulation is None else manipulation.manipulation_id
@@ -5348,7 +5349,7 @@ def _typed_favr(
             upper_bound=dealing_range.upper_bound,
             midpoint=dealing_range.midpoint,
             value_price=dealing_range.value_price,
-            mature_at=dealing_range.mature_at,
+            balance_confirmed_at=dealing_range.balance_confirmed_at,
             manipulation_side=manipulation.side,
             swept_at=manipulation.swept_at,
             manipulation_extreme=manipulation.sweep_extreme,
@@ -5561,7 +5562,7 @@ def _typed_favr(
         sequence_signals={
             "mature_dealing_range": _SequenceSignal(
                 float(mature),
-                None if dealing_range is None else dealing_range.mature_at,
+                None if dealing_range is None else dealing_range.balance_confirmed_at,
                 ()
                 if dealing_range is None
                 else (dealing_range.range_id,),

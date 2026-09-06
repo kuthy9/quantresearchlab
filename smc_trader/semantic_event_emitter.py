@@ -59,7 +59,11 @@ from .model import (
     clamp,
     to_primitive,
 )
-from .range_auction import CausalRangeAuctionTracker, RangeAuctionUpdate
+from .range_auction import (
+    BALANCE_CLAIM_ABANDONED,
+    CausalRangeAuctionTracker,
+    RangeAuctionUpdate,
+)
 from .scale_registry import _TIMEFRAME_MINUTES
 from .structure import StructureConfig
 from .zone import ZoneUpdate
@@ -3821,7 +3825,7 @@ class SemanticEventEmitter:
                     entity_id=state.range_id,
                     lifecycle=state.lifecycle.value,
                     formed_at=state.formed_at,
-                    confirmed_at=state.mature_at,
+                    confirmed_at=state.balance_confirmed_at,
                     ended_at=state.broken_at if terminal else None,
                     transition_reason=state.transition_reason,
                 )
@@ -3835,16 +3839,13 @@ class SemanticEventEmitter:
                 # lifecycle timeline transport, while the MARKET_EPOCH_RESET
                 # event owns the authoritative causal transition.
                 continue
+            # A Structural Range has two location facts and no third: it is
+            # created, and it is invalidated when price closes outside it.
+            # Balance is published separately as BALANCE_RANGE_OBSERVED and is
+            # never a transition of the interval.
             range_kind = {
-                DealingRangeLifecycle.FORMING: (
+                DealingRangeLifecycle.ACTIVE: (
                     EventKind.DEALING_RANGE_CREATED
-                ),
-                # Maturity is a claim about how price behaved inside the
-                # interval, not about where the interval is, so it is
-                # published as the balance fact rather than as a second
-                # location fact.
-                DealingRangeLifecycle.MATURE: (
-                    EventKind.BALANCE_RANGE_MATURED
                 ),
                 DealingRangeLifecycle.BROKEN: (
                     EventKind.DEALING_RANGE_INVALIDATED
@@ -3885,7 +3886,7 @@ class SemanticEventEmitter:
             except ValueError:
                 transition_bar_event_id = None
             if (
-                state.lifecycle is not DealingRangeLifecycle.FORMING
+                state.lifecycle is not DealingRangeLifecycle.ACTIVE
                 and created_event_id is None
                 and transition_bar_event_id is None
             ):
@@ -4022,7 +4023,7 @@ class SemanticEventEmitter:
                     known_at=state.state_started_at,
                 )
                 external_acceptance_event_id = accepted_event.event_id
-            if state.lifecycle is DealingRangeLifecycle.FORMING:
+            if state.lifecycle is DealingRangeLifecycle.ACTIVE:
                 range_sources = anchor_event_ids
             else:
                 if created_event_id is None:
@@ -4080,7 +4081,7 @@ class SemanticEventEmitter:
                 },
                 event_time=(
                     state.formed_at
-                    if state.lifecycle is DealingRangeLifecycle.FORMING
+                    if state.lifecycle is DealingRangeLifecycle.ACTIVE
                     else state.state_started_at
                 ),
                 zone=(state.lower_bound, state.upper_bound),
@@ -4095,16 +4096,16 @@ class SemanticEventEmitter:
             )
             self._record_balance_range_observation(
                 state,
-                range_event=range_event,
-                created_event_id=(
+                observed_at=state.state_started_at,
+                anchor_event_id=(
                     range_event.event_id
-                    if state.lifecycle is DealingRangeLifecycle.FORMING
-                    else created_event_id
+                    if state.lifecycle is DealingRangeLifecycle.ACTIVE
+                    else created_event_id or range_event.event_id
                 ),
-                transition_bar_event_id=transition_bar_event_id,
-                range_state_event_id=range_state_event.event_id,
+                bar_event_id=transition_bar_event_id,
+                context_event_ids=(range_state_event.event_id,),
             )
-            if state.lifecycle is DealingRangeLifecycle.FORMING:
+            if state.lifecycle is DealingRangeLifecycle.ACTIVE:
                 self._range_created_event_ids[state.range_id] = (
                     range_event.event_id
                 )
@@ -4130,67 +4131,7 @@ class SemanticEventEmitter:
                         zone=(state.lower_bound, state.upper_bound),
                     )
                     self._last_invalidated_range_event_id = None
-            elif state.lifecycle is DealingRangeLifecycle.MATURE:
-                self._range_active_event_ids[state.range_id] = (
-                    range_event.event_id
-                )
-                boundary_items = tuple(
-                    item
-                    for item in update.range_boundary_inventory
-                    if item.kind == "range_boundary"
-                    and state.range_id in item.source_ids
-                )
-                if {item.side for item in boundary_items} != {
-                    "above",
-                    "below",
-                }:
-                    if transition_bar_event_id is not None:
-                        raise ValueError(
-                            "active dealing range lacks its two frozen "
-                            "boundary inventory identities"
-                        )
-                    # Private legacy projector fixtures may exercise the
-                    # lifecycle transport without first registering normalized
-                    # BAR roots.  They are not an authoritative semantic DAG,
-                    # so do not manufacture boundary identities for them.
-                    boundary_items = ()
-                for item in boundary_items:
-                    self._range_boundary_level_ids[
-                        (state.range_id, item.side)
-                    ] = item.item_id
-                    if item.item_id in self._candidate_level_event_ids:
-                        continue
-                    candidate = self._append_semantic_atomic(
-                        EventKind.LIQUIDITY_LEVEL_CREATED,
-                        state.state_started_at,
-                        Timeframe.H1,
-                        item.side,
-                        item.price,
-                        item.strength,
-                        (range_event.event_id,),
-                        {
-                            "level_id": item.item_id,
-                            "range_id": state.range_id,
-                            "candidate_only": True,
-                            "source_kind": "mature_range_boundary",
-                            "source_ids": item.source_ids,
-                            "source_formed_at": item.formed_at.isoformat(),
-                            "source_confirmed_at": (
-                                item.confirmed_at.isoformat()
-                            ),
-                        },
-                        event_time=item.confirmed_at,
-                        zone=(item.lower_bound, item.upper_bound),
-                        source_entity_ids=(
-                            item.item_id,
-                            state.range_id,
-                            *item.source_ids,
-                        ),
-                    )
-                    self._candidate_level_event_ids[item.item_id] = (
-                        candidate.event_id
-                    )
-            elif state.lifecycle is DealingRangeLifecycle.BROKEN:
+            if state.lifecycle is DealingRangeLifecycle.BROKEN:
                 self._range_terminal_event_ids[state.range_id] = (
                     range_event.event_id
                 )
@@ -4205,6 +4146,12 @@ class SemanticEventEmitter:
         # SWEPT) as a new creation in the fresh epoch.
         if boundary_reason is not None:
             return
+
+        if include_ranges:
+            # Boundary promotion first: the levels a settled claim mints
+            # are ancestry the observation may cite.
+            self._record_confirmed_range_boundaries(update)
+            self._record_live_balance_range_observations(update)
 
         # Publish the physical mature-boundary crossing independently of
         # whether Group 4 has enough prior ATR to classify a manipulation.
@@ -4530,52 +4477,184 @@ class SemanticEventEmitter:
                     known_at=state.resolved_at,
                 )
 
+    def _record_live_balance_range_observations(
+        self,
+        update: RangeAuctionUpdate,
+    ) -> None:
+        """Test the balance claim on every completed H1 bar.
+
+        Group 4 recomputes each candidate's boundary touches, midpoint
+        crossings, inside-close fraction and compression on every completed H1
+        bar, but only a lifecycle change ever reached the emitter.  A candidate
+        that simply keeps forming has no next transition, so the registered
+        two-sided test could be met for an entire month with no clock on which
+        the Eye was allowed to say so.  The claim is still published exactly
+        once per range -- on the first bar that meets the frozen standard.
+        """
+
+        for state in update.dealing_ranges:
+            if (
+                state.lifecycle is DealingRangeLifecycle.BROKEN
+                or state.transition_reason == BALANCE_CLAIM_ABANDONED
+                or state.range_id in self._balance_range_observed_event_ids
+            ):
+                continue
+            anchor_event_id = self._range_created_event_ids.get(
+                state.range_id
+            )
+            if anchor_event_id is None:
+                # A compatibility caller can project an isolated range without
+                # its normalized history.  An authoritative semantic fact may
+                # never invent the ancestry it lacks.
+                continue
+            try:
+                bar_event_id = self._bar_event_id_at(
+                    Timeframe.H1,
+                    state.last_updated_at,
+                )
+            except ValueError:
+                bar_event_id = None
+            self._record_balance_range_observation(
+                state,
+                observed_at=state.last_updated_at,
+                anchor_event_id=anchor_event_id,
+                bar_event_id=bar_event_id,
+            )
+
+    def _record_confirmed_range_boundaries(
+        self,
+        update: RangeAuctionUpdate,
+    ) -> None:
+        """Publish the boundary levels a settled balance claim promotes.
+
+        Settling the claim is not a transition of the Structural Range -- the
+        interval is the same location it was on the previous bar -- so this
+        runs over the live population rather than over transitions.  Provenance
+        is the range's own creation event: a boundary level descends from the
+        interval that froze it, never from the claim that promoted it.
+        """
+
+        for state in update.dealing_ranges:
+            if (
+                state.balance_confirmed_at is None
+                or state.range_id in self._range_active_event_ids
+            ):
+                continue
+            created_event_id = self._range_created_event_ids.get(
+                state.range_id
+            )
+            if created_event_id is None:
+                continue
+            boundary_items = tuple(
+                item
+                for item in update.range_boundary_inventory
+                if item.kind == "range_boundary"
+                and state.range_id in item.source_ids
+            )
+            if {item.side for item in boundary_items} != {"above", "below"}:
+                # A private projector fixture can settle a claim without a
+                # normalized inventory behind it.  That is not an
+                # authoritative DAG, so do not invent identities for it.
+                continue
+            self._range_active_event_ids[state.range_id] = created_event_id
+            for item in boundary_items:
+                self._range_boundary_level_ids[
+                    (state.range_id, item.side)
+                ] = item.item_id
+                if item.item_id in self._candidate_level_event_ids:
+                    continue
+                candidate = self._append_semantic_atomic(
+                    EventKind.LIQUIDITY_LEVEL_CREATED,
+                    state.balance_confirmed_at,
+                    Timeframe.H1,
+                    item.side,
+                    item.price,
+                    item.strength,
+                    (created_event_id,),
+                    {
+                        "level_id": item.item_id,
+                        "range_id": state.range_id,
+                        "candidate_only": True,
+                        "source_kind": "mature_range_boundary",
+                        "source_ids": item.source_ids,
+                        "source_formed_at": item.formed_at.isoformat(),
+                        "source_confirmed_at": (
+                            item.confirmed_at.isoformat()
+                        ),
+                    },
+                    event_time=item.confirmed_at,
+                    zone=(item.lower_bound, item.upper_bound),
+                    source_entity_ids=(
+                        item.item_id,
+                        state.range_id,
+                        *item.source_ids,
+                    ),
+                )
+                self._candidate_level_event_ids[item.item_id] = (
+                    candidate.event_id
+                )
+
     def _record_balance_range_observation(
         self,
         state: DealingRangeState,
         *,
-        range_event: MarketEvent,
-        created_event_id: str | None,
-        transition_bar_event_id: str | None,
-        range_state_event_id: str,
+        observed_at: pd.Timestamp,
+        anchor_event_id: str,
+        bar_event_id: str | None,
+        context_event_ids: tuple[str, ...] = (),
     ) -> None:
         """Publish the balance claim over an existing structural range, once.
 
         Failing to balance never invalidates the location, so this is a
         separate append-only fact rather than a lifecycle of the range itself.
-        The Group-4 detector surfaces no intra-forming update, so the earliest
-        clock at which the Eye can state "both boundaries have been tested" is
-        the range's next registered transition.
+        ``observed_at`` is the completed H1 bar at which the registered
+        two-sided test was first met, which is a live bar for a candidate that
+        keeps forming and the transition clock for one that changes lifecycle
+        on the same bar.  Under ``balance_range_v1.2`` the test is price
+        interacting with each frozen boundary, counted in distinct visits, not
+        the source zone's structural touch count.
         """
 
-        minimum_touches = int(
+        minimum_tests = int(
             self.semantic_registry.parameters.parameters[
-                "balance_range_boundary_touches_each"
+                "balance_range_bilateral_price_tests_each"
             ]["value"]
         )
         if (
             state.range_id in self._balance_range_observed_event_ids
-            or state.lower_touch_count < minimum_touches
-            or state.upper_touch_count < minimum_touches
+            or state.balance_lower_test_generations < minimum_tests
+            or state.balance_upper_test_generations < minimum_tests
         ):
             return
-        anchor_event_id = created_event_id or range_event.event_id
         observed = self._append_semantic_atomic(
             EventKind.BALANCE_RANGE_OBSERVED,
-            state.state_started_at,
+            observed_at,
             Timeframe.H1,
             None,
             state.midpoint,
             state.strength,
             (
                 anchor_event_id,
-                *((
-                    transition_bar_event_id,
-                ) if transition_bar_event_id else ()),
+                *((bar_event_id,) if bar_event_id else ()),
             ),
             {
                 "range_id": state.range_id,
                 "structural_range_event_id": anchor_event_id,
+                # The balance evidence, and beside it the structural touch
+                # count it is now decoupled from: the two are different claims
+                # and a consumer must be able to tell them apart.
+                "balance_lower_test_generations": int(
+                    state.balance_lower_test_generations
+                ),
+                "balance_upper_test_generations": int(
+                    state.balance_upper_test_generations
+                ),
+                "balance_lower_test_kinds": tuple(
+                    state.balance_lower_test_kinds
+                ),
+                "balance_upper_test_kinds": tuple(
+                    state.balance_upper_test_kinds
+                ),
                 "lower_touch_count": int(state.lower_touch_count),
                 "upper_touch_count": int(state.upper_touch_count),
                 "midpoint_crossings": int(state.midpoint_crossings),
@@ -4588,12 +4667,12 @@ class SemanticEventEmitter:
                 ),
                 "age_h1_bars": int(state.age_h1_bars),
                 "observed_at_lifecycle": state.lifecycle.value,
-                "boundary_touches_each_standard": minimum_touches,
+                "bilateral_price_tests_each_standard": minimum_tests,
             },
-            event_time=state.state_started_at,
+            event_time=observed_at,
             zone=(state.lower_bound, state.upper_bound),
             source_entity_ids=(state.range_id,),
-            context_event_ids=(range_state_event_id,),
+            context_event_ids=context_event_ids,
         )
         self._balance_range_observed_event_ids[state.range_id] = (
             observed.event_id

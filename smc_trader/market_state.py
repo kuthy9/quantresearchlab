@@ -65,7 +65,7 @@ if TYPE_CHECKING:
     from .semantic_foundation import FoundationRecord
 
 
-MARKET_SNAPSHOT_SCHEMA_VERSION = 7
+MARKET_SNAPSHOT_SCHEMA_VERSION = 8
 TIMEFRAME_EVENT_REDUCER_SCHEMA_VERSION = 3
 
 
@@ -302,6 +302,17 @@ _SWING_RANK_DEPTH = {
     SwingRank.STRUCTURAL: 2,
     SwingRank.EXTERNAL: 3,
 }
+
+# How many confirmed Swings one timeframe keeps in reduced state.  The
+# immutable event stream owns the complete role history; the current public
+# state keeps only a bounded recent working set, exactly as ``structural_legs``
+# does.  Two reads can still reach an older Swing, and both were measured over
+# 2022-02: a later rank assignment reached at most 4 Swings back on its own
+# timeframe, and the geometry tree's retroactive adoption at most 447 -- bounded
+# by the span of the largest enabled timeframe's confirmation window rather than
+# by elapsed bars.  The window carries a wide margin over both, so eviction only
+# ever drops Swings that nothing reads.
+SWING_HIERARCHY_HOT_RETENTION = 2048
 
 
 @dataclass(frozen=True)
@@ -1638,9 +1649,9 @@ def _advance_level_rearm(
     )
 
 
-# A structural range locates price whenever it exists and price has not
-# closed outside it.  ``active``/``mature`` are the balance claim's spellings
-# and are included because a balanced range is still a structural one.
+# A structural range locates price whenever it exists and price has not closed
+# outside it.  The historical spellings are kept so journals written before the
+# lifecycle lost its balance-derived states still reduce.
 _LOCATING_RANGE_LIFECYCLES = frozenset(
     {"created", "forming", "extended", "replaced", "active", "mature"}
 )
@@ -1782,7 +1793,17 @@ class SwingGeometryTree:
     assignment would leave almost everything a root.
     """
 
-    __slots__ = ("_nodes", "_parent", "_children", "_depth", "_index")
+    _JOURNALLED = ("_nodes", "_parent", "_children", "_depth", "_index", "_starts")
+
+    __slots__ = (
+        "_nodes",
+        "_parent",
+        "_children",
+        "_depth",
+        "_index",
+        "_starts",
+        "_undo",
+    )
 
     def __init__(self) -> None:
         self._nodes: dict[str, SwingHierarchyView] = {}
@@ -1792,34 +1813,75 @@ class SwingGeometryTree:
         # Per timeframe, swing ids ordered by window_start.  Windows on one
         # timeframe all share a length, so this orders window_end too.
         self._index: dict[Timeframe, list[str]] = {}
+        # The same order as ``_index``, holding the window starts themselves so
+        # the bisect that bounds every search never rebuilds them from nodes.
+        self._starts: dict[Timeframe, list[pd.Timestamp]] = {}
+        self._undo: list[tuple[str, object, bool, object]] | None = None
 
     def clear(self) -> None:
+        self._record_whole()
         self._nodes.clear()
         self._parent.clear()
         self._children.clear()
         self._depth.clear()
         self._index.clear()
+        self._starts.clear()
 
-    def snapshot(self) -> dict[str, object]:
-        """A rollback point that does not copy the history it protects.
+    def begin(self) -> None:
+        """Start journalling so one publish attempt can be undone.
 
-        Only the containers are copied.  Every value they hold is either a
-        frozen view or a string, and nothing here is ever mutated in place, so
-        sharing the values restores exactly as much state as copying them --
-        without paying for the whole Swing population on every bar.
+        A bar changes a bounded number of entries, so recording what it is
+        about to overwrite costs what the bar changed.  Copying the containers
+        instead costs the whole Swing population on every bar, including the
+        overwhelming majority of bars that confirm nothing.
         """
 
-        return {
-            "_nodes": dict(self._nodes),
-            "_parent": dict(self._parent),
-            "_children": {key: list(value) for key, value in self._children.items()},
-            "_depth": dict(self._depth),
-            "_index": {key: list(value) for key, value in self._index.items()},
-        }
+        self._undo = []
 
-    def restore(self, state: Mapping[str, object]) -> None:
-        for name, value in state.items():
-            setattr(self, name, value)
+    def commit(self) -> None:
+        self._undo = None
+
+    def rollback(self) -> None:
+        if self._undo is None:
+            return
+        for name, key, present, value in reversed(self._undo):
+            container = getattr(self, name)
+            if key is None:
+                setattr(self, name, value)
+            elif present:
+                container[key] = value
+            else:
+                container.pop(key, None)
+        self._undo = None
+
+    def _record(self, name: str, key: object) -> None:
+        if self._undo is None:
+            return
+        container = getattr(self, name)
+        present = key in container
+        value = container[key] if present else None
+        self._undo.append(
+            (name, key, present, list(value) if type(value) is list else value)
+        )
+
+    def _record_whole(self) -> None:
+        """An epoch reset replaces everything, so nothing narrower undoes it."""
+
+        if self._undo is None:
+            return
+        for name in self._JOURNALLED:
+            container = getattr(self, name)
+            self._undo.append(
+                (
+                    name,
+                    None,
+                    True,
+                    {
+                        key: list(value) if type(value) is list else value
+                        for key, value in container.items()
+                    },
+                )
+            )
 
     def view_of(self, swing: SwingHierarchyView) -> SwingHierarchyView:
         """Return ``swing`` carrying its settled place in the tree."""
@@ -1840,12 +1902,6 @@ class SwingGeometryTree:
             child_ids=children,
         )
 
-    def _starts(self, timeframe: Timeframe) -> list[pd.Timestamp]:
-        return [
-            self._nodes[swing_id].window_start
-            for swing_id in self._index.get(timeframe, ())
-        ]
-
     def _tightest(self, left: str | None, right: str) -> str:
         if left is None:
             return right
@@ -1859,7 +1915,7 @@ class SwingGeometryTree:
         for timeframe, order in self._index.items():
             if not order:
                 continue
-            starts = self._starts(timeframe)
+            starts = self._starts[timeframe]
             cursor = bisect_right(starts, child.window_start) - 1
             while cursor >= 0:
                 candidate = self._nodes[order[cursor]]
@@ -1882,7 +1938,7 @@ class SwingGeometryTree:
         for timeframe, order in self._index.items():
             if not order:
                 continue
-            starts = self._starts(timeframe)
+            starts = self._starts[timeframe]
             cursor = bisect_left(starts, parent.window_start)
             while cursor < len(order):
                 candidate = self._nodes[order[cursor]]
@@ -1902,9 +1958,12 @@ class SwingGeometryTree:
         if incumbent is not None:
             siblings = self._children.get(incumbent)
             if siblings is not None and child_id in siblings:
+                self._record("_children", incumbent)
                 siblings.remove(child_id)
+        self._record("_parent", child_id)
         self._parent[child_id] = parent_id
         if parent_id is not None:
+            self._record("_children", parent_id)
             self._children.setdefault(parent_id, []).append(child_id)
 
     def _resettle_depths(self, roots: Iterable[str]) -> set[str]:
@@ -1918,6 +1977,7 @@ class SwingGeometryTree:
             depth = 0 if parent_id is None else self._depth.get(parent_id, 0) + 1
             if self._depth.get(swing_id) == depth and swing_id in touched:
                 continue
+            self._record("_depth", swing_id)
             self._depth[swing_id] = depth
             touched.add(swing_id)
             pending.extend(self._children.get(swing_id, ()))
@@ -1928,12 +1988,16 @@ class SwingGeometryTree:
 
         if swing.window_start is None or swing.swing_id in self._nodes:
             return set()
+        self._record("_nodes", swing.swing_id)
         self._nodes[swing.swing_id] = swing
+        self._record("_index", swing.timeframe)
+        self._record("_starts", swing.timeframe)
         order = self._index.setdefault(swing.timeframe, [])
-        starts = self._starts(swing.timeframe)
-        order.insert(
-            bisect_right(starts, swing.window_start), swing.swing_id
-        )
+        starts = self._starts.setdefault(swing.timeframe, [])
+        position = bisect_right(starts, swing.window_start)
+        order.insert(position, swing.swing_id)
+        starts.insert(position, swing.window_start)
+        self._record("_children", swing.swing_id)
         self._children.setdefault(swing.swing_id, [])
 
         moved = {swing.swing_id}
@@ -2003,6 +2067,17 @@ def _swing_hierarchy_transition(
             nesting_depth=_SWING_RANK_DEPTH[maximum],
             assignments=assignments,
         )
+    if len(by_id) > SWING_HIERARCHY_HOT_RETENTION:
+        # Confirmation order, not identifier order: a Swing leaves the working
+        # set because it is old, and its identifier says nothing about when it
+        # was confirmed.
+        by_id = {
+            item.swing_id: item
+            for item in sorted(
+                by_id.values(),
+                key=lambda item: (item.assignments[0].assigned_at, item.swing_id),
+            )[-SWING_HIERARCHY_HOT_RETENTION:]
+        }
     return tuple(sorted(by_id.values(), key=lambda item: item.swing_id))
 
 
@@ -4273,7 +4348,7 @@ class MarketSnapshotPublisher:
         (Timeframe.M15, Timeframe.M5),
         (Timeframe.M5, Timeframe.M1),
     )
-    _STATE_SCHEMA_VERSION = 7
+    _STATE_SCHEMA_VERSION = 8
     _PICKLE_FIELDS = frozenset(
         {
             "semantic_registry_identity",
@@ -4293,7 +4368,7 @@ class MarketSnapshotPublisher:
             "_relation_generations",
             "_relation_generation_ordinals",
             "_swing_geometry",
-            "_swing_hierarchy_sizes",
+            "_settled_hierarchies",
             "_retired_relation_generations",
             "_real_m1_bar_ordinal",
             "_publisher_state_schema_version",
@@ -4347,7 +4422,9 @@ class MarketSnapshotPublisher:
         self._relation_generations: dict[str, RelationGenerationState] = {}
         self._relation_generation_ordinals: dict[str, int] = {}
         self._swing_geometry = SwingGeometryTree()
-        self._swing_hierarchy_sizes: dict[Timeframe, int] = {}
+        self._settled_hierarchies: dict[
+            Timeframe, tuple[SwingHierarchyView, ...]
+        ] = {}
         # Closed on the current bar only, so a terminated occupancy is
         # published exactly once alongside the successor that replaced it.
         self._retired_relation_generations: tuple[
@@ -4798,14 +4875,15 @@ class MarketSnapshotPublisher:
 
         moved: set[str] = set()
         for timeframe, state in states.items():
-            # A hierarchy only ever grows, so an unchanged length is an exact
-            # "nothing was confirmed here" test.  Without it every bar walks
-            # the whole population again, which is the cost the incremental
-            # tree exists to avoid.
+            # The reducer returns the very same tuple when an event confirms
+            # nothing, so identity is an exact "nothing was confirmed here"
+            # test.  Length is not: the hot set is bounded, so once it is full
+            # its length stops changing while Swings keep arriving, and a
+            # length test would silently stop admitting all of them.
             hierarchy = state.swing_hierarchy
-            if len(hierarchy) == self._swing_hierarchy_sizes.get(timeframe):
+            if hierarchy is self._settled_hierarchies.get(timeframe):
                 continue
-            self._swing_hierarchy_sizes[timeframe] = len(hierarchy)
+            self._settled_hierarchies[timeframe] = hierarchy
             for swing in hierarchy:
                 moved |= self._swing_geometry.admit(swing)
         if not moved:
@@ -4824,6 +4902,7 @@ class MarketSnapshotPublisher:
             # Persist the settled views so the reducer carries them forward and
             # a bar that confirms nothing re-derives nothing.
             self._event_reducer.states[timeframe] = settled
+            self._settled_hierarchies[timeframe] = settled.swing_hierarchy
         return updated
 
     def _active_structure_generation_id(
@@ -4934,7 +5013,7 @@ class MarketSnapshotPublisher:
         self._relation_generations.clear()
         self._retired_relation_generations = ()
         self._swing_geometry.clear()
-        self._swing_hierarchy_sizes.clear()
+        self._settled_hierarchies.clear()
         # Ordinals keep counting across an epoch reset so a generation identity
         # is never reused for a different structural claim.
         # Do not clear the authoritative event DAG out of band.  A boundary
@@ -5804,16 +5883,16 @@ class MarketSnapshotPublisher:
                 self._structure_generation_ordinals
             ),
             "_relation_generations": dict(self._relation_generations),
-            "_swing_geometry": self._swing_geometry.snapshot(),
-            "_swing_hierarchy_sizes": dict(self._swing_hierarchy_sizes),
+            "_settled_hierarchies": dict(self._settled_hierarchies),
             "_relation_generation_ordinals": dict(
                 self._relation_generation_ordinals
             ),
             "_retired_relation_generations": self._retired_relation_generations,
             "_real_m1_bar_ordinal": self._real_m1_bar_ordinal,
         }
+        self._swing_geometry.begin()
         try:
-            return self._publish_committed_suffix(
+            published = self._publish_committed_suffix(
                 asof=asof,
                 symbol=symbol,
                 instrument_id=instrument_id,
@@ -5829,11 +5908,11 @@ class MarketSnapshotPublisher:
             for name, value in reducer_state.items():
                 setattr(self._event_reducer, name, value)
             for name, value in publisher_state.items():
-                if name == "_swing_geometry":
-                    self._swing_geometry.restore(value)
-                    continue
                 setattr(self, name, value)
+            self._swing_geometry.rollback()
             raise
+        self._swing_geometry.commit()
+        return published
 
     def _publish_committed_suffix(
         self,
@@ -6360,6 +6439,7 @@ __all__ = [
     "TimeframeZoneState",
     "build_structural_range",
     "build_structural_legs",
+    "SWING_HIERARCHY_HOT_RETENTION",
     "build_swing_geometry_nodes",
     "foundation_record_from_projection_event",
     "reduce_hierarchical_state",

@@ -4,7 +4,7 @@ Status date: 2026-08-27
 Runtime semantic identity: `smc_semantics_v1.3`
 Canonical foundation identity: `smc_semantic_foundation_v2.1`
 Canonical foundation registry identity: `69428dbfd2a9b2aa19f0254391fca2da17aedb8d0206829572e69c0cc212a715`
-Atomic registry identity: `f2f70377f10c0715256882370ad69fb60fb33d80e606472533387c8ffb32dc9f`
+Atomic registry identity: `7ca182b26418be6b7ecbceb62c581a2064f65bed663e0a704fde0c596de7d134`
 The frozen `smc_semantics_v1.2` / `smc_semantic_foundation_v2.0` pair remains
 the identity of every historical artifact below; it is not the runtime.
 

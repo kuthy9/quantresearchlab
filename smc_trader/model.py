@@ -486,8 +486,17 @@ class OrderBlockAttemptOutcome(str, Enum):
 
 
 class DealingRangeLifecycle(str, Enum):
-    FORMING = "forming"
-    MATURE = "mature"
+    """A Structural Range is created, is a location, and is eventually left.
+
+    ``mature`` was a grade the range earned by balancing, and ``forming`` meant
+    it had not earned one yet.  Balance turned out to be rare in the market
+    rather than absent from these intervals -- 0 of 84 ranges reached a
+    two-sided test where an arbitrary H1 window reaches one 4.06% of the time,
+    which the sample cannot separate -- so the grade recorded a failure that was
+    never occurring.  A location has no grade.
+    """
+
+    ACTIVE = "active"
     BROKEN = "broken"
 
 
@@ -2503,9 +2512,23 @@ RANGE_PAIR_FUNNEL_COUNTS = (
     "forming_selected",
 )
 
+# One visit to a boundary band, classified by how far price got.  The order is
+# the escalation order: a generation keeps the deepest interaction it reached.
+BALANCE_PRICE_TEST_KINDS = (
+    "touch_only",
+    "shallow_penetration",
+    "deep_penetration",
+    "close_outside",
+)
+
+
 RANGE_MATURITY_GATE_NAMES = (
     "duration",
-    "bilateral_touches",
+    # Balance evidence is price interacting with the frozen boundary, not the
+    # source zone's structural touch count -- a structural_swing zone only
+    # counts a touch when another confirmed swing forms inside it, which is
+    # not what "both sides were tested" means.  See balance_range_v1.2.
+    "bilateral_price_tests",
     "midpoint_crossing",
     "inside_close_fraction",
     "width",
@@ -2635,6 +2658,10 @@ class RangeFormationFunnelSnapshot:
 # A candidate that never balanced has lost its balance claim and nothing else.
 # The structural interval keeps locating price until price closes outside it.
 BALANCE_CLAIM_ABANDONED = "balance_claim_abandoned"
+# The balance claim met the registered standard.  This settles the claim and
+# promotes the boundaries to inventory; it is not a state of the range, which
+# stays ACTIVE until price closes outside it.
+BALANCE_CLAIM_CONFIRMED = "balance_claim_confirmed"
 
 
 
@@ -2662,7 +2689,7 @@ class DealingRangeState:
     upper_source_lower_bound: float
     upper_source_upper_bound: float
     formed_at: pd.Timestamp
-    mature_at: pd.Timestamp | None
+    balance_confirmed_at: pd.Timestamp | None
     broken_at: pd.Timestamp | None
     state_started_at: pd.Timestamp
     last_updated_at: pd.Timestamp
@@ -2686,6 +2713,14 @@ class DealingRangeState:
     strength: float
     age_h1_bars: int
     transition_reason: str | None
+    # Balance evidence, kept strictly separate from the structural touch counts
+    # above.  One generation is one continuous visit to a boundary's tolerance
+    # band: price has to leave the band and come back for the next to open, so
+    # a bar-by-bar hug of the level counts once, not once per bar.
+    balance_lower_test_generations: int = 0
+    balance_upper_test_generations: int = 0
+    balance_lower_test_kinds: tuple[str, ...] = ()
+    balance_upper_test_kinds: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         lower_members = tuple(self.lower_source_member_swing_ids)
@@ -2748,7 +2783,7 @@ class DealingRangeState:
         for name in (
             "lower_source_tested_at",
             "upper_source_tested_at",
-            "mature_at",
+            "balance_confirmed_at",
             "broken_at",
         ):
             value = getattr(self, name)
@@ -2842,6 +2877,17 @@ class DealingRangeState:
             or self.age_h1_bars < self.candidate_real_h1_bars - 1
         ):
             raise ValueError("dealing-range incremental counts are invalid")
+        for side in ("lower", "upper"):
+            kinds = tuple(getattr(self, f"balance_{side}_test_kinds"))
+            object.__setattr__(self, f"balance_{side}_test_kinds", kinds)
+            generations = getattr(self, f"balance_{side}_test_generations")
+            if (
+                type(generations) is not int
+                or generations < 0
+                or len(kinds) != generations
+                or any(kind not in BALANCE_PRICE_TEST_KINDS for kind in kinds)
+            ):
+                raise ValueError("dealing-range balance price tests are invalid")
         continuous_fields = (
             self.inside_close_fraction,
             self.compression_ratio,
@@ -2932,9 +2978,9 @@ class DealingRangeState:
                 raise ValueError(
                     "repeated range-boundary touches require a tested clock"
                 )
-        if self.mature_at is not None and (
-            self.mature_at < self.formed_at
-            or self.mature_at > self.last_updated_at
+        if self.balance_confirmed_at is not None and (
+            self.balance_confirmed_at < self.formed_at
+            or self.balance_confirmed_at > self.last_updated_at
             or self.candidate_real_h1_bars < 8
             or self.lower_touch_count < 2
             or self.upper_touch_count < 2
@@ -2949,47 +2995,37 @@ class DealingRangeState:
         if self.broken_at is not None and (
             self.broken_at <= self.formed_at
             or self.broken_at > self.last_updated_at
-            or (
-                self.mature_at is not None
-                and self.broken_at <= self.mature_at
-            )
         ):
             raise ValueError("dealing-range break clock is invalid")
         if self.transition_reason == "":
             raise ValueError("dealing-range transition reason cannot be empty")
-        if self.lifecycle is DealingRangeLifecycle.FORMING:
+        if self.lifecycle is DealingRangeLifecycle.ACTIVE:
             # A candidate that ran out of room to prove balance keeps its
             # structural interval: the balance claim ended, the interval did
             # not.  Such a range legitimately restarts its state clock and
-            # carries the deadline's bar count.
-            abandoned = (
-                self.transition_reason == BALANCE_CLAIM_ABANDONED
-            )
+            # carries the deadline's bar count.  The same is true once the
+            # claim is confirmed -- neither verdict is a state of the range.
+            claim_settled = self.transition_reason in {
+                BALANCE_CLAIM_ABANDONED,
+                BALANCE_CLAIM_CONFIRMED,
+            }
             if (
-                self.mature_at is not None
-                or self.broken_at is not None
+                self.broken_at is not None
                 or (
                     self.state_started_at != self.formed_at
-                    if not abandoned
+                    if not claim_settled
                     else self.state_started_at < self.formed_at
                 )
-                or (not abandoned and self.candidate_real_h1_bars >= 24)
+                or (not claim_settled and self.candidate_real_h1_bars >= 24)
                 or self.transition_reason
                 not in {
                     None,
                     "source_pair_selected",
                     BALANCE_CLAIM_ABANDONED,
+                    BALANCE_CLAIM_CONFIRMED,
                 }
             ):
-                raise ValueError("forming dealing-range lifecycle is inconsistent")
-        elif self.lifecycle is DealingRangeLifecycle.MATURE:
-            if (
-                self.mature_at is None
-                or self.broken_at is not None
-                or self.state_started_at != self.mature_at
-                or not self.transition_reason
-            ):
-                raise ValueError("mature dealing-range lifecycle is inconsistent")
+                raise ValueError("active dealing-range lifecycle is inconsistent")
         elif (
             self.broken_at is None
             or self.state_started_at != self.broken_at
@@ -6281,7 +6317,7 @@ class FrameObservation:
                     item.lower_source_tested_at,
                     item.upper_source_tested_at,
                     item.formed_at,
-                    item.mature_at,
+                    item.balance_confirmed_at,
                     item.broken_at,
                     item.state_started_at,
                     item.last_updated_at,
@@ -6294,8 +6330,8 @@ class FrameObservation:
             or sum(
                 item.lifecycle
                 in {
-                    DealingRangeLifecycle.FORMING,
-                    DealingRangeLifecycle.MATURE,
+                    DealingRangeLifecycle.ACTIVE,
+                    DealingRangeLifecycle.ACTIVE,
                 }
                 for item in self.dealing_ranges
             )
@@ -7708,7 +7744,7 @@ class FrozenRangeAuctionContext:
     upper_bound: float
     midpoint: float
     value_price: float
-    mature_at: pd.Timestamp
+    balance_confirmed_at: pd.Timestamp
     manipulation_side: str
     swept_at: pd.Timestamp
     manipulation_extreme: float
@@ -7719,7 +7755,7 @@ class FrozenRangeAuctionContext:
 
     def __post_init__(self) -> None:
         for name in (
-            "mature_at",
+            "balance_confirmed_at",
             "swept_at",
             "reentry_candidate_at",
             "reentered_at",
@@ -7773,7 +7809,7 @@ class FrozenRangeAuctionContext:
                 self.manipulation_side == "below"
                 and self.manipulation_extreme >= self.lower_bound
             )
-            or not self.mature_at
+            or not self.balance_confirmed_at
             < self.swept_at
             < self.reentry_candidate_at
             < self.reentered_at
@@ -8055,7 +8091,7 @@ class TradePlan:
         if self.range_auction is not None:
             clocks.extend(
                 (
-                    self.range_auction.mature_at,
+                    self.range_auction.balance_confirmed_at,
                     self.range_auction.swept_at,
                     self.range_auction.reentry_candidate_at,
                     self.range_auction.reentered_at,

@@ -296,7 +296,7 @@ def _case_reason_allowed(case: Mapping[str, Any], reason: str | None) -> bool:
     primitive = str(case["primitive"])
     lifecycle = str(case["lifecycle_or_outcome"])
     if primitive == "dealing_range" and stratum == "all_recognized_mature":
-        return reason == "maturity_conditions_met"
+        return reason == "balance_claim_confirmed"
     if primitive == "dealing_range" and stratum == "forming_reasonably_broken":
         return reason in RANGE_REASONABLY_BROKEN_REASONS
     if (

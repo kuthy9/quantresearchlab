@@ -128,7 +128,7 @@ def _range_failed_auction_fixture():
     mature = next(
         state
         for state in reaccepted.dealing_ranges
-        if state.lifecycle is DealingRangeLifecycle.MATURE
+        if state.lifecycle is DealingRangeLifecycle.ACTIVE
     )
     manipulation = reaccepted.manipulations[0]
     assert manipulation.lifecycle is ManipulationLifecycle.REACCEPTED
@@ -695,7 +695,7 @@ def _favr_public_scene_graph(
     additional_ranges = ()
     graph_displacement_id = fvg.source_displacement_id
     if cross_identities:
-        decoy_broken_at = mature.mature_at + pd.Timedelta(minutes=1)
+        decoy_broken_at = mature.balance_confirmed_at + pd.Timedelta(minutes=1)
         decoy_range = replace(
             mature,
             range_id=f"decoy:{mature.range_id}",
@@ -745,7 +745,7 @@ def _favr_public_scene_graph(
         )
         graph.update(
             _favr_context_graph_observation(
-                mature.mature_at,
+                mature.balance_confirmed_at,
                 price=mature.midpoint,
                 mature=mature,
                 inventory=visible_inventory,

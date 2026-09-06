@@ -102,8 +102,11 @@ def study(start: str, end: str, *, model_path: Path, source: Path) -> dict:
         relation_rows += len(snapshot.relations)
         # The swing and level populations are large and long-lived, so
         # re-reading them every bar makes the scan quadratic in the window.
-        # They are sampled instead; both are cumulative, so a sample loses
-        # only objects created and retired entirely between two samples.
+        # They are sampled instead, and accumulated across samples: a sample
+        # loses only objects that appear and leave entirely between two of
+        # them.  The Swing hot set is bounded, but by far more confirmations
+        # than one sample interval spans, so the bound costs the census
+        # nothing that the sampling did not already cost it.
         if bars % POPULATION_SAMPLE_BARS == 0:
             for state in snapshot.timeframe_states.values():
                 for swing in state.swing_hierarchy:

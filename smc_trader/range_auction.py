@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from collections import deque
 from copy import copy
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 import hashlib
 import json
 import math
@@ -14,7 +14,9 @@ from typing import Iterable, Sequence
 import pandas as pd
 
 from .model import (
+    BALANCE_PRICE_TEST_KINDS,
     BALANCE_CLAIM_ABANDONED,
+    BALANCE_CLAIM_CONFIRMED,
     Candle,
     DealingRangeLifecycle,
     DealingRangeState,
@@ -60,7 +62,12 @@ class RangeAuctionProtocol:
     maximum_compression_ratio: float
     maximum_ranges: int
     maximum_manipulations: int
+    balance_price_test_band_atr_fraction: float
+    balance_price_test_band_minimum_ticks: int
+    balance_deep_penetration_atr_fraction: float
+    balance_minimum_price_test_generations_each: int
     protocol_version: str = "3.2.0-group4.1"
+    balance_sub_protocol_version: str = "balance_range_v1.2"
 
     def __post_init__(self) -> None:
         hashes = (
@@ -94,6 +101,11 @@ class RangeAuctionProtocol:
             or self.maximum_compression_ratio <= 0.0
             or self.maximum_ranges < 1
             or self.maximum_manipulations < 1
+            or not self.balance_sub_protocol_version
+            or not 0.0 < self.balance_price_test_band_atr_fraction <= 1.0
+            or self.balance_price_test_band_minimum_ticks < 1
+            or not 0.0 < self.balance_deep_penetration_atr_fraction <= 1.0
+            or self.balance_minimum_price_test_generations_each < 2
         ):
             raise ValueError("Group 4 protocol differs from its frozen contract")
 
@@ -155,7 +167,22 @@ class RangeAuctionProtocol:
             maximum_manipulations=int(
                 parameters["retained_manipulation_states"]
             ),
+            balance_price_test_band_atr_fraction=float(
+                parameters["balance_price_test_band_atr_fraction"]
+            ),
+            balance_price_test_band_minimum_ticks=int(
+                parameters["balance_price_test_band_minimum_ticks"]
+            ),
+            balance_deep_penetration_atr_fraction=float(
+                parameters["balance_deep_penetration_atr_fraction"]
+            ),
+            balance_minimum_price_test_generations_each=int(
+                parameters["balance_minimum_price_test_generations_each"]
+            ),
             protocol_version=payload["protocol_version"],
+            balance_sub_protocol_version=payload[
+                "balance_sub_protocol_version"
+            ],
         )
 
 
@@ -253,6 +280,13 @@ class RangeAuctionUpdate:
 class _RangeWork:
     bars: deque[Candle]
     true_ranges: deque[float]
+    # Whether the previous completed bar was inside each boundary's tolerance
+    # band, and the verdict of every test generation so far.  Occupancy is what
+    # makes a run of bars hugging one level a single test.
+    lower_in_band: bool = False
+    upper_in_band: bool = False
+    lower_test_kinds: list[str] = field(default_factory=list)
+    upper_test_kinds: list[str] = field(default_factory=list)
 
     def clone(self) -> "_RangeWork":
         return _RangeWork(
@@ -261,6 +295,10 @@ class _RangeWork:
                 self.true_ranges,
                 maxlen=self.true_ranges.maxlen,
             ),
+            self.lower_in_band,
+            self.upper_in_band,
+            list(self.lower_test_kinds),
+            list(self.upper_test_kinds),
         )
 
 
@@ -556,8 +594,7 @@ class CausalRangeAuctionTracker:
             for state in ranges
             if state.lifecycle
             in {
-                DealingRangeLifecycle.FORMING,
-                DealingRangeLifecycle.MATURE,
+                DealingRangeLifecycle.ACTIVE,
             }
         )
         if len(live) > 1:
@@ -637,6 +674,73 @@ class CausalRangeAuctionTracker:
             "age_h1_bars": len(bars) - 1,
         }
 
+    def _balance_price_test(
+        self,
+        state: DealingRangeState,
+        work: _RangeWork,
+        candle: Candle,
+        prior_atr: float,
+    ) -> dict[str, object]:
+        """Record this completed bar's interaction with each frozen boundary.
+
+        Balance asks whether price repeatedly traded into and was rejected by
+        both sides.  The evidence is therefore the bar's own extremes against
+        the frozen boundary, never the source zone's structural touch count --
+        that only moves when another confirmed swing forms inside the zone,
+        which is a different claim about a different thing.
+
+        One generation is one continuous visit: price has to leave the
+        tolerance band before the next test can open, so a run of bars hugging
+        one level is a single test.  A generation keeps the deepest
+        interaction it reached, which is why a shallow print followed by a deep
+        one reads as one deep test rather than two.
+        """
+
+        band = max(
+            self.protocol.tick_size
+            * self.protocol.balance_price_test_band_minimum_ticks,
+            self.protocol.balance_price_test_band_atr_fraction * prior_atr,
+        )
+        deep = self.protocol.balance_deep_penetration_atr_fraction * prior_atr
+        close = float(candle.close)
+        for side, beyond, closed_outside in (
+            (
+                "upper",
+                float(candle.high) - state.upper_bound,
+                close > state.upper_bound,
+            ),
+            (
+                "lower",
+                state.lower_bound - float(candle.low),
+                close < state.lower_bound,
+            ),
+        ):
+            in_band = beyond >= -band
+            kinds = getattr(work, f"{side}_test_kinds")
+            was_in_band = getattr(work, f"{side}_in_band")
+            if in_band:
+                if closed_outside:
+                    kind = "close_outside"
+                elif beyond > deep:
+                    kind = "deep_penetration"
+                elif beyond > 0.0:
+                    kind = "shallow_penetration"
+                else:
+                    kind = "touch_only"
+                if not was_in_band:
+                    kinds.append(kind)
+                elif BALANCE_PRICE_TEST_KINDS.index(
+                    kind
+                ) > BALANCE_PRICE_TEST_KINDS.index(kinds[-1]):
+                    kinds[-1] = kind
+            setattr(work, f"{side}_in_band", in_band)
+        return {
+            "balance_lower_test_generations": len(work.lower_test_kinds),
+            "balance_upper_test_generations": len(work.upper_test_kinds),
+            "balance_lower_test_kinds": tuple(work.lower_test_kinds),
+            "balance_upper_test_kinds": tuple(work.upper_test_kinds),
+        }
+
     def _range_gate_evaluation(
         self,
         state: DealingRangeState,
@@ -644,10 +748,10 @@ class CausalRangeAuctionTracker:
     ) -> _RangeGateEvaluation:
         actuals = {
             "duration": float(statistics["candidate_real_h1_bars"]),
-            "bilateral_touches": float(
+            "bilateral_price_tests": float(
                 min(
-                    int(statistics["lower_touch_count"]),
-                    int(statistics["upper_touch_count"]),
+                    int(statistics["balance_lower_test_generations"]),
+                    int(statistics["balance_upper_test_generations"]),
                 )
             ),
             "midpoint_crossing": float(
@@ -663,8 +767,8 @@ class CausalRangeAuctionTracker:
             "duration": float(
                 self.protocol.minimum_candidate_real_h1_bars
             ),
-            "bilateral_touches": float(
-                self.protocol.minimum_boundary_touches_each
+            "bilateral_price_tests": float(
+                self.protocol.balance_minimum_price_test_generations_each
             ),
             "midpoint_crossing": float(
                 self.protocol.minimum_midpoint_crossings
@@ -743,7 +847,7 @@ class CausalRangeAuctionTracker:
         """Whether this candidate is still being tested for balance."""
 
         return (
-            state.lifecycle is DealingRangeLifecycle.FORMING
+            state.lifecycle is DealingRangeLifecycle.ACTIVE
             and state.transition_reason != BALANCE_CLAIM_ABANDONED
             and state.range_id in self._range_work
         )
@@ -753,16 +857,14 @@ class CausalRangeAuctionTracker:
         candle: Candle,
         zones_by_id: dict[str, SupportResistanceState],
         true_range: float,
+        prior_atr: float,
     ) -> tuple[DealingRangeState | None, _RangeGateEvaluation | None]:
         state = self._live_range(self._ranges.values())
         if state is None:
             return None, None
         lower = zones_by_id.get(state.lower_source_zone_id)
         upper = zones_by_id.get(state.upper_source_zone_id)
-        if (
-            state.lifecycle is DealingRangeLifecycle.MATURE
-            or not self._balance_claim_open(state)
-        ):
+        if not self._balance_claim_open(state):
             updated = replace(
                 state,
                 last_updated_at=candle.end,
@@ -787,12 +889,10 @@ class CausalRangeAuctionTracker:
         if work.bars[-1].end < candle.end:
             work.bars.append(candle)
             work.true_ranges.append(float(true_range))
-        statistics = self._range_statistics(
-            state,
-            work,
-            lower,
-            upper,
-        )
+        statistics = {
+            **self._range_statistics(state, work, lower, upper),
+            **self._balance_price_test(state, work, candle, prior_atr),
+        }
         update_fields = {
             **statistics,
             "lower_source_tested_at": (
@@ -844,10 +944,10 @@ class CausalRangeAuctionTracker:
         mature = (
             statistics["candidate_real_h1_bars"]
             >= self.protocol.minimum_candidate_real_h1_bars
-            and statistics["lower_touch_count"]
-            >= self.protocol.minimum_boundary_touches_each
-            and statistics["upper_touch_count"]
-            >= self.protocol.minimum_boundary_touches_each
+            and statistics["balance_lower_test_generations"]
+            >= self.protocol.balance_minimum_price_test_generations_each
+            and statistics["balance_upper_test_generations"]
+            >= self.protocol.balance_minimum_price_test_generations_each
             and statistics["midpoint_crossings"]
             >= self.protocol.minimum_midpoint_crossings
             and statistics["inside_close_fraction"]
@@ -862,18 +962,21 @@ class CausalRangeAuctionTracker:
                 "Group 4 maturity gate diagnostic disagrees with reducer"
             )
         if mature:
-            updated = replace(
+            # The registered standard is met.  That settles the balance claim
+            # and promotes the boundaries; the range itself is still exactly
+            # the location it was on the bar before, so its lifecycle does not
+            # move and this is not a range transition.
+            confirmed = replace(
                 state,
                 **update_fields,
-                lifecycle=DealingRangeLifecycle.MATURE,
-                mature_at=candle.end,
+                balance_confirmed_at=candle.end,
                 state_started_at=candle.end,
-                transition_reason="maturity_conditions_met",
+                transition_reason=BALANCE_CLAIM_CONFIRMED,
             )
-            self._ranges[state.range_id] = updated
+            self._ranges[state.range_id] = confirmed
             self._range_work.pop(state.range_id, None)
-            self._create_range_inventory(updated)
-            return updated, gate_evaluation
+            self._create_range_inventory(confirmed)
+            return None, gate_evaluation
         if (
             statistics["candidate_real_h1_bars"]
             >= self.protocol.maximum_forming_real_h1_bars
@@ -1069,7 +1172,7 @@ class CausalRangeAuctionTracker:
             symbol=candle.symbol,
             instrument_id=int(candle.instrument_id),
             timeframe=Timeframe.H1,
-            lifecycle=DealingRangeLifecycle.FORMING,
+            lifecycle=DealingRangeLifecycle.ACTIVE,
             lower_source_zone_id=lower.zone_id,
             upper_source_zone_id=upper.zone_id,
             lower_source_confirmed_at=lower.confirmed_at,
@@ -1083,7 +1186,7 @@ class CausalRangeAuctionTracker:
             upper_source_lower_bound=upper.lower_bound,
             upper_source_upper_bound=upper.upper_bound,
             formed_at=candle.end,
-            mature_at=None,
+            balance_confirmed_at=None,
             broken_at=None,
             state_started_at=candle.end,
             last_updated_at=candle.end,
@@ -1134,7 +1237,7 @@ class CausalRangeAuctionTracker:
             self.protocol.protocol_hash,
             state.range_id,
             side,
-            state.mature_at,
+            state.balance_confirmed_at,
         )
         return f"range_boundary:{digest}"
 
@@ -1142,8 +1245,10 @@ class CausalRangeAuctionTracker:
         self,
         state: DealingRangeState,
     ) -> None:
-        if state.mature_at is None:
-            raise RuntimeError("forming range cannot create inventory")
+        if state.balance_confirmed_at is None:
+            raise RuntimeError(
+                "a range whose balance claim has not settled has no inventory"
+            )
         for side, price, zone_id in (
             (
                 "below",
@@ -1165,7 +1270,7 @@ class CausalRangeAuctionTracker:
                 lower_bound=price,
                 upper_bound=price,
                 formed_at=state.formed_at,
-                confirmed_at=state.mature_at,
+                confirmed_at=state.balance_confirmed_at,
                 lifecycle=LiquidityInventoryLifecycle.VISIBLE,
                 source_ids=(state.range_id, zone_id),
                 age_bars=state.age_h1_bars,
@@ -1238,6 +1343,13 @@ class CausalRangeAuctionTracker:
         if not candle.real_completed:
             return self._output()
         true_range = _true_range(candle, self._prior_h1_close)
+        # The tolerance band is sized from the volatility known *before* this
+        # bar, so it is read off the window before this bar joins it.
+        prior_atr = (
+            sum(self._h1_true_ranges) / len(self._h1_true_ranges)
+            if self._h1_true_ranges
+            else float(self.protocol.tick_size)
+        )
         if self._prior_h1_close is not None and true_range > 0.0:
             self._h1_true_ranges.append(
                 max(true_range, self.protocol.tick_size)
@@ -1248,6 +1360,7 @@ class CausalRangeAuctionTracker:
             candle,
             zones_by_id,
             true_range,
+            prior_atr,
         )
         pair_partition = self._range_pair_partition(candle, zones)
         available_count = len(pair_partition.available_pairs)
@@ -1490,17 +1603,17 @@ class CausalRangeAuctionTracker:
             )
             if (
                 state is None
-                or state.mature_at is None
+                or state.balance_confirmed_at is None
                 or item.timeframe is not Timeframe.H1
                 or item.price != expected_price
                 or item.lower_bound != expected_price
                 or item.upper_bound != expected_price
                 or item.formed_at != state.formed_at
-                or item.confirmed_at != state.mature_at
+                or item.confirmed_at != state.balance_confirmed_at
                 or len(item.source_ids) != 2
                 or set(item.source_ids)
                 != {state.range_id, expected_zone_id}
-                or state.mature_at > candle.start
+                or state.balance_confirmed_at > candle.start
                 or (
                     state.broken_at is not None
                     and state.broken_at <= candle.end
@@ -1524,7 +1637,7 @@ class CausalRangeAuctionTracker:
                     source_timeframe=Timeframe.H1,
                     inventory=item,
                     formed_at=state.formed_at,
-                    eligible_at=state.mature_at,
+                    eligible_at=state.balance_confirmed_at,
                     lower_bound=state.lower_bound,
                     upper_bound=state.upper_bound,
                     boundary_price=item.price,
@@ -2028,7 +2141,7 @@ class CausalRangeAuctionTracker:
                 state = self._ranges.get(source.source_id)
                 if (
                     state is None
-                    or state.lifecycle is not DealingRangeLifecycle.MATURE
+                    or state.balance_confirmed_at is None
                 ):
                     raise RuntimeError(
                         "Group 4 range source changed without a same-clock "
@@ -2477,8 +2590,7 @@ class CausalRangeAuctionTracker:
                 for state in tuple(candidate._ranges.values())
                 if state.lifecycle
                 in {
-                    DealingRangeLifecycle.FORMING,
-                    DealingRangeLifecycle.MATURE,
+                    DealingRangeLifecycle.ACTIVE,
                 }
             )
             manipulation_transitions = tuple(

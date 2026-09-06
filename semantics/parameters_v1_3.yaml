@@ -114,11 +114,29 @@
       "status": "frozen_deterministic_snapshot_projection",
       "source": "smc_trader.market_state._candidate_range_membership"
     },
-    "balance_range_boundary_touches_each": {
+    "balance_range_bilateral_price_tests_each": {
       "value": 2,
       "status": "frozen_existing_protocol",
-      "source": "configs/primitives_range.json:engineering_parameters.minimum_boundary_touches_each",
-      "threshold_semantics": "the registered two-sided test standard: BALANCE_RANGE_OBSERVED is published once a structural range has this many confirmed touches on each frozen boundary, independently of the remaining maturity conditions, because a range whose source pair exists always has at least one touch per side and that alone is structure rather than evidence of balance"
+      "source": "configs/primitives_range.json:engineering_parameters.balance_minimum_price_test_generations_each",
+      "sub_protocol_version": "balance_range_v1.2",
+      "threshold_semantics": "the registered two-sided standard: BALANCE_RANGE_OBSERVED is published once price has made this many distinct test generations against each frozen boundary, independently of the remaining maturity conditions. A generation is one continuous visit to the boundary's tolerance band -- price must leave the band before the next can open -- so a run of bars hugging one level counts once. balance_range_v1.2 moved this off the source zone's structural touch count, which only increments when another confirmed swing forms inside the zone: over 2022-02, 17 of 18 H1 zones therefore stayed at one touch for life and the standard was unreachable in principle rather than merely rare. The value is unchanged at 2; only the evidence it counts is different."
+    },
+    "balance_range_price_test_band": {
+      "values": {
+        "band_atr_fraction": 0.25,
+        "band_minimum_ticks": 1,
+        "deep_penetration_atr_fraction": 0.25
+      },
+      "status": "frozen_existing_protocol",
+      "source": "configs/primitives_range.json:engineering_parameters",
+      "sub_protocol_version": "balance_range_v1.2",
+      "threshold_semantics": "the tolerance around a frozen boundary within which a completed H1 bar counts as testing it: max(band_minimum_ticks * tick_size, band_atr_fraction * the ATR known before that bar). A test is classified touch_only, shallow_penetration, deep_penetration or close_outside, escalating within one generation; deep_penetration begins deep_penetration_atr_fraction of that prior ATR beyond the boundary. close_outside remains the range's own invalidation and is not a second concept."
+    },
+    "swing_hierarchy_hot_retention": {
+      "value": 2048,
+      "status": "frozen_bounded_working_set",
+      "source": "smc_trader.market_state.SWING_HIERARCHY_HOT_RETENTION",
+      "threshold_semantics": "how many confirmed Swings one timeframe keeps in reduced state; the immutable event stream owns the complete role history, exactly as it does for structural_legs. Two reads can still reach an older Swing and both were measured over 2022-02: a later rank assignment reached at most 4 Swings back on its own timeframe, and the geometry tree's retroactive adoption at most 447, bounded by the span of the largest enabled timeframe's confirmation window rather than by elapsed bars. The window carries a wide margin over both, so eviction only ever drops Swings that nothing reads"
     },
     "interaction_hold_bars": {
       "value": 1,

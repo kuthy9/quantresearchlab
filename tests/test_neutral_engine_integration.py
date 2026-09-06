@@ -695,7 +695,7 @@ def test_engine_neutral_state_is_pickle_checkpoint_ready() -> None:
             previous_neutral_snapshot
         )
     publisher_state = engine.observer.market_snapshot_publisher.__getstate__()
-    assert publisher_state["_publisher_state_schema_version"] == 7
+    assert publisher_state["_publisher_state_schema_version"] == 8
     previous_publisher = dict(publisher_state)
     previous_publisher["_publisher_state_schema_version"] = 4
     with pytest.raises(ValueError, match="publisher checkpoint schema"):

@@ -562,7 +562,7 @@ class EyeAuthorityStatistics:
             "invalidated": ("invalidated_at", "state_started_at"),
             "created": ("formed_at", "state_started_at"),
             "untested": ("state_started_at",),
-            "mature": ("mature_at", "state_started_at"),
+            "mature": ("balance_confirmed_at", "state_started_at"),
             "swept": ("swept_at", "state_started_at"),
             "accepted_outside": ("accepted_outside_at", "resolved_at"),
             "approaching": ("state_started_at", "formed_at"),
@@ -1109,8 +1109,8 @@ class EyeAuthorityStatistics:
                                     if midpoint is not None
                                     else (lower_bound + upper_bound) / 2.0
                                 ),
-                                "mature_at": _clock(
-                                    _mapping_value(state, "mature_at")
+                                "balance_confirmed_at": _clock(
+                                    _mapping_value(state, "balance_confirmed_at")
                                 ),
                                 "broken_at": None,
                             },
@@ -1674,7 +1674,7 @@ class EyeAuthorityStatistics:
                         if midpoint is not None
                         else (lower_bound + upper_bound) / 2.0
                     ),
-                    "mature_at": _clock(_mapping_value(state, "mature_at")),
+                    "balance_confirmed_at": _clock(_mapping_value(state, "balance_confirmed_at")),
                     "broken_at": None,
                 },
             )
@@ -1726,9 +1726,9 @@ class EyeAuthorityStatistics:
             and state.range_id not in self._seen_mature_ranges
         ):
             self._seen_mature_ranges.add(state.range_id)
-            mature_at = _clock(state.mature_at)
-            if mature_at is not None:
-                month = mature_at.tz_convert("America/New_York").strftime("%Y-%m")
+            balance_confirmed_at = _clock(state.balance_confirmed_at)
+            if balance_confirmed_at is not None:
+                month = balance_confirmed_at.tz_convert("America/New_York").strftime("%Y-%m")
                 self._mature_months[month] += 1
 
     def _observe_range_funnel(self, values: Iterable[Any]) -> None:

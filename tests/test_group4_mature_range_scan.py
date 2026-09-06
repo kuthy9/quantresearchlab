@@ -31,7 +31,7 @@ END = pd.Timestamp("2020-07-01T18:00:00-04:00")
 def _protocol() -> SimpleNamespace:
     return SimpleNamespace(
         minimum_candidate_real_h1_bars=8,
-        minimum_boundary_touches_each=2,
+        balance_minimum_price_test_generations_each=2,
         minimum_midpoint_crossings=2,
         minimum_inside_close_fraction=0.8,
         maximum_width_atr_at_formation=4.0,
@@ -44,7 +44,7 @@ def _terminal(**changes: object) -> SimpleNamespace:
         "range_id": "range-1",
         "lifecycle": DealingRangeLifecycle.BROKEN,
         "formed_at": START + pd.Timedelta(hours=1),
-        "mature_at": None,
+        "balance_confirmed_at": None,
         "broken_at": START + pd.Timedelta(hours=10),
         "transition_reason": "close_beyond_frozen_range",
         "lower_bound": 99.0,
@@ -55,6 +55,11 @@ def _terminal(**changes: object) -> SimpleNamespace:
         "candidate_real_h1_bars": 10,
         "lower_touch_count": 2,
         "upper_touch_count": 2,
+        # Balance evidence is its own counter since balance_range_v1.2: price
+        # tested each frozen boundary twice, independently of the structural
+        # touch count above.
+        "balance_lower_test_generations": 2,
+        "balance_upper_test_generations": 2,
         "midpoint_crossings": 2,
         "inside_close_fraction": 0.7,
         "width_atr_at_formation": 3.0,
@@ -139,7 +144,7 @@ def test_terminal_reason_and_unmet_gates_are_separate_and_deduplicated() -> None
     )
     assert funnel["forming_terminal_unmet_gate_counts"] == {
         "duration": 0,
-        "bilateral_touches": 0,
+        "bilateral_price_tests": 0,
         "midpoint_crossing": 0,
         "inside_close_fraction": 1,
         "width": 0,
@@ -177,21 +182,21 @@ def test_right_censoring_counts_only_live_ranges_formed_inside_window() -> None:
     accumulator.latest_ranges = {
         "inside": SimpleNamespace(
             range_id="inside",
-            lifecycle=DealingRangeLifecycle.FORMING,
+            lifecycle=DealingRangeLifecycle.ACTIVE,
             formed_at=START + pd.Timedelta(hours=1),
-            mature_at=None,
+            balance_confirmed_at=None,
         ),
         "warmup": SimpleNamespace(
             range_id="warmup",
-            lifecycle=DealingRangeLifecycle.FORMING,
+            lifecycle=DealingRangeLifecycle.ACTIVE,
             formed_at=START - pd.Timedelta(hours=1),
-            mature_at=None,
+            balance_confirmed_at=None,
         ),
         "terminal": SimpleNamespace(
             range_id="terminal",
             lifecycle=DealingRangeLifecycle.BROKEN,
             formed_at=START + pd.Timedelta(hours=2),
-            mature_at=None,
+            balance_confirmed_at=None,
         ),
     }
     result = accumulator.result(source_rows=10, observed_updates=5)

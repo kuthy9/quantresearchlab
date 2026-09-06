@@ -258,11 +258,15 @@ def _mature_range(
         zones,
     ).dealing_ranges[-1]
     output = None
+    # Maturity now needs two distinct price tests of *each* boundary, so the
+    # candidate visits the lower band on bars 16 and 18 and the upper band on
+    # bars 15 and 17.  The late bars stay narrow, which is what the compression
+    # gate reads.
     for index, close, span in (
         (15, 100.25, 1.0),
         (16, 99.75, 1.0),
         (17, 100.25, 1.0),
-        (18, 99.75, 0.25),
+        (18, 99.75, 1.0),
         (19, 100.25, 0.25),
         (20, 99.75, 0.25),
         (21, 100.25, 0.25),
@@ -393,7 +397,7 @@ def test_range_auction_protocol_tracks_current_config_and_upstream_binding() -> 
 def test_h1_range_forms_matures_breaks_and_never_rewrites_geometry() -> None:
     tracker, formed, mature = _mature_range(_protocol())
 
-    assert formed.lifecycle is DealingRangeLifecycle.FORMING
+    assert formed.lifecycle is DealingRangeLifecycle.ACTIVE
     assert formed.transition_reason == "source_pair_selected"
     assert formed.candidate_real_h1_bars == 1
     assert (formed.lower_bound, formed.upper_bound, formed.midpoint) == (
@@ -405,8 +409,8 @@ def test_h1_range_forms_matures_breaks_and_never_rewrites_geometry() -> None:
     assert formed.formation_atr == pytest.approx(1.0)
     assert formed.width_atr_at_formation == pytest.approx(2.0)
 
-    assert mature.lifecycle is DealingRangeLifecycle.MATURE
-    assert mature.transition_reason == "maturity_conditions_met"
+    assert mature.lifecycle is DealingRangeLifecycle.ACTIVE
+    assert mature.transition_reason == "balance_claim_confirmed"
     assert mature.candidate_real_h1_bars == 8
     assert mature.age_h1_bars == 7
     assert mature.midpoint_crossings >= 2
@@ -497,13 +501,17 @@ def test_range_funnel_conserves_pair_selection_and_actual_gate_margins() -> None
         for name, actual, threshold, margin in gate.maturity_gates
     }
     assert rows["duration"] == pytest.approx((2.0, 8.0, -0.75))
-    assert rows["bilateral_touches"] == pytest.approx((2.0, 2.0, 0.0))
+    # This bar reached the upper band and nowhere near the lower one, so the
+    # two-sided standard reads the side that has nothing: min(0, 1).
+    assert rows["bilateral_price_tests"] == pytest.approx((0.0, 2.0, -1.0))
+    assert continued.balance_upper_test_generations == 1
+    assert continued.balance_lower_test_generations == 0
     assert gate.unmet_maturity_gates == tuple(
         name
         for name in RANGE_MATURITY_GATE_NAMES
         if rows[name][2] < 0.0
     )
-    assert continued.lifecycle is DealingRangeLifecycle.FORMING
+    assert continued.lifecycle is DealingRangeLifecycle.ACTIVE
 
 
 def test_mature_range_owns_a_same_price_sweep_over_a_local_pool() -> None:
@@ -570,12 +578,12 @@ def test_the_forming_deadline_ends_the_balance_claim_not_the_interval() -> None:
     # record one lifecycle twice, which real data reaches within days.
     assert output.range_transitions == ()
     abandoned = output.dealing_ranges[-1]
-    assert abandoned.lifecycle is DealingRangeLifecycle.FORMING
+    assert abandoned.lifecycle is DealingRangeLifecycle.ACTIVE
     assert abandoned.transition_reason == BALANCE_CLAIM_ABANDONED
     assert abandoned.candidate_real_h1_bars == 24
     assert abandoned.age_h1_bars == 23
     assert abandoned.broken_at is None
-    assert abandoned.mature_at is None
+    assert abandoned.balance_confirmed_at is None
     # The interval still knows where it is.
     assert abandoned.lower_bound < abandoned.midpoint < abandoned.upper_bound
 
@@ -610,7 +618,7 @@ def test_cold_existing_range_pair_waits_for_a_new_source_identity() -> None:
         _h1(16, close=100.0),
         (fresh_support, zones[1]),
     ).dealing_ranges[-1]
-    assert formed.lifecycle is DealingRangeLifecycle.FORMING
+    assert formed.lifecycle is DealingRangeLifecycle.ACTIVE
     assert formed.lower_source_zone_id == fresh_support.zone_id
 
 
@@ -1202,7 +1210,7 @@ def test_existing_live_and_same_bar_resolution_block_new_sources() -> None:
 
 def test_same_clock_range_invalidation_has_one_source_disposition() -> None:
     tracker, _, mature = _mature_range(_protocol())
-    assert mature.mature_at is not None
+    assert mature.balance_confirmed_at is not None
     completed_h1 = _h1(22, close=102.0, span=0.25)
     base = completed_h1.end - pd.Timedelta(minutes=16)
     inventory = tracker.snapshot().range_boundary_inventory
@@ -1236,8 +1244,8 @@ def test_same_clock_range_invalidation_has_one_source_disposition() -> None:
 def test_range_inventory_sweep_and_hard_boundary_preserve_typed_terminals() -> None:
     protocol = _protocol()
     tracker, _, mature = _mature_range(protocol)
-    assert mature.mature_at is not None
-    base = mature.mature_at + pd.Timedelta(minutes=1)
+    assert mature.balance_confirmed_at is not None
+    base = mature.balance_confirmed_at + pd.Timedelta(minutes=1)
     inventory = tracker.snapshot().range_boundary_inventory
     _warm_m1(
         tracker,
@@ -1330,8 +1338,8 @@ def test_observer_records_group4_range_terminal_only_at_boundary_clock(
     prior_offset_minutes: int,
 ) -> None:
     tracker, formed, mature = _mature_range(_protocol())
-    assert mature.mature_at is not None
-    base = mature.mature_at + pd.Timedelta(minutes=1)
+    assert mature.balance_confirmed_at is not None
+    base = mature.balance_confirmed_at + pd.Timedelta(minutes=1)
     inventory = tracker.snapshot().range_boundary_inventory
     _warm_m1(tracker, base=base, inventory=inventory)
     sweep_bar = _m1(
@@ -1359,20 +1367,19 @@ def test_observer_records_group4_range_terminal_only_at_boundary_clock(
     )
     observer._range_auction_tracker = tracker
     observer.memory.set_clock_coverage_start(formed.formed_at)
-    for state in (formed, mature):
-        observer._emitter._record_group4_events(
-            RangeAuctionUpdate(
-                dealing_ranges=(state,),
-                manipulations=(),
-                range_boundary_inventory=(
-                    inventory
-                    if state.lifecycle is DealingRangeLifecycle.MATURE
-                    else ()
-                ),
-                range_transitions=(state,),
-            ),
-            prior=observer._prior,
-        )
+    # A Structural Range has exactly one non-terminal transition -- its
+    # creation. Confirming the balance claim settles that claim and promotes
+    # the boundaries without moving the range's lifecycle, so replaying the
+    # confirmed state as a second transition would record `active` twice.
+    observer._emitter._record_group4_events(
+        RangeAuctionUpdate(
+            dealing_ranges=(mature,),
+            manipulations=(),
+            range_boundary_inventory=inventory,
+            range_transitions=(formed,),
+        ),
+        prior=observer._prior,
+    )
     sweep_bar_event = observer._emitter._append_completed_bar_event(
         sweep_bar,
         atr=1.0,
@@ -1473,9 +1480,11 @@ def test_observer_records_group4_range_terminal_only_at_boundary_clock(
     assert terminal_range.broken_at == boundary_at
     assert terminal_range.transition_reason == boundary_reason
     timeline = boundary_observation.retained_entity_timelines[range_key]
+    # Two states, not three: a Structural Range is created and is eventually
+    # left. Settling the balance claim in between is not a state it passes
+    # through.
     assert tuple(event.lifecycle for event in timeline) == (
-        "forming",
-        "mature",
+        "active",
         "broken",
     )
     terminal_event = timeline[-1]
@@ -1587,8 +1596,8 @@ def test_exact_retry_is_cached_and_same_clock_or_older_input_fails() -> None:
 
 def test_cold_sweep_without_prior_atr_is_unclassified_and_advances() -> None:
     tracker, _, mature = _mature_range(_protocol())
-    assert mature.mature_at is not None
-    base = mature.mature_at + pd.Timedelta(minutes=1)
+    assert mature.balance_confirmed_at is not None
+    base = mature.balance_confirmed_at + pd.Timedelta(minutes=1)
     inventory = tracker.snapshot().range_boundary_inventory
     tracker.on_completed_update(
         _m1(0, base=base),
@@ -1645,8 +1654,8 @@ def test_cold_sweep_without_prior_atr_is_unclassified_and_advances() -> None:
 
 def test_observer_publishes_mature_boundary_crossing_without_prior_atr() -> None:
     tracker, formed, mature = _mature_range(_protocol())
-    assert mature.mature_at is not None
-    base = mature.mature_at + pd.Timedelta(minutes=1)
+    assert mature.balance_confirmed_at is not None
+    base = mature.balance_confirmed_at + pd.Timedelta(minutes=1)
     inventory = tracker.snapshot().range_boundary_inventory
     tracker.on_completed_update(
         _m1(0, base=base),
@@ -1678,20 +1687,19 @@ def test_observer_publishes_mature_boundary_crossing_without_prior_atr() -> None
         )
     )
     observer.memory.set_clock_coverage_start(formed.formed_at)
-    for state in (formed, mature):
-        observer._emitter._record_group4_events(
-            RangeAuctionUpdate(
-                dealing_ranges=(state,),
-                manipulations=(),
-                range_boundary_inventory=(
-                    inventory
-                    if state.lifecycle is DealingRangeLifecycle.MATURE
-                    else ()
-                ),
-                range_transitions=(state,),
-            ),
-            prior=observer._prior,
-        )
+    # A Structural Range has exactly one non-terminal transition -- its
+    # creation. Confirming the balance claim settles that claim and promotes
+    # the boundaries without moving the range's lifecycle, so replaying the
+    # confirmed state as a second transition would record `active` twice.
+    observer._emitter._record_group4_events(
+        RangeAuctionUpdate(
+            dealing_ranges=(mature,),
+            manipulations=(),
+            range_boundary_inventory=inventory,
+            range_transitions=(formed,),
+        ),
+        prior=observer._prior,
+    )
     crossing_bar = observer._emitter._append_completed_bar_event(
         sweep,
         atr=1.0,
@@ -1943,8 +1951,8 @@ def test_exact_source_bindings_fail_closed_without_partial_commit() -> None:
     assert pool_tracker.snapshot() == before_pool
 
     range_tracker, _, mature = _mature_range(_protocol())
-    assert mature.mature_at is not None
-    base = mature.mature_at + pd.Timedelta(minutes=1)
+    assert mature.balance_confirmed_at is not None
+    base = mature.balance_confirmed_at + pd.Timedelta(minutes=1)
     range_inventory = range_tracker.snapshot().range_boundary_inventory
     _warm_m1(
         range_tracker,
@@ -2012,10 +2020,10 @@ def test_group4_requires_the_typed_h1_structure_source() -> None:
 
 def test_range_boundaries_join_the_visible_liquidity_route_inventory() -> None:
     tracker, _, mature = _mature_range(_protocol())
-    assert mature.mature_at is not None
+    assert mature.balance_confirmed_at is not None
     pool, pool_item = _pool(
         "above",
-        confirmed_at=mature.mature_at,
+        confirmed_at=mature.balance_confirmed_at,
         identity="canonical-draw",
     )
     observation = SimpleNamespace(
@@ -2105,7 +2113,7 @@ def test_same_clock_event_sequence_matches_the_frozen_causal_order() -> None:
     _, _, mature = _mature_range(_protocol())
     same_clock_range = replace(
         mature,
-        mature_at=swept.swept_at,
+        balance_confirmed_at=swept.swept_at,
         state_started_at=swept.swept_at,
         last_updated_at=swept.swept_at,
     )

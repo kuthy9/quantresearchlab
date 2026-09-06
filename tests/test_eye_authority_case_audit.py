@@ -230,7 +230,7 @@ def test_group5_step_transport_requires_ordered_memory_and_graph_steps() -> None
         ("near_mature_single_gate", ("compression",)),
         (
             "multiple_gate_rejected",
-            ("duration", "bilateral_touches", "compression"),
+            ("duration", "bilateral_price_tests", "compression"),
         ),
     ),
 )

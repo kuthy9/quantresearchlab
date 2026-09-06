@@ -62,6 +62,15 @@ projection would have emitted. Entries and exits differ by 5 in February and 10
 in March — exactly the timeframes still occupying a phase when the replay
 window ended, which is the expected right-censoring.
 
+> **Superseded 2026-09-05 for the balance rows only.** The counts below were
+> produced when balance evidence was the source zone's structural touch count.
+> `balance_range_v1.2` replaced that with price interaction against the frozen
+> boundary; February's single observation was a second confirmed swing inside a
+> source zone, which is not a price test, and it is gone. Both months now report
+> zero. Everything else in this document is unaffected — a kind-by-kind replay
+> comparison found exactly one changed event across both months. See
+> `balance_range_v1_2_two_month_comparison.json`.
+
 **Balance is genuinely rare, and that is the point of splitting it.** February
 registered 40 structural ranges and March 41; in each month exactly **one**
 reached two confirmed touches on each frozen boundary, and **none** matured.

@@ -1176,8 +1176,10 @@ def _validate_object_revision(
             "active": {"active", "terminated"},
         },
         FoundationObjectType.BALANCE_RANGE: {
-            "forming": {"forming", "mature", "broken"},
-            "mature": {"mature", "broken"},
+            # The structural interval is created, locates price, and ends when
+            # price closes outside it.  Balance is published beside it and is
+            # not a state it passes through.
+            "active": {"active", "broken"},
         },
         FoundationObjectType.FVG_STRUCTURAL_LIFECYCLE: {
             "active": {"active", "invalidated", "expired", "censored"},

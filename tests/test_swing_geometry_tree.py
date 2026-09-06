@@ -273,3 +273,47 @@ def test_a_later_window_adopts_the_swings_it_encloses() -> None:
     assert settled_child.geometric_depth == 1
     assert settled_parent.geometric_depth == 0
     assert settled_parent.child_ids == ("child",)
+
+
+def test_a_swing_confirmed_past_the_retained_window_still_enters_the_tree(
+    monkeypatch,
+) -> None:
+    """The settle short circuit cannot be "the hierarchy got longer".
+
+    While ``swing_hierarchy`` grew forever, an unchanged length was an exact
+    "this timeframe confirmed nothing" test.  Once the hot set is bounded the
+    length stops changing while Swings keep arriving, so the same test would
+    silently stop admitting every Swing confirmed after the bound was reached.
+    """
+
+    import smc_trader.market_state as market_state
+
+    monkeypatch.setattr(market_state, "SWING_HIERARCHY_HOT_RETENTION", 4)
+    reader = CausalMarketReader(scale_specs=MODEL_SCALE_SPECS)
+    observer = CausalObserver(
+        ObserverConfig(
+            structure_protocol=STRUCTURE_PROTOCOL,
+            liquidity_protocol=STRUCTURE_PROTOCOL,
+            displacement_protocol=DISPLACEMENT_PROTOCOL,
+            zone_protocol=GROUP3_PROTOCOL,
+            range_auction_protocol=GROUP4_PROTOCOL,
+            scale_specs=MODEL_SCALE_SPECS,
+            project_scene_graph=False,
+        )
+    )
+    confirmed: set[str] = set()
+    for bar in session_bars(2):
+        observer.observe(reader.on_bar(bar))
+        snapshot = observer.last_market_snapshot
+        if snapshot is None:
+            continue
+        confirmed.update(
+            swing.swing_id
+            for state in snapshot.timeframe_states.values()
+            for swing in state.swing_hierarchy
+            if swing.window_start is not None
+        )
+
+    admitted = set(observer.market_snapshot_publisher._swing_geometry._nodes)
+    assert len(confirmed) > 4, "the fixture never exceeded the retained window"
+    assert confirmed <= admitted

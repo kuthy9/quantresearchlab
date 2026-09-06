@@ -573,14 +573,14 @@ def _range_state(
         lifecycle=lifecycle,
         timeframe=Timeframe.H1,
         formed_at=origin,
-        mature_at=asof if lifecycle == "mature" else None,
+        balance_confirmed_at=asof if lifecycle == "mature" else None,
         broken_at=None,
         state_started_at=asof,
         last_updated_at=asof,
         transition_reason=(
             reason
             if reason is not None
-            else "maturity_conditions_met"
+            else "balance_claim_confirmed"
             if lifecycle == "mature"
             else None
         ),
@@ -671,7 +671,7 @@ def _range_funnel(
 ) -> SimpleNamespace:
     names = (
         "duration",
-        "bilateral_touches",
+        "bilateral_price_tests",
         "midpoint_crossing",
         "inside_close_fraction",
         "width",
@@ -871,7 +871,7 @@ def test_range_manipulation_displacement_and_ob_funnel_conservation() -> None:
     end = start + pd.Timedelta(minutes=4)
     protocol = SimpleNamespace(
         minimum_candidate_real_h1_bars=8,
-        minimum_boundary_touches_each=2,
+        balance_minimum_price_test_generations_each=2,
         minimum_midpoint_crossings=2,
         minimum_inside_close_fraction=0.8,
         maximum_width_atr_at_formation=4.0,
@@ -1419,7 +1419,7 @@ def test_favr_observation_chain_uses_exact_source_clock_and_geometry_identity(
             reason="close_beyond_frozen_range",
             formed_at=start,
         )
-        final_range.mature_at = start
+        final_range.balance_confirmed_at = start
         final_range.broken_at = trigger_at
     opposed_mss = SimpleNamespace(
         bos_id="favr-return-mss",
@@ -1679,10 +1679,10 @@ def test_range_atr_tertiles_are_aggregate_only_and_case_sampling_is_episode_uniq
 
 def test_case_selection_prioritizes_mature_and_deduplicates_range_gate_episode() -> None:
     start = pd.Timestamp("2023-06-06 16:00", tz="UTC")
-    mature_at = start + pd.Timedelta(minutes=1)
+    balance_confirmed_at = start + pd.Timedelta(minutes=1)
     statistics = EyeAuthorityStatistics(
         start=start,
-        end_exclusive=mature_at + pd.Timedelta(minutes=1),
+        end_exclusive=balance_confirmed_at + pd.Timedelta(minutes=1),
         coverage_start=start,
     )
     statistics.observe(
@@ -1699,13 +1699,13 @@ def test_case_selection_prioritizes_mature_and_deduplicates_range_gate_episode()
         ),
     )
     statistics.observe(
-        _update(mature_at),
+        _update(balance_confirmed_at),
         _observation(
-            mature_at,
+            balance_confirmed_at,
             ranges=(
                 _range_state(
                     "eventually-mature",
-                    mature_at,
+                    balance_confirmed_at,
                     "mature",
                     formed_at=start,
                 ),
@@ -1713,7 +1713,7 @@ def test_case_selection_prioritizes_mature_and_deduplicates_range_gate_episode()
             paths=(
                 _path(
                     "other-interrupted-path",
-                    mature_at,
+                    balance_confirmed_at,
                     reason="location_left",
                     trigger=False,
                     context_id="missing-manipulation",
@@ -2132,7 +2132,7 @@ def test_typed_delta_matches_snapshot_and_compacts_only_terminal_stats() -> None
         reason="close_beyond_frozen_range",
         formed_at=start,
     )
-    broken_range.mature_at = terminal_at
+    broken_range.balance_confirmed_at = terminal_at
     broken_range.broken_at = final_at
     final_snapshot = _observation(
         final_at,

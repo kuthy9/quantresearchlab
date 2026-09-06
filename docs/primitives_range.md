@@ -8,7 +8,7 @@ Current protocol: `3.2.0-group4.1`. Status:
 This contract freezes the causal meaning of:
 
 1. one H1 `DealingRangeState` with lifecycle
-   `forming → mature → broken`; and
+   `active → broken`; and
 2. one completed-1m `ManipulationState` with lifecycle
    `swept → reaccepted|accepted_outside`.
 
@@ -31,11 +31,21 @@ range position, 5m compression and 1m path scores are not Group 4 sources.
 
 The registered outcome-blind 2023 full-year coverage result is stored in
 [`evidence/group4_natural_authority_2023.json`](evidence/group4_natural_authority_2023.json).
-It records 448 in-window range formations, two mature ranges and 19,465 typed
+It records 448 in-window range formations, two ranges whose balance claim
+settled (recorded then as "mature") and 19,465 typed
 manipulations from all five enabled pool-source timeframes plus mature-range
 boundaries. Manipulation outcome conservation passed. Mature-range coverage is
 still only two cases, so this evidence does not change the sparse-coverage
 status or enable FAVR.
+
+> **Lifecycle change, 2026-09-06.** `forming -> mature -> broken` became
+> `active -> broken`. Balance was a grade the interval earned, and three months
+> of data showed the grade recorded a failure that was not occurring: 0 of 84
+> ranges reached a two-sided test against a 4.06% base rate on arbitrary H1
+> windows, which the sample cannot separate. Balance evidence is unchanged and
+> is still published as `BALANCE_RANGE_OBSERVED`. Candidate selection,
+> thresholds and the `mature_range_boundary` source kind are unchanged. Figures
+> below that predate this are historical measurements and are left as recorded.
 
 ## Minimal implementation boundary
 
@@ -44,9 +54,13 @@ accumulation, range, value, manipulation, custody, controller or wrapper
 layers.
 
 - Accumulation is the evidence accumulated while one typed range is
-  `forming`.
-- A dealing range is the same entity after it becomes `mature`.
-- Value is the mature range's frozen arithmetic midpoint.
+  `active`.
+- A dealing range is the same entity for its whole life. Since 2026-09-06
+  it has no maturity state: balance was a grade the interval earned, and
+  the data showed the grade recorded a failure that was not occurring.
+  Settling the balance claim is recorded as `balance_claim_confirmed` and
+  `balance_confirmed_at`, and is not a transition.
+- Value is the range's frozen arithmetic midpoint.
 - A manipulation is a completed-1m excursion through one already-visible
   mature range boundary or one already-formed typed liquidity pool.
 
@@ -113,7 +127,8 @@ error.
 
 Every engine update begins from exactly one newly completed 1m bar.
 
-- Only a `real_completed` H1 candle may form, mature, break or age a range.
+- Only a `real_completed` H1 candle may form, break or age a range, or
+  settle its balance claim.
 - Only a `real_completed` 1m candle may sweep, resolve or age a
   manipulation.
 - Candles containing any synthetic minutes may advance the raw cutoff but
@@ -127,11 +142,11 @@ Every engine update begins from exactly one newly completed 1m bar.
 
 For a source to be swept by a completed 1m bar:
 
-`source.mature_at_or_confirmed_at <= current_1m.start`.
+`source.balance_confirmed_at_or_confirmed_at <= current_1m.start`.
 
 Equality here means the source was fully known at the instant the new 1m
 interval began. A source first known at `current_1m.end` is ineligible for
-that bar. This is the explicit prevention of a newly matured H1 range being
+that bar. This is the explicit prevention of a newly promoted H1 boundary being
 retroactively swept by its own final minute.
 
 ## DealingRangeState
@@ -157,7 +172,7 @@ unbounded tombstone registry is needed.
 
 ### Deterministic selection
 
-An existing `forming` or `mature` range is never replaced by a more convenient
+An existing `active` range is never replaced by a more convenient
 later pair. When no range is live, eligible pairs are ordered by:
 
 1. smallest frozen outer width;
@@ -190,9 +205,11 @@ At candidate formation:
 Source IDs, source clocks, source bounds, outer bounds, midpoint,
 `value_price`, formation ATR and normalized width never change.
 
-The midpoint exists geometrically while forming, but it becomes authoritative
-value only when lifecycle is `mature`. A broken range retains the value as
-historical provenance; consumers must not treat it as current value.
+The midpoint is authoritative value for as long as the range is `active`. It
+used to be withheld until the range matured, which made a two-sided-test
+statistic a precondition for arithmetic the interval could always do. A broken
+range retains the value as historical provenance; consumers must not treat it
+as current value.
 
 This definition deliberately avoids a volume-profile proxy. Bar-level OHLCV
 does not reveal the within-bar volume distribution required to claim a true
@@ -236,14 +253,17 @@ Range strength is the unweighted mean of narrowness strength, compression
 strength, boundary-test strength, crossing strength and the inside-close
 fraction. It describes the maturity evidence; it is not an entry score.
 
-### Maturity
+### Balance claim settlement
 
-A forming range becomes mature at the first real completed H1 end when all
-conditions are simultaneously true:
+The range has no maturity state. What follows settles the *balance claim* over
+the interval at the first real completed H1 end when all conditions are
+simultaneously true; the range's own lifecycle does not move, and settling is
+recorded as `balance_claim_confirmed` with a `balance_confirmed_at` clock. It
+is what promotes the frozen boundaries to candidate liquidity levels.
 
 - candidate count is from 8 through 24;
-- lower touch count is at least 2;
-- upper touch count is at least 2;
+- lower price test generations are at least 2;
+- upper price test generations are at least 2;
 - midpoint crossing count is at least 2;
 - inside-close fraction is at least 0.80;
 - frozen width is no more than 4.0 formation ATR;
@@ -251,7 +271,7 @@ conditions are simultaneously true:
 - both source zones remain active/tested; and
 - the current completed H1 close remains within the frozen bounds.
 
-`mature_at` is that H1 end. Touch counts and IDs, crossings, containment,
+`balance_confirmed_at` is that H1 end. Touch counts and IDs, crossings, containment,
 compression, component strengths and aggregate strength freeze at that clock.
 Later price action cannot improve the original maturity evidence.
 
@@ -262,21 +282,20 @@ exist. It is not FAVR authority.
 
 Allowed transitions are:
 
-`forming → mature|broken`
+`active → broken`
 
-`mature → broken`
 
 `broken` is terminal.
 
 A strict completed H1 close below the lower bound or above the upper bound
-breaks a forming or mature range. Equality remains inside. A wick outside
+breaks an active range. Equality remains inside. A wick outside
 with a close inside does not break it.
 
 Before maturity, either source leaving `active|tested` breaks the candidate.
 After maturity, source retirement alone does not rewrite or break the frozen
 range; only its completed-close rule or a hard epoch boundary can do so.
 
-On candidate bar 24, maturity is evaluated before the forming deadline.
+On candidate bar 24, the balance claim is evaluated before the claim deadline.
 If maturity still fails, the state becomes broken with reason
 `maturity_deadline_elapsed`.
 
@@ -286,7 +305,7 @@ Same-H1-bar priority is:
 2. strict close break;
 3. pre-maturity source invalidation;
 4. maturity;
-5. forming deadline; then
+5. balance claim deadline; then
 6. ordinary statistic and age update.
 
 Every transition exposes its event time, state-start time, last-update time,
@@ -419,8 +438,9 @@ At maturity the range emits exactly two typed inventory items:
 - upper item: side `above`, kind `range_boundary`, price and both item bounds
   equal the frozen range upper bound.
 
-Each identity binds the Group 4 hash, range ID, side and `mature_at`.
-`formed_at` is the range formation clock; `confirmed_at` is `mature_at`.
+Each identity binds the Group 4 hash, range ID, side and
+`balance_confirmed_at`. `formed_at` is the range formation clock;
+`confirmed_at` is `balance_confirmed_at`.
 Source IDs contain the range and corresponding source zone.
 
 The eye emits only `visible` or `consumed`; `targeted` remains owned by belief
@@ -448,7 +468,7 @@ Group 1–2 typed zone snapshot at each clock. The prefix starts no later than
 candidate selection and contains one predecessor plus the full 14-real-H1 ATR
 window.
 
-If unavailable, the reducer does not backfill a mature range. Already-present
+If unavailable, the reducer does not backfill a promoted boundary. Already-present
 source pairs remain ineligible until at least one source identity changes,
 then normal fresh formation may begin.
 
@@ -473,7 +493,7 @@ source envelope may resume directly without rediscovery.
 ## Soft and hard boundaries
 
 Scheduled same-contract closures and synthetic/partially-synthetic candles are
-soft boundaries. They preserve all state and do not age, resolve, mature,
+soft boundaries. They preserve all state and do not age, resolve, settle,
 compact or update statistics.
 
 Hard reasons are:
@@ -485,7 +505,7 @@ Hard reasons are:
 
 At a hard boundary:
 
-- every forming or mature range becomes broken at the boundary clock with the
+- every active range becomes broken at the boundary clock with the
   exact reason;
 - a swept manipulation is not falsely relabeled as market acceptance. It
   remains lifecycle `swept` in a dedicated typed boundary transition, records
@@ -553,7 +573,7 @@ strength, transition reason, frozen geometry and exact source provenance.
 
 EventMemory uses:
 
-- `range:<range_id>` for `forming`, `mature`, `broken`; and
+- `range:<range_id>` for `active`, `broken`; and
 - `manipulation:<manipulation_id>` for
   `swept`, `reaccepted|accepted_outside`.
 

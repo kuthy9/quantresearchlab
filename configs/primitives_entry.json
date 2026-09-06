@@ -9,7 +9,7 @@
     "group3_protocol_version": "3.2.0-group3.4",
     "group3_protocol_sha256": "0163d8fc3d41bcd6037bfab05b59e4a44b6558f01d1c73eb95955ea1e0bf8899",
     "group4_protocol_version": "3.2.0-group4.1",
-    "group4_protocol_sha256": "9c5334e52bacd19a896cb326e02c77a3be4f932e9b09579929fdce7d9ccdbdf4",
+    "group4_protocol_sha256": "68dbc01dbc8d7e7d190a149bd59929f1dec4b34d31d14c7ef1dc65e8d7e5b8db",
     "required_typed_sources": [
       "5m FairValueGapState",
       "5m OrderBlockState",

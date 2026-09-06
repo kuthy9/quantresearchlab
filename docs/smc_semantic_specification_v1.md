@@ -78,17 +78,49 @@ identity, naming and reservation only:
 - **The Dealing Range is split and `DEALING_RANGE_ACTIVATED` is retired.**
   `DEALING_RANGE_CREATED` / `_INVALIDATED` / `_REPLACED` remain the structural
   range's location lifecycle. `BALANCE_RANGE_OBSERVED` is published once per
-  range, carrying `lower_touch_count`, `upper_touch_count`,
-  `midpoint_crossings`, `inside_close_fraction`, `compression_ratio`,
-  `candidate_real_h1_bars` and `age_h1_bars`, as soon as both frozen boundaries
-  have been tested at least `balance_range_boundary_touches_each` (2) times --
-  one touch per side is structural, because a range's source pair is built from
-  tested zones. `BALANCE_RANGE_MATURED` replaces the old activation at the
-  maturity transition and is what the compact view now calls an active range.
-  The Group-4 detector surfaces no intra-forming update, so the observation
-  clock is the range's next registered transition rather than the second
-  boundary test itself; moving it earlier is a Group-4 protocol change.
+  range, carrying `balance_lower_test_generations`,
+  `balance_upper_test_generations`, their per-generation
+  `balance_*_test_kinds`, the structural `lower_touch_count` /
+  `upper_touch_count` beside them, `midpoint_crossings`,
+  `inside_close_fraction`, `compression_ratio`, `candidate_real_h1_bars` and
+  `age_h1_bars`, as soon as price has tested both frozen boundaries at least
+  `balance_range_bilateral_price_tests_each` (2) times.
   Failing to balance no longer costs the location.
+- **The Structural Range lifecycle is `active` -> `broken`, and nothing else.**
+  A range is a location from the moment it is created and ends only when price
+  closes outside it. `mature` was a grade the interval earned by balancing and
+  `forming` meant it had not earned one yet; both are gone, and
+  `BALANCE_RANGE_MATURED` is reserved rather than emitted. Three months of data
+  removed the grounds for the inheritance: 0 of 84 ranges reached a two-sided
+  test, an arbitrary rolling H1 window reaches one 4.06% of the time, and the
+  sample cannot separate the two. Balance is rare in this market -- the range
+  was never failing at anything. Balance evidence is still collected and still
+  published once per range as `BALANCE_RANGE_OBSERVED`; settling the claim is
+  recorded on the range as the `balance_claim_confirmed` reason and the
+  `balance_confirmed_at` clock, which is what promotes the frozen boundaries to
+  candidate liquidity levels. Those levels now descend from
+  `DEALING_RANGE_CREATED`, the interval that froze them, rather than from a
+  maturity event that no longer exists.
+- **Balance evidence is price interacting with the boundary
+  (`balance_range_v1.2`).** A test is a completed H1 bar reaching into the
+  boundary's tolerance band, `max(1 tick, 0.25 x the ATR known before that
+  bar)`, classified `touch_only`, `shallow_penetration`, `deep_penetration` or
+  `close_outside` and escalating to the deepest reached. One *generation* is
+  one continuous visit: price must leave the band before the next test can
+  open, so a run of bars hugging a level counts once. `close_outside` remains
+  the range's own invalidation rather than a second concept. This replaced two
+  earlier clocks, each of which made the claim unreachable for a different
+  reason. Until 2026-09-03 the emitter saw a range only when its lifecycle
+  changed, so a candidate that simply kept forming had no clock at all; the
+  observation clock is now every completed H1 bar on which the range is live.
+  That alone changed nothing, because the evidence was the source zone's
+  `total_touch_count`, and a `structural_swing` zone is skipped by the
+  price-contact counter outright -- it only counts a touch when *another
+  confirmed swing* forms inside it. Over 2022-02, 17 of 18 H1 zones therefore
+  stayed at one touch for life, and one touch per side is structural because a
+  range's source pair is built from tested zones. The structural count is
+  untouched and still carries its own meaning; balance now counts its own
+  evidence.
 - **`FVG_FIRST_RETEST` is emitted.** Exactly one per gap, on the first bar
   where price re-enters the frozen gap, published before the revisable fill
   observation it shares that bar with. It freezes `fill_depth_at_entry`,

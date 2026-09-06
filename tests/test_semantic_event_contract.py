@@ -120,7 +120,6 @@ def test_v1_3_event_bindings_match_the_emitted_and_reserved_surface() -> None:
         EventKind.FVG_INVALIDATED,
         EventKind.DEALING_RANGE_CREATED,
         EventKind.BALANCE_RANGE_OBSERVED,
-        EventKind.BALANCE_RANGE_MATURED,
         EventKind.DEALING_RANGE_INVALIDATED,
         EventKind.DEALING_RANGE_REPLACED,
         EventKind.BASE_ORIGIN_CORE_CREATED,
@@ -137,6 +136,8 @@ def test_v1_3_event_bindings_match_the_emitted_and_reserved_surface() -> None:
     for kind in (
         EventKind.FVG_EXPIRED,
         EventKind.DEALING_RANGE_EXTENDED,
+        # The Structural Range lifecycle has no maturity state to publish.
+        EventKind.BALANCE_RANGE_MATURED,
     ):
         assert by_kind[kind].status == "reserved_not_emitted"
     for kind in (

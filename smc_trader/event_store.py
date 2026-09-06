@@ -2418,10 +2418,14 @@ class EventStore:
                     "state projection"
                 )
         elif source_kind == "mature_range_boundary":
-            if parent_kinds != (EventKind.BALANCE_RANGE_MATURED,):
+            # A boundary level descends from the interval that froze it. It
+            # used to cite BALANCE_RANGE_MATURED because promotion happened at
+            # a maturity transition; the range no longer has one, so the
+            # parent is the creation event the boundaries belong to.
+            if parent_kinds != (EventKind.DEALING_RANGE_CREATED,):
                 raise ValueError(
                     "authoritative mature-range candidate requires its exact "
-                    "matured balance-range parent"
+                    "created structural-range parent"
                 )
             range_id = EventStore._required_authoritative_text(
                 source_parents[0],
@@ -2440,7 +2444,7 @@ class EventStore:
             if source_parents:
                 if len(source_parents) != 1 or parent_kinds[0] not in {
                     EventKind.BAR_COMPLETED,
-                    EventKind.BALANCE_RANGE_MATURED,
+                    EventKind.DEALING_RANGE_CREATED,
                 }:
                     raise ValueError(
                         "authoritative range-boundary candidate parent is "

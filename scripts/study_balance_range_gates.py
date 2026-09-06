@@ -32,7 +32,12 @@ from smc_trader.semantics import load_semantic_selection  # noqa: E402
 # name -> (statistic attribute, protocol attribute, comparison)
 GATES = (
     ("duration", "candidate_real_h1_bars", "minimum_candidate_real_h1_bars", "min"),
-    ("bilateral_touches", None, "minimum_boundary_touches_each", "min"),
+    (
+        "bilateral_price_tests",
+        None,
+        "balance_minimum_price_test_generations_each",
+        "min",
+    ),
     ("midpoint_crossing", "midpoint_crossings", "minimum_midpoint_crossings", "min"),
     (
         "inside_close_fraction",
@@ -91,8 +96,13 @@ def build_eye(model_path: Path):
 
 
 def actual(state, name: str, attribute: str | None) -> float:
-    if name == "bilateral_touches":
-        return float(min(state.lower_touch_count, state.upper_touch_count))
+    if name == "bilateral_price_tests":
+        return float(
+            min(
+                state.balance_lower_test_generations,
+                state.balance_upper_test_generations,
+            )
+        )
     return float(getattr(state, attribute))
 
 
@@ -174,10 +184,12 @@ def main() -> None:
         "window": {"start": args.start, "end": args.end, "bars_replayed": bars},
         "registered_thresholds": thresholds,
         "ranges_observed": len(seen),
-        "matured": sum(
+        # The range no longer has a maturity state.  What is counted is the
+        # balance claim settling, which is what the gates were ever about.
+        "balance_claims_confirmed": sum(
             1
             for state in seen.values()
-            if state.lifecycle is DealingRangeLifecycle.MATURE
+            if state.balance_confirmed_at is not None
         ),
         "terminal_reasons": dict(terminal_reasons),
         "unmet_gate_counts": dict(unmet_counter),

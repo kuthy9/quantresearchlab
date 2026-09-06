@@ -1687,7 +1687,9 @@ def _external_range_chain(
             "candidate_only": True,
             "source_kind": "mature_range_boundary",
         },
-        source_event_ids=(activated.event_id,),
+        # A boundary level descends from the interval that froze it. The
+        # Structural Range no longer matures, so the parent is its creation.
+        source_event_ids=(created.event_id,),
         source_entity_ids=(level_id, "range-1"),
         zone=(110.0, 110.0),
         sequence_no=1,

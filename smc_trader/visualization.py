@@ -1727,15 +1727,13 @@ def _group4_range_overlay(
             )
         color = (
             "#ca8a04"
-            if state.lifecycle is DealingRangeLifecycle.MATURE
+            if state.balance_confirmed_at is not None
             else "#a16207"
-            if state.lifecycle is DealingRangeLifecycle.FORMING
+            if state.lifecycle is DealingRangeLifecycle.ACTIVE
             else "#78716c"
         )
         linestyle = (
-            "-"
-            if state.lifecycle is DealingRangeLifecycle.MATURE
-            else "--"
+            "-" if state.balance_confirmed_at is not None else "--"
         )
         for price in (state.lower_bound, state.upper_bound):
             if visible_low <= price <= visible_high:
@@ -1959,7 +1957,7 @@ def _group4_text(
             "historical_mid"
             if state.lifecycle.value == "broken"
             else "value"
-            if state.mature_at is not None
+            if state.balance_confirmed_at is not None
             else "candidate_mid"
         )
         rows.append(

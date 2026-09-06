@@ -59,7 +59,7 @@ LIVE_ZONE_STATES = {
 }
 GATE_NAMES = (
     "duration",
-    "bilateral_touches",
+    "bilateral_price_tests",
     "midpoint_crossing",
     "inside_close_fraction",
     "width",
@@ -339,11 +339,14 @@ def maturity_gate_margins(
             - protocol.minimum_candidate_real_h1_bars
         )
         / protocol.minimum_candidate_real_h1_bars,
-        "bilateral_touches": (
-            min(state.lower_touch_count, state.upper_touch_count)
-            - protocol.minimum_boundary_touches_each
+        "bilateral_price_tests": (
+            min(
+                state.balance_lower_test_generations,
+                state.balance_upper_test_generations,
+            )
+            - protocol.balance_minimum_price_test_generations_each
         )
-        / protocol.minimum_boundary_touches_each,
+        / protocol.balance_minimum_price_test_generations_each,
         "midpoint_crossing": (
             state.midpoint_crossings - protocol.minimum_midpoint_crossings
         )
@@ -534,7 +537,7 @@ def _range_record(
         "lifecycle": state.lifecycle.value,
         "transition_reason": state.transition_reason,
         "formed_at": state.formed_at,
-        "mature_at": state.mature_at,
+        "balance_confirmed_at": state.balance_confirmed_at,
         "broken_at": state.broken_at,
         "lower_bound": state.lower_bound,
         "upper_bound": state.upper_bound,
@@ -643,8 +646,8 @@ class CoverageAccumulator:
             if event not in self._seen_range_events:
                 self._seen_range_events.add(event)
                 self.formed_ids.add(state.range_id)
-        if state.mature_at is not None and self._in_window(state.mature_at):
-            event = (state.range_id, "mature", state.mature_at)
+        if state.balance_confirmed_at is not None and self._in_window(state.balance_confirmed_at):
+            event = (state.range_id, "mature", state.balance_confirmed_at)
             if event not in self._seen_range_events:
                 self._seen_range_events.add(event)
                 self.mature_ids.add(state.range_id)
@@ -654,15 +657,15 @@ class CoverageAccumulator:
                         self.protocol,
                         window_id=self.window_id,
                         case_class="mature",
-                        focus_clock=state.mature_at,
+                        focus_clock=state.balance_confirmed_at,
                     )
                 )
         elif (
-            state.mature_at is not None
-            and self._in_coverage(state.mature_at)
-            and state.mature_at < self.start
+            state.balance_confirmed_at is not None
+            and self._in_coverage(state.balance_confirmed_at)
+            and state.balance_confirmed_at < self.start
         ):
-            event = (state.range_id, "warmup_mature", state.mature_at)
+            event = (state.range_id, "warmup_mature", state.balance_confirmed_at)
             if event not in self._seen_range_events:
                 self._seen_range_events.add(event)
                 self.warmup_mature_ids.add(state.range_id)
@@ -671,7 +674,7 @@ class CoverageAccumulator:
                     self.protocol,
                     window_id=self.window_id,
                     case_class="mature",
-                    focus_clock=state.mature_at,
+                    focus_clock=state.balance_confirmed_at,
                 )
                 record["coverage_phase"] = "warmup"
                 self.case_records.append(record)
@@ -684,7 +687,7 @@ class CoverageAccumulator:
         self.broken_ids.add(state.range_id)
         reason = str(state.transition_reason or "unknown")
         self.terminal_reasons[reason] += 1
-        if state.mature_at is None:
+        if state.balance_confirmed_at is None:
             self.forming_terminal_reasons[reason] += 1
             unmet = unmet_maturity_gates(state, self.protocol)
             self.unmet_gate_counts.update(unmet)
@@ -920,20 +923,20 @@ class CoverageAccumulator:
         forming_censored = sorted(
             range_id
             for range_id, state in self.latest_ranges.items()
-            if state.lifecycle is DealingRangeLifecycle.FORMING
+            if state.lifecycle is DealingRangeLifecycle.ACTIVE
             and self._in_window(state.formed_at)
         )
         mature_censored = sorted(
             range_id
             for range_id, state in self.latest_ranges.items()
-            if state.lifecycle is DealingRangeLifecycle.MATURE
-            and state.mature_at is not None
-            and self._in_coverage(state.mature_at)
+            if state.lifecycle is DealingRangeLifecycle.ACTIVE
+            and state.balance_confirmed_at is not None
+            and self._in_coverage(state.balance_confirmed_at)
         )
         warmup_mature_censored = [
             range_id
             for range_id in mature_censored
-            if self.latest_ranges[range_id].mature_at < self.start
+            if self.latest_ranges[range_id].balance_confirmed_at < self.start
         ]
         return {
             "window_id": self.window_id,

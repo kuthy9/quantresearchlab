@@ -208,7 +208,7 @@
     {
       "concept": "balance_range",
       "event_kind": "balance_range_matured",
-      "status": "canonical_emitted"
+      "status": "reserved_not_emitted"
     },
     {
       "concept": "balance_range",

@@ -15,6 +15,7 @@ import collections
 import json
 from pathlib import Path
 import sys
+import time
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -95,12 +96,24 @@ def main() -> None:
     parser.add_argument("--end", default="2022-03-01")
     parser.add_argument("--model", default="configs/model.json")
     parser.add_argument("--limit", type=int, default=0)
+    parser.add_argument(
+        "--progress-bars",
+        type=int,
+        default=0,
+        help=(
+            "write a progress line to stderr every N completed bars; a month "
+            "otherwise prints nothing at all until it finishes, so a running "
+            "scan offers no observable but its resident size"
+        ),
+    )
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
 
     loaded = load_ohlcv(ROOT / args.source, start=args.start, end=args.end)
     reader, observer = build_eye(ROOT / args.model)
 
+    total_bars = len(loaded.frame)
+    started = time.monotonic()
     bars = 0
     first_end = last_end = None
     for bar in iter_completed_bars(loaded.frame):
@@ -111,6 +124,15 @@ def main() -> None:
         if first_end is None:
             first_end = bar.end
         last_end = bar.end
+        if args.progress_bars and bars % args.progress_bars == 0:
+            elapsed = time.monotonic() - started
+            print(
+                f"{bars}/{total_bars} bars  {bar.end.isoformat()}  "
+                f"{elapsed / 60.0:.1f} min elapsed  "
+                f"{bars / elapsed:.2f} bars/s",
+                file=sys.stderr,
+                flush=True,
+            )
 
     store = observer.audit_store
     events = list(store.events())

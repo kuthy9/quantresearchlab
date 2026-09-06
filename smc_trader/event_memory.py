@@ -153,14 +153,10 @@ class EventMemory:
             OrderBlockLifecycle.FAILED.value: frozenset(),
         },
         "range": {
-            DealingRangeLifecycle.FORMING.value: frozenset(
+            DealingRangeLifecycle.ACTIVE.value: frozenset(
                 {
-                    DealingRangeLifecycle.MATURE.value,
                     DealingRangeLifecycle.BROKEN.value,
                 }
-            ),
-            DealingRangeLifecycle.MATURE.value: frozenset(
-                {DealingRangeLifecycle.BROKEN.value}
             ),
             DealingRangeLifecycle.BROKEN.value: frozenset(),
         },
@@ -213,7 +209,7 @@ class EventMemory:
         "order_block": frozenset(
             {OrderBlockLifecycle.CREATED.value}
         ),
-        "range": frozenset({DealingRangeLifecycle.FORMING.value}),
+        "range": frozenset({DealingRangeLifecycle.ACTIVE.value}),
         "manipulation": frozenset(
             {ManipulationLifecycle.SWEPT.value}
         ),

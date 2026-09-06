@@ -6,7 +6,7 @@
   "upstream": {
     "group12_protocol_sha256": "5a8913907b92b22c5ea67df7056b5464518329adcce883435aadf9008dc7e0e0",
     "group3_protocol_sha256": "0163d8fc3d41bcd6037bfab05b59e4a44b6558f01d1c73eb95955ea1e0bf8899",
-    "group4_protocol_sha256": "9c5334e52bacd19a896cb326e02c77a3be4f932e9b09579929fdce7d9ccdbdf4"
+    "group4_protocol_sha256": "68dbc01dbc8d7e7d190a149bd59929f1dec4b34d31d14c7ef1dc65e8d7e5b8db"
   },
   "engineering_parameters": {
     "m1_atr_period": 14,
