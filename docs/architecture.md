@@ -20,12 +20,13 @@ It reuses the existing detectors and immutable store; it is not a parallel Eye
 or a new action path.
 The current implementation-versus-plan matrix is recorded separately in the
 [current implementation status](current_implementation_status.md), and
-the registered atomic definitions in the
-[v1.3 preregistered semantics](preregistered_semantics_v1_3_2026-08-31.md).
-The historical Phase 2–5, Phase 6–9, DOL/Belief/Temporal and round-two-review
-documents were removed on 2026-09-06; their still-current conclusions live in
-those two documents. Executable coverage is never treated as predictive
-validation.
+the registered atomic definitions — concepts, formulas, evidence, the
+v1.2 → v1.3 delta and every defect the replay exposed — in the
+[semantic specification](smc_semantic_specification_v1.3.md).
+The historical Phase 2–5, Phase 6–9, DOL/Belief/Temporal, round-two-review and
+separate preregistered-semantics documents were removed on 2026-09-06; their
+still-current conclusions live in those two documents. Executable coverage is
+never treated as predictive validation.
 The numbered implementation modules are no longer runtime owners: Zone logic
 lives in `smc_trader/zone.py`, and Range Auction logic lives in
 `smc_trader/range_auction.py`. `group3.py` and `group4.py` are unexported,

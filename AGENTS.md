@@ -68,7 +68,7 @@ keys. Do not introduce them anywhere new.
 The current implementation-versus-plan authority is
 [docs/current_implementation_status.md](docs/current_implementation_status.md);
 the registered semantic definitions are
-[docs/preregistered_semantics_v1_3_2026-08-31.md](docs/preregistered_semantics_v1_3_2026-08-31.md)
+[docs/smc_semantic_specification_v1.3.md](docs/smc_semantic_specification_v1.3.md)
 for the atomic layer and
 [docs/canonical_semantic_foundation_v2.1.md](docs/canonical_semantic_foundation_v2.1.md)
 for the Foundation projection.

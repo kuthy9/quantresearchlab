@@ -1,0 +1,181 @@
+{
+  "bars_replayed": 27360,
+  "efficiency": {
+    "level_generations": {
+      "by_generation_ordinal": {
+        "1": 2563,
+        "2": 3673,
+        "3": 930
+      },
+      "disarmed_now": 51,
+      "levels": 7166,
+      "rearmed": 4603
+    },
+    "relation_generations": {
+      "compression_ratio": 58.64,
+      "count": 2333,
+      "max": 5040,
+      "median": 16,
+      "min": 1,
+      "observations": 136800,
+      "p90": 135,
+      "per_bar_rows": 136800
+    },
+    "structure_generations": {
+      "breaks_absorbed": 5590,
+      "breaks_emitted": 2829,
+      "count": 1927,
+      "max": 1466,
+      "median": 1,
+      "min": 0,
+      "observations": 5590,
+      "p90": 4
+    },
+    "swing_geometry": {
+      "by_depth": {
+        "0": 84,
+        "1": 594,
+        "2": 2462,
+        "3": 4992,
+        "4": 4801
+      },
+      "depths_per_semantic_rank": {
+        "external": [
+          0,
+          1,
+          2,
+          3,
+          4
+        ],
+        "internal": [
+          0,
+          1,
+          2,
+          3,
+          4
+        ],
+        "micro": [
+          0,
+          1,
+          2,
+          3,
+          4
+        ],
+        "structural": [
+          0,
+          1,
+          2,
+          3,
+          4
+        ]
+      },
+      "nested": 12849,
+      "swings": 12933
+    }
+  },
+  "event_counts": {
+    "acceptance_confirmed": 10238,
+    "bar_completed": 35230,
+    "base_origin_core_created": 634,
+    "bos_post_break_state": 4378,
+    "dealing_range_created": 25,
+    "dealing_range_invalidated": 24,
+    "dealing_range_replaced": 24,
+    "dealing_range_state": 49,
+    "delivery_phase_entered": 7953,
+    "delivery_phase_exited": 7948,
+    "delivery_phase_updated": 3399,
+    "displacement_observed": 2697,
+    "entry_path_state": 3690,
+    "entry_path_step": 6610,
+    "fvg_created": 1044,
+    "fvg_first_retest": 1031,
+    "fvg_fully_filled": 543,
+    "fvg_invalidated": 469,
+    "fvg_midpoint_touched": 322,
+    "fvg_partially_filled": 292,
+    "fvg_state": 2670,
+    "level_penetrated": 25563,
+    "level_touched": 25837,
+    "liquidity_consumed": 7232,
+    "liquidity_level_created": 15000,
+    "liquidity_pool_state": 6131,
+    "liquidity_retired": 84,
+    "liquidity_sweep": 6750,
+    "manipulation_state": 4151,
+    "mss_core_confirmed": 1763,
+    "order_block_state": 119,
+    "origin_zone_invalidated": 5,
+    "origin_zone_mitigated": 35,
+    "protected_swing_assigned": 222,
+    "qualified_bos": 1066,
+    "qualified_origin_zone_created": 43,
+    "raw_boundary_break": 4380,
+    "structural_leg_created": 10081,
+    "structure_break": 4380,
+    "structure_break_failed": 11361,
+    "structure_direction_confirmed": 2272,
+    "structure_state": 9013,
+    "support_resistance_state": 37374,
+    "sweep_confirmed": 10188,
+    "swing_confirmed": 12933,
+    "swing_state": 71690
+  },
+  "fvg_first_retest": {
+    "age_bars_at_first_retest": {
+      "max": 1642,
+      "median": 2,
+      "min": 1,
+      "p90": 34
+    },
+    "cross_session_first_retests": 151,
+    "cumulative_within": {
+      "within_12_bars": 840,
+      "within_1_bars": 468,
+      "within_24_bars": 899,
+      "within_3_bars": 669,
+      "within_6_bars": 754
+    },
+    "cumulative_within_fraction": {
+      "within_12_bars": 0.8147,
+      "within_1_bars": 0.4539,
+      "within_24_bars": 0.872,
+      "within_3_bars": 0.6489,
+      "within_6_bars": 0.7313
+    },
+    "first_retests": 1031,
+    "fvg_created": 1044,
+    "mean_fill_depth_by_age": {
+      "<= 1": 0.7493,
+      "<= 12": 0.7616,
+      "<= 24": 0.777,
+      "<= 3": 0.7008,
+      "<= 6": 0.7328,
+      "> 24": 0.7191
+    },
+    "retested_fraction": 0.9875
+  },
+  "last_bar_end": "2022-03-01 00:00:00-05:00",
+  "population_sample_bars": 250,
+  "precision": {
+    "base_origin_cores_published": 634,
+    "cores_that_were_qualified": 43,
+    "qualification_lead_seconds": {
+      "max": 1200,
+      "median": 300,
+      "min": 0
+    },
+    "qualified_origin_zones": 43
+  },
+  "structural_range": {
+    "balance_matured": 0,
+    "balance_observed": 0,
+    "created": 25,
+    "invalidated": 24,
+    "transitions_seen": 25
+  },
+  "window": {
+    "end": "2022-03-01",
+    "start": "2022-02-01"
+  }
+}

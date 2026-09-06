@@ -17,10 +17,16 @@ documents were removed: the Eye/Brain consolidation audit, the repository file
 inventory, the Phase 0, Phase 2–4, Phase 2–5 and Phase 6–9 reports, the
 2026-08-29 v1.2 preregistered-semantics status, the round-two semantic review,
 and the DOL/Belief/Temporal supplement. Every one of them was a v1.1/v1.2-era
-snapshot, and each carried its own superseded notice. `docs/refactor/` now holds
-three documents and no others: this file, the
-[v1.3 preregistered semantics](preregistered_semantics_v1_3_2026-08-31.md), and
-the [Canonical Semantic Foundation v2.1](canonical_semantic_foundation_v2.1.md).
+snapshot, and each carried its own superseded notice. `docs/refactor/` itself
+was then dissolved into `docs/`, and the separate v1.3 preregistered-semantics
+document was merged into the
+[semantic specification](smc_semantic_specification_v1.3.md), which now carries
+the registered concepts, their formulas, the identity binding, the evidence
+base, the v1.2 → v1.3 delta and the replay-exposed defects. The current
+document set is this file, that specification, the
+[Canonical Semantic Foundation v2.1](canonical_semantic_foundation_v2.1.md),
+`architecture.md`, `self_review_checklist.md` and the three `primitives_*.md`
+contracts.
 Statements below that cited a removed document keep their content and name the
 document as removed; their frozen figures are unchanged.
 
@@ -594,7 +600,7 @@ disarm/rearm lifecycle; `SwingHierarchyView` carries the geometric tree;
 locks them rather than at qualification; and every crossing terminal carries
 `constituent_bar_ids`, `penetration_bar_id`, `reentry_bar_id`, `hold_bar_id`
 and `outside_close_ids`. Definitions and the level taxonomy are in
-`docs/refactor/preregistered_semantics_v1_3_2026-08-31.md`; measured effects
+`docs/smc_semantic_specification_v1.3.md`; measured effects
 over 2022-02 and 2022-03 are in
 `docs/evidence/v1_3_structure_reading_2022_0{2,3}.json`.
 
