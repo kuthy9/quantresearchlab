@@ -82,14 +82,15 @@ for the Foundation projection.
 Create the environment with `uv sync --extra test`; there is no compile step.
 
 - `env PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider`
-  runs daily semantic/runtime tests; historical and research-orchestration
-  groups are excluded by `pyproject.toml`.
+  runs daily semantic/runtime tests; the research-orchestration group is
+  excluded by `pyproject.toml`.
 - `.venv/bin/python -m pytest -m 'research_orchestration' -q -p no:cacheprovider`
   runs the remaining bounded study-orchestration tests, currently the Eye
   authority-scan group in `tests/test_eye_authority_scan.py`. They are excluded
   from the default loop, so run them after touching a study script or a runtime
-  identity binding. The `historical_frozen` and `research_runner` markers are
-  declared in `pyproject.toml` but no longer have any test.
+  identity binding. `research_orchestration` is the only registered marker; the
+  `historical_frozen` and `research_runner` markers were dropped on 2026-09-06
+  once the retirements left them with no test.
 - `.venv/bin/python -m pytest tests/test_semantic_foundation_projection.py -q -p no:cacheprovider`
   runs a focused contract file.
 - `git diff --check` catches whitespace errors before commit.

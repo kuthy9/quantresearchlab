@@ -233,15 +233,13 @@ development Engine retains its existing Scene Graph/Brain composition, while
 `project_scene_graph`, `materialize_event_view`, and
 `persist_state_projections` flags for explicitly graph-free or projection-free
 runs. This changes no checked-in model bytes, semantic identity, Snapshot
-schema, or current development-Engine output. Phase 7 empirical, Phase 8 runner,
-and Phase 9 file/operational runner tests are registered as the separate
-`research_runner` group. The Phase-7 readiness CLI test is registered as
-`research_orchestration`. They remain executable and are not deleted, but no
-longer inflate the default semantic/runtime test loop. The remaining runners
-cannot be directly deleted: Phase 7 is the sole materialize/fit/publish
-implementation, Phase 8 is bound by its runner contract and run template, and
-Phase 9 v2 supplies the shared input codec used by Phase 7, v3, and the Week-1
-materializer while v3 has a distinct WAL/capacity/checkpoint contract.
+schema, or current development-Engine output. The Phase 8 runner and Phase 9
+file/operational runner tests were once registered as a separate
+`research_runner` group; they went with those runners on 2026-09-06 and the
+marker was dropped from `pyproject.toml` on the same date. `research_orchestration`
+is now the only registered marker, and the only tests carrying it are the Eye
+authority-scan group in `tests/test_eye_authority_scan.py`. Phase 7 remains the
+sole materialize/fit/publish implementation and is not deleted.
 
 This is only the safe boundary closure. `MarketSnapshot` already obtains
 `TimeframeState` from canonical events, but compatibility Brain and Scene Graph
@@ -611,11 +609,12 @@ The frozen v1.1 protocol-v2 diagnostic remains immutable historical evidence:
 29,077 requested touches, 6,991 matches (24.04%), and zero source-linked
 samples at E3–E6.
 
-Tests marked `historical_frozen` require the then-frozen runtime checkout and
-are excluded from the default suite. Against the current v1.2 working tree,
-four marked checks still pass while two raw-Eye transport assertions correctly
-fail closed on the changed `smc_trader/causal.py` SHA. The old binding is not
-rewritten to make a current checkout impersonate that historical runtime.
+Those checks were once carried by a `historical_frozen` marker, because they
+required the then-frozen runtime checkout rather than the current one. The tests
+went with the 2026-09-06 retirements and the marker was dropped from
+`pyproject.toml` on the same date; the recorded conclusion above survives, and
+no binding was rewritten to make a current checkout impersonate that historical
+runtime.
 
 Four June Foundation comparison-v1 manifests are also inert historical
 preregistrations, not runnable current contracts. They were initially committed
