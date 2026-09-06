@@ -63,7 +63,7 @@ from scripts.run_mbo_mechanism_research import (
 
 
 ROOT = Path(__file__).resolve().parents[1]
-TEMPLATE = ROOT / "experiments/manifests/mbo_mechanism_phase6_template.yaml"
+TEMPLATE = ROOT / "configs/research/mbo_mechanism_phase6_template.yaml"
 
 
 def _clock(minute: int) -> pd.Timestamp:
@@ -1713,7 +1713,7 @@ def test_collection_failure_leaves_no_partial_result_or_ledgers(
             Phase6ResearchError("cold-start context collection failed")
         ),
     )
-    output = tmp_path / "experiments/results/cold_start.json"
+    output = tmp_path / "outputs/research/cold_start.json"
 
     with pytest.raises(Phase6ResearchError, match="cold-start context"):
         phase6_runner.run(

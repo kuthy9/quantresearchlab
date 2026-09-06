@@ -20,7 +20,7 @@ from typing import Any, ClassVar, Iterable, Mapping, TYPE_CHECKING
 
 import pandas as pd
 
-from .model import MarketObservation, Timeframe
+from .model import BALANCE_CLAIM_CONFIRMED, MarketObservation, Timeframe
 
 if TYPE_CHECKING:  # pragma: no cover - imported only for static analysis
     from .causal import ReaderUpdate
@@ -260,7 +260,7 @@ _OPEN_LIFECYCLES: dict[str, frozenset[str]] = {
     "displacement": frozenset({"started", "active"}),
     "fvg": frozenset({"open", "partial"}),
     "order_block": frozenset({"created", "untested"}),
-    "dealing_range": frozenset({"forming", "mature"}),
+    "dealing_range": frozenset({"active"}),
     "manipulation": frozenset({"swept"}),
     "entry_location": frozenset({"approaching", "in_zone", "rejected"}),
     "qualified_reacceptance": frozenset({"left", "reclaimed"}),
@@ -562,7 +562,7 @@ class EyeAuthorityStatistics:
             "invalidated": ("invalidated_at", "state_started_at"),
             "created": ("formed_at", "state_started_at"),
             "untested": ("state_started_at",),
-            "mature": ("balance_confirmed_at", "state_started_at"),
+            "active": ("formed_at", "state_started_at"),
             "swept": ("swept_at", "state_started_at"),
             "accepted_outside": ("accepted_outside_at", "resolved_at"),
             "approaching": ("state_started_at", "formed_at"),
@@ -701,7 +701,7 @@ class EyeAuthorityStatistics:
 
         reason = _value(_mapping_value(state, "transition_reason")) or ""
         if group == "group4" and primitive == "dealing_range":
-            if lifecycle == "mature":
+            if reason == BALANCE_CLAIM_CONFIRMED:
                 return "all_recognized_mature"
             if lifecycle == "broken":
                 if reason in _RANGE_REASONABLY_BROKEN_REASONS:
@@ -1078,8 +1078,8 @@ class EyeAuthorityStatistics:
                     )
                     if (
                         primitive == "dealing_range"
-                        and _value(_mapping_value(state, "lifecycle"))
-                        == "mature"
+                        and _mapping_value(state, "balance_confirmed_at")
+                        is not None
                         and (
                             range_id := str(
                                 _mapping_value(state, "range_id") or ""
@@ -1652,8 +1652,7 @@ class EyeAuthorityStatistics:
             state=state,
         )
         if (
-            new
-            and lifecycle == "mature"
+            _mapping_value(state, "balance_confirmed_at") is not None
             and (
                 lower_bound := _finite(_mapping_value(state, "lower_bound"))
             )
@@ -1721,8 +1720,7 @@ class EyeAuthorityStatistics:
         ):
             self._range_formation_atr_by_id[range_id] = formation_atr
         if (
-            new
-            and lifecycle == "mature"
+            state.balance_confirmed_at is not None
             and state.range_id not in self._seen_mature_ranges
         ):
             self._seen_mature_ranges.add(state.range_id)

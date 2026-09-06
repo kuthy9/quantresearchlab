@@ -470,6 +470,7 @@ def _node(
     semantic_attributes: tuple[tuple[str, str], ...] = (),
     descriptive_metrics: tuple[tuple[str, float], ...] = (),
     market_epoch_id: str = "epoch:0",
+    resolution_reason: str | None = None,
 ) -> SceneNode:
     return SceneNode(
         node_id=f"{market_epoch_id}:{kind}:{timeframe.value}:{identity}",
@@ -492,6 +493,7 @@ def _node(
         ),
         observed_at=observed_at,
         lifecycle=lifecycle,
+        resolution_reason=resolution_reason,
         price_bounds=bounds,
         invalidation_rule="frozen_test_rule",
         ambiguity_state=(
@@ -1291,7 +1293,8 @@ def test_mature_h1_balance_is_balanced_even_without_directional_authority() -> N
             Timeframe.H1,
             asof,
             direction=None,
-            lifecycle="mature",
+            lifecycle="active",
+            resolution_reason="balance_claim_confirmed",
         )
     )
     graph._last_asof = asof
@@ -1332,7 +1335,8 @@ def test_h4_direction_remains_global_authority_over_local_h1_balance() -> None:
             Timeframe.H1,
             asof,
             direction=None,
-            lifecycle="mature",
+            lifecycle="active",
+            resolution_reason="balance_claim_confirmed",
         )
     )
     graph._last_asof = asof
@@ -3225,7 +3229,7 @@ def test_descriptive_balance_sets_mode_only_without_directional_authority() -> N
         forming = graph.add_node(
             _node(
                 "h1-descriptive-balance", "range", Timeframe.H1, asof,
-                direction=None, lifecycle="forming",
+                direction=None, lifecycle="active",
                 semantic_attributes=(("lower_source_zone_id", "sr:lower"),
                                      ("upper_source_zone_id", "sr:upper")),
                 descriptive_metrics=(("lower_touch_count", 2.0),

@@ -1,10 +1,10 @@
 # Current SMC Refactor Implementation Status
 
-Status date: 2026-08-27
+Status date: 2026-09-06
 Runtime semantic identity: `smc_semantics_v1.3`
 Canonical foundation identity: `smc_semantic_foundation_v2.1`
 Canonical foundation registry identity: `69428dbfd2a9b2aa19f0254391fca2da17aedb8d0206829572e69c0cc212a715`
-Atomic registry identity: `7ca182b26418be6b7ecbceb62c581a2064f65bed663e0a704fde0c596de7d134`
+Atomic registry identity: `f92b24c86bf942defc88de4edb7be16cc2a30dd64fde3b4432657780648b1f0c`
 The frozen `smc_semantics_v1.2` / `smc_semantic_foundation_v2.0` pair remains
 the identity of every historical artifact below; it is not the runtime.
 
@@ -66,7 +66,7 @@ pair and freezes the existing identities into Engine, Shadow, and checkpoint
 state. The current combined Engine checkpoint schema is 12; older schemas fail
 closed on restore into the current Observation, Foundation, and Neutral-state
 contracts. `MarketObservation` schema 5 publishes the canonical physical
-`InteractionUpdate` (schema 2); `MarketSnapshot` is schema 5. Shadow uses
+`InteractionUpdate` (schema 2); `MarketSnapshot` is schema 8. Shadow uses
 `phase9_shadow_live_v1.3`, compact checkpoint `shadow_compact_runtime_v8`, and
 component digest `phase9_shadow_component_digest_v3`. These
 bindings grant no empirical, Brain, Trade Intent, execution, or live authority.
@@ -95,7 +95,10 @@ schema 8/protocol 1.8 stores exact 15-key per-update raw Interaction payloads
 and an 11-key delta-only aggregate; MarketCase schema 2/protocol 1.4 stores the
 same nine raw Interaction collections in its single-clock row. Brain runner
 state schema 15 and MarketCase runner state schema 8 reject older identities.
-The hash-bound historical `configs/data_splits.json` is unchanged; new
+`configs/data_splits.json` was edited on 2026-09-06 to drop the three
+`permanent_result_path`/`permanent_case_index_path` bindings of the 2023
+authority scans; because that file is one of the five inputs to the atomic
+semantic identity, the identity moved with it. New
 MarketCase runs select and hash-bind the sole current registry
 `configs/market_case_input_profiles_v2.json`.
 Normal Engine clocks construct one `BrainObservationView`; Neutral market
@@ -163,7 +166,7 @@ The Phase-7 empirical pipeline was removed as unreached over-engineering:
 `scripts/check_phase7_probability_readiness.py`,
 `configs/phase7_foundation_v2_empirical.json`,
 `configs/phase7_probability_fit_admission.json`,
-`experiments/manifests/phase7_foundation_v2_empirical_preregistration.yaml`,
+its preregistration manifest,
 `smc_trader/probability_cohorts.py`, `smc_trader/probability_fit.py`,
 `smc_trader/probability_admission.py`, `smc_trader/signal_outcome_fit.py`, and
 their four tests. Its preregistration was frozen against
@@ -438,7 +441,7 @@ rolling OOF, or sealed OOS.
 | 16. Experiment preregistration | **v1.2 v3 r2 frozen and executed as a development diagnostic** | The r2 manifest froze definitions, controls, outcomes, inference, ledgers, identities, input census, and no-authority flags before the complete run. OOS, fitting, inference authority, and semantic acceptance remain closed. |
 | 17. Brain organization | **Interfaces and current-scope path lifecycle integrated; target input/promotion path incomplete** | Neutral state owns one canonical `OpenMarketThesis` update per clock and Brain reuses it. Hypothesis Manager, Belief Updater, terminal/winner mapping, DOL ranking, fitted-artifact-only DOL probability, Signal Policy, Trade Intent, and artifact loaders remain integrated into `PlaybookBrain`. The compatibility Brain still consumes typed `MarketObservation`/Scene Graph views, scope retirement is unregistered, and no fitted artifacts are admitted. |
 | 18. Execution state machine | **Standalone FSM engineering complete (v1.5)** | Immutable commands/facts, order/position conservation, partial fill, cancel/replace, OCO, stop/target, reconciliation, checkpoint and replay contracts passed focused development review. It has not replaced the current Engine/Decision/Risk/simulator path; no broker or empirical-fill authority is claimed. |
-| 19. Recommended directories | **Adapted, not mechanically copied** | `semantics/`, `experiments/`, event/state/research/Brain modules, and focused tests exist inside the reused package. |
+| 19. Recommended directories | **Adapted, not mechanically copied** | `semantics/`, `configs/research/`, event/state/research/Brain modules, and focused tests exist inside the reused package. `experiments/` was retired on 2026-09-06. |
 | 20. Refactor order | **Phase 6 passed; Phase 7–9 components exist with target gates closed** | See the phase matrix below; fitted Brain promotion, complete Execution Research, operational Shadow Live, and OOS are not complete. |
 
 ## Phase matrix
@@ -602,7 +605,7 @@ locks them rather than at qualification; and every crossing terminal carries
 and `outside_close_ids`. Definitions and the level taxonomy are in
 `docs/smc_semantic_specification_v1.3.md`; measured effects
 over 2022-02 and 2022-03 are in
-`docs/evidence/v1_3_structure_reading_2022_0{2,3}.json`.
+a two-month structure-reading ledger retired on 2026-09-06.
 
 None of these entities change a detector rule. They give an existing fact an
 identity and a life so that a consumer counts episodes instead of bars; the
@@ -648,9 +651,8 @@ The generic semantic and MBO research runners remain; the historical manifests
 above remain unchanged and are not redirected to those generic runners.
 
 The separately frozen v1.2 protocol-v3 r2 development diagnostic completed.
-Its [manifest](../experiments/manifests/smc_semantics_v1_2_2024_01_phase5_diagnostic_v3_r2.yaml)
-and [result](../experiments/results/smc_semantics_v1_2_2024_01_phase5_diagnostic_v3_r2.json)
-bind a complete 36,000-clock run, 30,477 real diagnostic bars, 157,802 atomic
+Its `smc_semantics_v1_2_2024_01_phase5_diagnostic_v3_r2` manifest and result
+was retired on 2026-09-06 with the rest of `experiments/`. They bound a complete 36,000-clock run, 30,477 real diagnostic bars, 157,802 atomic
 events, and six audit ledgers. Episode counts are E1–E6 =
 1,124 / 317 / 17 / 1 / 1 / 0. Quiet and non-sweep controls matched 372 and 62
 episodes; pseudo and forward-shift controls matched zero. All fixed-family
@@ -682,8 +684,8 @@ Signal Research library can now project deterministic typed branching episodes
 without inferring missing edges or probabilities, but the frozen protocol-v3
 r2 result remains a linear historical diagnostic and supplies no branching
 evidence.
-See the final [manifest](../experiments/manifests/smc_semantics_v1_2_2024_06_phase6_mbo_week2_extension_v3.yaml)
-and [result](../experiments/results/smc_semantics_v1_2_2024_06_phase6_mbo_week2_extension_v3.json).
+The final `smc_semantics_v1_2_2024_06_phase6_mbo_week2_extension_v3` manifest
+and result was retired on 2026-09-06 with the rest of `experiments/`.
 
 ## Authority summary
 

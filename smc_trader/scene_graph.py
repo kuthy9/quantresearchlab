@@ -28,6 +28,7 @@ if TYPE_CHECKING:
     from .brain_entry_sequence import BrainInteractionView, BrainObservationView
 
 from .model import (
+    BALANCE_CLAIM_CONFIRMED,
     AuthorityLayer,
     BalanceContext,
     BOSLifecycle,
@@ -4942,7 +4943,7 @@ def _global_balance_context(
         for timeframe in (Timeframe.H4, Timeframe.H1, Timeframe.M15)
         if timeframe in observation.active_timeframes
         for state in observation.frame(timeframe).dealing_ranges
-        if state.lifecycle.value in {"forming", "mature", "broken"}
+        if state.lifecycle.value in {"active", "broken"}
     )
     if not ranges:
         range_nodes = tuple(
@@ -4953,7 +4954,7 @@ def _global_balance_context(
                 Timeframe.H1.value,
                 Timeframe.M15.value,
             }
-            and node.lifecycle in {"forming", "mature"}
+            and node.lifecycle == "active"
             and node.ambiguity_state
             in {EvidenceStatus.CONFIRMED, EvidenceStatus.FORMING}
         )
@@ -4962,7 +4963,7 @@ def _global_balance_context(
         node = max(
             range_nodes,
             key=lambda value: (
-                value.lifecycle == "mature",
+                value.resolution_reason == BALANCE_CLAIM_CONFIRMED,
                 value.confirmed_at or value.formed_at,
                 value.node_id,
             ),
@@ -4979,7 +4980,7 @@ def _global_balance_context(
         internal_crossing = metrics.get("midpoint_crossings", 0.0) > 0.0
         status = (
             "authoritative"
-            if node.lifecycle == "mature"
+            if node.resolution_reason == BALANCE_CLAIM_CONFIRMED
             else "descriptive"
             if bilateral
             and internal_crossing
@@ -5005,7 +5006,7 @@ def _global_balance_context(
     state = max(
         ranges,
         key=lambda value: (
-            value.lifecycle.value == "mature",
+            value.balance_confirmed_at is not None,
             value.balance_confirmed_at or value.formed_at,
             value.range_id,
         ),
@@ -5021,7 +5022,7 @@ def _global_balance_context(
         state.lifecycle.value == "broken"
         and state.transition_reason == "close_beyond_frozen_range"
     )
-    if state.lifecycle.value == "mature":
+    if state.balance_confirmed_at is not None:
         status = "authoritative"
     elif (
         bilateral
@@ -5092,7 +5093,7 @@ def _global_obstruction_views(
     mature_range_source_ids = {
         identity
         for node in _current_context_nodes(graph, "range")
-        if node.lifecycle == "mature"
+        if node.resolution_reason == BALANCE_CLAIM_CONFIRMED
         for identity in (
             _context_identity(node),
             node.node_id,

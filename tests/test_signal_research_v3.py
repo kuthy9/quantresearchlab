@@ -44,7 +44,7 @@ from scripts.run_semantic_signal_research import (
 )
 
 
-TEMPLATE = ROOT / "experiments/manifests/semantic_event_study_v3_template.yaml"
+TEMPLATE = ROOT / "configs/research/semantic_event_study_v3_template.yaml"
 
 
 def _clock(minute: int) -> pd.Timestamp:
@@ -748,7 +748,7 @@ def test_pseudo_control_requires_active_snapshot_then_real_future_touch() -> Non
 def test_old_evidence_stems_and_max_bar_smokes_fail_closed(tmp_path: Path) -> None:
     assert _artifact_status("frozen", 10) == ("incomplete_smoke_not_experiment_result")
     old_output = (
-        ROOT / "experiments/results/"
+        ROOT / "outputs/research/"
         "smc_semantics_v1_1_2024_01_phase5_diagnostic_v2.json"
     )
     with pytest.raises(ResearchContractError, match="immutable"):

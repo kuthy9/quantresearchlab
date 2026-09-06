@@ -23,7 +23,7 @@ from smc_trader.execution_research_runner import (
 
 DEFAULT_MANIFEST = (
     PROJECT_ROOT
-    / "experiments/manifests/execution_research_phase8_v2_run_template.yaml"
+    / "configs/research/execution_research_phase8_v2_run_template.yaml"
 )
 
 

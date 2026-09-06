@@ -40,7 +40,7 @@ v1.2 → v1.3 delta, the lifecycle entities, and every defect the replay exposed
 are stated here rather than split across two files. Its status is
 `preregistered_development_contract_not_oos_trading_authority`: atomic identity
 `smc_semantics_v1.3` ·
-`7ca182b26418be6b7ecbceb62c581a2064f65bed663e0a704fde0c596de7d134`, Foundation
+`f92b24c86bf942defc88de4edb7be16cc2a30dd64fde3b4432657780648b1f0c`, Foundation
 identity `smc_semantic_foundation_v2.1` ·
 `69428dbfd2a9b2aa19f0254391fca2da17aedb8d0206829572e69c0cc212a715`.
 
@@ -97,11 +97,11 @@ parent does not equal the selected atomic version.
 | 2022-03-01 → 04-01 | NQ 1m OHLCV | 31,740 | full event population, 404,656 events |
 | 2024-06-01 → 07-01 | NQ 1m OHLCV + MBO top-of-book | 27,720 | crossing-generation outcomes against the book |
 
-Machine-readable:
-[`v1_3_two_month_replay_comparison.json`](evidence/v1_3_two_month_replay_comparison.json),
-[`balance_range_gate_study_2022_02.json`](evidence/balance_range_gate_study_2022_02.json),
-[`balance_range_gate_study_2022_03.json`](evidence/balance_range_gate_study_2022_03.json),
-[`unresolved_interaction_study_2024_06.json`](evidence/unresolved_interaction_study_2024_06.json).
+The machine-readable ledgers behind these windows -- the two-month replay
+comparison, the two balance-range gate studies and the 2024-06
+unresolved-interaction study -- were retired on 2026-09-06. Every count this
+document relies on is stated here in full; re-running a study reproduces a new
+artifact, not those bytes.
 
 ## What v1.3 changed
 
@@ -525,7 +525,7 @@ Definitions in force:
 
 Two full months replayed bar for bar and independently: 2022-02 (27,360 bars,
 12,933 confirmed Swings) and 2022-03 (31,740 bars, 14,537 confirmed Swings),
-sources `docs/evidence/v1_3_structure_reading_2022_0{2,3}.json`.  The second
+sources, retired on 2026-09-06 with the rest of `docs/evidence/`'s JSON ledgers.  The second
 month is a replication, not a larger sample: every figure below is reported for
 both so that a number which moved between them is visible as such.
 

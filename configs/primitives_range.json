@@ -91,16 +91,11 @@
     "timeframe": "1H",
     "maximum_live_states_per_contract": 1,
     "lifecycle": [
-      "forming",
-      "mature",
+      "active",
       "broken"
     ],
     "allowed_transitions": {
-      "forming": [
-        "mature",
-        "broken"
-      ],
-      "mature": [
+      "active": [
         "broken"
       ],
       "broken": []
@@ -149,32 +144,14 @@
       "crossing_strength": "clamp(midpoint_crossings / 4, 0, 1)",
       "strength": "unweighted mean of narrowness_strength, compression_strength, boundary_test_strength, crossing_strength and inside_close_fraction; descriptive only"
     },
-    "maturity": {
-      "clock": "the first real completed H1 end at which every condition is simultaneously true",
-      "conditions": [
-        "candidate_real_h1_bars >= 8",
-        "candidate_real_h1_bars <= 24",
-        "lower source total_touch_count >= 2",
-        "upper source total_touch_count >= 2",
-        "midpoint_crossings >= 2",
-        "inside_close_fraction >= 0.80",
-        "width_atr_at_formation <= 4.0",
-        "compression_ratio <= 0.80",
-        "both source zones remain active or tested at the maturity clock",
-        "the current completed H1 close remains inside the frozen outer bounds"
-      ],
-      "freeze_at_maturity": "mature_at, exact source touch counts and IDs, midpoint crossings, inside fraction, compression ratio, component strengths and aggregate strength",
-      "not_strategy_gate": "maturity authorizes only a descriptive dealing-range/value source"
-    },
     "break": {
-      "forming_price_break": "a later real completed H1 close strictly below lower_bound or strictly above upper_bound",
-      "forming_source_break": "before maturity, either frozen source zone ceases to be active or tested",
-      "forming_deadline": "after evaluating price break, source validity and maturity on candidate bar 24, a still-forming candidate becomes broken with reason maturity_deadline_elapsed",
-      "mature_break": "a later real completed H1 close strictly below lower_bound or strictly above upper_bound",
+      "price_break": "a later real completed H1 close strictly below lower_bound or strictly above upper_bound",
+      "source_break": "before the balance claim settles, either frozen source zone ceases to be active or tested",
+      "deadline": "after evaluating price break, source validity and the balance claim on candidate bar 24, a range whose claim has not settled becomes broken with reason maturity_deadline_elapsed",
       "equality": "a close equal to either frozen bound remains inside",
       "wick_only": "a high or low outside the range with a completed H1 close inside does not break the range",
-      "post_maturity_source_retirement": "source-zone retirement alone does not rewrite or break a mature range; only its frozen close rule or a hard epoch boundary does",
-      "terminal": "broken is terminal and preserves all frozen geometry and maturity evidence"
+      "post_settlement_source_retirement": "source-zone retirement alone does not rewrite or break a range whose balance claim has settled; only its frozen close rule or a hard epoch boundary does",
+      "terminal": "broken is terminal and preserves all frozen geometry and balance evidence"
     },
     "same_h1_bar_priority": [
       "hard epoch boundary",
@@ -217,7 +194,24 @@
       "strength",
       "age_h1_bars",
       "transition_reason"
-    ]
+    ],
+    "balance_claim": {
+      "sub_protocol_version": "balance_range_v1.2",
+      "not_a_transition": "settling the balance claim records balance_confirmed_at and transition_reason=balance_claim_confirmed on a range whose lifecycle stays active; the interval was already a location on the bar before",
+      "clock": "the first real completed H1 end at which every condition is simultaneously true",
+      "conditions": [
+        "candidate_real_h1_bars >= minimum_candidate_real_h1_bars (8)",
+        "balance_lower_test_generations >= balance_minimum_price_test_generations_each (2)",
+        "balance_upper_test_generations >= balance_minimum_price_test_generations_each (2)",
+        "midpoint_crossings >= minimum_midpoint_crossings (2)",
+        "inside_close_fraction >= minimum_inside_close_fraction (0.80)",
+        "width_atr_at_formation <= maximum_width_atr_at_formation (4.0)",
+        "compression_ratio <= maximum_compression_ratio (0.80)"
+      ],
+      "evidence_change": "balance_range_v1.2 replaced the two source zones' structural total_touch_count with price test generations against each frozen boundary. A structural touch only increments when another confirmed swing forms inside the source zone, so over 2022-02 seventeen of eighteen H1 zones stayed at one touch for life and the standard was unreachable in principle. The required count is unchanged at 2; the evidence it reads is different.",
+      "freeze_at_settlement": "balance_confirmed_at, exact source touch counts and IDs, price test generations per boundary, midpoint crossings, inside fraction, compression ratio, component strengths and aggregate strength",
+      "not_strategy_gate": "a settled balance claim authorizes only a descriptive dealing-range/value source, and is not FAVR authority"
+    }
   },
   "manipulation": {
     "state_name": "ManipulationState",

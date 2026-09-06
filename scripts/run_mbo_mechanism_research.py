@@ -68,9 +68,9 @@ from smc_trader.signal_research import resolve_source_lineage_tokens  # noqa: E4
 
 
 MANIFEST_PATH = (
-    ROOT / "experiments/manifests/mbo_mechanism_phase6_template.yaml"
+    ROOT / "configs/research/mbo_mechanism_phase6_template.yaml"
 )
-DEFAULT_OUTPUT = ROOT / "experiments/results/mbo_mechanism_phase6.json"
+DEFAULT_OUTPUT = ROOT / "outputs/research/mbo_mechanism_phase6.json"
 PRIMARY_COMPARISON = "primary_fixed_holm"
 FVG_PSEUDO_SENSITIVITY_COMPARISON = (
     "fvg_successful_vs_pseudo_zone_descriptive_sensitivity"

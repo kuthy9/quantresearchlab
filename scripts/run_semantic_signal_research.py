@@ -82,8 +82,8 @@ from smc_trader.structural_outcome import (  # noqa: E402
 from smc_trader.validation import load_validation_protocol  # noqa: E402
 
 
-MANIFEST_PATH = ROOT / "experiments/manifests/" "semantic_event_study_v3_template.yaml"
-DEFAULT_OUTPUT = ROOT / "experiments/results/" "smc_semantic_v3_signal_diagnostic.json"
+MANIFEST_PATH = ROOT / "configs/research/" "semantic_event_study_v3_template.yaml"
+DEFAULT_OUTPUT = ROOT / "outputs/research/" "smc_semantic_v3_signal_diagnostic.json"
 MODEL_PATH = ROOT / "configs/model.json"
 # Production-emitted Phase-2/3 semantic atoms only. Normalized BAR/reset
 # infrastructure, state projections, compatibility transports, aliases, and
@@ -3688,10 +3688,10 @@ def run(
         )
     historical = {
         (
-            ROOT / "experiments/results/smc_semantic_v1_2024_01_signal_diagnostic.json"
+            ROOT / "outputs/research/smc_semantic_v1_2024_01_signal_diagnostic.json"
         ).resolve(),
         (
-            ROOT / "experiments/results/smc_semantic_v1_2024_01_signal_diagnostic.md"
+            ROOT / "outputs/research/smc_semantic_v1_2024_01_signal_diagnostic.md"
         ).resolve(),
     }
     if output in historical or output.with_suffix(".md") in historical:

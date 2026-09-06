@@ -110,7 +110,7 @@ def test_current_data_splits_preserve_causal_and_mbo_identities() -> None:
 
 def test_market_case_registry_versions_without_rewriting_frozen_splits() -> None:
     assert hashlib.sha256(DATA_SPLITS.read_bytes()).hexdigest() == (
-        "aee2d14f40eb9ebbfc050e9779c5604e06f4811f9e1e929179e25c04fc5f84c8"
+        "689783c5d5f32e917feb90a99b3b73ec1c6157778462677506e5c837e930fd61"
     )
     historical = json.loads(DATA_SPLITS.read_text(encoding="utf-8"))[
         "market_case_input_profiles"

@@ -646,9 +646,9 @@ def validate_phase8_run_manifest(
             output_paths[name] = None
             continue
         target = _resolve_repository_path(root, value, name=f"output {name}")
-        results_root = (root / "experiments/results").resolve()
+        results_root = (root / "outputs/research").resolve()
         if results_root != target.parent and results_root not in target.parents:
-            raise Phase8RunnerError("run outputs must remain under experiments/results")
+            raise Phase8RunnerError("run outputs must remain under outputs/research")
         output_paths[name] = target
     nonnull_outputs = tuple(value for value in output_paths.values() if value is not None)
     if len(nonnull_outputs) != len(set(nonnull_outputs)):

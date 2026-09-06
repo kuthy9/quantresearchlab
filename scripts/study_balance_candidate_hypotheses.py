@@ -305,7 +305,12 @@ def main() -> None:
     parser.add_argument(
         "--structural-ranges",
         type=Path,
-        default=ROOT / "docs/evidence/structural_range_width_strata_2022_02.json",
+        required=True,
+        help=(
+            "structural-range width strata JSON from "
+            "study_structural_range_width_strata.py; the tracked 2022-02 "
+            "ledger was retired on 2026-09-06"
+        ),
     )
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()

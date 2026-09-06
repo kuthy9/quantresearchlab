@@ -7,8 +7,9 @@
 balance interaction-generation logic are frozen exactly as committed; the
 script reads published state and restores the method it hooks.
 
-Raw data: `structural_range_width_strata_2022_02.json`,
-`structural_range_width_strata_2022_03.json`.
+Raw data: the two per-month width-strata ledgers this study produced were
+retired on 2026-09-06; every stratum count it relies on is tabulated below.
+Re-running `scripts/study_structural_range_width_strata.py` reproduces them.
 
 ## The question, and what would answer it either way
 

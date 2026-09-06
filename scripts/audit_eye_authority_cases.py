@@ -137,7 +137,7 @@ HARD_BOUNDARY_ANOMALIES = frozenset(
     {"contract_change_history_reset", "data_gap_history_reset"}
 )
 CASE_STRATUM_CONTRACTS = {
-    "all_recognized_mature": ("group4", "dealing_range", {"mature"}),
+    "all_recognized_mature": ("group4", "dealing_range", {"active"}),
     "obvious_mature_looking_but_rejected": (
         "group4",
         "range_maturity_evaluation",

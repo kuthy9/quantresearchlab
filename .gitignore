@@ -16,15 +16,10 @@ reports/
 artifacts/
 archive/
 
-# Oversized or non-runtime research ledgers remain locally hash-bound evidence.
-# They require Git LFS or an immutable artifact-store receipt rather than
-# ordinary Git. Compact manifests/results retain their path, row count, byte
-# count, and SHA-256 identity. The three small final Phase-6 ledgers are
-# explicitly portable because the Phase-7 readiness audit verifies them.
-experiments/results/*.jsonl
-!experiments/results/smc_semantics_v1_2_2024_06_phase6_mbo_week2_extension_v3.episodes.jsonl
-!experiments/results/smc_semantics_v1_2_2024_06_phase6_mbo_week2_extension_v3.matched_pairs.jsonl
-!experiments/results/smc_semantics_v1_2_2024_06_phase6_mbo_week2_extension_v3.unmatched.jsonl
+# Research runs write under outputs/, which is already ignored above. The
+# frozen experiments/ tree of v1.2-era manifests and result ledgers was retired
+# on 2026-09-06; the four runner templates it still needed moved to
+# configs/research/ and are tracked.
 
 # coverage artefacts
 .coverage

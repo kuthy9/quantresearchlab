@@ -29,7 +29,7 @@ def test_selection_keeps_two_identities_and_parent_binding() -> None:
 
     assert selection.atomic_semantics_version == "smc_semantics_v1.3"
     assert selection.atomic_definition_identity == (
-        "7ca182b26418be6b7ecbceb62c581a2064f65bed663e0a704fde0c596de7d134"
+        "f92b24c86bf942defc88de4edb7be16cc2a30dd64fde3b4432657780648b1f0c"
     )
     assert selection.foundation_projection_version == (
         "smc_semantic_foundation_v2.1"
@@ -124,5 +124,5 @@ def test_engine_injects_the_single_loaded_atomic_registry(
 
     assert len(calls) == 1
     assert engine.observer.semantic_registry.identity == (
-        "7ca182b26418be6b7ecbceb62c581a2064f65bed663e0a704fde0c596de7d134"
+        "f92b24c86bf942defc88de4edb7be16cc2a30dd64fde3b4432657780648b1f0c"
     )

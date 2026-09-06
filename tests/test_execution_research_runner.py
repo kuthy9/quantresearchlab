@@ -54,7 +54,7 @@ V1_CONFIG = ROOT / "configs/execution_research_v1.json"
 V2_CONFIG = ROOT / "configs/execution_research_v2.json"
 RISK_CONFIG = ROOT / "configs/risk_admission_v1.json"
 RUN_TEMPLATE = (
-    ROOT / "experiments/manifests/execution_research_phase8_v2_run_template.yaml"
+    ROOT / "configs/research/execution_research_phase8_v2_run_template.yaml"
 )
 T0 = pd.Timestamp("2024-06-03T13:30:00Z")
 EXPIRY = T0 + pd.Timedelta(minutes=6)
@@ -427,7 +427,7 @@ def test_output_writer_is_no_clobber_and_manifest_declares_last(tmp_path: Path) 
     )
     source_manifest = tmp_path / "frozen-run.json"
     source_manifest.write_text("{}\n", encoding="utf-8")
-    results = tmp_path / "experiments/results/phase8-test"
+    results = tmp_path / "outputs/research/phase8-test"
     contract = Phase8RunManifestContract(
         source_path=source_manifest,
         manifest_sha256=hashlib.sha256(source_manifest.read_bytes()).hexdigest(),
@@ -448,7 +448,7 @@ def test_output_writer_is_no_clobber_and_manifest_declares_last(tmp_path: Path) 
         },
         input_bindings={
             "intent_research_case_ledger": {
-                "path": "experiments/inputs/intent-cases.jsonl",
+                "path": "inputs/intent-cases.jsonl",
                 "sha256": "b" * 64,
             },
             "source_mode": SourceMode.REGISTERED_PHASE6.value,

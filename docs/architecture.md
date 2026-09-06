@@ -771,10 +771,9 @@ triggered the preregistered underpowered extension; the final two-week result
 passed engineering/data audit and admits only `acceptance_continuation` and
 `displacement_impact`. The registered Week 2 extension is consumed and the
 result explicitly forbids a further extension. This is development association
-only—not causality, OOS, model fit, or trading authority. The final
-[manifest](../experiments/manifests/smc_semantics_v1_2_2024_06_phase6_mbo_week2_extension_v3.yaml)
-and [result](../experiments/results/smc_semantics_v1_2_2024_06_phase6_mbo_week2_extension_v3.json)
-remain the evidence authority; no document rewrites their identities.
+only—not causality, OOS, model fit, or trading authority. The final `smc_semantics_v1_2_2024_06_phase6_mbo_week2_extension_v3` manifest
+and result was retired on 2026-09-06 with the rest of `experiments/`; the conclusion above is what
+survives it, and no document rewrites the identities they carried.
 
 The optional EntryEpisode causal case library (`--causal-case-library`, with
 `scripts/query_causal_cases.py`) and the input-only MarketEpisode stream consume

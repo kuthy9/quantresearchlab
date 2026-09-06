@@ -1,17 +1,21 @@
 # v1.3 versus v1.2: two complete months of NQ replay
 
 Status date: 2026-08-31
-Atomic identity: `smc_semantics_v1.3` ·
+Atomic identity at run time: `smc_semantics_v1.3` ·
 `7f4e790bfcd43e9a7077e738cb33be4e2f6f1a4731c219a947c7807d23b3aa7f`
 Foundation identity: `smc_semantic_foundation_v2.1` ·
 `69428dbfd2a9b2aa19f0254391fca2da17aedb8d0206829572e69c0cc212a715`
 
-Machine-readable counts: [`v1_3_two_month_replay_comparison.json`](v1_3_two_month_replay_comparison.json).
-The v1.2 / foundation-v2.0 baseline scans this compares against were run over
-the same bars; their two `eye_event_statistics_2022_0{2,3}.json` files were
-retired on 2026-09-06 as v1.2-era evidence. The comparison JSON stays readable
-without them: every changed kind carries both its v1.2 and its v1.3 count, and
-an unchanged kind is by definition equal to the v1.3 count recorded there.
+The atomic identity above is the one this replay ran under and is kept as the
+run's own binding. The runtime has since moved twice — `balance_range_v1.2` and
+the 2026-09-06 configuration cleanup — so it is deliberately not the current
+identity; the current value lives in
+[the semantic specification](../smc_semantic_specification_v1.3.md).
+
+The v1.2 / foundation-v2.0 baselines this compares against, and the machine
+ledger of the comparison itself, were retired on 2026-09-06. The tables below
+are self-contained: every changed kind carries both its v1.2 and its v1.3
+count, and an unchanged kind is by definition equal to the v1.3 count shown.
 
 ## What was compared
 
@@ -70,8 +74,8 @@ window ended, which is the expected right-censoring.
 > boundary; February's single observation was a second confirmed swing inside a
 > source zone, which is not a price test, and it is gone. Both months now report
 > zero. Everything else in this document is unaffected — a kind-by-kind replay
-> comparison found exactly one changed event across both months. See
-> `balance_range_v1_2_two_month_comparison.json`.
+> comparison found exactly one changed event across both months. The machine
+> ledger that recorded it was retired on 2026-09-06.
 
 **Balance is genuinely rare, and that is the point of splitting it.** February
 registered 40 structural ranges and March 41; in each month exactly **one**

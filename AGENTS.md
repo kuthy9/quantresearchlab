@@ -5,9 +5,9 @@
 Runtime code lives in `smc_trader/`; preserve the existing Eye, state, Brain,
 execution, and research ownership boundaries. Version semantic authorities in
 `semantics/`, settings in `configs/`, and reproducible materializers or bounded
-runners in `scripts/`. Tests use `tests/test_*.py`. Frozen study contracts and
-results live in `experiments/`; current explanations and receipts live in
-`docs/` and `docs/evidence/`.
+runners in `scripts/`. Tests use `tests/test_*.py`. Research runner templates live in
+`configs/research/` and their runs write under `outputs/`; current explanations
+and receipts live in `docs/` and `docs/evidence/`.
 
 ## Runtime Architecture
 

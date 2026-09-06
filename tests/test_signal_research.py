@@ -1353,8 +1353,7 @@ def test_legacy_and_unfrozen_template_manifests_fail_closed() -> None:
     )
 
     for manifest in (
-        ROOT / "experiments/manifests/smc_semantic_v1_2024_01_signal_diagnostic.yaml",
-        ROOT / "experiments/manifests/semantic_event_study_v2_template.yaml",
+        ROOT / "configs/research/semantic_event_study_v2_template.yaml",
     ):
         with pytest.raises(ResearchContractError):
             load_frozen_research_contract(
@@ -1392,7 +1391,7 @@ def test_v2_template_preserves_historical_numbered_runtime_paths() -> None:
         "runtime_validation": "smc_trader/validation.py",
     }
     template = json.loads(
-        (ROOT / "experiments/manifests/semantic_event_study_v2_template.yaml").read_text(
+        (ROOT / "configs/research/semantic_event_study_v2_template.yaml").read_text(
             encoding="utf-8"
         )
     )
@@ -1526,7 +1525,7 @@ def test_frozen_contract_binds_every_registered_file_exactly(tmp_path: Path) -> 
 
 def test_link_contract_rejects_wall_clock_or_optional_lineage() -> None:
     template = json.loads(
-        (ROOT / "experiments/manifests/semantic_event_study_v2_template.yaml").read_text(
+        (ROOT / "configs/research/semantic_event_study_v2_template.yaml").read_text(
             encoding="utf-8"
         )
     )
@@ -1540,7 +1539,7 @@ def test_link_contract_rejects_wall_clock_or_optional_lineage() -> None:
 
 def test_non_nested_mss_comparison_requires_prior_displacement() -> None:
     template = json.loads(
-        (ROOT / "experiments/manifests/semantic_event_study_v2_template.yaml").read_text(
+        (ROOT / "configs/research/semantic_event_study_v2_template.yaml").read_text(
             encoding="utf-8"
         )
     )
@@ -1560,7 +1559,7 @@ def test_non_nested_mss_comparison_requires_prior_displacement() -> None:
 
 def test_research_design_requires_matched_cohort_and_persistent_ledgers() -> None:
     template = json.loads(
-        (ROOT / "experiments/manifests/semantic_event_study_v2_template.yaml").read_text(
+        (ROOT / "configs/research/semantic_event_study_v2_template.yaml").read_text(
             encoding="utf-8"
         )
     )
@@ -1633,7 +1632,7 @@ def test_research_design_requires_matched_cohort_and_persistent_ledgers() -> Non
 
 def test_research_design_freezes_direction_and_secondary_outcome_definitions() -> None:
     template = json.loads(
-        (ROOT / "experiments/manifests/semantic_event_study_v2_template.yaml").read_text(
+        (ROOT / "configs/research/semantic_event_study_v2_template.yaml").read_text(
             encoding="utf-8"
         )
     )
