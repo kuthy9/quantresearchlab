@@ -66,9 +66,9 @@ pair and freezes the existing identities into Engine, Shadow, and checkpoint
 state. The current combined Engine checkpoint schema is 12; older schemas fail
 closed on restore into the current Observation, Foundation, and Neutral-state
 contracts. `MarketObservation` schema 5 publishes the canonical physical
-`InteractionUpdate` (schema 2); `MarketSnapshot` is schema 8. Shadow uses
-`phase9_shadow_live_v1.3`, compact checkpoint `shadow_compact_runtime_v8`, and
-component digest `phase9_shadow_component_digest_v3`. These
+`InteractionUpdate` (schema 2); `MarketSnapshot` is schema 8. The Phase-9 shadow
+harness that carried `phase9_shadow_live_v1.3`, `shadow_compact_runtime_v8` and
+`phase9_shadow_component_digest_v3` was retired on 2026-09-06. These
 bindings grant no empirical, Brain, Trade Intent, execution, or live authority.
 
 The current model schema is 4. Its observer configuration selects
@@ -182,13 +182,11 @@ and Execution paths are untouched. The Brain's own Phase-7 surface --
 are live modules that only carry the phase name. A future probability layer
 must be preregistered again rather than restored from git.
 
-The removed Phase-8 readiness checker and two old templates were consumed only
-by their old tests, documentation, and one another; the fail-closed v2 runner
-and sole run template retain the current evaluator/config/loader path. A zero
-exit from `run_execution_research_v2.py` in its default validate-only mode means
-only that the inert template is structurally valid. It does not override
-`template_incomplete_not_authorized_to_run`, bind a non-zero ledger, resolve the
-six blockers, or grant execution readiness.
+The Phase-8 readiness checker and its templates were removed earlier; the v2
+runner, its evaluator/config/loader path and the sole run template followed on
+2026-09-06. Nothing about that surface ever reached
+readiness: the template stayed `template_incomplete_not_authorized_to_run` with
+six open blockers and no bound ledger.
 
 Six focused admission, runner, and capacity-authority contracts pass after the
 deletions; the default repository suite at the frozen simplification commit had
@@ -356,33 +354,26 @@ races, stops, targets, reconciliation, reservations, position conservation,
 checkpointing, and deterministic event replay. Its independent engineering
 logic review is P0/P1=0. It has no broker/network submission authority.
 
-Phase 8 Execution Research has a causal seven-entry-method same-intent core and
-fail-closed `phase8_execution_research_v1.1` protocol. Entry good-til-time is
-separate from the later analysis horizon; a target reached before a pending
-remainder fills cancels that remainder; and secondary realized-spread/path
-censoring does not suppress an otherwise complete primary implementation-
-shortfall pair. Off-grid stop/invalidation or target prices fail intent
-admission. The v2 protocol requires exact pre-outcome semantic provenance for
-every method price and registers wait, cancel, stop, and target variants with
-explicit evaluable-or-censored rules. A fail-closed formal runner and canonical
-result writer exist. Its run manifest remains
-`template_incomplete_not_authorized_to_run` because no non-zero
-intent/research-case ledger or minute source is bound, outputs and experiment
-identity are unset, and the manifest is not frozen. No formal empirical result
-exists.
-Phase 9 has a `phase9_shadow_live_v1.3` no-submission parity runner with exact
-execution/account evidence, immutable evidence identities, frozen instrument
-mapping, fail-stop journal/failure/gateway parity, and
-`NullExecutionGateway`. Its current compact runner checkpoint is
-`shadow_compact_runtime_v8`, and its component digest is
-`phase9_shadow_component_digest_v3`. A retained tick-normalized schema-v2,
-6,900-clock June Week-1 cold-start input was materialized (6,899 real plus one
-synthetic; SHA-256
-`fd9e48850d1657cf369e3e617e3e8b464790e9823f48c79b01f65bfc111a46e4`).
-A bounded run checkpointed at 100 clocks, resumed to 200, and matched an
-independent 200-clock cold replay exactly after v1.2 removed cross-process
+**Phase 8 Execution Research was retired on 2026-09-06.** Its seven-entry-method
+same-intent core, the `phase8_execution_research_v1.1` and v2 protocols, the
+fail-closed formal runner, the canonical result writer, four configs
+(`execution_research_v{1,2}.json`, `execution_research_runner_v1.json`,
+`risk_admission_v1.json`) and the run template are removed. The gate is closed,
+not passed: the run manifest never left
+`template_incomplete_not_authorized_to_run` — no non-zero intent/research-case
+ledger or minute source was bound, outputs and experiment identity were unset,
+and the manifest was never frozen — so no formal empirical result existed to
+lose. The immutable order FSM v1.5 (`execution_fsm.py`) was a separate
+deliverable and is untouched.
+**Phase 9 was retired on 2026-09-06.** The `phase9_shadow_live_v1.3`
+no-submission parity runner, the operational v3 contract, the two file-pilot
+scripts and three configs are removed. What it had established, for the record:
+a bounded run checkpointed at 100 clocks, resumed to 200, and matched an
+independent 200-clock cold replay exactly, after v1.2 removed cross-process
 hash-order dependence from revised Scene-Graph edge IDs. The full 6,900-clock
-run and a real-time multi-day pilot have not run.
+run and a real-time multi-day pilot never ran, so Phase 9's operational gate is
+closed rather than passed, and reopening it needs a new harness bound to a
+current runtime identity.
 That receipt binds the earlier path/model identities `5213b3d6…` and
 `4214da19…`. A separate Foundation-enabled 200-row receipt binds the model and
 Shadow bytes that preceded the compact-state/action-policy migration. Both are

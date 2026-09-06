@@ -646,45 +646,55 @@ path still uses Decision/Risk and the retained simulator, while the exact
 `TradeIntent -> RiskApproval -> FSM` handoff remains a standalone shadow
 adapter.
 
-Execution Research is also separate. Its implemented core compares seven
-same-intent entry methods using causal BBO, a Phase 6 MBO displayed-volume
-proxy, and OHLC adverse-first resolution; invalid, stale, crossed, reset,
-synthetic, missing, or fractional-capacity observations are censored rather
-than relabeled as failures. Exact logical/vendor instrument mapping,
-tick/point value, whole contracts, source-intent identity, and protocol hashes
-are required. Protocol v1.1 separates entry GTT from a later analysis horizon,
-forbids new fills after GTT while allowing an existing position's observation
-to continue, cancels an unfilled remainder if the target resolves first, and
-does not suppress a complete primary implementation-shortfall pair merely
-because a secondary realized-spread/path metric is censored. Stop/invalidation
-and target prices that are off the frozen tick grid reject the research intent.
-The v2 protocol requires exact pre-outcome semantic provenance for every method
-price and registers wait/cancel/stop/target variants. A variant whose required
-future-frozen cancel state or entry-zone boundary is absent is censored by its
-registered evaluability rule; it is never backfilled. The formal runner and
-result serializer exist, but the current run manifest remains
-`template_incomplete_not_authorized_to_run`: no non-zero intent/research-case
-ledger or minute source is bound, output identities are unset, and the manifest
-is not frozen. Therefore no empirical result exists and the Phase 8 gate is not
-passed.
+**Phase 8 Execution Research was retired on 2026-09-06.** Its seven-entry-method
+core, the v1.1/v1.2 protocols, the fail-closed formal runner and result
+serializer, their four configs and the run template are removed
+(`execution_research.py`, `execution_research_v2.py`,
+`execution_research_runner.py`, `run_execution_research_v2.py`,
+`configs/execution_research_v{1,2}.json`,
+`configs/execution_research_runner_v1.json`, `configs/risk_admission_v1.json`).
+It never produced an empirical result: the run manifest stayed at
+`template_incomplete_not_authorized_to_run` with no bound non-zero
+intent/research-case ledger, no minute source, unset output identities and no
+freeze, so nothing measured is lost with it. The Phase 8 research gate is
+closed, not passed, and reopening it means registering a new protocol rather
+than restoring these files.
+
+The order FSM above is unaffected — `execution_fsm.py` stays a package-root
+export, and it was a separate deliverable from the research core.
 
 ## Phase 9 shadow-live parity boundary
 
-The `phase9_shadow_live_v1.3` runner drives the production development engine
-from one exact completed bar plus causal execution/account evidence. It binds
+**Retired on 2026-09-06.** The `phase9_shadow_live_v1.3` runner, the
+operational v3 contract, the two file-pilot scripts and the three configs
+(`shadow_live_v1.json`, `phase9_shadow_operational_v1.json`,
+`phase9_current_contract_mapping_v1.template.json`) are removed, together with
+the `inputs/`/`outputs/` payloads their bounded runs read and wrote. Nothing in
+the current runtime depended on them: `shadow_live.py` and
+`shadow_operational.py` were imported only by each other, by those scripts and
+by their own tests. `shadow_outcome.py` is a different module and stays — it
+serves the optional `--shadow-outcomes` case-library projection.
+
+An operational pilot therefore has no harness in this repository. Re-opening one
+needs a newly frozen runtime/config identity, not a restored file. The rest of
+this section is the record of what that harness had established before it was
+retired.
+
+The runner drove the production development engine
+from one exact completed bar plus causal execution/account evidence. It bound
 immutable feed, execution, and account evidence IDs; a frozen logical-to-vendor
 instrument mapping; the model and Phase 7/8 protocol fingerprints; complete
 registered state digests; and the journal prefix. Duplicate identical feed IDs
-are idempotent, conflicting identity/content or causal-order violations fail
-stop, and the first failure becomes terminal evidence.
+were idempotent, conflicting identity/content or causal-order violations failed
+stop, and the first failure became terminal evidence.
 
-Its current compact runner checkpoint is `shadow_compact_runtime_v8`, and its
-component identity is `phase9_shadow_component_digest_v3`. Every run requires
+Its last compact runner checkpoint was `shadow_compact_runtime_v8`, and its
+component identity `phase9_shadow_component_digest_v3`. Every run required
 the exact `ContinuousSMCEngine` and exact
-`NullExecutionGateway` classes, so an external submission attempt fails and is
-included in parity state. Cold replay and checkpoint restart compare records,
+`NullExecutionGateway` classes, so an external submission attempt failed and was
+included in parity state. Cold replay and checkpoint restart compared records,
 journal, failure, gateway, and final engine/FSM state exactly. The synthetic
-baseline uses 36 deterministic minute clocks. A retained schema-v2 June Week-1
+baseline used 36 deterministic minute clocks. A retained schema-v2 June Week-1
 cold-start input materialized 6,900 hash-bound, tick-normalized clocks (6,899
 real plus one synthetic), flat engineering account snapshots, and zero
 approvals/events. A
