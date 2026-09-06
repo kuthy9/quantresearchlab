@@ -775,9 +775,12 @@ only—not causality, OOS, model fit, or trading authority. The final
 and [result](../experiments/results/smc_semantics_v1_2_2024_06_phase6_mbo_week2_extension_v3.json)
 remain the evidence authority; no document rewrites their identities.
 
-The optional [EntryEpisode causal case library](causal_case_library.md) and
-input-only [MarketEpisode stream](market_episode_case_library.md) consume this
-same replay without a second replay loop. `CausalCase` may join independently
+The optional EntryEpisode causal case library (`--causal-case-library`, with
+`scripts/query_causal_cases.py`) and the input-only MarketEpisode stream consume
+this same replay without a second replay loop; their separate protocol
+documents were removed on 2026-09-06, and the executable contracts are in
+`smc_trader/causal_cases.py`, `smc_trader/market_cases.py` and
+`smc_trader/case_retrieval.py`. `CausalCase` may join independently
 resolved outcomes only after neighbour selection; `MarketEpisode` has a
 different physical identity, estimand, and outcome-free boundary. They remain
 separate protocols while sharing canonical storage/hash/no-clobber publication,

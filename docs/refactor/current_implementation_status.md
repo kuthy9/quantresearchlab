@@ -726,11 +726,11 @@ than embedded in this document. Until the separate large-ledger handoff, the
 evidence publication is not a complete portable bundle. Those ledgers remain
 receipt-bound evidence and are not deleted as cleanup.
 
-The tracked 2023 Eye-authority summary also points to the ignored local
+The tracked 2023 Eye-authority summary also pointed to a local
 `outputs/development/eye_authority_case_audit/2023_exact_contract/transmission_audit.json`
 (107,989 bytes; SHA-256
 `d34209116fa798e8b5932f7a39011cdd3ed722df29c90fa9903e605cba46b218`).
-A small versionable [receipt](../evidence/eye_authority_case_audit_2023_receipt.json)
-now preserves that path, byte count, hash, and no-authority boundary. The
-ignored payload still requires an immutable retrieval location if clean-checkout
-access to the full audit is required.
+That payload was deleted with `outputs/` on 2026-09-06, and the small versionable
+receipt that preserved its path, byte count and hash was removed with it. The
+hash above is the only surviving record; regenerating the audit would produce a
+new artifact, not that one.
