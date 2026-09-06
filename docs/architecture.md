@@ -201,9 +201,10 @@ definitions are retained on purpose; they are not a second lifecycle or state
 authority. Formal Signal and MBO research runners remain Eye-only.
 
 `ContinuousSMCEngine` has one incremental trader path, and its trader replay
-calls that same engine. The frozen Phase 5 diagnostic is deliberately a
-separate Reader + Eye-only runner; it does not construct Brain, Decision, Risk,
-MBO, or execution. Multi-timeframe bars update only when complete.
+calls that same engine. The frozen Phase 5 diagnostic was deliberately a
+separate Reader + Eye-only runner that never constructed Brain, Decision, Risk,
+MBO, or execution; that runner was retired on 2026-09-06 and only its recorded
+conclusions survive. Multi-timeframe bars update only when complete.
 
 The separator in the diagram is a sequencing boundary, not a claim that the
 Scene Graph/Brain consumes `MarketSnapshot` as its sole evidence contract.
@@ -564,10 +565,14 @@ artifact is admitted. Equal-logit subtraction is explicitly softmax-invariant,
 not effective decay. Earlier per-path expiry, hazard, or prior reversion
 remains unavailable unless a separately frozen temporal definition/artifact is
 admitted; the shared horizon is unchanged.
-The read-only Phase 7 readiness checker verifies the frozen Phase 6 source and
-all three compact ledgers, inspects 7,381 rows, and reports 13 blockers with
-`ready_for_offline_fit=false` and `artifacts_written=[]`. It does not fit a
-likelihood, temporal, path-calibration, or DOL-calibration artifact. The June
+The read-only Phase 7 readiness checker last reported 13 blockers with
+`ready_for_offline_fit=false` and `artifacts_written=[]` against the frozen
+Phase 6 source and its three compact ledgers, having inspected 7,381 rows; it
+never fitted a likelihood, temporal, path-calibration, or DOL-calibration
+artifact. Neither the checker nor those ledgers is in the repository any more —
+they went with `experiments/` and the Phase 5/6 runners on 2026-09-06 — so that
+blocker count is a historical reading, not a check this checkout can rerun. The
+June
 Week-4 temporal/branching design is separately frozen and passes its strict
 identity validator without opening market data; execution bindings,
 materialization, replay, and results remain absent and unauthorized.
@@ -784,6 +789,20 @@ result explicitly forbids a further extension. This is development association
 only—not causality, OOS, model fit, or trading authority. The final `smc_semantics_v1_2_2024_06_phase6_mbo_week2_extension_v3` manifest
 and result was retired on 2026-09-06 with the rest of `experiments/`; the conclusion above is what
 survives it, and no document rewrites the identities they carried.
+
+The executable side of both studies was retired on 2026-09-06 as well:
+`smc_trader/signal_research.py`, `smc_trader/mbo_mechanism.py`,
+`smc_trader/mbo_mechanism_research.py`, the
+`scripts/run_semantic_signal_research.py`,
+`scripts/run_mbo_mechanism_research.py` and
+`scripts/materialize_mbo_mechanism.py` runners, and the three
+`configs/research/` manifest templates are gone. What the studies concluded
+still binds Phase 7 through the `phase6_*` identities and evidence allowlist in
+`configs/path_hypotheses.json`, which `smc_trader/path_belief.py` still
+validates fail-closed. `smc_trader/mbo.py` and
+`scripts/materialize_mbo_execution.py` are unaffected: they belong to the
+execution-reality path that `scripts/run_continuous_replay.py --mbo-execution`
+uses, not to the mechanism study.
 
 The optional EntryEpisode causal case library (`--causal-case-library`, with
 `scripts/query_causal_cases.py`) and the input-only MarketEpisode stream consume

@@ -18,8 +18,9 @@ archive/
 
 # Research runs write under outputs/, which is already ignored above. The
 # frozen experiments/ tree of v1.2-era manifests and result ledgers was retired
-# on 2026-09-06; the four runner templates it still needed moved to
-# configs/research/ and are tracked.
+# on 2026-09-06, and the runner templates that briefly lived in configs/research/
+# went with the Phase 5 and Phase 6 runners on the same date. No research
+# manifest template is tracked any more.
 
 # coverage artefacts
 .coverage

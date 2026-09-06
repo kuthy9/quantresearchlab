@@ -28,7 +28,7 @@ include = ["smc_trader*"]
 testpaths = ["tests"]
 addopts = "-q -m 'not historical_frozen and not research_runner and not research_orchestration'"
 markers = [
-  "historical_frozen: immutable historical release/governance checks that require their archived runtime",
-  "research_runner: bounded Phase 8-9 runner and publication contracts run separately from daily semantic tests",
-  "research_orchestration: bounded semantic or MBO study orchestration tests run separately from daily model tests",
+  "historical_frozen: immutable historical release/governance checks that require their archived runtime; no test carries it since the 2026-09-06 retirements",
+  "research_runner: bounded runner and publication contracts run separately from daily semantic tests; no test carries it since the Phase 8-9 retirement",
+  "research_orchestration: bounded study-orchestration tests run separately from daily model tests; currently only the Eye authority-scan group",
 ]

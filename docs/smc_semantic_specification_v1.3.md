@@ -218,9 +218,12 @@ the current model config; running it under v1.3 requires a new preregistration.
 New event studies must start from a separately frozen manifest and fail closed
 when a required semantic identity, parameter, code/data hash, input census, or
 acceptance field is absent. The completed Signal Research protocol-v3 r2
-manifest authorizes only its full-window development diagnostic; the template,
-smoke run, and failed first attempt authorize nothing. That boundary is
-separate from the completed, frozen Phase 6 MBO study.
+manifest authorized only its full-window development diagnostic; the template,
+smoke run, and failed first attempt authorized nothing. That boundary is
+separate from the completed, frozen Phase 6 MBO study. Both studies' executable
+surfaces — the runners, their `smc_trader` primitives and the `configs/research/`
+templates — were retired on 2026-09-06, so a new study must bring its own runner
+and its own frozen manifest rather than reusing theirs.
 
 ## v1.2 → v1.3
 
@@ -1298,8 +1301,9 @@ The Brain therefore emits rankings but an empty DOL-probability map. June Week
 temporal/branching development design is frozen. The strict identity validator
 passes without opening market data, but execution bindings, materialization,
 replay, and results remain absent and unauthorized; it is not a Phase 6
-extension. The Phase 7 read-only readiness checker inspects all 7,381 compact
-Phase 6 ledger rows and reports 13 blockers with no fit or artifact write.
+extension. The Phase 7 read-only readiness checker inspected all 7,381 compact
+Phase 6 ledger rows and reported 13 blockers with no fit or artifact write; it
+was retired on 2026-09-06 and that reading is historical.
 Phase 8 standalone order-FSM engineering and seven-entry-method evaluator core
 are complete. Evaluator v1.1 separates entry GTT from analysis end, cancels a
 pending remainder after target-first resolution, and preserves eligible primary

@@ -3,11 +3,14 @@
 ## Project Structure & Module Organization
 
 Runtime code lives in `smc_trader/`; preserve the existing Eye, state, Brain,
-execution, and research ownership boundaries. Version semantic authorities in
+and execution ownership boundaries. Version semantic authorities in
 `semantics/`, settings in `configs/`, and reproducible materializers or bounded
-runners in `scripts/`. Tests use `tests/test_*.py`. Research runner templates live in
-`configs/research/` and their runs write under `outputs/`; current explanations
-and receipts live in `docs/` and `docs/evidence/`.
+study scripts in `scripts/`. Tests use `tests/test_*.py`. Bounded studies write
+under `outputs/`; current explanations and receipts live in `docs/` and
+`docs/evidence/`. The frozen Phase 5 signal-research and Phase 6 MBO-mechanism
+runners, their `smc_trader` primitives and their `configs/research/` manifest
+templates were retired on 2026-09-06; no formal-research runner remains in the
+repository.
 
 ## Runtime Architecture
 
@@ -50,9 +53,9 @@ have already advanced. `execution.py` owns `ExecutionRealityInput` and the
 cost/fillability score; `model.py` owns the inert not-evaluated value beside
 `ExecutionObservation`; `ContinuousSMCEngine._score_execution` derives the
 score and the Eye only transports the result. That boundary is enforced by
-`tests/test_eye_module_boundary.py`. `eye_statistics.py`, `visualization.py`, `shadow_*`,
-`*_research*`, `causal_cases.py` and `market_cases.py` are optional projections
-and research consumers. None of them may become a second market-state
+`tests/test_eye_module_boundary.py`. `eye_statistics.py`, `visualization.py`,
+`shadow_outcome.py`, `causal_cases.py` and `market_cases.py` are optional
+projections and study consumers. None of them may become a second market-state
 authority.
 
 `EventStore` is the Eye's internal history authority and is not part of the
@@ -62,8 +65,9 @@ lineage import `smc_trader.event_store` directly.
 Naming rule: `Zone`, `RangeAuction` and `Interaction` are the public concepts.
 `Group3`/`Group4`/`Group5` and `Phase 4/5/6` survive only as historical or
 internal migration names — in `group3.py`/`group4.py`/`group5.py` pickle shims,
-in `MarketObservation` field names, and in frozen research-manifest binding
-keys. Do not introduce them anywhere new.
+in `MarketObservation` field names, and in the frozen `phase6_*` evidence-boundary
+keys that `configs/path_hypotheses.json` binds and `path_belief.py` validates.
+Do not introduce them anywhere new.
 
 The current implementation-versus-plan authority is
 [docs/current_implementation_status.md](docs/current_implementation_status.md);
@@ -80,16 +84,20 @@ Create the environment with `uv sync --extra test`; there is no compile step.
 - `env PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider`
   runs daily semantic/runtime tests; historical and research-orchestration
   groups are excluded by `pyproject.toml`.
-- `.venv/bin/python -m pytest -m 'research_runner or research_orchestration' -q -p no:cacheprovider`
-  runs bounded study, publication, and operational-contract tests separately.
-  These are excluded from the default loop, so run them after touching a
-  research runner, a manifest template, or a runtime identity binding.
+- `.venv/bin/python -m pytest -m 'research_orchestration' -q -p no:cacheprovider`
+  runs the remaining bounded study-orchestration tests, currently the Eye
+  authority-scan group in `tests/test_eye_authority_scan.py`. They are excluded
+  from the default loop, so run them after touching a study script or a runtime
+  identity binding. The `historical_frozen` and `research_runner` markers are
+  declared in `pyproject.toml` but no longer have any test.
 - `.venv/bin/python -m pytest tests/test_semantic_foundation_projection.py -q -p no:cacheprovider`
   runs a focused contract file.
 - `git diff --check` catches whitespace errors before commit.
 
-Run formal research only through frozen manifests and documented validation
-modes. Never casually add `--force` to a registered run.
+No formal-research runner or frozen manifest remains in the repository. Any new
+formal study must be preregistered under a fresh experiment identity and its own
+frozen manifest before a runner is reintroduced; the retired Phase 5/6 templates
+are not a starting point. Never casually add `--force` to a registered run.
 
 ## Coding Style & Naming Conventions
 

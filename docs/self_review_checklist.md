@@ -142,9 +142,11 @@ governance artifacts during ordinary development.
 - [ ] Do not call the Phase 7 probability model fitted or calibrated while the
   runtime uses equal priors and zero likelihood increments/decay or lacks the
   admitted path/DOL/outcome artifact set.
-- [ ] The Phase 7 readiness checker remains read-only: it verifies all 7,381
-  compact Phase 6 ledger rows, reports the current 13 blockers and
-  `ready_for_offline_fit=false`, writes no artifact, and performs no fit.
+- [ ] The Phase 7 readiness checker was read-only: it verified all 7,381
+  compact Phase 6 ledger rows and reported 13 blockers with
+  `ready_for_offline_fit=false`, writing no artifact and performing no fit. It
+  was retired on 2026-09-06 with the Phase 5/6 runners, so treat that reading as
+  historical; do not cite it as a check this checkout ran.
 - [ ] `correlation_key` is a global dependency-cluster identity; changing an
   evidence-family label cannot turn one Sweep/Displacement/MSS impulse into
   independent likelihood multipliers. Any fitted shared cluster has one
@@ -277,7 +279,9 @@ governance artifacts during ordinary development.
 - [ ] Phase 6 reporting uses the final registered two-week extension result;
   only `acceptance_continuation` and `displacement_impact` enter the Phase 7
   allowlist, unsupported/underpowered mechanisms remain excluded, and no
-  unregistered Week 3 is opened.
+  unregistered Week 3 is opened. The mechanism code and runners were retired on
+  2026-09-06; the allowlist survives only as the `phase6_*` bindings in
+  `configs/path_hypotheses.json`, which `path_belief.py` validates fail-closed.
 - [ ] Missing MBO remains missing and is not replaced with constant execution
   reality.
 - [ ] Checkpoint, shards, progress, resume and portfolio before-bar /
