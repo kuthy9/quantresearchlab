@@ -29,9 +29,11 @@ Typed playbooks may consume its exact identities and lifecycles through their
 own causal gates. The legacy H1 dealing range, H1 acceptance/rejection, H4
 range position, 5m compression and 1m path scores are not Group 4 sources.
 
-The registered outcome-blind 2023 full-year coverage result is stored in
-[`evidence/group4_natural_authority_2023.json`](evidence/group4_natural_authority_2023.json).
-It records 448 in-window range formations, two ranges whose balance claim
+A registered outcome-blind 2023 full-year coverage scan was run under the
+`group4_natural_authority_2023_full_year` profile in `configs/data_splits.json`;
+its result file was retired on 2026-09-06 as v1.2-era evidence, and the profile
+no longer binds a permanent path. The recorded counts were 448 in-window range
+formations, two ranges whose balance claim
 settled (recorded then as "mature") and 19,465 typed
 manipulations from all five enabled pool-source timeframes plus mature-range
 boundaries. Manipulation outcome conservation passed. Mature-range coverage is

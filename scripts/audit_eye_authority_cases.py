@@ -1404,7 +1404,11 @@ def main() -> None:
     parser.add_argument(
         "--case-index",
         type=Path,
-        default=ROOT / str(profile["permanent_case_index_path"]),
+        required=True,
+        help=(
+            "case index JSON produced by run_eye_authority_scan.py; there is "
+            "no permanent tracked default"
+        ),
     )
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
     parser.add_argument("--force", action="store_true")

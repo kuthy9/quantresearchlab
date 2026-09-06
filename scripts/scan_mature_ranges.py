@@ -166,7 +166,6 @@ def _coverage_payload(
         "pool_source_timeframes": coverage.get(
             "pool_source_timeframes"
         ),
-        "permanent_result_path": coverage.get("permanent_result_path"),
         "windows": windows,
     }
 
@@ -1058,7 +1057,6 @@ def _validate_config(payload: Mapping[str, Any]) -> None:
             "timezone",
             "warmup_calendar_days",
             "pool_source_timeframes",
-            "permanent_result_path",
             "windows",
         )
         if any(
@@ -1562,12 +1560,6 @@ def main() -> None:
         profile=payload,
     )
     _write_json(output / "summary.json", summary)
-    permanent_path = payload.get("permanent_result_path")
-    if permanent_path:
-        destination = (ROOT / str(permanent_path)).resolve()
-        if ROOT.resolve() not in destination.parents:
-            raise ValueError("permanent result path escapes the repository")
-        _write_json(destination, summary)
     print(json.dumps(to_primitive(summary), indent=2, sort_keys=True), flush=True)
 
 

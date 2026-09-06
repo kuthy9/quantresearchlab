@@ -158,7 +158,13 @@
       "pnl_used": false,
       "mbo_used": false,
       "include_all_pool_source_timeframes": true,
-      "pool_source_timeframes": ["4H", "1H", "15m", "5m", "1m"],
+      "pool_source_timeframes": [
+        "4H",
+        "1H",
+        "15m",
+        "5m",
+        "1m"
+      ],
       "model_config": "configs/model.json",
       "protocols": {
         "group12": "configs/primitives_structure_liquidity.json",
@@ -180,7 +186,13 @@
       "pnl_used": false,
       "mbo_used": false,
       "include_all_pool_source_timeframes": true,
-      "pool_source_timeframes": ["4H", "1H", "15m", "5m", "1m"],
+      "pool_source_timeframes": [
+        "4H",
+        "1H",
+        "15m",
+        "5m",
+        "1m"
+      ],
       "model_config": "configs/model.json",
       "protocols": {
         "group12": "configs/primitives_structure_liquidity.json",
@@ -189,7 +201,6 @@
         "group4": "configs/primitives_range.json",
         "group5": "configs/primitives_entry.json"
       },
-      "permanent_result_path": "docs/evidence/group4_natural_authority_2023.json",
       "windows": [
         {
           "id": "2023-full-year",
@@ -219,7 +230,13 @@
       "materialize_event_view": false,
       "execution_reality_status": "not_evaluated",
       "include_all_pool_source_timeframes": true,
-      "pool_source_timeframes": ["4H", "1H", "15m", "5m", "1m"],
+      "pool_source_timeframes": [
+        "4H",
+        "1H",
+        "15m",
+        "5m",
+        "1m"
+      ],
       "model_config": "configs/model.json",
       "protocols": {
         "group12": "configs/primitives_structure_liquidity.json",
@@ -265,8 +282,6 @@
         "an unstable MatureBalanceRange remains parked and FAVR may only become an optional LSR range context"
       ],
       "checkpoint_every_completed_1m": 25000,
-      "permanent_result_path": "docs/evidence/eye_group1_5_natural_authority_2023_summary.json",
-      "permanent_case_index_path": "docs/evidence/eye_group1_5_natural_authority_2023_cases.json",
       "windows": [
         {
           "id": "2023-full-year-eye",
@@ -320,7 +335,11 @@
     },
     "ensemble": {
       "members": 3,
-      "seeds": [17, 100020, 200023]
+      "seeds": [
+        17,
+        100020,
+        200023
+      ]
     },
     "optimizer": {
       "name": "AdamW",
@@ -522,7 +541,10 @@
       "warmup_calendar_days": 14,
       "representation_split_role": "train",
       "representation_fit_allowed": true,
-      "expected_replay_contract": {"symbol": "NQH9", "instrument_id": 15657},
+      "expected_replay_contract": {
+        "symbol": "NQH9",
+        "instrument_id": 15657
+      },
       "observer_transition_delta_transport": true,
       "threshold_search": false,
       "calibration_fit_allowed": false,
@@ -549,7 +571,10 @@
       "warmup_calendar_days": 14,
       "representation_split_role": "train",
       "representation_fit_allowed": true,
-      "expected_replay_contract": {"symbol": "NQU9", "instrument_id": 36742},
+      "expected_replay_contract": {
+        "symbol": "NQU9",
+        "instrument_id": 36742
+      },
       "observer_transition_delta_transport": true,
       "threshold_search": false,
       "calibration_fit_allowed": false,
@@ -576,7 +601,10 @@
       "warmup_calendar_days": 14,
       "representation_split_role": "train",
       "representation_fit_allowed": true,
-      "expected_replay_contract": {"symbol": "NQH0", "instrument_id": 10204},
+      "expected_replay_contract": {
+        "symbol": "NQH0",
+        "instrument_id": 10204
+      },
       "observer_transition_delta_transport": true,
       "threshold_search": false,
       "calibration_fit_allowed": false,
@@ -603,7 +631,10 @@
       "warmup_calendar_days": 14,
       "representation_split_role": "train",
       "representation_fit_allowed": true,
-      "expected_replay_contract": {"symbol": "NQU0", "instrument_id": 14028},
+      "expected_replay_contract": {
+        "symbol": "NQU0",
+        "instrument_id": 14028
+      },
       "observer_transition_delta_transport": true,
       "threshold_search": false,
       "calibration_fit_allowed": false,
@@ -630,7 +661,10 @@
       "warmup_calendar_days": 14,
       "representation_split_role": "train",
       "representation_fit_allowed": true,
-      "expected_replay_contract": {"symbol": "NQH1", "instrument_id": 4378},
+      "expected_replay_contract": {
+        "symbol": "NQH1",
+        "instrument_id": 4378
+      },
       "observer_transition_delta_transport": true,
       "threshold_search": false,
       "calibration_fit_allowed": false,
@@ -657,7 +691,10 @@
       "warmup_calendar_days": 14,
       "representation_split_role": "train",
       "representation_fit_allowed": true,
-      "expected_replay_contract": {"symbol": "NQU1", "instrument_id": 828},
+      "expected_replay_contract": {
+        "symbol": "NQU1",
+        "instrument_id": 828
+      },
       "observer_transition_delta_transport": true,
       "threshold_search": false,
       "calibration_fit_allowed": false,
@@ -684,7 +721,10 @@
       "warmup_calendar_days": 14,
       "representation_split_role": "validation",
       "representation_fit_allowed": false,
-      "expected_replay_contract": {"symbol": "NQM2", "instrument_id": 2895},
+      "expected_replay_contract": {
+        "symbol": "NQM2",
+        "instrument_id": 2895
+      },
       "observer_transition_delta_transport": true,
       "threshold_search": false,
       "calibration_fit_allowed": false,
@@ -711,7 +751,10 @@
       "warmup_calendar_days": 14,
       "representation_split_role": "validation",
       "representation_fit_allowed": false,
-      "expected_replay_contract": {"symbol": "NQZ2", "instrument_id": 13613},
+      "expected_replay_contract": {
+        "symbol": "NQZ2",
+        "instrument_id": 13613
+      },
       "observer_transition_delta_transport": true,
       "threshold_search": false,
       "calibration_fit_allowed": false,
@@ -738,7 +781,10 @@
       "warmup_calendar_days": 14,
       "representation_split_role": "holdout",
       "representation_fit_allowed": false,
-      "expected_replay_contract": {"symbol": "NQH5", "instrument_id": 42288528},
+      "expected_replay_contract": {
+        "symbol": "NQH5",
+        "instrument_id": 42288528
+      },
       "observer_transition_delta_transport": true,
       "threshold_search": false,
       "calibration_fit_allowed": false,
@@ -765,7 +811,10 @@
       "warmup_calendar_days": 14,
       "representation_split_role": "holdout",
       "representation_fit_allowed": false,
-      "expected_replay_contract": {"symbol": "NQU5", "instrument_id": 42008487},
+      "expected_replay_contract": {
+        "symbol": "NQU5",
+        "instrument_id": 42008487
+      },
       "observer_transition_delta_transport": true,
       "threshold_search": false,
       "calibration_fit_allowed": false,

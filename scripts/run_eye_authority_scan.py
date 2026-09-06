@@ -929,15 +929,11 @@ def run_scan(
             cases_path,
         ):
             path.unlink(missing_ok=True)
-    permanent_summary = ROOT / str(profile_payload["permanent_result_path"])
-    permanent_cases = ROOT / str(
-        profile_payload["permanent_case_index_path"]
-    )
     if max_bars is None and not force and (
-        permanent_summary.exists() or permanent_cases.exists()
+        summary_path.exists() or cases_path.exists()
     ):
         raise FileExistsError(
-            "permanent eye evidence already exists; use --force to replace it"
+            "eye scan evidence already exists here; use --force to replace it"
         )
     output.mkdir(parents=True, exist_ok=True)
 
@@ -1132,14 +1128,8 @@ def run_scan(
     integrity_passed = bool(
         summary["scan_status"]["evidence_integrity_passed"]
     )
-    if scan_completed and integrity_passed:
-        _write_json(permanent_summary, summary)
-        _write_json(permanent_cases, case_index)
-        summary_path.unlink(missing_ok=True)
-        cases_path.unlink(missing_ok=True)
-    else:
-        _write_json(summary_path, summary)
-        _write_json(cases_path, case_index)
+    _write_json(summary_path, summary)
+    _write_json(cases_path, case_index)
     checkpoint_path.unlink(missing_ok=True)
     if scan_completed and not integrity_passed:
         write_progress()

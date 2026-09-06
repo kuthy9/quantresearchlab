@@ -1,8 +1,5 @@
 {
-  "baselines": [
-    "docs/evidence/eye_event_statistics_2022_02.json",
-    "docs/evidence/eye_event_statistics_2022_03.json"
-  ],
+  "baselines_retired": "eye_event_statistics_2022_02.json and eye_event_statistics_2022_03.json were retired on 2026-09-06 as v1.2-era evidence; the changed kinds below carry both counts and an unchanged kind equals its v1.3 count",
   "generated_for": "item 12 of the v1.3 semantic work",
   "model": "configs/model.json",
   "months": {

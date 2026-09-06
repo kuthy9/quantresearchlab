@@ -7,9 +7,11 @@ Foundation identity: `smc_semantic_foundation_v2.1` ·
 `69428dbfd2a9b2aa19f0254391fca2da17aedb8d0206829572e69c0cc212a715`
 
 Machine-readable counts: [`v1_3_two_month_replay_comparison.json`](v1_3_two_month_replay_comparison.json).
-Baselines: [`eye_event_statistics_2022_02.json`](eye_event_statistics_2022_02.json)
-and [`eye_event_statistics_2022_03.json`](eye_event_statistics_2022_03.json),
-both produced by the frozen v1.2 / foundation-v2.0 Eye over the same bars.
+The v1.2 / foundation-v2.0 baseline scans this compares against were run over
+the same bars; their two `eye_event_statistics_2022_0{2,3}.json` files were
+retired on 2026-09-06 as v1.2-era evidence. The comparison JSON stays readable
+without them: every changed kind carries both its v1.2 and its v1.3 count, and
+an unchanged kind is by definition equal to the v1.3 count recorded there.
 
 ## What was compared
 
