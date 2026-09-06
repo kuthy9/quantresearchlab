@@ -15,7 +15,7 @@ The current additive object/lifecycle projection is
 `smc_semantic_foundation_v2.1`, bound to the v1.3 atomic stream by
 [`semantics/foundation_v2_1.yaml`](../semantics/foundation_v2_1.yaml). Its
 human-readable authority is the
-[Canonical Semantic Foundation v2](refactor/canonical_semantic_foundation_v2.md).
+[Canonical Semantic Foundation v2.1](refactor/canonical_semantic_foundation_v2.1.md).
 It adds no parallel detector and does not rewrite a v1.2 `MarketEvent` or any
 frozen experiment. Production emits no `FOUNDATION_STATE_CHANGED`; the enum and
 strict decoder remain only for legacy technical replay transport and grant no
@@ -166,19 +166,19 @@ those events are the accepted inputs to hierarchical state reducers.
 Compatibility/state-projection events may remain readable for transport or
 historical replay, but they are not a second semantic authority.
 
-The [second-round semantic review](refactor/semantic_review_round_2.md)
-separates **definition validity** from **empirical validity** for the 17 named
-concepts. A causal, deterministic, replayable definition may remain empirically
+**Definition validity** and **empirical validity** are separate for every named
+concept. A causal, deterministic, replayable definition may remain empirically
 unknown or unsupported. Conversely, coverage or a contemporaneous association
 cannot repair an ambiguous definition or grant predictive/OOS/action authority.
 The frozen v1.2 registry remains the identity of historical artifacts. The
 foundation is deliberately a separate versioned identity, so current
 store/reducer/tick hardening and lifecycle completion do not rewrite those
 artifacts or silently change their definitions.
-The [DOL/Belief/Temporal supplement](refactor/dol_belief_temporal_supplement.md)
-is the current authority for dependency-cluster handling, research-only
-temporal links, FVG first-lifecycle freezing, and the 2024-06 data role. It does
-not add a canonical market event or rewrite this semantic version.
+The separate DOL/Belief/Temporal supplement that carried dependency-cluster
+handling, research-only temporal links, FVG first-lifecycle freezing, and the
+2024-06 data role was removed on 2026-09-06. None of it added a canonical
+market event or rewrote this semantic version; the executable contracts remain
+in `configs/dol_probability.json` and the runtime modules themselves.
 
 ## Common provenance contract
 
@@ -464,7 +464,7 @@ prefix are retained evidence for the earlier path/model bindings
 so that output remains historical. A separate Foundation-enabled Engine run
 passed the same exact 200-row prefix under later, but now also historical,
 model/registry bindings; its detailed boundary is in the
-[Foundation release table](refactor/canonical_semantic_foundation_v2.md#replay-test-and-empirical-boundary).
+[Foundation release table](refactor/canonical_semantic_foundation_v2.1.md#replay-test-and-empirical-boundary).
 The read-only 6,900-clock capacity preflight still verifies the historical
 `COMPLETED.json` to checkpoint-manifest SHA binding, finds that receipt's
 historical/current identity mismatch, and explicitly withholds full-run
@@ -473,9 +473,9 @@ historical run, and an actual real-time multi-day pilot remain open. Calibrated
 promotion, empirical Execution Research, operational Shadow Live, rolling OOF,
 and final OOS remain later gates; conformance to the complete target-state
 prompt is therefore **partial**.
-The input and checkpoint are ignored local engineering files; their paths,
-hashes, commands, no-replace publication rules, and receipt limitation are
-listed in the
-[Phase 6–9 gate report](refactor/phase_6_9_completion_report.md#phase-9-parity-harness-implemented-pilot-pending).
+The input and checkpoint were ignored local engineering files under `inputs/`
+and `outputs/`; both directories, and the Phase 6–9 gate report that listed
+their paths, hashes, commands and no-replace publication rules, were removed on
+2026-09-06.
 See the
 [current implementation status](refactor/current_implementation_status.md).

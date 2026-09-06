@@ -1,21 +1,51 @@
-# Canonical Semantic Foundation v2
+# Canonical Semantic Foundation v2.1
 
-Status date: 2026-08-28
-Foundation identity: `smc_semantic_foundation_v2.0`
-Parent atomic identity: `smc_semantics_v1.2`
-Canonical-JSON registry identity SHA-256: `0c49da28e103f0515d3eb93ab03e8659e334d2477449f5174df3b5e8b0b84cc6`
+Status date: 2026-09-06
+Foundation identity: `smc_semantic_foundation_v2.1`
+Parent atomic identity: `smc_semantics_v1.3`
+Canonical-JSON registry identity SHA-256: `69428dbfd2a9b2aa19f0254391fca2da17aedb8d0206829572e69c0cc212a715`
 
 This document is the implementation authority for the canonical semantic
-foundation layered over the immutable v1.2 atomic event stream. It completes
+foundation layered over the immutable v1.3 atomic event stream. It completes
 object identity, geometry, generation, lifecycle, relation, transition,
 reinteraction, ancestry, and factual outcome contracts. It does not add a
 trading signal, fit a probability model, or grant action authority.
 
 The machine-readable authority is
-[`semantics/foundation_v2_0.yaml`](../../semantics/foundation_v2_0.yaml).
-Changing any registered definition requires a new semantic version and a new
-registry identity. Historical v1.2 events and frozen research artifacts are
-not rewritten.
+[`semantics/foundation_v2_1.yaml`](../../semantics/foundation_v2_1.yaml), and
+`smc_trader/foundation_registry.py` fails closed unless the loaded file carries
+exactly the version, parent version and identity printed above. Changing any
+registered definition requires a new semantic version and a new registry
+identity. Historical `smc_semantics_v1.2` / `smc_semantic_foundation_v2.0`
+events and frozen research artifacts keep that identity and are not rewritten.
+
+## What v2.1 changed
+
+v2.1 is an additive revision of v2.0. It registers **no new object and retires
+none** — the 24 registered concepts below are identical — and it rewrites no
+frozen record. Seven registered fields changed, and they carry one idea: a
+definitional window may now contain a bar that had no trading, and the
+foundation states that explicitly instead of behaving as if the window were
+shorter.
+
+| Registered field | v2.0 | v2.1 |
+|---|---|---|
+| `parent_atomic_semantic_version` | `smc_semantics_v1.2` | `smc_semantics_v1.3` |
+| `structural_leg.duration_bars` | `inclusive_real_completed_native_bars` | `inclusive_registered_completed_native_bars` |
+| `structural_leg.path_admits_densified_no_trade_bars` | absent | `true` |
+| `structural_leg.synthetic_path_minutes` | absent | sum of densified no-trade minutes across admitted path bars |
+| `swing_geometry.envelope` | `real_completed_definitional_pivot_through_confirmation_bar_window` | `registered_completed_definitional_pivot_through_confirmation_bar_window` |
+| `swing_geometry.window_admits_densified_no_trade_bars` | absent | `true` |
+| `swing_geometry.synthetic_window_minutes` | absent | sum of densified no-trade minutes across admitted window bars |
+| `liquidity_level_lifecycle.tradable_zone_projection` | `continuous_v1_2_zone_…` | `continuous_v1_3_zone_…` (identical projection arithmetic, new parent identity) |
+
+`real_completed` became `registered_completed` because a no-trade minute is a
+registered clock without price discovery, not a missing bar. Admitting it keeps
+a leg or Swing window that spans such a minute representable at its true span,
+and the two `synthetic_*_minutes` counters are zero exactly when every admitted
+bar carried real price discovery — so the distinction stays auditable rather
+than silent. ATR ancestry is deliberately excluded from this change and still
+draws on `real_completed` bars only, because a no-trade bar has zero true range.
 
 ## Phase A audit result
 
@@ -27,7 +57,7 @@ detectors and reducers were retained.
 | Structural Leg path | Partial | Existing leg identity retained; full native-bar path, two efficiencies, close/wick MAE, tick amplitude, duration, and strictly-prior `ATR_at_leg_start` were added. |
 | Swing hierarchy | Conflicting | Existing `micro/internal/structural/external` depth was role depth. A separate geometric containment tree now carries geometric depth and parent/child identity. |
 | Same-level rearm | Partial | Equal-pool private generations existed, but general levels were terminal once. A registered level/interaction lifecycle now owns rearm. |
-| Structure generation | Partial/conflicting | Tracker records and snapshot directions existed, but no canonical internal/external generation lifecycle existed. It is now an event-sourced projection over exact v1.2 facts. |
+| Structure generation | Partial/conflicting | Tracker records and snapshot directions existed, but no canonical internal/external generation lifecycle existed. It is now an event-sourced projection over exact v1.3 facts. |
 | Origin / OB | Partial/conflicting | A private frozen origin was folded into the qualified OB result. Base Origin Core and Qualified OB are now separate immutable objects. |
 | Structural / Balance range | Conflicting | The legacy dealing-range slot represented Mature Balance Range while also feeding location labels. Structural Range and Balance Range are now independent records and locations. |
 | Delivery generation | Missing | The deterministic phase classifier is reused and wrapped in a persistent generation lifecycle. |
@@ -40,7 +70,7 @@ detectors and reducers were retained.
 ## Architecture and authority
 
 ```text
-normalized BAR + canonical v1.2 atomic facts
+normalized BAR + canonical v1.3 atomic facts
                       |
                       v
         EventStore (sole atomic history)
@@ -82,15 +112,15 @@ terminal or archived revisions before the next epoch. Checkpoint restore and
 atomic replay reconstruct the same record identities and current views.
 
 The production model has one strict `semantic_selection` object containing the
-atomic v1.2 version/path/definition identity and this Foundation v2.0
+atomic v1.3 version/path/definition identity and this Foundation v2.1
 version/path/registry identity. `ContinuousSMCEngine` loads the pair once and
 requires this registry's `parent_atomic_semantic_version` to equal the selected
 atomic version. The Observer's Foundation-enabled boolean is now an internal
 derived compatibility detail, not a second configuration authority. This pair
-does not create `smc_semantics_v2.0` or any composite semantic identity. Engine
+does not create `smc_semantics_v2.1` or any composite semantic identity. Engine
 and Shadow retain their existing version/identity receipt fields, and the
 model-config byte hash remains part of runtime identity. The current combined
-Engine checkpoint schema is 11; earlier checkpoints fail closed on restore into
+Engine checkpoint schema is 12; earlier checkpoints fail closed on restore into
 the current Observation, Foundation, and Neutral-state contracts.
 
 The compact migration (historical) separated history from hot state, and the
@@ -140,8 +170,10 @@ versioned promotion.
 
 ### Swing Geometry / Nesting
 
-A Swing's geometric envelope is its real completed definitional pivot-through-
-confirmation bar window. A parent must have a strictly larger time window and
+A Swing's geometric envelope is its registered completed definitional
+pivot-through-confirmation bar window; since v2.1 that window admits a densified
+no-trade bar and records the admitted no-trade span as
+`synthetic_window_minutes`. A parent must have a strictly larger time window and
 contain the child in both time and price. If several parents qualify, the
 deterministic order is minimum enclosing duration, minimum price span, then
 parent Swing ID. A late enclosing parent appends a superseding assignment; it
@@ -164,7 +196,7 @@ The existing leg ID remains stable. A foundation-v2 leg additionally freezes:
 - `ATR_at_leg_start`, calculated from exactly 14 strictly prior real completed
   native bars, plus those 14 source IDs.
 
-Since 2026-08-28 the path admits a densified no-trade bar so a leg spanning a
+Since v2.1 the path admits a densified no-trade bar so a leg spanning a
 no-trade minute stays representable; `synthetic_path_minutes` is zero exactly
 when every admitted bar carried real price discovery. ATR ancestry is
 unaffected — it is still drawn from `real_completed` bars only, because a
@@ -260,7 +292,7 @@ when `L<=invalidation`; short is symmetric. Same-bar double touch is
 `MAE_ATR=max(0,reference-min L)/ATR`; short is symmetric. Scanning starts
 strictly after source knowledge and the first native-clock gap censors.
 
-Foundation v2 does not redefine the v1.2 Displacement score. Its gate and score
+Foundation v2 does not redefine the v1.3 Displacement score. Its gate and score
 authority remain `configs/primitives_displacement.json`.
 
 ## Liquidity lifecycle and interaction generations
@@ -453,14 +485,16 @@ missing fields into inferred authority:
 
 These boundaries fail closed and do not authorize heuristic backfill. Adding a
 new duplicated field or stronger independent recomputation contract requires a
-new registered foundation version; it cannot silently change v2.0.
+new registered foundation version; it cannot silently change v2.1.
 
 ## Replay, test, and empirical boundary
 
 The table below is historical engineering evidence from the recorded
-pre-compact source snapshot. Its model, action-policy, Engine-checkpoint, and
-Shadow identities have since changed; neither the table nor its machine receipt
-authorizes or proves parity for the current runtime. Current implementation
+pre-compact source snapshot, produced under `smc_semantic_foundation_v2.0` /
+`smc_semantics_v1.2` and keeping that identity. It is not a v2.1 measurement.
+Its model, action-policy, Engine-checkpoint, and Shadow identities have since
+changed; neither the table nor its machine receipt authorizes or proves parity
+for the current runtime. Current implementation
 state is maintained in
 [`current_implementation_status.md`](current_implementation_status.md).
 

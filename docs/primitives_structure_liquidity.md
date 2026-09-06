@@ -4,7 +4,7 @@ This is the single development definition for concept groups 1–2. It is
 descriptive and must not be tuned against PnL.
 
 This file documents the retained v1.2 atomic detector protocol. The additive
-[`smc_semantic_foundation_v2.0`](refactor/canonical_semantic_foundation_v2.md)
+[`smc_semantic_foundation_v2.1`](refactor/canonical_semantic_foundation_v2.1.md)
 projection consumes these facts and separately owns geometric Swing nesting,
 Candidate Liquidity Level retirement/rearm, Liquidity Interaction Generation,
 Boundary Attack, Structure Generation/Transition, and complete multi-bar

@@ -65,11 +65,13 @@ internal migration names — in `group3.py`/`group4.py`/`group5.py` pickle shims
 in `MarketObservation` field names, and in frozen research-manifest binding
 keys. Do not introduce them anywhere new.
 
-The item-by-item consolidation state, retained debt and registered next steps
-are in
-[docs/refactor/eye_brain_consolidation_audit_2026-08-26.md](docs/refactor/eye_brain_consolidation_audit_2026-08-26.md);
-the current implementation-versus-plan authority is
-[docs/refactor/current_implementation_status.md](docs/refactor/current_implementation_status.md).
+The current implementation-versus-plan authority is
+[docs/refactor/current_implementation_status.md](docs/refactor/current_implementation_status.md);
+the registered semantic definitions are
+[docs/refactor/preregistered_semantics_v1_3_2026-08-31.md](docs/refactor/preregistered_semantics_v1_3_2026-08-31.md)
+for the atomic layer and
+[docs/refactor/canonical_semantic_foundation_v2.1.md](docs/refactor/canonical_semantic_foundation_v2.1.md)
+for the Foundation projection.
 
 ## Build, Test, and Development Commands
 

@@ -7,10 +7,9 @@ Foundation identity: `smc_semantic_foundation_v2.1` ·
 `69428dbfd2a9b2aa19f0254391fca2da17aedb8d0206829572e69c0cc212a715`
 Status: `preregistered_development_contract_not_oos_trading_authority`
 
-This supersedes
-[the v1.2 status document](preregistered_semantics_status_2026-08-29.md) for the
-runtime. That document's measurements keep their v1.2 identity and remain valid
-as v1.2 evidence.
+This supersedes the 2026-08-29 v1.2 status document, which was removed on
+2026-09-06. That document's measurements kept their v1.2 identity; the ones
+still load-bearing for the runtime are restated below under v1.3.
 
 ## What binds what
 

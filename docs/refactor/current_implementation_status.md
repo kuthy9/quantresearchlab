@@ -10,26 +10,30 @@ the identity of every historical artifact below; it is not the runtime.
 
 This is the current implementation-versus-plan authority. Its 2026-08-26
 revision corrected stale schema/protocol/identity bindings and the Foundation
-hot-state description against the checked-in code; the per-item consolidation
-disposition and the evidence behind those corrections are in the
-[Eye/Brain consolidation audit](eye_brain_consolidation_audit_2026-08-26.md).
-The
-[Phase 2–5 completion report](phase_2_5_completion_report.md) remains the
-immutable historical report for the January 2024 v1.1 diagnostic; its sample
-counts, 24.04% matched-control coverage, and zero E3–E6 chain are baseline
-results, not descriptions of the v1.2 implementation.
-The [Phase 6–9 report](phase_6_9_completion_report.md) records the newer
-engineering and validation boundary without changing any frozen artifact.
-The [second-round semantic review](semantic_review_round_2.md) remains the
-17-concept Definition-versus-Empirical validity authority for the historical
-v1.2 review. The additive
-[Canonical Semantic Foundation v2](canonical_semantic_foundation_v2.md) is the
-current definition authority for geometry, generations, lifecycle,
+hot-state description against the checked-in code.
+
+**Document consolidation (2026-09-06).** Nine historical `docs/refactor/`
+documents were removed: the Eye/Brain consolidation audit, the repository file
+inventory, the Phase 0, Phase 2–4, Phase 2–5 and Phase 6–9 reports, the
+2026-08-29 v1.2 preregistered-semantics status, the round-two semantic review,
+and the DOL/Belief/Temporal supplement. Every one of them was a v1.1/v1.2-era
+snapshot, and each carried its own superseded notice. `docs/refactor/` now holds
+three documents and no others: this file, the
+[v1.3 preregistered semantics](preregistered_semantics_v1_3_2026-08-31.md), and
+the [Canonical Semantic Foundation v2.1](canonical_semantic_foundation_v2.1.md).
+Statements below that cited a removed document keep their content and name the
+document as removed; their frozen figures are unchanged.
+
+The January 2024 v1.1 diagnostic remains an immutable historical baseline — its
+sample counts, 24.04% matched-control coverage, and zero E3–E6 chain are
+baseline results, not descriptions of the v1.2 or v1.3 implementation. The
+additive
+[Canonical Semantic Foundation v2.1](canonical_semantic_foundation_v2.1.md) is
+the current definition authority for geometry, generations, lifecycle,
 reinteraction, ancestry, and factual outcomes. It does not rewrite the frozen
-v1.2 runs or promote their empirical conclusions.
-The [DOL/Belief/Temporal supplement](dol_belief_temporal_supplement.md) records
-the current dependency-cluster rule, temporal/ancestry separation, FVG
-first-lifecycle freeze, and the 2024-06 joint OHLCV/MBO data-role audit.
+v1.2 runs or promote their empirical conclusions. Definition validity and
+empirical validity remain separately graded: a causal, deterministic,
+replayable definition may still be empirically unknown.
 Against the repository-owned target architecture, the overall verdict remains
 **partial**: the core ownership, causality, replay, and fail-closed interfaces
 are present, while empirical fitting/calibration, formal Execution Research,
@@ -115,15 +119,14 @@ cold definition/replay modules (`semantic_foundation.py`,
 builders in `market_state.py`) whose only current consumers are their focused
 tests. Those definitions are deliberately retained, not deleted, but they are
 not a second lifecycle or state authority and must not be described as hot
-state. See the
-[Eye/Brain consolidation audit](eye_brain_consolidation_audit_2026-08-26.md)
-for the item-by-item disposition.
+state. The item-by-item consolidation disposition lived in the Eye/Brain
+consolidation audit, removed on 2026-09-06.
 
 ### Simplification audit and retained migration debt
 
-The complete 288-file baseline census, static consumer links, exact-byte
-duplicate check, and consolidation priorities are recorded in the
-[repository file inventory](repository_file_inventory.md). It found no
+A 288-file baseline census with static consumer links, an exact-byte duplicate
+check, and consolidation priorities was recorded in the repository file
+inventory, removed on 2026-09-06. It found no
 unreferenced `smc_trader` runtime module, no unreferenced current config or
 semantic authority, and no byte-identical tracked file pair. A zero inbound
 reference is therefore treated only as triage: direct CLIs, tests, design
@@ -375,7 +378,7 @@ That receipt binds the earlier path/model identities `5213b3d6…` and
 Shadow bytes that preceded the compact-state/action-policy migration. Both are
 historical engineering evidence for their exact source snapshots; neither is a
 current-runtime parity receipt. The single detailed historical
-[release-verification table](canonical_semantic_foundation_v2.md#replay-test-and-empirical-boundary)
+[release-verification table](canonical_semantic_foundation_v2.1.md#replay-test-and-empirical-boundary)
 and its machine receipt (retired 2026-09-06 with the local `inputs/`/`outputs/` payload)
 record that older bounded file-parity result. A new parity claim requires a new
 frozen runtime/config identity. It does not complete or rematerialize the
@@ -387,15 +390,15 @@ for the checkpoint, 370,193,384 bytes of retained output, and 723,016,956 bytes
 for peak working set. The historical/current runtime identities differ,
 nonlinear consistency cost remains unresolved, and the preflight explicitly
 sets `full_6900_replay_authorized=false`.
-These input/checkpoint files are local and Git-ignored; the
-[Phase 6–9 gate report](phase_6_9_completion_report.md#phase-9-parity-harness-implemented-pilot-pending)
-records their exact paths, hashes, commands, publication semantics, and the
-limits of the small portable receipt for otherwise Git-ignored local evidence.
+Those input/checkpoint files were local Git-ignored payloads under `inputs/` and
+`outputs/`; both directories, and the Phase 6–9 gate report that recorded their
+exact paths, hashes, commands and publication semantics, were removed on
+2026-09-06.
 
 ## Historical Foundation-v2 release verification
 
 The foundation specification contains the single detailed
-[release-verification table](canonical_semantic_foundation_v2.md#replay-test-and-empirical-boundary),
+[release-verification table](canonical_semantic_foundation_v2.1.md#replay-test-and-empirical-boundary),
 including the exact June-2024 OHLCV input identity, focused regressions,
 the repository-regression handoff boundary, construction/replay performance
 A/B, bounded final record census, five-view atomic replay parity, and the separate
@@ -491,7 +494,7 @@ therefore empirical validation and promotion:
   from that transport alone; direct and range-boundary Touch geometry remain
   independently checked. The other non-inferred transport limits are catalogued
   in the foundation specification's
-  [explicit replay-seam limits](canonical_semantic_foundation_v2.md#explicit-replay-seam-limits).
+  [explicit replay-seam limits](canonical_semantic_foundation_v2.1.md#explicit-replay-seam-limits).
 - Protected-Swing survival and matched Origin-Zone first-retest remain
   registered research questions, not completed studies. Their estimands,
   pre-treatment rank/matching rules, competing-risk clocks, horizons, and

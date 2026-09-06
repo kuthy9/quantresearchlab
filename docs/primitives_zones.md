@@ -10,7 +10,7 @@ block. Both are descriptive location entities. Neither is an entry signal,
 playbook, stop, target, probability adjustment, or profitability claim.
 
 This is the retained v1.2 Group-3 detector contract. The additive
-[`smc_semantic_foundation_v2.0`](refactor/canonical_semantic_foundation_v2.md)
+[`smc_semantic_foundation_v2.1`](refactor/canonical_semantic_foundation_v2.1.md)
 projection separates Base Origin Core from Qualified OB, gives FVG a structural
 expiry distinct from invalidation, and publishes a strictly future geometric
 First Retest after departure. It does not relabel this file's historical

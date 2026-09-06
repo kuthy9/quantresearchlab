@@ -15,20 +15,17 @@ The additive `smc_semantic_foundation_v2.1` projection now completes the
 registered geometry, generation, lifecycle, relation, transition, first-
 reinteraction, ancestry, and factual-outcome layer over those immutable facts.
 See the
-[foundation specification](refactor/canonical_semantic_foundation_v2.md).
+[foundation specification](refactor/canonical_semantic_foundation_v2.1.md).
 It reuses the existing detectors and immutable store; it is not a parallel Eye
 or a new action path.
-The current implementation-versus-plan matrix, the frozen January 2024
-diagnostic boundary, and the Phase 6–9 boundary are recorded separately in the
-[current implementation status](refactor/current_implementation_status.md) and
-[historical Phase 2–5 completion report](refactor/phase_2_5_completion_report.md),
-and [Phase 6–9 completion report](refactor/phase_6_9_completion_report.md).
-The current DOL, path-belief, temporal-relation, and June-2024 data boundary is
-recorded in the
-[DOL/Belief/Temporal supplement](refactor/dol_belief_temporal_supplement.md).
-The [round-two semantic review](refactor/semantic_review_round_2.md) separately
-grades definition validity and empirical validity; executable coverage is never
-treated as predictive validation.
+The current implementation-versus-plan matrix is recorded separately in the
+[current implementation status](refactor/current_implementation_status.md), and
+the registered atomic definitions in the
+[v1.3 preregistered semantics](refactor/preregistered_semantics_v1_3_2026-08-31.md).
+The historical Phase 2–5, Phase 6–9, DOL/Belief/Temporal and round-two-review
+documents were removed on 2026-09-06; their still-current conclusions live in
+those two documents. Executable coverage is never treated as predictive
+validation.
 The numbered implementation modules are no longer runtime owners: Zone logic
 lives in `smc_trader/zone.py`, and Range Auction logic lives in
 `smc_trader/range_auction.py`. `group3.py` and `group4.py` are unexported,
@@ -119,9 +116,9 @@ runtime action authority under `legacy_decision_risk_compat`. The newer
 shadow consumers; Engine disables TradeIntent projection in compatibility mode
 and rejects a non-zero prefilled intent before Decision/Risk. This prevents two
 simultaneous action owners without claiming the vertical migration is complete.
-The exact owner, consumer, disposition, size, and responsibility of every
-tracked file is in the
-[repository file inventory](refactor/repository_file_inventory.md).
+The per-file owner/consumer census that used to live in a repository file
+inventory was removed on 2026-09-06; `git ls-files` and this document are the
+current answer.
 
 ### Trading Eye responsibility layers
 
@@ -706,7 +703,7 @@ model and Shadow configuration. Both outputs remain historical evidence for
 their exact source snapshots: the compact runtime, action-policy, and Shadow
 schema changes require a new frozen identity before another parity claim. See
 the historical
-[release-verification table](refactor/canonical_semantic_foundation_v2.md#replay-test-and-empirical-boundary).
+[release-verification table](refactor/canonical_semantic_foundation_v2.1.md#replay-test-and-empirical-boundary).
 That result closed only its bound prefix. A new prefix or complete 6,900-clock
 rehearsal must be rematerialized, and neither is a real-time pilot.
 The current protocol tests deterministic equality and fail-stop behavior; it
@@ -723,10 +720,10 @@ and a 723,016,956-byte peak-working-set lower bound. Historical and current
 runtime bindings differ, nonlinear consistency cost remains unresolved, and
 the preflight explicitly returns `full_6900_replay_authorized=false`; it does
 not close the engineering or operational gate.
-The retained input and bounded checkpoint remain ignored local files, not
-portable repository evidence. Their exact commands, paths, hashes, and
-exclusive publication contract are listed in the
-[Phase 6–9 gate report](refactor/phase_6_9_completion_report.md#phase-9-parity-harness-implemented-pilot-pending).
+The retained input and bounded checkpoint were local `inputs/` and `outputs/`
+payloads, never portable repository evidence; both directories were deleted on
+2026-09-06 together with the Phase 6–9 gate report that listed their commands,
+paths and hashes.
 
 ## Replay, audit and validation
 
@@ -741,8 +738,8 @@ result, derived Markdown, and three hash-bound research ledgers. It is
 diagnostic-only, does not persist the complete audit store, and has no
 Brain/MBO/execution or OOS authority. Its exact source-linked nested population
 stops at E2; E3–E6 have zero samples, and its matched-control coverage is
-24.04%. Those are immutable historical results; see the
-[Phase 2–5 completion report](refactor/phase_2_5_completion_report.md).
+24.04%. Those are immutable historical v1.1 results; the completion report that
+recorded them was removed on 2026-09-06.
 
 Research protocol v3 is a separately frozen and executed v1.2 development
 diagnostic. It
