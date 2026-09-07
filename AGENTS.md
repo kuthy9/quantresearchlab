@@ -2,15 +2,40 @@
 
 ## Project Structure & Module Organization
 
-Runtime code lives in `smc_trader/`; preserve the existing Eye, state, Brain,
-and execution ownership boundaries. Version semantic authorities in
-`semantics/`, settings in `configs/`, and reproducible materializers or bounded
-study scripts in `scripts/`. Tests use `tests/test_*.py`. Bounded studies write
-under `outputs/`; current explanations and receipts live in `docs/` and
-`docs/evidence/`. The frozen Phase 5 signal-research and Phase 6 MBO-mechanism
-runners, their `smc_trader` primitives and their `configs/research/` manifest
-templates were retired on 2026-09-06; no formal-research runner remains in the
-repository.
+Runtime code is split into four subsystem packages. Each owns its own `core/`,
+`tests/`, `configs/` and `docs/`, and the split preserves the existing Eye,
+state, Brain and execution ownership boundaries rather than redrawing them:
+
+| package | owns |
+| --- | --- |
+| `eyes/` | the Trading Eye — normalization, the six detectors, semantic-event emission, the event store and market-state reduction |
+| `brain/` | path belief, DOL, signal policy, playbooks, calibration, decision and risk |
+| `execution/` | execution reality, the order/position FSM, trade intent and sequential simulation |
+| `shares/` | contracts (`model.py`), data access, the session clock, the scale registry, orchestration (`engine.py`) and the study projections the other three consume |
+
+Each package also owns a `scripts/` directory holding its bounded studies,
+materializers and throwaway probes; a script that drives the whole stack
+(`shares/scripts/run_continuous_replay.py`) belongs to `shares/`.
+
+Two directories stay at the repository root because the atomic semantic identity
+hashes their contents or their path strings, and moving either would force a
+refreeze:
+
+- `configs/` — exactly the eight sealed files: `model.json`, `data_splits.json`
+  and the six `primitives_*.json` protocols. Every unsealed protocol lives with
+  the subsystem that reads it (`brain/configs/`, `shares/configs/`).
+- `semantics/` — `registry_v1_3.yaml` names its own parameters file by the
+  repository-root-relative string `semantics/parameters_v1_3.yaml`, and the
+  registry's bytes are `registry_sha256`. Relocating the directory rewrites that
+  line and moves `atomic_definition_identity` off
+  `f92b24c86bf942defc88de4edb7be16cc2a30dd64fde3b4432657780648b1f0c`.
+
+Tests use `<subsystem>/tests/test_*.py`. Bounded studies write under `outputs/`;
+current explanations and receipts live in `<subsystem>/docs/` and
+`eyes/docs/evidence/`.
+The frozen Phase 5 signal-research and Phase 6 MBO-mechanism runners, their
+`smc_trader` primitives and their `configs/research/` manifest templates were
+retired on 2026-09-06; no formal-research runner remains in the repository.
 
 ## Runtime Architecture
 
@@ -18,81 +43,108 @@ One data entry, one Eye entry, one history authority, one current view:
 
 ```text
 Bar
- └─ CausalMarketReader        causal.py            data normalizer
-     ├─ market_clock.py       registered session calendar
-     └─ scale_registry.py     ScaleSpec / scale_registry_id
-     └─ CausalObserver        observation.py       semantic event engine
-         ├─ structure.py / liquidity.py / displacement.py
-         ├─ zone.py           (canonical owner of the former "Group 3")
-         ├─ range_auction.py  (canonical owner of the former "Group 4")
-         ├─ interaction.py    (Eye half of the former "Group 5")
-         ├─ semantic_event_emitter.py
+ └─ CausalMarketReader     eyes/core/causal.py             data normalizer
+     ├─ shares/core/market_clock.py    registered session calendar
+     └─ shares/core/scale_registry.py  ScaleSpec / scale_registry_id
+     └─ CausalObserver     eyes/core/observation.py         semantic event engine
+         ├─ eyes/core/structure.py / liquidity.py / displacement.py
+         ├─ eyes/core/zone.py           (canonical owner of the former "Group 3")
+         ├─ eyes/core/range_auction.py  (canonical owner of the former "Group 4")
+         ├─ eyes/core/interaction.py    (Eye half of the former "Group 5")
+         ├─ eyes/core/semantic_event_emitter.py
          │                    SemanticEventEmitter — sole event emitter and
          │                    owner of the cross-detector ancestry index
-         ├─ event_memory.py   bounded causal working set
-         ├─ event_store.py    EventStore — complete atomic history
-         └─ market_state.py   MarketSnapshotPublisher
+         ├─ eyes/core/event_memory.py   bounded causal working set
+         ├─ eyes/core/event_store.py    EventStore — complete atomic history
+         └─ eyes/core/market_state.py   MarketSnapshotPublisher
              ├─ TimeframeEventReducer → TimeframeState
              ├─ RelationResolver      → RelationState
              └─ SessionStateReducer   → SessionState
                  └─ MarketSnapshot    — current market view
- └─ ContinuousSMCEngine       engine.py            orchestration
-     ├─ scene_graph.py           Engine-owned research/visualisation view
-     ├─ execution.py             execution-reality scoring
-     ├─ brain_entry_sequence.py  Brain interpretation of Eye facts
-     ├─ neutral projection       one OpenMarketThesis per clock
-     ├─ playbooks.py             PlaybookBrain.update(...)
-     └─ decision.py → risk.py    sole runtime action authority
+ └─ ContinuousSMCEngine    shares/core/engine.py            orchestration
+     ├─ shares/core/scene_graph.py       Engine-owned research/visualisation view
+     ├─ execution/core/execution.py      execution-reality scoring
+     ├─ brain/core/brain_entry_sequence.py
+     │                                   Brain interpretation of Eye facts
+     ├─ neutral projection               one OpenMarketThesis per clock
+     ├─ brain/core/playbooks.py          PlaybookBrain.update(...)
+     └─ brain/core/decision.py → risk.py sole runtime action authority
 ```
 
-The Eye imports no downstream module. `scene_graph.py` is owned by
-`ContinuousSMCEngine`, which advances it over one completed Eye observation and
-stamps the resulting `scene_*` delta identities; a graph failure poisons the
-observer through `CausalObserver.mark_terminal_failure` because the reducers
-have already advanced. `execution.py` owns `ExecutionRealityInput` and the
-cost/fillability score; `model.py` owns the inert not-evaluated value beside
-`ExecutionObservation`; `ContinuousSMCEngine._score_execution` derives the
-score and the Eye only transports the result. That boundary is enforced by
-`tests/test_eye_module_boundary.py`. `eye_statistics.py`, `visualization.py`,
-`shadow_outcome.py`, `causal_cases.py` and `market_cases.py` are optional
+The Eye imports no downstream module — no `eyes/core/` module imports `brain`,
+`execution`, or the orchestration half of `shares`. `shares/core/scene_graph.py`
+is owned by `ContinuousSMCEngine`, which advances it over one completed Eye
+observation and stamps the resulting `scene_*` delta identities; a graph failure
+poisons the observer through `CausalObserver.mark_terminal_failure` because the
+reducers have already advanced. `execution/core/execution.py` owns
+`ExecutionRealityInput` and the cost/fillability score; `shares/core/model.py`
+owns the inert not-evaluated value beside `ExecutionObservation`;
+`ContinuousSMCEngine._score_execution` derives the score and the Eye only
+transports the result. That boundary is enforced by
+`eyes/tests/test_eye_module_boundary.py`, which resolves both the intra-package
+relative imports and the cross-package absolute ones. `eyes/core/eye_statistics.py`,
+`shares/core/visualization.py`, `brain/core/shadow_outcome.py`,
+`shares/core/causal_cases.py` and `shares/core/market_cases.py` are optional
 projections and study consumers. None of them may become a second market-state
 authority.
 
+`shares/__init__.py` is the aggregate public surface and resolves every export
+lazily: `shares.core.model` is imported by all four subsystems, so an eager
+facade would drag the whole engine into that import and turn the existing
+module-level cycles into import errors.
+
 `EventStore` is the Eye's internal history authority and is not part of the
 package's public surface. Research and replay tools that need read-only event
-lineage import `smc_trader.event_store` directly.
+lineage import `eyes.core.event_store` directly.
 
 Naming rule: `Zone`, `RangeAuction` and `Interaction` are the public concepts.
 `Group3`/`Group4`/`Group5` and `Phase 4/5/6` survive only as historical or
-internal migration names — in `group3.py`/`group4.py`/`group5.py` pickle shims,
-in `MarketObservation` field names, and in the frozen `phase6_*` evidence-boundary
-keys that `configs/path_hypotheses.json` binds and `path_belief.py` validates.
-Do not introduce them anywhere new.
+internal migration names — in `MarketObservation` field names, in the
+test-local `shares/tests/legacy_group5.py` reducer, and in the frozen `phase6_*`
+evidence-boundary keys that `brain/configs/path_hypotheses.json` binds and
+`brain/core/path_belief.py` validates. The three `group3.py`/`group4.py`/
+`group5.py` pickle shims no longer exist; they were removed before the subsystem
+split. Do not introduce them anywhere new.
+
+`semantics/registry_v1_3.yaml` and `semantics/parameters_v1_3.yaml` are hashed
+into `atomic_definition_identity`, so the seven runtime provenance strings they
+carry still name the pre-split modules: `smc_trader.market_state` is today
+`eyes/core/market_state.py`, `smc_trader.structure` is `eyes/core/structure.py`,
+and `smc_trader.zone` is `eyes/core/zone.py`. Those strings record which module
+implemented v1.3 when the identity was frozen; rewriting them would break the
+seal, so leave them and read them through this mapping. The same applies to the
+`configs/` path strings inside `semantics/parameters_v1_3.yaml` and
+`configs/data_splits.json`, which is why the eight sealed protocol files stay at
+the repository root.
 
 The current implementation-versus-plan authority is
-[docs/current_implementation_status.md](docs/current_implementation_status.md);
+[shares/docs/current_implementation_status.md](shares/docs/current_implementation_status.md);
 the registered semantic definitions are
-[docs/smc_semantic_specification_v1.3.md](docs/smc_semantic_specification_v1.3.md)
+[eyes/docs/smc_semantic_specification_v1.3.md](eyes/docs/smc_semantic_specification_v1.3.md)
 for the atomic layer and
-[docs/canonical_semantic_foundation_v2.1.md](docs/canonical_semantic_foundation_v2.1.md)
+[eyes/docs/canonical_semantic_foundation_v2.1.md](eyes/docs/canonical_semantic_foundation_v2.1.md)
 for the Foundation projection.
 
 ## Build, Test, and Development Commands
 
-Create the environment with `uv sync --extra test`; there is no compile step.
+Create the environment with `uv sync --all-extras`; there is no compile step.
+`--extra test` alone prunes `torch` and `databento`, which
+`shares/tests/test_market_representation.py` and the MBO protocol tests need.
 
 - `env PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider`
   runs daily semantic/runtime tests; the research-orchestration group is
   excluded by `pyproject.toml`.
 - `.venv/bin/python -m pytest -m 'research_orchestration' -q -p no:cacheprovider`
   runs the remaining bounded study-orchestration tests, currently the Eye
-  authority-scan group in `tests/test_eye_authority_scan.py`. They are excluded
+  authority-scan group in `eyes/tests/test_eye_authority_scan.py`. They are excluded
   from the default loop, so run them after touching a study script or a runtime
   identity binding. `research_orchestration` is the only registered marker; the
   `historical_frozen` and `research_runner` markers were dropped on 2026-09-06
   once the retirements left them with no test.
-- `.venv/bin/python -m pytest tests/test_semantic_foundation_projection.py -q -p no:cacheprovider`
+- `.venv/bin/python -m pytest eyes/tests/test_semantic_foundation_projection.py -q -p no:cacheprovider`
   runs a focused contract file.
+- `.venv/bin/python -m pytest eyes/tests -q -p no:cacheprovider` runs one
+  subsystem's tests; swap in `brain/tests`, `execution/tests` or `shares/tests`.
 - `git diff --check` catches whitespace errors before commit.
 
 No formal-research runner or frozen manifest remains in the repository. Any new

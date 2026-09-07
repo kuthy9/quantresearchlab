@@ -26,10 +26,10 @@ dbn = ["databento>=0.64"]
 representation = ["torch>=2.2,<3"]
 
 [tool.setuptools.packages.find]
-include = ["smc_trader*"]
+include = ["eyes*", "brain*", "execution*", "shares*"]
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+testpaths = ["eyes/tests", "brain/tests", "execution/tests", "shares/tests"]
 addopts = "-q -m 'not research_orchestration'"
 markers = [
   "research_orchestration: bounded study-orchestration tests run separately from daily model tests; currently only the Eye authority-scan group",
