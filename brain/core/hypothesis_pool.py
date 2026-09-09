@@ -21,7 +21,8 @@ iteration order, and the whole point of recording SPLIT and MERGE is to tell a
 real change from an artefact.
 
 The gate is what separates the two. A hypothesis keeps its identity only if its
-matched node is within ``association_max_distance``; beyond that the geometry has
+matched node is within ``association_max_distance_scale`` times the basis's own
+spread; beyond that the geometry has
 moved far enough that calling it the same claim would be a fiction.
 """
 from __future__ import annotations

@@ -18,15 +18,18 @@ dependencies = [
   "matplotlib>=3.7",
   "exchange-calendars==4.11",
   "psutil>=5.9",
+  # brain/core is a runtime consumer of both, not just a research one:
+  # hypothesis_proposer clusters each clock's conditional cloud with
+  # sklearn.cluster.KMeans, and hypothesis_pool matches nodes to live
+  # hypotheses with scipy.optimize.linear_sum_assignment. scikit-learn 1.3
+  # brought HDBSCAN into the main package, so no separate hdbscan dependency
+  # is needed.
+  "scikit-learn>=1.3",
+  "scipy>=1.10",
 ]
 
 [project.optional-dependencies]
 test = ["pytest>=8"]
-# Mode discovery clusters the trajectory vectors. scikit-learn 1.3 brought
-# HDBSCAN into the main package, so no separate hdbscan dependency is needed;
-# K-Medoids is implemented in brain/research/mode_discovery.py because
-# scikit-learn-extra, the only package that shipped it, is unmaintained.
-research = ["scikit-learn>=1.3"]
 dbn = ["databento>=0.64"]
 representation = ["torch>=2.2,<3"]
 
