@@ -20,7 +20,11 @@ from typing import Any, ClassVar, Iterable, Mapping, TYPE_CHECKING
 
 import pandas as pd
 
-from shares.core.model import BALANCE_CLAIM_CONFIRMED, MarketObservation, Timeframe
+from contract.market import Timeframe
+from contract.eye import (
+    BALANCE_CLAIM_CONFIRMED,
+    MarketObservation,
+)
 
 if TYPE_CHECKING:  # pragma: no cover - imported only for static analysis
     from .causal import ReaderUpdate

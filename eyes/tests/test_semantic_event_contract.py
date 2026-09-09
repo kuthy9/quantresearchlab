@@ -8,7 +8,11 @@ import pandas as pd
 import pytest
 
 from eyes.core.event_store import EventStore
-from shares.core.model import EventKind, SMC_SEMANTIC_VERSION, Timeframe
+from contract.market import (
+    SMC_SEMANTIC_VERSION,
+    Timeframe,
+)
+from contract.eye import EventKind
 from eyes.core.event_memory import EventMemory
 from eyes.core.semantic_event_emitter import SemanticEventEmitter, _event
 from eyes.core.semantics import (
@@ -479,7 +483,7 @@ def test_bos_lifecycle_is_carried_by_its_terminal_kinds_only() -> None:
     """
 
     from eyes.core.event_memory import EventMemory
-    from shares.core.model import BOSLifecycle
+    from contract.eye import BOSLifecycle
 
     initial = EventMemory._COMPLETE_INITIAL_LIFECYCLES["bos"]
     transitions = EventMemory._TIMELINE_TRANSITIONS["bos"]

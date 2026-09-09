@@ -27,13 +27,20 @@ from .event_memory import EventMemory
 from .event_store import EventStore
 from .interaction import InteractionUpdate
 from .market_state import DeliveryPhaseTransition, session_name_phase
-from shares.core.model import (
-    BOS_CONFIRMATION_REASON,
+from contract.market import (
+    Candle,
+    Direction,
+    SMC_SEMANTIC_VERSION,
+    Timeframe,
+    candle_identity,
+    clamp,
+    to_primitive,
+)
+from contract.eye import (
     BOSLifecycle,
     BOSScope,
-    Candle,
+    BOS_CONFIRMATION_REASON,
     DealingRangeLifecycle,
-    Direction,
     EventKind,
     EventOrigin,
     FairValueGapLifecycle,
@@ -53,11 +60,6 @@ from shares.core.model import (
     SupportResistanceState,
     SwingLifecycle,
     SwingRelation,
-    Timeframe,
-    SMC_SEMANTIC_VERSION,
-    candle_identity,
-    clamp,
-    to_primitive,
 )
 from .range_auction import (
     BALANCE_CLAIM_ABANDONED,

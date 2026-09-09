@@ -9,21 +9,25 @@ import pytest
 
 from eyes.core.causal import CausalMarketReader
 from shares.core.engine import ContinuousSMCEngine
-from shares.core.model import (
+from contract.market import (
     Bar,
-    CandleStructureState,
     Direction,
+    Playbook,
+    PlaybookPhase,
+    Timeframe,
+)
+from contract.eye import (
+    CandleStructureState,
     EventKind,
-    GlobalConflictRole,
     LiquidityInventoryItem,
     LiquidityInventoryLifecycle,
     LiquidityPoolLifecycle,
     LiquidityPoolState,
     MarketEvent,
-    Playbook,
-    PlaybookPhase,
+)
+from contract.brain import (
+    GlobalConflictRole,
     SequenceStepState,
-    Timeframe,
 )
 from eyes.core.observation import CausalObserver, ObserverConfig
 from shares.core.scene_graph import (

@@ -19,7 +19,7 @@ from typing import Any
 
 import pandas as pd
 
-from shares.core.model import (
+from contract.market import (
     Candle,
     Direction,
     Timeframe,

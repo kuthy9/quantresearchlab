@@ -29,18 +29,20 @@ from shares.core.artifact_stream import (
 )
 from .foundation_registry import FOUNDATION_VERSION
 from shares.core.market_clock import validate_registered_native_bar_root
-from shares.core.model import (
-    bar_evidence_coverage,
+from contract.market import (
     Direction,
-    EventKind,
-    EventOrigin,
     FrozenDict,
-    MarketEvent,
     SMC_SEMANTIC_VERSION,
     Timeframe,
     aware_timestamp,
+    bar_evidence_coverage,
     price_to_ticks,
     to_primitive,
+)
+from contract.eye import (
+    EventKind,
+    EventOrigin,
+    MarketEvent,
 )
 from .semantics import (
     SemanticDefinitionIdentity,

@@ -35,10 +35,14 @@ from eyes.core.eye_statistics import EyeAuthorityStatistics  # noqa: E402
 from eyes.core.range_auction import RangeAuctionProtocol  # noqa: E402
 from shares.core.io import LoadedOHLCV, iter_completed_bars, load_ohlcv  # noqa: E402
 from shares.core.market_clock import is_registered_trading_minute  # noqa: E402
-from shares.core.model import MarketObservation, Timeframe, to_primitive  # noqa: E402
+from contract.market import (  # noqa: E402
+    Timeframe,
+    to_primitive,
+)
+from contract.eye import MarketObservation  # noqa: E402
 from eyes.core.observation import CausalObserver, ObserverConfig  # noqa: E402
 from shares.core.scale_registry import parse_scale_specs  # noqa: E402
-from shares.core.validation import load_validation_protocol  # noqa: E402
+from brain.core.validation import load_validation_protocol  # noqa: E402
 
 
 DEFAULT_CONFIG = ROOT / "configs/data_splits.json"
@@ -109,8 +113,18 @@ EXPECTED_STOPPING_RULES = (
         "an optional LSR range context"
     ),
 )
+# Every source file whose bytes can change what a scan observes.  The type
+# contracts used to be one `shares/core/model.py`; since the 2026-09-08 split
+# they are the `contract/` modules the Eye path actually loads.
 RUNTIME_CODE_FILES = (
     "eyes/scripts/run_eye_authority_scan.py",
+    "brain/core/validation.py",
+    "contract/execution/reality.py",
+    "contract/eye/entities.py",
+    "contract/eye/interaction.py",
+    "contract/eye/observation.py",
+    "contract/eye/vocabulary.py",
+    "contract/market/primitives.py",
     "shares/core/artifact_stream.py",
     "eyes/core/causal.py",
     "eyes/core/displacement.py",
@@ -124,11 +138,9 @@ RUNTIME_CODE_FILES = (
     "eyes/core/liquidity.py",
     "shares/core/market_clock.py",
     "eyes/core/market_state.py",
-    "shares/core/model.py",
     "eyes/core/observation.py",
     "shares/core/scene_graph.py",
     "eyes/core/structure.py",
-    "shares/core/validation.py",
 )
 _CHECKPOINT_MAGIC = b"SMC-EYE-AUTHORITY-CHECKPOINT-v1\n"
 RUNTIME_SWITCHES = {

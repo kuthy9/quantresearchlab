@@ -7,22 +7,26 @@ from types import SimpleNamespace
 import pandas as pd
 import pytest
 
-from shares.core.model import (
+from contract.market import (
     Direction,
+    Playbook,
+    PlaybookPhase,
+    Timeframe,
+)
+from contract.eye import (
     EntryLocationLifecycle,
     EntryLocationState,
-    HypothesisSequenceState,
     InteractionUpdate,
-    DrawSelection,
-    LiquidityRoute,
     PathSequenceLifecycle,
     PathSequenceState,
     PathSequenceStep,
-    Playbook,
-    PlaybookPhase,
-    SequenceStepState,
-    Timeframe,
+)
+from contract.brain import (
+    DrawSelection,
     GlobalConflictRole,
+    HypothesisSequenceState,
+    LiquidityRoute,
+    SequenceStepState,
 )
 from shares.core.scene_graph import (
     EvidenceStatus,

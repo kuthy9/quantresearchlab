@@ -4,12 +4,10 @@ from dataclasses import replace
 
 import pandas as pd
 
-from shares.core.model import (
-    Action,
-    Bar,
-    EngineSnapshot,
-    RiskAssessment,
-)
+from contract.market import Bar
+from contract.decision import Action
+from contract.risk import RiskAssessment
+from contract.research import EngineSnapshot
 from brain.core.risk import StructuralRiskEngine
 from execution.core.simulation import SequentialPortfolio, SequentialReplay
 from execution.core.execution import ExecutionRealityInput

@@ -24,19 +24,21 @@ from eyes.core.market_state import (
     replay_atomic_market_snapshot,
     reduce_timeframe_state,
 )
-from shares.core.model import (
-    Candle,
+from contract.market import (
     Bar,
+    Candle,
     Direction,
+    SMC_SEMANTIC_VERSION,
+    Timeframe,
+    to_primitive,
+)
+from contract.eye import (
     EventKind,
     EventOrigin,
     FrameObservation,
     LiquidityInventoryItem,
     LiquidityInventoryLifecycle,
     MarketEvent,
-    SMC_SEMANTIC_VERSION,
-    Timeframe,
-    to_primitive,
 )
 from eyes.core.observation import CausalObserver, ObserverConfig
 

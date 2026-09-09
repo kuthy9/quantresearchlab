@@ -1,1 +1,1 @@
-"""Trading Brain core: belief, playbooks, decision and risk."""
+"""Trading Brain core: belief, calibration, validation, decision and risk."""

@@ -21,8 +21,11 @@ from eyes.core.interaction import (
     interaction_artifact_collections,
     interaction_update_from_artifact_collections,
 )
-from shares.core.model import (
+from contract.market import (
     Direction,
+    to_primitive,
+)
+from contract.eye import (
     INTERACTION_UPDATE_SCHEMA_VERSION,
     InteractionUpdate,
     MARKET_OBSERVATION_SCHEMA_VERSION,
@@ -32,7 +35,6 @@ from shares.core.model import (
     QualifiedReacceptanceState,
     ReacceptanceLifecycle,
     ReacceptanceState,
-    to_primitive,
 )
 from shares.core.scene_graph import TemporalMarketSceneGraph
 
@@ -256,10 +258,10 @@ def test_reacceptance_is_physical_and_only_brain_names_qualification() -> None:
     assert QualifiedReacceptanceState is ReacceptanceState
     assert QualifiedReacceptanceLifecycle is ReacceptanceLifecycle
     assert pickle.loads(
-        b"cshares.core.model\nQualifiedReacceptanceState\n."
+        b"ccontract.eye.entities\nQualifiedReacceptanceState\n."
     ) is ReacceptanceState
     assert pickle.loads(
-        b"cshares.core.model\nQualifiedReacceptanceLifecycle\n."
+        b"ccontract.eye.vocabulary\nQualifiedReacceptanceLifecycle\n."
     ) is ReacceptanceLifecycle
     legacy_pickle = (
         pickle.dumps(physical, protocol=0)

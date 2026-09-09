@@ -111,41 +111,5 @@
         "residual_unknown": 0.0
       }
     }
-  },
-  "dol_diagnostic_ranking": {
-    "schema_version": 1,
-    "protocol_version": "dol_diagnostic_ranking_development_v0.1",
-    "model_version": "dol_diagnostic_softmax_development_v0.1",
-    "status": "development_unvalidated",
-    "authority": "shadow_only",
-    "probability_interpretation": "softmax_normalized_development_candidate_weight_not_calibrated_posterior",
-    "joint_quality_interpretation": "path_probability_times_softmax_candidate_weight_not_calibrated_posterior",
-    "target_interval_rule": "strict_open_interval_from_current_price_to_target_price",
-    "target_self_exclusion_rule": "exclude_identity_source_intersection_or_colocated_target_obstructions",
-    "co_location_tolerance_points": 0.0,
-    "distance_scale_points": 100.0,
-    "age_scale_real_completed_bars": 100.0,
-    "obstacle_count_cap": 5,
-    "timeframe_values": {
-      "1m": 0.0,
-      "5m": 0.25,
-      "15m": 0.5,
-      "1H": 0.75,
-      "4H": 1.0
-    },
-    "structural_rank_values": {
-      "internal": 0.0,
-      "external": 1.0
-    },
-    "feature_weights": {
-      "intercept": 0.0,
-      "candidate_strength": 0.8,
-      "timeframe_value": 0.3,
-      "structural_rank_value": 0.25,
-      "distance_proximity": 0.4,
-      "age_freshness": 0.2,
-      "hard_obstacle_fraction": -0.75,
-      "soft_obstacle_fraction": -0.2
-    }
   }
 }

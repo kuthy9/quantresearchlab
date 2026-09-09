@@ -15,12 +15,14 @@ import pandas as pd
 import pytest
 
 from eyes.core.market_state import reduce_timeframe_state
-from shares.core.model import (
+from contract.market import (
+    SMC_SEMANTIC_VERSION,
+    Timeframe,
+)
+from contract.eye import (
     EventKind,
     EventOrigin,
     MarketEvent,
-    SMC_SEMANTIC_VERSION,
-    Timeframe,
 )
 
 

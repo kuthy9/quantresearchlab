@@ -19,7 +19,10 @@ from __future__ import annotations
 
 import pytest
 
-from shares.core.model import DealingRangeLifecycle, EventKind
+from contract.eye import (
+    DealingRangeLifecycle,
+    EventKind,
+)
 from eyes.core.range_auction import CausalRangeAuctionTracker
 
 from eyes.tests.test_range_auction_primitives import (

@@ -8,12 +8,14 @@ import pytest
 
 from eyes.core.foundation_registry import FOUNDATION_VERSION
 from eyes.core.market_state import DeliveryPhase, RelationRole, RelationState
-from shares.core.model import (
+from contract.market import (
     Direction,
-    EventKind,
-    MarketEvent,
     Timeframe,
     content_hash,
+)
+from contract.eye import (
+    EventKind,
+    MarketEvent,
 )
 from eyes.core.semantic_foundation import (
     FoundationRecord,

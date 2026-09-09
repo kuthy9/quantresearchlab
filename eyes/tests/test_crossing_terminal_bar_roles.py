@@ -12,7 +12,7 @@ from __future__ import annotations
 import pytest
 
 from eyes.core.causal import CausalMarketReader
-from shares.core.model import EventKind
+from contract.eye import EventKind
 from eyes.core.observation import CausalObserver, ObserverConfig
 
 from shares.tests.helpers import MODEL_SCALE_SPECS, session_bars

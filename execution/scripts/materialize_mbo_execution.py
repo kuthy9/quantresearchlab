@@ -28,7 +28,7 @@ from execution.core.mbo import (  # noqa: E402
     assert_mbo_source_allowed,
     iter_complete_events,
 )
-from shares.core.validation import load_validation_protocol  # noqa: E402
+from brain.core.validation import load_validation_protocol  # noqa: E402
 
 
 def parse_args() -> argparse.Namespace:

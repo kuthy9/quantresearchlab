@@ -27,25 +27,27 @@ from shares.core.artifact_stream import atomic_bytes  # noqa: E402
 from eyes.core.causal import CausalMarketReader  # noqa: E402
 from eyes.core.range_auction import RangeAuctionProtocol  # noqa: E402
 from shares.core.io import iter_completed_bars, load_ohlcv  # noqa: E402
-from shares.core.model import (  # noqa: E402
+from contract.market import (  # noqa: E402
+    Timeframe,
+    to_primitive,
+)
+from contract.eye import (  # noqa: E402
     DealingRangeLifecycle,
     DealingRangeState,
-    RANGE_AUCTION_HARD_BOUNDARY_REASONS,
     LiquidityInventoryItem,
     LiquidityInventoryLifecycle,
     ManipulationLifecycle,
     ManipulationState,
+    RANGE_AUCTION_HARD_BOUNDARY_REASONS,
     SupportResistanceLifecycle,
     SupportResistanceState,
-    Timeframe,
-    to_primitive,
 )
 from eyes.core.observation import (  # noqa: E402
     CausalObserver,
     ObserverConfig,
 )
 from shares.core.scale_registry import parse_scale_specs  # noqa: E402
-from shares.core.validation import load_validation_protocol  # noqa: E402
+from brain.core.validation import load_validation_protocol  # noqa: E402
 
 
 DEFAULT_CONFIG = ROOT / "configs/data_splits.json"

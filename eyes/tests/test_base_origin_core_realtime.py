@@ -11,7 +11,8 @@ from __future__ import annotations
 
 import pytest
 
-from shares.core.model import Direction, OrderBlockLifecycle
+from contract.market import Direction
+from contract.eye import OrderBlockLifecycle
 
 from eyes.tests.test_zone_primitives import (
     _Harness,

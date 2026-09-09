@@ -34,7 +34,7 @@ import pandas as pd  # noqa: E402
 
 from shares.core.io import iter_completed_bars, load_ohlcv  # noqa: E402
 from eyes.core.market_state import session_name_phase  # noqa: E402
-from shares.core.model import EventKind  # noqa: E402
+from contract.eye import EventKind  # noqa: E402
 
 from eyes.scripts.scan_eye_event_statistics import DEFAULT_SOURCE, build_eye  # noqa: E402
 

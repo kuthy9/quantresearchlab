@@ -6,18 +6,22 @@ from dataclasses import dataclass
 import pandas as pd
 
 from shares.core.engine import ContinuousSMCEngine
-from shares.core.model import (
-    AccountState,
-    Action,
+from contract.market import (
     Bar,
     Direction,
-    EngineSnapshot,
-    FrozenThesis,
     LiquidityLevel,
-    PositionSnapshot,
     StructuralLevel,
+)
+from contract.execution import (
+    AccountState,
+    PositionSnapshot,
+)
+from contract.brain import (
+    FrozenThesis,
     TradePlan,
 )
+from contract.decision import Action
+from contract.research import EngineSnapshot
 from .execution import ExecutionRealityInput
 from brain.core.risk import (
     causal_protection_candidate,

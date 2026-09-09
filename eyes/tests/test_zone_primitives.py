@@ -21,19 +21,21 @@ from eyes.core.zone import (
     ZoneProtocol,
     WINDOW_RESET_REASONS,
 )
-from shares.core.model import (
+from contract.market import (
+    Candle,
+    Direction,
+    Timeframe,
+)
+from contract.eye import (
     BOSLifecycle,
     BOSPostBreakState,
     BOSScope,
     BreakOfStructureState,
-    Candle,
-    Direction,
-    FairValueGapLifecycle,
     FVGQualification,
+    FairValueGapLifecycle,
     ORDER_BLOCK_FUNNEL_STAGES,
     OrderBlockAttemptOutcome,
     OrderBlockLifecycle,
-    Timeframe,
 )
 from eyes.core.structure import StructureConfig, StructureTracker
 

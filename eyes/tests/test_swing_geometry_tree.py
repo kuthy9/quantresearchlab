@@ -17,7 +17,8 @@ import pytest
 
 from eyes.core.causal import CausalMarketReader
 from eyes.core.market_state import SwingHierarchyView
-from shares.core.model import EventKind, Timeframe
+from contract.market import Timeframe
+from contract.eye import EventKind
 from eyes.core.observation import CausalObserver, ObserverConfig
 
 from shares.tests.helpers import MODEL_SCALE_SPECS, session_bars
@@ -233,7 +234,7 @@ def test_a_later_window_adopts_the_swings_it_encloses() -> None:
     """
 
     from eyes.core.market_state import SwingGeometryTree
-    from shares.core.model import SwingRank
+    from contract.eye import SwingRank
     from eyes.core.market_state import SwingRankAssignment
 
     def _view(swing_id, timeframe, start_minutes, span_minutes, low, high):

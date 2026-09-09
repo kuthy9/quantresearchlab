@@ -9,15 +9,19 @@ state, Brain and execution ownership boundaries rather than redrawing them:
 | package | owns |
 | --- | --- |
 | `eyes/` | the Trading Eye — normalization, the six detectors, semantic-event emission, the event store and market-state reduction |
-| `brain/` | path belief, DOL, signal policy, playbooks, calibration, decision and risk |
-| `execution/` | execution reality, the order/position FSM, trade intent and sequential simulation |
-| `shares/` | contracts (`model.py`), data access, the session clock, the scale registry, orchestration (`engine.py`) and the study projections the other three consume |
+| `brain/` | path belief, calibration, validation, decision and risk (the typed playbooks, DOL and Signal Policy were retired on 2026-09-07) |
+| `execution/` | execution reality, MBO reconstruction and sequential simulation (the order FSM and trade intent were retired on 2026-09-07) |
+| `shares/` | data access, the session clock, the scale registry, orchestration (`engine.py`) and the study projections the other three consume |
+| `contract/` | every payload that crosses a subsystem boundary, one package per boundary (`market`, `execution`, `eye`, `brain`, `decision`, `risk`, `research`) |
 
 Each package also owns a `scripts/` directory holding its bounded studies,
 materializers and throwaway probes; a script that drives the whole stack
 (`shares/scripts/run_continuous_replay.py`) belongs to `shares/`.
 
-Two directories stay at the repository root because the atomic semantic identity
+`contract/` also sits at the repository root: it is consumed by all four
+subsystems, so it cannot live inside any one of them.
+
+Two more directories stay at the root because the atomic semantic identity
 hashes their contents or their path strings, and moving either would force a
 refreeze:
 
@@ -61,15 +65,26 @@ Bar
              ├─ RelationResolver      → RelationState
              └─ SessionStateReducer   → SessionState
                  └─ MarketSnapshot    — current market view
+                     (published as contract/eye/observation.MarketObservation)
  └─ ContinuousSMCEngine    shares/core/engine.py            orchestration
      ├─ shares/core/scene_graph.py       Engine-owned research/visualisation view
      ├─ execution/core/execution.py      execution-reality scoring
+     │                                   (contract: contract/execution/reality.py)
      ├─ brain/core/brain_entry_sequence.py
      │                                   Brain interpretation of Eye facts
      ├─ neutral projection               one OpenMarketThesis per clock
-     ├─ brain/core/playbooks.py          PlaybookBrain.update(...)
+     ├─ (no belief producer)             the typed Brain was retired 2026-09-07
      └─ brain/core/decision.py → risk.py sole runtime action authority
 ```
+
+**`shares/core/engine.py` cannot currently be imported.** It still imports
+`brain.core.playbooks`, `brain.core.playbook_registry`,
+`brain.core.dol_probability` and `brain.core.signal_policy`, all of which were
+removed with the typed Brain. Eight test modules (135 tests) cannot be collected
+until those import blocks and the code behind them are removed or rebound to a
+new `MarketBelief` producer, and `shares.ContinuousSMCEngine` is unavailable
+until then. Run the suite with `--ignore` on those eight modules to exercise the
+other 1297 tests.
 
 The Eye imports no downstream module — no `eyes/core/` module imports `brain`,
 `execution`, or the orchestration half of `shares`. `shares/core/scene_graph.py`
@@ -77,21 +92,26 @@ is owned by `ContinuousSMCEngine`, which advances it over one completed Eye
 observation and stamps the resulting `scene_*` delta identities; a graph failure
 poisons the observer through `CausalObserver.mark_terminal_failure` because the
 reducers have already advanced. `execution/core/execution.py` owns
-`ExecutionRealityInput` and the cost/fillability score; `shares/core/model.py`
+`ExecutionRealityInput` and the cost/fillability score; `contract/execution/reality.py`
 owns the inert not-evaluated value beside `ExecutionObservation`;
 `ContinuousSMCEngine._score_execution` derives the score and the Eye only
 transports the result. That boundary is enforced by
 `eyes/tests/test_eye_module_boundary.py`, which resolves both the intra-package
 relative imports and the cross-package absolute ones. `eyes/core/eye_statistics.py`,
-`shares/core/visualization.py`, `brain/core/shadow_outcome.py`,
-`shares/core/causal_cases.py` and `shares/core/market_cases.py` are optional
+`shares/core/visualization.py` and `shares/core/market_cases.py` are optional
 projections and study consumers. None of them may become a second market-state
 authority.
 
-`shares/__init__.py` is the aggregate public surface and resolves every export
-lazily: `shares.core.model` is imported by all four subsystems, so an eager
-facade would drag the whole engine into that import and turn the existing
-module-level cycles into import errors.
+`contract/` replaced `shares/core/model.py` on 2026-09-08. The type contracts
+are now one package per boundary, strictly layered
+`market -> execution -> eye -> brain -> decision -> risk -> research`; a package
+may import an earlier one and never a later one, and
+`eyes/tests/test_eye_module_boundary.py` enforces that per package. Import from
+the layer that owns the type, so a consumer's imports state which boundaries it
+depends on. See [contract/README.md](contract/README.md).
+
+`shares/__init__.py` remains the aggregate public surface and resolves every
+export lazily so the facade never drags the whole engine into an import.
 
 `EventStore` is the Eye's internal history authority and is not part of the
 package's public surface. Research and replay tools that need read-only event
@@ -102,7 +122,7 @@ Naming rule: `Zone`, `RangeAuction` and `Interaction` are the public concepts.
 internal migration names — in `MarketObservation` field names, in the
 test-local `shares/tests/legacy_group5.py` reducer, and in the frozen `phase6_*`
 evidence-boundary keys that `brain/configs/path_hypotheses.json` binds and
-`brain/core/path_belief.py` validates. The three `group3.py`/`group4.py`/
+`brain/core/market_belief.py` validates. The three `group3.py`/`group4.py`/
 `group5.py` pickle shims no longer exist; they were removed before the subsystem
 split. Do not introduce them anywhere new.
 
@@ -128,8 +148,10 @@ for the Foundation projection.
 ## Build, Test, and Development Commands
 
 Create the environment with `uv sync --all-extras`; there is no compile step.
-`--extra test` alone prunes `torch` and `databento`, which
-`shares/tests/test_market_representation.py` and the MBO protocol tests need.
+`--extra test` alone prunes `torch` and `databento`, which the MBO protocol
+tests need. The `data/` payload is gitignored, so a fresh worktree must link or
+materialize it before `brain/tests/test_data_splits.py` and the MBO protocol
+tests can pass.
 
 - `env PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider`
   runs daily semantic/runtime tests; the research-orchestration group is

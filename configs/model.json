@@ -17,25 +17,9 @@
     "foundation_registry": "semantics/foundation_v2_1.yaml",
     "foundation_registry_identity": "69428dbfd2a9b2aa19f0254391fca2da17aedb8d0206829572e69c0cc212a715"
   },
-  "playbook_registry": "brain/configs/playbooks.json",
   "path_hypotheses": {
     "protocol": "brain/configs/path_hypotheses.json",
-    "path_protocol_fingerprint": "d897635cb91fc1cb84647f41eb4c5a6b8a06d05d2e44a1b3471e8e9ff67b0482",
-    "dol_protocol_fingerprint": "be9177601fbdac6e36072dbf7dd8bde46c793e7197d0a9e3662f835ceebbb4be"
-  },
-  "dol_probability": {
-    "protocol": "brain/configs/dol_probability.json",
-    "protocol_fingerprint": "37ab22d858510877e73de95e5d8bb08faefa68066a6970cfa65b7f7d5ba333b7",
-    "model_artifact": null,
-    "model_artifact_fingerprint": null
-  },
-  "signal_policy": {
-    "protocol": "brain/configs/signal_policy.json",
-    "protocol_fingerprint": "4e8d042fec936f0274c2c3f28655833d2d969c2a38e6a5d2157fcbce2607ee7d",
-    "path_likelihood_artifact": null,
-    "dol_calibration_artifact": null,
-    "outcome_model_artifact": null,
-    "artifact_pins": null
+    "path_protocol_fingerprint": "61417d9f5feb0d3bcc62012ce6c3d4d0ea7d86d0a044df240ecd9361fe3152e0"
   },
   "action_pipeline": {
     "schema_version": 1,

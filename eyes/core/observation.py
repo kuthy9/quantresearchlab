@@ -41,20 +41,25 @@ from .liquidity import (
     LiquidityConfig,
     LiquidityProtocolError,
 )
-from shares.core.model import (
+from contract.market import (
+    CORE_TIMEFRAMES,
+    Candle,
+    Direction,
+    Timeframe,
+    clamp,
+)
+from contract.execution import (
     ExecutionObservation,
     execution_not_evaluated,
+)
+from contract.eye import (
     BOSLifecycle,
     BOSScope,
     BreakOfStructureState,
-    Candle,
     CandleStructureState,
-    CORE_TIMEFRAMES,
     DealingRangeState,
-    Direction,
     EventKind,
     FrameObservation,
-    RANGE_AUCTION_HARD_BOUNDARY_REASONS,
     LiquidityInventoryItem,
     LiquidityInventoryLifecycle,
     LiquidityPoolLifecycle,
@@ -63,11 +68,10 @@ from shares.core.model import (
     ManipulationState,
     MarketObservation,
     PathSequenceState,
+    RANGE_AUCTION_HARD_BOUNDARY_REASONS,
     StructureLifecycle,
     SwingLifecycle,
     SwingRelation,
-    Timeframe,
-    clamp,
 )
 from .market_state import (
     MarketSnapshot,

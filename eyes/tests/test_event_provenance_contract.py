@@ -20,14 +20,16 @@ from eyes.core.event_store import (
 )
 from eyes.core.foundation_registry import FOUNDATION_VERSION
 from eyes.core.market_state import TimeframeEventReducer, reduce_timeframe_state
-from shares.core.model import (
+from contract.market import (
     Direction,
-    EventKind,
-    EventOrigin,
-    MarketEvent,
     SMC_SEMANTIC_VERSION,
     Timeframe,
     to_primitive,
+)
+from contract.eye import (
+    EventKind,
+    EventOrigin,
+    MarketEvent,
 )
 from eyes.core.semantics import SemanticRegistry
 

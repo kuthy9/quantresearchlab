@@ -44,7 +44,7 @@ sys.path.insert(0, str(ROOT))
 
 from eyes.core.causal import CausalMarketReader  # noqa: E402
 from shares.core.io import iter_completed_bars, load_ohlcv  # noqa: E402
-from shares.core.model import Timeframe  # noqa: E402
+from contract.market import Timeframe  # noqa: E402
 from shares.core.scale_registry import parse_scale_specs  # noqa: E402
 from eyes.scripts.scan_eye_event_statistics import DEFAULT_SOURCE  # noqa: E402
 from eyes.scripts.study_balance_shape_h1_windows import (  # noqa: E402

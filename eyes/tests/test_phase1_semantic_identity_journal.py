@@ -13,12 +13,14 @@ from eyes.core.event_store import (
     read_event_journal,
     write_event_journal,
 )
-from shares.core.model import (
+from contract.market import (
     Direction,
-    EventKind,
-    MarketEvent,
     SMC_SEMANTIC_VERSION,
     Timeframe,
+)
+from contract.eye import (
+    EventKind,
+    MarketEvent,
 )
 from eyes.core.semantics import SemanticRegistry, SemanticRegistryError
 

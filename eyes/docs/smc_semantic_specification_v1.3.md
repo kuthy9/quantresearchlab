@@ -960,7 +960,9 @@ is the same location it was on the bar before.
    carried two meanings at once — the claim is confirmed *and* the range is
    alive — and replacing it with `balance_confirmed_at is not None` silently
    dropped the second, because that clock survives the break. Three call sites
-   in `playbooks.py` now test both. This is the failure mode of splitting an
+   in the then-current `playbooks.py` were fixed to test both; that module was
+   retired on 2026-09-07, so the lesson outlives its call sites. This is the
+   failure mode of splitting an
    enum whose members carried more than one fact: every meaning has to be
    written out again explicitly.
 
@@ -1009,9 +1011,15 @@ is the same location it was on the bar before.
    admitted: that is memory and checkpoint size only — no per-bar step walks
    it any more — and it is deliberate, because evicting a node is the one thing
    that could change a later geometric adoption.
-5. **`shares/core/model.py` imports Brain modules** (`path_belief`,
-   `dol_probability`, `dol_ranking`). It is a shared type module, not an
-   Eye-only module, and the layering test does not catch this.
+5. **Two contract modules still import a subsystem.** `shares/core/model.py`
+   took `path_belief`, `dol_probability` and `dol_ranking`; the 2026-09-07 Brain
+   retirement removed the last two, and the 2026-09-08 split replaced that file
+   with `contract/`. The remaining upward edges are confined to one module each:
+   `contract/eye/entities.py` imports `FOUNDATION_VERSION` for a single
+   comparison, and `contract/brain/belief.py` imports `PathBeliefUpdateRecord`
+   and `PathCompetitionSetState` for four isinstance checks.
+   `contract/eye/observation.py` shows the fix — name the type under
+   `TYPE_CHECKING` and defer the import.
 
 ## Existing-system migration decision
 
@@ -1034,8 +1042,9 @@ artifacts or silently change their definitions.
 The separate DOL/Belief/Temporal supplement that carried dependency-cluster
 handling, research-only temporal links, FVG first-lifecycle freezing, and the
 2024-06 data role was removed on 2026-09-06. None of it added a canonical
-market event or rewrote this semantic version; the executable contracts remain
-in `brain/configs/dol_probability.json` and the runtime modules themselves.
+market event or rewrote this semantic version. Its executable contracts lived in
+`brain/configs/dol_probability.json` and the DOL runtime modules, all of which
+were retired on 2026-09-07; nothing in this semantic version depended on them.
 
 ## Common provenance contract
 

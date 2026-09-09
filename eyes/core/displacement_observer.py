@@ -14,12 +14,14 @@ from .displacement import (
     DisplacementTransition,
     DisplacementUpdate,
 )
-from shares.core.model import (
+from contract.market import (
     Candle,
-    DisplacementObservation,
-    DisplacementTransitionObservation,
     Timeframe,
     aware_timestamp,
+)
+from contract.eye import (
+    DisplacementObservation,
+    DisplacementTransitionObservation,
 )
 
 

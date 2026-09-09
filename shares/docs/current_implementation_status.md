@@ -1,12 +1,38 @@
 # Current SMC Refactor Implementation Status
 
-Status date: 2026-09-06
+Status date: 2026-09-07
 Runtime semantic identity: `smc_semantics_v1.3`
 Canonical foundation identity: `smc_semantic_foundation_v2.1`
 Canonical foundation registry identity: `69428dbfd2a9b2aa19f0254391fca2da17aedb8d0206829572e69c0cc212a715`
 Atomic registry identity: `f92b24c86bf942defc88de4edb7be16cc2a30dd64fde3b4432657780648b1f0c`
 The frozen `smc_semantics_v1.2` / `smc_semantic_foundation_v2.0` pair remains
 the identity of every historical artifact below; it is not the runtime.
+
+**Typed-Brain retirement (2026-09-07).** Everything this document says about
+`PlaybookBrain`, the three typed playbooks, DOL ranking, DOL probability, Signal
+Policy, Trade Intent, the order FSM and the causal case library is now
+*historical*. Those modules were removed:
+
+`brain/core/playbooks.py`, `playbook_registry.py`, `dol_ranking.py`,
+`dol_probability.py`, `signal_policy.py`, `shadow_outcome.py`;
+`execution/core/trade_intent.py`, `execution_fsm.py`;
+`shares/core/causal_cases.py`, `market_representation.py`, `case_retrieval.py`;
+`shares/scripts/run_continuous_replay.py` and five other scripts;
+`brain/configs/playbooks.json`, `dol_probability.json`, `signal_policy.json`.
+
+`brain/core/path_belief.py` is now `brain/core/market_belief.py`, and
+`shares/core/validation.py` is now `brain/core/validation.py`. Nothing fitted or
+published was lost — every artifact slot in `configs/model.json` was already
+`null` and every protocol declared `shadow_only` — but `PlaybookBrain` was the
+only producer of `MarketBelief`, so **the repository currently has no belief
+producer**. `shares/core/engine.py` still imports four retired modules and
+cannot be imported; 8 test modules (135 tests) cannot be collected, and the
+remaining 1,297 collected tests pass. Read every "integrated", "complete" or
+"fail-closed" claim below as a record of what existed before that date.
+
+Rows still marked complete for the Eye, the semantic layer, the data authority
+and the scale/clock contracts are unaffected: none of that code was touched.
+
 
 This is the current implementation-versus-plan authority. Its 2026-08-26
 revision corrected stale schema/protocol/identity bindings and the Foundation
@@ -34,7 +60,8 @@ and `docs/`: `eyes/` (Trading Eye), `brain/` (belief, playbooks, decision,
 risk), `execution/` (execution reality, order FSM, trade intent, simulation) and
 `shares/` (contracts, data access, orchestration, study projections). The move
 was a relocation, not a redesign: no runtime logic changed, the import graph is
-unchanged edge for edge, and the collected test total stayed at 2,413.
+unchanged edge for edge, and the collected test total stayed at 2,413. The
+2026-09-07 retirement above then emptied much of `brain/` and `execution/`.
 
 The atomic semantic identity constrained what could move. Because
 `SemanticDefinitionIdentity` hashes the reference *strings*
@@ -47,7 +74,8 @@ eight sealed files stay at the repository root: `configs/model.json`,
 `f92b24c86bf942defc88de4edb7be16cc2a30dd64fde3b4432657780648b1f0c`, verified
 after the move. The five unsealed protocols moved to the subsystem that reads
 them: `playbooks.json`, `path_hypotheses.json`, `dol_probability.json` and
-`signal_policy.json` to `brain/configs/`, and
+`signal_policy.json` to `brain/configs/` (only `path_hypotheses.json` survives
+the 2026-09-07 retirement), and
 `market_case_input_profiles_v2.json` to `shares/configs/`.
 
 `semantics/` is pinned by the same seal through a second mechanism, confirmed by
@@ -76,7 +104,7 @@ Two provenance consequences are recorded rather than fixed. First, the seven
 rewriting them would break the seal; `AGENTS.md` carries the mapping
 (`smc_trader.market_state` → `eyes/core/market_state.py`, `smc_trader.structure`
 → `eyes/core/structure.py`, `smc_trader.zone` → `eyes/core/zone.py`). Second,
-`brain/configs/dol_probability.json` is unsealed, so its two provenance strings
+`brain/configs/dol_probability.json` was unsealed, so its two provenance strings
 were updated to `brain.core.dol_ranking.*` to match the module that actually
 implements them; that changed its content, so its recorded
 `protocol_fingerprint` in `configs/model.json` was recomputed from

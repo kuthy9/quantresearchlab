@@ -21,7 +21,7 @@ from eyes.core.displacement_observer import (
     CausalDisplacementEye,
     _boundary_reason,
 )
-from shares.core.model import Timeframe
+from contract.market import Timeframe
 
 from eyes.tests.test_v3_displacement_replay import _m5, _protocol, _send, _update, _warm_eye
 

@@ -14,13 +14,13 @@ from eyes.scripts.scan_mature_ranges import (
     select_stratified_cases,
     unmet_maturity_gates,
 )
-from shares.core.model import (
+from contract.market import Timeframe
+from contract.eye import (
     DealingRangeLifecycle,
     LiquidityInventoryItem,
     LiquidityInventoryLifecycle,
     ManipulationLifecycle,
     SupportResistanceLifecycle,
-    Timeframe,
 )
 
 

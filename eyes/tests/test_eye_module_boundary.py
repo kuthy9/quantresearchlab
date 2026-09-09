@@ -7,6 +7,10 @@ defect however harmless the imported name looks.
 Since the four-way split the Eye's modules live in ``eyes/core/`` and its shared
 foundations in ``shares/core/``, so this scan resolves both the intra-package
 relative imports and the cross-package absolute ones.
+
+The type contracts moved out of ``shares/core/model.py`` into ``contract/``, so
+this file also pins the contract layering itself: a contract package may only
+import from packages earlier in the chain.
 """
 from __future__ import annotations
 
@@ -34,7 +38,6 @@ EYE_MODULES = {
     "liquidity": "eyes",
     "market_clock": "shares",
     "market_state": "eyes",
-    "model": "shares",
     "observation": "eyes",
     "range_auction": "eyes",
     "scale_registry": "shares",
@@ -50,8 +53,6 @@ DOWNSTREAM_MODULES = frozenset(
         "decision",
         "engine",
         "execution",
-        "execution_fsm",
-        "playbooks",
         "risk",
         "scene_graph",
         "simulation",
@@ -92,3 +93,58 @@ def test_eye_module_does_not_import_a_downstream_layer(module: str) -> None:
         f"{module}.py imports downstream layer(s) {offending}; the Eye "
         "publishes facts and must not depend on what consumes them"
     )
+
+
+# The contract layering, most fundamental first.  ``contract/`` replaced
+# ``shares/core/model.py``: one package per boundary the payload crosses.
+CONTRACT_ORDER = (
+    "market",
+    "execution",
+    "eye",
+    "brain",
+    "decision",
+    "risk",
+    "research",
+)
+
+
+def _contract_imports(path: pathlib.Path) -> set[str]:
+    """Every ``contract.<package>`` this file imports."""
+
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    found: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module:
+            parts = node.module.split(".")
+            if parts[0] == "contract" and len(parts) >= 2:
+                found.add(parts[1])
+            elif node.level and node.module in CONTRACT_ORDER:
+                found.add(node.module)
+    return found
+
+
+@pytest.mark.parametrize("package", CONTRACT_ORDER)
+def test_contract_package_only_imports_more_fundamental_packages(
+    package: str,
+) -> None:
+    directory = ROOT / "contract" / package
+    assert directory.is_dir(), f"contract/{package} is missing"
+
+    allowed = set(CONTRACT_ORDER[: CONTRACT_ORDER.index(package) + 1])
+    for path in sorted(directory.glob("*.py")):
+        offending = sorted(_contract_imports(path) - allowed)
+        assert not offending, (
+            f"contract/{package}/{path.name} imports {offending}, which sit "
+            f"later in the contract chain {CONTRACT_ORDER}"
+        )
+
+
+def test_the_retired_model_module_has_no_replacement_in_a_subsystem() -> None:
+    """``contract/`` is the only home for a cross-boundary payload type."""
+
+    for subsystem in SUBSYSTEMS:
+        stray = ROOT / subsystem / "core" / "model.py"
+        assert not stray.exists(), (
+            f"{subsystem}/core/model.py exists again; cross-boundary contracts "
+            "belong in contract/, not inside one subsystem"
+        )

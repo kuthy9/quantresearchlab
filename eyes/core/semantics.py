@@ -13,7 +13,11 @@ from pathlib import Path, PurePosixPath
 import re
 from typing import TYPE_CHECKING, Any, Mapping, Sequence
 
-from shares.core.model import EventKind, FrozenDict, SMC_SEMANTIC_VERSION
+from contract.market import (
+    FrozenDict,
+    SMC_SEMANTIC_VERSION,
+)
+from contract.eye import EventKind
 
 if TYPE_CHECKING:
     from .foundation_registry import FoundationRegistry

@@ -18,7 +18,11 @@ import pytest
 
 from eyes.core.causal import CausalMarketReader
 from eyes.core.market_state import MarketSnapshotPublisher, StructureScope
-from shares.core.model import Direction, EventKind, Timeframe
+from contract.market import (
+    Direction,
+    Timeframe,
+)
+from contract.eye import EventKind
 from eyes.core.observation import CausalObserver, ObserverConfig
 
 from shares.tests.helpers import MODEL_SCALE_SPECS, session_bars

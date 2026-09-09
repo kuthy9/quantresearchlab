@@ -14,7 +14,7 @@ from .market_clock import (
     is_registered_trading_minute,
     scheduled_gap_kind,
 )
-from .model import Bar
+from contract.market import Bar
 
 
 UF_DATALESS = 0x40000000

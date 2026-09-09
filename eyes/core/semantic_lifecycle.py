@@ -21,14 +21,14 @@ import pandas as pd
 
 from .foundation_registry import FOUNDATION_VERSION
 from shares.core.market_clock import next_registered_native_completion
-from shares.core.model import (
+from contract.market import (
     Direction,
     FrozenDict,
-    MarketEvent,
     Timeframe,
     aware_timestamp,
     content_hash,
 )
+from contract.eye import MarketEvent
 
 if TYPE_CHECKING:
     from .market_state import DeliveryPhase, RelationState

@@ -20,7 +20,12 @@ from eyes.core.market_state import (
     update_swing_geometry_assignments,
 )
 from shares.core.market_clock import next_registered_native_completion
-from shares.core.model import Direction, FrozenDict, Timeframe, to_primitive
+from contract.market import (
+    Direction,
+    FrozenDict,
+    Timeframe,
+    to_primitive,
+)
 from eyes.core.semantic_foundation import (
     FoundationObjectType,
     FoundationProjection,

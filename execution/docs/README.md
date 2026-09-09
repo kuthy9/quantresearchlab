@@ -1,23 +1,29 @@
 # Execution
 
-Execution owns order and position reality. It never submits: `trade_intent.py`
-constructs a deterministic, immutable, never-submit Trade Intent, and
-`shares/core/engine.py` rejects a non-zero `TradeIntent` before Decision/Risk
-while the action authority stays `legacy_decision_risk_compat`.
+Execution owns order and position reality. It never submits.
+
+**The order FSM and Trade Intent were retired on 2026-09-07.**
+`execution_fsm.py` and `trade_intent.py` are gone: `trade_intent.py`'s only
+entry point took a `SignalAssessment` from the retired `brain.core.signal_policy`,
+and `execution_fsm.py` was built entirely on the `TradeIntent` it produced. What
+remains is execution reality, MBO reconstruction and the sequential simulator —
+the parts that never needed a Brain intent.
 
 ## Core modules — `execution/core/`
 
 | module | owns |
 | --- | --- |
 | `execution.py` | `ExecutionRealityInput`, the cost/fillability score and the causal top-of-book adapter |
-| `execution_fsm.py` | immutable shadow execution facts and the explicit order/position FSM |
-| `trade_intent.py` | deterministic, immutable, never-submit Trade Intent construction |
 | `simulation.py` | the causal sequential execution adapter for historical and shadow replay |
 | `mbo.py` | memory-bounded MBO book reconstruction and minute execution reality |
 
+`simulation.py` imports `shares/core/engine.py`, which cannot currently be
+imported because the Brain it orchestrates was retired. The simulator itself is
+unchanged and will work again as soon as that orchestration is rebound.
+
 `ContinuousSMCEngine._score_execution` derives the execution score; the Eye only
-transports the result. `shares/core/model.py` owns the inert not-evaluated value
-beside `ExecutionObservation`.
+transports the result. `contract/execution/reality.py` owns `ExecutionObservation`,
+its inert not-evaluated value, `PositionSnapshot` and `AccountState`.
 
 ## Protocols — `execution/configs/`
 
@@ -30,9 +36,11 @@ stay at the repository root.
 
 ## Tests — `execution/tests/`
 
-`test_execution_fsm.py` and `test_sequential_replay.py`. The MBO protocol cases
-live in `shares/tests/test_v2_protocols.py` because they span validation, the
-playbook registry and the data authority as well.
+`test_sequential_replay.py` only. It cannot be
+collected while `shares/core/engine.py` is broken. `test_execution_fsm.py` was
+removed with the FSM. The MBO protocol cases live in
+`shares/tests/test_v2_protocols.py` because they span validation and the data
+authority as well.
 
 ## Authority documents
 

@@ -13,7 +13,7 @@ from dataclasses import replace
 
 import pandas as pd
 
-from shares.core.model import (
+from contract.eye import (
     DealingRangeLifecycle,
     EventKind,
 )
@@ -191,7 +191,7 @@ def test_a_structural_range_locates_price_before_anything_balances() -> None:
         TimeframeRangeState,
         _candidate_range_membership,
     )
-    from shares.core.model import Timeframe
+    from contract.market import Timeframe
 
     created = TimeframeRangeState(
         range_id="range-1",

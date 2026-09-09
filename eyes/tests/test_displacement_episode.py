@@ -16,16 +16,18 @@ from eyes.core.zone import (
     ZoneBOSSource,
     ZoneProtocol,
 )
-from shares.core.model import (
+from contract.market import (
+    Candle,
+    Direction,
+    Timeframe,
+)
+from contract.eye import (
     BOSLifecycle,
     BOSPostBreakState,
     BOSScope,
     BreakOfStructureState,
-    Candle,
-    Direction,
     FairValueGapLifecycle,
     OrderBlockLifecycle,
-    Timeframe,
 )
 from eyes.core.observation import CausalObserver, ObserverConfig
 

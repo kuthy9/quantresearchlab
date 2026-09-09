@@ -18,20 +18,22 @@ from eyes.core.market_state import (
     build_structural_legs,
     reduce_hierarchical_state,
 )
-from shares.core.model import (
+from contract.market import (
     Candle,
     Direction,
+    SMC_SEMANTIC_VERSION,
+    Timeframe,
+    to_primitive,
+)
+from contract.eye import (
     EventKind,
     EventOrigin,
     FrameObservation,
     MarketEvent,
-    SMC_SEMANTIC_VERSION,
     SwingLifecycle,
     SwingPoint,
     SwingRelation,
     SwingSide,
-    Timeframe,
-    to_primitive,
 )
 
 

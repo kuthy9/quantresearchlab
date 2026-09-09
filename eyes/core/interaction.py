@@ -12,12 +12,17 @@ from typing import Any, Iterable, Mapping, Sequence
 
 import pandas as pd
 
-from shares.core.model import (
+from contract.market import (
+    Candle,
+    Direction,
+    Timeframe,
+    aware_timestamp,
+    clamp,
+)
+from contract.eye import (
     BOSLifecycle,
     BOSScope,
     BreakOfStructureState,
-    Candle,
-    Direction,
     EntryLocationLifecycle,
     EntryLocationState,
     FVGQualification,
@@ -38,9 +43,6 @@ from shares.core.model import (
     PathSequenceStep,
     ReacceptanceLifecycle,
     ReacceptanceState,
-    Timeframe,
-    aware_timestamp,
-    clamp,
 )
 
 

@@ -11,8 +11,8 @@ import hashlib
 
 import pandas as pd
 
-from shares.core.model import (
-    Direction,
+from contract.market import Direction
+from contract.eye import (
     EntryLocationState,
     InteractionUpdate,
     MicroBOSReference,

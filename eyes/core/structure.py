@@ -16,13 +16,18 @@ from typing import Sequence, TypeVar
 
 import pandas as pd
 
-from shares.core.model import (
+from contract.market import (
+    Candle,
+    Direction,
+    Timeframe,
+    candle_identity,
+    price_to_ticks,
+)
+from contract.eye import (
     BOSLifecycle,
     BOSPostBreakState,
     BOSScope,
     BreakOfStructureState,
-    Candle,
-    Direction,
     STRUCTURE_BREAK_FAILURE_REASON,
     STRUCTURE_FORMATION_FAILURE_REASON,
     StructureLifecycle,
@@ -32,9 +37,6 @@ from shares.core.model import (
     SwingRank,
     SwingRelation,
     SwingSide,
-    Timeframe,
-    candle_identity,
-    price_to_ticks,
 )
 
 

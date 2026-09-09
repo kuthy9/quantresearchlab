@@ -19,12 +19,18 @@ from eyes.core.market_state import (
     update_swing_geometry_assignments,
     _require_contiguous_native_candles,
 )
-from shares.core.model import (
+from contract.market import (
     BarCoverage,
     Candle,
+    Direction,
+    Timeframe,
+    bar_evidence_coverage,
+    candle_coverage,
+    candle_identity,
+)
+from contract.eye import (
     DealingRangeLifecycle,
     DealingRangeState,
-    Direction,
     LiquidityInventoryItem,
     LiquidityInventoryLifecycle,
     SwingLifecycle,
@@ -32,10 +38,6 @@ from shares.core.model import (
     SwingRank,
     SwingRelation,
     SwingSide,
-    Timeframe,
-    bar_evidence_coverage,
-    candle_coverage,
-    candle_identity,
 )
 
 
@@ -939,7 +941,7 @@ def test_leg_decoder_fails_closed_on_a_missing_path_class() -> None:
     """
 
     from eyes.core.market_state import _leg_from_event
-    from shares.core.model import EventKind
+    from contract.eye import EventKind
     from eyes.core.semantic_event_emitter import _event
 
     warmup = tuple(_candle(index) for index in range(14))

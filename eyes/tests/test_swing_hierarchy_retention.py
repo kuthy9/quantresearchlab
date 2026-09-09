@@ -29,7 +29,15 @@ from eyes.core.market_state import (
     SWING_HIERARCHY_HOT_RETENTION,
     reduce_timeframe_state,
 )
-from shares.core.model import Direction, EventKind, EventOrigin, MarketEvent, Timeframe
+from contract.market import (
+    Direction,
+    Timeframe,
+)
+from contract.eye import (
+    EventKind,
+    EventOrigin,
+    MarketEvent,
+)
 from eyes.core.semantics import SemanticRegistry
 
 TZ = "America/New_York"

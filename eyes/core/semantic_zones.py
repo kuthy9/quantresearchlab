@@ -1,7 +1,7 @@
 """Immutable zone-semantics foundations for the next canonical contract.
 
 This module deliberately does not select candles, detect displacement, or
-emit :class:`~shares.core.model.MarketEvent` objects.  It receives facts that
+emit :class:`~contract.eye.observation.MarketEvent` objects.  It receives facts that
 the existing Eye already knows and supplies small, pure lifecycle reducers.
 Keeping it independent lets the current v1.2 replay remain historical while a
 later semantic version binds these contracts explicitly.
@@ -19,7 +19,7 @@ import pandas as pd
 
 from .foundation_registry import FOUNDATION_VERSION
 from shares.core.market_clock import next_registered_native_completion
-from shares.core.model import (
+from contract.market import (
     Direction,
     Timeframe,
     aware_timestamp,

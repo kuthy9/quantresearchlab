@@ -17,12 +17,19 @@ from .displacement import (
     DisplacementState,
     DisplacementUpdate,
 )
-from shares.core.model import (
-    BOSLifecycle,
-    BOSScope,
-    BreakOfStructureState,
+from contract.market import (
     Candle,
     Direction,
+    Timeframe,
+    aware_timestamp,
+    candle_identity,
+    price_to_ticks,
+)
+from contract.eye import (
+    BOSLifecycle,
+    BOSScope,
+    BaseOriginCoreState,
+    BreakOfStructureState,
     FVGQualification,
     FairValueGapLifecycle,
     FairValueGapState,
@@ -30,12 +37,7 @@ from shares.core.model import (
     OrderBlockAttemptOutcome,
     OrderBlockFunnelSnapshot,
     OrderBlockLifecycle,
-    BaseOriginCoreState,
     OrderBlockState,
-    Timeframe,
-    aware_timestamp,
-    candle_identity,
-    price_to_ticks,
 )
 FVG_BOUNDARY_REASONS = frozenset(
     {

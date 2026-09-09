@@ -20,7 +20,7 @@ from eyes.scripts.audit_eye_authority_cases import (
     transmission_record,
 )
 from eyes.scripts.run_eye_authority_scan import _registered_payload
-from shares.core.model import Timeframe
+from contract.market import Timeframe
 from shares.core.visualization import VisualArtifact
 
 

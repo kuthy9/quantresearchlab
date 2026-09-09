@@ -6,20 +6,22 @@ import pandas as pd
 import pytest
 
 from eyes.core.causal import CausalMarketReader
-from shares.core.model import (
+from contract.market import (
     Bar,
+    Candle,
+    Direction,
+    Timeframe,
+    to_primitive,
+)
+from contract.eye import (
     BOSLifecycle,
     BOSPostBreakState,
     BOSScope,
-    Candle,
-    Direction,
     EventKind,
     StructureLifecycle,
     SwingLifecycle,
     SwingRelation,
     SwingSide,
-    Timeframe,
-    to_primitive,
 )
 from eyes.core.observation import CausalObserver, ObserverConfig
 from eyes.core.structure import StructureConfig, StructureTracker

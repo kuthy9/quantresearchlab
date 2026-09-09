@@ -17,22 +17,24 @@ from typing import Sequence
 
 import pandas as pd
 
-from shares.core.model import (
+from contract.market import (
     Candle,
+    Timeframe,
+    clamp,
+)
+from contract.eye import (
     LiquidityInventoryItem,
     LiquidityInventoryLifecycle,
     LiquidityPoolLifecycle,
     LiquidityPoolState,
     SUPPORT_RESISTANCE_RETIREMENT_REASON,
-    SupportResistanceLifecycle,
-    SupportResistanceState,
     StructureLifecycle,
     StructureSequenceState,
+    SupportResistanceLifecycle,
+    SupportResistanceState,
     SwingLifecycle,
     SwingPoint,
     SwingSide,
-    Timeframe,
-    clamp,
 )
 
 

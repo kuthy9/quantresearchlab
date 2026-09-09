@@ -13,11 +13,13 @@ import math
 
 import pandas as pd
 
-from shares.core.model import (
+from contract.market import (
     Direction,
-    ExecutionObservation,
     aware_timestamp,
     clamp,
+)
+from contract.execution import (
+    ExecutionObservation,
     execution_not_evaluated,
 )
 

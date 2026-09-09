@@ -12,7 +12,12 @@ from shares.core.market_clock import (
     registered_native_bar_bounds,
     scheduled_gap_kind,
 )
-from shares.core.model import Bar, Candle, Timeframe, ticks_to_price
+from contract.market import (
+    Bar,
+    Candle,
+    Timeframe,
+    ticks_to_price,
+)
 from shares.core.scale_registry import ScaleSpec, scale_registry_id
 
 

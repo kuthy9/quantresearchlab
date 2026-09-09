@@ -7,27 +7,29 @@ internal history authority and is deliberately not exported; import
 ``eyes.core.event_store`` directly when a research or replay tool needs
 read-only access to event lineage.
 
-Every name is resolved lazily.  ``shares.core.model`` is imported by all four
-subsystems, so binding the facade eagerly would make that import pull the whole
-engine in and would turn the existing module-level cycles into import errors.
+``ContinuousSMCEngine`` is deliberately absent while the typed Brain is being
+rebuilt: ``shares.core.engine`` still imports the retired playbook, DOL and
+Signal Policy modules and cannot be imported.  Import it directly once that
+orchestration is rebound to a new belief producer.
+
+Every name is resolved lazily so this facade never pulls the engine in.  The
+type contracts themselves now live in the ``contract`` package, one module per
+layer; import from there rather than through this facade.
 """
 from __future__ import annotations
 
 from typing import Any
 
 _EXPORTS = {
-    "Action": "shares.core.model",
-    "Bar": "shares.core.model",
-    "ContinuousSMCEngine": "shares.core.engine",
-    "Direction": "shares.core.model",
-    "ExecutionFSM": "execution.core.execution_fsm",
+    "Action": "contract.decision",
+    "Bar": "contract.market",
+    "Direction": "contract.market",
     "MarketSnapshot": "eyes.core.market_state",
     "MarketSnapshotAuthority": "eyes.core.market_state",
-    "Playbook": "shares.core.model",
-    "PlaybookPhase": "shares.core.model",
+    "Playbook": "contract.market",
+    "PlaybookPhase": "contract.market",
     "RelationState": "eyes.core.market_state",
-    "RiskApprovedTradeIntent": "execution.core.execution_fsm",
-    "SMC_SEMANTIC_VERSION": "shares.core.model",
+    "SMC_SEMANTIC_VERSION": "contract.market",
     "SemanticRegistry": "eyes.core.semantics",
     "SessionState": "eyes.core.market_state",
     "TimeframeState": "eyes.core.market_state",

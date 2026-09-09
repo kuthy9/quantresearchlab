@@ -17,7 +17,7 @@ from typing import Any, Mapping, Sequence
 import pandas as pd
 
 from .foundation_registry import FOUNDATION_VERSION
-from shares.core.model import (
+from contract.market import (
     Direction,
     Timeframe,
     aware_timestamp,

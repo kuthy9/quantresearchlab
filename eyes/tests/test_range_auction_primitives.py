@@ -15,10 +15,13 @@ from eyes.core.range_auction import (
     RangeAuctionProtocol,
     RangeAuctionUpdate,
 )
-from shares.core.model import (
-    BALANCE_CLAIM_ABANDONED,
+from contract.market import (
     Bar,
     Candle,
+    Timeframe,
+)
+from contract.eye import (
+    BALANCE_CLAIM_ABANDONED,
     DealingRangeLifecycle,
     DealingRangeState,
     EventKind,
@@ -32,14 +35,13 @@ from shares.core.model import (
     RANGE_PAIR_FUNNEL_COUNTS,
     SupportResistanceLifecycle,
     SupportResistanceState,
-    Timeframe,
 )
 from eyes.core.observation import (
     CausalObserver,
     ObserverConfig,
 )
 from eyes.core.semantic_event_emitter import _event
-from brain.core.playbooks import _visible_levels
+from shares.core.scene_graph import current_dol_inventory
 from brain.core.risk import _visible_level_ids
 
 from shares.tests.helpers import CORE_TEST_SCALE_SPECS, market_observation
@@ -2038,7 +2040,7 @@ def test_range_boundaries_join_the_visible_liquidity_route_inventory() -> None:
         item.item_id for item in observation.liquidity_inventory
     }
     assert {
-        level.level_id for level in _visible_levels(observation)
+        item.item_id for item in current_dol_inventory(observation)
     } == expected_ids
     assert _visible_level_ids(observation) == expected_ids
 

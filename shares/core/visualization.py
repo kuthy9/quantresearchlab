@@ -10,20 +10,22 @@ from typing import Any, Mapping, Sequence
 import pandas as pd
 
 from brain.core.brain_entry_sequence import brain_interaction_view
-from .model import (
-    Action,
+from contract.market import (
     Candle,
+    PlaybookPhase,
+    Timeframe,
+)
+from contract.eye import (
     DealingRangeLifecycle,
-    EngineSnapshot,
     EventKind,
     FVGQualification,
     FairValueGapLifecycle,
     LiquidityInventoryLifecycle,
     ManipulationLifecycle,
     OrderBlockLifecycle,
-    PlaybookPhase,
-    Timeframe,
 )
+from contract.decision import Action
+from contract.research import EngineSnapshot
 from .market_clock import scheduled_gap_kind
 
 

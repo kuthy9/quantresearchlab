@@ -17,7 +17,7 @@ from brain.core.brain_entry_sequence import (
     interpret_milestone_transitions,
 )
 from eyes.core.interaction import InteractionProtocol, InteractionSemantics
-from shares.core.model import (
+from contract.eye import (
     EntryLocationState,
     InteractionUpdate,
     MicroBOSReference,

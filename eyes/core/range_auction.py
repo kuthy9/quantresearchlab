@@ -13,14 +13,18 @@ from typing import Iterable, Sequence
 
 import pandas as pd
 
-from shares.core.model import (
-    BALANCE_PRICE_TEST_KINDS,
+from contract.market import (
+    Candle,
+    Timeframe,
+    aware_timestamp,
+    clamp,
+)
+from contract.eye import (
     BALANCE_CLAIM_ABANDONED,
     BALANCE_CLAIM_CONFIRMED,
-    Candle,
+    BALANCE_PRICE_TEST_KINDS,
     DealingRangeLifecycle,
     DealingRangeState,
-    RANGE_AUCTION_HARD_BOUNDARY_REASONS,
     LiquidityInventoryItem,
     LiquidityInventoryLifecycle,
     LiquidityPoolState,
@@ -28,14 +32,12 @@ from shares.core.model import (
     ManipulationSourceDisposition,
     ManipulationSourceDispositionKind,
     ManipulationState,
+    RANGE_AUCTION_HARD_BOUNDARY_REASONS,
     RANGE_MATURITY_GATE_NAMES,
     RANGE_PAIR_FUNNEL_COUNTS,
     RangeFormationFunnelSnapshot,
     SupportResistanceLifecycle,
     SupportResistanceState,
-    Timeframe,
-    aware_timestamp,
-    clamp,
 )
 
 

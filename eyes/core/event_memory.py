@@ -1,7 +1,7 @@
 """Bounded causal event memory for the Trading Eye.
 
 This is the Eye's short-term working set: a bounded window of recently
-appended :class:`~shares.core.model.MarketEvent` objects plus the derived
+appended :class:`~contract.eye.observation.MarketEvent` objects plus the derived
 indexes the observer needs to reason about the current clock — latest event per
 entity, per-entity lifecycle timelines and their registered legal transitions,
 closed durations, same-clock sequence counts, and synthetic-minute runs.
@@ -20,9 +20,12 @@ from typing import Iterable, Mapping
 import pandas as pd
 
 from .event_store import EventStore, event_order_key
-from shares.core.model import (
-    BOSLifecycle,
+from contract.market import (
     Candle,
+    Timeframe,
+)
+from contract.eye import (
+    BOSLifecycle,
     DealingRangeLifecycle,
     FairValueGapLifecycle,
     LiquidityPoolLifecycle,
@@ -33,7 +36,6 @@ from shares.core.model import (
     StructureLifecycle,
     SupportResistanceLifecycle,
     SwingLifecycle,
-    Timeframe,
     typed_event_entity_key,
 )
 

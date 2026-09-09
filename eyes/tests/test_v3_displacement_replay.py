@@ -12,13 +12,15 @@ from eyes.core.displacement import (
     DisplacementProtocol,
 )
 from eyes.core.displacement_observer import CausalDisplacementEye, READER_ANOMALY_WHITELIST
-from shares.core.model import (
+from contract.market import (
     Bar,
     Candle,
+    Timeframe,
+)
+from contract.eye import (
     EventKind,
     MarketEvent,
     OrderBlockAttemptOutcome,
-    Timeframe,
 )
 from eyes.core.observation import CausalObserver, EventMemory, ObserverConfig
 

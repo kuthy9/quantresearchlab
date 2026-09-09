@@ -16,7 +16,7 @@ if str(ROOT) not in sys.path:
 from eyes.core.causal import CausalMarketReader  # noqa: E402
 from shares.core.io import iter_completed_bars, load_ohlcv  # noqa: E402
 from shares.core.scale_registry import parse_scale_specs  # noqa: E402
-from shares.core.validation import load_validation_protocol  # noqa: E402
+from brain.core.validation import load_validation_protocol  # noqa: E402
 
 
 def parse_args() -> argparse.Namespace:

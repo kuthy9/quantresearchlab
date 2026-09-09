@@ -6,7 +6,7 @@ import pandas as pd
 import pytest
 
 from eyes.core.causal import CausalClockError, CausalMarketReader
-from shares.core.model import (
+from contract.market import (
     Bar,
     Candle,
     Timeframe,

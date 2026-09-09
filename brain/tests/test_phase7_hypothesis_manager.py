@@ -8,9 +8,9 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-import brain.core.path_belief as path_belief_module
+import brain.core.market_belief as market_belief_module
 
-from brain.core.path_belief import (
+from brain.core.market_belief import (
     HypothesisManager,
     PathKind,
     PathStatus,
@@ -168,7 +168,7 @@ def _temporal_protocol(tmp_path: Path):
         "authority": "shadow_only",
         "action_authority": False,
     }
-    temporal["artifact_fingerprint"] = path_belief_module._canonical_hash(
+    temporal["artifact_fingerprint"] = market_belief_module._canonical_hash(
         temporal
     )
     payload["temporal_model"] = temporal
@@ -486,13 +486,13 @@ def test_equal_logit_subtraction_is_probability_invariant() -> None:
             strict=True,
         )
     }
-    original, _ = path_belief_module._normalized_members(
+    original, _ = market_belief_module._normalized_members(
         tuple(
             replace(member, log_weight=logits[member.path])
             for member in state.members
         )
     )
-    shifted, _ = path_belief_module._normalized_members(
+    shifted, _ = market_belief_module._normalized_members(
         tuple(
             replace(member, log_weight=logits[member.path] - 7.0)
             for member in state.members

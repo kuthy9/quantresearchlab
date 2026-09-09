@@ -8,7 +8,7 @@ import pandas as pd
 import pytest
 
 from eyes.core.eye_statistics import EyeAuthorityStatistics
-from shares.core.model import Timeframe
+from contract.market import Timeframe
 
 
 def _candle(end: pd.Timestamp, *, real: bool = True) -> SimpleNamespace:

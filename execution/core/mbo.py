@@ -11,7 +11,10 @@ from typing import Any, Callable, Iterable, Iterator, Mapping, Sequence
 import pandas as pd
 
 from .execution import TopOfBook, TopOfBookExecutionProvider
-from shares.core.model import Bar, aware_timestamp
+from contract.market import (
+    Bar,
+    aware_timestamp,
+)
 from .execution import ExecutionRealityInput
 
 

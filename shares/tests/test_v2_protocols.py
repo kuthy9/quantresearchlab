@@ -35,14 +35,11 @@ from execution.core.mbo import (
     MBOReplayError,
     MinuteExecutionRealityStore,
 )
-from shares.core.model import (
-    Action,
-    Bar,
-    VetoCode,
-)
-from brain.core.playbook_registry import load_playbook_registry
+from contract.market import Bar
+from contract.decision import Action
+from contract.risk import VetoCode
 from brain.core.risk import RiskLimits, StructuralRiskEngine
-from shares.core.validation import load_validation_protocol
+from brain.core.validation import load_validation_protocol
 
 from shares.tests.helpers import engine_snapshot, flat_account
 
@@ -103,13 +100,6 @@ def _record(
         flags=flags,
         sequence=sequence,
     )
-
-
-def test_preregistered_registry_contains_exactly_three_ordered_protocols() -> None:
-    registry = load_playbook_registry()
-    assert len(registry.protocols) == 3
-    assert all(len(protocol.required_sequence) >= 3 for protocol in registry.protocols)
-    assert all(protocol.invalidation["retrospective_rewrite"] is False for protocol in registry.protocols)
 
 
 def test_mbo_snapshot_reconstructs_real_top_of_book() -> None:

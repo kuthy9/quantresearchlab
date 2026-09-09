@@ -25,16 +25,18 @@ from shares.core.market_cases import (
     validate_market_case_input_row,
     validate_market_case_rows,
 )
-from shares.core.model import (
+from contract.market import (
     Direction,
+    MarketMode,
+    ScaleRelation,
+    Timeframe,
+)
+from contract.eye import InteractionUpdate
+from contract.brain import (
     DirectionalObstructionView,
     GlobalMarketContext,
-    InteractionUpdate,
-    MarketMode,
     NEUTRAL_MARKET_STATE_SCHEMA_VERSION,
-    ScaleRelation,
     ScaleRelationState,
-    Timeframe,
 )
 from shares.core.scene_graph import (
     SceneEdgeKind,

@@ -27,20 +27,24 @@ from eyes.core.interaction import (
     interaction_artifact_collections,
     interaction_update_from_artifact_collections,
 )
-from .model import (
-    DealingRangeState,
+from contract.market import (
     Direction,
+    Timeframe,
+    aware_timestamp,
+)
+from contract.eye import (
+    DealingRangeState,
     FairValueGapState,
-    GlobalMarketContext,
     INTERACTION_UPDATE_SCHEMA_VERSION,
     InteractionUpdate,
     LiquidityInventoryItem,
     LiquidityPoolState,
     ManipulationState,
-    NEUTRAL_MARKET_STATE_SCHEMA_VERSION,
     OrderBlockState,
-    Timeframe,
-    aware_timestamp,
+)
+from contract.brain import (
+    GlobalMarketContext,
+    NEUTRAL_MARKET_STATE_SCHEMA_VERSION,
 )
 from .scene_graph import (
     SCENE_EDGE_LIFECYCLE_VOCAB,

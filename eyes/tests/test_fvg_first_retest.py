@@ -15,7 +15,12 @@ import pandas as pd
 import pytest
 
 from eyes.core.causal import CausalMarketReader
-from shares.core.model import Bar, EventKind, Timeframe, ticks_to_price
+from contract.market import (
+    Bar,
+    Timeframe,
+    ticks_to_price,
+)
+from contract.eye import EventKind
 from eyes.core.observation import CausalObserver, ObserverConfig
 
 from shares.tests.helpers import MODEL_SCALE_SPECS, session_bars

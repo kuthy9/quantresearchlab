@@ -17,19 +17,25 @@ from brain.core.dol_probability import (
     load_dol_probability_model_artifact,
     load_dol_probability_protocol,
 )
-from .model import (
-    ExecutionObservation,
-    AccountState,
+from contract.market import (
     Bar,
-    EngineSnapshot,
-    GlobalMarketContext,
-    MarketObservation,
-    NeutralEngineSnapshot,
-    NeutralMarketState,
     Playbook,
-    PositionSnapshot,
     Timeframe,
     to_primitive,
+)
+from contract.execution import (
+    AccountState,
+    ExecutionObservation,
+    PositionSnapshot,
+)
+from contract.eye import MarketObservation
+from contract.brain import (
+    GlobalMarketContext,
+    NeutralMarketState,
+)
+from contract.research import (
+    EngineSnapshot,
+    NeutralEngineSnapshot,
 )
 from execution.core.execution import (
     ExecutionRealityInput,

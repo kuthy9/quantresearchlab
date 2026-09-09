@@ -6,29 +6,39 @@ from typing import Any
 
 import pandas as pd
 
-from shares.core.model import (
-    AccountState,
-    Action,
+from contract.market import (
     Bar,
-    Decision,
-    DealingRangeLifecycle,
     Direction,
-    EventKind,
-    FrozenLSRContext,
-    FrozenThesis,
-    LiquidityInventoryLifecycle,
     LiquidityLevel,
+    Playbook,
+    StructuralLevel,
+    Timeframe,
+    content_hash,
+)
+from contract.execution import (
+    AccountState,
+    PositionSnapshot,
+)
+from contract.eye import (
+    DealingRangeLifecycle,
+    EventKind,
+    LiquidityInventoryLifecycle,
     ManipulationLifecycle,
     MarketObservation,
     PathSequenceLifecycle,
-    Playbook,
-    PositionSnapshot,
-    RiskAssessment,
-    StructuralLevel,
-    Timeframe,
+)
+from contract.brain import (
+    FrozenLSRContext,
+    FrozenThesis,
     TradePlan,
+)
+from contract.decision import (
+    Action,
+    Decision,
+)
+from contract.risk import (
+    RiskAssessment,
     VetoCode,
-    content_hash,
 )
 
 

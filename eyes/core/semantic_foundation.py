@@ -31,15 +31,17 @@ from .market_state import (
     SwingGeometryAssignment,
     SwingGeometryNode,
 )
-from shares.core.model import (
-    DealingRangeLifecycle,
+from contract.market import (
     Direction,
     FrozenDict,
-    StructuralLegState,
-    SwingRank,
     Timeframe,
     aware_timestamp,
     to_primitive,
+)
+from contract.eye import (
+    DealingRangeLifecycle,
+    StructuralLegState,
+    SwingRank,
 )
 from .semantic_lifecycle import (
     BoundaryAttackFact,

@@ -18,7 +18,10 @@ from __future__ import annotations
 
 import pytest
 
-from shares.core.model import DealingRangeLifecycle, RANGE_MATURITY_GATE_NAMES
+from contract.eye import (
+    DealingRangeLifecycle,
+    RANGE_MATURITY_GATE_NAMES,
+)
 from eyes.core.range_auction import CausalRangeAuctionTracker
 
 from eyes.tests.test_range_auction_primitives import (

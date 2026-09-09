@@ -8,14 +8,16 @@ import pandas as pd
 import pytest
 
 from eyes.core.foundation_registry import FOUNDATION_VERSION
-from shares.core.model import (
+from contract.market import (
+    Direction,
+    Timeframe,
+)
+from contract.eye import (
     BOSLifecycle,
     BOSScope,
-    Direction,
     EventKind,
     EventOrigin,
     MarketEvent,
-    Timeframe,
 )
 from eyes.core.observation import CausalObserver, ObserverConfig
 from eyes.core.semantic_zones import (

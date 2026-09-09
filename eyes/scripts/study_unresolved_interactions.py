@@ -27,7 +27,8 @@ sys.path.insert(0, str(ROOT))
 
 from eyes.core.causal import CausalMarketReader  # noqa: E402
 from shares.core.io import iter_completed_bars, load_ohlcv  # noqa: E402
-from shares.core.model import EventKind, Timeframe  # noqa: E402
+from contract.market import Timeframe  # noqa: E402
+from contract.eye import EventKind  # noqa: E402
 from eyes.core.observation import CausalObserver, ObserverConfig  # noqa: E402
 from shares.core.scale_registry import parse_scale_specs  # noqa: E402
 from eyes.core.semantics import load_semantic_selection  # noqa: E402

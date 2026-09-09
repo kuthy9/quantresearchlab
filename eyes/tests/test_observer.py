@@ -9,10 +9,14 @@ import pandas as pd
 import pytest
 
 from eyes.core.causal import CausalMarketReader
-from shares.core.model import (
+from contract.market import (
     Bar,
     Candle,
     Direction,
+    Timeframe,
+    to_primitive,
+)
+from contract.eye import (
     EventKind,
     FrameObservation,
     LiquidityInventoryItem,
@@ -27,8 +31,6 @@ from shares.core.model import (
     PathSequenceStep,
     SupportResistanceLifecycle,
     SupportResistanceState,
-    Timeframe,
-    to_primitive,
 )
 from execution.core.execution import ExecutionRealityInput
 from eyes.core.observation import (

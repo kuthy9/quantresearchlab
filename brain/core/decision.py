@@ -5,17 +5,21 @@ from dataclasses import dataclass
 import math
 
 from .calibration import TYPED_ACTIVE_PLAYBOOKS
-from shares.core.model import (
-    AccountState,
+from contract.market import (
+    Direction,
+    PlaybookPhase,
+    clamp,
+)
+from contract.execution import AccountState
+from contract.eye import MarketObservation
+from contract.brain import (
+    HypothesisBelief,
+    MarketBelief,
+)
+from contract.decision import (
     Action,
     ActionUtility,
     Decision,
-    Direction,
-    HypothesisBelief,
-    MarketBelief,
-    MarketObservation,
-    PlaybookPhase,
-    clamp,
 )
 from .risk import causal_protection_candidate
 

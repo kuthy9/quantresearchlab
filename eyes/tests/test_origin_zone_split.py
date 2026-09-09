@@ -13,7 +13,7 @@ from __future__ import annotations
 import pytest
 
 from eyes.core.event_store import EventStore
-from shares.core.model import EventKind
+from contract.eye import EventKind
 from eyes.core.semantics import SemanticRegistry
 
 from eyes.tests.test_event_provenance_contract import (

@@ -15,7 +15,12 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Mapping, Sequence
 
-from .model import CORE_TIMEFRAMES, Timeframe, content_hash, to_primitive
+from contract.market import (
+    CORE_TIMEFRAMES,
+    Timeframe,
+    content_hash,
+    to_primitive,
+)
 
 
 class ScaleRole(str, Enum):

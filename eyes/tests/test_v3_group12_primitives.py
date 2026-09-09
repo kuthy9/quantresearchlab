@@ -20,12 +20,16 @@ from shares.core.market_clock import (
     registered_native_bar_bounds,
 )
 from eyes.core.market_state import replay_atomic_market_snapshot
-from shares.core.model import (
-    BOS_CONFIRMATION_REASON,
-    BOSLifecycle,
-    BOSPostBreakState,
+from contract.market import (
     Candle,
     Direction,
+    Timeframe,
+    to_primitive,
+)
+from contract.eye import (
+    BOSLifecycle,
+    BOSPostBreakState,
+    BOS_CONFIRMATION_REASON,
     EventKind,
     FrameObservation,
     LiquidityInventoryItem,
@@ -33,9 +37,9 @@ from shares.core.model import (
     LiquidityPoolLifecycle,
     LiquidityPoolState,
     MarketEvent,
-    SUPPORT_RESISTANCE_RETIREMENT_REASON,
     STRUCTURE_BREAK_FAILURE_REASON,
     STRUCTURE_FORMATION_FAILURE_REASON,
+    SUPPORT_RESISTANCE_RETIREMENT_REASON,
     StructureLifecycle,
     SupportResistanceLifecycle,
     SupportResistanceState,
@@ -43,8 +47,6 @@ from shares.core.model import (
     SwingPoint,
     SwingRelation,
     SwingSide,
-    Timeframe,
-    to_primitive,
 )
 from eyes.core.observation import (
     CausalObserver,
@@ -55,7 +57,7 @@ from eyes.core.observation import (
     _strict_prior_atr,
 )
 from eyes.core.semantic_event_emitter import _event
-from brain.core.playbooks import _visible_levels
+from shares.core.scene_graph import current_dol_inventory
 from brain.core.risk import _visible_level_ids
 from eyes.core.structure import StructureConfig, StructureTracker
 
@@ -1762,18 +1764,18 @@ def test_brain_and_risk_share_the_same_top_level_inventory_universe() -> None:
             _inventory_swing_source(consumed),
         ),
     )
-    brain_ids = {item.level_id for item in _visible_levels(observation)}
+    graph_ids = {item.item_id for item in current_dol_inventory(observation)}
     risk_ids = _visible_level_ids(observation)
-    assert brain_ids == risk_ids == {"swing:h4-swing"}
+    assert graph_ids == risk_ids == {"swing:h4-swing"}
 
 
 def test_empty_typed_inventory_fails_closed() -> None:
     populated = market_observation()
-    assert _visible_levels(populated)
+    assert current_dol_inventory(populated)
     assert _visible_level_ids(populated)
 
     empty = _with_authoritative_liquidity(populated)
-    assert _visible_levels(empty) == []
+    assert current_dol_inventory(empty) == ()
     assert _visible_level_ids(empty) == set()
 
 

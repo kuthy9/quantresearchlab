@@ -12,25 +12,27 @@ from eyes.core.market_state import (
     build_structural_legs,
     reduce_timeframe_state,
 )
-from shares.core.model import (
+from contract.market import (
+    Candle,
+    Direction,
+    SMC_SEMANTIC_VERSION,
+    Timeframe,
+)
+from contract.eye import (
     BOSLifecycle,
     BOSPostBreakState,
     BOSScope,
     BreakOfStructureState,
-    Candle,
-    Direction,
     EventKind,
     EventOrigin,
     FrameObservation,
     MarketEvent,
-    SMC_SEMANTIC_VERSION,
     StructuralLegState,
     SwingLifecycle,
     SwingPoint,
     SwingRank,
     SwingRelation,
     SwingSide,
-    Timeframe,
 )
 from eyes.core.observation import CausalObserver, ObserverConfig
 from eyes.core.semantic_event_emitter import SemanticEventEmitter

@@ -11,25 +11,27 @@ import pandas as pd
 import pytest
 
 from shares.tests.legacy_group5 import CausalGroup5Reducer, Group5Protocol
-from shares.core.model import (
+from contract.market import (
+    Candle,
+    Direction,
+    Timeframe,
+)
+from contract.eye import (
     BOSLifecycle,
     BOSPostBreakState,
     BOSScope,
     BreakOfStructureState,
-    Candle,
-    Direction,
     EntryLocationLifecycle,
     EventKind,
+    FVGQualification,
     FairValueGapLifecycle,
     FairValueGapState,
-    FVGQualification,
     LiquidityInventoryItem,
     LiquidityInventoryLifecycle,
     ManipulationLifecycle,
     ManipulationState,
     PathSequenceLifecycle,
     QualifiedReacceptanceLifecycle,
-    Timeframe,
 )
 from eyes.core.observation import CausalObserver, ObserverConfig
 

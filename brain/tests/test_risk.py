@@ -5,30 +5,34 @@ from dataclasses import FrozenInstanceError, replace
 import pandas as pd
 import pytest
 
-from shares.core.model import (
-    Action,
-    ActionUtility,
+from contract.market import (
     Bar,
-    Decision,
+    LiquidityLevel,
+    StructuralLevel,
+    Timeframe,
+)
+from contract.execution import PositionSnapshot
+from contract.eye import (
     EntryLocationLifecycle,
     EntryLocationState,
     EventKind,
     InteractionUpdate,
     LiquidityInventoryItem,
     LiquidityInventoryLifecycle,
-    LiquidityLevel,
     LiquidityPoolLifecycle,
     LiquidityPoolState,
     MarketObservation,
     PathSequenceLifecycle,
     PathSequenceState,
     PathSequenceStep,
-    PositionSnapshot,
-    StructuralLevel,
-    Timeframe,
-    TradePlan,
-    VetoCode,
 )
+from contract.brain import TradePlan
+from contract.decision import (
+    Action,
+    ActionUtility,
+    Decision,
+)
+from contract.risk import VetoCode
 from brain.core.risk import (
     RiskLimits,
     StructuralRiskEngine,

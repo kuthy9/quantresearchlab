@@ -87,27 +87,16 @@ Temporal Market Scene Graph + GlobalMarketContext
         ↓
 playbook-neutral OpenMarketThesis + FocusState
         ↓
-independent root-specific DFP / LSR projections
+        ✕ no belief producer — the typed Brain was retired 2026-09-07
         ↓
-long-lived Context Thesis + short-lived Entry Episodes
-        ↓
-Belief(t) = update(Belief(t-1), Observation(t), SceneDelta(t))
-        ├── shadow six-path beliefs + DOL ranking
-        ├── fitted-artifact-only DOL probability/no-target layer
-        ├── fail-closed Signal Policy + Trade Intent projection
-        └── retained typed action candidates
-        ↓
-typed DFP / LSR / FAVR episodes and phases
-        ↓
-enter / wait / hold / protect / exit / abstain utility comparison
+enter / wait / hold / protect / exit / abstain utility comparison   (no input)
         ↓
 independent structural, cost, deadline, data and fillability development vetoes
         ↓
 optional one-next-bar conservative simulation → position feedback
 
-separate research/shadow paths (no order submission):
-Trade Intent → Phase 8 execution evaluator / immutable order FSM v1.5
-exact bar + execution + account evidence → Phase 9 parity journal
+the six-path competition set survives standalone in
+brain/core/market_belief.py; nothing consumes it
 ```
 
 ### Reasoning responsibilities
@@ -120,14 +109,14 @@ question and may consume only already-known outputs from the layer above it:
 | Data fact admission | `io`, `market_clock`, `CausalMarketReader` | Which completed clocks and prices are legally knowable now? | No structure, probability, or action interpretation. |
 | Atomic observation | `CausalObserver`, Group 1–5 trackers, `EventStore` | Which preregistered v1.2 market facts occurred, and from which exact sources? | No rewriting history and no trade decision. |
 | State and relation projection | timeframe/session reducers, `RelationResolver`, Foundation v2, `MarketSnapshotPublisher` | What is the deterministic current state, lifecycle, geometry, and cross-frame relation? | Foundation is an additive v1.2 projection, not a new detector or full-stack v2 authority. |
-| Competing-hypothesis reasoning | Scene Graph, `PlaybookBrain`, path belief, DOL, Signal Policy | Which still-falsifiable path or target is better supported by admitted evidence? | With no fitted/admitted artifacts, outputs remain neutral or shadow-only. |
-| Action constraint and validation | Trade Intent, Decision, Risk, execution FSM, simulator, Phase 7–9 runners | Is an already-described candidate allowed to become an intent, simulated action, or no-order audit fact? | No retroactive semantic change, broker authority, profit claim, or sealed-OOS access. |
+| Competing-hypothesis reasoning | Scene Graph, `market_belief` (the typed Brain, DOL and Signal Policy were retired 2026-09-07) | Which still-falsifiable path or target is better supported by admitted evidence? | With no fitted/admitted artifacts, outputs remain neutral or shadow-only. |
+| Action constraint and validation | Decision, Risk, simulator (Trade Intent and the execution FSM were retired 2026-09-07) | Is an already-described candidate allowed to become a simulated action or a no-order audit fact? | No retroactive semantic change, broker authority, profit claim, or sealed-OOS access. |
 
-The legacy `Decision`/`Risk`/sequential simulator path is the sole current
-runtime action authority under `legacy_decision_risk_compat`. The newer
-`TradeIntent`/risk-approval/execution-FSM contracts remain separate research and
-shadow consumers; Engine disables TradeIntent projection in compatibility mode
-and rejects a non-zero prefilled intent before Decision/Risk. This prevents two
+The `Decision`/`Risk`/sequential simulator path remains the only registered
+runtime action authority under `legacy_decision_risk_compat`, and it currently
+has no belief to act on. The `TradeIntent`/risk-approval/execution-FSM contracts
+that used to sit beside it were retired on 2026-09-07. The rule they existed to
+enforce still holds and must hold for whatever replaces them: this prevents two
 simultaneous action owners without claiming the vertical migration is complete.
 The per-file owner/consumer census that used to live in a repository file
 inventory was removed on 2026-09-06; `git ls-files` and this document are the
@@ -167,7 +156,7 @@ The Eye imports no downstream module. `scale_registry.py` owns `ScaleSpec`,
 observer imports the optional Scene Graph in order to describe its own scales;
 `scene_graph.py` re-exports those names only so historical pickles resolve to
 the same class objects. `execution.py` owns `ExecutionRealityInput` and the
-cost/fillability score, and `model.py` owns the inert not-evaluated value
+cost/fillability score, and `contract/execution/reality.py` owns the inert not-evaluated value
 beside the `ExecutionObservation` it constructs, so the Eye transports an
 execution observation without deriving one; `ContinuousSMCEngine._score_execution`
 derives it. `eyes/tests/test_eye_module_boundary.py` asserts that no Eye module
@@ -362,276 +351,91 @@ first-concrete-lifecycle proxy (originally labelled `fvg_retest_response`) is
 unsupported,
 and the pseudo-zone comparison is descriptive only. No Week 3 is authorized.
 
-## Existing Development Typed Brain
+## Retired typed Brain, DOL and Signal Policy
 
-Exactly three legacy typed playbooks remain registered; they were not replaced
-or physically removed:
+**Retired on 2026-09-07.** The whole typed-playbook Brain and the Phase 7
+shadow layer above it are removed from the repository:
 
-1. DFP: directional structure/draw → displacement zone → first pullback →
-   exact rejection, held reacceptance or aligned 1m micro BOS; an accepted H1
-   continuation BOS is supporting evidence rather than a duplicate hard gate.
-   The H4-timeframe draw establishes thesis and terminal context (external to
-   the M5 setup, without a new structural-rank gate); the executable primary
-   target is a visible unconsumed registered structural-liquidity kind before
-   that draw and any relevant hard barrier, with planned and remaining path
-   each at least 1R;
-2. LSR: visible liquidity pool → sweep/failed outside acceptance → one frozen
-   opposite-displacement reversal Context → multiple independent
-   displacement-linked FVG/OB Entry Episodes → each zone's own first pullback
-   and three-way typed trigger; an accepted M5 OPPOSED MSS strengthens the
-   Context but is neither a mandatory gate nor a separate entry mechanism;
-3. FAVR: mature accumulation/dealing range → failed outside auction → re-entry
-   and displacement back inside → first pullback/trigger → midpoint or opposite
-   boundary liquidity.
+| removed | was |
+| --- | --- |
+| `brain/core/playbooks.py` | `PlaybookBrain`, the DFP/LSR/FAVR typed playbooks, the Context/EntryEpisode lifecycles, `PlanFeasibility` and Focus binding |
+| `brain/core/playbook_registry.py` | the preregistered playbook set and its versioned protocol loader |
+| `brain/core/dol_ranking.py` | deterministic shadow-only DOL candidate ranking |
+| `brain/core/dol_probability.py` | the path-marginalized shadow-only DOL probability boundary |
+| `brain/core/signal_policy.py` | the fail-closed shadow-only Signal Policy assessment |
+| `brain/core/shadow_outcome.py` | outcome-blind shadow candidates for one frozen replay |
+| `execution/core/trade_intent.py` | the never-submit Trade Intent, whose only entry point consumed a `SignalAssessment` |
+| `execution/core/execution_fsm.py` | order FSM v1.5, which existed only to take that intent into custody |
+| `shares/core/causal_cases.py`, `market_representation.py`, `case_retrieval.py` | the case-library chain that recorded and retrieved Brain output |
+| `shares/scripts/run_continuous_replay.py` | the 7,519-line full-stack replay runner built on `PlaybookBrain` output |
+| `brain/configs/playbooks.json`, `dol_probability.json`, `signal_policy.json` | their protocol files |
 
-DFP and LSR now serve only as typed setup and entry-episode generators; neither
-owns the six-path market probability model. FAVR remains parked whenever a
-mature range and value cannot be established with natural market evidence. A
-general rejection is not a FAVR substitute. This keeps proven episode and
-position-management semantics without preserving competing probability
-authority.
+None of it was published or fitted. `configs/model.json` had
+`calibration_artifact: null`, every Signal Policy artifact slot `null`, and
+`release_readiness.live_execution_allowed: false`; `path_hypotheses.json`
+declared `authority: shadow_only` with equal priors, zero decay and zero
+likelihood increments. Removing the layer therefore retires unfitted machinery,
+not a validated model.
 
-Each hypothesis exposes separate typed dimensions:
+### What this leaves
 
-- `thesis_strength`;
-- deterministic `sequence_progress`;
-- `location_quality`;
-- `entry_readiness`;
-- `delivery_quality`;
-- `uncertainty`.
+`PlaybookBrain` was the only producer of `MarketBelief`. With it gone:
 
-The common phase vocabulary is:
+- `brain/core/decision.py` and `risk.py` keep their contracts but have no input.
+  Decision reads `MarketBelief.thesis_candidates` and
+  `position_management_candidates`, which nothing now fills.
+- `MarketBelief` (now `contract/brain/belief.py`) keeps its shape, but its DOL, Signal Policy and
+  Trade Intent fields (`dol_rankings`, `dol_probabilities`,
+  `dol_candidate_exclusions`, `dol_probability_protocol_fingerprint`,
+  `signal_policy_protocol_fingerprint`, `signal_assessments`, `trade_intents`,
+  `shadow_signal_rejections`) are removed along with the roughly 200 lines of
+  `__post_init__` that validated their shadow-authority scope. What survives is
+  the path-diagnostic scope: `path_competition_state`,
+  `path_update_records_this_clock`, `path_protocol_status` and `path_authority`.
+- `shares/core/engine.py` still imports `brain.core.playbooks`,
+  `brain.core.playbook_registry`, `brain.core.dol_probability` and
+  `brain.core.signal_policy`, so **it cannot be imported**. Eight test modules
+  (135 tests) cannot be collected, and `shares/__init__.py` no longer exports
+  `ContinuousSMCEngine`, `ExecutionFSM` or `RiskApprovedTradeIntent`. Rebinding
+  that orchestration to a new belief producer is the next piece of work.
 
-`inactive → forming → armed → waiting_location → waiting_trigger → executable
-→ entered → delivering/weakening → completed/invalidated`
+### What survives on the belief side
 
-Episode, terminal and rearm semantics prevent a later event from silently
-rewriting the active thesis. A stable evidence revision is assimilated once,
-not repeatedly every minute.
+`brain/core/market_belief.py` — renamed from `path_belief.py` — is now a
+self-contained real-time path-probability component. Nothing else imports its
+`PathKind` vocabulary; `contract/brain/belief.py` takes only
+`PathBeliefUpdateRecord` and `PathCompetitionSetState` from it.
 
-The Scene Graph first emits identity-bound, playbook-neutral market theses.
-These theses are descriptive analysis candidates and never possess action
-authority by themselves. Their `ThesisEvidenceState` incrementally records
-new support, opposition and the forming/active/weakening/invalidated lifecycle;
-an unchanged evidence revision is not assimilated again. Every compatible thesis root is evaluated
-independently by DFP or LSR. Its root-specific typed projection becomes an
-action candidate only when the exact-root graph binding, causal hard gates,
-frozen entry/invalidation/draw/target/deadline and delivery path are complete.
-An unmatched or incomplete thesis remains available to Focus and unexplained-
-episode diagnostics but cannot enter. FAVR projections remain parked.
+It owns one competition set scoped by instrument, market epoch, dominant
+authority structure and a shared session horizon, over six mutually exclusive
+paths: continuation, deeper retracement, reversal, balance, failed breakout and
+residual unknown. Exact-source evidence contributes a configured log-weight
+increment once; unchanged evidence is deduplicated, and `correlation_key` is a
+global dependency-cluster identity rather than a family-local token. Real
+completed bars apply registered decay, terminal paths receive zero probability,
+and active survivors are normalized with log-sum-exp. `residual_unknown`
+preserves mass for paths the named hypotheses do not represent. Update records
+retain the rule, source event IDs, `known_at`, model version and protocol
+fingerprint, and the manager checkpoints and restores.
 
-`PRECEDES` remains a diagnostic temporal-neighborhood edge (the current
-producer still uses an unregistered 60-minute construction window). Generic
-graph inspection may display it, but causal/open-thesis closure and action
-connectivity use explicit relation allowlists that exclude `PRECEDES`,
-`RESPONDS_TO`, and path-blocking edges. A temporal neighbor therefore cannot
-manufacture an action path or FAVR eligibility. A future temporal research
-definition must freeze its identity, completed-bar window, same-clock policy,
-and observed delta before it may enter any modeled relation.
+The published model remains neutral — equal priors, zero log-likelihood
+increments, zero real-bar decay — and no fitted artifact is admitted. This is
+executable accounting with an audit trail, not a calibrated posterior. The
+protocol declares `development_unvalidated` / `shadow_only` and
+`action_authority_ready: false`, and `load_path_belief_protocol` fails closed if
+any of that changes without a separately pinned artifact set.
 
-`thesis_candidates` is the sole development action-candidate identity set. The
-six
-playbook-direction slots are read-only summaries projected from those roots and
-carry `summary_source_candidate_id`; they keep no independent prior and cannot
-authorize an action. Explicit shadow diagnostics read the root-specific
-candidate and its common plan-feasibility result directly; no parallel
-thesis-comparison object is stored in the development `MarketBelief`. Focus
-binds to the dominant root candidate and is recomputed only for a semantic graph
-revision, candidate/phase/terminal change, or related conflict/ambiguity.
-Unexplained episodes are offline diagnostics and never override Decision.
+`path_hypotheses.json` lost its `dol_diagnostic_ranking` block, whose only
+loader lived in the retired `dol_ranking.py`. Because the protocol fingerprint
+is `sha256` over the whole file, that edit moved it from `d897635c…b0482` to
+`61417d9f…3152e0`; `configs/model.json` records the new value, and its
+`playbook_registry`, `dol_probability` and `signal_policy` bindings are gone.
 
-Each playbook supplies the allowed invalidation and draw identities. The shared
-`PlanFeasibility` view only validates their entry/stop/target geometry, remaining
-path, obstruction and deadline; it does not invent a stop or target. Risk remains
-the final independent veto. For DFP, the primary target may be re-evaluated only
-before Risk approval; Risk approval freezes it for order and position lifecycle
-management. Once a validated calibration artifact is installed, delivery
-calibration is intended to resolve against that primary target before frozen
-invalidation/deadline, not against the farther H4 terminal draw. The current
-configuration has no such artifact.
+The six paths are still a frozen `PathKind` enum with order-sensitive
+validation throughout the module. Making that set protocol-driven, so the
+module no longer names its own hypotheses, is a separate task.
 
-Candidate prior, terminal and rearm state are isolated by thesis root. Once an
-approved candidate owns a position, its unique frozen root projection remains
-available for position management until completion, invalidation or boundary
-exit even if the descriptive root leaves the current open-thesis set; this
-retention cannot authorize a second entry.
-
-The lifecycle is deliberately split. `ContextThesisState` freezes the market
-epoch, higher-timeframe authority identity, direction, context/terminal draw
-and structural invalidation. It may remain active across an interval with no
-current entry child. `EntryEpisodeState` owns one local mechanism root, zone,
-path, first pullback, frozen first trigger, plan and short deadline. Multiple
-independent episodes may be children of one Context; one child's terminal does
-not weaken or close the Context, while a causal Context invalidation or context
-draw delivery closes all current/dormant/position children. Discovery-root
-visibility is not itself an Entry Episode lifetime signal: if the current
-observation uniquely resolves the identical frozen setup, location and active
-path, that same root-specific candidate continues typed gate evaluation and may
-remain in the action map. It cannot borrow a zone, path or trigger from another
-root. If any frozen identity is missing or ambiguous, it moves to
-`retained_episode_candidates`, which is resolution-only and excluded from
-Focus, Decision entry candidates and the six-slot projection. Explicit
-structure/draw/deadline/boundary terminal evidence still closes it before any
-action evaluation. `HypothesisBelief.entry_path_id` and
-`EntryEpisodeState.entry_path_id` carry the exact frozen zone-return path even
-before a trigger or plan exists; setup/root identity is never used as a path
-fallback. The bounded `child_episode_ids` field contains current
-children only; replay diagnostics own historical counts. DFP Context lifetime
-is governed by its frozen structure/draw and market epoch rather than the local
-plan clock, while each DFP episode freezes its own plan deadline. LSR retains a
-local Context horizon because its sweep is itself the mechanism root.
-
-DFP freezes terminal authority by semantic role rather than by a broad source-ID
-closure. The exact H4 structure, protected raw swing and context draw can close
-the Context; current H4 high/low projections can revise supporting evidence but
-cannot close an Entry Episode, the parent Context or a managed position. A
-local zone/path/trigger terminal applies only to its owning child. Scene Graph
-connectivity still records projection provenance, but shared provenance does
-not grant a projection the terminal authority of its source structure.
-
-LSR separates its parent reversal mechanism from local entry opportunity.
-`FrozenLSRContext` carries the exact manipulation, pool-path protocol,
-reacceptance and displacement clocks, sweep extreme and direction even after a
-completed Group5 path is compacted from the current observation. Each eligible
-zone gets a stable Episode identity derived from manipulation root,
-displacement, zone and direction. Siblings never share first pullback, trigger,
-entry path or terminal state. A failed child leaves the Context and other
-children alive; a Context terminal cascades once. The first uniquely timed
-executable and plan-valid child freezes plan/action-candidate ownership together
-with its entry, original sweep stop, primary target, deadline, route, trigger and first-
-executable clock; only current remaining-path, target-visibility and hard-
-obstruction diagnostics remain dynamic. A same-clock tie fails closed. Before
-or after terminal resolution, no newly visible intermediate liquidity may
-rewrite that owner route; completed or invalidated phase keeps the frozen plan
-and first trigger as non-actionable historical custody. Before
-that owner freeze, the target in a child's route is provisional; its
-consumption cannot complete an Episode that is still waiting for its own first
-pullback or same-zone trigger. Once ownership and the complete plan are frozen,
-delivery of that exact primary target retains its existing completion authority.
-Context termination, position management, Decision and Risk semantics are
-unchanged. Accepted outside rejects a not-yet-established Context, but cannot
-retrospectively erase a frozen reacceptance and reverse displacement. Risk
-validates the frozen parent
-provenance and the exact child location/path independently; it does not infer
-the parent from a zone-specific setup ID. No threshold, target geometry or hard
-gate is relaxed.
-
-Child discovery is gated by the frozen parent lifecycle. A closed, terminal,
-deadline-expired, or formerly known but absent LSR Context cannot spawn a later
-zone Episode; retained children remain available only for causal settlement.
-When multiple live Contexts claim one physical location or entry path, Episode
-materialization and action publication both fail closed while the Contexts and
-diagnostic evidence remain visible. Rearm requires a new manipulation root.
-
-LSR source authority is tiered without deleting 1m observations: H4/H1 or
-typed external/intermediate liquidity may establish Tier A; connected 15m/5m
-internal liquidity may establish Tier B; isolated or nested 1m internal
-liquidity is Tier C trigger/refinement evidence only. A mature balance range is
-rare optional context for LSR, never its hard gate, and FAVR remains parked.
-
-## Phase 7 shadow hypotheses, DOL probability and intent
-
-The neutral projection is the single per-clock authority for
-`OpenMarketThesis`: it updates `GlobalMarketContext`, builds the thesis tuple
-once, and stores that exact tuple in `NeutralMarketState`. The full Engine hands
-the precomputed context to `PlaybookBrain`; the Brain validates its clock,
-revision, epoch, root uniqueness, and canonical order and reuses it. Standalone
-Brain use performs the same construction once as a fallback. Terminal routing
-may change candidates and lifecycle state, but cannot rebuild or replace the
-neutral thesis tuple. Checkpoint restore requires Brain and Neutral views to
-agree.
-
-The same `PlaybookBrain` owns one current Hypothesis Manager competition set
-scoped by instrument, market epoch, dominant authority structure, and a shared
-session horizon. Its mutually exclusive paths are continuation, deeper
-retracement, reversal, balance, failed breakout, and residual unknown.
-Exact-source evidence contributes a configured log-weight increment once;
-unchanged evidence is deduplicated, and `correlation_key` is a global
-dependency-cluster identity rather than a family-local token. An admitted
-model cannot multiply cross-family contributions from one cluster unless one
-registered joint or history-conditioned contribution represents it. The Brain
-rejects a likelihood-enabled path protocol without a complete externally pinned
-artifact set. Because the current admission schema has no registered dependency
-resolver, fitted runtime facts are conservatively scoped to one unresolved
-competition-set cluster and cannot accumulate independent multipliers. Real
-completed bars apply registered decay,
-terminal paths receive zero probability, and active survivors are normalized
-with log-sum-exp. `residual_unknown` preserves mass for paths not represented by
-the named hypotheses. Update records retain the rule, source event IDs,
-`known_at`, model version, and protocol fingerprint. Only exact `MarketEvent`
-IDs resolvable in the current Observation are admitted; unresolved
-context/entity identities fail closed. `MarketBelief` carries the current
-competition set and this-clock records, not a complete persisted evidence
-journal.
-
-The runtime now uses those invalidation and realization contracts inside the
-current authority scope. The `PlaybookBrain` adapter admits only
-production-shape, exact-parent facts:
-frozen-authority Qualified BOS/MSS may falsify paths; BOS
-Acceptance/Rejection, graph-connected lower-frame Acceptance, and the legacy
-range-activation fact may settle a winner. A same-clock
-terminal precedes a conflicting winner, and local EntryEpisode failure has no
-global path authority. The published probability model is still neutral—equal
-priors, zero log-likelihood increments, zero real-bar decay—and no fitted
-artifact is admitted. Equal-logit subtraction is explicitly softmax-invariant,
-not effective decay. Earlier per-path expiry, hazard, or prior reversion
-remains unavailable unless a separately frozen temporal definition/artifact is
-admitted; the shared horizon is unchanged.
-The read-only Phase 7 readiness checker last reported 13 blockers with
-`ready_for_offline_fit=false` and `artifacts_written=[]` against the frozen
-Phase 6 source and its three compact ledgers, having inspected 7,381 rows; it
-never fitted a likelihood, temporal, path-calibration, or DOL-calibration
-artifact. Neither the checker nor those ledgers is in the repository any more —
-they went with `experiments/` and the Phase 5/6 runners on 2026-09-06 — so that
-blocker count is a historical reading, not a check this checkout can rerun. The
-June
-Week-4 temporal/branching design is separately frozen and passes its strict
-identity validator without opening market data; execution bindings,
-materialization, replay, and results remain absent and unauthorized.
-Authority/scope rollover can replace the current competition set, but no
-registered fact yet classifies and archives the retired scope as realized,
-invalidated, or expired. The Brain input is still
-`MarketObservation + SceneGraph/SceneDelta`, not solely
-`MarketSnapshot + events`; both gaps belong in the eventual vertical migration
-rather than a second Brain.
-The range-driven balance mapping remains shadow-only. Foundation v2 now keeps
-Structural and Balance Range identities/locations separate, but no empirical
-artifact admits either as path evidence. DOL target-map compatibility consumes
-the foundation-active liquidity lifecycle where present, including a distinct
-rearmed interaction generation, while preserving the legacy view only for
-sources not yet managed by the foundation. This is still a candidate/ranking
-adapter, not a fitted DOL probability model.
-
-The Bayesian Belief Updater is executable accounting, not a calibrated
-Bayesian posterior. The configuration declares
-`normalized_development_weights_not_calibrated_posterior` and
-`development_unvalidated`/`shadow_only`; the increments have not been fitted
-as likelihood ratios. The engine binds exact path, DOL-ranking,
-DOL-probability, and Signal Policy protocol fingerprints, and live/action
-consumers remain isolated.
-
-DOL ranking joins only exact visible external-draw candidates to one path. For
-each direction it evaluates target distance, strength, timeframe, structural
-rank, age, and hard/soft obstructions lying strictly between current price and
-target. Target-self identity, shared-source, and co-located obstructions are
-excluded. A softmax normalizes candidate weights within the diagnostic cohort,
-and the output also records the linked normalized path-hypothesis weight and
-their product as diagnostic joint quality. The separate DOL-probability layer
-can marginalize across paths and retains an explicit no-target alternative
-instead of forcing a draw. Neither the Brain nor the standalone marginalizer
-publishes a DOL-probability result while an exact fitted/admitted artifact bound
-to the active path protocol/model is absent; only the diagnostic ranking weight
-remains visible.
-
-Signal Policy assessment and a standalone shadow Trade Intent projector retain
-separate exact artifact admission. `legacy_decision_risk_compat` Engine updates
-do not invoke that projector. Without fitted/admitted path-likelihood,
-DOL-probability, and outcome-calibration artifacts, assessment also fails
-closed and the belief intent map remains empty. It does not fall back to a legacy
-`HypothesisBelief.probability`, and none of these fields changes Decision,
-Risk, an order, or a position.
-
-## Decision, risk and Phase 8 execution boundary
+## Decision, risk and the retired execution boundary
 
 Flat states compare enter, wait and abstain. Open states compare hold, protect,
 exit and abstain. An unclear best-versus-second-best advantage resolves to
@@ -647,21 +451,29 @@ first eligible on the next tradable clock. Its recorded resolution is
 `filled`, `pending_right_censored`, or `not_filled_or_expired_next_bar`; the
 last label intentionally combines non-fill and expiry. A simulated fill may
 create one position, and same-bar stop/target ambiguity is adverse-first.
-Position/risk feedback enters the next Brain update.
+Position/risk feedback entered the next Brain update.
 
-The retained simulator above is not the Phase 8 Executor. Phase 8 separately
-implements immutable order FSM v1.5 with risk-approved intent custody, command/
-fact separation, working/cancelled/expired/rejected/partial/filled transitions,
-cancel/replace races, OCO reconciliation, managed stops, aggregate entry/exit
-reservations, position conservation, checkpoints, and deterministic event
-replay. Venue facts are checked against submit/request causality, and order and
-position states remain separate from market state. The independent logic review
-finished with P0/P1=0. This is engineering validation only: the FSM has no
-broker/network submission path and is not evidence of fill quality. It is also
-not yet the authoritative end-to-end executor: the current development action
-path still uses Decision/Risk and the retained simulator, while the exact
-`TradeIntent -> RiskApproval -> FSM` handoff remains a standalone shadow
-adapter.
+Decision and Risk are intact as code and untouched by the Brain retirement, but
+they have no input: Decision reads `MarketBelief.thesis_candidates` and
+`position_management_candidates`, which no module now fills. The simulator in
+`execution/core/simulation.py` is likewise intact but imports
+`shares/core/engine.py`, which cannot be imported. Both wait on a new belief
+producer.
+
+**Order FSM v1.5 was retired on 2026-09-07** together with the Trade Intent it
+took into custody. `execution/core/execution_fsm.py` implemented immutable
+risk-approved intent custody, command/fact separation,
+working/cancelled/expired/rejected/partial/filled transitions, cancel/replace
+races, OCO reconciliation, managed stops, aggregate entry/exit reservations,
+position conservation, checkpoints and deterministic event replay, and its
+independent logic review finished with P0/P1=0. That was engineering validation
+only: it never had a broker or network submission path, and it was never the
+authoritative executor — the development action path always used Decision/Risk
+and the simulator, with `TradeIntent -> RiskApproval -> FSM` a standalone shadow
+adapter. It went because `execution/core/trade_intent.py` went, and that went
+because its only entry point consumed a `SignalAssessment` from the retired
+Signal Policy. Restoring an executor means registering a new intent contract
+against the new belief producer, not restoring these files.
 
 **Phase 8 Execution Research was retired on 2026-09-06.** Its seven-entry-method
 core, the v1.1/v1.2 protocols, the fail-closed formal runner and result
@@ -677,8 +489,8 @@ freeze, so nothing measured is lost with it. The Phase 8 research gate is
 closed, not passed, and reopening it means registering a new protocol rather
 than restoring these files.
 
-The order FSM above is unaffected — `execution_fsm.py` stays a package-root
-export, and it was a separate deliverable from the research core.
+The order FSM was unaffected by that retirement — it was a separate deliverable
+from the research core — but it has since been retired in its own right, above.
 
 ## Phase 9 shadow-live parity boundary
 
@@ -689,8 +501,9 @@ operational v3 contract, the two file-pilot scripts and the three configs
 the `inputs/`/`outputs/` payloads their bounded runs read and wrote. Nothing in
 the current runtime depended on them: `shadow_live.py` and
 `shadow_operational.py` were imported only by each other, by those scripts and
-by their own tests. `shadow_outcome.py` is a different module and stays — it
-serves the optional `--shadow-outcomes` case-library projection.
+by their own tests. `shadow_outcome.py` was a different module and survived that
+retirement; it was itself retired on 2026-09-07 with the case-library projection
+it served.
 
 An operational pilot therefore has no harness in this repository. Re-opening one
 needs a newly frozen runtime/config identity, not a restored file. The rest of
@@ -810,26 +623,31 @@ The executable side of both studies was retired on 2026-09-06 as well:
 `scripts/materialize_mbo_mechanism.py` runners, and the three
 `configs/research/` manifest templates are gone. What the studies concluded
 still binds Phase 7 through the `phase6_*` identities and evidence allowlist in
-`brain/configs/path_hypotheses.json`, which `brain/core/path_belief.py` still
+`brain/configs/path_hypotheses.json`, which `brain/core/market_belief.py` still
 validates fail-closed. `execution/core/mbo.py` and
 `execution/scripts/materialize_mbo_execution.py` are unaffected: they belong to the
-execution-reality path that `shares/scripts/run_continuous_replay.py --mbo-execution`
-uses, not to the mechanism study.
+execution-reality path, not to the mechanism study. The replay runner that drove
+it (`shares/scripts/run_continuous_replay.py --mbo-execution`) was retired on
+2026-09-07 with the Brain it replayed.
 
-The optional EntryEpisode causal case library (`--causal-case-library`, with
-`shares/scripts/query_causal_cases.py`) and the input-only MarketEpisode stream consume
-this same replay without a second replay loop; their separate protocol
-documents were removed on 2026-09-06, and the executable contracts are in
-`shares/core/causal_cases.py`, `shares/core/market_cases.py` and
-`shares/core/case_retrieval.py`. `CausalCase` may join independently
-resolved outcomes only after neighbour selection; `MarketEpisode` has a
-different physical identity, estimand, and outcome-free boundary. They remain
-separate protocols while sharing canonical storage/hash/no-clobber publication,
-immutable vector storage, and cosine/OOD mechanics. Shared infrastructure
-cannot weaken either eligibility or leakage rule. OHLCV remains in the
-canonical source and is read by prefix boundary. Any AI comment must still be
-translated into a computable sequence primitive and can never become an action
-label.
+**The EntryEpisode causal case library was retired on 2026-09-07.**
+`shares/core/causal_cases.py`, `shares/core/market_representation.py`,
+`shares/core/case_retrieval.py`, `shares/scripts/query_causal_cases.py`,
+`shares/scripts/train_market_representation.py` and
+`shares/scripts/evaluate_market_episode_retrieval.py` are gone: `CausalCase`
+recorded `PlaybookBrain` EntryEpisodes, so it lost its subject with the Brain.
+`shares/core/market_cases.py` is retained — the input-only MarketEpisode stream
+has a different physical identity, estimand and outcome-free boundary, and does
+not depend on the Brain — but nothing loads it today, and
+`shares/configs/market_case_input_profiles_v2.json` is likewise kept as a frozen
+preregistration artifact with no current reader.
+
+The rules those protocols established still bind any replacement: a case may
+join independently resolved outcomes only after neighbour selection; shared
+storage/hash/no-clobber infrastructure cannot weaken either eligibility or
+leakage rule; OHLCV is read by prefix boundary from the canonical source; and an
+AI comment must be translated into a computable sequence primitive and can never
+become an action label.
 
 [`../configs/data_splits.json`](../../configs/data_splits.json) separates
 development, calibration, rolling OOF and sealed OHLCV, plus MBO development

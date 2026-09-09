@@ -13,7 +13,11 @@ from shares.core.io import (
     iter_completed_bars,
     load_ohlcv,
 )
-from shares.core.model import AccountState, Direction, Timeframe
+from contract.market import (
+    Direction,
+    Timeframe,
+)
+from contract.execution import AccountState
 from execution.core.execution import ExecutionRealityInput
 
 from shares.tests.helpers import session_bars

@@ -8,24 +8,28 @@ import pandas as pd
 import pytest
 
 from brain.core.brain_entry_sequence import brain_observation_view
-from shares.core.model import (
-    BOSScope,
+from contract.market import (
     Direction,
-    DirectionalObstructionView,
+    MarketMode,
+    ScaleRelation,
+    Timeframe,
+)
+from contract.eye import (
+    BOSScope,
     EntryLocationLifecycle,
     EntryLocationState,
-    GlobalMarketContext,
     InteractionUpdate,
-    MarketMode,
     MicroBreakFact,
-    NEUTRAL_MARKET_STATE_SCHEMA_VERSION,
-    OpenMarketThesis,
     PathSequenceLifecycle,
     PathSequenceState,
     PathSequenceStep,
-    ScaleRelation,
+)
+from contract.brain import (
+    DirectionalObstructionView,
+    GlobalMarketContext,
+    NEUTRAL_MARKET_STATE_SCHEMA_VERSION,
+    OpenMarketThesis,
     ScaleRelationState,
-    Timeframe,
 )
 from shares.core.scene_graph import (
     build_neutral_market_state,

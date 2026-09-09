@@ -8,37 +8,45 @@ from pathlib import Path
 
 import pandas as pd
 
-from shares.core.model import (
-    AccountState,
-    Action,
-    ActionUtility,
+from contract.market import (
     Bar,
     Candle,
-    Decision,
     Direction,
-    EngineSnapshot,
-    EventKind,
-    ExecutionObservation,
-    FrameObservation,
-    HypothesisBelief,
-    LiquidityInventoryItem,
-    LiquidityInventoryLifecycle,
     LiquidityLevel,
-    MarketBelief,
-    MarketEvent,
-    MarketObservation,
     Playbook,
     PlaybookPhase,
-    RiskAssessment,
     StructuralLevel,
+    Timeframe,
+    ticks_to_price,
+)
+from contract.execution import (
+    AccountState,
+    ExecutionObservation,
+)
+from contract.eye import (
+    EventKind,
+    FrameObservation,
+    LiquidityInventoryItem,
+    LiquidityInventoryLifecycle,
+    MarketEvent,
+    MarketObservation,
     SwingLifecycle,
     SwingPoint,
     SwingRelation,
     SwingSide,
-    Timeframe,
-    TradePlan,
-    ticks_to_price,
 )
+from contract.brain import (
+    HypothesisBelief,
+    MarketBelief,
+    TradePlan,
+)
+from contract.decision import (
+    Action,
+    ActionUtility,
+    Decision,
+)
+from contract.risk import RiskAssessment
+from contract.research import EngineSnapshot
 from shares.core.scale_registry import parse_scale_specs, scale_registry_id
 
 
