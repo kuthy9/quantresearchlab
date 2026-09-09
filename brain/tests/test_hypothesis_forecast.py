@@ -754,3 +754,48 @@ def test_no_sequence_of_lifecycle_operations_can_break_the_pool_invariants():
         assert len({h.mode_id for h in advance.hypotheses}) == len(advance.hypotheses)
     assert largest <= MAX_LIVE_HYPOTHESES
     assert exercised == {op.value for op in LifecycleOperation}
+
+
+# -- vocabulary pins ----------------------------------------------------------
+#
+# The context vector one-hot encodes three of the Eye's vocabularies. Guessing
+# their members silently degrades every affected feature to a constant, which no
+# other test would catch, so each is pinned against its source of truth here.
+
+
+def test_direction_encoding_matches_the_eye_vocabulary():
+    from contract.market import Direction
+
+    from brain.core.hypothesis_proposer import _direction
+
+    assert {member.name for member in Direction} == {"LONG", "SHORT"}
+    assert _direction(Direction.LONG) == 1.0
+    assert _direction(Direction.SHORT) == -1.0
+    assert _direction(None) == 0.0
+
+
+def test_delivery_phase_encoding_covers_every_registered_phase():
+    from eyes.core.market_state import DeliveryPhase
+
+    from brain.core.hypothesis_proposer import DELIVERY_PHASES
+
+    registered = {member.value for member in DeliveryPhase}
+    assert registered <= set(DELIVERY_PHASES)
+    assert DELIVERY_PHASES[-1] == "other"
+    assert set(DELIVERY_PHASES) - registered == {"other"}
+
+
+def test_session_phase_encoding_covers_every_registered_phase():
+    import pandas as pd_
+
+    from eyes.core.market_state import session_name_phase
+
+    from brain.core.hypothesis_proposer import SESSION_PHASES
+
+    clocks = pd_.date_range(
+        "2022-01-03 00:00", periods=24 * 60, freq="1min", tz="America/New_York"
+    )
+    emitted = {session_name_phase(clock)[1] for clock in clocks}
+    assert emitted <= set(SESSION_PHASES)
+    assert SESSION_PHASES[-1] == "other"
+    assert set(SESSION_PHASES) - emitted == {"other"}

@@ -36,13 +36,31 @@ CONTEXT_TIMEFRAMES: tuple[Timeframe, ...] = (
     Timeframe.M1,
 )
 
-# Delivery phases are one-hot encoded; an unrecognized phase lands in "other"
-# rather than silently colliding with a known one.
+# The Eye's registered delivery phases, one-hot encoded.  These are the exact
+# values of ``eyes.core.market_state.DeliveryPhase``; an unrecognized phase
+# lands in "other" rather than silently colliding with a known one, and
+# ``test_hypothesis_forecast`` pins this tuple against the enum so a new phase
+# cannot appear without this vector noticing.
 DELIVERY_PHASES: tuple[str, ...] = (
-    "accumulation",
-    "manipulation",
-    "distribution",
-    "rebalance",
+    "balance",
+    "expansion",
+    "retracement",
+    "reversal_attempt",
+    "transition",
+    "other",
+)
+
+# The registered exchange-session phases, from
+# ``eyes.core.market_state.session_name_phase``.  The session name is a coarser
+# label derived from the same clock, so encoding the phase alone loses nothing.
+SESSION_PHASES: tuple[str, ...] = (
+    "overnight_delivery",
+    "pre_open",
+    "opening_expansion",
+    "morning_delivery",
+    "midday_balance",
+    "afternoon_delivery",
+    "closing_rotation",
     "other",
 )
 
@@ -86,10 +104,7 @@ _SESSION_FEATURES: tuple[str, ...] = (
     "session_dist_prior_day_low_atr",
     "session_dist_overnight_high_atr",
     "session_dist_overnight_low_atr",
-    "session_phase_premarket",
-    "session_phase_regular",
-    "session_phase_overnight",
-    "session_phase_other",
+    *(f"session_phase_{name}" for name in SESSION_PHASES),
 )
 
 # Raw one-minute price context.  The Eye reports structure; these say how the
@@ -118,21 +133,16 @@ FEATURE_NAMES: tuple[str, ...] = (
 )
 FEATURE_DIM = len(FEATURE_NAMES)
 
-_SESSION_PHASE_PREFIXES: tuple[tuple[str, str], ...] = (
-    ("premarket", "premarket"),
-    ("regular", "regular"),
-    ("overnight", "overnight"),
-)
-
-
 class HypothesisProposerError(RuntimeError):
     """The proposer refuses to guess when its inputs are not what it needs."""
 
 
 def _direction(value: object) -> float:
-    if value is Direction.BULLISH:
+    """Signed direction: the Eye names these LONG and SHORT, not bullish/bearish."""
+
+    if value is Direction.LONG:
         return 1.0
-    if value is Direction.BEARISH:
+    if value is Direction.SHORT:
         return -1.0
     return 0.0
 
@@ -336,12 +346,8 @@ def observation_features(
         None if session.overnight_low is None else price - session.overnight_low, m1_atr
     )
     phase_name = str(session.phase or "")
-    matched_phase = "other"
-    for prefix, name in _SESSION_PHASE_PREFIXES:
-        if phase_name.startswith(prefix):
-            matched_phase = name
-            break
-    for name in ("premarket", "regular", "overnight", "other"):
+    matched_phase = phase_name if phase_name in SESSION_PHASES else "other"
+    for name in SESSION_PHASES:
         values[f"session_phase_{name}"] = 1.0 if name == matched_phase else 0.0
 
     values.update(_price_context(closes, bar_high_low, m1_atr))
@@ -584,6 +590,7 @@ class HypothesisProposer:
 __all__ = [
     "CONTEXT_TIMEFRAMES",
     "DELIVERY_PHASES",
+    "SESSION_PHASES",
     "FEATURE_DIM",
     "FEATURE_NAMES",
     "HypothesisProposer",
