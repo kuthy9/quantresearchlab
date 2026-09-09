@@ -88,11 +88,22 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--artifacts", default=DEFAULT_ARTIFACTS)
     parser.add_argument("--protocol", default="brain/configs/hypothesis_protocol.json")
+    parser.add_argument(
+        "--emit-end",
+        default="2022-01-05T17:00",
+        help="last clock to replay, exclusive, in exchange-local time; must "
+             "match the window the library was fitted on",
+    )
     parser.add_argument("--output", default=None)
     args = parser.parse_args()
 
     artifacts = ROOT / args.artifacts
     index, features, prices, payload = _load(artifacts)
+    if args.emit_end:
+        keep = index.tz_convert("America/New_York") < pd.Timestamp(
+            args.emit_end, tz="America/New_York"
+        )
+        index, features, prices = index[keep], features[keep], prices[keep]
     library, assignments, centre, scale = load_library_payload(payload)
     protocol_path = ROOT / args.protocol
     protocol = load_hypothesis_protocol(protocol_path)

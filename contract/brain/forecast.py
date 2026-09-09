@@ -460,11 +460,11 @@ def belief_revision_id(
 
 
 def normalized_entropy(probabilities: tuple[float, ...]) -> float:
-    """Shannon entropy of the full simplex (residual included), scaled to [0, 1].
+    """Shannon entropy over the given outcomes, scaled by the widest the Brain
+    can be (``MAX_LIVE_HYPOTHESES + 1`` outcomes).
 
-    A single certain outcome scores 0; a flat spread over the live modes plus
-    the residual scores 1.  ``MAX_LIVE_HYPOTHESES + 1`` outcomes is the widest
-    the Brain can be, so that is the normalizing base.
+    This is the raw measure. For a published belief use ``belief_uncertainty``,
+    which reads the residual correctly.
     """
 
     weights = [float(value) for value in probabilities if float(value) > 0.0]
@@ -475,6 +475,29 @@ def normalized_entropy(probabilities: tuple[float, ...]) -> float:
     if ceiling <= 0.0:
         return 0.0
     return min(1.0, max(0.0, entropy / ceiling))
+
+
+def belief_uncertainty(
+    probabilities: tuple[float, ...], residual_probability: float
+) -> float:
+    """How little the Brain can commit on this clock, in [0, 1].
+
+    The residual is not one outcome — it is "some mode I am not naming", and
+    treating it as a single alternative would make total ignorance look like
+    certainty: an empty pool carries a residual of one, whose entropy as a lone
+    outcome is zero. So the residual mass is spread across every slot the Brain
+    is not currently using, which is the most conservative reading available.
+
+    An empty pool therefore scores 1.0, and a pool with one near-certain
+    hypothesis scores near 0.0.
+    """
+
+    live = tuple(float(value) for value in probabilities)
+    residual = float(residual_probability)
+    unnamed = MAX_LIVE_HYPOTHESES + 1 - len(live)
+    if unnamed <= 0:
+        return normalized_entropy(live + (residual,))
+    return normalized_entropy(live + tuple(residual / unnamed for _ in range(unnamed)))
 
 
 __all__ = [
@@ -494,5 +517,6 @@ __all__ = [
     "TRAJECTORY_DIM",
     "TrajectoryMode",
     "belief_revision_id",
+    "belief_uncertainty",
     "normalized_entropy",
 ]

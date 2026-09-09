@@ -59,6 +59,7 @@ from .forecast import (
     TRAJECTORY_DIM,
     TrajectoryMode,
     belief_revision_id,
+    belief_uncertainty,
     normalized_entropy,
 )
 
@@ -109,5 +110,6 @@ __all__ = [
     "TradePlan",
     "TrajectoryMode",
     "belief_revision_id",
+    "belief_uncertainty",
     "normalized_entropy",
 ]

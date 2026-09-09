@@ -20,7 +20,7 @@ from contract.brain.forecast import (
     MarketBeliefState,
     ModeLibrary,
     belief_revision_id,
-    normalized_entropy,
+    belief_uncertainty,
 )
 from contract.market import Timeframe
 
@@ -120,7 +120,7 @@ class HypothesisForecaster:
         )
 
         probabilities = tuple(item.probability for item in advance.hypotheses)
-        uncertainty = normalized_entropy(probabilities + (advance.residual_probability,))
+        uncertainty = belief_uncertainty(probabilities, advance.residual_probability)
         revision_id = belief_revision_id(
             asof=advance.asof,
             hypotheses=advance.hypotheses,

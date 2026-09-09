@@ -366,12 +366,21 @@ class HypothesisPool:
             # hypotheses can converge without being adjacent leaves, and
             # requiring adjacency would make MERGE almost unreachable.
             parent_id = self._lowest_common_ancestor(left.mode_id, right.mode_id)
-            if parent_id is None or parent_id in (left.mode_id, right.mode_id):
-                continue
-            if any(m.mode_id == parent_id for m in members):
+            if parent_id is None:
                 continue
             age = max(left.age, right.age)
-            if _remaining_distance(left_mode, right_mode, age) > self.config.merge_maximum_distance:
+            if (
+                _remaining_distance(left_mode, right_mode, age)
+                > self.config.merge_maximum_distance
+            ):
+                continue
+            if parent_id in (left.mode_id, right.mode_id):
+                # One hypothesis is the other's own ancestor and the two no
+                # longer claim distinguishable futures: the finer distinction
+                # has stopped paying for itself, so the descendant is absorbed
+                # into the ancestor rather than competing with it.
+                pass
+            elif any(m.mode_id == parent_id for m in members):
                 continue
             # The survivor keeps the older anchor, so the merged hypothesis is
             # judged against the whole path either parent was judged against.
@@ -408,12 +417,12 @@ class HypothesisPool:
 
         members = list(members)
         records: list[LifecycleRecord] = []
-        room = self.config.max_live_hypotheses - len(members)
-        if room < 1:
-            return members, records
         for member in sorted(members, key=lambda m: m.hypothesis_id):
-            if room < 1:
-                break
+            # The loop walks a snapshot: an earlier split may already have
+            # replaced or evicted this member, and splitting it again would add
+            # two without removing one.
+            if not any(m is member for m in members):
+                continue
             if member.age < self.config.split_minimum_age_bars:
                 continue
             mode = self._mode(member)
@@ -432,6 +441,20 @@ class HypothesisPool:
                 continue
             if abs(d1 - d2) / total > self.config.split_maximum_imbalance:
                 continue
+            # A split replaces one claim with two, so it needs a free slot. When
+            # the pool is full it may take one from the weakest other member,
+            # exactly as a spawn may: refining a claim the tape is actively
+            # failing to decide is worth at least as much as admitting a new
+            # one. Without this, a pool that is usually full can never split.
+            evicted: PoolMember | None = None
+            if len(members) >= self.config.max_live_hypotheses:
+                others = [m for m in members if m is not member]
+                if not others:
+                    continue
+                weakest = min(others, key=lambda m: (m.prior, m.hypothesis_id))
+                if weakest.prior >= member.prior:
+                    continue
+                evicted = weakest
             lineage = tuple(dict.fromkeys((*member.lineage, member.hypothesis_id)))
             replacements = [
                 PoolMember(
@@ -444,8 +467,18 @@ class HypothesisPool:
                 )
                 for child in (first, second)
             ]
-            members = [m for m in members if m is not member] + replacements
-            room -= 1
+            dropped = {id(member)} | ({id(evicted)} if evicted is not None else set())
+            members = [m for m in members if id(m) not in dropped] + replacements
+            if evicted is not None:
+                records.append(
+                    LifecycleRecord(
+                        asof=asof,
+                        operation=LifecycleOperation.RETIRE,
+                        hypothesis_ids=(evicted.hypothesis_id,),
+                        mode_ids=(evicted.mode_id,),
+                        reason="evicted to make room for a split",
+                    )
+                )
             records.append(
                 LifecycleRecord(
                     asof=asof,

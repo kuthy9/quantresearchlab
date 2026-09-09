@@ -52,8 +52,31 @@ def main() -> None:
             "coarsest of which needs sixteen completed 4H bars."
         ),
     )
-    parser.add_argument("--emit-start", default="2022-01-02")
+    parser.add_argument("--emit-start", default="2022-01-02T18:00")
+    parser.add_argument(
+        "--emit-end",
+        default="2022-01-05T17:00",
+        help=(
+            "last observation point, exclusive, in exchange-local time. The "
+            "default is the close of the third trading session on or after "
+            "2022-01-01: sessions run 18:00 to 17:00 New York, so the three "
+            "sessions 2022-01-03/04/05 span 01-02 18:00 to 01-05 17:00. Bars "
+            "after this are still loaded, because the last observation points "
+            "need sixty minutes of future."
+        ),
+    )
     parser.add_argument("--end", default="2022-01-07")
+    parser.add_argument(
+        "--algorithm",
+        default="ward",
+        choices=("ward", "kmeans", "hdbscan"),
+        help=(
+            "grouping method. ward is the default because HDBSCAN abstains on "
+            "real trajectory vectors: they form one continuous cloud with no "
+            "density gaps. See clustering_comparison.csv."
+        ),
+    )
+    parser.add_argument("--n-modes", type=int, default=6)
     parser.add_argument("--min-cluster-size", type=int, default=25)
     parser.add_argument(
         "--decimation",
@@ -105,9 +128,19 @@ def main() -> None:
         )
         print(f"cached dataset -> {cache}")
 
+    if args.emit_end:
+        local = index.tz_convert("America/New_York")
+        keep = local < pd.Timestamp(args.emit_end, tz="America/New_York")
+        dropped = int((~keep).sum())
+        index, features = index[keep], features[keep]
+        trajectories, prices = trajectories[keep], prices[keep]
+        if dropped:
+            print(f"trimmed {dropped} observation points at or after {args.emit_end}")
+
+    local = index.tz_convert("America/New_York")
     print(
         f"{len(index)} observation points "
-        f"{index.min()} -> {index.max()}  "
+        f"{local.min()} -> {local.max()} (New York)  "
         f"({(time.monotonic() - started) / 60:.1f} min)"
     )
 
@@ -134,12 +167,16 @@ def main() -> None:
             print(f"  {key:32s} ARI={score:.3f}")
         (out / "stability.json").write_text(json.dumps(stability, indent=2) + "\n")
 
-    print("\n=== fitting the mode library (HDBSCAN + K-Medoids) ===")
+    print(f"\n=== fitting the mode library ({args.algorithm} + K-Medoids) ===")
     result = discover_modes(
         trajectories=trajectories,
         features=features,
         fitted_at=pd.Timestamp.now(tz="UTC").floor("s"),
-        config=DiscoveryConfig(min_cluster_size=args.min_cluster_size),
+        config=DiscoveryConfig(
+            algorithm=args.algorithm,
+            n_modes=args.n_modes,
+            min_cluster_size=args.min_cluster_size,
+        ),
     )
     library = result.library
     print(f"library {library.library_id}  fingerprint {library.fingerprint[:16]}…")

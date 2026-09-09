@@ -1,25 +1,37 @@
 """Discovering the trajectory modes the market actually produced.
 
-HDBSCAN finds the leaf modes: it is density-based, so it does not have to be
-told how many modes exist, and it is allowed to call a trajectory *noise*
-instead of forcing it into a cluster.  That refusal is the point — an
-observation the market only produced once is not a mode, and pretending
-otherwise is how a hypothesis engine learns to be confidently wrong.
+**Ward is the default, and that is an empirical result, not a preference.**
+HDBSCAN was the first choice — density-based, never told how many modes exist,
+and free to call a trajectory *noise* rather than forcing it into a cluster.
+On real ATR-normalized sixty-minute trajectories it abstains almost completely:
+over 5,813 observation points it labelled 98.2% of them noise at
+``min_cluster_size=15`` and found no cluster at all at 25 or above. The
+trajectories are one continuous cloud with no density gaps, which is what a
+near-continuous return distribution looks like. See ``compare_algorithms`` and
+``outputs/hypothesis_modes/clustering_comparison.csv``.
 
-K-Medoids then picks each mode's representative.  A centroid would average two
-opposite futures into a third that never happened; a medoid is always a real
-observed trajectory.
+So the modes here are quantization bins of a continuum rather than natural
+clusters, and the honest way to cut a continuum is a partitional method. Ward
+beats a Gaussian mixture decisively on stability (block-resample ARI 0.49 vs
+0.22) and matches K-Means, and unlike K-Means it produces a hierarchy — which
+the pool needs, because SPLIT and MERGE move along it. HDBSCAN remains
+selectable for data that does have density structure.
+
+K-Medoids picks each mode's representative regardless of how the members were
+grouped. A centroid would average two opposite futures into a third that never
+happened; a medoid is always a real observed trajectory.
 
 The leaves are agglomerated (Ward, on the standardized medoids) into a binary
-hierarchy.  The internal nodes are what give the pool its SPLIT and MERGE
+hierarchy. The internal nodes are what give the pool its SPLIT and MERGE
 structure: a parent is a coarser claim about the next hour, its two children
 the finer alternatives it can decompose into.
 
-``compare_algorithms`` exists because the choice above has to be defensible.
-It scores HDBSCAN against K-Means, a Gaussian mixture and Ward on the same
-vectors, including on a temporally decimated sample — adjacent observation
-points share fifty-nine of their sixty future minutes, so any metric computed
-on overlapping points measures autocorrelation as much as structure.
+``compare_algorithms`` is what makes the choice falsifiable. It scores all four
+families on the same vectors, including on a temporally decimated sample —
+adjacent observation points share fifty-nine of their sixty future minutes, so
+any metric computed on overlapping points measures autocorrelation as much as
+structure. Note that ``eta2_r60`` rises monotonically with ``k`` while
+silhouette falls: the two disagree precisely because there is no natural ``k``.
 """
 from __future__ import annotations
 
@@ -68,9 +80,22 @@ def standardize(matrix: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]
     """
 
     data = np.asarray(matrix, dtype=float)
-    centre = np.nanmean(data, axis=0)
-    centre = np.where(np.isfinite(centre), centre, 0.0)
-    scale = np.nanstd(data, axis=0)
+    # A column can legitimately be entirely NaN — a scale whose state the Eye
+    # never published over this window — so compute the moments by hand rather
+    # than letting nanmean/nanstd warn about the empty slice.
+    valid = np.isfinite(data)
+    counts = valid.sum(axis=0)
+    filled = np.where(valid, data, 0.0)
+    centre = np.divide(
+        filled.sum(axis=0), counts, out=np.zeros(data.shape[1]), where=counts > 0
+    )
+    variance = np.divide(
+        (np.where(valid, data - centre, 0.0) ** 2).sum(axis=0),
+        counts,
+        out=np.zeros(data.shape[1]),
+        where=counts > 0,
+    )
+    scale = np.sqrt(variance)
     scale = np.where(np.isfinite(scale) & (scale > 1e-12), scale, 1.0)
     z = (data - centre) / scale
     return np.nan_to_num(z, nan=0.0, posinf=0.0, neginf=0.0), centre, scale
@@ -145,14 +170,25 @@ def _dispersion(members: np.ndarray, medoid: np.ndarray) -> np.ndarray:
 
 @dataclass(frozen=True)
 class DiscoveryConfig:
-    """How permissive discovery is about calling something a mode."""
+    """Which grouping method to use, and how permissive it is.
 
+    ``n_modes`` applies to the partitional methods. Silhouette prefers few
+    modes and explained variance prefers many, so no criterion picks it for
+    you; six is where the disjoint-sample comparison had both still reasonable.
+    """
+
+    algorithm: str = "ward"
+    n_modes: int = 6
     min_cluster_size: int = 25
     min_samples: int | None = None
     cluster_selection_method: str = "eom"
     build_hierarchy: bool = True
 
     def __post_init__(self) -> None:
+        if self.algorithm not in ("ward", "kmeans", "hdbscan"):
+            raise ValueError("algorithm must be 'ward', 'kmeans' or 'hdbscan'")
+        if self.n_modes < 2:
+            raise ValueError("n_modes must be at least 2")
         if self.min_cluster_size < 2:
             raise ValueError("min_cluster_size must be at least 2")
         if self.cluster_selection_method not in ("eom", "leaf"):
@@ -192,7 +228,6 @@ def discover_modes(
     """
 
     _require_sklearn()
-    from sklearn.cluster import HDBSCAN
 
     config = config or DiscoveryConfig()
     trajectories = np.asarray(trajectories, dtype=float)
@@ -200,26 +235,24 @@ def discover_modes(
         raise ModeDiscoveryError(
             f"trajectories must be (n, {TRAJECTORY_DIM}), got {trajectories.shape}"
         )
-    if trajectories.shape[0] < config.min_cluster_size:
+    floor = (
+        config.min_cluster_size if config.algorithm == "hdbscan" else config.n_modes
+    )
+    if trajectories.shape[0] < floor:
         raise ModeDiscoveryError(
-            f"{trajectories.shape[0]} trajectories cannot support a minimum "
-            f"cluster size of {config.min_cluster_size}"
+            f"{trajectories.shape[0]} trajectories cannot support {floor} groups"
         )
 
     z_traj, traj_centre, traj_scale = standardize(trajectories)
     _, feat_centre, feat_scale = standardize(np.asarray(features, dtype=float))
 
-    labels = HDBSCAN(
-        min_cluster_size=config.min_cluster_size,
-        min_samples=config.min_samples,
-        cluster_selection_method=config.cluster_selection_method,
-        copy=True,
-    ).fit_predict(z_traj)
+    labels = _group(z_traj, config)
     leaf_labels = sorted({int(value) for value in labels if value >= 0})
     if not leaf_labels:
         raise ModeDiscoveryError(
             "HDBSCAN found no density mode at this min_cluster_size; the "
-            "trajectories are a single diffuse cloud"
+            "trajectories are a single diffuse cloud. Real trajectory vectors "
+            "behave this way — use algorithm='ward' instead."
         )
 
     modes: list[TrajectoryMode] = []
@@ -270,10 +303,7 @@ def discover_modes(
         library_id=library_id,
         fingerprint=_library_fingerprint(payload),
         fitted_at=fitted_at,
-        algorithm=(
-            f"hdbscan(min_cluster_size={config.min_cluster_size},"
-            f"selection={config.cluster_selection_method})+kmedoids+ward_hierarchy"
-        ),
+        algorithm=_algorithm_label(config),
         modes=tuple(modes),
         feature_names=TRAJECTORY_COMPONENTS,
         observation_count=int(trajectories.shape[0]),
@@ -287,6 +317,40 @@ def discover_modes(
         trajectory_centre=traj_centre,
         trajectory_scale=traj_scale,
     )
+
+
+def _algorithm_label(config: DiscoveryConfig) -> str:
+    if config.algorithm == "hdbscan":
+        return (
+            f"hdbscan(min_cluster_size={config.min_cluster_size},"
+            f"selection={config.cluster_selection_method})+kmedoids+ward_hierarchy"
+        )
+    return f"{config.algorithm}(n_modes={config.n_modes})+kmedoids+ward_hierarchy"
+
+
+def _group(z_traj: np.ndarray, config: DiscoveryConfig) -> np.ndarray:
+    """Assign every trajectory to a leaf group, or to noise (HDBSCAN only)."""
+
+    if config.algorithm == "hdbscan":
+        from sklearn.cluster import HDBSCAN
+
+        return HDBSCAN(
+            min_cluster_size=config.min_cluster_size,
+            min_samples=config.min_samples,
+            cluster_selection_method=config.cluster_selection_method,
+            copy=True,
+        ).fit_predict(z_traj)
+    if config.algorithm == "kmeans":
+        from sklearn.cluster import KMeans
+
+        return KMeans(
+            n_clusters=config.n_modes, n_init=10, random_state=0
+        ).fit_predict(z_traj)
+    from sklearn.cluster import AgglomerativeClustering
+
+    return AgglomerativeClustering(
+        n_clusters=config.n_modes, linkage="ward"
+    ).fit_predict(z_traj)
 
 
 def _agglomerate(

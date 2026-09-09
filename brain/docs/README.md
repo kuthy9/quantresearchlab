@@ -44,8 +44,8 @@ MarketObservation (Eye)
 | --- | --- |
 | `SPAWN` | a proposed mode is not live, its retrieval prior clears `spawn_minimum_prior`, and there is a free slot (or it beats the weakest live hypothesis by `spawn_displacement_margin`) |
 | `UPDATE` | every clock: each live hypothesis is re-scored against its realized path |
-| `SPLIT` | a hypothesis older than `split_minimum_age_bars` sits between two child modes of its own mode, within `split_maximum_imbalance`, and there is room |
-| `MERGE` | two live siblings' *remaining* expected trajectories are within `merge_maximum_distance`; they become their common parent |
+| `SPLIT` | a hypothesis older than `split_minimum_age_bars` sits between two child modes of its own mode, within `split_maximum_imbalance`. If the pool is full it may evict the weakest rival, exactly as a spawn may — otherwise a pool that is usually full could never split |
+| `MERGE` | two live hypotheses' *remaining* expected trajectories are within `merge_maximum_distance`; they become their lowest common ancestor. When one is already the other's ancestor, the descendant is absorbed into it — the finer distinction stopped paying for itself |
 | `RETIRE` | age reached `retire_maximum_age_bars`, divergence exceeded `falsification_divergence`, probability fell under `retire_minimum_probability`, or a better-supported proposal displaced it |
 
 The evidence weight is recomputed in full on every clock rather than
@@ -58,12 +58,18 @@ term in the log-sum-exp, is floored at `residual_floor`, and equals one when
 nothing is live — the Brain is never forced to explain the whole future with
 whichever modes it happens to be holding.
 
+`uncertainty` reads that residual correctly. The residual is "some mode I am
+not naming", not one named outcome, so `belief_uncertainty` spreads it across
+the slots the Brain is not using before taking the entropy. Treating it as a
+single outcome would make total ignorance — an empty pool, residual one — score
+zero uncertainty, the same as perfect confidence.
+
 ## Research — `brain/research/`
 
 | module | owns |
 | --- | --- |
 | `trajectory_dataset.py` | driving the Eye over a window and pairing each bar with its realized sixty minutes |
-| `mode_discovery.py` | HDBSCAN + K-Medoids mode fitting, the Ward hierarchy, and the algorithm comparison harness |
+| `mode_discovery.py` | Ward + K-Medoids mode fitting, the Ward hierarchy, and the algorithm comparison harness |
 
 Both read the future by construction. Nothing here may become a runtime
 authority, which is why `observation_features` lives in `brain/core/` and this
@@ -72,6 +78,47 @@ package imports it, not the other way round.
 `trajectory_vector` replays the future through the same `RealizedPath` the
 runtime updater uses, so a mode's medoid and a live hypothesis's partial path
 can never be measured by different arithmetic.
+
+### Why Ward, not HDBSCAN
+
+HDBSCAN was the first choice, for good reasons: density-based, never told how
+many modes exist, and free to call a trajectory *noise* rather than forcing it
+into a cluster. On real data it abstains almost completely.
+
+Over 5,813 observation points (2022-01-02 → 01-06):
+
+| algorithm | parameter | clusters | noise | η²(r60) |
+| --- | --- | --- | --- | --- |
+| HDBSCAN | `min_cluster_size=15` | 2 | **98.2%** | 0.038 |
+| HDBSCAN | 25 / 50 / 100 / 200 | **0** | 100% | — |
+
+ATR-normalized sixty-minute trajectories are one continuous cloud with no
+density gaps — which is what a near-continuous return distribution looks like.
+This is not a tuning failure; there is no density structure to find.
+
+So the modes are quantization bins of a continuum, and the honest way to cut a
+continuum is a partitional method. On the temporally disjoint sample:
+
+| algorithm | k | silhouette | η²(r60) | block-resample ARI |
+| --- | --- | --- | --- | --- |
+| **ward** | 6 | 0.175 | **0.576** | 0.487 |
+| kmeans | 6 | 0.243 | 0.514 | **0.540** |
+| gmm | 6 | 0.119 | 0.446 | 0.220 |
+
+Ward and K-Means are close; the Gaussian mixture is decisively worse on
+stability. Ward wins because it produces a hierarchy, and `SPLIT`/`MERGE` move
+along it.
+
+Note that η² rises monotonically with `k` while silhouette falls. The two
+criteria disagree precisely because there is no natural `k`; six is where both
+were still reasonable, and `--n-modes` exposes the choice.
+
+Two sampling cautions are built into the harness. Consecutive observation
+points share fifty-nine of their sixty future minutes, so metrics on the full
+sample measure autocorrelation as much as structure — hence the decimated
+"disjoint" sample, which for a three-day window is only ~97 points. And
+stability uses contiguous-block resampling, because an i.i.d. bootstrap over
+near-duplicate rows reports a stability the data does not have.
 
 ## Protocols — `brain/configs/`
 
@@ -133,7 +180,12 @@ the machinery runs.
 3. The mode library has only ever been fitted on a three-day in-sample window.
    Nothing has been fitted out-of-sample, and no threshold in
    `hypothesis_protocol.json` has been calibrated.
-4. `brain/core/validation.py`, `calibration.py`, `brain_calibration.py` and
+4. `SPLIT` and `MERGE` churn: over three sessions the replay recorded 587 splits
+   and 1,644 merges against 4,132 updates. The pool consolidates and refines far
+   more often than it retires, which is defensible — the context genuinely moves
+   between specific and ambiguous — but the rates have not been tuned, and a
+   quieter pool may well be preferable.
+5. `brain/core/validation.py`, `calibration.py`, `brain_calibration.py` and
    `calibration_replay.py` were removed on 2026-09-08. Four scripts still import
    `brain.core.validation`
    (`eyes/scripts/run_eye_authority_scan.py`, `eyes/scripts/scan_mature_ranges.py`,

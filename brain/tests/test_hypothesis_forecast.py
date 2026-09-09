@@ -799,3 +799,26 @@ def test_session_phase_encoding_covers_every_registered_phase():
     assert emitted <= set(SESSION_PHASES)
     assert SESSION_PHASES[-1] == "other"
     assert set(SESSION_PHASES) - emitted == {"other"}
+
+
+def test_an_empty_pool_is_maximally_uncertain_not_maximally_confident():
+    """The residual is "some mode I am not naming", not one named outcome.
+
+    Treated as a single outcome, a residual of one has zero entropy — total
+    ignorance would report perfect confidence. Spreading it over the unused
+    slots is what makes the number mean what it says.
+    """
+
+    from contract.brain.forecast import belief_uncertainty
+
+    assert belief_uncertainty((), 1.0) == pytest.approx(1.0)
+    assert belief_uncertainty((0.97,), 0.03) < 0.2
+    assert belief_uncertainty((0.25, 0.25, 0.25), 0.25) == pytest.approx(1.0)
+
+
+def test_uncertainty_falls_as_one_hypothesis_takes_over():
+    from contract.brain.forecast import belief_uncertainty
+
+    spread = belief_uncertainty((0.3, 0.3), 0.4)
+    concentrated = belief_uncertainty((0.9, 0.05), 0.05)
+    assert concentrated < spread

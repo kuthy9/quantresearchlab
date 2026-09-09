@@ -29,7 +29,8 @@
     "neighbours": 200,
     "minimum_neighbours": 25,
     "max_proposals": 6,
-    "minimum_prior": 0.05
+    "minimum_prior": 0.25,
+    "_minimum_prior_note": "The share of retrieved neighbours a mode needs before it is named specifically. Below it, the proposer climbs to the mode's ancestor instead: an ambiguous neighbourhood supports a coarser claim, not a confident fine one. With six leaves a uniform split gives each 0.167, so a threshold under that never engages the roll-up at all."
   },
   "pool": {
     "max_live_hypotheses": 3,
