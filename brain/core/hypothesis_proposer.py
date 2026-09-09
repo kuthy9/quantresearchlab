@@ -30,7 +30,7 @@ from typing import Any, Mapping, Sequence
 import numpy as np
 
 from contract.brain.forecast import (
-    MAX_LIVE_HYPOTHESES,
+    MAX_CLOUD_NODES,
     PRINCIPAL_COMPONENT_COUNT,
     TRAJECTORY_CURVE_LENGTH,
     ConditionalCloud,
@@ -392,7 +392,7 @@ class ProposerConfig:
     neighbours: int = 200
     minimum_neighbours: int = 25
     cluster_count: int = 6
-    max_nodes: int = MAX_LIVE_HYPOTHESES
+    max_nodes: int = 4
     minimum_mass: float = 0.12
     kmeans_restarts: int = 5
 
@@ -403,8 +403,8 @@ class ProposerConfig:
             raise ValueError("minimum_neighbours must lie in [1, neighbours]")
         if self.cluster_count < 2:
             raise ValueError("cluster_count must be at least 2")
-        if not 1 <= self.max_nodes <= MAX_LIVE_HYPOTHESES:
-            raise ValueError(f"max_nodes must lie in [1, {MAX_LIVE_HYPOTHESES}]")
+        if not 1 <= self.max_nodes <= MAX_CLOUD_NODES:
+            raise ValueError(f"max_nodes must lie in [1, {MAX_CLOUD_NODES}]")
         if not 0.0 < self.minimum_mass < 1.0:
             raise ValueError("minimum_mass must lie in (0, 1)")
         if self.kmeans_restarts < 1:
@@ -564,6 +564,7 @@ class HypothesisProposer:
                 assigned_count=0,
                 cluster_count=0,
                 nodes=(),
+                component_scale=self.index.component_scale,
             )
 
         scores = self.index.reference_scores[rows]
@@ -589,6 +590,7 @@ class HypothesisProposer:
                 continue
             centre = scores[members].mean(axis=0)
             local = int(np.argmin(np.linalg.norm(scores[members] - centre, axis=1)))
+            # The medoid is what we publish; the centroid is what we match on.
             representative = int(members[local])
             member_curves = curves[members]
             dispersion = np.maximum(
@@ -600,7 +602,7 @@ class HypothesisProposer:
             node = TrajectoryNode(
                 node_id=node_identity(curve),
                 curve=curve,
-                components=tuple(float(v) for v in scores[representative]),
+                components=tuple(float(v) for v in centre),
                 dispersion=tuple(float(v) for v in dispersion),
                 mass=mass,
                 member_count=int(members.size),
@@ -622,6 +624,7 @@ class HypothesisProposer:
             assigned_count=sum(node.member_count for node in kept),
             cluster_count=clusters,
             nodes=tuple(kept),
+            component_scale=self.index.component_scale,
         )
 
 

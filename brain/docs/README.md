@@ -97,8 +97,16 @@ greedy nearest-first pass would make the operation depend on iteration order,
 and the whole point of recording `SPLIT` and `MERGE` is to tell a real change
 from an artefact.
 
-`association_max_distance` is the gate. Beyond it the geometry has moved far
-enough that calling it the same claim would be a fiction.
+`association_max_distance_scale` is the gate, expressed as a **fraction of the
+principal basis's own spread** rather than an absolute distance — PC coordinates
+scale with the window's volatility, so a fixed number means something different
+in every regime. Beyond the gate the geometry has moved far enough that calling
+it the same claim would be a fiction.
+
+Nodes match on the cluster **centroid** and publish the **medoid**. A medoid is a
+discrete choice, so a small shift in the cloud can jump it to a different
+historical curve even when the cluster barely moved; the centroid is what stays
+comparable, and the medoid is what stays real.
 
 The evidence weight is recomputed in full on every clock rather than
 accumulated. Accumulating would count the same realized minute once per
@@ -170,6 +178,44 @@ reproduction on a window the basis was not fitted on**.
 Reproduction is the criterion that matters most. A resolution whose
 representative shapes do not reappear out of sample is describing one window's
 noise, however tidy its silhouette.
+
+### What the first calibration run found
+
+Measured on the fit window 2022-01-03/04/05 against the holdout 2022-01-07/10/11:
+
+| finding | number |
+| --- | --- |
+| PC1 alone explains | 80.7% of curve variance; PC1–5 reach 95.8% |
+| associating on the medoid's coordinates | median consecutive-clock distance 3.37 |
+| associating on the cluster **centroid** | median 1.94 — which is why nodes match on the centroid and publish the medoid |
+| K-Means vs Ward vs GMM | K-Means wins on silhouette and stability at every k; GMM goes negative above k≈10 |
+| centroid reproduction out of sample | 0.50 at k=2 falling to 0.17 at k=6 |
+| eta-squared on the holdout | **>= the fit value at every k** |
+| k=4 vs k=6 | stability 0.840 vs 0.545; k=6 has the prettier shapes and the worse behaviour |
+
+Two of those deserve emphasis. The association gate was originally an absolute
+distance of 2.0 while PC coordinates scale with the window's volatility
+(`component_scale` was 11.44 here), so it admitted almost nothing and the pool
+churned completely every clock — 7,012 spawns over 4,135 clocks. Expressing it
+as a fraction of the basis spread cut that to ~2,100.
+
+And reproduction disagrees with eta-squared: the specific centroid *shapes* do
+not reappear one-to-one out of sample, while the *partition* explains
+out-of-sample return variance as well as in-sample. Those measure different
+things, and only the second is currently encouraging.
+
+### Why SPLIT does not fire
+
+It is absent from both replay windows, and that is a property of the data rather
+than a broken code path. With four extracted nodes and three slots, the leftover
+node is simply the fourth K-Means cluster: measured over 3,192 unmatched nodes,
+its median distance to the nearest live claim is 15.2 against a gate of 5.7, and
+of the 1.8% inside the gate none had a matched nearest claim. A split means one
+claim separating into two; widening the gate until the fourth cluster counted as
+one would relabel a distinct future as a refinement of a different one.
+
+The replay therefore reports lifecycle coverage rather than requiring it. The
+five operations are covered by the unit tests.
 
 ### Churn: real change or jitter?
 

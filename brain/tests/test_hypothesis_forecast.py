@@ -40,6 +40,7 @@ from brain.research.forecast_index import (
     fit_principal_basis,
 )
 from contract.brain.forecast import (
+    MAX_CLOUD_NODES,
     MAX_LIVE_HYPOTHESES,
     PRINCIPAL_COMPONENT_COUNT,
     TRAJECTORY_CURVE_LENGTH,
@@ -97,12 +98,15 @@ def _node(level: float, *, mass: float = 0.3, spread: float = 0.5) -> Trajectory
 
 
 def _cloud(nodes, *, asof=ASOF, neighbours=200) -> ConditionalCloud:
+    # component_scale of one makes the pool's relative gate read as an absolute
+    # distance, so these tests can state gates in the units the nodes use.
     return ConditionalCloud(
         asof=asof,
         neighbour_count=neighbours,
         assigned_count=sum(n.member_count for n in nodes),
         cluster_count=6,
         nodes=tuple(nodes),
+        component_scale=1.0,
     )
 
 
@@ -227,9 +231,25 @@ def test_a_belief_may_never_claim_action_authority():
         )
 
 
-def test_a_cloud_may_not_surface_more_than_three_nodes():
+def test_a_cloud_may_surface_more_futures_than_the_pool_has_slots():
+    """Extraction breadth and working-set size are different limits.
+
+    A SPLIT is made of a node the pool has no slot for yet, so capping the cloud
+    at the number of slots would make it unreachable by construction.
+    """
+
+    cloud = _cloud([_node(float(i), mass=0.2) for i in range(4)])
+    assert len(cloud.nodes) == 4
     with pytest.raises(ValueError, match="at most"):
-        _cloud([_node(float(i), mass=0.2) for i in range(4)])
+        _cloud([_node(float(i) / 2, mass=0.1) for i in range(MAX_CLOUD_NODES + 1)])
+
+
+def test_the_pool_still_keeps_at_most_three_of_them():
+    pool = HypothesisPool(config=PoolConfig(association_max_distance_scale=0.1))
+    advance = _advance(
+        pool, minute=1, close=100.0, nodes=[_node(float(i), mass=0.2) for i in range(4)]
+    )
+    assert len(advance.hypotheses) <= MAX_LIVE_HYPOTHESES
 
 
 def test_node_masses_cannot_exceed_the_whole_neighbourhood():
@@ -374,7 +394,7 @@ def test_a_matched_node_keeps_the_hypothesis_identity_and_ages_it():
 
 
 def test_a_node_beyond_the_gate_spawns_rather_than_inheriting():
-    pool = HypothesisPool(config=PoolConfig(association_max_distance=0.5))
+    pool = HypothesisPool(config=PoolConfig(association_max_distance_scale=0.5))
     first = _advance(pool, minute=1, close=100.0, nodes=[_node(1.0, mass=0.5)])
     identity = first.hypotheses[0].hypothesis_id
     second = _advance(pool, minute=2, close=100.1, nodes=[_node(9.0, mass=0.5)])
@@ -386,7 +406,7 @@ def test_a_node_beyond_the_gate_spawns_rather_than_inheriting():
 
 
 def test_a_second_node_next_to_a_live_claim_is_a_split():
-    pool = HypothesisPool(config=PoolConfig(association_max_distance=3.0))
+    pool = HypothesisPool(config=PoolConfig(association_max_distance_scale=3.0))
     _advance(pool, minute=1, close=100.0, nodes=[_node(1.0, mass=0.5)])
     advance = _advance(
         pool, minute=2, close=100.1, nodes=[_node(1.0, mass=0.3), _node(2.0, mass=0.3)]
@@ -395,7 +415,7 @@ def test_a_second_node_next_to_a_live_claim_is_a_split():
 
 
 def test_two_live_claims_collapsing_onto_one_node_is_a_merge():
-    pool = HypothesisPool(config=PoolConfig(association_max_distance=3.0))
+    pool = HypothesisPool(config=PoolConfig(association_max_distance_scale=3.0))
     _advance(
         pool, minute=1, close=100.0, nodes=[_node(1.0, mass=0.3), _node(2.0, mass=0.3)]
     )
@@ -461,7 +481,7 @@ def test_no_sequence_of_association_outcomes_can_break_the_pool_invariants():
     import random
 
     rng = random.Random(31)
-    pool = HypothesisPool(config=PoolConfig(association_max_distance=2.0))
+    pool = HypothesisPool(config=PoolConfig(association_max_distance_scale=2.0))
     price, largest = 100.0, 0
     exercised: set[str] = set()
     for minute in range(1, 900):
@@ -761,4 +781,34 @@ def test_the_forecaster_refuses_a_snapshot_that_reports_no_atr():
                 asof=ASOF, close=100.0, high=100.5, low=99.5,
                 context=np.zeros(FEATURE_DIM), snapshot=_Snapshot(),
             )
+        )
+
+
+def test_the_association_gate_scales_with_the_principal_basis():
+    """A fixed distance would mean something different in every volatility regime."""
+
+    from brain.core.hypothesis_pool import PoolConfig as _Config
+
+    nodes = [_node(1.0, mass=0.5)]
+    wide = ConditionalCloud(
+        asof=ASOF + pd.Timedelta(minutes=2), neighbour_count=200,
+        assigned_count=40, cluster_count=6,
+        nodes=tuple([_node(3.0, mass=0.5)]), component_scale=10.0,
+    )
+    pool = HypothesisPool(config=_Config(association_max_distance_scale=0.5))
+    first = _advance(pool, minute=1, close=100.0, nodes=nodes)
+    identity = first.hypotheses[0].hypothesis_id
+    # The node moved 2 * sqrt(5) ~= 4.47 away; against a scale of 10 the gate is
+    # 5.0, so it is still the same claim.
+    advance = pool.advance(
+        asof=wide.asof, close=100.1, high=100.6, low=99.6, atr=1.0, cloud=wide
+    )
+    assert advance.hypotheses[0].hypothesis_id == identity
+
+
+def test_a_cloud_must_carry_a_positive_component_scale():
+    with pytest.raises(ValueError, match="component_scale"):
+        ConditionalCloud(
+            asof=ASOF, neighbour_count=10, assigned_count=0, cluster_count=0,
+            nodes=(), component_scale=0.0,
         )

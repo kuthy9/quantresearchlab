@@ -57,7 +57,7 @@ class PoolConfig:
     """Every threshold that decides an association outcome."""
 
     max_live_hypotheses: int = MAX_LIVE_HYPOTHESES
-    association_max_distance: float = 2.0
+    association_max_distance_scale: float = 0.5
     retire_minimum_probability: float = 0.05
     retire_maximum_age_bars: int = 60
     falsification_divergence: float = 3.0
@@ -70,8 +70,8 @@ class PoolConfig:
             raise ValueError(
                 f"max_live_hypotheses must lie in [1, {MAX_LIVE_HYPOTHESES}]"
             )
-        if self.association_max_distance <= 0.0:
-            raise ValueError("association_max_distance must be positive")
+        if self.association_max_distance_scale <= 0.0:
+            raise ValueError("association_max_distance_scale must be positive")
         if self.retire_maximum_age_bars < 1:
             raise ValueError("retire_maximum_age_bars must be positive")
         if self.falsification_divergence <= 0.0:
@@ -88,7 +88,9 @@ class PoolConfig:
         section = payload.get("pool", {})
         return cls(
             max_live_hypotheses=int(section["max_live_hypotheses"]),
-            association_max_distance=float(section["association_max_distance"]),
+            association_max_distance_scale=float(
+                section["association_max_distance_scale"]
+            ),
             retire_minimum_probability=float(section["retire_minimum_probability"]),
             retire_maximum_age_bars=int(section["retire_maximum_age_bars"]),
             falsification_divergence=float(section["falsification_divergence"]),
@@ -334,9 +336,11 @@ class HypothesisPool:
                 cost[row, column] = float(
                     np.linalg.norm(left - np.asarray(node.components, dtype=float))
                 )
-        matched, unmatched_live, unmatched_nodes = _assign(
-            cost, self.config.association_max_distance
-        )
+        # The gate is a fraction of the principal basis's own spread, not an
+        # absolute distance: PC coordinates scale with the window's volatility,
+        # so a fixed number would mean something different in every regime.
+        gate = self.config.association_max_distance_scale * cloud.component_scale
+        matched, unmatched_live, unmatched_nodes = _assign(cost, gate)
 
         survivors: list[PoolMember] = []
         for row, column in sorted(matched.items()):
@@ -362,17 +366,37 @@ class HypothesisPool:
 
         # An unmatched node next to a live claim is that claim splitting: the
         # cloud now separates what it used to hold as one future.
-        room = self.config.max_live_hypotheses - len(survivors)
-        for column in sorted(unmatched_nodes):
-            if room < 1:
-                break
+        #
+        # Highest mass first, because a full pool can only admit a node by
+        # displacing one, and the strongest candidate should get that chance.
+        for column in sorted(
+            unmatched_nodes, key=lambda index: (-nodes[index].mass, index)
+        ):
             node = nodes[column]
             parent_row = int(np.argmin(cost[:, column])) if cost.shape[0] else -1
             is_split = (
                 parent_row >= 0
                 and parent_row in matched
-                and cost[parent_row, column] <= self.config.association_max_distance
+                and cost[parent_row, column] <= gate
             )
+            parent_id = (
+                members[parent_row].hypothesis_id if is_split else None
+            )
+            # A full pool may still admit this node by displacing its weakest
+            # rival — a split cannot fire otherwise, because the Hungarian
+            # assignment fills every slot before any node is left over. The
+            # parent of a split is never the one displaced.
+            evicted: PoolMember | None = None
+            if len(survivors) >= self.config.max_live_hypotheses:
+                candidates = [
+                    survivor
+                    for survivor in survivors
+                    if survivor.hypothesis_id != parent_id
+                    and survivor.mass < node.mass
+                ]
+                if not candidates:
+                    continue
+                evicted = min(candidates, key=lambda m: (m.mass, m.hypothesis_id))
             spawned = PoolMember(
                 hypothesis_id=_hypothesis_id(node.node_id, asof, ()),
                 node=node,
@@ -384,8 +408,24 @@ class HypothesisPool:
                 association_distance=float(cost[parent_row, column]) if is_split else 0.0,
                 lineage=(members[parent_row].hypothesis_id,) if is_split else (),
             )
+            if evicted is not None:
+                survivors = [
+                    survivor
+                    for survivor in survivors
+                    if survivor.hypothesis_id != evicted.hypothesis_id
+                ]
+                records.append(
+                    LifecycleRecord(
+                        asof=asof,
+                        operation=LifecycleOperation.RETIRE,
+                        hypothesis_ids=(evicted.hypothesis_id,),
+                        node_ids=(evicted.node.node_id,),
+                        reason=(
+                            f"displaced by a node carrying mass {node.mass:.3f}"
+                        ),
+                    )
+                )
             survivors.append(spawned)
-            room -= 1
             records.append(
                 LifecycleRecord(
                     asof=asof,
@@ -418,7 +458,7 @@ class HypothesisPool:
             )
             if (
                 absorber is not None
-                and cost[row, nearest] <= self.config.association_max_distance
+                and cost[row, nearest] <= gate
             ):
                 records.append(
                     LifecycleRecord(

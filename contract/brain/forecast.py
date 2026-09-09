@@ -46,6 +46,13 @@ PRINCIPAL_COMPONENT_COUNT = 5
 # claim that only three futures exist.
 MAX_LIVE_HYPOTHESES = 3
 
+# How many representative futures one clock's cloud may surface. Deliberately
+# larger than the working set: extraction breadth and working-set size are
+# different limits, and collapsing them makes SPLIT unreachable — a split is
+# made of a node the pool has no slot for yet, which cannot exist when the cloud
+# is capped at the number of slots.
+MAX_CLOUD_NODES = 8
+
 # Horizons the path attributes are read at. These describe a trajectory; they
 # do not identify it.
 ATTRIBUTE_RETURN_HORIZONS: tuple[int, ...] = (5, 15, 30, 60)
@@ -173,6 +180,13 @@ class TrajectoryNode:
     never happened.  ``mass`` is the share of the retrieved neighbourhood that
     fell into this node, which is what makes it a probability rather than a
     shape someone liked the look of.
+
+    ``components`` is the cluster's **centroid**, not the medoid's coordinates,
+    and the split is deliberate. A medoid is a discrete choice, so a small shift
+    in the cloud can jump it to a different historical curve even when the
+    cluster itself barely moved; associating on that measured a median
+    consecutive-clock distance of 3.37 against the centroid's 1.94. The medoid
+    is what gets published and checked; the centroid is what gets matched.
     """
 
     node_id: str
@@ -226,15 +240,23 @@ class ConditionalCloud:
     assigned_count: int
     cluster_count: int
     nodes: tuple[TrajectoryNode, ...]
+    # The principal basis's own spread. Association gates and ambiguity are
+    # expressed as fractions of it, so a threshold stays meaningful across
+    # windows fitted in different volatility regimes.
+    component_scale: float = 1.0
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "asof", aware_timestamp(self.asof, name="asof"))
+        scale = _finite(self.component_scale, name="component_scale")
+        if scale <= 0.0:
+            raise ValueError("component_scale must be positive")
+        object.__setattr__(self, "component_scale", scale)
         nodes = tuple(self.nodes)
         if any(not isinstance(node, TrajectoryNode) for node in nodes):
             raise TypeError("nodes must be TrajectoryNode instances")
-        if len(nodes) > MAX_LIVE_HYPOTHESES:
+        if len(nodes) > MAX_CLOUD_NODES:
             raise ValueError(
-                f"a cloud may surface at most {MAX_LIVE_HYPOTHESES} nodes, "
+                f"a cloud may surface at most {MAX_CLOUD_NODES} nodes, "
                 f"got {len(nodes)}"
             )
         ids = [node.node_id for node in nodes]
@@ -584,6 +606,7 @@ __all__ = [
     "HypothesisStatus",
     "LifecycleOperation",
     "LifecycleRecord",
+    "MAX_CLOUD_NODES",
     "MAX_LIVE_HYPOTHESES",
     "MarketBeliefState",
     "PRINCIPAL_COMPONENT_COUNT",

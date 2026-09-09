@@ -14,22 +14,24 @@
   "proposer": {
     "neighbours": 200,
     "minimum_neighbours": 25,
-    "cluster_count": 6,
-    "max_nodes": 3,
+    "cluster_count": 4,
+    "max_nodes": 4,
     "minimum_mass": 0.12,
     "kmeans_restarts": 5,
-    "_minimum_mass_note": "The share of the retrieved neighbourhood a cluster needs before it is surfaced as a representative future. Mass below this is left to the residual rather than named."
+    "_minimum_mass_note": "The share of the retrieved neighbourhood a cluster needs before it is surfaced as a representative future. Mass below this is left to the residual rather than named.",
+    "_cluster_count_note": "How finely the retrieved neighbourhood is cut before the top nodes by mass are kept. Chosen from study_cluster_selection on 2022-01-03/04/05 against 2022-01-07/10/11: k=4 had the highest block-resample stability (0.840) and the lowest reproduction distance among k>=3. Note this is the LOCAL cut of ~200 neighbours, while the sweep cut the whole window, so the sweep informs the resolution rather than fixing it. Centroid shapes reproduced poorly at every k (0.50 at k=2 falling to 0.17 at k=6), which is a three-day-window result and not a settled one.",
+    "_max_nodes_note": "How many representative futures the cloud surfaces, deliberately larger than pool.max_live_hypotheses. A SPLIT is made of a node the pool has no slot for yet; capping extraction at the number of slots makes it unreachable by construction."
   },
   "pool": {
     "max_live_hypotheses": 3,
-    "association_max_distance": 2.0,
+    "association_max_distance_scale": 0.5,
     "retire_minimum_probability": 0.05,
     "retire_maximum_age_bars": 60,
     "falsification_divergence": 3.0,
     "falsification_minimum_age_bars": 5,
     "residual_floor": 0.05,
     "prior_floor": 0.001,
-    "_association_note": "A hypothesis keeps its identity only if this clock's matched node lies within association_max_distance in the principal basis. The gate is what separates a real change of claim from clustering jitter, and churn_diagnostics measures whether it is set sensibly."
+    "_association_note": "association_max_distance_scale is a fraction of the principal basis's own spread (ForecastIndex.component_scale), not an absolute distance: PC coordinates scale with the window's volatility, so a fixed number would mean something different in every regime. Measured on 2022-01-03/04/05, consecutive-clock centroid matches had a median distance of 0.17 scales; 0.5 admits about three quarters of them. Nothing here is calibrated."
   },
   "belief_updater": {
     "likelihood_scale_floor": 0.25,
