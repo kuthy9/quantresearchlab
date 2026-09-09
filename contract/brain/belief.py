@@ -1,7 +1,14 @@
 """Brain belief: the aggregate per-clock output contract.
 
-``MarketBelief`` is what a belief producer publishes and what Decision reads.
-Its path diagnostics remain shadow-only and fail closed."""
+``MarketBelief`` is what a playbook-neutral belief producer publishes and what
+Decision reads.
+
+The six-path competition diagnostics were removed on 2026-09-09 with
+``brain/core/market_belief.py``.  Naturally discovered hypotheses live in
+``contract/brain/forecast.py`` instead: ``MarketBeliefState`` is the Brain's
+per-clock forecast, and it is a separate contract from this one.  Removing them
+also removed this module's only import of a runtime package, so ``contract/``
+no longer depends upward on ``brain/``."""
 from __future__ import annotations
 
 from collections.abc import Mapping
@@ -14,7 +21,6 @@ from contract.brain.vocabulary import GlobalConflictRole
 from contract.brain.plan import DrawSelection, FrozenLSRContext, FrozenRangeAuctionContext, LiquidityRoute
 from contract.brain.hypothesis import HypothesisBelief
 from contract.brain.context import ContextThesisState, EntryEpisodeState, GlobalMarketContext, OpenMarketThesis
-from brain.core.market_belief import PathBeliefUpdateRecord, PathCompetitionSetState
 
 
 @dataclass(frozen=True)
@@ -47,13 +53,6 @@ class MarketBelief:
     entry_episodes: Mapping[str, EntryEpisodeState] = field(
         default_factory=dict
     )
-    path_competition_state: PathCompetitionSetState | None = None
-    path_update_records_this_clock: tuple[
-        PathBeliefUpdateRecord,
-        ...,
-    ] = ()
-    path_protocol_status: str = "development_unvalidated"
-    path_authority: str = "shadow_only"
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "asof", aware_timestamp(self.asof, name="belief.asof"))
@@ -72,42 +71,6 @@ class MarketBelief:
             "unresolved_ambiguities",
             tuple(self.unresolved_ambiguities),
         )
-        path_records = tuple(self.path_update_records_this_clock)
-        object.__setattr__(
-            self,
-            "path_update_records_this_clock",
-            path_records,
-        )
-        path_state = self.path_competition_state
-        if (
-            self.path_protocol_status != "development_unvalidated"
-            or self.path_authority != "shadow_only"
-            or any(
-                not isinstance(record, PathBeliefUpdateRecord)
-                or record.asof != self.asof
-                for record in path_records
-            )
-        ):
-            raise ValueError("belief path diagnostics are not shadow-only")
-        if path_state is None:
-            if path_records:
-                raise ValueError(
-                    "belief path diagnostics require a current competition set"
-                )
-        else:
-            if not isinstance(path_state, PathCompetitionSetState):
-                raise ValueError("belief path diagnostic scope is inconsistent")
-            if (
-                path_state.asof != self.asof
-                or path_state.protocol_status != self.path_protocol_status
-                or path_state.authority != self.path_authority
-                or any(
-                    record.competition_set_id
-                    != path_state.competition_set_id
-                    for record in path_records
-                )
-            ):
-                raise ValueError("belief path diagnostic scope is inconsistent")
         if any(
             key != hypothesis.key
             or any(

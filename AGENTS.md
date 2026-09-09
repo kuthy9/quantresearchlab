@@ -9,7 +9,7 @@ state, Brain and execution ownership boundaries rather than redrawing them:
 | package | owns |
 | --- | --- |
 | `eyes/` | the Trading Eye — normalization, the six detectors, semantic-event emission, the event store and market-state reduction |
-| `brain/` | path belief, calibration, validation, decision and risk (the typed playbooks, DOL and Signal Policy were retired on 2026-09-07) |
+| `brain/` | the naturally discovered hypothesis engine (proposer, pool, belief updater, forecast), decision and risk. The typed playbooks, DOL and Signal Policy were retired on 2026-09-07; the frozen six-path competition set on 2026-09-09 |
 | `execution/` | execution reality, MBO reconstruction and sequential simulation (the order FSM and trade intent were retired on 2026-09-07) |
 | `shares/` | data access, the session clock, the scale registry, orchestration (`engine.py`) and the study projections the other three consume |
 | `contract/` | every payload that crosses a subsystem boundary, one package per boundary (`market`, `execution`, `eye`, `brain`, `decision`, `risk`, `research`) |
@@ -73,17 +73,21 @@ Bar
      ├─ brain/core/brain_entry_sequence.py
      │                                   Brain interpretation of Eye facts
      ├─ neutral projection               one OpenMarketThesis per clock
-     ├─ (no belief producer)             the typed Brain was retired 2026-09-07
+     ├─ brain/core/forecast.py           the belief producer: one
+     │   ├─ hypothesis_proposer.py       MarketBeliefState per clock
+     │   ├─ hypothesis_pool.py           (contract: contract/brain/forecast.py)
+     │   └─ belief_updater.py
      └─ brain/core/decision.py → risk.py sole runtime action authority
 ```
 
 **`shares/core/engine.py` cannot currently be imported.** It still imports
 `brain.core.playbooks`, `brain.core.playbook_registry`,
 `brain.core.dol_probability` and `brain.core.signal_policy`, all of which were
-removed with the typed Brain. Eight test modules (135 tests) cannot be collected
-until those import blocks and the code behind them are removed or rebound to a
-new `MarketBelief` producer, and `shares.ContinuousSMCEngine` is unavailable
-until then. Run the suite with `--ignore` on those eight modules to exercise the
+removed with the typed Brain. It also binds `model.path_hypotheses`, which went
+with the six-path retirement on 2026-09-09. Eight test modules (135 tests)
+cannot be collected until those import blocks and the code behind them are
+removed or rebound to `brain/core/forecast.py`, the belief producer that
+replaced them, and `shares.ContinuousSMCEngine` is unavailable until then. Run the suite with `--ignore` on those eight modules to exercise the
 other 1297 tests.
 
 The Eye imports no downstream module — no `eyes/core/` module imports `brain`,
@@ -119,10 +123,11 @@ lineage import `eyes.core.event_store` directly.
 
 Naming rule: `Zone`, `RangeAuction` and `Interaction` are the public concepts.
 `Group3`/`Group4`/`Group5` and `Phase 4/5/6` survive only as historical or
-internal migration names — in `MarketObservation` field names, in the
-test-local `shares/tests/legacy_group5.py` reducer, and in the frozen `phase6_*`
-evidence-boundary keys that `brain/configs/path_hypotheses.json` binds and
-`brain/core/market_belief.py` validates. The three `group3.py`/`group4.py`/
+internal migration names — in `MarketObservation` field names and in the
+test-local `shares/tests/legacy_group5.py` reducer. The frozen `phase6_*`
+evidence-boundary keys went with `brain/configs/path_hypotheses.json` and
+`brain/core/market_belief.py` when the six-path competition set was retired on
+2026-09-09. The three `group3.py`/`group4.py`/
 `group5.py` pickle shims no longer exist; they were removed before the subsystem
 split. Do not introduce them anywhere new.
 

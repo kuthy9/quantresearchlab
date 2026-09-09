@@ -281,7 +281,9 @@ governance artifacts during ordinary development.
   allowlist, unsupported/underpowered mechanisms remain excluded, and no
   unregistered Week 3 is opened. The mechanism code and runners were retired on
   2026-09-06; the allowlist survives only as the `phase6_*` bindings in
-  `brain/configs/path_hypotheses.json`, which `market_belief.py` validates fail-closed.
+  `brain/configs/hypothesis_protocol.json`, which `hypothesis_proposer.load_hypothesis_protocol`
+  validates fail-closed. (`path_hypotheses.json` and `market_belief.py` were
+  retired on 2026-09-09.)
 - [ ] Missing MBO remains missing and is not replaced with constant execution
   reality.
 - [ ] Checkpoint, shards, progress, resume and portfolio before-bar /

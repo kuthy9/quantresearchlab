@@ -1,1 +1,1 @@
-"""Trading Brain core: belief, calibration, validation, decision and risk."""
+"""Trading Brain core: hypothesis proposal, pooling, belief update, decision, risk."""

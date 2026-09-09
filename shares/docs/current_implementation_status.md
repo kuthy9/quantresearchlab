@@ -20,7 +20,9 @@ Policy, Trade Intent, the order FSM and the causal case library is now
 `shares/scripts/run_continuous_replay.py` and five other scripts;
 `brain/configs/playbooks.json`, `dol_probability.json`, `signal_policy.json`.
 
-`brain/core/path_belief.py` is now `brain/core/market_belief.py`, and
+`brain/core/path_belief.py` became `brain/core/market_belief.py` and was then
+retired on 2026-09-09 with the six-path taxonomy; the belief producer is now
+`brain/core/forecast.py` over a fitted trajectory-mode library. Also,
 `shares/core/validation.py` is now `brain/core/validation.py`. Nothing fitted or
 published was lost — every artifact slot in `configs/model.json` was already
 `null` and every protocol declared `shadow_only` — but `PlaybookBrain` was the
@@ -74,7 +76,8 @@ eight sealed files stay at the repository root: `configs/model.json`,
 `f92b24c86bf942defc88de4edb7be16cc2a30dd64fde3b4432657780648b1f0c`, verified
 after the move. The five unsealed protocols moved to the subsystem that reads
 them: `playbooks.json`, `path_hypotheses.json`, `dol_probability.json` and
-`signal_policy.json` to `brain/configs/` (only `path_hypotheses.json` survives
+`signal_policy.json` to `brain/configs/` (all four are now retired; the
+directory holds `hypothesis_protocol.json`
 the 2026-09-07 retirement), and
 `market_case_input_profiles_v2.json` to `shares/configs/`.
 
@@ -261,7 +264,7 @@ v1.3/foundation-v2.1 switch the runner refused the live model config outright.
 No `smc_trader` module imported any of the removed modules, so the Eye, Brain,
 and Execution paths are untouched. The Brain's own Phase-7 surface --
 `path_belief.py`, `playbooks.py`, `signal_policy.py`,
-`brain/configs/path_hypotheses.json`, `brain/configs/dol_probability.json` and the three
+the retired `brain/configs/path_hypotheses.json`, `brain/configs/dol_probability.json` and the three
 `tests/test_phase7_*.py` files that exercise them -- was kept, because those
 are live modules that only carry the phase name. A future probability layer
 must be preregistered again rather than restored from git.
@@ -528,7 +531,7 @@ rolling OOF, or sealed OOS.
 | 3. Derived structure | **Foundation definitions complete; empirical value untested** | Persistent internal/external Structure Generations and transitions, Base Origin Core versus Qualified OB, Structural versus Balance Range, and Delivery Phase Generation are independently represented. MSS starts or updates a forming challenger; it cannot itself confirm an opposite regime. | Range extension remains undefined. Foundation definitions do not validate predictive value or retroactively change v1.2 artifacts. |
 | 4. Timeframe and relation state | **Complete with distinct geometry and relation generations** | Timeframe/Session/Snapshot and role hierarchy remain; Foundation v2 adds geometric Swing assignments, dual range locations, and persistent cross-timeframe Relation Generations. | Outcome value is not implied by deterministic nesting or relation state and remains an empirical question. |
 | 5. Signal Research | **Full registered v1.2 protocol-v3 diagnostic complete** | Frozen r2 produced a complete 36,000-clock run, six hash-bound ledgers, E1–E6 and non-nested proofs, four separate controls, adjacent deltas, exact McNemar, and fixed-family Holm. | E3–E6 and two control families remain sparse/empty; preregister an independent development/validation design rather than relaxing thresholds. No OOS window is open. The runner, its `smc_trader/signal_research.py` primitives and its two `configs/research/` templates were retired on 2026-09-06; only the conclusions above survive. |
-| 6. MBO mechanism | **Complete for the registered two-week development study** | Primary week plus the preregistered underpowered extension passed engineering/data/statistical audit. Phase 7 allowlist: `acceptance_continuation`, `displacement_impact`; no Week 3. | Keep underpowered Sweep/MSS and the unsupported historical FVG first-concrete-lifecycle proxy excluded. A true first-retest estimand requires a new preregistration. This association result is not causal, OOS, model-fit, or trading authority. The mechanism modules, runners and template were retired on 2026-09-06; the allowlist it produced survives as the `phase6_*` bindings in `brain/configs/path_hypotheses.json`. |
+| 6. MBO mechanism | **Complete for the registered two-week development study** | Primary week plus the preregistered underpowered extension passed engineering/data/statistical audit. Phase 7 allowlist: `acceptance_continuation`, `displacement_impact`; no Week 3. | Keep underpowered Sweep/MSS and the unsupported historical FVG first-concrete-lifecycle proxy excluded. A true first-retest estimand requires a new preregistration. This association result is not causal, OOS, model-fit, or trading authority. The mechanism modules, runners and template were retired on 2026-09-06; the allowlist it produced survived as the `phase6_*` bindings in `brain/configs/path_hypotheses.json` until that protocol was retired on 2026-09-09, and now survives only in this record. |
 | 7. Trading Brain | **Current-scope shadow lifecycle/interfaces integrated; fitted model not admitted** | Neutral state owns the canonical OpenMarketThesis tuple and Brain reuses it. Exact facts map to per-path falsification/winners; dependency guards, DOL ranking, fitted-artifact-only no-target projection, Signal Policy, Trade Intent, and loaders fail closed. The read-only checker last verified 7,381 Phase 6 rows and reported 13 blockers without fitting or writing; it was retired on 2026-09-06 and that reading is now historical. Equal priors and zero increments/decay remain neutral. | Preregister scope-rollover retirement/archive semantics; bind and execute the already-frozen June W4 design; narrow final Brain input to `MarketSnapshot + events`; fit, validate, load, and admit path/DOL/outcome artifacts. Pre-horizon per-path expiry/hazard/prior reversion also need separate definitions and fitted temporal evidence. |
 | 8. Execution Research | **Standalone FSM, evaluator, and formal runner complete; study/vertical gates not passed** | Seven entry methods can be compared under one frozen intent. Evaluator v1.1 separates entry GTT from analysis end, cancels a remainder when the target resolves before its pending fill, keeps primary-pair eligibility independent of secondary censoring, and rejects off-grid stop/target prices. The v2 runner enforces provenance, variant evaluability/censoring, no-clobber outputs, and validate-only default behavior. | Resolve the six current run-template blockers: produce and bind a non-zero intent/research-case ledger and minute source, register outputs and experiment identity, freeze and execute the paired study, then connect exact risk-approved intents to the FSM. |
 | 9. Shadow Live | **Deterministic parity harness implemented; current operational gate not passed** | v1.3/compact-v8/digest-v3 bind exact evidence/state identities. The 6,900-clock and Foundation 200-row receipts remain historical under their recorded pre-current bindings. The read-only capacity preflight evaluates historical evidence only and grants no run authority. | Re-freeze and rematerialize any new prefix or complete 6,900-clock rehearsal under the final source snapshot; preregister operational metrics, remove the full-week nonlinear capacity residual, then run the real-time multi-day no-order pilot. |

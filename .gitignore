@@ -8,7 +8,11 @@ __pycache__/
 *.egg-info/
 
 # Market data and generated/release artifacts are governed by their own
-# manifests and must never be copied into source control.
+# manifests and must never be copied into source control.  The bare names
+# matter as much as the trailing-slash forms: a fresh worktree links `data` to
+# the materialized payload, and git treats that symlink as a file, so `data/`
+# alone would not ignore it.
+data
 data/
 inputs/
 outputs/

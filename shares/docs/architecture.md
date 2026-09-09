@@ -95,8 +95,8 @@ independent structural, cost, deadline, data and fillability development vetoes
         ↓
 optional one-next-bar conservative simulation → position feedback
 
-the six-path competition set survives standalone in
-brain/core/market_belief.py; nothing consumes it
+brain/core/forecast.py publishes one MarketBeliefState per clock
+from the fitted trajectory-mode library (contract/brain/forecast.py)
 ```
 
 ### Reasoning responsibilities
@@ -109,7 +109,7 @@ question and may consume only already-known outputs from the layer above it:
 | Data fact admission | `io`, `market_clock`, `CausalMarketReader` | Which completed clocks and prices are legally knowable now? | No structure, probability, or action interpretation. |
 | Atomic observation | `CausalObserver`, Group 1–5 trackers, `EventStore` | Which preregistered v1.2 market facts occurred, and from which exact sources? | No rewriting history and no trade decision. |
 | State and relation projection | timeframe/session reducers, `RelationResolver`, Foundation v2, `MarketSnapshotPublisher` | What is the deterministic current state, lifecycle, geometry, and cross-frame relation? | Foundation is an additive v1.2 projection, not a new detector or full-stack v2 authority. |
-| Competing-hypothesis reasoning | Scene Graph, `market_belief` (the typed Brain, DOL and Signal Policy were retired 2026-09-07) | Which still-falsifiable path or target is better supported by admitted evidence? | With no fitted/admitted artifacts, outputs remain neutral or shadow-only. |
+| Competing-hypothesis reasoning | Scene Graph, `hypothesis_proposer` → `hypothesis_pool` → `belief_updater` → `forecast` (the typed Brain, DOL and Signal Policy were retired 2026-09-07; the frozen six-path set 2026-09-09) | Which naturally observed sixty-minute trajectory modes are still consistent with the realized path? | At most three live hypotheses plus an irreducible residual; `shadow_only`, no action authority. |
 | Action constraint and validation | Decision, Risk, simulator (Trade Intent and the execution FSM were retired 2026-09-07) | Is an already-described candidate allowed to become a simulated action or a no-order audit fact? | No retroactive semantic change, broker authority, profit claim, or sealed-OOS access. |
 
 The `Decision`/`Risk`/sequential simulator path remains the only registered
@@ -372,9 +372,9 @@ shadow layer above it are removed from the repository:
 
 None of it was published or fitted. `configs/model.json` had
 `calibration_artifact: null`, every Signal Policy artifact slot `null`, and
-`release_readiness.live_execution_allowed: false`; `path_hypotheses.json`
-declared `authority: shadow_only` with equal priors, zero decay and zero
-likelihood increments. Removing the layer therefore retires unfitted machinery,
+`release_readiness.live_execution_allowed: false`; the since-retired
+`path_hypotheses.json` declared `authority: shadow_only` with equal priors,
+zero decay and zero likelihood increments. Removing the layer therefore retires unfitted machinery,
 not a validated model.
 
 ### What this leaves
@@ -389,9 +389,11 @@ not a validated model.
   `dol_candidate_exclusions`, `dol_probability_protocol_fingerprint`,
   `signal_policy_protocol_fingerprint`, `signal_assessments`, `trade_intents`,
   `shadow_signal_rejections`) are removed along with the roughly 200 lines of
-  `__post_init__` that validated their shadow-authority scope. What survives is
-  the path-diagnostic scope: `path_competition_state`,
-  `path_update_records_this_clock`, `path_protocol_status` and `path_authority`.
+  `__post_init__` that validated their shadow-authority scope. The path-diagnostic
+  fields that briefly survived beside them (`path_competition_state`,
+  `path_update_records_this_clock`, `path_protocol_status`, `path_authority`)
+  went with the six-path retirement on 2026-09-09, and with them
+  `contract/`'s last upward import of a runtime package.
 - `shares/core/engine.py` still imports `brain.core.playbooks`,
   `brain.core.playbook_registry`, `brain.core.dol_probability` and
   `brain.core.signal_policy`, so **it cannot be imported**. Eight test modules
@@ -399,41 +401,38 @@ not a validated model.
   `ContinuousSMCEngine`, `ExecutionFSM` or `RiskApprovedTradeIntent`. Rebinding
   that orchestration to a new belief producer is the next piece of work.
 
-### What survives on the belief side
+### What replaced the belief side
 
-`brain/core/market_belief.py` — renamed from `path_belief.py` — is now a
-self-contained real-time path-probability component. Nothing else imports its
-`PathKind` vocabulary; `contract/brain/belief.py` takes only
-`PathBeliefUpdateRecord` and `PathCompetitionSetState` from it.
+`brain/core/market_belief.py` and `brain/configs/path_hypotheses.json` were
+retired on 2026-09-09. The six named paths — continuation, deeper retracement,
+reversal, balance, failed breakout, residual unknown — were a taxonomy the
+module asserted about the market rather than one the market produced, and
+nothing consumed the competition set.
 
-It owns one competition set scoped by instrument, market epoch, dominant
-authority structure and a shared session horizon, over six mutually exclusive
-paths: continuation, deeper retracement, reversal, balance, failed breakout and
-residual unknown. Exact-source evidence contributes a configured log-weight
-increment once; unchanged evidence is deduplicated, and `correlation_key` is a
-global dependency-cluster identity rather than a family-local token. Real
-completed bars apply registered decay, terminal paths receive zero probability,
-and active survivors are normalized with log-sum-exp. `residual_unknown`
-preserves mass for paths the named hypotheses do not represent. Update records
-retain the rule, source event IDs, `known_at`, model version and protocol
-fingerprint, and the manager checkpoints and restores.
+What replaced them fits its hypotheses from history. `brain/research/` pairs
+every past completed bar with the sixty minutes that followed it, summarized as
+a fourteen-component ATR-normalized trajectory vector; HDBSCAN groups those
+trajectories into modes and K-Medoids picks each mode's representative — a real
+observed trajectory, never an average of two opposite futures. Ward linkage over
+the medoids gives the modes a binary hierarchy, which is what SPLIT and MERGE
+move along.
 
-The published model remains neutral — equal priors, zero log-likelihood
-increments, zero real-bar decay — and no fitted artifact is admitted. This is
-executable accounting with an audit trail, not a calibrated posterior. The
-protocol declares `development_unvalidated` / `shadow_only` and
-`action_authority_ready: false`, and `load_path_belief_protocol` fails closed if
-any of that changes without a separately pinned artifact set.
+At runtime `brain/core/` keeps at most three of those modes alive:
+`hypothesis_proposer.py` retrieves the modes that historically followed the
+nearest context vectors, `hypothesis_pool.py` runs SPAWN/UPDATE/SPLIT/MERGE/
+RETIRE, `belief_updater.py` scores each live hypothesis against its realized
+path, and `forecast.py` publishes one `MarketBeliefState` per clock.
 
-`path_hypotheses.json` lost its `dol_diagnostic_ranking` block, whose only
-loader lived in the retired `dol_ranking.py`. Because the protocol fingerprint
-is `sha256` over the whole file, that edit moved it from `d897635c…b0482` to
-`61417d9f…3152e0`; `configs/model.json` records the new value, and its
-`playbook_registry`, `dol_probability` and `signal_policy` bindings are gone.
+The residual is the standing weight of "none of these". It competes as an
+ordinary log-sum-exp term, is floored by protocol, and equals one when nothing is
+live. Three is a working-set bound, not a claim that only three futures exist.
 
-The six paths are still a frozen `PathKind` enum with order-sensitive
-validation throughout the module. Making that set protocol-driven, so the
-module no longer names its own hypotheses, is a separate task.
+`hypothesis_protocol.json` declares `development_unvalidated` / `shadow_only`
+and `action_authority_ready: false`, and `load_hypothesis_protocol` fails closed
+if any of that changes. `configs/model.json` records its
+`hypothesis_protocol_fingerprint`. Every threshold in it is a development
+default; none has been fitted, and the library has only been fitted in-sample on
+one three-day window.
 
 ## Decision, risk and the retired execution boundary
 
@@ -622,9 +621,10 @@ The executable side of both studies was retired on 2026-09-06 as well:
 `scripts/run_mbo_mechanism_research.py` and
 `scripts/materialize_mbo_mechanism.py` runners, and the three
 `configs/research/` manifest templates are gone. What the studies concluded
-still binds Phase 7 through the `phase6_*` identities and evidence allowlist in
-`brain/configs/path_hypotheses.json`, which `brain/core/market_belief.py` still
-validates fail-closed. `execution/core/mbo.py` and
+bound Phase 7 through the `phase6_*` identities and evidence allowlist in
+`brain/configs/path_hypotheses.json`. That protocol and the module that
+validated it were retired on 2026-09-09; the allowlist survives only in this
+record, and the hypothesis engine that replaced them binds no `phase6_*` key. `execution/core/mbo.py` and
 `execution/scripts/materialize_mbo_execution.py` are unaffected: they belong to the
 execution-reality path, not to the mechanism study. The replay runner that drove
 it (`shares/scripts/run_continuous_replay.py --mbo-execution`) was retired on

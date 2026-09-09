@@ -17,9 +17,9 @@
     "foundation_registry": "semantics/foundation_v2_1.yaml",
     "foundation_registry_identity": "69428dbfd2a9b2aa19f0254391fca2da17aedb8d0206829572e69c0cc212a715"
   },
-  "path_hypotheses": {
-    "protocol": "brain/configs/path_hypotheses.json",
-    "path_protocol_fingerprint": "61417d9f5feb0d3bcc62012ce6c3d4d0ea7d86d0a044df240ecd9361fe3152e0"
+  "hypothesis_protocol": {
+    "protocol": "brain/configs/hypothesis_protocol.json",
+    "hypothesis_protocol_fingerprint": "93d4da62b60bf35a1d82de1ba33da14fb30e38cd0116e65092155533f0669d25"
   },
   "action_pipeline": {
     "schema_version": 1,

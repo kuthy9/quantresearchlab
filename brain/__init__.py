@@ -1,1 +1,1 @@
-"""Trading Brain: path belief, calibration, validation, decision and risk."""
+"""Trading Brain: naturally discovered hypotheses, decision and risk."""

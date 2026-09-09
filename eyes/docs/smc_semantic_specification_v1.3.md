@@ -1016,8 +1016,10 @@ is the same location it was on the bar before.
    retirement removed the last two, and the 2026-09-08 split replaced that file
    with `contract/`. The remaining upward edges are confined to one module each:
    `contract/eye/entities.py` imports `FOUNDATION_VERSION` for a single
-   comparison, and `contract/brain/belief.py` imports `PathBeliefUpdateRecord`
-   and `PathCompetitionSetState` for four isinstance checks.
+   comparison. `contract/brain/belief.py` used to import `PathBeliefUpdateRecord`
+   and `PathCompetitionSetState` for four isinstance checks; that import went with
+   the six-path retirement on 2026-09-09, leaving `FOUNDATION_VERSION` as the
+   only upward edge.
    `contract/eye/observation.py` shows the fix — name the type under
    `TYPE_CHECKING` and defer the import.
 

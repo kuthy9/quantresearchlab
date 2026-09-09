@@ -67,16 +67,18 @@ methods carry 576 fail-closed checks. The rules that matter across boundaries:
 - **Price grid.** OHLC is normalized to integer ticks with `Decimal`, so an
   off-grid vendor bar is refused before it reaches any state.
 
-## Remaining upward dependencies
+## Remaining upward dependency
 
-Two contract modules still import a subsystem. Both were repository-wide before
-the split and are now confined to one module each:
+One contract module still imports a subsystem:
 
 - `contract/eye/entities.py` imports `FOUNDATION_VERSION` from
   `eyes.core.foundation_registry` (one comparison in `StructuralLegState`).
-- `contract/brain/belief.py` imports `PathBeliefUpdateRecord` and
-  `PathCompetitionSetState` from `brain.core.market_belief` (four isinstance
-  checks in `MarketBelief`).
+
+`contract/brain/belief.py` used to import `PathBeliefUpdateRecord` and
+`PathCompetitionSetState` from `brain.core.market_belief`. Retiring the six-path
+competition set on 2026-09-09 removed that import, and with it the second
+upward edge.
 
 `contract/eye/observation.py` names `MarketSnapshot` under `TYPE_CHECKING` with
-two deferred local imports, which is the pattern the other two should follow.
+two deferred local imports, which is the pattern the remaining one should
+follow.
