@@ -1,15 +1,24 @@
-"""Brain forecast: the naturally discovered hypothesis contract.
+"""Brain forecast: the local conditional future contract.
 
-The Brain no longer names a frozen taxonomy of market paths.  It fits a library
-of *trajectory modes* from history — each mode is one way the next sixty minutes
-actually unfolded, in ATR units — and at every completed clock it keeps at most
-three of them alive as competing hypotheses.
+The Brain does not hold a taxonomy of market paths, and it no longer holds a
+global library of them either.  At every completed clock it asks a narrower
+question: *given a context like this one, what did the next sixty minutes
+actually do?*  It retrieves the nearest historical contexts, reads their futures
+as a **conditional future cloud**, and extracts at most three representative
+trajectory nodes carrying meaningful probability mass.
 
-``MarketBeliefState`` is what the Brain publishes each minute.  Its hypotheses
-never account for the whole future: ``residual_probability`` is the standing
-admission that the live modes may all be wrong, and it is never normalized away.
+Identity is path geometry.  A trajectory is the ATR-normalized cumulative
+return curve over the next sixty minutes; that curve, projected onto a globally
+fitted principal basis, is what decides whether two futures are the same claim.
+Realized volatility is carried as an attribute and never as an identity
+dimension — two paths that arrive in the same place by the same shape are the
+same claim regardless of how noisily they got there.
 
-Everything here is shadow-only.  A forecast carries no action authority, and
+Nothing here accounts for the whole future.  ``residual_probability`` is the
+share of the conditional cloud that no live node covers, and it is never
+normalized away.
+
+Everything is shadow-only.  A forecast carries no action authority, and
 ``MarketBeliefState`` refuses to be constructed claiming otherwise.
 """
 from __future__ import annotations
@@ -22,53 +31,26 @@ import pandas as pd
 
 from contract.market.primitives import aware_timestamp, content_hash
 
-FORECAST_SCHEMA_VERSION = 1
+FORECAST_SCHEMA_VERSION = 2
 
-# The initial trajectory vector.  Sixty raw price points cannot be clustered
-# directly, so a trajectory is summarized by six ATR-normalized returns, three
-# favorable/adverse excursion pairs and two realized-volatility terms.  The
-# order is part of the contract: a mode library's medoid is read positionally.
-TRAJECTORY_COMPONENTS: tuple[str, ...] = (
-    "r_1",
-    "r_5",
-    "r_10",
-    "r_15",
-    "r_30",
-    "r_60",
-    "mfe_15",
-    "mae_15",
-    "mfe_30",
-    "mae_30",
-    "mfe_60",
-    "mae_60",
-    "rv_30",
-    "rv_60",
-)
-TRAJECTORY_DIM = len(TRAJECTORY_COMPONENTS)
+# One trajectory is the ATR-normalized cumulative return at each of the next
+# sixty completed minutes: r_1 .. r_60. The whole curve is the identity input;
+# no hand-picked subset of it is.
+TRAJECTORY_CURVE_LENGTH = 60
 
-# The horizon each component observes, used to decide which components are
-# already decided at a given hypothesis age.
-TRAJECTORY_COMPONENT_HORIZON: tuple[int, ...] = (
-    1,
-    5,
-    10,
-    15,
-    30,
-    60,
-    15,
-    15,
-    30,
-    30,
-    60,
-    60,
-    30,
-    60,
-)
+# The principal basis the curve is projected onto. Five components is where the
+# curve's shape is captured without the basis starting to fit single paths.
+PRINCIPAL_COMPONENT_COUNT = 5
 
-# The Brain keeps at most this many live hypotheses.  This is a runtime working
-# set, not a claim that only three futures exist: the mode library may hold any
-# number of modes.
+# The Brain keeps at most this many live hypotheses. A working-set bound, not a
+# claim that only three futures exist.
 MAX_LIVE_HYPOTHESES = 3
+
+# Horizons the path attributes are read at. These describe a trajectory; they
+# do not identify it.
+ATTRIBUTE_RETURN_HORIZONS: tuple[int, ...] = (5, 15, 30, 60)
+ATTRIBUTE_EXCURSION_WINDOWS: tuple[tuple[int, int], ...] = ((0, 15), (15, 30), (30, 60))
+ATTRIBUTE_VOLATILITY_HORIZONS: tuple[int, ...] = (30, 60)
 
 FORECAST_AUTHORITY = "shadow_only"
 FORECAST_PROTOCOL_STATUS = "development_unvalidated"
@@ -82,7 +64,7 @@ class HypothesisStatus(str, Enum):
 
 
 class LifecycleOperation(str, Enum):
-    """The five things the pool may do to its hypotheses on one clock."""
+    """The five things one clock's association may do to the working set."""
 
     SPAWN = "spawn"
     UPDATE = "update"
@@ -98,172 +80,244 @@ def _finite(value: object, *, name: str) -> float:
     return number
 
 
-def _trajectory(values: object, *, name: str) -> tuple[float, ...]:
+def _curve(values: object, *, name: str) -> tuple[float, ...]:
     if isinstance(values, (str, bytes)) or not hasattr(values, "__iter__"):
         raise TypeError(f"{name} must be a sequence of floats")
     vector = tuple(_finite(item, name=name) for item in values)  # type: ignore[union-attr]
-    if len(vector) != TRAJECTORY_DIM:
+    if len(vector) != TRAJECTORY_CURVE_LENGTH:
         raise ValueError(
-            f"{name} must carry {TRAJECTORY_DIM} components, got {len(vector)}"
+            f"{name} must carry {TRAJECTORY_CURVE_LENGTH} points, got {len(vector)}"
         )
     return vector
 
 
-def _identity(*parts: object) -> str:
-    return content_hash([str(part) for part in parts])
+def _unit(value: object, *, name: str) -> float:
+    number = _finite(value, name=name)
+    if not 0.0 <= number <= 1.0:
+        raise ValueError(f"{name} must lie in [0, 1]")
+    return number
 
 
 @dataclass(frozen=True)
-class TrajectoryMode:
-    """One naturally occurring sixty-minute shape, plus how tight it is.
+class PathAttributes:
+    """What a trajectory looks like, once it is already identified.
 
-    ``medoid`` is a real observed trajectory, never a centroid average: an
-    average of two opposite futures is a third future that never happened.
-    ``dispersion`` is the per-component spread inside the mode and is what the
-    belief updater uses as its likelihood scale.
+    Excursions are **incremental**: ``mfe_15_30`` is how much further the path
+    ran beyond its first-fifteen-minute high, not the high over the first thirty.
+    Nested cumulative excursions restate the same extreme three times and make
+    the later windows nearly collinear with the earlier ones.
     """
 
-    mode_id: str
-    medoid: tuple[float, ...]
-    dispersion: tuple[float, ...]
-    support: int
-    parent_mode_id: str | None = None
-    child_mode_ids: tuple[str, ...] = ()
+    r_5: float
+    r_15: float
+    r_30: float
+    r_60: float
+    mfe_0_15: float
+    mfe_15_30: float
+    mfe_30_60: float
+    mae_0_15: float
+    mae_15_30: float
+    mae_30_60: float
+    # Fraction of the horizon elapsed when the extreme was set. A rally that
+    # tops out at minute five is a different animal from one that tops at
+    # minute fifty-five, even with an identical close.
+    time_to_mfe: float
+    time_to_mae: float
+    # Net displacement over distance travelled, in [0, 1]. Near one is a clean
+    # directional run; near zero is churn that ended where it started.
+    path_efficiency: float
+    # Attributes, never identity dimensions.
+    rv_30: float
+    rv_60: float
 
     def __post_init__(self) -> None:
-        if not self.mode_id:
-            raise ValueError("mode_id is required")
-        object.__setattr__(self, "medoid", _trajectory(self.medoid, name="medoid"))
-        dispersion = _trajectory(self.dispersion, name="dispersion")
-        if any(value <= 0.0 for value in dispersion):
-            raise ValueError("mode dispersion must be strictly positive")
-        object.__setattr__(self, "dispersion", dispersion)
-        if int(self.support) <= 0:
-            raise ValueError("a mode must be supported by at least one observation")
-        object.__setattr__(self, "support", int(self.support))
-        children = tuple(str(item) for item in self.child_mode_ids)
-        if len(set(children)) != len(children):
-            raise ValueError("child_mode_ids must be unique")
-        if self.mode_id in children or self.mode_id == self.parent_mode_id:
-            raise ValueError("a mode may not be its own parent or child")
-        object.__setattr__(self, "child_mode_ids", children)
+        for name in (
+            "r_5", "r_15", "r_30", "r_60",
+            "mfe_0_15", "mfe_15_30", "mfe_30_60",
+            "mae_0_15", "mae_15_30", "mae_30_60",
+            "rv_30", "rv_60",
+        ):
+            object.__setattr__(self, name, _finite(getattr(self, name), name=name))
+        for name in ("time_to_mfe", "time_to_mae", "path_efficiency"):
+            object.__setattr__(self, name, _unit(getattr(self, name), name=name))
+        if any(
+            getattr(self, name) < 0.0
+            for name in ("mfe_0_15", "mfe_15_30", "mfe_30_60", "rv_30", "rv_60")
+        ):
+            raise ValueError("favorable excursions and volatilities cannot be negative")
+        if any(
+            getattr(self, name) > 0.0
+            for name in ("mae_0_15", "mae_15_30", "mae_30_60")
+        ):
+            raise ValueError("adverse excursions cannot be positive")
 
-    def component(self, name: str) -> float:
-        """Read one named medoid component."""
-
-        return self.medoid[TRAJECTORY_COMPONENTS.index(name)]
+    def as_mapping(self) -> dict[str, float]:
+        return {
+            name: float(getattr(self, name))
+            for name in (
+                "r_5", "r_15", "r_30", "r_60",
+                "mfe_0_15", "mfe_15_30", "mfe_30_60",
+                "mae_0_15", "mae_15_30", "mae_30_60",
+                "time_to_mfe", "time_to_mae", "path_efficiency",
+                "rv_30", "rv_60",
+            )
+        }
 
 
 @dataclass(frozen=True)
-class ModeLibrary:
-    """The fitted set of modes, sealed by the fingerprint of what produced it."""
+class TrajectoryNode:
+    """One representative future extracted from this clock's conditional cloud.
 
-    library_id: str
-    fingerprint: str
-    fitted_at: pd.Timestamp
-    algorithm: str
-    modes: tuple[TrajectoryMode, ...]
-    feature_names: tuple[str, ...]
-    observation_count: int
-    noise_count: int
-    schema_version: int = FORECAST_SCHEMA_VERSION
-    authority: str = FORECAST_AUTHORITY
-    protocol_status: str = FORECAST_PROTOCOL_STATUS
+    ``curve`` is a medoid — a real observed trajectory — never a centroid
+    average, because the average of two opposite futures is a third future that
+    never happened.  ``mass`` is the share of the retrieved neighbourhood that
+    fell into this node, which is what makes it a probability rather than a
+    shape someone liked the look of.
+    """
+
+    node_id: str
+    curve: tuple[float, ...]
+    components: tuple[float, ...]
+    dispersion: tuple[float, ...]
+    mass: float
+    member_count: int
+    attributes: PathAttributes
 
     def __post_init__(self) -> None:
-        if not self.library_id or not self.fingerprint:
-            raise ValueError("a mode library must carry an identity and a fingerprint")
-        object.__setattr__(
-            self, "fitted_at", aware_timestamp(self.fitted_at, name="fitted_at")
-        )
-        modes = tuple(self.modes)
-        if not modes:
-            raise ValueError("a mode library must hold at least one mode")
-        if any(not isinstance(mode, TrajectoryMode) for mode in modes):
-            raise TypeError("modes must be TrajectoryMode instances")
-        ids = [mode.mode_id for mode in modes]
-        if len(set(ids)) != len(ids):
-            raise ValueError("mode ids must be unique inside a library")
-        known = set(ids)
-        for mode in modes:
-            if mode.parent_mode_id is not None and mode.parent_mode_id not in known:
-                raise ValueError(f"mode {mode.mode_id} cites an unknown parent")
-            missing = [child for child in mode.child_mode_ids if child not in known]
-            if missing:
-                raise ValueError(f"mode {mode.mode_id} cites unknown children {missing}")
-        object.__setattr__(self, "modes", modes)
-        object.__setattr__(self, "feature_names", tuple(str(n) for n in self.feature_names))
-        if int(self.observation_count) < len(modes):
-            raise ValueError("a library cannot hold more modes than observations")
-        object.__setattr__(self, "observation_count", int(self.observation_count))
-        if int(self.noise_count) < 0:
-            raise ValueError("noise_count cannot be negative")
-        object.__setattr__(self, "noise_count", int(self.noise_count))
-        if self.authority != FORECAST_AUTHORITY:
-            raise ValueError("a mode library is shadow-only")
-        if self.protocol_status != FORECAST_PROTOCOL_STATUS:
-            raise ValueError("a mode library is development-unvalidated")
-
-    def mode(self, mode_id: str) -> TrajectoryMode:
-        for candidate in self.modes:
-            if candidate.mode_id == mode_id:
-                return candidate
-        raise KeyError(mode_id)
+        if not self.node_id:
+            raise ValueError("node_id is required")
+        object.__setattr__(self, "curve", _curve(self.curve, name="curve"))
+        object.__setattr__(self, "dispersion", _curve(self.dispersion, name="dispersion"))
+        if any(value <= 0.0 for value in self.dispersion):
+            raise ValueError("node dispersion must be strictly positive")
+        components = tuple(_finite(v, name="components") for v in self.components)
+        if len(components) != PRINCIPAL_COMPONENT_COUNT:
+            raise ValueError(
+                f"components must carry {PRINCIPAL_COMPONENT_COUNT} values, "
+                f"got {len(components)}"
+            )
+        object.__setattr__(self, "components", components)
+        object.__setattr__(self, "mass", _unit(self.mass, name="mass"))
+        if int(self.member_count) <= 0:
+            raise ValueError("a node must be supported by at least one neighbour")
+        object.__setattr__(self, "member_count", int(self.member_count))
+        if not isinstance(self.attributes, PathAttributes):
+            raise TypeError("attributes must be PathAttributes")
 
     @property
-    def mode_ids(self) -> tuple[str, ...]:
-        return tuple(mode.mode_id for mode in self.modes)
+    def terminal_return(self) -> float:
+        """Where the node's curve ends, in ATR units."""
+
+        return self.curve[-1]
 
 
 @dataclass(frozen=True)
-class HypothesisProposal:
-    """One context-conditioned candidate, before the pool decides anything.
+class ConditionalCloud:
+    """The retrieved futures for one clock, and what was extracted from them.
 
-    ``prior`` is the empirical frequency with which the retrieved historical
-    neighbours of the current context went on to realize this mode.
+    ``residual_mass`` is the share of the neighbourhood that no kept node
+    covers.  It is measured, not floored into existence: a cloud that three
+    nodes genuinely explain reports a small residual, and one that they do not
+    reports a large one.
     """
 
-    mode_id: str
-    prior: float
+    asof: pd.Timestamp
     neighbour_count: int
-    neighbour_distance: float
+    assigned_count: int
+    cluster_count: int
+    nodes: tuple[TrajectoryNode, ...]
 
     def __post_init__(self) -> None:
-        if not self.mode_id:
-            raise ValueError("mode_id is required")
-        prior = _finite(self.prior, name="prior")
-        if not 0.0 <= prior <= 1.0:
-            raise ValueError("a proposal prior must be a probability")
-        object.__setattr__(self, "prior", prior)
-        if int(self.neighbour_count) < 0:
-            raise ValueError("neighbour_count cannot be negative")
-        object.__setattr__(self, "neighbour_count", int(self.neighbour_count))
-        distance = _finite(self.neighbour_distance, name="neighbour_distance")
-        if distance < 0.0:
-            raise ValueError("neighbour_distance cannot be negative")
-        object.__setattr__(self, "neighbour_distance", distance)
+        object.__setattr__(self, "asof", aware_timestamp(self.asof, name="asof"))
+        nodes = tuple(self.nodes)
+        if any(not isinstance(node, TrajectoryNode) for node in nodes):
+            raise TypeError("nodes must be TrajectoryNode instances")
+        if len(nodes) > MAX_LIVE_HYPOTHESES:
+            raise ValueError(
+                f"a cloud may surface at most {MAX_LIVE_HYPOTHESES} nodes, "
+                f"got {len(nodes)}"
+            )
+        ids = [node.node_id for node in nodes]
+        if len(set(ids)) != len(ids):
+            raise ValueError("node ids must be unique inside one cloud")
+        total = sum(node.mass for node in nodes)
+        if total > 1.0 + 1e-9:
+            raise ValueError("node masses cannot exceed the whole neighbourhood")
+        object.__setattr__(self, "nodes", nodes)
+        for name in ("neighbour_count", "assigned_count", "cluster_count"):
+            value = int(getattr(self, name))
+            if value < 0:
+                raise ValueError(f"{name} cannot be negative")
+            object.__setattr__(self, name, value)
+        if self.assigned_count > self.neighbour_count:
+            raise ValueError("more neighbours were assigned than were retrieved")
+
+    @property
+    def covered_mass(self) -> float:
+        return sum(node.mass for node in self.nodes)
+
+    @property
+    def residual_mass(self) -> float:
+        return max(0.0, 1.0 - self.covered_mass)
+
+
+@dataclass(frozen=True)
+class BeliefUncertainty:
+    """Three separate things that "uncertain" can mean, kept separate.
+
+    ``entropy`` — how evenly the probability is spread over what is named.
+    ``distribution_ambiguity`` — how far apart the named claims are from each
+    other. Three tightly agreeing hypotheses and three wildly opposed ones can
+    carry identical entropy and mean completely different things.
+    ``coverage`` — how much of the conditional cloud nothing named covers at all.
+
+    ``combined`` is their mean, offered as a single sortable number. The three
+    components are the authoritative reading; the mean is a convenience and
+    claims no principled aggregation.
+    """
+
+    entropy: float
+    distribution_ambiguity: float
+    coverage: float
+
+    def __post_init__(self) -> None:
+        for name in ("entropy", "distribution_ambiguity", "coverage"):
+            object.__setattr__(self, name, _unit(getattr(self, name), name=name))
+
+    @property
+    def combined(self) -> float:
+        return (self.entropy + self.distribution_ambiguity + self.coverage) / 3.0
 
 
 @dataclass(frozen=True)
 class Hypothesis:
-    """One live claim about the next sixty minutes, and how it is holding up."""
+    """One live claim about the next sixty minutes, and how it is holding up.
+
+    A hypothesis persists across clocks by *association*: each clock's freshly
+    extracted nodes are matched against the live set, and a matched hypothesis
+    keeps its identity, its age and the path it has been judged against.
+    ``association_distance`` is how well it matched on this clock, and is the
+    raw material for telling a real change from clustering jitter.
+    """
 
     hypothesis_id: str
-    mode_id: str
+    node_id: str
     spawned_at: pd.Timestamp
     asof: pd.Timestamp
     age_bars: int
     prior_log_weight: float
     evidence_log_weight: float
     probability: float
-    expected_trajectory: tuple[float, ...]
+    expected_curve: tuple[float, ...]
     realized_divergence: float
+    association_distance: float
+    attributes: PathAttributes
     status: HypothesisStatus = HypothesisStatus.ACTIVE
     lineage: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
-        if not self.hypothesis_id or not self.mode_id:
-            raise ValueError("a hypothesis needs an identity and a mode")
+        if not self.hypothesis_id or not self.node_id:
+            raise ValueError("a hypothesis needs an identity and a node")
         object.__setattr__(
             self, "spawned_at", aware_timestamp(self.spawned_at, name="spawned_at")
         )
@@ -274,27 +328,19 @@ class Hypothesis:
         if age < 0:
             raise ValueError("age_bars cannot be negative")
         object.__setattr__(self, "age_bars", age)
+        for name in ("prior_log_weight", "evidence_log_weight"):
+            object.__setattr__(self, name, _finite(getattr(self, name), name=name))
+        object.__setattr__(self, "probability", _unit(self.probability, name="probability"))
         object.__setattr__(
-            self, "prior_log_weight", _finite(self.prior_log_weight, name="prior_log_weight")
+            self, "expected_curve", _curve(self.expected_curve, name="expected_curve")
         )
-        object.__setattr__(
-            self,
-            "evidence_log_weight",
-            _finite(self.evidence_log_weight, name="evidence_log_weight"),
-        )
-        probability = _finite(self.probability, name="probability")
-        if not 0.0 <= probability <= 1.0:
-            raise ValueError("probability must lie in [0, 1]")
-        object.__setattr__(self, "probability", probability)
-        object.__setattr__(
-            self,
-            "expected_trajectory",
-            _trajectory(self.expected_trajectory, name="expected_trajectory"),
-        )
-        divergence = _finite(self.realized_divergence, name="realized_divergence")
-        if divergence < 0.0:
-            raise ValueError("realized_divergence cannot be negative")
-        object.__setattr__(self, "realized_divergence", divergence)
+        for name in ("realized_divergence", "association_distance"):
+            value = _finite(getattr(self, name), name=name)
+            if value < 0.0:
+                raise ValueError(f"{name} cannot be negative")
+            object.__setattr__(self, name, value)
+        if not isinstance(self.attributes, PathAttributes):
+            raise TypeError("attributes must be PathAttributes")
         if not isinstance(self.status, HypothesisStatus):
             raise TypeError("status must be a HypothesisStatus")
         lineage = tuple(str(item) for item in self.lineage)
@@ -304,20 +350,23 @@ class Hypothesis:
 
     @property
     def log_weight(self) -> float:
-        """The unnormalized log score the pool ranks and renormalizes."""
-
         return self.prior_log_weight + self.evidence_log_weight
+
+    @property
+    def terminal_return(self) -> float:
+        return self.expected_curve[-1]
 
 
 @dataclass(frozen=True)
 class LifecycleRecord:
-    """One SPAWN/UPDATE/SPLIT/MERGE/RETIRE the pool performed on this clock."""
+    """One SPAWN/UPDATE/SPLIT/MERGE/RETIRE the association produced."""
 
     asof: pd.Timestamp
     operation: LifecycleOperation
     hypothesis_ids: tuple[str, ...]
-    mode_ids: tuple[str, ...]
+    node_ids: tuple[str, ...]
     reason: str
+    association_distance: float = 0.0
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "asof", aware_timestamp(self.asof, name="asof"))
@@ -326,38 +375,35 @@ class LifecycleRecord:
         object.__setattr__(
             self, "hypothesis_ids", tuple(str(item) for item in self.hypothesis_ids)
         )
-        object.__setattr__(self, "mode_ids", tuple(str(item) for item in self.mode_ids))
+        object.__setattr__(self, "node_ids", tuple(str(item) for item in self.node_ids))
         if not self.hypothesis_ids:
             raise ValueError("a lifecycle record must name at least one hypothesis")
         if not self.reason:
             raise ValueError("a lifecycle record must state why it happened")
+        distance = _finite(self.association_distance, name="association_distance")
+        if distance < 0.0:
+            raise ValueError("association_distance cannot be negative")
+        object.__setattr__(self, "association_distance", distance)
 
 
 @dataclass(frozen=True)
 class MarketBeliefState:
-    """The Brain's published per-clock forecast.
-
-    ``residual_probability`` is the weight of "none of the live modes".  It is
-    never renormalized away, so ``sum(probabilities) + residual == 1`` exactly,
-    and a clock with no live hypothesis publishes a residual of one rather than
-    an empty, falsely confident belief.
-    """
+    """The Brain's published per-clock forecast."""
 
     asof: pd.Timestamp
     hypotheses: tuple[Hypothesis, ...]
     residual_probability: float
-    uncertainty: float
+    uncertainty: BeliefUncertainty
     revision_id: str
+    cloud: ConditionalCloud | None = None
     lifecycle_records: tuple[LifecycleRecord, ...] = ()
-    mode_library_fingerprint: str = ""
+    index_fingerprint: str = ""
     protocol_fingerprint: str = ""
     schema_version: int = FORECAST_SCHEMA_VERSION
     authority: str = FORECAST_AUTHORITY
     protocol_status: str = FORECAST_PROTOCOL_STATUS
     action_authority_ready: bool = False
 
-    # Probabilities are accumulated in log space and renormalized, so the sum
-    # is exact only up to floating-point rounding.
     PROBABILITY_TOLERANCE = 1e-9
 
     def __post_init__(self) -> None:
@@ -373,18 +419,16 @@ class MarketBeliefState:
         ids = [item.hypothesis_id for item in hypotheses]
         if len(set(ids)) != len(ids):
             raise ValueError("hypothesis ids must be unique inside one belief")
-        modes = [item.mode_id for item in hypotheses]
-        if len(set(modes)) != len(modes):
-            raise ValueError("one mode may back at most one live hypothesis")
+        nodes = [item.node_id for item in hypotheses]
+        if len(set(nodes)) != len(nodes):
+            raise ValueError("one node may back at most one live hypothesis")
         if any(item.asof != self.asof for item in hypotheses):
             raise ValueError("every live hypothesis must be observed on this clock")
         if any(item.status is not HypothesisStatus.ACTIVE for item in hypotheses):
             raise ValueError("a published belief carries only active hypotheses")
         object.__setattr__(self, "hypotheses", hypotheses)
 
-        residual = _finite(self.residual_probability, name="residual_probability")
-        if not 0.0 <= residual <= 1.0:
-            raise ValueError("residual_probability must be a probability")
+        residual = _unit(self.residual_probability, name="residual_probability")
         total = sum(item.probability for item in hypotheses) + residual
         if abs(total - 1.0) > self.PROBABILITY_TOLERANCE:
             raise ValueError(
@@ -395,13 +439,15 @@ class MarketBeliefState:
             raise ValueError("an empty belief must carry a residual of one")
         object.__setattr__(self, "residual_probability", residual)
 
-        uncertainty = _finite(self.uncertainty, name="uncertainty")
-        if not 0.0 <= uncertainty <= 1.0:
-            raise ValueError("uncertainty must lie in [0, 1]")
-        object.__setattr__(self, "uncertainty", uncertainty)
-
+        if not isinstance(self.uncertainty, BeliefUncertainty):
+            raise TypeError("uncertainty must be a BeliefUncertainty")
         if not self.revision_id:
             raise ValueError("revision_id is required")
+        if self.cloud is not None:
+            if not isinstance(self.cloud, ConditionalCloud):
+                raise TypeError("cloud must be a ConditionalCloud")
+            if self.cloud.asof != self.asof:
+                raise ValueError("the cloud must belong to this clock")
         records = tuple(self.lifecycle_records)
         if any(not isinstance(item, LifecycleRecord) for item in records):
             raise TypeError("lifecycle_records must be LifecycleRecord instances")
@@ -418,17 +464,28 @@ class MarketBeliefState:
 
     @property
     def leading(self) -> Hypothesis | None:
-        """The most probable live hypothesis, or ``None`` when the pool is empty."""
-
         if not self.hypotheses:
             return None
-        return max(self.hypotheses, key=lambda item: (item.probability, item.hypothesis_id))
+        return max(
+            self.hypotheses, key=lambda item: (item.probability, item.hypothesis_id)
+        )
 
-    def probability_of(self, mode_id: str) -> float:
+    def probability_of(self, node_id: str) -> float:
         for item in self.hypotheses:
-            if item.mode_id == mode_id:
+            if item.node_id == node_id:
                 return item.probability
         return 0.0
+
+
+def node_identity(curve: tuple[float, ...]) -> str:
+    """Content-addressed identity for one representative curve.
+
+    Two clocks that surface the same observed trajectory name it the same way,
+    which is what lets association fall back on exact identity when the geometry
+    has not moved at all.
+    """
+
+    return content_hash([round(float(value), 8) for value in curve])[:32]
 
 
 def belief_revision_id(
@@ -436,36 +493,29 @@ def belief_revision_id(
     asof: pd.Timestamp,
     hypotheses: tuple[Hypothesis, ...],
     residual_probability: float,
-    mode_library_fingerprint: str,
+    index_fingerprint: str,
     protocol_fingerprint: str,
 ) -> str:
-    """Deterministic identity for one published belief.
+    """Deterministic identity for one published belief."""
 
-    Two runs over the same bars, library and protocol produce the same id, which
-    is what makes a replay auditable.
-    """
-
-    return _identity(
-        FORECAST_SCHEMA_VERSION,
-        aware_timestamp(asof, name="asof").isoformat(),
-        mode_library_fingerprint,
-        protocol_fingerprint,
-        f"{float(residual_probability):.12f}",
-        *[
-            f"{item.hypothesis_id}:{item.mode_id}:{item.age_bars}:"
-            f"{item.probability:.12f}:{item.log_weight:.12f}"
-            for item in sorted(hypotheses, key=lambda h: h.hypothesis_id)
-        ],
+    return content_hash(
+        [
+            str(FORECAST_SCHEMA_VERSION),
+            aware_timestamp(asof, name="asof").isoformat(),
+            index_fingerprint,
+            protocol_fingerprint,
+            f"{float(residual_probability):.12f}",
+            *[
+                f"{item.hypothesis_id}:{item.node_id}:{item.age_bars}:"
+                f"{item.probability:.12f}:{item.log_weight:.12f}"
+                for item in sorted(hypotheses, key=lambda h: h.hypothesis_id)
+            ],
+        ]
     )
 
 
 def normalized_entropy(probabilities: tuple[float, ...]) -> float:
-    """Shannon entropy over the given outcomes, scaled by the widest the Brain
-    can be (``MAX_LIVE_HYPOTHESES + 1`` outcomes).
-
-    This is the raw measure. For a published belief use ``belief_uncertainty``,
-    which reads the residual correctly.
-    """
+    """Shannon entropy scaled by the widest the Brain can be."""
 
     weights = [float(value) for value in probabilities if float(value) > 0.0]
     if not weights:
@@ -477,19 +527,16 @@ def normalized_entropy(probabilities: tuple[float, ...]) -> float:
     return min(1.0, max(0.0, entropy / ceiling))
 
 
-def belief_uncertainty(
+def entropy_uncertainty(
     probabilities: tuple[float, ...], residual_probability: float
 ) -> float:
-    """How little the Brain can commit on this clock, in [0, 1].
+    """Entropy over the named claims plus the residual, read correctly.
 
-    The residual is not one outcome — it is "some mode I am not naming", and
-    treating it as a single alternative would make total ignorance look like
-    certainty: an empty pool carries a residual of one, whose entropy as a lone
-    outcome is zero. So the residual mass is spread across every slot the Brain
-    is not currently using, which is the most conservative reading available.
-
-    An empty pool therefore scores 1.0, and a pool with one near-certain
-    hypothesis scores near 0.0.
+    The residual is "some future I am not naming", not one named outcome.  As a
+    lone outcome its entropy is zero, so an empty pool — total ignorance — would
+    score as perfect confidence.  Spreading the residual across the slots the
+    Brain is not using is the most conservative reading available, and makes an
+    empty pool score one.
     """
 
     live = tuple(float(value) for value in probabilities)
@@ -500,23 +547,52 @@ def belief_uncertainty(
     return normalized_entropy(live + tuple(residual / unnamed for _ in range(unnamed)))
 
 
+def distribution_ambiguity(
+    components: tuple[tuple[float, ...], ...], *, scale: float
+) -> float:
+    """How far apart the named claims are from one another, in [0, 1].
+
+    Mean pairwise distance in the principal basis, saturated against ``scale``
+    (the basis's own spread) so the number stays comparable across windows.
+    Fewer than two claims cannot disagree, and score zero.
+    """
+
+    if len(components) < 2:
+        return 0.0
+    if not math.isfinite(scale) or scale <= 0.0:
+        raise ValueError("ambiguity scale must be finite and positive")
+    distances: list[float] = []
+    for index, left in enumerate(components):
+        for right in components[index + 1 :]:
+            distances.append(
+                math.sqrt(sum((a - b) ** 2 for a, b in zip(left, right)))
+            )
+    mean = sum(distances) / len(distances)
+    return min(1.0, max(0.0, mean / (mean + scale)))
+
+
 __all__ = [
+    "ATTRIBUTE_EXCURSION_WINDOWS",
+    "ATTRIBUTE_RETURN_HORIZONS",
+    "ATTRIBUTE_VOLATILITY_HORIZONS",
+    "BeliefUncertainty",
+    "ConditionalCloud",
     "FORECAST_AUTHORITY",
     "FORECAST_PROTOCOL_STATUS",
     "FORECAST_SCHEMA_VERSION",
     "Hypothesis",
-    "HypothesisProposal",
     "HypothesisStatus",
     "LifecycleOperation",
     "LifecycleRecord",
     "MAX_LIVE_HYPOTHESES",
     "MarketBeliefState",
-    "ModeLibrary",
-    "TRAJECTORY_COMPONENTS",
-    "TRAJECTORY_COMPONENT_HORIZON",
-    "TRAJECTORY_DIM",
-    "TrajectoryMode",
+    "PRINCIPAL_COMPONENT_COUNT",
+    "PathAttributes",
+    "TRAJECTORY_CURVE_LENGTH",
+    "TrajectoryNode",
     "belief_revision_id",
-    "belief_uncertainty",
+    "distribution_ambiguity",
+    "entropy_uncertainty",
+    "node_identity",
     "normalized_entropy",
 ]

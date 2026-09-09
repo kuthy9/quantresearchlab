@@ -1,10 +1,12 @@
 """Offline construction of the (context, trajectory) pairs the Brain learns from.
 
 One observation point per completed one-minute bar: ``X_t`` is what the Eye had
-published by ``t``, and ``T_t`` summarizes the sixty minutes that followed it in
-ATR units.  ``T_t`` is computed by replaying those minutes through the same
-``RealizedPath`` the runtime updater uses, so a mode's medoid and a live
-hypothesis's realized path are measured by identical arithmetic.
+published by ``t``, and the sixty bars that followed are kept **raw**.
+
+Storing the raw future rather than a derived summary is deliberate. Deriving the
+trajectory representation is cheap; re-driving the Eye to change it costs an hour
+per window. Every curve, attribute and principal score downstream is computed
+from these bars, so the representation can be revised without touching the Eye.
 
 This is a research surface.  It drives the Eye, reads the future and writes
 study artifacts; nothing here may become a runtime authority.
@@ -19,9 +21,12 @@ from typing import Sequence
 import numpy as np
 import pandas as pd
 
-from brain.core.belief_updater import RealizedPath
-from brain.core.hypothesis_proposer import FEATURE_DIM, FEATURE_NAMES, observation_features
-from contract.brain.forecast import TRAJECTORY_COMPONENTS, TRAJECTORY_DIM
+from brain.core.hypothesis_proposer import (
+    FEATURE_DIM,
+    FEATURE_NAMES,
+    observation_features,
+)
+from contract.brain.forecast import TRAJECTORY_CURVE_LENGTH
 from contract.market import Timeframe
 from eyes.core.causal import CausalMarketReader
 from eyes.core.observation import CausalObserver, ObserverConfig
@@ -29,9 +34,7 @@ from eyes.core.semantics import load_semantic_selection
 from shares.core.io import iter_completed_bars, load_ohlcv
 from shares.core.scale_registry import parse_scale_specs
 
-FUTURE_HORIZON_MINUTES = max(
-    int(name.rsplit("_", 1)[1]) for name in TRAJECTORY_COMPONENTS
-)
+FUTURE_HORIZON_MINUTES = TRAJECTORY_CURVE_LENGTH
 
 # The proposer's tape features look back an hour, so a context vector is only
 # complete once that much one-minute history has accumulated.
@@ -90,50 +93,17 @@ def build_eye(model_path: str | Path, *, root: Path) -> tuple[CausalMarketReader
     return reader, observer
 
 
-def trajectory_vector(
-    *,
-    anchor_price: float,
-    anchor_atr: float,
-    closes: Sequence[float],
-    highs: Sequence[float],
-    lows: Sequence[float],
-) -> tuple[float, ...]:
-    """Summarize the realized future as the contract's trajectory vector.
-
-    The future bars are replayed through ``RealizedPath`` so this offline
-    definition and the runtime's partial-path reading can never drift apart.
-    """
-
-    if len(closes) < FUTURE_HORIZON_MINUTES:
-        raise TrajectoryDatasetError(
-            f"a trajectory needs {FUTURE_HORIZON_MINUTES} future bars, got {len(closes)}"
-        )
-    path = RealizedPath(anchor_price=float(anchor_price), anchor_atr=float(anchor_atr))
-    for close, high, low in zip(
-        closes[:FUTURE_HORIZON_MINUTES],
-        highs[:FUTURE_HORIZON_MINUTES],
-        lows[:FUTURE_HORIZON_MINUTES],
-    ):
-        path = path.extend(close=close, high=high, low=low)
-    values = []
-    for name in TRAJECTORY_COMPONENTS:
-        realized = path.realized(name)
-        if realized is None:
-            raise TrajectoryDatasetError(f"component {name} is undecided at full horizon")
-        values.append(float(realized))
-    return tuple(values)
-
-
 @dataclass(frozen=True)
 class TrajectoryDataset:
     """Aligned contexts and futures, plus the bars they were derived from."""
 
     index: pd.DatetimeIndex
     features: np.ndarray
-    trajectories: np.ndarray
     prices: pd.DataFrame
+    future_closes: np.ndarray
+    future_highs: np.ndarray
+    future_lows: np.ndarray
     feature_names: tuple[str, ...] = FEATURE_NAMES
-    component_names: tuple[str, ...] = TRAJECTORY_COMPONENTS
 
     def __post_init__(self) -> None:
         rows = len(self.index)
@@ -141,11 +111,12 @@ class TrajectoryDataset:
             raise TrajectoryDatasetError(
                 f"features must be ({rows}, {FEATURE_DIM}), got {self.features.shape}"
             )
-        if self.trajectories.shape != (rows, TRAJECTORY_DIM):
-            raise TrajectoryDatasetError(
-                f"trajectories must be ({rows}, {TRAJECTORY_DIM}), "
-                f"got {self.trajectories.shape}"
-            )
+        for name in ("future_closes", "future_highs", "future_lows"):
+            shape = getattr(self, name).shape
+            if shape != (rows, FUTURE_HORIZON_MINUTES):
+                raise TrajectoryDatasetError(
+                    f"{name} must be ({rows}, {FUTURE_HORIZON_MINUTES}), got {shape}"
+                )
         if len(self.prices) != rows:
             raise TrajectoryDatasetError("prices and observation points disagree in length")
 
@@ -177,8 +148,10 @@ def build_dataset(
 
     stamps: list[pd.Timestamp] = []
     feature_rows: list[tuple[float, ...]] = []
-    trajectory_rows: list[tuple[float, ...]] = []
     price_rows: list[dict[str, float]] = []
+    future_close_rows: list[np.ndarray] = []
+    future_high_rows: list[np.ndarray] = []
+    future_low_rows: list[np.ndarray] = []
     history: list[float] = []
     seen = 0
 
@@ -202,15 +175,9 @@ def build_dataset(
             continue
         atr = float(atr)
         window = slice(index + 1, index + 1 + FUTURE_HORIZON_MINUTES)
-        trajectory_rows.append(
-            trajectory_vector(
-                anchor_price=float(bar.close),
-                anchor_atr=atr,
-                closes=closes[window],
-                highs=highs[window],
-                lows=lows[window],
-            )
-        )
+        future_close_rows.append(closes[window].copy())
+        future_high_rows.append(highs[window].copy())
+        future_low_rows.append(lows[window].copy())
         feature_rows.append(
             observation_features(
                 snapshot,
@@ -237,8 +204,10 @@ def build_dataset(
     return TrajectoryDataset(
         index=index,
         features=np.asarray(feature_rows, dtype=float),
-        trajectories=np.asarray(trajectory_rows, dtype=float),
         prices=pd.DataFrame(price_rows, index=index),
+        future_closes=np.asarray(future_close_rows, dtype=float),
+        future_highs=np.asarray(future_high_rows, dtype=float),
+        future_lows=np.asarray(future_low_rows, dtype=float),
     )
 
 
@@ -249,5 +218,4 @@ __all__ = [
     "TrajectoryDatasetError",
     "build_dataset",
     "build_eye",
-    "trajectory_vector",
 ]

@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
-"""Replay the rebuilt Brain minute by minute over one window.
+"""Replay the Brain minute by minute and report whether it rebuilt correctly.
 
-Loads the cached observation points and the fitted mode library, runs the
-forecaster over every bar, and reports whether the Brain rebuilt correctly:
+Runs the forecaster over every clock in a window and checks five things:
 
 * every clock published a well-formed ``MarketBeliefState``
 * the live working set never exceeded three hypotheses
@@ -10,14 +9,19 @@ forecaster over every bar, and reports whether the Brain rebuilt correctly:
 * all five lifecycle operations were exercised
 * a second pass reproduced every ``revision_id`` exactly
 
-None of that is evidence the forecast is *right*.  It is evidence the machinery
+None of that is evidence the forecast is *right*. It is evidence the machinery
 runs, is bounded, and is deterministic.
+
+It also measures churn honestly. Every lifecycle event is recorded against the
+clustering jitter and neighbourhood drift it happened under, so a real change of
+claim can be told from a re-initialization artefact instead of both being
+counted as "a split".
 """
 from __future__ import annotations
 
 import argparse
 import collections
-import json
+import hashlib
 from pathlib import Path
 import sys
 
@@ -29,139 +33,183 @@ import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
 
 from brain.core.belief_updater import BeliefUpdaterConfig  # noqa: E402
+from brain.core.forecast import ForecastInput, HypothesisForecaster  # noqa: E402
 from brain.core.hypothesis_pool import PoolConfig  # noqa: E402
 from brain.core.hypothesis_proposer import (  # noqa: E402
     HypothesisProposer,
     ProposerConfig,
     load_hypothesis_protocol,
 )
-from brain.research.mode_discovery import load_library_payload  # noqa: E402
+from brain.research.churn_diagnostics import (  # noqa: E402
+    association_distance_profile,
+    cloud_drift,
+    cluster_jitter,
+    summarize_churn,
+)
+from brain.research.forecast_index import load_index  # noqa: E402
+from brain.scripts._windows import load_dataset, slice_window  # noqa: E402
 from contract.brain.forecast import MAX_LIVE_HYPOTHESES, LifecycleOperation  # noqa: E402
 
-DEFAULT_ARTIFACTS = "outputs/hypothesis_modes"
+DEFAULT_ARTIFACTS = "outputs/hypothesis_v2"
 
 
 def _protocol_fingerprint(path: Path) -> str:
-    import hashlib
-
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def _load(artifacts: Path) -> tuple[pd.DatetimeIndex, np.ndarray, pd.DataFrame, dict]:
-    stored = np.load(artifacts / "dataset.npz", allow_pickle=False)
-    index = pd.DatetimeIndex(pd.to_datetime(stored["index"], utc=True), name="asof")
-    prices = pd.DataFrame(
-        stored["prices"], index=index, columns=["close", "high", "low", "atr"]
-    )
-    payload = json.loads((artifacts / "mode_library.json").read_text(encoding="utf-8"))
-    return index, stored["features"], prices, payload
-
-
-def _run(forecaster, index, features, prices) -> tuple[list, dict]:
-    from brain.core.forecast import ForecastInput
+def _run(forecaster, window, *, diagnose_every: int = 0):
+    """Replay one window; optionally sample clustering jitter as it goes."""
 
     forecaster.reset()
-    states = []
-    counts: collections.Counter[str] = collections.Counter()
-    for position, asof in enumerate(index):
-        row = prices.iloc[position]
-        # The context vector was already derived from the live snapshot by the
-        # dataset builder, so the replay hands it over rather than re-deriving
-        # it — but it still publishes through the ordinary forecast surface.
+    states, jitter_rows = [], []
+    previous_rows = None
+    for position, asof in enumerate(window.index):
+        row = window.prices[position]
         state = forecaster.observe(
             ForecastInput(
                 asof=asof,
-                close=float(row["close"]),
-                high=float(row["high"]),
-                low=float(row["low"]),
-                context=features[position],
-                atr=float(row["atr"]),
+                close=float(row[0]),
+                high=float(row[1]),
+                low=float(row[2]),
+                context=window.features[position],
+                atr=float(row[3]),
             )
         )
-        for record in state.lifecycle_records:
-            counts[record.operation.value] += 1
         states.append(state)
-    return states, dict(counts)
+        if diagnose_every and position % diagnose_every == 0:
+            rows = forecaster.proposer.neighbourhood(window.features[position])
+            scores = forecaster.proposer.index.reference_scores[rows]
+            agreement, shift = cluster_jitter(
+                scores, cluster_count=forecaster.proposer.config.cluster_count
+            )
+            jitter_rows.append(
+                {
+                    "asof": asof,
+                    "jitter_ari": agreement,
+                    "centroid_shift": shift,
+                    "cloud_drift": (
+                        cloud_drift(previous_rows, rows)
+                        if previous_rows is not None
+                        else 0.0
+                    ),
+                }
+            )
+            previous_rows = rows
+    return states, pd.DataFrame(jitter_rows)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--artifacts", default=DEFAULT_ARTIFACTS)
     parser.add_argument("--protocol", default="brain/configs/hypothesis_protocol.json")
+    parser.add_argument("--start", default="2022-01-02T18:00")
+    parser.add_argument("--end", default="2022-01-05T17:00")
+    parser.add_argument("--label", default="fit")
     parser.add_argument(
-        "--emit-end",
-        default="2022-01-05T17:00",
-        help="last clock to replay, exclusive, in exchange-local time; must "
-             "match the window the library was fitted on",
+        "--diagnose-every",
+        type=int,
+        default=25,
+        help="sample clustering jitter every N clocks; 0 disables the diagnostic",
     )
     parser.add_argument("--output", default=None)
     args = parser.parse_args()
 
     artifacts = ROOT / args.artifacts
-    index, features, prices, payload = _load(artifacts)
-    if args.emit_end:
-        keep = index.tz_convert("America/New_York") < pd.Timestamp(
-            args.emit_end, tz="America/New_York"
-        )
-        index, features, prices = index[keep], features[keep], prices[keep]
-    library, assignments, centre, scale = load_library_payload(payload)
+    data = load_dataset(artifacts / "dataset.npz")
+    window = slice_window(data, name=args.label, start=args.start, end=args.end)
+    index = load_index(artifacts / "forecast_index.npz")
     protocol_path = ROOT / args.protocol
     protocol = load_hypothesis_protocol(protocol_path)
 
     proposer = HypothesisProposer(
-        library=library,
-        reference_features=features,
-        reference_modes=assignments,
-        center=centre,
-        scale=scale,
-        config=ProposerConfig.from_protocol(protocol),
+        index=index, config=ProposerConfig.from_protocol(protocol)
     )
-
-    from brain.core.forecast import HypothesisForecaster
-
     forecaster = HypothesisForecaster(
         proposer=proposer,
-        library=library,
         protocol_fingerprint=_protocol_fingerprint(protocol_path),
         pool_config=PoolConfig.from_protocol(protocol),
         updater_config=BeliefUpdaterConfig.from_protocol(protocol),
     )
 
-    print(f"replaying {len(index)} clocks {index.min()} -> {index.max()}")
-    states, counts = _run(forecaster, index, features, prices)
+    print(window.describe())
+    print(f"index fingerprint {index.fingerprint[:16]}…\n")
+    states, jitter = _run(forecaster, window, diagnose_every=args.diagnose_every)
 
     live = [len(state.hypotheses) for state in states]
     residual = [state.residual_probability for state in states]
-    uncertainty = [state.uncertainty for state in states]
     sums = [
         sum(h.probability for h in state.hypotheses) + state.residual_probability
         for state in states
     ]
     worst_sum = max(abs(value - 1.0) for value in sums)
+    counts: collections.Counter[str] = collections.Counter()
+    churn_rows = []
+    jitter_lookup = jitter.set_index("asof") if not jitter.empty else None
+    for state in states:
+        for record in state.lifecycle_records:
+            counts[record.operation.value] += 1
+            nearest = (
+                jitter_lookup.index.asof(record.asof)
+                if jitter_lookup is not None and len(jitter_lookup)
+                else None
+            )
+            churn_rows.append(
+                {
+                    "operation": record.operation.value,
+                    "association_distance": record.association_distance,
+                    "jitter_ari": (
+                        float(jitter_lookup.loc[nearest, "jitter_ari"])
+                        if nearest is not None and nearest in jitter_lookup.index
+                        else float("nan")
+                    ),
+                    "cloud_drift": (
+                        float(jitter_lookup.loc[nearest, "cloud_drift"])
+                        if nearest is not None and nearest in jitter_lookup.index
+                        else float("nan")
+                    ),
+                }
+            )
 
-    print("\n=== working set ===")
+    print("=== working set ===")
     histogram = collections.Counter(live)
     for size in sorted(histogram):
-        share = histogram[size] / len(states)
-        print(f"  H_t = {size}: {histogram[size]:6d} clocks ({share:6.1%})")
+        print(f"  H_t = {size}: {histogram[size]:6d} clocks ({histogram[size]/len(states):6.1%})")
     print(f"  mean live hypotheses {np.mean(live):.2f}, max {max(live)}")
 
     print("\n=== belief ===")
-    print(f"  residual    mean {np.mean(residual):.3f}  min {min(residual):.3f}  max {max(residual):.3f}")
-    print(f"  uncertainty mean {np.mean(uncertainty):.3f}  min {min(uncertainty):.3f}  max {max(uncertainty):.3f}")
+    print(f"  residual mean {np.mean(residual):.3f}  min {min(residual):.3f}  max {max(residual):.3f}")
+    for name in ("entropy", "distribution_ambiguity", "coverage"):
+        values = [getattr(state.uncertainty, name) for state in states]
+        print(f"  {name:22s} mean {np.mean(values):.3f}  min {min(values):.3f}  max {max(values):.3f}")
+    combined = [state.uncertainty.combined for state in states]
+    print(f"  {'combined':22s} mean {np.mean(combined):.3f}  min {min(combined):.3f}  max {max(combined):.3f}")
     print(f"  worst |sum(p) + residual - 1| = {worst_sum:.3e}")
 
     print("\n=== lifecycle ===")
     for operation in LifecycleOperation:
         print(f"  {operation.value:8s} {counts.get(operation.value, 0):6d}")
 
+    if churn_rows and jitter_lookup is not None and not jitter.empty:
+        frame = pd.DataFrame(churn_rows).dropna(subset=["jitter_ari"])
+        if not frame.empty:
+            print("\n=== churn: real change or clustering jitter? ===")
+            print(summarize_churn(frame).to_string(index=False, float_format=lambda v: f"{v:8.3f}"))
+            print(
+                "\n  artefact_suspicion is high when an operation fires while the "
+                "cloud has barely moved but the clustering is unstable."
+            )
+        distances = [r["association_distance"] for r in churn_rows if r["association_distance"] > 0]
+        if distances:
+            print("\n=== where an association gate would sit ===")
+            print(association_distance_profile(distances).to_string(index=False, float_format=lambda v: f"{v:8.3f}"))
+
     print("\n=== determinism ===")
-    second, _ = _run(forecaster, index, features, prices)
+    second, _ = _run(forecaster, window, diagnose_every=0)
     identical = all(a.revision_id == b.revision_id for a, b in zip(states, second))
     print(f"  second pass reproduced every revision_id: {identical}")
 
     checks = {
-        "every_clock_published": len(states) == len(index),
+        "every_clock_published": len(states) == len(window),
         "working_set_bounded": max(live) <= MAX_LIVE_HYPOTHESES,
         "probabilities_sum_to_one": worst_sum <= 1e-9,
         "all_lifecycle_operations_exercised": all(
@@ -177,17 +225,17 @@ def main() -> None:
     if args.output:
         frame = pd.DataFrame(
             {
-                "asof": index,
+                "asof": window.index,
                 "live_hypotheses": live,
                 "residual_probability": residual,
-                "uncertainty": uncertainty,
-                "leading_mode": [
-                    state.leading.mode_id if state.leading else None for state in states
-                ],
-                "leading_probability": [
-                    state.leading.probability if state.leading else 0.0 for state in states
-                ],
-                "revision_id": [state.revision_id for state in states],
+                "entropy": [s.uncertainty.entropy for s in states],
+                "distribution_ambiguity": [s.uncertainty.distribution_ambiguity for s in states],
+                "coverage": [s.uncertainty.coverage for s in states],
+                "uncertainty": combined,
+                "leading_node": [s.leading.node_id if s.leading else None for s in states],
+                "leading_probability": [s.leading.probability if s.leading else 0.0 for s in states],
+                "leading_r60": [s.leading.terminal_return if s.leading else float("nan") for s in states],
+                "revision_id": [s.revision_id for s in states],
             }
         ).set_index("asof")
         destination = ROOT / args.output

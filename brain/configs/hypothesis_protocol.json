@@ -1,51 +1,35 @@
 {
-  "protocol_id": "natural_hypothesis_v1",
-  "schema_version": 1,
+  "protocol_id": "local_conditional_hypothesis_v2",
+  "schema_version": 2,
   "authority": "shadow_only",
   "protocol_status": "development_unvalidated",
   "action_authority_ready": false,
-  "description": "Thresholds for the naturally discovered hypothesis Brain. Every value here is a development default chosen so the five lifecycle operations are all reachable on a short replay; none of them has been fitted or validated against out-of-sample outcomes.",
+  "description": "Thresholds for the local conditional hypothesis Brain. Every value here is a development default chosen so the five lifecycle operations are reachable on a short replay; none has been fitted or validated against out-of-sample outcomes.",
   "trajectory": {
-    "future_horizon_minutes": 60,
+    "curve_length_minutes": 60,
     "atr_timeframe": "1m",
-    "components": [
-      "r_1",
-      "r_5",
-      "r_10",
-      "r_15",
-      "r_30",
-      "r_60",
-      "mfe_15",
-      "mae_15",
-      "mfe_30",
-      "mae_30",
-      "mfe_60",
-      "mae_60",
-      "rv_30",
-      "rv_60"
-    ]
+    "principal_components": 5,
+    "identity": "the ATR-normalized cumulative return curve, projected onto a globally fitted principal basis. Realized volatility is an attribute and never an identity dimension."
   },
   "proposer": {
     "neighbours": 200,
     "minimum_neighbours": 25,
-    "max_proposals": 6,
-    "minimum_prior": 0.25,
-    "_minimum_prior_note": "The share of retrieved neighbours a mode needs before it is named specifically. Below it, the proposer climbs to the mode's ancestor instead: an ambiguous neighbourhood supports a coarser claim, not a confident fine one. With six leaves a uniform split gives each 0.167, so a threshold under that never engages the roll-up at all."
+    "cluster_count": 6,
+    "max_nodes": 3,
+    "minimum_mass": 0.12,
+    "kmeans_restarts": 5,
+    "_minimum_mass_note": "The share of the retrieved neighbourhood a cluster needs before it is surfaced as a representative future. Mass below this is left to the residual rather than named."
   },
   "pool": {
     "max_live_hypotheses": 3,
-    "spawn_minimum_prior": 0.12,
-    "spawn_displacement_margin": 0.05,
+    "association_max_distance": 2.0,
     "retire_minimum_probability": 0.05,
     "retire_maximum_age_bars": 60,
     "falsification_divergence": 3.0,
     "falsification_minimum_age_bars": 5,
-    "merge_maximum_distance": 0.75,
-    "split_minimum_age_bars": 5,
-    "split_maximum_imbalance": 0.2,
     "residual_floor": 0.05,
-    "prior_decay_per_bar": 0.9,
-    "prior_floor": 0.001
+    "prior_floor": 0.001,
+    "_association_note": "A hypothesis keeps its identity only if this clock's matched node lies within association_max_distance in the principal basis. The gate is what separates a real change of claim from clustering jitter, and churn_diagnostics measures whether it is set sensibly."
   },
   "belief_updater": {
     "likelihood_scale_floor": 0.25,

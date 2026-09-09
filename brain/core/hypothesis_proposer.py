@@ -1,16 +1,23 @@
 """What the market has historically done next, from where it stands now.
 
-The proposer answers one question each minute: *given this context, which
-trajectory modes actually followed in the past?*  It never invents a future.
-It reads the current Eye state into a context vector ``X_t``, retrieves the
-nearest historical contexts, and reports how often each mode followed them.
+The proposer answers one question each minute: *given a context like this one,
+what did the next sixty minutes actually do?*  It reads the current Eye state
+into a context vector ``X_t``, retrieves the nearest historical contexts, reads
+their realized futures as a **conditional future cloud**, and clusters that
+cloud locally to extract at most three representative trajectory nodes.
 
-This module also owns the definition of ``X_t`` itself.  The offline dataset
-builder in ``brain/research/`` imports it from here rather than the other way
-round, so the research package never becomes a runtime dependency.
+Nothing is fitted globally except the retrieval space and the principal basis.
+There is no library of modes: the representatives are re-extracted every clock
+from whichever futures the current context actually retrieves. Persistence
+across clocks is the pool's job, by association, not this module's.
 
-Nothing here reads the future.  ``X_t`` is built only from facts the Eye has
-already published at ``t``.
+This module also owns the definition of ``X_t``. The offline builder in
+``brain/research/`` imports it from here rather than the other way round, so the
+research package never becomes a runtime dependency.
+
+Nothing here reads the future *of the current clock*. ``X_t`` is built only from
+facts the Eye has already published at ``t``; the futures in the cloud belong to
+historical neighbours whose sixty minutes are long since complete.
 """
 from __future__ import annotations
 
@@ -22,7 +29,15 @@ from typing import Any, Mapping, Sequence
 
 import numpy as np
 
-from contract.brain.forecast import HypothesisProposal, ModeLibrary
+from contract.brain.forecast import (
+    MAX_LIVE_HYPOTHESES,
+    PRINCIPAL_COMPONENT_COUNT,
+    TRAJECTORY_CURVE_LENGTH,
+    ConditionalCloud,
+    PathAttributes,
+    TrajectoryNode,
+    node_identity,
+)
 from contract.market import Direction, Timeframe
 
 # The scales the context vector reads, coarsest first.  This mirrors the
@@ -363,24 +378,37 @@ def observation_features(
     return tuple(values[name] for name in FEATURE_NAMES)
 
 
+
+
+# A node's per-point dispersion is floored so a tight cluster cannot claim
+# impossible precision and reject every real path as a falsification.
+MINIMUM_DISPERSION = 0.05
+
+
 @dataclass(frozen=True)
 class ProposerConfig:
-    """How far the proposer looks back and how selective it is."""
+    """How far the retrieval reaches, and how selective the extraction is."""
 
     neighbours: int = 200
     minimum_neighbours: int = 25
-    max_proposals: int = 6
-    minimum_prior: float = 0.05
+    cluster_count: int = 6
+    max_nodes: int = MAX_LIVE_HYPOTHESES
+    minimum_mass: float = 0.12
+    kmeans_restarts: int = 5
 
     def __post_init__(self) -> None:
         if self.neighbours < 1:
             raise ValueError("neighbours must be positive")
         if not 1 <= self.minimum_neighbours <= self.neighbours:
             raise ValueError("minimum_neighbours must lie in [1, neighbours]")
-        if self.max_proposals < 1:
-            raise ValueError("max_proposals must be positive")
-        if not 0.0 <= self.minimum_prior < 1.0:
-            raise ValueError("minimum_prior must lie in [0, 1)")
+        if self.cluster_count < 2:
+            raise ValueError("cluster_count must be at least 2")
+        if not 1 <= self.max_nodes <= MAX_LIVE_HYPOTHESES:
+            raise ValueError(f"max_nodes must lie in [1, {MAX_LIVE_HYPOTHESES}]")
+        if not 0.0 < self.minimum_mass < 1.0:
+            raise ValueError("minimum_mass must lie in (0, 1)")
+        if self.kmeans_restarts < 1:
+            raise ValueError("kmeans_restarts must be positive")
 
     @classmethod
     def from_protocol(cls, payload: Mapping[str, Any]) -> "ProposerConfig":
@@ -388,8 +416,10 @@ class ProposerConfig:
         return cls(
             neighbours=int(section["neighbours"]),
             minimum_neighbours=int(section["minimum_neighbours"]),
-            max_proposals=int(section["max_proposals"]),
-            minimum_prior=float(section["minimum_prior"]),
+            cluster_count=int(section["cluster_count"]),
+            max_nodes=int(section["max_nodes"]),
+            minimum_mass=float(section["minimum_mass"]),
+            kmeans_restarts=int(section["kmeans_restarts"]),
         )
 
 
@@ -410,189 +440,199 @@ def load_hypothesis_protocol(path: str | Path) -> Mapping[str, Any]:
     return payload
 
 
-class HypothesisProposer:
-    """Retrieves the modes that historically followed contexts like this one.
+@dataclass(frozen=True)
+class ForecastIndex:
+    """Everything the runtime needs to answer "what followed contexts like this".
 
-    The reference set is the fitted dataset: one row per historical observation
-    point, standardized in the same way the mode library was, each already
-    assigned to a mode (or to noise).  Retrieval is exact k-nearest-neighbour in
-    that standardized space — deterministic, and cheap enough per minute that
-    no approximation is warranted at this scale.
+    This is the only globally fitted object left. It carries the retrieval space
+    (standardized contexts), the realized futures those contexts led to, and the
+    principal basis the futures are compared in. It holds no modes: what counts
+    as a representative future is decided per clock, from the neighbourhood.
+    """
+
+    fingerprint: str
+    feature_center: np.ndarray
+    feature_scale: np.ndarray
+    reference_features: np.ndarray
+    reference_curves: np.ndarray
+    reference_scores: np.ndarray
+    reference_attributes: np.ndarray
+    attribute_names: tuple[str, ...]
+    principal_mean: np.ndarray
+    principal_components: np.ndarray
+    component_scale: float
+
+    def __post_init__(self) -> None:
+        rows = self.reference_features.shape[0]
+        checks = {
+            "feature_center": (self.feature_center.shape, (FEATURE_DIM,)),
+            "feature_scale": (self.feature_scale.shape, (FEATURE_DIM,)),
+            "reference_features": (self.reference_features.shape, (rows, FEATURE_DIM)),
+            "reference_curves": (
+                self.reference_curves.shape,
+                (rows, TRAJECTORY_CURVE_LENGTH),
+            ),
+            "reference_scores": (
+                self.reference_scores.shape,
+                (rows, PRINCIPAL_COMPONENT_COUNT),
+            ),
+            "principal_mean": (self.principal_mean.shape, (TRAJECTORY_CURVE_LENGTH,)),
+            "principal_components": (
+                self.principal_components.shape,
+                (PRINCIPAL_COMPONENT_COUNT, TRAJECTORY_CURVE_LENGTH),
+            ),
+        }
+        for name, (actual, expected) in checks.items():
+            if actual != expected:
+                raise HypothesisProposerError(
+                    f"{name} must have shape {expected}, got {actual}"
+                )
+        if self.reference_attributes.shape != (rows, len(self.attribute_names)):
+            raise HypothesisProposerError("reference attributes are misaligned")
+        if np.any(self.feature_scale <= 0.0):
+            raise HypothesisProposerError("feature scale must be positive")
+        if not math.isfinite(self.component_scale) or self.component_scale <= 0.0:
+            raise HypothesisProposerError("component_scale must be finite and positive")
+        if not self.fingerprint:
+            raise HypothesisProposerError("a forecast index must carry a fingerprint")
+
+    def __len__(self) -> int:
+        return int(self.reference_features.shape[0])
+
+    def project(self, curves: np.ndarray) -> np.ndarray:
+        """Project raw curves onto the principal basis."""
+
+        centred = np.asarray(curves, dtype=float) - self.principal_mean
+        return centred @ self.principal_components.T
+
+
+class HypothesisProposer:
+    """Extracts this clock's representative futures from its conditional cloud.
+
+    Retrieval is exact k-nearest-neighbour in the standardized context space —
+    deterministic, and cheap enough per minute that no approximation is
+    warranted at this scale. Clustering is K-Means in the principal basis:
+    conditional future clouds are continuous rather than island-shaped, so a
+    density method abstains on them and a partitional cut is the honest tool.
     """
 
     def __init__(
         self,
         *,
-        library: ModeLibrary,
-        reference_features: np.ndarray,
-        reference_modes: Sequence[str | None],
-        center: np.ndarray,
-        scale: np.ndarray,
+        index: ForecastIndex,
         config: ProposerConfig | None = None,
     ) -> None:
-        features = np.asarray(reference_features, dtype=float)
-        if features.ndim != 2 or features.shape[1] != FEATURE_DIM:
-            raise HypothesisProposerError(
-                f"reference features must be (n, {FEATURE_DIM}), got {features.shape}"
-            )
-        modes = tuple(reference_modes)
-        if len(modes) != features.shape[0]:
-            raise HypothesisProposerError(
-                "reference features and mode assignments disagree in length"
-            )
-        known = set(library.mode_ids)
-        unknown = {m for m in modes if m is not None and m not in known}
-        if unknown:
-            raise HypothesisProposerError(
-                f"reference rows cite modes absent from the library: {sorted(unknown)[:5]}"
-            )
-        self.library = library
+        self.index = index
         self.config = config or ProposerConfig()
-        self._center = np.asarray(center, dtype=float)
-        self._scale = np.asarray(scale, dtype=float)
-        if self._center.shape != (FEATURE_DIM,) or self._scale.shape != (FEATURE_DIM,):
-            raise HypothesisProposerError("standardization vectors are the wrong width")
-        if np.any(self._scale <= 0.0):
-            raise HypothesisProposerError("standardization scale must be positive")
-        # Impute once, at construction: a NaN component becomes the reference
-        # centre, which is the same thing the query does, so a missing value
-        # contributes nothing to the distance instead of poisoning it.
-        self._reference = self._standardize(features)
-        self._modes = modes
+        self._reference = np.nan_to_num(
+            (index.reference_features - index.feature_center) / index.feature_scale,
+            nan=0.0,
+            posinf=0.0,
+            neginf=0.0,
+        )
 
-    def _standardize(self, features: np.ndarray) -> np.ndarray:
-        z = (np.asarray(features, dtype=float) - self._center) / self._scale
-        return np.nan_to_num(z, nan=0.0, posinf=0.0, neginf=0.0)
+    def _standardize(self, context: Sequence[float]) -> np.ndarray:
+        z = (
+            np.asarray(context, dtype=float).reshape(1, -1) - self.index.feature_center
+        ) / self.index.feature_scale
+        return np.nan_to_num(z, nan=0.0, posinf=0.0, neginf=0.0)[0]
 
-    def propose(self, context: Sequence[float]) -> tuple[HypothesisProposal, ...]:
-        """Rank the modes that followed the nearest historical contexts.
+    def neighbourhood(self, context: Sequence[float]) -> np.ndarray:
+        """Row indices of the nearest historical contexts, nearest first."""
 
-        Returns an empty tuple when too few neighbours are available to say
-        anything — the pool then holds a residual of one rather than spawning on
-        a handful of points.
-        """
-
-        query = self._standardize(np.asarray(context, dtype=float).reshape(1, -1))[0]
         if self._reference.shape[0] == 0:
-            return ()
+            return np.empty(0, dtype=int)
+        query = self._standardize(context)
         distances = np.linalg.norm(self._reference - query, axis=1)
         take = min(self.config.neighbours, distances.size)
-        # argpartition then sort the head: O(n) instead of a full sort per minute.
         head = np.argpartition(distances, take - 1)[:take]
-        head = head[np.argsort(distances[head], kind="stable")]
+        return head[np.argsort(distances[head], kind="stable")]
 
-        counts: dict[str, int] = {}
-        distance_sums: dict[str, float] = {}
-        assigned = 0
-        for index in head:
-            mode_id = self._modes[int(index)]
-            if mode_id is None:
-                continue
-            assigned += 1
-            counts[mode_id] = counts.get(mode_id, 0) + 1
-            distance_sums[mode_id] = distance_sums.get(mode_id, 0.0) + float(
-                distances[int(index)]
-            )
-        if assigned < self.config.minimum_neighbours:
-            return ()
+    def propose(self, context: Sequence[float], *, asof) -> ConditionalCloud:
+        """Retrieve, cluster locally, and surface the top nodes by mass.
 
-        # Priors are shares of the retrieved neighbourhood, so unassigned
-        # (noise) neighbours dilute every mode instead of being redistributed.
-        # That dilution is the residual's first source of evidence.
-        total = float(len(head))
-        frontier = self._frontier(counts, distance_sums, total)
-        proposals = [
-            HypothesisProposal(
-                mode_id=mode_id,
-                prior=weight / total,
-                neighbour_count=int(weight),
-                neighbour_distance=distance,
-            )
-            for mode_id, weight, distance in frontier
-        ]
-        proposals.sort(key=lambda p: (-p.prior, p.neighbour_distance, p.mode_id))
-        return tuple(proposals[: self.config.max_proposals])
-
-    def _frontier(
-        self,
-        counts: Mapping[str, int],
-        distance_sums: Mapping[str, float],
-        total: float,
-    ) -> list[tuple[str, float, float]]:
-        """Choose how specific a claim the neighbourhood actually supports.
-
-        A leaf mode that the neighbours clearly agree on is proposed as itself.
-        When the neighbours split across several fine modes so that none of them
-        clears ``minimum_prior`` alone, their shared ancestor is proposed
-        instead: the honest reading of an ambiguous context is a coarser claim,
-        not silence. That is also what later gives ``SPLIT`` something to split
-        — a leaf has no children, so a pool that only ever holds leaves could
-        never split at all.
-
-        The returned nodes are mutually non-ancestral, so their neighbour sets
-        are disjoint and their priors sum to at most one.
+        A neighbourhood too small to say anything yields a cloud with no nodes,
+        whose residual is one — the Brain says nothing rather than extrapolating
+        from a handful of points.
         """
 
-        library = self.library
-        parent = {mode.mode_id: mode.parent_mode_id for mode in library.modes}
-        rolled: dict[str, float] = {}
-        weighted_distance: dict[str, float] = {}
-        for mode_id, count in counts.items():
-            node: str | None = mode_id
-            while node is not None:
-                rolled[node] = rolled.get(node, 0.0) + count
-                node = parent.get(node)
-
-        selected: set[str] = set()
-        for mode_id in counts:
-            node = mode_id
-            while node is not None and rolled[node] / total < self.config.minimum_prior:
-                node = parent.get(node)
-            if node is not None:
-                selected.add(node)
-
-        # Keep only the most specific selections: an ancestor of another
-        # selected node would double-count the same neighbours.
-        ancestors: set[str] = set()
-        for node in selected:
-            walker = parent.get(node)
-            while walker is not None:
-                ancestors.add(walker)
-                walker = parent.get(walker)
-        frontier = sorted(selected - ancestors)
-
-        # A frontier node's distance is the neighbour-weighted mean over the
-        # leaves it absorbed.
-        for node in frontier:
-            leaves = [
-                mode_id
-                for mode_id in counts
-                if node == mode_id or self._is_ancestor(parent, node, mode_id)
-            ]
-            weight = sum(counts[leaf] for leaf in leaves)
-            weighted_distance[node] = (
-                sum(distance_sums[leaf] for leaf in leaves) / weight
-                if weight
-                else 0.0
+        rows = self.neighbourhood(context)
+        if rows.size < self.config.minimum_neighbours:
+            return ConditionalCloud(
+                asof=asof,
+                neighbour_count=int(rows.size),
+                assigned_count=0,
+                cluster_count=0,
+                nodes=(),
             )
-        return [(node, rolled[node], weighted_distance[node]) for node in frontier]
 
-    @staticmethod
-    def _is_ancestor(parent: Mapping[str, str | None], node: str, of: str) -> bool:
-        walker = parent.get(of)
-        while walker is not None:
-            if walker == node:
-                return True
-            walker = parent.get(walker)
-        return False
+        scores = self.index.reference_scores[rows]
+        curves = self.index.reference_curves[rows]
+        attributes = self.index.reference_attributes[rows]
+        clusters = min(self.config.cluster_count, scores.shape[0])
+
+        from sklearn.cluster import KMeans
+
+        labels = KMeans(
+            n_clusters=clusters,
+            n_init=self.config.kmeans_restarts,
+            random_state=0,
+        ).fit_predict(scores)
+
+        total = float(rows.size)
+        candidates: list[tuple[float, int, TrajectoryNode]] = []
+        assigned = 0
+        for label in sorted(set(int(v) for v in labels)):
+            members = np.flatnonzero(labels == label)
+            mass = members.size / total
+            if mass < self.config.minimum_mass:
+                continue
+            centre = scores[members].mean(axis=0)
+            local = int(np.argmin(np.linalg.norm(scores[members] - centre, axis=1)))
+            representative = int(members[local])
+            member_curves = curves[members]
+            dispersion = np.maximum(
+                member_curves.std(axis=0) if members.size > 1
+                else np.full(TRAJECTORY_CURVE_LENGTH, MINIMUM_DISPERSION),
+                MINIMUM_DISPERSION,
+            )
+            curve = tuple(float(v) for v in curves[representative])
+            node = TrajectoryNode(
+                node_id=node_identity(curve),
+                curve=curve,
+                components=tuple(float(v) for v in scores[representative]),
+                dispersion=tuple(float(v) for v in dispersion),
+                mass=mass,
+                member_count=int(members.size),
+                attributes=PathAttributes(
+                    **dict(zip(self.index.attribute_names, attributes[representative]))
+                ),
+            )
+            candidates.append((mass, -members.size, node))
+            assigned += int(members.size)
+
+        # Highest mass first; ties broken by member count then identity, so two
+        # runs over the same cloud always surface the same nodes in the same
+        # order.
+        candidates.sort(key=lambda item: (-item[0], item[1], item[2].node_id))
+        kept = [node for _, _, node in candidates[: self.config.max_nodes]]
+        return ConditionalCloud(
+            asof=asof,
+            neighbour_count=int(rows.size),
+            assigned_count=sum(node.member_count for node in kept),
+            cluster_count=clusters,
+            nodes=tuple(kept),
+        )
 
 
 __all__ = [
     "CONTEXT_TIMEFRAMES",
     "DELIVERY_PHASES",
-    "SESSION_PHASES",
     "FEATURE_DIM",
     "FEATURE_NAMES",
+    "MINIMUM_DISPERSION",
+    "SESSION_PHASES",
+    "ForecastIndex",
     "HypothesisProposer",
     "HypothesisProposerError",
     "ProposerConfig",

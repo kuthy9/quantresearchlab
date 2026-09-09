@@ -96,7 +96,7 @@ independent structural, cost, deadline, data and fillability development vetoes
 optional one-next-bar conservative simulation → position feedback
 
 brain/core/forecast.py publishes one MarketBeliefState per clock
-from the fitted trajectory-mode library (contract/brain/forecast.py)
+from the conditional future cloud (contract/brain/forecast.py)
 ```
 
 ### Reasoning responsibilities
@@ -109,7 +109,7 @@ question and may consume only already-known outputs from the layer above it:
 | Data fact admission | `io`, `market_clock`, `CausalMarketReader` | Which completed clocks and prices are legally knowable now? | No structure, probability, or action interpretation. |
 | Atomic observation | `CausalObserver`, Group 1–5 trackers, `EventStore` | Which preregistered v1.2 market facts occurred, and from which exact sources? | No rewriting history and no trade decision. |
 | State and relation projection | timeframe/session reducers, `RelationResolver`, Foundation v2, `MarketSnapshotPublisher` | What is the deterministic current state, lifecycle, geometry, and cross-frame relation? | Foundation is an additive v1.2 projection, not a new detector or full-stack v2 authority. |
-| Competing-hypothesis reasoning | Scene Graph, `hypothesis_proposer` → `hypothesis_pool` → `belief_updater` → `forecast` (the typed Brain, DOL and Signal Policy were retired 2026-09-07; the frozen six-path set 2026-09-09) | Which naturally observed sixty-minute trajectory modes are still consistent with the realized path? | At most three live hypotheses plus an irreducible residual; `shadow_only`, no action authority. |
+| Competing-hypothesis reasoning | Scene Graph, `hypothesis_proposer` → `hypothesis_pool` → `belief_updater` → `forecast` (the typed Brain, DOL and Signal Policy were retired 2026-09-07; the frozen six-path set and the global mode library 2026-09-09) | Given a context like this one, which sixty-minute trajectories actually followed, and which are still consistent with the realized path? | At most three live hypotheses plus a measured residual; `shadow_only`, no action authority. |
 | Action constraint and validation | Decision, Risk, simulator (Trade Intent and the execution FSM were retired 2026-09-07) | Is an already-described candidate allowed to become a simulated action or a no-order audit fact? | No retroactive semantic change, broker authority, profit claim, or sealed-OOS access. |
 
 The `Decision`/`Risk`/sequential simulator path remains the only registered
@@ -409,30 +409,39 @@ reversal, balance, failed breakout, residual unknown — were a taxonomy the
 module asserted about the market rather than one the market produced, and
 nothing consumed the competition set.
 
-What replaced them fits its hypotheses from history. `brain/research/` pairs
-every past completed bar with the sixty minutes that followed it, summarized as
-a fourteen-component ATR-normalized trajectory vector; HDBSCAN groups those
-trajectories into modes and K-Medoids picks each mode's representative — a real
-observed trajectory, never an average of two opposite futures. Ward linkage over
-the medoids gives the modes a binary hierarchy, which is what SPLIT and MERGE
-move along.
+Their first replacement fitted a global library of trajectory modes. That was
+retired the same day, for a subtler reason: a global fit answers "what shapes
+exist in this market?", while the Brain needs "what follows a context like this
+one?". Only the second question is conditional on the present.
 
-At runtime `brain/core/` keeps at most three of those modes alive:
-`hypothesis_proposer.py` retrieves the modes that historically followed the
-nearest context vectors, `hypothesis_pool.py` runs SPAWN/UPDATE/SPLIT/MERGE/
-RETIRE, `belief_updater.py` scores each live hypothesis against its realized
-path, and `forecast.py` publishes one `MarketBeliefState` per clock.
+The Brain now works locally, per clock. `brain/research/` pairs every past
+completed bar with the sixty minutes that followed it and keeps those bars raw;
+`forecast_index.py` fits the retrieval space and one globally shared principal
+basis over the ATR-normalized return curves. At runtime the proposer retrieves
+the nearest historical contexts, reads their realized futures as a conditional
+future cloud, and clusters that cloud locally into at most three representative
+nodes carrying meaningful probability mass.
 
-The residual is the standing weight of "none of these". It competes as an
-ordinary log-sum-exp term, is floored by protocol, and equals one when nothing is
-live. Three is a working-set bound, not a claim that only three futures exist.
+Identity is path geometry: the whole `r_1…r_60` curve, projected onto `PC1…PC5`.
+Realized volatility is an attribute and never an identity dimension.
+
+Because the nodes are re-extracted every clock they have no identity of their
+own across time, so `hypothesis_pool.py` maintains persistence by association —
+a gated Hungarian match between this clock's nodes and the live set. The five
+lifecycle operations are read off that match rather than being separate rules,
+which is also what makes churn measurable: `churn_diagnostics.py` separates a
+real change of claim from a re-initialization artefact by re-clustering the same
+cloud under different seeds.
+
+Uncertainty is three numbers, not one: entropy over what is named, ambiguity
+between the named claims, and coverage of what nothing names. The residual is
+measured from the cloud rather than asserted.
 
 `hypothesis_protocol.json` declares `development_unvalidated` / `shadow_only`
 and `action_authority_ready: false`, and `load_hypothesis_protocol` fails closed
 if any of that changes. `configs/model.json` records its
 `hypothesis_protocol_fingerprint`. Every threshold in it is a development
-default; none has been fitted, and the library has only been fitted in-sample on
-one three-day window.
+default; none has been fitted.
 
 ## Decision, risk and the retired execution boundary
 

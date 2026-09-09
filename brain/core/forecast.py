@@ -1,13 +1,13 @@
 """The Trading Brain's published information stream.
 
-One call per completed one-minute bar, one ``MarketBeliefState`` out.  This is
+One call per completed one-minute bar, one ``MarketBeliefState`` out. This is
 the only surface downstream consumers are meant to read; the proposer, the pool
 and the updater are its internals.
 
-The forecaster owns no market state and no history.  It reads the Eye's
-published snapshot, asks the proposer what historically followed contexts like
-this one, advances the pool, and publishes.  It is a belief producer, not an
-action authority: every state it emits is ``shadow_only``.
+The forecaster owns no market state and no history. It reads the Eye's published
+snapshot, asks the proposer what the conditional future cloud looks like from
+here, advances the pool, and publishes. It is a belief producer, not an action
+authority: every state it emits is ``shadow_only``.
 """
 from __future__ import annotations
 
@@ -17,10 +17,11 @@ from typing import Any, Sequence
 import pandas as pd
 
 from contract.brain.forecast import (
+    BeliefUncertainty,
     MarketBeliefState,
-    ModeLibrary,
     belief_revision_id,
-    belief_uncertainty,
+    distribution_ambiguity,
+    entropy_uncertainty,
 )
 from contract.market import Timeframe
 
@@ -38,11 +39,11 @@ class ForecastInput:
     """One completed bar, as the forecaster needs to see it.
 
     ``closes`` is the completed one-minute close history ending at this bar,
-    oldest first, and it must end with ``close``.  The forecaster does not keep
-    a price history of its own — that would be a second market-state authority.
+    oldest first. The forecaster keeps no price history of its own — that would
+    be a second market-state authority.
 
     ``context`` and ``atr`` let a replay hand over values a study already derived
-    from the live snapshot, instead of re-deriving them.  Supplying both makes
+    from the live snapshot instead of re-deriving them. Supplying both makes
     ``snapshot`` unnecessary; supplying neither requires it.
     """
 
@@ -63,23 +64,19 @@ class HypothesisForecaster:
         self,
         *,
         proposer: HypothesisProposer,
-        library: ModeLibrary,
         protocol_fingerprint: str,
         pool_config: PoolConfig | None = None,
         updater_config: BeliefUpdaterConfig | None = None,
     ) -> None:
-        if proposer.library is not library:
-            raise ForecastError(
-                "the proposer and the forecaster must share one mode library"
-            )
         if not protocol_fingerprint:
             raise ForecastError("a published belief must cite its protocol fingerprint")
         self.proposer = proposer
-        self.library = library
         self.protocol_fingerprint = protocol_fingerprint
-        self.pool = HypothesisPool(
-            library=library, config=pool_config, updater_config=updater_config
-        )
+        self.pool = HypothesisPool(config=pool_config, updater_config=updater_config)
+
+    @property
+    def index_fingerprint(self) -> str:
+        return self.proposer.index.fingerprint
 
     def reset(self) -> None:
         self.pool.reset()
@@ -107,25 +104,40 @@ class HypothesisForecaster:
                 )
         if atr is None:
             raise ForecastError(
-                "a one-minute ATR is required: the mode library is fitted in ATR units"
+                "a one-minute ATR is required: every curve is expressed in ATR units"
             )
-        proposals = self.proposer.propose(context)
+
+        cloud = self.proposer.propose(context, asof=payload.asof)
         advance = self.pool.advance(
             asof=payload.asof,
             close=float(payload.close),
             high=float(payload.high),
             low=float(payload.low),
             atr=float(atr),
-            proposals=proposals,
+            cloud=cloud,
         )
 
+        live_nodes = {item.node_id for item in advance.hypotheses}
         probabilities = tuple(item.probability for item in advance.hypotheses)
-        uncertainty = belief_uncertainty(probabilities, advance.residual_probability)
+        uncertainty = BeliefUncertainty(
+            entropy=entropy_uncertainty(probabilities, advance.residual_probability),
+            distribution_ambiguity=distribution_ambiguity(
+                tuple(
+                    node.components for node in cloud.nodes if node.node_id in live_nodes
+                ),
+                scale=self.proposer.index.component_scale,
+            ),
+            # Measured from the cloud, not from the normalized posterior: how
+            # much of what actually followed similar contexts no live claim
+            # speaks for is a different question from how the probability mass
+            # is spread over the claims that do exist.
+            coverage=cloud.residual_mass if cloud.nodes else 1.0,
+        )
         revision_id = belief_revision_id(
             asof=advance.asof,
             hypotheses=advance.hypotheses,
             residual_probability=advance.residual_probability,
-            mode_library_fingerprint=self.library.fingerprint,
+            index_fingerprint=self.index_fingerprint,
             protocol_fingerprint=self.protocol_fingerprint,
         )
         return MarketBeliefState(
@@ -134,8 +146,9 @@ class HypothesisForecaster:
             residual_probability=advance.residual_probability,
             uncertainty=uncertainty,
             revision_id=revision_id,
+            cloud=cloud,
             lifecycle_records=advance.records,
-            mode_library_fingerprint=self.library.fingerprint,
+            index_fingerprint=self.index_fingerprint,
             protocol_fingerprint=self.protocol_fingerprint,
         )
 

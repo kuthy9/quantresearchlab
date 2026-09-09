@@ -9,7 +9,7 @@ state, Brain and execution ownership boundaries rather than redrawing them:
 | package | owns |
 | --- | --- |
 | `eyes/` | the Trading Eye — normalization, the six detectors, semantic-event emission, the event store and market-state reduction |
-| `brain/` | the naturally discovered hypothesis engine (proposer, pool, belief updater, forecast), decision and risk. The typed playbooks, DOL and Signal Policy were retired on 2026-09-07; the frozen six-path competition set on 2026-09-09 |
+| `brain/` | the local conditional hypothesis engine (trajectory geometry, retrieval, pool, belief updater, forecast), decision and risk. The typed playbooks, DOL and Signal Policy were retired on 2026-09-07; the frozen six-path competition set and the global mode library on 2026-09-09 |
 | `execution/` | execution reality, MBO reconstruction and sequential simulation (the order FSM and trade intent were retired on 2026-09-07) |
 | `shares/` | data access, the session clock, the scale registry, orchestration (`engine.py`) and the study projections the other three consume |
 | `contract/` | every payload that crosses a subsystem boundary, one package per boundary (`market`, `execution`, `eye`, `brain`, `decision`, `risk`, `research`) |
@@ -74,9 +74,11 @@ Bar
      │                                   Brain interpretation of Eye facts
      ├─ neutral projection               one OpenMarketThesis per clock
      ├─ brain/core/forecast.py           the belief producer: one
-     │   ├─ hypothesis_proposer.py       MarketBeliefState per clock
-     │   ├─ hypothesis_pool.py           (contract: contract/brain/forecast.py)
-     │   └─ belief_updater.py
+     │   ├─ trajectory.py                MarketBeliefState per clock
+     │   ├─ hypothesis_proposer.py       (contract: contract/brain/forecast.py)
+     │   ├─ hypothesis_pool.py           hypotheses are extracted per clock from
+     │   └─ belief_updater.py            a conditional future cloud, then kept
+     │                                   alive by association
      └─ brain/core/decision.py → risk.py sole runtime action authority
 ```
 
