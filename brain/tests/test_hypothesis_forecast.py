@@ -683,3 +683,74 @@ def test_a_hypothesis_is_not_falsified_by_its_first_minute():
         if r.operation is LifecycleOperation.RETIRE and "falsified" in r.reason
     ]
     assert not falsified, "a one-bar-old hypothesis must survive its first divergence"
+
+
+def _binary_library() -> ModeLibrary:
+    """Four leaves under two parents under a root — SPLIT and MERGE have room."""
+
+    return _library(
+        (
+            _mode("leaf_aa", 0.5, spread=0.8, parent_mode_id="pair_a"),
+            _mode("leaf_ab", 0.7, spread=0.8, parent_mode_id="pair_a"),
+            _mode("leaf_ba", -0.5, spread=0.8, parent_mode_id="pair_b"),
+            _mode("leaf_bb", -0.7, spread=0.8, parent_mode_id="pair_b"),
+            _mode("pair_a", 0.6, spread=0.8, parent_mode_id="root",
+                  child_mode_ids=("leaf_aa", "leaf_ab")),
+            _mode("pair_b", -0.6, spread=0.8, parent_mode_id="root",
+                  child_mode_ids=("leaf_ba", "leaf_bb")),
+            _mode("root", 0.0, spread=0.8, child_mode_ids=("pair_a", "pair_b")),
+        )
+    )
+
+
+def test_no_sequence_of_lifecycle_operations_can_break_the_pool_invariants():
+    """Randomized proposals over a random walk, checked every clock.
+
+    The bound, the probability sum and one-mode-per-hypothesis are the three
+    things a downstream consumer relies on unconditionally, so they are checked
+    against arbitrary lifecycle sequences rather than hand-picked ones.
+    """
+
+    import random
+
+    library = _binary_library()
+    rng = random.Random(99)
+    pool = HypothesisPool(
+        library=library,
+        config=PoolConfig(
+            split_minimum_age_bars=3,
+            split_maximum_imbalance=0.9,
+            merge_maximum_distance=1.5,
+            falsification_minimum_age_bars=4,
+        ),
+    )
+    mode_ids = [mode.mode_id for mode in library.modes]
+    price = 100.0
+    largest = 0
+    exercised: set[str] = set()
+    for minute in range(1, 1200):
+        price += rng.gauss(0, 0.4)
+        proposals = tuple(
+            HypothesisProposal(
+                mode_id=mode_id,
+                prior=rng.uniform(0.1, 0.5),
+                neighbour_count=20,
+                neighbour_distance=1.0,
+            )
+            for mode_id in rng.sample(mode_ids, k=rng.randint(0, 4))
+        )
+        advance = pool.advance(
+            asof=ASOF + pd.Timedelta(minutes=minute),
+            close=price,
+            high=price + 0.5,
+            low=price - 0.5,
+            atr=1.0,
+            proposals=proposals,
+        )
+        largest = max(largest, len(advance.hypotheses), len(pool.members))
+        exercised |= {record.operation.value for record in advance.records}
+        total = sum(h.probability for h in advance.hypotheses) + advance.residual_probability
+        assert total == pytest.approx(1.0, abs=1e-9)
+        assert len({h.mode_id for h in advance.hypotheses}) == len(advance.hypotheses)
+    assert largest <= MAX_LIVE_HYPOTHESES
+    assert exercised == {op.value for op in LifecycleOperation}

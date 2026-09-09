@@ -293,11 +293,11 @@ class HypothesisPool:
         records.extend(merge_records)
 
         # 5. SPLIT a hypothesis that sits between two children of its own mode.
-        members, split_records = self._split(members, asof, scored)
+        members, split_records = self._split(members, asof)
         records.extend(split_records)
 
         # 6. SPAWN from the context proposals into free (or out-competed) slots.
-        members, spawn_records = self._spawn(members, asof, proposals, close, atr, scored)
+        members, spawn_records = self._spawn(members, asof, proposals, close, atr)
         records.extend(spawn_records)
 
         # 7. Normalize over the survivors plus the residual.
@@ -402,10 +402,7 @@ class HypothesisPool:
         return members, records
 
     def _split(
-        self,
-        members: Sequence[PoolMember],
-        asof: pd.Timestamp,
-        scored: Mapping[str, Any],
+        self, members: Sequence[PoolMember], asof: pd.Timestamp
     ) -> tuple[list[PoolMember], list[LifecycleRecord]]:
         """Replace an undecided hypothesis with the two children it sits between."""
 
@@ -470,7 +467,6 @@ class HypothesisPool:
         proposals: Sequence[HypothesisProposal],
         close: float,
         atr: float,
-        scored: Mapping[str, Any],
     ) -> tuple[list[PoolMember], list[LifecycleRecord]]:
         """Admit context-supported modes, displacing the weakest when they beat it."""
 
