@@ -2083,28 +2083,63 @@ def _swing_hierarchy_transition(
     return tuple(sorted(by_id.values(), key=lambda item: item.swing_id))
 
 
-def _liquidity_for_swing_hierarchy(
+def _project_candidate_views(
     liquidity: TimeframeLiquidityState,
     hierarchy: tuple[SwingHierarchyView, ...],
+    range_state: TimeframeRangeState,
 ) -> TimeframeLiquidityState:
+    """Refresh both snapshot-derived candidate projections in one pass.
+
+    Semantic rank and IRL/ERL membership are read off the state, never folded
+    into it by an event: the registry binds them as "snapshot-derived only ...
+    no canonical membership event is claimed".  Running them at the tail of
+    every reduced event walked the whole candidate collection once per event
+    and re-sorted it twice, and that collection grows with market history, so
+    the cost of one bar grew for the life of the run.
+
+    Both projections read ``price`` and write neither it nor ``lifecycle``, so
+    the armed inventory ``_liquidity_state`` derives -- and the order it
+    derives it in -- is the same whether they run once or ten times.
+    """
+
     ranks = {item.swing_id: item.semantic_rank.value for item in hierarchy}
-    if not ranks:
-        return liquidity
     return _liquidity_state(
         (
-            replace(
-                candidate,
-                rank=ranks.get(
-                    candidate.candidate_id.removeprefix("swing:"),
-                    candidate.rank,
-                ),
+            _candidate_range_membership(
+                replace(
+                    candidate,
+                    rank=ranks.get(
+                        candidate.candidate_id.removeprefix("swing:"),
+                        candidate.rank,
+                    ),
+                )
+                if ranks and candidate.source_kind == "confirmed_swing"
+                else candidate,
+                range_state,
             )
-            if candidate.source_kind == "confirmed_swing"
-            else candidate
             for candidate in liquidity.candidates
         ),
         liquidity.recently_swept_ids,
     )
+
+
+def _settled_candidate_state(state: TimeframeState) -> TimeframeState:
+    """Return ``state`` carrying the projections a reader sees.
+
+    Every path that materializes a published hierarchy goes through here --
+    the publisher and the cold replay from the atomic log alike -- so a
+    checkpoint-restored view and a log-rebuilt one cannot disagree about a
+    field the reducer no longer folds in.
+    """
+
+    liquidity = _project_candidate_views(
+        state.liquidity,
+        state.swing_hierarchy,
+        state.range,
+    )
+    if liquidity == state.liquidity:
+        return state
+    return replace(state, liquidity=liquidity)
 
 
 def _zone_transition(
@@ -2708,8 +2743,9 @@ def reduce_timeframe_state(
                 liquidity.recently_swept_ids,
             )
 
-    liquidity = _liquidity_for_swing_hierarchy(liquidity, hierarchy)
-    liquidity = _liquidity_for_range(liquidity, range_state)
+    # The candidate projections are deliberately absent here: they are read
+    # from the published state, so ``_settle_candidate_views`` runs them once
+    # per bar in ``_publish_committed_suffix`` instead of once per event.
     delivery = replace(
         delivery,
         phase=_delivery_phase(
@@ -4863,6 +4899,31 @@ class MarketSnapshotPublisher:
 
         return dict(self._last_projection_payloads)
 
+    def _settle_candidate_views(
+        self,
+        states: Mapping[Timeframe, TimeframeState],
+    ) -> Mapping[Timeframe, TimeframeState]:
+        """Refresh the snapshot-derived candidate fields once for this bar.
+
+        The reducer folded these back on every event it applied, which walked
+        a collection that grows with market history once per event.  They are
+        projections, so one pass per published timeframe answers the same
+        question.
+
+        The result is persisted the way the settled Swing views are: a rank
+        assigned while its Swing was still in the hot hierarchy must survive
+        that Swing's eviction, and the projection falls back to the stored
+        rank exactly when the hierarchy can no longer supply one.
+        """
+
+        updated: dict[Timeframe, TimeframeState] = {}
+        for timeframe, state in states.items():
+            projected = _settled_candidate_state(state)
+            updated[timeframe] = projected
+            if projected is not state:
+                self._event_reducer.states[timeframe] = projected
+        return updated
+
     def _settle_swing_geometry(
         self,
         states: Mapping[Timeframe, TimeframeState],
@@ -6056,10 +6117,12 @@ class MarketSnapshotPublisher:
                         timeframe.value for timeframe in unexpected
                     )
                 )
-            states = {
-                timeframe: event_states[timeframe]
-                for timeframe in expected_timeframes
-            }
+            states = self._settle_candidate_views(
+                {
+                    timeframe: event_states[timeframe]
+                    for timeframe in expected_timeframes
+                }
+            )
             authority = MarketSnapshotAuthority.ATOMIC_EVENT_REDUCER
         else:
             projected_states = {
@@ -6373,7 +6436,12 @@ def replay_atomic_market_snapshot(
                 "atomic replay contains unregistered timeframe state: "
                 + ", ".join(timeframe.value for timeframe in unexpected)
             )
-    states = FrozenDict(reducer.states)
+    states = FrozenDict(
+        {
+            timeframe: _settled_candidate_state(state)
+            for timeframe, state in reducer.states.items()
+        }
+    )
     relations = RelationResolver(
         edges=MarketSnapshotPublisher._RELATION_EDGES
     ).resolve(

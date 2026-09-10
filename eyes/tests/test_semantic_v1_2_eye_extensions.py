@@ -9,6 +9,7 @@ import pytest
 from eyes.core.market_state import (
     LiquidityRangeRole,
     TimeframeRangeState,
+    _settled_candidate_state,
     build_structural_legs,
     reduce_timeframe_state,
 )
@@ -89,6 +90,21 @@ def _event(
         source_entity_ids=source_entity_ids,
         origin=origin,
     )
+
+
+def _settled(state):
+    """Read a reduced state the way a materialized hierarchy does.
+
+    ``reduce_timeframe_state`` no longer folds the snapshot-derived candidate
+    projections in on every event -- doing so walked the whole candidate
+    collection once per event, and that collection grows with market history.
+    ``_settled_candidate_state`` applies them wherever a hierarchy is
+    published, so a reader that asserts on them settles the state first,
+    exactly as the publisher and the cold replay from the atomic log do.
+    """
+
+    assert state is not None
+    return _settled_candidate_state(state)
 
 
 def _replay(events: tuple[MarketEvent, ...]):
@@ -1015,18 +1031,19 @@ def test_candidate_irl_erl_requires_an_active_same_timeframe_range() -> None:
         origin=EventOrigin.LEGACY_TRANSPORT,
     )
 
-    no_range = _replay(candidate_events)
+    no_range = _settled(_replay(candidate_events))
     assert all(
         item.range_role is LiquidityRangeRole.UNRESOLVED
         and item.normalized_location_in_range is None
         for item in no_range.liquidity.candidates
     )
-    forming = reduce_timeframe_state(
-        no_range,
-        created,
-        semantic_registry_identity="v1.2-eye-test",
+    forming = _settled(
+        reduce_timeframe_state(
+            no_range,
+            created,
+            semantic_registry_identity="v1.2-eye-test",
+        )
     )
-    assert forming is not None
     # v1.3: the structural interval locates price from creation.  Waiting for
     # the balance claim made a two-sided-test statistic a precondition for
     # arithmetic the interval could already do.
@@ -1035,12 +1052,13 @@ def test_candidate_irl_erl_requires_an_active_same_timeframe_range() -> None:
     }
     assert forming_by_id["inside"].range_role is LiquidityRangeRole.IRL
     assert forming_by_id["inside"].normalized_location_in_range == 0.5
-    active = reduce_timeframe_state(
-        forming,
-        activated,
-        semantic_registry_identity="v1.2-eye-test",
+    active = _settled(
+        reduce_timeframe_state(
+            forming,
+            activated,
+            semantic_registry_identity="v1.2-eye-test",
+        )
     )
-    assert active is not None
     by_id = {item.candidate_id: item for item in active.liquidity.candidates}
     assert by_id["inside"].range_role is LiquidityRangeRole.IRL
     assert by_id["inside"].normalized_location_in_range == 0.5
@@ -1050,12 +1068,13 @@ def test_candidate_irl_erl_requires_an_active_same_timeframe_range() -> None:
     assert by_id["high-boundary"].normalized_location_in_range == 1.0
     assert by_id["outside"].normalized_location_in_range == 1.25
 
-    terminal = reduce_timeframe_state(
-        active,
-        invalidated,
-        semantic_registry_identity="v1.2-eye-test",
+    terminal = _settled(
+        reduce_timeframe_state(
+            active,
+            invalidated,
+            semantic_registry_identity="v1.2-eye-test",
+        )
     )
-    assert terminal is not None
     assert all(
         item.range_role is LiquidityRangeRole.UNRESOLVED
         and item.normalized_location_in_range is None
