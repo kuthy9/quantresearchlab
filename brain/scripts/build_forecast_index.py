@@ -3,8 +3,8 @@
 
 Drives the Eye once, pairs every completed bar with the sixty minutes that
 followed it, caches that dataset, and fits the retrieval index: the standardized
-contexts, the realized future curves, and the principal basis those curves are
-compared in.
+contexts, the realized future curves, and the principal basis the detrended
+shapes are compared in.
 
 The dataset cache keeps the raw future window, not just derived features, so a
 change to the trajectory representation never costs another Eye run — which is
@@ -33,7 +33,7 @@ from brain.research.trajectory_dataset import build_dataset  # noqa: E402
 from brain.scripts._windows import load_dataset, slice_window  # noqa: E402
 
 DEFAULT_SOURCE = "data/processed/nq_1m_previous_session_front_v2_3_2017_2026.parquet"
-DEFAULT_OUTPUT = "outputs/hypothesis_v2"
+DEFAULT_OUTPUT = "outputs/hypothesis_v3"
 
 
 def main() -> None:
@@ -110,9 +110,16 @@ def main() -> None:
         future_lows=window.future_lows,
     )
     print(f"\nindex fingerprint {index.fingerprint[:16]}…  rows {len(index)}")
-    print("\n=== principal basis of the trajectory curves ===")
+    print("\n=== principal basis of the detrended shapes ===")
     print(basis_report(basis).to_string(index=False, float_format=lambda v: f"{v:8.4f}"))
-    print(f"\ncomponent scale {index.component_scale:.4f}")
+    print(
+        f"\ncomponent scale {index.component_scale:.4f} "
+        f"(typical distance between two unrelated futures)"
+    )
+    print(
+        f"context scale   {index.context_scale:.4f} "
+        f"(typical distance between two unrelated contexts)"
+    )
 
     destination = out / "forecast_index.npz"
     save_index(index, basis, destination)

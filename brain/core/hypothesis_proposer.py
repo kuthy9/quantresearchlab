@@ -22,6 +22,7 @@ historical neighbours whose sixty minutes are long since complete.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
 import json
 import math
 from pathlib import Path
@@ -30,8 +31,10 @@ from typing import Any, Mapping, Sequence
 import numpy as np
 
 from contract.brain.forecast import (
+    DIRECTION_DIM,
     MAX_CLOUD_NODES,
-    PRINCIPAL_COMPONENT_COUNT,
+    REPRESENTATION_DIM,
+    SHAPE_COMPONENT_COUNT,
     TRAJECTORY_CURVE_LENGTH,
     ConditionalCloud,
     PathAttributes,
@@ -391,7 +394,12 @@ class ProposerConfig:
 
     neighbours: int = 200
     minimum_neighbours: int = 25
-    cluster_count: int = 6
+    # The *ceiling* on the local cut, not the cut itself. How many clusters a
+    # cloud is actually divided into is decided per clock, from the cloud.
+    max_cluster_count: int = 6
+    # How separated a multi-cluster cut must be before it is preferred to
+    # saying "this cloud is one thing". Below it, k_t collapses to one.
+    separation_floor: float = 0.15
     max_nodes: int = 4
     minimum_mass: float = 0.12
     kmeans_restarts: int = 5
@@ -401,8 +409,10 @@ class ProposerConfig:
             raise ValueError("neighbours must be positive")
         if not 1 <= self.minimum_neighbours <= self.neighbours:
             raise ValueError("minimum_neighbours must lie in [1, neighbours]")
-        if self.cluster_count < 2:
-            raise ValueError("cluster_count must be at least 2")
+        if self.max_cluster_count < 2:
+            raise ValueError("max_cluster_count must be at least 2")
+        if not 0.0 <= self.separation_floor < 1.0:
+            raise ValueError("separation_floor must lie in [0, 1)")
         if not 1 <= self.max_nodes <= MAX_CLOUD_NODES:
             raise ValueError(f"max_nodes must lie in [1, {MAX_CLOUD_NODES}]")
         if not 0.0 < self.minimum_mass < 1.0:
@@ -416,11 +426,23 @@ class ProposerConfig:
         return cls(
             neighbours=int(section["neighbours"]),
             minimum_neighbours=int(section["minimum_neighbours"]),
-            cluster_count=int(section["cluster_count"]),
+            max_cluster_count=int(section["max_cluster_count"]),
+            separation_floor=float(section["separation_floor"]),
             max_nodes=int(section["max_nodes"]),
             minimum_mass=float(section["minimum_mass"]),
             kmeans_restarts=int(section["kmeans_restarts"]),
         )
+
+
+def protocol_fingerprint(path: str | Path) -> str:
+    """The exact bytes a published belief ran under.
+
+    Hashing the file rather than the parsed payload is deliberate: a comment
+    changed in the protocol is a change to what a reader was told, and a belief
+    that cites a fingerprint should cite the thing they can actually read.
+    """
+
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
 def load_hypothesis_protocol(path: str | Path) -> Mapping[str, Any]:
@@ -460,7 +482,16 @@ class ForecastIndex:
     attribute_names: tuple[str, ...]
     principal_mean: np.ndarray
     principal_components: np.ndarray
+    direction_centre: np.ndarray
+    direction_spread: np.ndarray
+    shape_centre: np.ndarray
+    shape_spread: np.ndarray
+    direction_weight: float
     component_scale: float
+    # How far apart two unrelated contexts typically are. Retrieval confidence
+    # is read against this: neighbours as distant as strangers are not
+    # precedent, however many of them were returned.
+    context_scale: float
 
     def __post_init__(self) -> None:
         rows = self.reference_features.shape[0]
@@ -474,13 +505,17 @@ class ForecastIndex:
             ),
             "reference_scores": (
                 self.reference_scores.shape,
-                (rows, PRINCIPAL_COMPONENT_COUNT),
+                (rows, REPRESENTATION_DIM),
             ),
             "principal_mean": (self.principal_mean.shape, (TRAJECTORY_CURVE_LENGTH,)),
             "principal_components": (
                 self.principal_components.shape,
-                (PRINCIPAL_COMPONENT_COUNT, TRAJECTORY_CURVE_LENGTH),
+                (SHAPE_COMPONENT_COUNT, TRAJECTORY_CURVE_LENGTH),
             ),
+            "direction_centre": (self.direction_centre.shape, (DIRECTION_DIM,)),
+            "direction_spread": (self.direction_spread.shape, (DIRECTION_DIM,)),
+            "shape_centre": (self.shape_centre.shape, (SHAPE_COMPONENT_COUNT,)),
+            "shape_spread": (self.shape_spread.shape, (SHAPE_COMPONENT_COUNT,)),
         }
         for name, (actual, expected) in checks.items():
             if actual != expected:
@@ -491,19 +526,55 @@ class ForecastIndex:
             raise HypothesisProposerError("reference attributes are misaligned")
         if np.any(self.feature_scale <= 0.0):
             raise HypothesisProposerError("feature scale must be positive")
-        if not math.isfinite(self.component_scale) or self.component_scale <= 0.0:
-            raise HypothesisProposerError("component_scale must be finite and positive")
+        if np.any(self.direction_spread <= 0.0) or np.any(self.shape_spread <= 0.0):
+            raise HypothesisProposerError("channel spreads must be positive")
+        if not 0.0 < self.direction_weight < 1.0:
+            raise HypothesisProposerError("direction_weight must lie in (0, 1)")
+        for name in ("component_scale", "context_scale"):
+            value = float(getattr(self, name))
+            if not math.isfinite(value) or value <= 0.0:
+                raise HypothesisProposerError(f"{name} must be finite and positive")
         if not self.fingerprint:
             raise HypothesisProposerError("a forecast index must carry a fingerprint")
 
     def __len__(self) -> int:
         return int(self.reference_features.shape[0])
 
-    def project(self, curves: np.ndarray) -> np.ndarray:
-        """Project raw curves onto the principal basis."""
+    @property
+    def direction_gain(self) -> float:
+        return math.sqrt(self.direction_weight / DIRECTION_DIM)
 
-        centred = np.asarray(curves, dtype=float) - self.principal_mean
-        return centred @ self.principal_components.T
+    @property
+    def shape_gain(self) -> float:
+        return math.sqrt((1.0 - self.direction_weight) / SHAPE_COMPONENT_COUNT)
+
+    def represent(
+        self, curves: np.ndarray, attributes: Sequence[PathAttributes]
+    ) -> np.ndarray:
+        """Place trajectories in the same two-channel space the index was built in.
+
+        Direction carries where the path went and how far; Shape carries what is
+        left once the endpoint trend is removed. Each channel is standardized on
+        the fitted window's own statistics and then gain-scaled, so a curve
+        projected here is directly comparable with ``reference_scores``.
+        """
+
+        from brain.core.trajectory import direction_vector, shape_matrix
+
+        raw = np.array([direction_vector(item) for item in attributes], dtype=float)
+        if raw.shape[0] != np.asarray(curves, dtype=float).shape[0]:
+            raise HypothesisProposerError("curves and attributes are misaligned")
+        direction = (raw - self.direction_centre) / self.direction_spread
+        shapes = shape_matrix(np.asarray(curves, dtype=float))
+        scores = (shapes - self.principal_mean) @ self.principal_components.T
+        shape = (scores - self.shape_centre) / self.shape_spread
+        return np.hstack(
+            [
+                np.nan_to_num(direction, nan=0.0, posinf=0.0, neginf=0.0)
+                * self.direction_gain,
+                np.nan_to_num(shape, nan=0.0, posinf=0.0, neginf=0.0) * self.shape_gain,
+            ]
+        )
 
 
 class HypothesisProposer:
@@ -511,9 +582,16 @@ class HypothesisProposer:
 
     Retrieval is exact k-nearest-neighbour in the standardized context space —
     deterministic, and cheap enough per minute that no approximation is
-    warranted at this scale. Clustering is K-Means in the principal basis:
-    conditional future clouds are continuous rather than island-shaped, so a
-    density method abstains on them and a partitional cut is the honest tool.
+    warranted at this scale. Clustering is K-Means in the two-channel
+    representation: conditional future clouds are continuous rather than
+    island-shaped, so a density method abstains on them and a partitional cut is
+    the honest tool.
+
+    How many pieces to cut the cloud into is **not** fixed. A cloud whose
+    futures all agree is one thing and gets one node; a cloud with two dense
+    regions gets two; a cloud that keeps spreading gets more, up to the ceiling.
+    Forcing a constant k would manufacture structure on the quiet clocks and
+    hide it on the interesting ones.
     """
 
     def __init__(
@@ -537,26 +615,74 @@ class HypothesisProposer:
         ) / self.index.feature_scale
         return np.nan_to_num(z, nan=0.0, posinf=0.0, neginf=0.0)[0]
 
-    def neighbourhood(self, context: Sequence[float]) -> np.ndarray:
-        """Row indices of the nearest historical contexts, nearest first."""
+    def _retrieve(self, context: Sequence[float]) -> tuple[np.ndarray, np.ndarray]:
+        """Nearest historical contexts and how far away they actually were."""
 
         if self._reference.shape[0] == 0:
-            return np.empty(0, dtype=int)
+            return np.empty(0, dtype=int), np.empty(0, dtype=float)
         query = self._standardize(context)
         distances = np.linalg.norm(self._reference - query, axis=1)
         take = min(self.config.neighbours, distances.size)
         head = np.argpartition(distances, take - 1)[:take]
-        return head[np.argsort(distances[head], kind="stable")]
+        order = head[np.argsort(distances[head], kind="stable")]
+        return order, distances[order]
+
+    def neighbourhood(self, context: Sequence[float]) -> np.ndarray:
+        """Row indices of the nearest historical contexts, nearest first."""
+
+        return self._retrieve(context)[0]
+
+    def local_cut(self, scores: np.ndarray) -> tuple[np.ndarray, int, float]:
+        """Decide how many pieces *this* cloud is made of, and cut it.
+
+        Every k from two to the ceiling is tried and scored by mean silhouette,
+        which asks whether a point sits closer to its own group than to the next
+        one. The best k wins only if it clears ``separation_floor``; otherwise
+        the cloud is declared a single mode. That floor is what stops a
+        unimodal cloud from being sliced into decorative halves.
+
+        Returns the labels, the chosen ``k_t``, and the separation it achieved.
+        """
+
+        rows = int(scores.shape[0])
+        singleton = (np.zeros(rows, dtype=int), 1, 0.0)
+        ceiling = min(self.config.max_cluster_count, rows - 1)
+        if ceiling < 2:
+            return singleton
+
+        from sklearn.cluster import KMeans
+        from sklearn.metrics import silhouette_score
+
+        # One distance matrix, reused by every candidate k.
+        gram = np.linalg.norm(scores[:, None, :] - scores[None, :, :], axis=2)
+        best: tuple[np.ndarray, int, float] | None = None
+        for count in range(2, ceiling + 1):
+            labels = KMeans(
+                n_clusters=count,
+                n_init=self.config.kmeans_restarts,
+                random_state=0,
+            ).fit_predict(scores)
+            if np.unique(labels).size < 2:
+                continue
+            separation = float(silhouette_score(gram, labels, metric="precomputed"))
+            if best is None or separation > best[2]:
+                best = (labels, count, separation)
+        if best is None or best[2] < self.config.separation_floor:
+            return singleton
+        return best
 
     def propose(self, context: Sequence[float], *, asof) -> ConditionalCloud:
-        """Retrieve, cluster locally, and surface the top nodes by mass.
+        """Retrieve, cut the cloud locally, and surface the top nodes by mass.
 
         A neighbourhood too small to say anything yields a cloud with no nodes,
         whose residual is one — the Brain says nothing rather than extrapolating
         from a handful of points.
         """
 
-        rows = self.neighbourhood(context)
+        rows, neighbour_distances = self._retrieve(context)
+        mean_distance = (
+            float(neighbour_distances.mean()) if neighbour_distances.size else 0.0
+        )
         if rows.size < self.config.minimum_neighbours:
             return ConditionalCloud(
                 asof=asof,
@@ -565,31 +691,24 @@ class HypothesisProposer:
                 cluster_count=0,
                 nodes=(),
                 component_scale=self.index.component_scale,
+                mean_neighbour_distance=mean_distance,
             )
 
         scores = self.index.reference_scores[rows]
         curves = self.index.reference_curves[rows]
         attributes = self.index.reference_attributes[rows]
-        clusters = min(self.config.cluster_count, scores.shape[0])
-
-        from sklearn.cluster import KMeans
-
-        labels = KMeans(
-            n_clusters=clusters,
-            n_init=self.config.kmeans_restarts,
-            random_state=0,
-        ).fit_predict(scores)
+        labels, clusters, _ = self.local_cut(scores)
 
         total = float(rows.size)
         candidates: list[tuple[float, int, TrajectoryNode]] = []
-        assigned = 0
         for label in sorted(set(int(v) for v in labels)):
             members = np.flatnonzero(labels == label)
             mass = members.size / total
             if mass < self.config.minimum_mass:
                 continue
             centre = scores[members].mean(axis=0)
-            local = int(np.argmin(np.linalg.norm(scores[members] - centre, axis=1)))
+            offsets = np.linalg.norm(scores[members] - centre, axis=1)
+            local = int(np.argmin(offsets))
             # The medoid is what we publish; the centroid is what we match on.
             representative = int(members[local])
             member_curves = curves[members]
@@ -609,9 +728,12 @@ class HypothesisProposer:
                 attributes=PathAttributes(
                     **dict(zip(self.index.attribute_names, attributes[representative]))
                 ),
+                # Global row indices, so the same historical observation point
+                # is recognizable from one clock to the next.
+                member_ids=tuple(int(v) for v in rows[members]),
+                component_spread=float(np.sqrt(np.mean(offsets**2))),
             )
             candidates.append((mass, -members.size, node))
-            assigned += int(members.size)
 
         # Highest mass first; ties broken by member count then identity, so two
         # runs over the same cloud always surface the same nodes in the same
@@ -625,6 +747,7 @@ class HypothesisProposer:
             cluster_count=clusters,
             nodes=tuple(kept),
             component_scale=self.index.component_scale,
+            mean_neighbour_distance=mean_distance,
         )
 
 
@@ -640,5 +763,6 @@ __all__ = [
     "HypothesisProposerError",
     "ProposerConfig",
     "load_hypothesis_protocol",
+    "protocol_fingerprint",
     "observation_features",
 ]

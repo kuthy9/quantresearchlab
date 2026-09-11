@@ -8,22 +8,41 @@ the live hypotheses in the principal basis.
 The five lifecycle operations fall out of that matching rather than being
 separate rules:
 
-``UPDATE``  one live hypothesis matched one node: it keeps its identity, its
-            age and the path it has been judged against
-``SPAWN``   a node matched nothing live
+``UPDATE``  one live hypothesis matched one node *and still rests on the same
+            historical support*: it keeps its identity, its age and the path it
+            has been judged against
+``SPAWN``   a node matched nothing live, and inherited no live claim's support
 ``RETIRE``  a live hypothesis matched no node, or was out-competed on probability
-``SPLIT``   one live hypothesis is the nearest claim to a second node
-``MERGE``   two live hypotheses collapse onto the same node
+``SPLIT``   one live hypothesis's supporting samples divided between two
+            geometrically separated nodes
+``MERGE``   two live hypotheses' supports converged onto one node that makes no
+            distinguishable claim from either
 
 Matching uses the Hungarian assignment, which is deterministic and globally
 optimal. A greedy nearest-first pass would make the operation depend on
 iteration order, and the whole point of recording SPLIT and MERGE is to tell a
 real change from an artefact.
 
-The gate is what separates the two. A hypothesis keeps its identity only if its
-matched node is within ``association_max_distance_scale`` times the basis's own
-spread; beyond that the geometry has
-moved far enough that calling it the same claim would be a fiction.
+**Identity is decided by support, not by proximity.** A cloud's nodes are
+re-clustered from scratch every minute, so "the centroid is still nearby" is a
+weak claim: the same coordinates can be produced by a completely different set
+of historical samples, and that is a different assertion about the market
+wearing the previous one's clothes. Every node therefore carries the row
+indices of the observation points that support it, and the lifecycle reads
+those sets:
+
+* a match whose support has been replaced is not an update, it is a retirement
+  and a spawn that happen to coincide in space;
+* a split fires when one claim's support *divides* between two nodes that are
+  far enough apart to be separate claims — not when a second node merely turns
+  up nearby;
+* a merge, its exact dual, fires when two claims' supports converge on one node
+  and the information gap between them has closed.
+
+Distance still matters, and it is measured on the centroid **and the spread
+together**. Two clouds can share a centroid and be nothing alike — one a tight
+knot, the other a diffuse ring — so the spread enters the metric as one more
+coordinate rather than being ignored.
 """
 from __future__ import annotations
 
@@ -42,6 +61,7 @@ from contract.brain.forecast import (
     LifecycleOperation,
     LifecycleRecord,
     TrajectoryNode,
+    support_overlap,
 )
 from contract.market import content_hash
 
@@ -59,6 +79,16 @@ class PoolConfig:
 
     max_live_hypotheses: int = MAX_LIVE_HYPOTHESES
     association_max_distance_scale: float = 0.5
+    # Below this share of carried-over supporting samples, a matched pair is not
+    # the same claim however close the centroids are.
+    identity_minimum_overlap: float = 0.10
+    # A split needs one claim's support genuinely divided: each side must take
+    # at least this share of it.
+    split_minimum_inheritance: float = 0.20
+    # A merge needs the other claim's support to have flowed into the surviving
+    # node, and the two claims to have stopped being distinguishable.
+    merge_minimum_inheritance: float = 0.20
+    merge_information_floor: float = 0.35
     retire_minimum_probability: float = 0.05
     retire_maximum_age_bars: int = 60
     falsification_divergence: float = 3.0
@@ -73,6 +103,15 @@ class PoolConfig:
             )
         if self.association_max_distance_scale <= 0.0:
             raise ValueError("association_max_distance_scale must be positive")
+        for name in (
+            "identity_minimum_overlap",
+            "split_minimum_inheritance",
+            "merge_minimum_inheritance",
+        ):
+            if not 0.0 <= getattr(self, name) <= 1.0:
+                raise ValueError(f"{name} must lie in [0, 1]")
+        if self.merge_information_floor < 0.0:
+            raise ValueError("merge_information_floor cannot be negative")
         if self.retire_maximum_age_bars < 1:
             raise ValueError("retire_maximum_age_bars must be positive")
         if self.falsification_divergence <= 0.0:
@@ -92,6 +131,10 @@ class PoolConfig:
             association_max_distance_scale=float(
                 section["association_max_distance_scale"]
             ),
+            identity_minimum_overlap=float(section["identity_minimum_overlap"]),
+            split_minimum_inheritance=float(section["split_minimum_inheritance"]),
+            merge_minimum_inheritance=float(section["merge_minimum_inheritance"]),
+            merge_information_floor=float(section["merge_information_floor"]),
             retire_minimum_probability=float(section["retire_minimum_probability"]),
             retire_maximum_age_bars=int(section["retire_maximum_age_bars"]),
             falsification_divergence=float(section["falsification_divergence"]),
@@ -114,6 +157,10 @@ class PoolMember:
     path: RealizedPath
     association_distance: float = 0.0
     lineage: tuple[str, ...] = ()
+    # How much of last clock's support this claim still rests on, and how much
+    # the cloud's spread around it moved. Both are published.
+    support_overlap: float = 1.0
+    dispersion_shift: float = 0.0
 
     @property
     def age(self) -> int:
@@ -136,6 +183,38 @@ def _hypothesis_id(node_id: str, spawned_at: pd.Timestamp, lineage: Sequence[str
     return content_hash(
         [node_id, pd.Timestamp(spawned_at).isoformat(), list(lineage)]
     )[:32]
+
+
+def information_gap(left: TrajectoryNode, right: TrajectoryNode) -> float:
+    """How distinguishable two claims are as predictions.
+
+    The two curves are separated in units of their own pooled dispersion, so the
+    answer asks the right question: not "are these numbers different" but "does
+    keeping these apart say anything the cloud can actually tell apart". Two
+    claims whose separation is small against the spread of futures each already
+    covers are one claim written twice, and the merge is the operation that says
+    so.
+    """
+
+    first = np.asarray(left.curve, dtype=float)
+    second = np.asarray(right.curve, dtype=float)
+    pooled = np.sqrt(
+        (
+            np.asarray(left.dispersion, dtype=float) ** 2
+            + np.asarray(right.dispersion, dtype=float) ** 2
+        )
+        / 2.0
+    )
+    return float(np.sqrt(np.mean(((first - second) / pooled) ** 2)))
+
+
+def _inheritance(parent: Sequence[int], child: Sequence[int]) -> float:
+    """The share of a parent claim's support that a node has taken over."""
+
+    supporting = set(int(value) for value in parent)
+    if not supporting:
+        return 0.0
+    return len(supporting & set(int(value) for value in child)) / len(supporting)
 
 
 def _assign(cost: np.ndarray, gate: float) -> tuple[dict[int, int], set[int], set[int]]:
@@ -227,16 +306,9 @@ class HypothesisPool:
             )
             for member in members
         }
-        if members:
-            records.append(
-                LifecycleRecord(
-                    asof=asof,
-                    operation=LifecycleOperation.UPDATE,
-                    hypothesis_ids=tuple(m.hypothesis_id for m in members),
-                    node_ids=tuple(m.node.node_id for m in members),
-                    reason="rescored against the realized path",
-                )
-            )
+        # Rescoring is not a lifecycle event: it happens to every survivor on
+        # every clock, and recording it would make the UPDATE count mean
+        # "clocks elapsed" rather than "claims that kept their identity".
 
         # 3. RETIRE on expiry or falsification, before anything is matched.
         kept: list[PoolMember] = []
@@ -330,28 +402,49 @@ class HypothesisPool:
                 )
             return [], records
 
+        # Distance is measured on the centroid *and* the spread together. A
+        # node that sits where a live claim sits but covers a far wider band of
+        # futures is not that claim, and a metric that reads only the centre
+        # cannot see the difference.
         cost = np.zeros((len(members), len(nodes)), dtype=float)
         for row, member in enumerate(members):
             left = np.asarray(member.node.components, dtype=float)
             for column, node in enumerate(nodes):
-                cost[row, column] = float(
+                centre = float(
                     np.linalg.norm(left - np.asarray(node.components, dtype=float))
                 )
-        # The gate is a fraction of the principal basis's own spread, not an
-        # absolute distance: PC coordinates scale with the window's volatility,
-        # so a fixed number would mean something different in every regime.
+                spread = node.component_spread - member.node.component_spread
+                cost[row, column] = math.hypot(centre, spread)
+        # The gate is a fraction of the representation's own spread, not an
+        # absolute distance: coordinates scale with the window's volatility, so
+        # a fixed number would mean something different in every regime.
         gate = self.config.association_max_distance_scale * cloud.component_scale
         matched, unmatched_live, unmatched_nodes = _assign(cost, gate)
 
         survivors: list[PoolMember] = []
+        # A geometric match whose support has been replaced is not the same
+        # claim; it is returned to the unmatched pool so the node can spawn on
+        # its own terms and the stale claim can retire on its own.
+        impostors: list[int] = []
         for row, column in sorted(matched.items()):
             member, node = members[row], nodes[column]
+            overlap = support_overlap(member.node.member_ids, node.member_ids)
+            shift = node.component_spread - member.node.component_spread
+            if (
+                member.node.member_ids
+                and node.member_ids
+                and overlap < self.config.identity_minimum_overlap
+            ):
+                impostors.append(row)
+                continue
             survivors.append(
                 replace(
                     member,
                     node=node,
                     mass=node.mass,
                     association_distance=float(cost[row, column]),
+                    support_overlap=overlap,
+                    dispersion_shift=float(shift),
                 )
             )
             records.append(
@@ -360,13 +453,35 @@ class HypothesisPool:
                     operation=LifecycleOperation.UPDATE,
                     hypothesis_ids=(member.hypothesis_id,),
                     node_ids=(node.node_id,),
-                    reason="matched this clock's node",
+                    reason="matched this clock's node on geometry and support",
                     association_distance=float(cost[row, column]),
+                    support_overlap=overlap,
+                    dispersion_shift=float(shift),
                 )
             )
+        for row in impostors:
+            node = nodes[matched[row]]
+            unmatched_nodes.add(matched[row])
+            records.append(
+                LifecycleRecord(
+                    asof=asof,
+                    operation=LifecycleOperation.RETIRE,
+                    hypothesis_ids=(members[row].hypothesis_id,),
+                    node_ids=(members[row].node.node_id,),
+                    reason="the samples supporting this claim have been replaced",
+                    association_distance=float(cost[row, matched[row]]),
+                    support_overlap=support_overlap(
+                        members[row].node.member_ids, node.member_ids
+                    ),
+                )
+            )
+        claimed = {row: column for row, column in matched.items() if row not in impostors}
 
-        # An unmatched node next to a live claim is that claim splitting: the
-        # cloud now separates what it used to hold as one future.
+        # An unmatched node is a SPLIT when it has taken over a real share of a
+        # live claim's support *and* that claim's own node kept a real share
+        # too — the support divided — and the two nodes are far enough apart to
+        # be separate claims. Anything else is a SPAWN: a future the pool was
+        # not carrying.
         #
         # Highest mass first, because a full pool can only admit a node by
         # displacing one, and the strongest candidate should get that chance.
@@ -374,15 +489,30 @@ class HypothesisPool:
             unmatched_nodes, key=lambda index: (-nodes[index].mass, index)
         ):
             node = nodes[column]
-            parent_row = int(np.argmin(cost[:, column])) if cost.shape[0] else -1
+            parent_row, inherited = -1, 0.0
+            for row, member in enumerate(members):
+                share = _inheritance(member.node.member_ids, node.member_ids)
+                if share > inherited:
+                    parent_row, inherited = row, share
+            sibling_share, separation = 0.0, 0.0
+            if parent_row in claimed:
+                sibling = nodes[claimed[parent_row]]
+                sibling_share = _inheritance(
+                    members[parent_row].node.member_ids, sibling.member_ids
+                )
+                separation = float(
+                    np.linalg.norm(
+                        np.asarray(node.components, dtype=float)
+                        - np.asarray(sibling.components, dtype=float)
+                    )
+                )
             is_split = (
-                parent_row >= 0
-                and parent_row in matched
-                and cost[parent_row, column] <= gate
+                parent_row in claimed
+                and inherited >= self.config.split_minimum_inheritance
+                and sibling_share >= self.config.split_minimum_inheritance
+                and separation > gate
             )
-            parent_id = (
-                members[parent_row].hypothesis_id if is_split else None
-            )
+            parent_id = members[parent_row].hypothesis_id if is_split else None
             # A full pool may still admit this node by displacing its weakest
             # rival — a split cannot fire otherwise, because the Hungarian
             # assignment fills every slot before any node is left over. The
@@ -406,8 +536,9 @@ class HypothesisPool:
                 # A new claim is anchored at the bar that surfaced it, so its
                 # path starts empty and its ATR scale is this clock's.
                 path=RealizedPath(anchor_price=float(close), anchor_atr=float(atr)),
-                association_distance=float(cost[parent_row, column]) if is_split else 0.0,
-                lineage=(members[parent_row].hypothesis_id,) if is_split else (),
+                association_distance=separation if is_split else 0.0,
+                lineage=(parent_id,) if is_split else (),
+                support_overlap=inherited if is_split else 0.0,
             )
             if evicted is not None:
                 survivors = [
@@ -436,16 +567,22 @@ class HypothesisPool:
                     hypothesis_ids=(spawned.hypothesis_id,),
                     node_ids=(node.node_id,),
                     reason=(
-                        "the cloud separated a second future from a live claim"
+                        f"a live claim's support divided: this side took "
+                        f"{inherited:.2f} of it, the other {sibling_share:.2f}"
                         if is_split
                         else f"a new representative future carries mass {node.mass:.3f}"
                     ),
                     association_distance=spawned.association_distance,
+                    support_overlap=spawned.support_overlap,
                 )
             )
 
-        # A live hypothesis whose nearest node already belongs to another
-        # survivor has merged: the cloud stopped distinguishing the two claims.
+        # The exact dual: a live hypothesis whose support has flowed into a node
+        # another survivor already holds, and whose claim is no longer
+        # distinguishable from that survivor's, has merged.
+        # Impostors are not eligible: they were retired precisely because the
+        # support under them was replaced, and that is the opposite of two
+        # claims converging.
         for row in sorted(unmatched_live):
             member = members[row]
             nearest = int(np.argmin(cost[row])) if cost.shape[1] else -1
@@ -457,9 +594,20 @@ class HypothesisPool:
                 ),
                 None,
             )
+            inherited = (
+                _inheritance(member.node.member_ids, nodes[nearest].member_ids)
+                if nearest >= 0
+                else 0.0
+            )
+            gap = (
+                information_gap(member.node, absorber.node)
+                if absorber is not None
+                else float("inf")
+            )
             if (
                 absorber is not None
-                and cost[row, nearest] <= gate
+                and inherited >= self.config.merge_minimum_inheritance
+                and gap <= self.config.merge_information_floor
             ):
                 records.append(
                     LifecycleRecord(
@@ -467,8 +615,12 @@ class HypothesisPool:
                         operation=LifecycleOperation.MERGE,
                         hypothesis_ids=(member.hypothesis_id, absorber.hypothesis_id),
                         node_ids=(nodes[nearest].node_id,),
-                        reason="the cloud stopped distinguishing these two claims",
+                        reason=(
+                            f"supports converged ({inherited:.2f} inherited) and the "
+                            f"information gap closed to {gap:.2f}"
+                        ),
                         association_distance=float(cost[row, nearest]),
+                        support_overlap=inherited,
                     )
                 )
                 survivors = [
@@ -561,6 +713,7 @@ class HypothesisPool:
                 attributes=member.node.attributes,
                 status=HypothesisStatus.ACTIVE,
                 lineage=member.lineage,
+                support_overlap=member.support_overlap,
             )
             for member, evidence, probability in zip(members, evidences, probabilities)
         )
@@ -569,6 +722,7 @@ class HypothesisPool:
 
 __all__ = [
     "HypothesisPool",
+    "information_gap",
     "HypothesisPoolError",
     "PoolAdvance",
     "PoolConfig",

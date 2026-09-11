@@ -397,7 +397,8 @@ not a validated model.
 - `shares/core/engine.py` still imports `brain.core.playbooks`,
   `brain.core.playbook_registry`, `brain.core.dol_probability` and
   `brain.core.signal_policy`, so **it cannot be imported**. Eight test modules
-  (135 tests) cannot be collected, and `shares/__init__.py` no longer exports
+  cannot be collected for that reason and three more for the retired
+  calibration/validation surface, and `shares/__init__.py` no longer exports
   `ContinuousSMCEngine`, `ExecutionFSM` or `RiskApprovedTradeIntent`. Rebinding
   that orchestration to a new belief producer is the next piece of work.
 
@@ -417,25 +418,52 @@ one?". Only the second question is conditional on the present.
 The Brain now works locally, per clock. `brain/research/` pairs every past
 completed bar with the sixty minutes that followed it and keeps those bars raw;
 `forecast_index.py` fits the retrieval space and one globally shared principal
-basis over the ATR-normalized return curves. At runtime the proposer retrieves
-the nearest historical contexts, reads their realized futures as a conditional
-future cloud, and clusters that cloud locally into at most three representative
-nodes carrying meaningful probability mass.
+basis. At runtime the proposer retrieves the nearest historical contexts, reads
+their realized futures as a conditional future cloud, and clusters that cloud
+locally into at most three representative nodes carrying meaningful probability
+mass. How many pieces the cloud is cut into is decided per clock from its own
+separation, not fixed in advance.
 
-Identity is path geometry: the whole `r_1…r_60` curve, projected onto `PC1…PC5`.
-Realized volatility is an attribute and never an identity dimension.
+Identity is path geometry in two channels. Fitting principal components to the
+raw `r_1…r_60` curve put 80.7% of the variance on one axis that was essentially
+the endpoint, so distance degenerated into a quantization of direction and
+"fell, came back, rallied" became indistinguishable from "rallied straight".
+Direction is now its own thirteen-dimension channel — where the path went and
+how far — and Shape is the curve with the endpoint trend removed and rescaled to
+unit RMS, projected onto the fitted basis. Realized volatility is an attribute
+and never an identity dimension.
 
 Because the nodes are re-extracted every clock they have no identity of their
 own across time, so `hypothesis_pool.py` maintains persistence by association —
-a gated Hungarian match between this clock's nodes and the live set. The five
-lifecycle operations are read off that match rather than being separate rules,
+a gated Hungarian match between this clock's nodes and the live set, measured on
+the centroid and the cluster's spread together. Identity, though, is decided by
+**support**: every node records which historical observation points back it, a
+match whose support was replaced is not an update, a split is one claim's
+support dividing between two separated nodes, and a merge is its exact dual. The
+five lifecycle operations are read off that rather than being separate rules,
 which is also what makes churn measurable: `churn_diagnostics.py` separates a
 real change of claim from a re-initialization artefact by re-clustering the same
 cloud under different seeds.
 
-Uncertainty is three numbers, not one: entropy over what is named, ambiguity
-between the named claims, and coverage of what nothing names. The residual is
+Uncertainty is three numbers, not one: mode ambiguity among the claims that are
+published, representation coverage of the local cloud, and retrieval confidence
+in whether the present state has enough close precedent to reason from at all. A
+belief can be sharp and fully covered and still rest on a dozen remote
+analogues, which is the case the third number exists to surface. The residual is
 measured from the cloud rather than asserted.
+
+**The retrieval has no demonstrated predictive skill.** Measured on 2022-01 with
+ten sessions fitted and ten held out, the conditional future cloud is not closer
+to the realized path than a random slice of history — correlation +0.012 between
+predicted and realized sixty-minute return, sign agreement 49.2%, and a
+least-squares optimal scaling of −0.119, meaning the best available use of the
+prediction is to ignore it. The same holds on adjacent windows where the
+retrieval does find close analogues, so it is not an artefact of the mid-January
+regime break; and an in-sample run of the identical measurement returns +0.580,
+which is leakage from adjacent observation points sharing 59 of their 60 future
+minutes. The Brain is bounded, deterministic and honestly instrumented
+machinery with nothing yet proven behind it, and
+`brain/docs/README.md` records the full measurement.
 
 `hypothesis_protocol.json` declares `development_unvalidated` / `shadow_only`
 and `action_authority_ready: false`, and `load_hypothesis_protocol` fails closed

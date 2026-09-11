@@ -16,6 +16,7 @@ from brain.core.hypothesis_pool import (
     HypothesisPoolError,
     PoolConfig,
     _assign,
+    information_gap,
 )
 from brain.core.hypothesis_proposer import (
     FEATURE_DIM,
@@ -25,8 +26,16 @@ from brain.core.hypothesis_proposer import (
     HypothesisProposerError,
     ProposerConfig,
     load_hypothesis_protocol,
+    protocol_fingerprint,
 )
-from brain.core.trajectory import RealizedPath, TrajectoryError, path_attributes
+from brain.core.trajectory import (
+    RealizedPath,
+    TrajectoryError,
+    detrended_shape,
+    direction_vector,
+    path_attributes,
+    shape_matrix,
+)
 from brain.research.churn_diagnostics import (
     association_distance_profile,
     cloud_drift,
@@ -34,15 +43,26 @@ from brain.research.churn_diagnostics import (
     summarize_churn,
 )
 from brain.research.cluster_study import centroid_reproduction, eta_squared, medoids
+from brain.research.design_study import (
+    paired_verdict,
+    prototype_geometry,
+    raw_representation,
+    retrieval_skill,
+    skill_profile,
+    two_channel_representation,
+)
 from brain.research.forecast_index import (
     ATTRIBUTE_NAMES,
     build_index,
     fit_principal_basis,
 )
 from contract.brain.forecast import (
+    DIRECTION_DIM,
+    DIRECTION_FEATURE_NAMES,
     MAX_CLOUD_NODES,
     MAX_LIVE_HYPOTHESES,
-    PRINCIPAL_COMPONENT_COUNT,
+    REPRESENTATION_DIM,
+    SHAPE_COMPONENT_COUNT,
     TRAJECTORY_CURVE_LENGTH,
     BeliefUncertainty,
     ConditionalCloud,
@@ -53,9 +73,10 @@ from contract.brain.forecast import (
     PathAttributes,
     TrajectoryNode,
     belief_revision_id,
-    distribution_ambiguity,
-    entropy_uncertainty,
+    mode_ambiguity,
     node_identity,
+    retrieval_confidence,
+    support_overlap,
 )
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -84,26 +105,47 @@ def _ramp(level: float) -> tuple[float, ...]:
     )
 
 
-def _node(level: float, *, mass: float = 0.3, spread: float = 0.5) -> TrajectoryNode:
+def _node(
+    level: float,
+    *,
+    mass: float = 0.3,
+    spread: float = 0.5,
+    members: tuple[int, ...] | None = None,
+    component_spread: float = 1.0,
+) -> TrajectoryNode:
+    """A node at ``level``, supported by a named set of historical samples.
+
+    ``members`` defaults to a block derived from the level, so two calls with
+    the same level rest on the same history and two different levels do not.
+    Identity in the pool is decided by these sets, so a test that does not name
+    them is not testing what the pool actually does.
+    """
+
     curve = _ramp(level)
+    if members is None:
+        base = int(round(level * 1000))
+        members = tuple(range(base, base + 40))
     return TrajectoryNode(
         node_id=node_identity(curve),
         curve=curve,
-        components=tuple(float(level) for _ in range(PRINCIPAL_COMPONENT_COUNT)),
+        components=tuple(float(level) for _ in range(REPRESENTATION_DIM)),
         dispersion=tuple(spread for _ in range(TRAJECTORY_CURVE_LENGTH)),
         mass=mass,
-        member_count=40,
+        member_count=len(members),
         attributes=_attrs(r_60=level),
+        member_ids=members,
+        component_spread=component_spread,
     )
 
 
 def _cloud(nodes, *, asof=ASOF, neighbours=200) -> ConditionalCloud:
     # component_scale of one makes the pool's relative gate read as an absolute
     # distance, so these tests can state gates in the units the nodes use.
+    assigned = sum(n.member_count for n in nodes)
     return ConditionalCloud(
         asof=asof,
-        neighbour_count=neighbours,
-        assigned_count=sum(n.member_count for n in nodes),
+        neighbour_count=max(neighbours, assigned),
+        assigned_count=assigned,
         cluster_count=6,
         nodes=tuple(nodes),
         component_scale=1.0,
@@ -164,7 +206,7 @@ def test_realized_volatility_is_an_attribute_only():
     assert "rv_60" in ATTRIBUTE_NAMES
     node = _node(2.0)
     assert len(node.curve) == TRAJECTORY_CURVE_LENGTH
-    assert len(node.components) == PRINCIPAL_COMPONENT_COUNT
+    assert len(node.components) == REPRESENTATION_DIM
 
 
 def test_attribute_names_match_the_contract_ordering():
@@ -283,33 +325,71 @@ def test_revision_id_is_deterministic_and_content_addressed():
 
 
 def test_an_empty_pool_is_maximally_uncertain_not_maximally_confident():
-    """The residual is "some future I am not naming", not one named outcome."""
+    """Nothing named, nothing covered, and the reading must say so."""
 
-    assert entropy_uncertainty((), 1.0) == pytest.approx(1.0)
-    assert entropy_uncertainty((0.97,), 0.03) < 0.2
-    assert entropy_uncertainty((0.25, 0.25, 0.25), 0.25) == pytest.approx(1.0)
+    empty = BeliefUncertainty(
+        mode_ambiguity=0.0, representation_coverage=0.0, retrieval_confidence=0.0
+    )
+    assert empty.combined == pytest.approx(2.0 / 3.0)
+    assert not empty.well_supported
 
 
 def test_ambiguity_separates_agreeing_claims_from_opposed_ones():
     """Identical entropy, opposite meanings — which is why it is its own number."""
 
-    agreeing = ((1.0,) * PRINCIPAL_COMPONENT_COUNT, (1.01,) * PRINCIPAL_COMPONENT_COUNT)
-    opposed = ((5.0,) * PRINCIPAL_COMPONENT_COUNT, (-5.0,) * PRINCIPAL_COMPONENT_COUNT)
-    assert distribution_ambiguity(agreeing, scale=1.0) < 0.1
-    assert distribution_ambiguity(opposed, scale=1.0) > 0.9
+    agreeing = ((1.0,) * REPRESENTATION_DIM, (1.01,) * REPRESENTATION_DIM)
+    opposed = ((5.0,) * REPRESENTATION_DIM, (-5.0,) * REPRESENTATION_DIM)
+    assert mode_ambiguity(agreeing, (0.5, 0.5), scale=1.0) < 0.1
+    assert mode_ambiguity(opposed, (0.5, 0.5), scale=1.0) > 0.9
+
+
+def test_ambiguity_is_weighted_by_how_much_each_claim_is_believed():
+    """A negligible outlier far away is not the same as two claims pulling apart."""
+
+    components = ((1.0,) * REPRESENTATION_DIM, (-9.0,) * REPRESENTATION_DIM)
+    contested = mode_ambiguity(components, (0.5, 0.5), scale=1.0)
+    lopsided = mode_ambiguity(components, (0.98, 0.02), scale=1.0)
+    assert lopsided < contested
 
 
 def test_a_single_claim_cannot_disagree_with_itself():
-    single = (((1.0,) * PRINCIPAL_COMPONENT_COUNT),)
-    assert distribution_ambiguity(single, scale=1.0) == 0.0
-    assert distribution_ambiguity((), scale=1.0) == 0.0
+    single = (((1.0,) * REPRESENTATION_DIM),)
+    assert mode_ambiguity(single, (1.0,), scale=1.0) == 0.0
+    assert mode_ambiguity((), (), scale=1.0) == 0.0
+
+
+def test_retrieval_confidence_needs_both_enough_cases_and_close_ones():
+    """A full complement of remote analogues is not precedent."""
+
+    close = dict(mean_distance=0.1, target_count=200, distance_scale=1.0)
+    assert retrieval_confidence(neighbour_count=200, **close) > 0.9
+    # Enough cases, but all of them far away.
+    assert retrieval_confidence(
+        neighbour_count=200, mean_distance=20.0, target_count=200, distance_scale=1.0
+    ) < 0.1
+    # Close cases, but only twelve of them — the example the design calls out.
+    assert retrieval_confidence(
+        neighbour_count=12, mean_distance=0.1, target_count=200, distance_scale=1.0
+    ) < 0.1
 
 
 def test_the_three_uncertainty_components_stay_separate():
-    uncertainty = BeliefUncertainty(entropy=0.9, distribution_ambiguity=0.1, coverage=0.5)
-    assert uncertainty.combined == pytest.approx(0.5)
+    """Each says a different thing, so none can stand in for another."""
+
+    uncertainty = BeliefUncertainty(
+        mode_ambiguity=0.3, representation_coverage=0.8, retrieval_confidence=0.6
+    )
+    assert uncertainty.combined == pytest.approx((0.3 + 0.2 + 0.4) / 3.0)
+    assert uncertainty.well_supported
+    thin = BeliefUncertainty(
+        mode_ambiguity=0.0, representation_coverage=1.0, retrieval_confidence=0.1
+    )
+    # Sharp and fully covered, and still not to be trusted: no precedent.
+    assert not thin.well_supported
     with pytest.raises(ValueError):
-        BeliefUncertainty(entropy=1.4, distribution_ambiguity=0.0, coverage=0.0)
+        BeliefUncertainty(
+            mode_ambiguity=1.4, representation_coverage=0.0, retrieval_confidence=0.0
+        )
 
 
 # -- belief updater -----------------------------------------------------------
@@ -405,23 +485,155 @@ def test_a_node_beyond_the_gate_spawns_rather_than_inheriting():
     }
 
 
-def test_a_second_node_next_to_a_live_claim_is_a_split():
-    pool = HypothesisPool(config=PoolConfig(association_max_distance_scale=3.0))
-    _advance(pool, minute=1, close=100.0, nodes=[_node(1.0, mass=0.5)])
+def test_a_split_needs_the_support_to_divide_not_just_a_neighbour_to_appear():
+    """H1's three hundred samples separate into two groups — that is a split."""
+
+    pool = HypothesisPool()
+    parent = tuple(range(300))
+    _advance(pool, minute=1, close=100.0, nodes=[_node(1.0, mass=0.5, members=parent)])
     advance = _advance(
-        pool, minute=2, close=100.1, nodes=[_node(1.0, mass=0.3), _node(2.0, mass=0.3)]
+        pool,
+        minute=2,
+        close=100.1,
+        nodes=[
+            _node(1.0, mass=0.3, members=parent[:170]),
+            _node(1.2, mass=0.3, members=parent[170:]),
+        ],
     )
-    assert any(r.operation is LifecycleOperation.SPLIT for r in advance.records)
+    split = [r for r in advance.records if r.operation is LifecycleOperation.SPLIT]
+    assert split, [r.operation.value for r in advance.records]
+    assert split[0].support_overlap == pytest.approx(130 / 300)
+    child = next(h for h in advance.hypotheses if h.hypothesis_id in split[0].hypothesis_ids)
+    assert child.lineage  # the child knows which claim it came out of
 
 
-def test_two_live_claims_collapsing_onto_one_node_is_a_merge():
-    pool = HypothesisPool(config=PoolConfig(association_max_distance_scale=3.0))
+def test_a_nearby_node_on_unrelated_history_spawns_rather_than_splitting():
+    """Proximity is not inheritance: nothing of the live claim carried over."""
+
+    pool = HypothesisPool()
     _advance(
-        pool, minute=1, close=100.0, nodes=[_node(1.0, mass=0.3), _node(2.0, mass=0.3)]
+        pool, minute=1, close=100.0, nodes=[_node(1.0, mass=0.5, members=tuple(range(300)))]
     )
-    advance = _advance(pool, minute=2, close=100.1, nodes=[_node(1.5, mass=0.6)])
-    assert any(r.operation is LifecycleOperation.MERGE for r in advance.records)
+    advance = _advance(
+        pool,
+        minute=2,
+        close=100.1,
+        nodes=[
+            _node(1.0, mass=0.3, members=tuple(range(300))),
+            _node(1.2, mass=0.3, members=tuple(range(9000, 9130))),
+        ],
+    )
+    operations = {r.operation for r in advance.records}
+    assert LifecycleOperation.SPAWN in operations
+    assert LifecycleOperation.SPLIT not in operations
+
+
+def test_a_match_whose_support_was_replaced_is_not_an_update():
+    """Same coordinates, different history — a different claim in the same coat."""
+
+    pool = HypothesisPool()
+    first = _advance(
+        pool, minute=1, close=100.0, nodes=[_node(1.0, mass=0.5, members=tuple(range(300)))]
+    )
+    identity = first.hypotheses[0].hypothesis_id
+    advance = _advance(
+        pool,
+        minute=2,
+        close=100.1,
+        nodes=[_node(1.0, mass=0.5, members=tuple(range(9000, 9300)))],
+    )
+    assert advance.hypotheses[0].hypothesis_id != identity
+    retire = [r for r in advance.records if r.operation is LifecycleOperation.RETIRE]
+    assert any("replaced" in r.reason for r in retire)
+
+
+def test_two_claims_whose_supports_converge_on_one_node_merge():
+    """The exact dual of a split: the information gap between them closed."""
+
+    pool = HypothesisPool()
+    left, right = tuple(range(100)), tuple(range(100, 200))
+    _advance(
+        pool,
+        minute=1,
+        close=100.0,
+        nodes=[
+            _node(1.0, mass=0.3, members=left),
+            _node(1.15, mass=0.3, members=right),
+        ],
+    )
+    advance = _advance(
+        pool, minute=2, close=100.1, nodes=[_node(1.07, mass=0.6, members=left + right)]
+    )
+    merged = [r for r in advance.records if r.operation is LifecycleOperation.MERGE]
+    assert merged, [r.operation.value for r in advance.records]
     assert len(advance.hypotheses) == 1
+    assert advance.hypotheses[0].lineage
+
+
+def test_two_claims_that_still_say_different_things_do_not_merge():
+    """Converged support is not enough: the claims must be indistinguishable."""
+
+    pool = HypothesisPool(config=PoolConfig(association_max_distance_scale=3.0))
+    left, right = tuple(range(100)), tuple(range(100, 200))
+    _advance(
+        pool,
+        minute=1,
+        close=100.0,
+        nodes=[
+            _node(-2.0, mass=0.3, members=left),
+            _node(2.0, mass=0.3, members=right),
+        ],
+    )
+    advance = _advance(
+        pool, minute=2, close=100.1, nodes=[_node(2.0, mass=0.6, members=left + right)]
+    )
+    assert not [r for r in advance.records if r.operation is LifecycleOperation.MERGE]
+
+
+def test_information_gap_reads_separation_against_the_spread_it_is_measured_in():
+    """Two claims a hair apart inside a wide band are one claim written twice."""
+
+    tight = information_gap(_node(1.0, spread=0.05), _node(1.5, spread=0.05))
+    wide = information_gap(_node(1.0, spread=5.0), _node(1.5, spread=5.0))
+    assert wide < tight
+    assert information_gap(_node(1.0), _node(1.0)) == pytest.approx(0.0)
+
+
+def test_a_node_at_the_same_centre_with_a_different_spread_is_not_the_same_claim():
+    """A tight knot and a diffuse ring share a centroid and claim different things."""
+
+    pool = HypothesisPool()
+    members = tuple(range(300))
+    first = _advance(
+        pool,
+        minute=1,
+        close=100.0,
+        nodes=[_node(1.0, mass=0.5, members=members, component_spread=0.1)],
+    )
+    identity = first.hypotheses[0].hypothesis_id
+    advance = _advance(
+        pool,
+        minute=2,
+        close=100.1,
+        nodes=[_node(1.0, mass=0.5, members=members, component_spread=4.0)],
+    )
+    assert advance.hypotheses[0].hypothesis_id != identity
+
+
+def test_a_matched_update_records_what_it_matched_on():
+    pool = HypothesisPool()
+    members = tuple(range(300))
+    _advance(pool, minute=1, close=100.0, nodes=[_node(1.0, mass=0.5, members=members)])
+    advance = _advance(
+        pool, minute=2, close=100.1, nodes=[_node(1.0, mass=0.5, members=members[:200])]
+    )
+    update = next(
+        r
+        for r in advance.records
+        if r.operation is LifecycleOperation.UPDATE and "matched" in r.reason
+    )
+    assert update.support_overlap == pytest.approx(200 / 300)
+    assert advance.hypotheses[0].support_overlap == pytest.approx(200 / 300)
 
 
 def test_an_empty_cloud_retires_everything_and_publishes_a_full_residual():
@@ -492,7 +704,17 @@ def test_no_sequence_of_association_outcomes_can_break_the_pool_invariants():
         levels = rng.sample(
             [-3.0, -1.5, -0.6, -0.5, 0.5, 0.6, 1.5, 1.6, 3.0], k=count
         )
-        nodes = [_node(level, mass=0.9 / max(1, count)) for level in levels]
+        # Support windows are drawn from one shared pool and slide with the
+        # level, so adjacent claims share history and distant ones do not —
+        # which is what makes every lifecycle outcome reachable at all.
+        nodes = [
+            _node(
+                level,
+                mass=0.9 / max(1, count),
+                members=tuple(range(int((level + 3.0) * 20), int((level + 3.0) * 20) + 40)),
+            )
+            for level in levels
+        ]
         advance = _advance(pool, minute=minute, close=price, nodes=nodes)
         largest = max(largest, len(advance.hypotheses), len(pool.members))
         exercised |= {r.operation.value for r in advance.records}
@@ -532,7 +754,7 @@ def _index(rows: int = 400, seed: int = 5) -> ForecastIndex:
 
 
 def _proposer(**overrides) -> HypothesisProposer:
-    config = dict(neighbours=60, minimum_neighbours=10, cluster_count=3)
+    config = dict(neighbours=60, minimum_neighbours=10, max_cluster_count=3)
     config.update(overrides)
     return HypothesisProposer(index=_index(), config=ProposerConfig(**config))
 
@@ -551,15 +773,15 @@ def test_retrieval_follows_the_context_when_it_moves():
 def test_too_few_neighbours_yields_a_cloud_with_no_nodes():
     proposer = HypothesisProposer(
         index=_index(),
-        config=ProposerConfig(neighbours=5, minimum_neighbours=5, cluster_count=3),
+        config=ProposerConfig(neighbours=5, minimum_neighbours=5, max_cluster_count=3),
     )
     proposer.config = ProposerConfig(
-        neighbours=5, minimum_neighbours=5, cluster_count=3
+        neighbours=5, minimum_neighbours=5, max_cluster_count=3
     )
     # Force the shortfall: ask for more assigned neighbours than exist.
     starved = HypothesisProposer(
         index=proposer.index,
-        config=ProposerConfig(neighbours=30, minimum_neighbours=30, cluster_count=3),
+        config=ProposerConfig(neighbours=30, minimum_neighbours=30, max_cluster_count=3),
     )
     starved._reference = starved._reference[:10]
     cloud = starved.propose(np.zeros(FEATURE_DIM), asof=ASOF)
@@ -574,7 +796,7 @@ def test_a_nan_context_component_does_not_poison_retrieval():
 
 
 def test_extraction_is_deterministic_over_the_same_cloud():
-    proposer = _proposer(neighbours=80, cluster_count=4)
+    proposer = _proposer(neighbours=80, max_cluster_count=4)
     first = proposer.propose(np.zeros(FEATURE_DIM), asof=ASOF)
     second = proposer.propose(np.zeros(FEATURE_DIM), asof=ASOF)
     assert [n.node_id for n in first.nodes] == [n.node_id for n in second.nodes]
@@ -602,7 +824,13 @@ def test_a_misshapen_index_is_refused():
             attribute_names=index.attribute_names,
             principal_mean=index.principal_mean,
             principal_components=index.principal_components,
+            direction_centre=index.direction_centre,
+            direction_spread=index.direction_spread,
+            shape_centre=index.shape_centre,
+            shape_spread=index.shape_spread,
+            direction_weight=index.direction_weight,
             component_scale=index.component_scale,
+            context_scale=index.context_scale,
         )
 
 
@@ -614,13 +842,54 @@ def test_the_feature_vector_is_fixed_width_and_uniquely_named():
 # -- principal basis and study surfaces ---------------------------------------
 
 
-def test_the_principal_basis_captures_most_of_a_low_rank_curve_set():
+def test_detrending_erases_where_the_path_ended():
+    """Ramps to wildly different levels all have the same shape: none at all."""
+
     rng = np.random.default_rng(2)
-    levels = rng.normal(size=(300, 1))
-    curves = levels * np.linspace(0, 1, TRAJECTORY_CURVE_LENGTH)
-    basis = fit_principal_basis(curves + rng.normal(scale=0.01, size=curves.shape))
-    assert basis.explained_variance_ratio[0] > 0.95
-    assert basis.components.shape == (PRINCIPAL_COMPONENT_COUNT, TRAJECTORY_CURVE_LENGTH)
+    levels = rng.normal(size=(300, 1)) * 5.0
+    ramps = levels * np.linspace(1 / 60, 1.0, TRAJECTORY_CURVE_LENGTH)
+    assert np.abs(shape_matrix(ramps)).max() < 1e-9
+    assert max(abs(v) for v in detrended_shape(_ramp(9.0))) < 1e-9
+
+
+def test_the_shape_basis_captures_a_common_bow_whatever_the_endpoint():
+    """The part raw-curve PCA crushed: two paths that end together, shaped apart."""
+
+    rng = np.random.default_rng(2)
+    steps = np.arange(1, TRAJECTORY_CURVE_LENGTH + 1)
+    bow = np.sin(np.pi * steps / TRAJECTORY_CURVE_LENGTH)
+    levels = rng.normal(size=(300, 1)) * 5.0
+    amplitude = rng.normal(size=(300, 1))
+    curves = levels * (steps / TRAJECTORY_CURVE_LENGTH) + amplitude * bow
+    basis = fit_principal_basis(
+        shape_matrix(curves + rng.normal(scale=0.01, size=curves.shape))
+    )
+    assert basis.explained_variance_ratio[0] > 0.9
+    assert basis.components.shape == (SHAPE_COMPONENT_COUNT, TRAJECTORY_CURVE_LENGTH)
+
+
+def test_the_two_channels_answer_different_questions():
+    """Same destination, opposite journeys — Direction agrees, Shape does not."""
+
+    steps = np.arange(1, TRAJECTORY_CURVE_LENGTH + 1) / TRAJECTORY_CURVE_LENGTH
+    bow = np.sin(np.pi * steps)
+    dipped = tuple(2.0 * steps - 3.0 * bow)
+    rallied = tuple(2.0 * steps + 3.0 * bow)
+    highs = tuple(max(v, 0.0) + 0.1 for v in dipped)
+    lows = tuple(min(v, 0.0) - 0.1 for v in dipped)
+    left = path_attributes(curve=dipped, highs=highs, lows=lows)
+    right = path_attributes(
+        curve=rallied,
+        highs=tuple(max(v, 0.0) + 0.1 for v in rallied),
+        lows=tuple(min(v, 0.0) - 0.1 for v in rallied),
+    )
+    assert left.r_60 == pytest.approx(right.r_60)
+    shape_distance = float(
+        np.linalg.norm(np.array(detrended_shape(dipped)) - np.array(detrended_shape(rallied)))
+    )
+    assert shape_distance > 5.0
+    assert len(direction_vector(left)) == DIRECTION_DIM
+    assert DIRECTION_FEATURE_NAMES[0] == "r_5"
 
 
 def test_medoids_are_real_rows_not_averages():
@@ -644,6 +913,64 @@ def test_centroid_reproduction_rewards_shapes_that_come_back():
     different = np.array([_ramp(0.0), _ramp(0.1)])
     assert centroid_reproduction(reference, same, gate=0.5)["matched_fraction"] == 1.0
     assert centroid_reproduction(reference, different, gate=0.001)["matched_fraction"] == 0.0
+
+
+# -- the adaptive local cut ---------------------------------------------------
+
+
+def test_one_blob_is_one_mode_not_a_decorative_split():
+    """A cloud with no structure must not be sliced into halves."""
+
+    rng = np.random.default_rng(4)
+    blob = rng.normal(size=(150, REPRESENTATION_DIM)) * 0.4
+    labels, chosen, separation = _proposer().local_cut(blob)
+    assert chosen == 1
+    assert set(labels) == {0}
+    assert separation == 0.0
+
+
+def test_two_dense_regions_are_cut_into_two():
+    rng = np.random.default_rng(4)
+    left = rng.normal(size=(80, REPRESENTATION_DIM)) * 0.2
+    right = left + 12.0
+    labels, chosen, separation = _proposer().local_cut(np.vstack([left, right]))
+    assert chosen == 2
+    assert separation > 0.5
+    assert len(set(labels[:80])) == 1 and len(set(labels[80:])) == 1
+
+
+def test_a_cloud_that_keeps_spreading_takes_a_finer_cut():
+    """Three separated groups are three, not the two a fixed k would allow."""
+
+    rng = np.random.default_rng(4)
+    groups = [
+        rng.normal(size=(60, REPRESENTATION_DIM)) * 0.2 + offset
+        for offset in (0.0, 15.0, 30.0)
+    ]
+    _, chosen, _ = _proposer().local_cut(np.vstack(groups))
+    assert chosen == 3
+
+
+def test_the_separation_floor_is_what_decides_between_one_and_many():
+    rng = np.random.default_rng(4)
+    blob = rng.normal(size=(150, REPRESENTATION_DIM)) * 0.4
+    permissive = HypothesisProposer(
+        index=_index(),
+        config=ProposerConfig(neighbours=60, minimum_neighbours=10, separation_floor=0.0),
+    )
+    _, chosen, _ = permissive.local_cut(blob)
+    assert chosen > 1
+
+
+def test_a_cloud_carries_its_support_and_how_far_the_neighbours_were():
+    cloud = _proposer().propose(np.zeros(FEATURE_DIM), asof=ASOF)
+    assert cloud.mean_neighbour_distance > 0.0
+    for node in cloud.nodes:
+        assert len(node.member_ids) == node.member_count
+        assert node.component_spread >= 0.0
+    assert len({i for node in cloud.nodes for i in node.member_ids}) == sum(
+        node.member_count for node in cloud.nodes
+    )
 
 
 # -- churn diagnostics --------------------------------------------------------
@@ -691,6 +1018,130 @@ def test_the_association_gate_can_be_read_off_the_distances():
     assert profile.association_distance.is_monotonic_increasing
 
 
+# -- the four design measurements ---------------------------------------------
+
+
+def test_retrieval_skill_finds_skill_where_skill_exists():
+    """A context that determines the future must beat a random draw."""
+
+    rng = np.random.default_rng(6)
+    steps = np.arange(1, TRAJECTORY_CURVE_LENGTH + 1) / TRAJECTORY_CURVE_LENGTH
+    reference = np.array(
+        [
+            (1.0 if row % 2 else -1.0) * steps * 3.0
+            + rng.normal(scale=0.05, size=TRAJECTORY_CURVE_LENGTH)
+            for row in range(400)
+        ]
+    )
+    realized = np.array([steps * 3.0 for _ in range(40)])
+    # Every retrieval returns only the rising half, which is what happened.
+    neighbourhoods = [np.arange(1, 400, 2) for _ in range(40)]
+    frame = retrieval_skill(
+        neighbourhoods=neighbourhoods,
+        reference_curves=reference,
+        realized_curves=realized,
+    )
+    assert frame["conditional_rmse"].mean() < frame["random_rmse"].mean()
+    verdict = paired_verdict(frame, left="conditional_rmse", right="random_rmse")
+    assert verdict["significant"]
+
+
+def test_retrieval_skill_reports_none_when_the_context_says_nothing():
+    """The test must be able to fail, or it is not a test."""
+
+    rng = np.random.default_rng(6)
+    reference = rng.normal(size=(400, TRAJECTORY_CURVE_LENGTH))
+    realized = rng.normal(size=(40, TRAJECTORY_CURVE_LENGTH))
+    neighbourhoods = [rng.choice(400, size=50, replace=False) for _ in range(40)]
+    frame = retrieval_skill(
+        neighbourhoods=neighbourhoods,
+        reference_curves=reference,
+        realized_curves=realized,
+    )
+    assert not paired_verdict(frame, left="conditional_rmse", right="random_rmse")[
+        "significant"
+    ]
+
+
+def test_skill_profile_separates_no_information_from_over_confidence():
+    """RMSE alone cannot; correlation and the optimal scaling can."""
+
+    rng = np.random.default_rng(8)
+    steps = np.arange(1, TRAJECTORY_CURVE_LENGTH + 1) / TRAJECTORY_CURVE_LENGTH
+    # The context's first component decides the sign of the future.
+    features = rng.normal(size=(600, FEATURE_DIM))
+    curves = np.array(
+        [
+            np.sign(features[row, 0]) * steps * 3.0
+            + rng.normal(scale=0.3, size=TRAJECTORY_CURVE_LENGTH)
+            for row in range(600)
+        ]
+    )
+    informative = skill_profile(
+        pool_features=features[:400],
+        pool_curves=curves[:400],
+        scored_features=features[400:],
+        scored_curves=curves[400:],
+        neighbours=40,
+        stride=1,
+    )
+    assert informative["correlation"] > 0.4
+    assert informative["optimal_alpha"] > 0.5
+    assert informative["sign_agreement"] > 0.65
+
+    # The same machinery on a context that decides nothing must report nothing.
+    noise = rng.normal(size=(600, TRAJECTORY_CURVE_LENGTH))
+    empty = skill_profile(
+        pool_features=features[:400],
+        pool_curves=noise[:400],
+        scored_features=features[400:],
+        scored_curves=noise[400:],
+        neighbours=40,
+        stride=1,
+    )
+    assert abs(empty["correlation"]) < 0.2
+    assert empty["optimal_alpha"] < 0.5
+    # The gap between the two is what the measurement is for.
+    assert informative["correlation"] > abs(empty["correlation"]) + 0.3
+
+
+def test_the_two_representations_are_told_apart_by_their_prototypes():
+    """Raw PCA concentrates variance on one axis; the split design does not."""
+
+    rng = np.random.default_rng(6)
+    steps = np.arange(1, TRAJECTORY_CURVE_LENGTH + 1) / TRAJECTORY_CURVE_LENGTH
+    bow = np.sin(np.pi * steps)
+    curves = np.array(
+        [
+            rng.normal(0, 2.0) * steps
+            + rng.normal(0, 1.0) * bow
+            + rng.normal(scale=0.05, size=TRAJECTORY_CURVE_LENGTH)
+            for _ in range(400)
+        ]
+    )
+    attributes = [
+        path_attributes(
+            curve=tuple(row),
+            highs=tuple(max(v, 0.0) + 0.1 for v in row),
+            lows=tuple(min(v, 0.0) - 0.1 for v in row),
+        )
+        for row in curves
+    ]
+    raw = raw_representation(curves, attributes)
+    split = two_channel_representation(curves, attributes)
+    assert raw.leading_share > split.leading_share
+    geometry = prototype_geometry(split.scores, curves, cluster_count=3)
+    assert float(geometry["shape_span"].iloc[0]) > 0.0
+
+
+def test_the_protocol_fingerprint_is_the_bytes_a_reader_would_see(tmp_path):
+    path = tmp_path / "protocol.json"
+    path.write_text('{"a": 1}', encoding="utf-8")
+    first = protocol_fingerprint(path)
+    path.write_text('{"a": 1} ', encoding="utf-8")
+    assert protocol_fingerprint(path) != first
+
+
 # -- protocol and the published surface ---------------------------------------
 
 
@@ -699,7 +1150,21 @@ def test_the_shipped_protocol_is_shadow_only():
     assert protocol["authority"] == "shadow_only"
     assert protocol["action_authority_ready"] is False
     assert protocol["trajectory"]["curve_length_minutes"] == TRAJECTORY_CURVE_LENGTH
-    assert protocol["trajectory"]["principal_components"] == PRINCIPAL_COMPONENT_COUNT
+    assert protocol["trajectory"]["shape_components"] == SHAPE_COMPONENT_COUNT
+    assert protocol["trajectory"]["direction_dim"] == DIRECTION_DIM
+    assert protocol["trajectory"]["representation_dim"] == REPRESENTATION_DIM
+
+
+def test_the_model_binding_cites_the_protocol_it_actually_ships():
+    """A protocol edit that forgets the binding leaves the model pointing at a
+    file that no longer exists in the form it claims."""
+
+    model = json.loads((ROOT / "configs" / "model.json").read_text(encoding="utf-8"))
+    binding = model["hypothesis_protocol"]
+    assert binding["protocol"] == "brain/configs/hypothesis_protocol.json"
+    assert binding["hypothesis_protocol_fingerprint"] == protocol_fingerprint(
+        PROTOCOL_PATH
+    )
 
 
 def test_a_protocol_claiming_authority_is_refused(tmp_path):
@@ -789,17 +1254,18 @@ def test_the_association_gate_scales_with_the_principal_basis():
 
     from brain.core.hypothesis_pool import PoolConfig as _Config
 
-    nodes = [_node(1.0, mass=0.5)]
+    members = tuple(range(300))
+    nodes = [_node(1.0, mass=0.5, members=members)]
     wide = ConditionalCloud(
-        asof=ASOF + pd.Timedelta(minutes=2), neighbour_count=200,
-        assigned_count=40, cluster_count=6,
-        nodes=tuple([_node(3.0, mass=0.5)]), component_scale=10.0,
+        asof=ASOF + pd.Timedelta(minutes=2), neighbour_count=300,
+        assigned_count=300, cluster_count=6,
+        nodes=tuple([_node(3.0, mass=0.5, members=members)]), component_scale=20.0,
     )
     pool = HypothesisPool(config=_Config(association_max_distance_scale=0.5))
     first = _advance(pool, minute=1, close=100.0, nodes=nodes)
     identity = first.hypotheses[0].hypothesis_id
-    # The node moved 2 * sqrt(5) ~= 4.47 away; against a scale of 10 the gate is
-    # 5.0, so it is still the same claim.
+    # The node moved 2 * sqrt(18) ~= 8.49 away; against a scale of 20 the gate
+    # is 10.0, so it is still the same claim — and its support never changed.
     advance = pool.advance(
         asof=wide.asof, close=100.1, high=100.6, low=99.6, atr=1.0, cloud=wide
     )

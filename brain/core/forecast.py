@@ -20,8 +20,8 @@ from contract.brain.forecast import (
     BeliefUncertainty,
     MarketBeliefState,
     belief_revision_id,
-    distribution_ambiguity,
-    entropy_uncertainty,
+    mode_ambiguity,
+    retrieval_confidence,
 )
 from contract.market import Timeframe
 
@@ -117,21 +117,36 @@ class HypothesisForecaster:
             cloud=cloud,
         )
 
-        live_nodes = {item.node_id for item in advance.hypotheses}
-        probabilities = tuple(item.probability for item in advance.hypotheses)
+        # The three ways this belief can be wrong, kept separate because they
+        # have different remedies. Mode ambiguity says the covered future is
+        # contested; representation coverage says the pool does not speak for
+        # much of the cloud; retrieval confidence says the cloud itself rests on
+        # thin precedent. A belief can be sharp and confident on all three
+        # counts and still be built on twelve remote analogues, which is exactly
+        # the failure the third number exists to surface.
+        by_node = {node.node_id: node for node in cloud.nodes}
+        covered = tuple(
+            (by_node[item.node_id], item.probability)
+            for item in advance.hypotheses
+            if item.node_id in by_node
+        )
         uncertainty = BeliefUncertainty(
-            entropy=entropy_uncertainty(probabilities, advance.residual_probability),
-            distribution_ambiguity=distribution_ambiguity(
-                tuple(
-                    node.components for node in cloud.nodes if node.node_id in live_nodes
-                ),
+            mode_ambiguity=mode_ambiguity(
+                tuple(node.components for node, _ in covered),
+                tuple(probability for _, probability in covered),
                 scale=self.proposer.index.component_scale,
             ),
             # Measured from the cloud, not from the normalized posterior: how
-            # much of what actually followed similar contexts no live claim
-            # speaks for is a different question from how the probability mass
-            # is spread over the claims that do exist.
-            coverage=cloud.residual_mass if cloud.nodes else 1.0,
+            # much of what actually followed similar contexts the live claims
+            # speak for is a different question from how the probability mass is
+            # spread over the claims that do exist.
+            representation_coverage=sum(node.mass for node, _ in covered),
+            retrieval_confidence=retrieval_confidence(
+                neighbour_count=cloud.neighbour_count,
+                mean_distance=cloud.mean_neighbour_distance,
+                target_count=self.proposer.config.neighbours,
+                distance_scale=self.proposer.index.context_scale,
+            ),
         )
         revision_id = belief_revision_id(
             asof=advance.asof,

@@ -24,11 +24,12 @@ import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
 
 from brain.core.trajectory import curve_matrix  # noqa: E402
+from brain.research.design_study import path_attribute_rows  # noqa: E402
 from brain.research.cluster_study import sweep_cluster_count  # noqa: E402
 from brain.research.forecast_index import load_index  # noqa: E402
 from brain.scripts._windows import load_dataset, slice_window  # noqa: E402
 
-DEFAULT_ARTIFACTS = "outputs/hypothesis_v2"
+DEFAULT_ARTIFACTS = "outputs/hypothesis_v3"
 
 
 def _curves(window) -> np.ndarray:
@@ -39,21 +40,31 @@ def _curves(window) -> np.ndarray:
     )
 
 
+def _attributes(window) -> list:
+    return path_attribute_rows(
+        anchor_prices=window.prices[:, 0],
+        anchor_atrs=window.prices[:, 3],
+        future_closes=window.future_closes,
+        future_highs=window.future_highs,
+        future_lows=window.future_lows,
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--artifacts", default=DEFAULT_ARTIFACTS)
     parser.add_argument("--fit-start", default="2022-01-02T18:00")
-    parser.add_argument("--fit-end", default="2022-01-05T17:00")
+    parser.add_argument("--fit-end", default="2022-01-14T17:00")
     parser.add_argument(
         "--holdout-start",
-        default="2022-01-06T18:00",
+        default="2022-01-14T18:00",
         help=(
             "start of the unseen window, exchange-local. The default is the "
-            "three sessions 2022-01-07/10/11 — the first three trading days on "
-            "or after 2022-01-07, rolling past the weekend."
+            "second half of January 2022, so the sweep is judged on sessions "
+            "the basis was not fitted on."
         ),
     )
-    parser.add_argument("--holdout-end", default="2022-01-11T17:00")
+    parser.add_argument("--holdout-end", default="2022-01-28T17:00")
     parser.add_argument("--k-min", type=int, default=2)
     parser.add_argument("--k-max", type=int, default=20)
     parser.add_argument(
@@ -80,8 +91,10 @@ def main() -> None:
 
     fit_curves = _curves(fit)
     holdout_curves = _curves(holdout)
-    fit_scores = index.project(fit_curves)
-    holdout_scores = index.project(holdout_curves)
+    # Both windows are placed in the index's own two-channel space, so the
+    # sweep scores the representation the runtime actually uses.
+    fit_scores = index.represent(fit_curves, _attributes(fit))
+    holdout_scores = index.represent(holdout_curves, _attributes(holdout))
 
     table = sweep_cluster_count(
         fit_scores=fit_scores,

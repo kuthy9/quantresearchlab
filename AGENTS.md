@@ -78,7 +78,7 @@ Bar
      │   ├─ hypothesis_proposer.py       (contract: contract/brain/forecast.py)
      │   ├─ hypothesis_pool.py           hypotheses are extracted per clock from
      │   └─ belief_updater.py            a conditional future cloud, then kept
-     │                                   alive by association
+     │                                   alive by inherited support
      └─ brain/core/decision.py → risk.py sole runtime action authority
 ```
 
@@ -86,11 +86,14 @@ Bar
 `brain.core.playbooks`, `brain.core.playbook_registry`,
 `brain.core.dol_probability` and `brain.core.signal_policy`, all of which were
 removed with the typed Brain. It also binds `model.path_hypotheses`, which went
-with the six-path retirement on 2026-09-09. Eight test modules (135 tests)
-cannot be collected until those import blocks and the code behind them are
-removed or rebound to `brain/core/forecast.py`, the belief producer that
-replaced them, and `shares.ContinuousSMCEngine` is unavailable until then. Run the suite with `--ignore` on those eight modules to exercise the
-other 1297 tests.
+with the six-path retirement on 2026-09-09. Together with three further modules
+that import the retired `brain.core.calibration`, `calibration_replay` and
+`validation`, **eleven test modules cannot be collected** until those import
+blocks and the code behind them are removed or rebound to
+`brain/core/forecast.py`, the belief producer that replaced them, and
+`shares.ContinuousSMCEngine` is unavailable until then. Run the suite with
+`--ignore` on those eleven modules to exercise the other 1,151 tests, which
+pass.
 
 The Eye imports no downstream module — no `eyes/core/` module imports `brain`,
 `execution`, or the orchestration half of `shares`. `shares/core/scene_graph.py`

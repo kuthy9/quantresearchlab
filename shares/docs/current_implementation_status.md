@@ -22,15 +22,33 @@ Policy, Trade Intent, the order FSM and the causal case library is now
 
 `brain/core/path_belief.py` became `brain/core/market_belief.py` and was then
 retired on 2026-09-09 with the six-path taxonomy; the belief producer is now
-`brain/core/forecast.py` over a fitted trajectory-mode library. Also,
-`shares/core/validation.py` is now `brain/core/validation.py`. Nothing fitted or
+`brain/core/forecast.py`, which forms its hypotheses locally per clock from the
+conditional future cloud that the current context retrieves. The global mode
+library that first replaced the six paths was retired the same day, and so was
+the raw-curve principal basis: trajectories are now represented in two channels,
+Direction and detrended Shape. Also, `shares/core/validation.py` became
+`brain/core/validation.py` and was then removed with the typed Brain, which is
+why four scripts and three further test modules still fail to import. Nothing fitted or
 published was lost — every artifact slot in `configs/model.json` was already
 `null` and every protocol declared `shadow_only` — but `PlaybookBrain` was the
 only producer of `MarketBelief`, so **the repository currently has no belief
 producer**. `shares/core/engine.py` still imports four retired modules and
-cannot be imported; 8 test modules (135 tests) cannot be collected, and the
-remaining 1,297 collected tests pass. Read every "integrated", "complete" or
+cannot be imported; eleven test modules cannot be collected — eight for the
+retired typed Brain and three for the retired calibration/validation surface —
+and the remaining 1,151 collected tests pass. Read every "integrated", "complete" or
 "fail-closed" claim below as a record of what existed before that date.
+
+**Forecast skill (2026-09-10).** The local conditional Brain was measured on
+2022-01 (ten sessions fitted, ten held out, 27,338 observation points). The
+representation redesign succeeded — the leading component's share of variance
+fell from 0.810 to 0.213 — and the lifecycle behaves as designed, with SPLIT
+firing 1,754 times against zero under the previous rule. **The predictive test
+failed.** The retrieved conditional future cloud is not closer to what actually
+happened than a random slice of history (correlation +0.012, sign agreement
+49.2%, optimal scaling −0.119), and the failure reproduces on adjacent windows
+where the retrieval does find close analogues. No belief surface may be read as
+predictive, and no threshold in `hypothesis_protocol.json` has been or can yet
+be calibrated against an out-of-sample outcome.
 
 Rows still marked complete for the Eye, the semantic layer, the data authority
 and the scale/clock contracts are unaffected: none of that code was touched.

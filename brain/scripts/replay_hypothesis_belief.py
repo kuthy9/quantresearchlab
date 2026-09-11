@@ -9,13 +9,11 @@ Runs the forecaster over every clock in a window and checks five things:
 * a second pass reproduced every ``revision_id`` exactly
 
 Lifecycle coverage is **reported, not required**. Which operations occur is a
-property of the data, not of the machinery: on 2022-01-03/04/05 no SPLIT fires
-at all, because with four extracted nodes and three slots the leftover node is
-simply the fourth K-Means cluster — a median of 15.2 away from the nearest live
-claim against a gate of 5.7 — rather than one claim separating into two. Widening
-the gate until that counted as a split would relabel a distinct future as a
-refinement of a different one. The five operations are covered by the unit tests
-instead.
+property of the data, not of the machinery. Under the v3 pool a SPLIT is one
+claim's supporting samples dividing between two separated nodes rather than a
+second node merely appearing nearby, and whether that happens in a given window
+is a measurement — ``study_lifecycle.py`` reports it — not something a replay
+should force. The five operations are covered by the unit tests instead.
 
 None of this is evidence the forecast is *right*. It is evidence the machinery
 runs, is bounded, and is deterministic.
@@ -29,7 +27,6 @@ from __future__ import annotations
 
 import argparse
 import collections
-import hashlib
 from pathlib import Path
 import sys
 
@@ -47,6 +44,7 @@ from brain.core.hypothesis_proposer import (  # noqa: E402
     HypothesisProposer,
     ProposerConfig,
     load_hypothesis_protocol,
+    protocol_fingerprint,
 )
 from brain.research.churn_diagnostics import (  # noqa: E402
     association_distance_profile,
@@ -58,11 +56,7 @@ from brain.research.forecast_index import load_index  # noqa: E402
 from brain.scripts._windows import load_dataset, slice_window  # noqa: E402
 from contract.brain.forecast import MAX_LIVE_HYPOTHESES, LifecycleOperation  # noqa: E402
 
-DEFAULT_ARTIFACTS = "outputs/hypothesis_v2"
-
-
-def _protocol_fingerprint(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
+DEFAULT_ARTIFACTS = "outputs/hypothesis_v3"
 
 
 def _run(forecaster, window, *, diagnose_every: int = 0):
@@ -87,8 +81,10 @@ def _run(forecaster, window, *, diagnose_every: int = 0):
         if diagnose_every and position % diagnose_every == 0:
             rows = forecaster.proposer.neighbourhood(window.features[position])
             scores = forecaster.proposer.index.reference_scores[rows]
+            # Jitter is measured at the cut this clock actually took, not at a
+            # nominal k the cloud may never have been divided into.
             agreement, shift = cluster_jitter(
-                scores, cluster_count=forecaster.proposer.config.cluster_count
+                scores, cluster_count=state.cloud.cluster_count
             )
             jitter_rows.append(
                 {
@@ -111,7 +107,7 @@ def main() -> None:
     parser.add_argument("--artifacts", default=DEFAULT_ARTIFACTS)
     parser.add_argument("--protocol", default="brain/configs/hypothesis_protocol.json")
     parser.add_argument("--start", default="2022-01-02T18:00")
-    parser.add_argument("--end", default="2022-01-05T17:00")
+    parser.add_argument("--end", default="2022-01-14T17:00")
     parser.add_argument("--label", default="fit")
     parser.add_argument(
         "--diagnose-every",
@@ -134,7 +130,7 @@ def main() -> None:
     )
     forecaster = HypothesisForecaster(
         proposer=proposer,
-        protocol_fingerprint=_protocol_fingerprint(protocol_path),
+        protocol_fingerprint=protocol_fingerprint(protocol_path),
         pool_config=PoolConfig.from_protocol(protocol),
         updater_config=BeliefUpdaterConfig.from_protocol(protocol),
     )
@@ -186,12 +182,27 @@ def main() -> None:
 
     print("\n=== belief ===")
     print(f"  residual mean {np.mean(residual):.3f}  min {min(residual):.3f}  max {max(residual):.3f}")
-    for name in ("entropy", "distribution_ambiguity", "coverage"):
+    for name in ("mode_ambiguity", "representation_coverage", "retrieval_confidence"):
         values = [getattr(state.uncertainty, name) for state in states]
-        print(f"  {name:22s} mean {np.mean(values):.3f}  min {min(values):.3f}  max {max(values):.3f}")
+        print(f"  {name:24s} mean {np.mean(values):.3f}  min {min(values):.3f}  max {max(values):.3f}")
     combined = [state.uncertainty.combined for state in states]
-    print(f"  {'combined':22s} mean {np.mean(combined):.3f}  min {min(combined):.3f}  max {max(combined):.3f}")
+    print(f"  {'combined':24s} mean {np.mean(combined):.3f}  min {min(combined):.3f}  max {max(combined):.3f}")
     print(f"  worst |sum(p) + residual - 1| = {worst_sum:.3e}")
+
+    print("\n=== local cut ===")
+    cuts = collections.Counter(
+        state.cloud.cluster_count for state in states if state.cloud is not None
+    )
+    for size in sorted(cuts):
+        print(f"  k_t = {size}: {cuts[size]:6d} clocks ({cuts[size]/len(states):6.1%})")
+    neighbour_distance = [
+        state.cloud.mean_neighbour_distance for state in states if state.cloud
+    ]
+    if neighbour_distance:
+        print(
+            f"  mean neighbour distance {np.mean(neighbour_distance):.3f} "
+            f"(context scale {forecaster.proposer.index.context_scale:.3f})"
+        )
 
     print("\n=== lifecycle ===")
     for operation in LifecycleOperation:
@@ -205,6 +216,23 @@ def main() -> None:
             print(
                 "\n  artefact_suspicion is high when an operation fires while the "
                 "cloud has barely moved but the clustering is unstable."
+            )
+        overlaps = [
+            record.support_overlap
+            for state in states
+            for record in state.lifecycle_records
+            if record.operation is LifecycleOperation.UPDATE
+        ]
+        if overlaps:
+            print("\n=== support inheritance on UPDATE ===")
+            print(
+                f"  weighted overlap mean {np.mean(overlaps):.3f}  "
+                f"median {np.median(overlaps):.3f}  "
+                f"share below 0.5: {np.mean([v < 0.5 for v in overlaps]):.1%}"
+            )
+            print(
+                "  a low overlap means the geometry survived while the history "
+                "under it was replaced — a different claim wearing the same coat."
             )
         distances = [r["association_distance"] for r in churn_rows if r["association_distance"] > 0]
         if distances:
@@ -239,9 +267,14 @@ def main() -> None:
                 "asof": window.index,
                 "live_hypotheses": live,
                 "residual_probability": residual,
-                "entropy": [s.uncertainty.entropy for s in states],
-                "distribution_ambiguity": [s.uncertainty.distribution_ambiguity for s in states],
-                "coverage": [s.uncertainty.coverage for s in states],
+                "mode_ambiguity": [s.uncertainty.mode_ambiguity for s in states],
+                "representation_coverage": [
+                    s.uncertainty.representation_coverage for s in states
+                ],
+                "retrieval_confidence": [
+                    s.uncertainty.retrieval_confidence for s in states
+                ],
+                "local_k": [s.cloud.cluster_count if s.cloud else 0 for s in states],
                 "uncertainty": combined,
                 "leading_node": [s.leading.node_id if s.leading else None for s in states],
                 "leading_probability": [s.leading.probability if s.leading else 0.0 for s in states],

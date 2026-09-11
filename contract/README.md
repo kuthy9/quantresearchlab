@@ -28,6 +28,7 @@ market  ->  execution  ->  eye  ->  brain  ->  decision  ->  risk  ->  research
 | | `hypothesis.py` | `Evidence` `HypothesisSequenceState` **`HypothesisBelief`** |
 | | `context.py` | `AuthorityLayer` `BalanceContext` obstructions, `OpenMarketThesis`, the Context/Episode lifecycles, `GlobalMarketContext` `NeutralMarketState` |
 | | `belief.py` | **`MarketBelief`** `FrozenThesis` |
+| | `forecast.py` | the local conditional forecast: `PathAttributes` `TrajectoryNode` `ConditionalCloud` `Hypothesis` `LifecycleRecord` `BeliefUncertainty` and **`MarketBeliefState`**, plus the representation constants (`DIRECTION_DIM` `SHAPE_COMPONENT_COUNT` `REPRESENTATION_DIM`) and the derivations every consumer must read the same way (`node_identity` `belief_revision_id` `mode_ambiguity` `retrieval_confidence` `support_overlap`) |
 | `decision` | `action.py` | `Action` `ActionUtility` `Decision` |
 | `risk` | `assessment.py` | `VetoCode` `RiskAssessment` |
 | `research` | `snapshot.py` | `EngineSnapshot` `NeutralEngineSnapshot` |

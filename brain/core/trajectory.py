@@ -22,6 +22,8 @@ from contract.brain.forecast import (
     ATTRIBUTE_EXCURSION_WINDOWS,
     ATTRIBUTE_RETURN_HORIZONS,
     ATTRIBUTE_VOLATILITY_HORIZONS,
+    DIRECTION_FEATURE_NAMES,
+    SHAPE_SCALE_FLOOR,
     TRAJECTORY_CURVE_LENGTH,
     PathAttributes,
 )
@@ -217,9 +219,73 @@ def curve_matrix(
 
 __all__ = [
     "RealizedPath",
+    "detrended_shape",
+    "direction_vector",
+    "shape_matrix",
     "TrajectoryError",
     "attributes_from_future",
     "curve_from_future",
     "curve_matrix",
     "path_attributes",
 ]
+
+
+def detrended_shape(curve: Sequence[float]) -> tuple[float, ...]:
+    """Strip the endpoint trend from a curve, leaving only its shape.
+
+    The raw cumulative-return curve is dominated by where it ends: fitted
+    directly, its first principal component absorbed 80.7% of the variance and
+    the representation degenerated into a quantization of direction. "Fell, came
+    back, rallied" and "rallied straight" then look identical, and the
+    difference between them is the part that is actually informative.
+
+    So the straight line from the origin to the endpoint is removed:
+
+        shape_k = c_k - c_60 * k / 60
+
+    What remains is the deviation from a constant-rate path, which is zero at
+    both ends by construction. It is then scaled to unit RMS, because magnitude
+    is the Direction channel's job and leaving it here would reintroduce the
+    same dominance through the back door. A path that is already straight has
+    no shape to normalize, and comes back as all zeros rather than as amplified
+    rounding noise.
+    """
+
+    values = np.asarray(curve, dtype=float)
+    if values.size != TRAJECTORY_CURVE_LENGTH:
+        raise TrajectoryError(
+            f"a shape needs {TRAJECTORY_CURVE_LENGTH} points, got {values.size}"
+        )
+    steps = np.arange(1, TRAJECTORY_CURVE_LENGTH + 1, dtype=float)
+    residual = values - values[-1] * steps / float(TRAJECTORY_CURVE_LENGTH)
+    scale = float(np.sqrt(np.mean(residual**2)))
+    if scale <= SHAPE_SCALE_FLOOR:
+        return tuple(0.0 for _ in range(TRAJECTORY_CURVE_LENGTH))
+    return tuple(float(value) for value in residual / scale)
+
+
+def shape_matrix(curves: np.ndarray) -> np.ndarray:
+    """Vectorized detrended, unit-RMS shapes for a whole dataset."""
+
+    values = np.asarray(curves, dtype=float)
+    if values.ndim != 2 or values.shape[1] != TRAJECTORY_CURVE_LENGTH:
+        raise TrajectoryError(
+            f"curves must be (n, {TRAJECTORY_CURVE_LENGTH}), got {values.shape}"
+        )
+    steps = np.arange(1, TRAJECTORY_CURVE_LENGTH + 1, dtype=float)
+    residual = values - values[:, -1:] * (steps / float(TRAJECTORY_CURVE_LENGTH))
+    scale = np.sqrt(np.mean(residual**2, axis=1, keepdims=True))
+    flat = scale[:, 0] <= SHAPE_SCALE_FLOOR
+    out = np.divide(residual, scale, out=np.zeros_like(residual), where=~flat[:, None])
+    return out
+
+
+def direction_vector(attributes: PathAttributes) -> tuple[float, ...]:
+    """The Direction channel: where the path went and how far.
+
+    Everything about magnitude and timing of magnitude lives here, which is what
+    frees the Shape channel to carry nothing but form.
+    """
+
+    mapping = attributes.as_mapping()
+    return tuple(float(mapping[name]) for name in DIRECTION_FEATURE_NAMES)

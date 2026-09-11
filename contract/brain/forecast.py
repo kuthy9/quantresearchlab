@@ -4,15 +4,34 @@ The Brain does not hold a taxonomy of market paths, and it no longer holds a
 global library of them either.  At every completed clock it asks a narrower
 question: *given a context like this one, what did the next sixty minutes
 actually do?*  It retrieves the nearest historical contexts, reads their futures
-as a **conditional future cloud**, and extracts at most three representative
-trajectory nodes carrying meaningful probability mass.
+as a **conditional future cloud**, cuts that cloud into as many pieces as it
+actually has, and keeps at most three of the resulting representative
+trajectory nodes live.
 
-Identity is path geometry.  A trajectory is the ATR-normalized cumulative
-return curve over the next sixty minutes; that curve, projected onto a globally
-fitted principal basis, is what decides whether two futures are the same claim.
-Realized volatility is carried as an attribute and never as an identity
-dimension — two paths that arrive in the same place by the same shape are the
-same claim regardless of how noisily they got there.
+Identity is path geometry, and it is carried on **two separate channels**.
+
+Fitting the raw cumulative-return curve directly does not work: its first
+principal component absorbed 80.7% of the variance, so distance was decided
+almost entirely by where the path ended and the representation collapsed into a
+quantization of direction. "Fell, came back, rallied" and "rallied straight"
+became the same claim, and the difference between them is the informative part.
+
+So a trajectory is described by:
+
+* **Direction** — where it went and how far: the return ladder, the incremental
+  excursions, when each extreme was set, and path efficiency.
+* **Shape** — what form it took getting there: the curve with the straight line
+  to its endpoint removed and scaled to unit RMS, projected onto a globally
+  fitted principal basis. Zero at both ends by construction, so it carries no
+  destination information at all.
+
+Realized volatility is an attribute and appears on neither channel.
+
+A node also carries **which historical observation points support it**. Nodes
+are re-clustered every clock and carry no identity of their own, so the pool
+decides whether a claim persisted by how those sets were inherited rather than
+by how far a centroid moved: the same coordinates can be produced by completely
+different history, and that is a different assertion.
 
 Nothing here accounts for the whole future.  ``residual_probability`` is the
 share of the conditional cloud that no live node covers, and it is never
@@ -38,9 +57,37 @@ FORECAST_SCHEMA_VERSION = 2
 # no hand-picked subset of it is.
 TRAJECTORY_CURVE_LENGTH = 60
 
-# The principal basis the curve is projected onto. Five components is where the
-# curve's shape is captured without the basis starting to fit single paths.
-PRINCIPAL_COMPONENT_COUNT = 5
+# The principal basis the *detrended shape* is projected onto. The raw curve is
+# no longer projected at all; see the module docstring for why.
+SHAPE_COMPONENT_COUNT = 5
+
+# A path that is already straight has no shape to normalize. Below this RMS the
+# detrended residual is rounding noise, and scaling it to unit RMS would amplify
+# that noise into a spurious identity.
+SHAPE_SCALE_FLOOR = 1e-9
+
+# The Direction channel, in order. Magnitude and the timing of magnitude both
+# live here, which is what frees the Shape channel to carry nothing but form.
+DIRECTION_FEATURE_NAMES: tuple[str, ...] = (
+    "r_5",
+    "r_15",
+    "r_30",
+    "r_60",
+    "mfe_0_15",
+    "mfe_15_30",
+    "mfe_30_60",
+    "mae_0_15",
+    "mae_15_30",
+    "mae_30_60",
+    "time_to_mfe",
+    "time_to_mae",
+    "path_efficiency",
+)
+DIRECTION_DIM = len(DIRECTION_FEATURE_NAMES)
+
+# One representation vector is the standardized Direction channel followed by
+# the shape components.
+REPRESENTATION_DIM = DIRECTION_DIM + SHAPE_COMPONENT_COUNT
 
 # The Brain keeps at most this many live hypotheses. A working-set bound, not a
 # claim that only three futures exist.
@@ -196,6 +243,15 @@ class TrajectoryNode:
     mass: float
     member_count: int
     attributes: PathAttributes
+    # Which historical observation points support this node. Identity across
+    # clocks is decided by how these sets are inherited, not by how far the
+    # centroid moved: two nodes can sit in the same place while resting on
+    # completely different history, and that is not the same claim.
+    member_ids: tuple[int, ...] = ()
+    # Spread of the members around the centroid in representation space. Two
+    # clouds can share a centroid and be nothing alike — one tight, one a
+    # diffuse ring — so a match has to see this too.
+    component_spread: float = 0.0
 
     def __post_init__(self) -> None:
         if not self.node_id:
@@ -205,9 +261,9 @@ class TrajectoryNode:
         if any(value <= 0.0 for value in self.dispersion):
             raise ValueError("node dispersion must be strictly positive")
         components = tuple(_finite(v, name="components") for v in self.components)
-        if len(components) != PRINCIPAL_COMPONENT_COUNT:
+        if len(components) != REPRESENTATION_DIM:
             raise ValueError(
-                f"components must carry {PRINCIPAL_COMPONENT_COUNT} values, "
+                f"components must carry {REPRESENTATION_DIM} values, "
                 f"got {len(components)}"
             )
         object.__setattr__(self, "components", components)
@@ -217,6 +273,16 @@ class TrajectoryNode:
         object.__setattr__(self, "member_count", int(self.member_count))
         if not isinstance(self.attributes, PathAttributes):
             raise TypeError("attributes must be PathAttributes")
+        ids = tuple(int(value) for value in self.member_ids)
+        if len(set(ids)) != len(ids):
+            raise ValueError("member_ids must be unique")
+        if ids and len(ids) != self.member_count:
+            raise ValueError("member_ids and member_count disagree")
+        object.__setattr__(self, "member_ids", ids)
+        spread = _finite(self.component_spread, name="component_spread")
+        if spread < 0.0:
+            raise ValueError("component_spread cannot be negative")
+        object.__setattr__(self, "component_spread", spread)
 
     @property
     def terminal_return(self) -> float:
@@ -240,10 +306,15 @@ class ConditionalCloud:
     assigned_count: int
     cluster_count: int
     nodes: tuple[TrajectoryNode, ...]
-    # The principal basis's own spread. Association gates and ambiguity are
-    # expressed as fractions of it, so a threshold stays meaningful across
-    # windows fitted in different volatility regimes.
+    # The typical distance between two unrelated futures in this representation.
+    # Association gates and ambiguity are expressed as fractions of it, so a
+    # threshold stays meaningful across windows fitted in different volatility
+    # regimes — and so a distance is compared against a distance.
     component_scale: float = 1.0
+    # How far the retrieved neighbours actually were. A full complement of
+    # remote analogues is not precedent, and without this the published belief
+    # would have no way to say so.
+    mean_neighbour_distance: float = 0.0
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "asof", aware_timestamp(self.asof, name="asof"))
@@ -273,6 +344,10 @@ class ConditionalCloud:
             object.__setattr__(self, name, value)
         if self.assigned_count > self.neighbour_count:
             raise ValueError("more neighbours were assigned than were retrieved")
+        distance = _finite(self.mean_neighbour_distance, name="mean_neighbour_distance")
+        if distance < 0.0:
+            raise ValueError("mean_neighbour_distance cannot be negative")
+        object.__setattr__(self, "mean_neighbour_distance", distance)
 
     @property
     def covered_mass(self) -> float:
@@ -285,30 +360,54 @@ class ConditionalCloud:
 
 @dataclass(frozen=True)
 class BeliefUncertainty:
-    """Three separate things that "uncertain" can mean, kept separate.
+    """Three different things that "uncertain" can mean, kept separate.
 
-    ``entropy`` — how evenly the probability is spread over what is named.
-    ``distribution_ambiguity`` — how far apart the named claims are from each
-    other. Three tightly agreeing hypotheses and three wildly opposed ones can
-    carry identical entropy and mean completely different things.
-    ``coverage`` — how much of the conditional cloud nothing named covers at all.
+    ``mode_ambiguity`` — within the future that *is* covered, how much the live
+    hypotheses disagree with each other. Three tightly agreeing claims and three
+    wildly opposed ones can carry identical probability spreads and mean
+    opposite things.
 
-    ``combined`` is their mean, offered as a single sortable number. The three
-    components are the authoritative reading; the mean is a convenience and
-    claims no principled aggregation.
+    ``representation_coverage`` — how much of the local conditional cloud the
+    live pool actually explains. This is about the pool's reach, not its
+    confidence.
+
+    ``retrieval_confidence`` — whether the present state has enough close
+    historical precedent to be talking about at all. A belief can read
+    ``H1 = 0.82`` with a residual of 0.05 and still be worthless if it rests on
+    twelve distant neighbours; without this term nothing in the output would say
+    so. High means well-supported.
+
+    ``combined`` is a convenience scalar, defined so that *low* retrieval
+    confidence raises it: being unsupported is a form of not knowing.
     """
 
-    entropy: float
-    distribution_ambiguity: float
-    coverage: float
+    mode_ambiguity: float
+    representation_coverage: float
+    retrieval_confidence: float
 
     def __post_init__(self) -> None:
-        for name in ("entropy", "distribution_ambiguity", "coverage"):
+        for name in (
+            "mode_ambiguity",
+            "representation_coverage",
+            "retrieval_confidence",
+        ):
             object.__setattr__(self, name, _unit(getattr(self, name), name=name))
 
     @property
     def combined(self) -> float:
-        return (self.entropy + self.distribution_ambiguity + self.coverage) / 3.0
+        """One sortable number; the three components remain authoritative."""
+
+        return (
+            self.mode_ambiguity
+            + (1.0 - self.representation_coverage)
+            + (1.0 - self.retrieval_confidence)
+        ) / 3.0
+
+    @property
+    def well_supported(self) -> bool:
+        """Whether the present state has precedent worth reasoning from."""
+
+        return self.retrieval_confidence >= 0.5
 
 
 @dataclass(frozen=True)
@@ -336,6 +435,12 @@ class Hypothesis:
     attributes: PathAttributes
     status: HypothesisStatus = HypothesisStatus.ACTIVE
     lineage: tuple[str, ...] = ()
+    # The weighted share of last clock's supporting samples this claim still
+    # rests on. One means the same history; near zero means the geometry
+    # survived but the evidence under it was replaced. A claim spawned on this
+    # clock reports zero because it inherited nothing — read it together with
+    # ``age_bars``, which is zero there and positive for a survivor.
+    support_overlap: float = 1.0
 
     def __post_init__(self) -> None:
         if not self.hypothesis_id or not self.node_id:
@@ -355,6 +460,9 @@ class Hypothesis:
         object.__setattr__(self, "probability", _unit(self.probability, name="probability"))
         object.__setattr__(
             self, "expected_curve", _curve(self.expected_curve, name="expected_curve")
+        )
+        object.__setattr__(
+            self, "support_overlap", _unit(self.support_overlap, name="support_overlap")
         )
         for name in ("realized_divergence", "association_distance"):
             value = _finite(getattr(self, name), name=name)
@@ -389,6 +497,13 @@ class LifecycleRecord:
     node_ids: tuple[str, ...]
     reason: str
     association_distance: float = 0.0
+    # What the operation was actually decided on. ``support_overlap`` is the
+    # weighted share of historical samples carried across; ``dispersion_shift``
+    # is how much the cloud's spread around that claim changed. A record that
+    # names only a distance cannot distinguish "the same claim, updated" from
+    # "a different claim that happens to sit in the same place".
+    support_overlap: float = 0.0
+    dispersion_shift: float = 0.0
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "asof", aware_timestamp(self.asof, name="asof"))
@@ -406,6 +521,11 @@ class LifecycleRecord:
         if distance < 0.0:
             raise ValueError("association_distance cannot be negative")
         object.__setattr__(self, "association_distance", distance)
+        object.__setattr__(
+            self, "support_overlap", _unit(self.support_overlap, name="support_overlap")
+        )
+        shift = _finite(self.dispersion_shift, name="dispersion_shift")
+        object.__setattr__(self, "dispersion_shift", shift)
 
 
 @dataclass(frozen=True)
@@ -499,6 +619,27 @@ class MarketBeliefState:
         return 0.0
 
 
+def support_overlap(
+    left: Sequence[int], right: Sequence[int]
+) -> float:
+    """How much of one claim's historical support the other still rests on.
+
+    This is the Jaccard index of the two supporting sample sets. It is what
+    separates "the same hypothesis, updated" from "a hypothesis that happens to
+    sit where the old one did, resting on completely different history" — two
+    situations that centroid distance alone reports identically.
+
+    Either side being empty means the question cannot be answered, and the
+    answer is zero rather than a defaulted one.
+    """
+
+    first = set(int(value) for value in left)
+    second = set(int(value) for value in right)
+    if not first or not second:
+        return 0.0
+    return len(first & second) / len(first | second)
+
+
 def node_identity(curve: tuple[float, ...]) -> str:
     """Content-addressed identity for one representative curve.
 
@@ -536,46 +677,25 @@ def belief_revision_id(
     )
 
 
-def normalized_entropy(probabilities: tuple[float, ...]) -> float:
-    """Shannon entropy scaled by the widest the Brain can be."""
-
-    weights = [float(value) for value in probabilities if float(value) > 0.0]
-    if not weights:
-        return 0.0
-    entropy = -sum(value * math.log(value) for value in weights)
-    ceiling = math.log(MAX_LIVE_HYPOTHESES + 1)
-    if ceiling <= 0.0:
-        return 0.0
-    return min(1.0, max(0.0, entropy / ceiling))
-
-
-def entropy_uncertainty(
-    probabilities: tuple[float, ...], residual_probability: float
+def mode_ambiguity(
+    components: tuple[tuple[float, ...], ...],
+    probabilities: tuple[float, ...],
+    *,
+    scale: float,
 ) -> float:
-    """Entropy over the named claims plus the residual, read correctly.
+    """How much the covered future's claims disagree, in [0, 1].
 
-    The residual is "some future I am not naming", not one named outcome.  As a
-    lone outcome its entropy is zero, so an empty pool — total ignorance — would
-    score as perfect confidence.  Spreading the residual across the slots the
-    Brain is not using is the most conservative reading available, and makes an
-    empty pool score one.
-    """
+    This is the expected distance between two futures drawn independently from
+    the published claims, saturated against ``scale`` so it stays comparable
+    across windows. It is *not* a mean over pairs: normalizing by the pair
+    weights would cancel the probabilities out entirely whenever there are only
+    two claims, which is exactly the case the weighting exists for. Two
+    dominant claims pulling apart is a contested future; one dominant claim and
+    a negligible outlier far away is not.
 
-    live = tuple(float(value) for value in probabilities)
-    residual = float(residual_probability)
-    unnamed = MAX_LIVE_HYPOTHESES + 1 - len(live)
-    if unnamed <= 0:
-        return normalized_entropy(live + (residual,))
-    return normalized_entropy(live + tuple(residual / unnamed for _ in range(unnamed)))
+    Mass the claims do not cover contributes nothing here — how much of the
+    cloud goes unspoken for is representation coverage's question, not this one.
 
-
-def distribution_ambiguity(
-    components: tuple[tuple[float, ...], ...], *, scale: float
-) -> float:
-    """How far apart the named claims are from one another, in [0, 1].
-
-    Mean pairwise distance in the principal basis, saturated against ``scale``
-    (the basis's own spread) so the number stays comparable across windows.
     Fewer than two claims cannot disagree, and score zero.
     """
 
@@ -583,14 +703,42 @@ def distribution_ambiguity(
         return 0.0
     if not math.isfinite(scale) or scale <= 0.0:
         raise ValueError("ambiguity scale must be finite and positive")
-    distances: list[float] = []
+    weights = tuple(float(value) for value in probabilities)
+    if len(weights) != len(components):
+        raise ValueError("one probability is required per claim")
+    expected = 0.0
     for index, left in enumerate(components):
-        for right in components[index + 1 :]:
-            distances.append(
-                math.sqrt(sum((a - b) ** 2 for a, b in zip(left, right)))
-            )
-    mean = sum(distances) / len(distances)
-    return min(1.0, max(0.0, mean / (mean + scale)))
+        for offset, right in enumerate(components[index + 1 :], start=index + 1):
+            distance = math.sqrt(sum((a - b) ** 2 for a, b in zip(left, right)))
+            expected += 2.0 * weights[index] * weights[offset] * distance
+    if expected <= 0.0:
+        return 0.0
+    return min(1.0, max(0.0, expected / (expected + scale)))
+
+
+def retrieval_confidence(
+    *,
+    neighbour_count: int,
+    mean_distance: float,
+    target_count: int,
+    distance_scale: float,
+) -> float:
+    """Whether the present state has enough close precedent to reason from.
+
+    Two independent ways to have none: too few neighbours, or neighbours that
+    are nominally the nearest but still far away. Both are needed — a full
+    complement of remote analogues is no better supported than a handful of
+    close ones — so the two terms multiply rather than average.
+    """
+
+    if target_count < 1:
+        raise ValueError("target_count must be positive")
+    if not math.isfinite(distance_scale) or distance_scale <= 0.0:
+        raise ValueError("distance_scale must be finite and positive")
+    count_term = min(1.0, max(0, int(neighbour_count)) / float(target_count))
+    distance = max(0.0, float(mean_distance))
+    proximity_term = distance_scale / (distance_scale + distance)
+    return min(1.0, max(0.0, count_term * proximity_term))
 
 
 __all__ = [
@@ -609,13 +757,17 @@ __all__ = [
     "MAX_CLOUD_NODES",
     "MAX_LIVE_HYPOTHESES",
     "MarketBeliefState",
-    "PRINCIPAL_COMPONENT_COUNT",
+    "DIRECTION_DIM",
+    "DIRECTION_FEATURE_NAMES",
+    "support_overlap",
+    "REPRESENTATION_DIM",
+    "SHAPE_COMPONENT_COUNT",
+    "SHAPE_SCALE_FLOOR",
     "PathAttributes",
     "TRAJECTORY_CURVE_LENGTH",
     "TrajectoryNode",
     "belief_revision_id",
-    "distribution_ambiguity",
-    "entropy_uncertainty",
+    "mode_ambiguity",
     "node_identity",
-    "normalized_entropy",
+    "retrieval_confidence",
 ]

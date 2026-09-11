@@ -19,7 +19,7 @@
   },
   "hypothesis_protocol": {
     "protocol": "brain/configs/hypothesis_protocol.json",
-    "hypothesis_protocol_fingerprint": "4a1289adbdff3122faf20c3f20377c3ba8688127dad00f62154732f9dd2744f1"
+    "hypothesis_protocol_fingerprint": "5cf7d6512a343cf151144d95c201045835cd307e35261918013088ac9a12c688"
   },
   "action_pipeline": {
     "schema_version": 1,

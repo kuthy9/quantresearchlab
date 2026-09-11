@@ -32,6 +32,9 @@ dependencies = [
 test = ["pytest>=8"]
 dbn = ["databento>=0.64"]
 representation = ["torch>=2.2,<3"]
+# The predictability gate's tree model. Research only; nothing in brain/core
+# imports it.
+research = ["lightgbm>=4.3"]
 
 [tool.setuptools.packages.find]
 include = ["eyes*", "brain*", "execution*", "shares*"]
