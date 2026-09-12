@@ -60,6 +60,7 @@ def test_run_gate_writes_results_ablation_and_verdict(tmp_path: Path) -> None:
         rolling=(6, 2, 2),
         models=("logistic",),
         ablation_kinds=("sweep_confirmed",),
+        ablation_models=("logistic",),
     )
     assert (tmp_path / "results.csv").exists()
     assert (tmp_path / "verdict.csv").exists()

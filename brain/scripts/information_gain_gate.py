@@ -63,6 +63,7 @@ PRIMARY: tuple[int, int] = (90, 20)        # train sessions, holdout sessions
 ROLLING: tuple[int, int, int] = (60, 10, 10)  # train, holdout, step
 MODELS: tuple[str, ...] = ("logistic", "lightgbm")
 LOGISTIC_C_GRID: tuple[float, ...] = (0.01, 0.1, 1.0)
+Z_CLIP = 10.0
 
 
 class GateRunError(RuntimeError):
@@ -189,7 +190,7 @@ def run_gate(
     rolling: tuple[int, int, int] = ROLLING,
     models: tuple[str, ...] = MODELS,
     ablation_kinds: tuple[str, ...] = TRANSITION_KINDS,
-    ablation_models: tuple[str, ...] = ("logistic",),
+    ablation_models: tuple[str, ...] = ("lightgbm",),
     log: Callable[[str], None] = lambda line: print(line, flush=True),
 ) -> pd.DataFrame:
     out_dir = Path(out_dir)
@@ -229,6 +230,13 @@ def run_gate(
 
     def row_losses(target: str, model: str, fold: Fold, x: np.ndarray, *, key: tuple[str, str, str]) -> np.ndarray:
         train_x, test_x = standardize_pair(x[fold.train], x[fold.holdout])
+        # Δ has many near-constant columns (a kind seen a handful of times in
+        # training). A z-score on such a column is arbitrarily large the first
+        # time the kind fires out of sample, which is a numerical event, not
+        # information; both matrices are clipped to +-10 standard deviations
+        # for every model so the linear class cannot be undone by one column.
+        np.clip(train_x, -Z_CLIP, Z_CLIP, out=train_x)
+        np.clip(test_x, -Z_CLIP, Z_CLIP, out=test_x)
         if target in labels:
             y = labels[target]
             c = None
@@ -331,7 +339,7 @@ def main() -> None:
         "--ablation", default="all",
         help="'all' for every transition kind, 'none', or a comma-separated list of kinds",
     )
-    parser.add_argument("--ablation-models", default="logistic")
+    parser.add_argument("--ablation-models", default="lightgbm")
     args = parser.parse_args()
 
     run_root = ROOT / args.output_root / args.run_id
