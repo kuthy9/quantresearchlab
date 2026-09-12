@@ -198,18 +198,27 @@ already on record.
 Clock Cᵏ = the set of bars t at which at least one transition event with
 timeframe ≥ k was published (`known_at == t`).
 
-- **C15 — headline.** ≈49 clocks/session on the real tape: ≈4,400 training
-  and ≈1,000 OOS clocks. Sparse enough to be what the brief calls
-  event-driven.
-- **C5 — sensitivity.** ≈237 clocks/session: ≈21,000 / ≈4,700. More power,
-  more dilution.
+The verdict is taken over a **family of three clocks**, none of them
+privileged. Which clock carries an improvement, if any, is an output of the
+gate — the time scale the information lives on — not an assumption fed into
+it. On the real tape (§2), per session and for the 90 + 20 split:
+
+| clock | bars covered | training clocks | OOS clocks | what it can and cannot test |
+| --- | --- | --- | --- | --- |
+| **C1** | 75.4 % | ≈94,000 | ≈21,000 | the only clock that tests intra-session micro-sequences (Sweep → Reclaim → Displacement on 1m–5m) at their natural rate; differs from the every-minute clock by a quarter of the bars, so it carries most of that clock's dilution |
+| **C5** | 17.2 % | ≈21,000 | ≈4,700 | the most power among the sparse clocks; still admits 5m `displacement_observed` at ≈131/session |
+| **C15** | 3.6 % | ≈4,400 | ≈1,000 | closest to a few-triggers-a-day reading; thin enough that a wide interval is a live outcome |
+
 - C60 is reported descriptively (≈11 clocks/session is too thin for a
   20-session OOS) and never enters the verdict.
 - The every-minute clock is reported once, as the dilution reference, not as
   a verdict input.
 
-M₀ and M₁ are fitted and scored on the same clock set, so the comparison is
-"given that an event happened here, does knowing which events happened help".
+The clock decides *when* M₀ and M₁ are fitted and scored, never *what* M₁
+sees: on every clock, Δₜ carries all 49 transition kinds on all five scales
+(§5.5). Both models are fitted and scored on the same clock set, so the
+comparison is "given that an event happened here, does knowing which events
+happened, and in what order, help".
 
 ### 5.5 Feature groups
 
@@ -222,10 +231,16 @@ M₀ and M₁ are fitted and scored on the same clock set, so the comparison is
      (capped at L; L when none), count within L, direction of the last
      occurrence (+1 / −1 / 0). 49 transition kinds × 5 scales × 3 = 735 columns,
      mostly constant on any one clock;
-  2. the ordered last K = 8 transition events: for each slot, kind id,
-     minutes ago, direction, timeframe rank, strength — 40 columns. Slot
-     order is arrival order, so *Sweep → Reclaim → Displacement* and
-     *Displacement → Sweep → Reclaim* are different vectors;
+  2. the ordered recent sequence, **one track per scale**: for each of the
+     five scales, the last K = 4 transition events published on that scale,
+     each slot carrying kind id, minutes ago, direction, strength and an
+     empty flag — 5 tracks × 4 slots × 5 fields = 100 columns. Slot order is
+     arrival order within the track, so *Sweep → Reclaim → Displacement*
+     and *Displacement → Sweep → Reclaim* are different vectors. Tracks are
+     per scale because 1-minute transitions arrive about every 1.3 minutes
+     on the real tape (§2); a single shared track of any practical length
+     would hold nothing but the last few 1-minute events and no 15-minute
+     or 1-hour sequence would ever be visible to the model;
   3. the trigger set at t: a one-hot over kinds fired at t itself.
   No hand-set weights anywhere: every coefficient or split is fitted inside
   the training window.
@@ -247,7 +262,7 @@ L and K are fixed here so they cannot be tuned to the OOS result.
 
 ### 5.7 Folds
 
-- **Headline fold:** train 90 sessions → OOS 20 sessions (§5.1).
+- **Primary fold:** train 90 sessions → OOS 20 sessions (§5.1).
 - **Rolling folds:** within the same 110 sessions, train 60 → holdout 10,
   step 10 → 5 folds, for the consistency and drop-best-fold conditions the
   existing verdict already applies. The Eye dataset is built once; only the
@@ -260,25 +275,28 @@ L and K are fixed here so they cannot be tuned to the OOS result.
   bootstrap (`block_bootstrap_interval`, 2,000 draws), pooled across folds
   by `pooled_interval`. Accuracy and the class prior are reported beside it.
 - Continuous: OOS R² and ΔR² as today.
-- **Ablation** on the headline clock only: M_Full − Eᵢ for every transition
-  kind i (drop all Δₜ columns that mention kind i, refit, rescore), reported
-  as a ranked table of Δlog-loss. It informs which events the Brain would
+- **Ablation**, on each of the three family clocks and the primary fold:
+  M_Full − Eᵢ for every transition kind i (drop all Δₜ columns that mention
+  kind i on every scale, refit, rescore), reported as a ranked table of
+  Δlog-loss per clock. It informs which events the Brain would
   later learn from; it does not enter the verdict.
 
 ### 5.9 Pre-registered verdict
 
-The gate returns **PASS** when, for at least one of the three first-passage
-targets on C15 or on C5, all of the following hold for at least one of the
-two model classes:
+The gate returns **PASS** when, for at least one cell of the family
+{`fp_1.0_1.0`, `fp_1.0_0.5`, `fp_0.5_1.0`} × {C1, C5, C15}, all of the
+following hold for at least one of the two model classes:
 
-1. the headline-fold OOS log-loss of M₁ is below M₀ and the pooled
+1. the primary-fold OOS log-loss of M₁ is below M₀ and the pooled
    session-block bootstrap interval of the difference lies below zero, at
-   α = 0.10 after Holm correction across the 6 (target × clock) tests;
+   α = 0.10 after Holm correction across the 9 (target × clock) tests;
 2. M₁ beats M₀ on ≥ 80 % of the rolling folds;
 3. dropping the best rolling fold does not flip the mean difference.
 
+The passing cells name the clock, and therefore the time scale, the
+information was found on; that is recorded as a finding, not assumed.
 Everything else — `asymmetry_60`, `range_60`, C60, the every-minute clock,
-the ablation table — is reported and not judged. A PASS starts C; a FAIL is
+the ablation tables — is reported and not judged. A PASS starts C; a FAIL is
 recorded with the full tables and stops the redesign at the measurement,
 which is the outcome the brief itself allows for.
 
@@ -306,8 +324,9 @@ so they run in seconds:
 - Clock construction: a bar with only 1m transitions is in C1 and not in C5;
   a bar with a 15m transition is in C1, C5 and C15.
 - Δₜ encoding reads nothing with `known_at > t` (a planted future event
-  leaves the vector unchanged) and distinguishes the two orderings of the
-  same three events.
+  leaves the vector unchanged), distinguishes the two orderings of the same
+  three events, and keeps a 1-hour event in the 1H track when forty 1-minute
+  events arrive after it.
 - First-passage labels on hand-built futures: upper-first, lower-first,
   neither, and the same-bar tie resolved conservatively (both touched on one
   bar → the adverse side first, the same conservative reading `configs/model.json` names `same_bar_resolution: conservative` for the risk engine).
@@ -317,9 +336,12 @@ so they run in seconds:
 
 ## 7. Risks and what is deliberately not decided here
 
-- **Thin OOS on C15** (~1,000 clocks). Mitigated by the bootstrap interval
-  and the rolling folds; if the interval is wide on both sides, the gate is
-  inconclusive, not a PASS, and the record says so.
+- **Thin OOS on C15** (~1,000 clocks) and **dilution on C1**. The family
+  verdict accepts that the two ends of the family fail for opposite reasons;
+  a cell whose interval is wide on both sides is inconclusive, not a PASS,
+  and the record says so. Holm across nine tests costs some power against
+  the six-test alternative with a privileged clock; that price buys not
+  having chosen the time scale in advance.
 - **Leakage through S.** `observation_features` reads the snapshot at t; the
   existing gate already established it carries no future. The event log is
   filtered on `known_at`, not `observed_at`, for the same reason.
