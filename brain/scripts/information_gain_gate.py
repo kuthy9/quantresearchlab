@@ -36,6 +36,7 @@ from brain.research.event_sequence import clock_mask, sequence_features, without
 from brain.research.first_passage import (  # noqa: E402
     CLASS_COUNT,
     FIRST_PASSAGE_TARGETS,
+    HORIZON_ATR_SCALE,
     first_passage_labels,
 )
 from brain.research.gate_family import (  # noqa: E402
@@ -64,6 +65,9 @@ ROLLING: tuple[int, int, int] = (60, 10, 10)  # train, holdout, step
 MODELS: tuple[str, ...] = ("logistic", "lightgbm")
 LOGISTIC_C_GRID: tuple[float, ...] = (0.01, 0.1, 1.0)
 Z_CLIP = 10.0
+# A target whose primary training rows leave any class below this share is
+# refused: it would be scored as a coin flip, not as a first passage.
+MINIMUM_CLASS_SHARE = 0.05
 
 
 class GateRunError(RuntimeError):
@@ -215,12 +219,22 @@ def run_gate(
     labels = {
         name: first_passage_labels(
             prices=prices, future_highs=data["future_highs"], future_lows=data["future_lows"],
-            up_atr=up, down_atr=down,
+            up_atr=up, down_atr=down, unit=HORIZON_ATR_SCALE,
         )
         for name, up, down in FIRST_PASSAGE_TARGETS
     }
     continuous = continuous_targets(prices, data["future_highs"], data["future_lows"])
     sessions = session_labels(index)
+    ordered_sessions = list(dict.fromkeys(sessions))
+    primary_train = np.isin(sessions, ordered_sessions[: primary[0]])
+    for name, y in labels.items():
+        shares = np.bincount(y[primary_train], minlength=CLASS_COUNT) / max(int(primary_train.sum()), 1)
+        log(f"{name}: class shares on the primary training rows (neither/upper/lower) {np.round(shares, 3).tolist()}")
+        if shares.min() < MINIMUM_CLASS_SHARE:
+            raise GateRunError(
+                f"{name} is degenerate: a class holds {shares.min():.1%} of the primary "
+                f"training rows (minimum {MINIMUM_CLASS_SHARE:.0%}); check the barrier unit"
+            )
 
     results: list[dict] = []
     pooled: dict[tuple[str, str, str], list[tuple[np.ndarray, np.ndarray]]] = {}

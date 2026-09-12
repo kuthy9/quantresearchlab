@@ -23,7 +23,11 @@ def _synthetic_data(sessions: int = 14, per_session: int = 240, seed: int = 5) -
     index = pd.DatetimeIndex(stamps).tz_convert("UTC")
     closes = 100 + np.cumsum(rng.normal(0, 0.3, rows))
     prices = np.column_stack([closes, closes + 0.2, closes - 0.2, np.full(rows, 1.0)])
-    steps = rng.normal(0, 0.3, (rows, 60)).cumsum(axis=1)
+    # sigma 1.0 per minute against an anchor ATR of 1: the sixty-minute
+    # excursion straddles the horizon-unit barriers, so all three first-passage
+    # classes are populated (a random walk that never reaches a barrier is
+    # exactly the degenerate target the guard refuses).
+    steps = rng.normal(0, 1.0, (rows, 60)).cumsum(axis=1)
     future_closes = closes[:, None] + steps
     kinds = rng.choice(["sweep_confirmed", "qualified_bos", "fvg_created"], rows // 5)
     scales = rng.choice(["1m", "5m", "15m"], rows // 5, p=[0.6, 0.3, 0.1])
@@ -76,3 +80,19 @@ def test_run_gate_writes_results_ablation_and_verdict(tmp_path: Path) -> None:
     ablation = pd.read_csv(tmp_path / "ablation.csv")
     assert set(ablation["kind"]) == {"sweep_confirmed"}
     assert set(ablation["clock"]) == {"C1", "C5"}
+
+
+def test_a_degenerate_target_is_refused(tmp_path: Path) -> None:
+    """A barrier reached on every row leaves no 'neither' class; the gate
+    must refuse rather than score a coin flip."""
+    import pytest
+
+    from brain.scripts.information_gain_gate import GateRunError
+
+    data = _synthetic_data()
+    data["future_highs"] = data["future_highs"] + 50.0  # +1 ATR reached on every row, immediately
+    with pytest.raises(GateRunError, match="class"):
+        run_gate(
+            data, out_dir=tmp_path, clocks={"C1": 1}, descriptive={},
+            primary=(9, 2), rolling=(6, 2, 2), models=("logistic",), ablation_kinds=(),
+        )

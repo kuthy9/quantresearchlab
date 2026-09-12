@@ -62,3 +62,23 @@ def test_barriers_scale_with_the_anchor_atr() -> None:
 def test_three_registered_targets() -> None:
     assert [t[0] for t in FIRST_PASSAGE_TARGETS] == ["fp_1.0_1.0", "fp_1.0_0.5", "fp_0.5_1.0"]
     assert FIRST_PASSAGE_TARGETS[2][1:] == (0.5, 1.0)
+
+
+def test_the_horizon_unit_is_the_diffusive_sixty_minute_scale() -> None:
+    from brain.research.first_passage import HORIZON_ATR_SCALE
+
+    assert HORIZON_ATR_SCALE == np.sqrt(60)
+
+
+def test_barriers_in_the_horizon_unit_are_wider_by_root_sixty() -> None:
+    # +3 points on an anchor ATR of 1: reached in one-minute units, not in
+    # horizon units (1.0 * sqrt(60) = 7.75 points).
+    h, l = _future([103.0], [99.9])
+    assert _label(h, l, up=1.0, down=1.0) == UPPER_FIRST
+    assert first_passage_labels(
+        prices=PRICES, future_highs=h, future_lows=l, up_atr=1.0, down_atr=1.0, unit=np.sqrt(60)
+    )[0] == NEITHER
+    h, l = _future([108.0], [99.9])
+    assert first_passage_labels(
+        prices=PRICES, future_highs=h, future_lows=l, up_atr=1.0, down_atr=1.0, unit=np.sqrt(60)
+    )[0] == UPPER_FIRST
