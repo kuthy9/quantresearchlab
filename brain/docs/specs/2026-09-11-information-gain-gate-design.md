@@ -107,6 +107,19 @@ is kept for runtime use.
 
 ## 4. Part 1 — Eye per-bar cost
 
+**Outcome (2026-09-12): stopped after the harness; Part 2 runs on the
+unchanged Eye.** The harness (§4.5) was built and a clean baseline captured
+(9.8 → 51.4 s per 500 bars over 4,500 real bars, block 9 / block 1 = 5.2×).
+Change 1 was implemented and measured at zero cache hits over 73,115
+projections on 800 real bars: `eyes/core/market_state.py:2374` rebuilds every
+liquidity candidate on every `BAR_COMPLETED` (`age_bars + 1`, a fresh
+`distance_atr`), so the objects and their values differ on every bar by
+design and no memo can hit. Changes 2 and 3 remain valid (closed paths are
+not aged, `interaction.py:2171`) but together cover about 20 s of the 55 s
+per-1,000-bar growth, worth roughly twenty minutes of wall time on the
+23-block gate run. They are not done; the harness stays for future Eye work.
+The rest of this section is kept as the record of what was planned.
+
 ### 4.1 Invariant
 
 For every bar of a replay, `content_hash(to_primitive(observation))` and the
