@@ -40,20 +40,41 @@ sessions 2022-01-09..13, with the Eye built from `configs/model.json` by
   never conditioned on events; this gate does.
 - **Eye per-bar cost grows with bars seen.** Real-tape timing per 500 bars:
   9.0 → 18.3 → 22.0 → 26.5 → 30.1 → 35.5 → 38.1 → 44.0 s over the first 4,000
-  bars (55 → 11 bars/s). Profiled growth sits in three places, all of the form
-  "re-process a retained collection on every bar":
-  1. `contract/eye/interaction.py:397 validate_canonical_bindings` re-admits
-     every nested DTO of the current `InteractionUpdate` on every bar. The
-     update carries every closed path until `maximum_context_states` (256, a
-     sealed parameter in `semantics/parameters_v1_3.yaml:149`) forces eviction;
-     at bar 3,000 it held 187 paths, 169 of them closed for a median 1,640 min.
-  2. `eyes/core/event_memory.py:691 sync_retained_entity_timelines` iterates
-     every retained entity timeline; 2,012 at bar 3,000, of which 1,616 belong
-     to entities no longer live (924 are swings kept by `history_limit`).
-  3. `eyes/core/event_store.py:1771` inside `build_structural_legs` scans the
-     whole available-event map for `BAR_COMPLETED` events on every call.
-  Both collections are bounded by configuration, so the curve plateaus near
-  0.1 s/bar rather than growing forever; 110 sessions would take 4–5 h today.
+  bars (55 → 11 bars/s). Cumulative-time growth between bars 500–1,500 and
+  2,000–3,000 (99.9 s → 155.0 s per 1,000 bars) sits in three places, all of
+  the form "re-process a retained collection on every bar":
+  1. **+14.8 s** `eyes/core/market_state.py:5900 publish` →
+     `_settle_candidate_views` → `_project_candidate_views`: on every bar and
+     every scale, every liquidity candidate is rebuilt with `replace` (twice)
+     and re-sorted — 1.36 M `DOLCandidateView.__post_init__` calls per 1,000
+     bars. The reducer branches for `LEVEL_TOUCHED`, `LEVEL_PENETRATED` and
+     `SWEEP_CONFIRMED` rebuild the same tuple on every liquidity event.
+  2. **+13.5 s** `contract/eye/interaction.py:397 validate_canonical_bindings`
+     re-admits every nested DTO of the current `InteractionUpdate` on every
+     bar (22 M inner iterations per 1,000 bars). The update carries every
+     closed path until `maximum_context_states` (256, a sealed parameter in
+     `semantics/parameters_v1_3.yaml:149`) forces eviction; at bar 3,000 it
+     held 187 paths, 169 of them closed for a median 1,640 min.
+  3. **+6.8 s** `eyes/core/event_store.py:679 append_batch` →
+     `_validate_structural_leg_contract` (`event_store.py:1771`) scans the
+     whole available-event map for eligible `BAR_COMPLETED` events on every
+     structural-leg event.
+  `eyes/core/event_memory.py:691 sync_retained_entity_timelines` grows too
+  (+1.7 s; 2,012 timelines at bar 3,000, 1,616 for entities no longer live)
+  but is left alone: it is not on the critical path.
+- **The one-minute liquidity candidate set never retires.**
+  `TimeframeLiquidityState.candidates` only grows: a sweep marks a level
+  `disarmed` ("the level itself survives"), and no reducer branch handles
+  `liquidity_retired` or `liquidity_consumed`. One-minute candidates on the
+  real tape: 102 at bar 500, 206 at 1,000, 343 at 2,000, 508 at 3,000
+  (+0.17 per bar, 502 of the 508 still armed). Item 1 above is proportional
+  to this set, so a continuous 151k-bar run would end near 0.5 s/bar and take
+  roughly a day. It also means the Brain's `1m_unswept_bsl` / `1m_unswept_ssl`
+  counts and `1m_dist_*_atr` distances are taken over every level the Eye has
+  created since it started: they drift with run length, which is one
+  concrete form of the "confused input" the brief suspects. Retiring levels
+  is a semantic change and stays out of scope; the gate bounds the drift by
+  construction instead (§5.2).
 - **Event rates on the real tape** (per 1,380-bar session, any scale):
   `*_state` re-publications and `bar_completed` fire on 67–100 % of bars;
   1-minute transitions such as `sweep_confirmed` (468/session),
@@ -72,8 +93,9 @@ published output byte-identical before and after. No parameter, protocol,
 specification or test expectation changes; the atomic identity
 `f92b24c8…` is untouched.
 
-**Part 2 — the gate.** One continuous Eye run over 110 sessions of 2022, an
-event log beside the existing state dataset, and an extension of
+**Part 2 — the gate.** One Eye pass over 110 sessions of 2022, run in
+Globex-week blocks each warmed up for seven days, an event log beside the
+existing state dataset, and an extension of
 `brain/scripts/predictability_gate.py` that adds event clocks, Δₜ features,
 first-passage targets, classification metrics and a per-kind ablation, with a
 pre-registered verdict.
@@ -94,7 +116,16 @@ after the change. This is the acceptance test, not a hope: the harness in
 
 ### 4.2 Changes
 
-1. **`InteractionUpdate.validate_canonical_bindings`** — memoise re-admission
+1. **Liquidity candidate projection** (`market_state._project_candidate_views`
+   and `_settled_candidate_state`) — memoise per candidate instance. The
+   projection of one `DOLCandidateView` depends only on the candidate object,
+   its hierarchy rank and the five range fields (`range_id`, `range_kind`,
+   `lifecycle`, `low`, `high`); a candidate object that was projected under
+   the same rank and range key is returned from an `id`-keyed cache guarded
+   by a weak reference, so an unchanged bar re-projects nothing. The sort in
+   `_liquidity_state` stays; the reducer's per-event rebuild stays (it is
+   bounded by §5.2's weekly blocks, not by this change).
+2. **`InteractionUpdate.validate_canonical_bindings`** — memoise re-admission
    per DTO instance. Every nested DTO (`EntryLocationState`,
    `ReacceptanceState`, `MicroBreakFact`, `PathSequenceState`,
    `PathSequenceStep`, …) is a frozen dataclass; an instance that passed
@@ -103,19 +134,16 @@ after the change. This is the acceptance test, not a hope: the harness in
    instances and skip the reconstruction for members already in it. The
    shape check on the update itself (`set(self.__dict__)`) stays. A DTO that
    is genuinely new (this bar's transition) is validated exactly as today.
-2. **`EventMemory.sync_retained_entity_timelines`** — the future-check loop
-   over all timelines and the two `retained_clocks`/`retained_event_ids`
-   set comprehensions recompute from scratch each bar. Maintain them
-   incrementally: track the maximum `observed_at` per timeline at `append`
-   time (the tail is already the maximum, so the check becomes one
-   comparison per timeline key that changed this bar), and keep the retained
-   clock and event-id sets as counters updated on append/drop rather than
-   rebuilt. Dictionary narrowing to `retained` stays as written.
-3. **`EventStore` `BAR_COMPLETED` lookup** (`event_store.py:1771` and the
-   sibling scans in `build_structural_legs`) — keep a per-scale ordered index
-   of `BAR_COMPLETED` / `NORMALIZED_DATA` events maintained on admission, and
-   read the eligible range from it instead of filtering
-   `available_events.values()`.
+3. **`EventStore` eligible-bar index** (`event_store.py:1771` in
+   `_validate_structural_leg_contract`) — keep, per
+   (timeframe, symbol, instrument_id), the ordered list of committed
+   `BAR_COMPLETED` events with `NORMALIZED_DATA` origin and
+   `event_time == known_at`, maintained on commit exactly as
+   `_normalized_bar_event_ids` already is, overlaid with the batch's staged
+   bars, and read the eligible sequence from it instead of filtering
+   `available_events.values()`. The remaining predicates
+   (`semantic_version`, `admits_definitional_path`) are applied to the
+   indexed list, so the sequence is identical.
 
 Each change is one commit, each verified against the hash stream on its own,
 so a regression is attributable.
@@ -129,9 +157,12 @@ must keep passing (no new downstream import in `eyes/core/`).
 
 ### 4.4 Expected result
 
-Per-bar cost flat at roughly the current bar-0 level (≈0.02–0.03 s/bar,
-35–50 bars/s) across a multi-session run; 151k bars in about one hour on one
-core. Memory still grows to the configured caps exactly as today.
+Within one weekly block (≤ 12,000 bars including warm-up) the per-bar cost
+stays near the bar-0 level: the eighth 500-bar block costs no more than 1.5×
+the first. The reducer's per-event liquidity rebuild still grows with the
+candidate set, which is why Part 2 runs in blocks; a continuous multi-week
+run is not a goal of this change. Memory still grows to the configured caps
+exactly as today.
 
 ### 4.5 Verification
 
@@ -163,14 +194,26 @@ core. Memory still grows to the configured caps exactly as today.
 
 ### 5.2 One Eye run, two artefacts
 
-`brain/research/trajectory_dataset.build_dataset` is extended (not forked)
-to record, beside the existing per-clock `features` / `prices` /
-`future_*` arrays, an **event log** with one row per published transition
-event: `known_at`, `kind`, `timeframe`, `direction`, `side`, `strength`,
-`price`, `entity_id`, `lifecycle`, `event_id`. Saved as
-`events.parquet` next to `dataset.npz` under `outputs/information_gain_gate/<run_id>/`
-(an ignored directory). The run id is the sha256 of the model path, the
-split registry identity, the window strings and the Eye's atomic identity.
+The Eye runs in **Globex-week blocks**: for each week of the 110 sessions,
+a fresh Eye is built from `configs/model.json`, fed the seven calendar days
+before the week's open as warm-up (never sampled), then sampled through the
+week — the same rule `configs/data_splits.json` registers for its
+`fixed_development_windows` (`warmup_calendar_days: 7`). Blocks are
+independent, so they run in parallel, and every sampled clock sees an Eye
+that has been running for between seven and fourteen days. That bounds both
+the per-bar cost (§2) and the run-length drift of the one-minute liquidity
+inventory: on every clock, the level set the Brain reads was accumulated over
+a comparable span.
+
+Within each block, `brain/research/trajectory_dataset.build_dataset` is
+extended (not forked) to record, beside the existing per-clock `features` /
+`prices` / `future_*` arrays, an **event log** with one row per published
+transition event: `known_at`, `kind`, `timeframe`, `direction`, `side`, `strength`,
+`price`, `entity_id`, `lifecycle`, `event_id`. Each block writes `dataset.npz` and `events.parquet` under
+`outputs/information_gain_gate/<run_id>/blocks/<week>/`, and the gate reads
+the concatenation in week order (an ignored directory throughout). The run
+id is the sha256 of the model path, the split registry identity, the window
+strings, the block rule and the Eye's atomic identity.
 
 A *transition* event is any `EventKind` whose value does not end in `_state`
 and is not `bar_completed` or `market_epoch_reset`. `*_state` events are
@@ -345,9 +388,15 @@ so they run in seconds:
 - **Leakage through S.** `observation_features` reads the snapshot at t; the
   existing gate already established it carries no future. The event log is
   filtered on `known_at`, not `observed_at`, for the same reason.
-- **Eye retention plateaus, not grows.** If Part 1 does not bring the eighth
-  500-bar block within 1.5× of the first, the run still completes (4–5 h)
-  and Part 2 proceeds; Part 1 is a cost, not a correctness, prerequisite.
+- **Part 1 is a cost, not a correctness, prerequisite.** If it does not
+  bring the eighth 500-bar block within 1.5× of the first, the weekly blocks
+  still complete (≈25 min each at today's speed, 22 blocks) and Part 2
+  proceeds unchanged.
+- **Blocks are a protocol, not the runtime.** A weekly-warmed Eye is not the
+  Eye a live system would run; the gate measures information under one
+  fixed, documented history length. Whether the one-minute inventory should
+  retire is a question for the Eye contract redesign, and the §2 numbers are
+  its first evidence.
 - **Which events matter is not decided here.** The clock thresholds (5m,
   15m) are sampling rules, not a claim that 1-minute events are worthless;
   the ablation table is where that question gets its first data.
