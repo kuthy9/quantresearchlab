@@ -63,42 +63,59 @@ def main() -> None:
     parser.add_argument("--start", required=True)
     parser.add_argument("--end", required=True)
     parser.add_argument("--limit", type=int, default=0, help="stop after this many bars")
-    parser.add_argument("--output", required=True)
+    parser.add_argument("--output", default=None, help="hash stream CSV; omit with --timing-only")
     parser.add_argument("--timing-every", type=int, default=500)
+    parser.add_argument(
+        "--timing-only", action="store_true",
+        help="skip hashing: the timing lines then measure the Eye alone",
+    )
     args = parser.parse_args()
+    if args.output is None and not args.timing_only:
+        parser.error("--output is required unless --timing-only")
 
     frame = load_ohlcv(ROOT / args.source, start=args.start, end=args.end).frame
     bars = list(iter_completed_bars(frame))
     if args.limit:
         bars = bars[: args.limit]
     reader, observer = build_eye(ROOT / args.model, root=ROOT)
-    out = ROOT / args.output
-    out.parent.mkdir(parents=True, exist_ok=True)
-    started = block_started = time.monotonic()
-    with out.open("w", newline="") as handle:
-        writer = csv.writer(handle)
+    out = None if args.output is None else ROOT / args.output
+    if out is not None:
+        out.parent.mkdir(parents=True, exist_ok=True)
+    handle = out.open("w", newline="") if out is not None else None
+    writer = csv.writer(handle) if handle is not None else None
+    if writer is not None:
         writer.writerow(("asof", "observation_hash", "events_hash", "n_events"))
+    started = time.monotonic()
+    # The timing lines measure the Eye alone: hashing the observation is the
+    # harness's cost, and it grows with the snapshot, so it is kept outside.
+    eye_seconds = 0.0
+    try:
         for number, bar in enumerate(bars, start=1):
+            tick = time.perf_counter()
             observation = observer.observe(reader.on_bar(bar))
-            events = observation.semantic_events_this_update
-            writer.writerow(
-                (
-                    observation.asof.isoformat(),
-                    content_hash(observation),
-                    content_hash(events),
-                    len(events),
+            eye_seconds += time.perf_counter() - tick
+            if writer is not None:
+                events = observation.semantic_events_this_update
+                writer.writerow(
+                    (
+                        observation.asof.isoformat(),
+                        content_hash(observation),
+                        content_hash(events),
+                        len(events),
+                    )
                 )
-            )
             if args.timing_every and number % args.timing_every == 0:
-                now = time.monotonic()
-                block = now - block_started
                 print(
-                    f"bars {number - args.timing_every:6d}-{number:6d}: {block:6.1f}s "
-                    f"({args.timing_every / block:5.1f} bars/s)",
+                    f"bars {number - args.timing_every:6d}-{number:6d}: {eye_seconds:6.1f}s "
+                    f"({args.timing_every / eye_seconds:5.1f} bars/s)",
                     flush=True,
                 )
-                block_started = now
-    print(f"{len(bars)} bars -> {out}  ({(time.monotonic() - started) / 60:.1f} min)")
+                eye_seconds = 0.0
+    finally:
+        if handle is not None:
+            handle.close()
+    target = out if out is not None else "(timing only)"
+    print(f"{len(bars)} bars -> {target}  ({(time.monotonic() - started) / 60:.1f} min)")
 
 
 if __name__ == "__main__":
