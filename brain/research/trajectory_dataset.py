@@ -13,7 +13,7 @@ study artifacts; nothing here may become a runtime authority.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import json
 from pathlib import Path
 
@@ -25,6 +25,7 @@ from brain.core.hypothesis_proposer import (
     FEATURE_NAMES,
     observation_features,
 )
+from brain.research.event_log import EVENT_COLUMNS, empty_event_log, event_row, is_transition
 from contract.brain.forecast import TRAJECTORY_CURVE_LENGTH
 from contract.market import Timeframe
 from eyes.core.causal import CausalMarketReader
@@ -103,6 +104,9 @@ class TrajectoryDataset:
     future_highs: np.ndarray
     future_lows: np.ndarray
     feature_names: tuple[str, ...] = FEATURE_NAMES
+    # One row per transition event published inside the emit window; the
+    # gate's Δₜ source. Empty for every consumer that predates it.
+    events: pd.DataFrame = field(default_factory=empty_event_log)
 
     def __post_init__(self) -> None:
         rows = len(self.index)
@@ -152,11 +156,19 @@ def build_dataset(
     future_high_rows: list[np.ndarray] = []
     future_low_rows: list[np.ndarray] = []
     history: list[float] = []
+    event_rows: list[dict] = []
     seen = 0
 
     for bar in iter_completed_bars(frame):
         observation = observer.observe(reader.on_bar(bar))
         seen += 1
+        for event in observation.semantic_events_this_update:
+            if not is_transition(event.kind):
+                continue
+            row = event_row(event)
+            if row["known_at"] < emit_from:
+                continue
+            event_rows.append(row)
         history.append(float(bar.close))
         if progress_every and seen % progress_every == 0:
             print(f"  {seen}/{len(frame)} bars, kept {len(stamps)}", flush=True)
@@ -207,6 +219,11 @@ def build_dataset(
         future_closes=np.asarray(future_close_rows, dtype=float),
         future_highs=np.asarray(future_high_rows, dtype=float),
         future_lows=np.asarray(future_low_rows, dtype=float),
+        events=(
+            pd.DataFrame(event_rows, columns=list(EVENT_COLUMNS))
+            if event_rows
+            else empty_event_log()
+        ),
     )
 
 

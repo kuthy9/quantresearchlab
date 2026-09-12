@@ -560,3 +560,22 @@ def engine_snapshot() -> EngineSnapshot:
 
 def flat_account() -> AccountState:
     return AccountState(100_000.0)
+
+
+def write_synthetic_ohlcv(bars: list[Bar], path: Path) -> Path:
+    """Persist synthetic bars as the parquet shape ``shares.core.io.load_ohlcv`` reads."""
+
+    frame = pd.DataFrame(
+        {
+            "ts": [bar.start for bar in bars],
+            "open": [bar.open for bar in bars],
+            "high": [bar.high for bar in bars],
+            "low": [bar.low for bar in bars],
+            "close": [bar.close for bar in bars],
+            "volume": [bar.volume for bar in bars],
+            "symbol": [bar.symbol for bar in bars],
+            "instrument_id": [int(bar.instrument_id) for bar in bars],
+        }
+    )
+    frame.to_parquet(path, index=False)
+    return path
