@@ -25,3 +25,4 @@ def test_the_last_block_ends_after_the_last_session_plus_horizon() -> None:
     block = blocks[0]
     assert pd.Timestamp(block.end) > pd.Timestamp("2022-01-07T17:00")
     assert block.emit_end == "2022-01-09T18:00"
+    assert block.end == "2022-01-09T20:00"

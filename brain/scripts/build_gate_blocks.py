@@ -2,7 +2,7 @@
 
 Each block is a fresh Eye warmed for the seven calendar days before the
 week's Sunday 18:00 New York open and sampled through the week; the tape is
-read one day past the week's close so every sampled clock has its full
+read two hours past the next open, which covers every sampled clock's
 sixty-minute future. Blocks are independent, so ``--workers`` builds them in
 parallel. The rule is the one ``configs/data_splits.json`` registers for its
 fixed development windows (``warmup_calendar_days: 7``); see
@@ -40,7 +40,7 @@ class Block:
     warmup_start: str  # local time; fed to the Eye, never sampled
     emit_start: str    # the week's Sunday 18:00 open
     emit_end: str      # the next week's open; rows at or after it are dropped
-    end: str           # where the tape read stops (emit_end plus one day)
+    end: str           # where the tape read stops (emit_end plus two hours)
 
 
 def _sunday_open(session: str) -> pd.Timestamp:
@@ -60,7 +60,10 @@ def globex_weeks(first_session: str, last_session: str, *, warmup_days: int = 7)
                 warmup_start=(open_at - pd.Timedelta(days=warmup_days)).strftime(_CLOCK),
                 emit_start=open_at.strftime(_CLOCK),
                 emit_end=next_open.strftime(_CLOCK),
-                end=(next_open + pd.Timedelta(days=1)).strftime(_CLOCK),
+                # Two hours past the next open: with a contiguous future
+                # required, no clock after Friday 16:00 is sampled, so the
+                # read stops as soon as the week's own bars are in.
+                end=(next_open + pd.Timedelta(hours=2)).strftime(_CLOCK),
             )
         )
         open_at = next_open

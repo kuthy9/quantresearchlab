@@ -178,6 +178,14 @@ def build_dataset(
         index = position.get(snapshot.asof)
         if index is None or index + FUTURE_HORIZON_MINUTES >= len(frame):
             continue
+        # A future is sixty consecutive traded minutes, not sixty rows: a
+        # window that spans the maintenance break or a weekend would splice
+        # the next session onto this one and label it as one path.
+        if (
+            frame.index[index + FUTURE_HORIZON_MINUTES] - frame.index[index]
+            != pd.Timedelta(minutes=FUTURE_HORIZON_MINUTES)
+        ):
+            continue
         if len(history) <= CONTEXT_LOOKBACK_MINUTES:
             continue
         state = snapshot.timeframe_states.get(Timeframe.M1)

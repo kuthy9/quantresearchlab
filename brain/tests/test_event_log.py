@@ -70,3 +70,19 @@ def test_blocks_concatenate_in_order(synthetic_block) -> None:
     data = load_blocks(synthetic_block)
     assert data["features"].shape[0] == data["index"].shape[0] == data["prices"].shape[0]
     assert np.all(np.diff(pd.DatetimeIndex(data["index"]).asi8) > 0)
+
+
+def test_a_clock_whose_future_crosses_a_session_gap_is_not_sampled(synthetic_block) -> None:
+    """The last hour before a session close has no sixty consecutive traded
+    minutes ahead of it, so it carries events but no observation point."""
+
+    data = load_blocks(synthetic_block)
+    local = pd.DatetimeIndex(data["index"]).tz_convert("America/New_York")
+    minute_of_day = local.hour * 60 + local.minute
+    # session_bars closes each synthetic day at 17:00. The dataset's future
+    # window is the sixty rows after the row at ``asof`` (closes at asof+2 ..
+    # asof+61, a one-minute offset the research path has always carried), so
+    # the last clock with a complete traded future is 15:59.
+    assert not ((minute_of_day >= 16 * 60) & (minute_of_day <= 17 * 60)).any()
+    assert (minute_of_day == 15 * 60 + 59).any()
+    assert (minute_of_day >= 18 * 60).any()  # the evening half of the session is sampled
