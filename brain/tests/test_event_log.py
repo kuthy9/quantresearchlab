@@ -43,8 +43,23 @@ def synthetic_block(tmp_path_factory) -> Path:
         root=ROOT,
     )
     out = tmp_path_factory.mktemp("blocks") / "2025-01-06"
-    save_block(dataset, out, emit_end=None)
+    # emit_end past the last bar: nothing is cut, but the cut path runs.
+    save_block(dataset, out, emit_end="2025-01-12T18:00")
     return out.parent
+
+
+def test_emit_end_drops_clocks_and_events_at_or_after_it(tmp_path) -> None:
+    source = write_synthetic_ohlcv(session_bars(3), tmp_path / "synthetic.parquet")
+    dataset = build_dataset(
+        source=source, warmup_start="2025-01-05", emit_start="2025-01-07", end="2025-01-09",
+        model_path=ROOT / "configs" / "model.json", root=ROOT,
+    )
+    save_block(dataset, tmp_path / "block", emit_end="2025-01-08T12:00")
+    data = load_blocks(tmp_path)
+    limit = pd.Timestamp("2025-01-08T12:00", tz="America/New_York")
+    assert (pd.DatetimeIndex(data["index"]) < limit).all()
+    assert (data["events"]["known_at"] < limit).all()
+    assert len(data["index"]) < len(dataset.index)
 
 
 def test_the_log_has_one_row_per_transition_event_at_its_known_at(synthetic_block) -> None:

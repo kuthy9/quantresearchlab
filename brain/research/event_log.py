@@ -62,7 +62,7 @@ def save_block(dataset, out_dir: Path, *, emit_end: str | None) -> None:
     keep = np.ones(len(dataset.index), dtype=bool)
     if emit_end is not None:
         local = dataset.index.tz_convert("America/New_York")
-        keep = (local < pd.Timestamp(emit_end, tz="America/New_York")).to_numpy()
+        keep = np.asarray(local < pd.Timestamp(emit_end, tz="America/New_York"), dtype=bool)
     np.savez_compressed(
         out_dir / "dataset.npz",
         index=dataset.index[keep].tz_convert("UTC").tz_localize(None).to_numpy(),
