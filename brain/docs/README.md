@@ -701,7 +701,9 @@ Gap 5 is the one that matters. The others are orchestration.
    Until that block is rebound to `brain/core/forecast.py`, 8 test modules
    cannot be collected and `shares.ContinuousSMCEngine` is unavailable. The forecaster is deliberately usable without the Engine — it
    takes one `ForecastInput` per bar — so this is orchestration work, not a
-   redesign.
+   redesign. The Eye-to-forecaster half is already exercised end to end by
+   `brain/tests/test_eye_to_brain_link.py` on real `MarketSnapshot`s from the
+   registered Eye; what is missing is only the Engine calling it.
 2. `decision.py` reads `MarketBelief.thesis_candidates` and
    `position_management_candidates`. `MarketBeliefState` does not fill those;
    Decision needs either an adapter or a new input contract.
@@ -729,3 +731,19 @@ Gap 5 is the one that matters. The others are orchestration.
    much longer retrieval history: ten sessions cannot cover the context space,
    and the fit→holdout neighbour distance of 24.86 against a context scale of
    8.32 says the holdout's states had no true precedent in the pool.
+6. **The Eye's events do not add information either (2026-09-12).** The
+   information-gain gate of
+   [2026-09-11-information-gain-gate-design.md](specs/2026-09-11-information-gain-gate-design.md)
+   asked, on 110 sessions of 2022 read in warmed weekly blocks, whether the
+   recent event sequence Δₜ — the 49 transition kinds as recency, count,
+   direction, one ordered track per scale and the trigger set, over two
+   hours — improves a sixty-minute first-passage forecast that already sees
+   the raw tape and the Eye's state, on clocks where a ≥1m, ≥5m or ≥15m
+   event fired. It does not: none of the eighteen pre-registered cells
+   passes. The boosted class gains at most 0.3 % of its log-loss on one
+   cell and not across the rolling folds; the linear class loses 1.5–2.5 %
+   on every cell; the ablation ranks noise. The receipt is
+   [evidence/2026-09-12_information_gain_gate.md](evidence/2026-09-12_information_gain_gate.md);
+   the event-driven joint conditional model, the distribution-mode
+   hypothesis lifecycle and the event-driven orchestration the brief
+   proposed do not start on this result.
