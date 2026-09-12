@@ -233,13 +233,26 @@ and is not `bar_completed` or `market_epoch_reset`. `*_state` events are
 lifecycle re-publications of retained entities, not changes; they are what
 made "every minute has an event" true in §2.
 
-### 5.3 Targets (horizon 60 minutes, ATR = the snapshot's one-minute ATR)
+### 5.3 Targets (horizon 60 minutes, barrier unit ATR₆₀ = ATR₁ₘ · √60)
+
+**Corrected 2026-09-13.** The first run used the snapshot's one-minute ATR
+as the barrier unit. On the real tape the sixty-minute excursion is 3.5
+one-minute ATRs at the median, so ±1.0 ATR₁ₘ is reached within the first
+minutes on every clock: "neither" occurred on 0.0 % of rows, the class
+prior was 49.5 / 50.5 (log-loss ln 2) and M₀ could not beat it. Those
+cells measured the sign of the first tick, not a sixty-minute first
+passage, and their verdict is void (receipt, run 1). The unit is now the
+diffusive sixty-minute scale ATR₁ₘ · √60, fixed before any model result
+under it exists; the multipliers are the brief's. Measured class shares on
+the 149,366 clocks: `fp_1.0_1.0` 67 / 15 / 18 (neither / upper / lower),
+`fp_1.0_0.5` 40 / 14 / 46, `fp_0.5_1.0` 40 / 44 / 16. The gate refuses to
+run a target whose primary training rows leave any class below 5 %.
 
 | name | type | definition |
 | --- | --- | --- |
-| `fp_1.0_1.0` | 3-class | first of: high ≥ +1.0 ATR, low ≤ −1.0 ATR, neither within 60 min |
-| `fp_1.0_0.5` | 3-class | first of: high ≥ +1.0 ATR, low ≤ −0.5 ATR, neither |
-| `fp_0.5_1.0` | 3-class | first of: high ≥ +0.5 ATR, low ≤ −1.0 ATR, neither (the mirror of the row above) |
+| `fp_1.0_1.0` | 3-class | first of: high ≥ +1.0 ATR₆₀, low ≤ −1.0 ATR₆₀, neither within 60 min |
+| `fp_1.0_0.5` | 3-class | first of: high ≥ +1.0 ATR₆₀, low ≤ −0.5 ATR₆₀, neither |
+| `fp_0.5_1.0` | 3-class | first of: high ≥ +0.5 ATR₆₀, low ≤ −1.0 ATR₆₀, neither (the mirror of the row above) |
 | `asymmetry_60` | continuous | `(U − D)/(U + D)` as in the existing gate |
 | `range_60` | continuous | `U + D`, the known-predictable control |
 
