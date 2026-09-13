@@ -65,12 +65,19 @@ class ZoneProtocol:
     protocol_hash: str
     tick_size: float
     protocol_version: str = "3.2.0-group3.4"
-    timeframe: str = "5m"
+    # The scales the definition is applied on; one tracker runs per scale.
+    timeframes: tuple[Timeframe, ...] = (Timeframe.M5,)
     fvg_source_bars: int = 3
     fvg_formation_atr_period: int = 14
     ob_anchor_history_bars: int = 64
     maximum_fvg_states: int = 256
     maximum_order_block_states: int = 128
+
+    @property
+    def timeframe(self) -> str:
+        """The protocol's first scale, the pre-2026-09 single scale."""
+
+        return self.timeframes[0].value
 
     def __post_init__(self) -> None:
         if (
@@ -81,7 +88,10 @@ class ZoneProtocol:
                 for character in self.protocol_hash
             )
             or self.protocol_version != "3.2.0-group3.4"
-            or self.timeframe != "5m"
+            or not self.timeframes
+            or any(not isinstance(value, Timeframe) for value in self.timeframes)
+            or len(set(self.timeframes)) != len(self.timeframes)
+            or Timeframe.M1 in self.timeframes
             or not math.isclose(
                 float(self.tick_size),
                 0.25,
@@ -107,7 +117,10 @@ class ZoneProtocol:
             protocol_hash=hashlib.sha256(raw).hexdigest(),
             protocol_version=payload["protocol_version"],
             tick_size=payload["tick_size"],
-            timeframe=payload["timeframe"],
+            timeframes=tuple(
+                Timeframe(value)
+                for value in payload.get("timeframes", [payload.get("timeframe")])
+            ),
             fvg_source_bars=payload["fvg_source_bars"],
             fvg_formation_atr_period=payload[
                 "fvg_formation_atr_period"
@@ -214,7 +227,7 @@ class ZoneBOSSource:
     def __post_init__(self) -> None:
         if (
             not isinstance(self.state, BreakOfStructureState)
-            or self.state.timeframe is not Timeframe.M5
+            or self.state.timeframe is Timeframe.M1
             or not isinstance(self.symbol, str)
             or not self.symbol
             or type(self.instrument_id) is not int
@@ -258,6 +271,7 @@ class CausalZoneTracker:
     _CHECKPOINT_FIELDS = frozenset(
         {
             "protocol",
+            "timeframe",
             "_history",
             "_episode_membership",
             "_active_transition_ids",
@@ -288,10 +302,16 @@ class CausalZoneTracker:
         *,
         displacement_protocol_hash: str | None = None,
         structure_protocol_hash: str | None = None,
+        timeframe: Timeframe | None = None,
     ) -> None:
         if not isinstance(protocol, ZoneProtocol):
             raise TypeError("a frozen Group 3 protocol is required")
         self.protocol = protocol
+        self.timeframe = (
+            protocol.timeframes[0] if timeframe is None else timeframe
+        )
+        if self.timeframe not in protocol.timeframes:
+            raise ValueError("Group 3 tracker scale is not in its protocol")
         self._history: deque[Candle] = deque(
             maxlen=protocol.ob_anchor_history_bars
         )
@@ -681,13 +701,17 @@ class CausalZoneTracker:
         displacement: DisplacementUpdate,
         bos_sources: tuple[ZoneBOSSource, ...],
     ) -> None:
+        # A regular completed bar of this scale: the whole scheduled span was
+        # observed.  The span itself is the session's (a 4H block at the
+        # session tail is three hours), so it is not compared to a constant.
         if (
-            candle.timeframe is not Timeframe.M5
+            candle.timeframe is not self.timeframe
             or not candle.complete
-            or (candle.expected_minutes, candle.observed_minutes)
-            != (5, 5)
+            or candle.expected_minutes != candle.observed_minutes
         ):
-            raise ValueError("Group 3 requires a completed 5m candle")
+            raise ValueError(
+                f"Group 3 requires a completed {self.timeframe.value} candle"
+            )
         if (
             self._last_clock is not None
             and candle.end <= self._last_clock
@@ -725,7 +749,7 @@ class CausalZoneTracker:
                 name="displacement",
             )
             if (
-                state.timeframe is not Timeframe.M5
+                state.timeframe is not self.timeframe
                 or state.symbol != candle.symbol
                 or state.instrument_id != candle.instrument_id
                 or state.observed_at > candle.end
@@ -745,7 +769,7 @@ class CausalZoneTracker:
             if (
                 transition_state.observed_at > candle.end
                 or transition_state.prefix_last_admitted_at > candle.end
-                or transition_state.timeframe is not Timeframe.M5
+                or transition_state.timeframe is not self.timeframe
                 or transition_state.symbol != candle.symbol
                 or transition_state.instrument_id != candle.instrument_id
             ):
@@ -822,7 +846,7 @@ class CausalZoneTracker:
         if (
             self._identity is None
             or source_identity != self._identity
-            or state.timeframe is not Timeframe.M5
+            or state.timeframe is not self.timeframe
             or state.terminal_reason != expected_terminal_reason
             or state.observed_at != candle.end
             or state.terminal_at != candle.end
@@ -1207,7 +1231,7 @@ class CausalZoneTracker:
             self.protocol.protocol_hash,
             candle.symbol,
             candle.instrument_id,
-            Timeframe.M5,
+            self.timeframe,
             state.direction,
             *cluster_ids,
             state.entity_id,
@@ -1231,7 +1255,7 @@ class CausalZoneTracker:
             protocol_hash=self.protocol.protocol_hash,
             symbol=candle.symbol,
             instrument_id=int(candle.instrument_id),
-            timeframe=Timeframe.M5,
+            timeframe=self.timeframe,
             direction=state.direction,
             source_displacement_id=state.entity_id,
             source_displacement_transition_id=(
@@ -1331,7 +1355,7 @@ class CausalZoneTracker:
             self.protocol.protocol_hash,
             c3.symbol,
             c3.instrument_id,
-            Timeframe.M5,
+            self.timeframe,
             direction,
             c1_id,
             c2_id,
@@ -1352,7 +1376,7 @@ class CausalZoneTracker:
             protocol_hash=self.protocol.protocol_hash,
             symbol=c3.symbol,
             instrument_id=c3.instrument_id,
-            timeframe=Timeframe.M5,
+            timeframe=self.timeframe,
             direction=direction,
             lifecycle=FairValueGapLifecycle.OPEN,
             qualification=(
@@ -1441,7 +1465,7 @@ class CausalZoneTracker:
             bos_source
             for bos_source in bos_sources
             if (
-                bos_source.state.timeframe is Timeframe.M5
+                bos_source.state.timeframe is self.timeframe
                 and bos_source.state.lifecycle is BOSLifecycle.CONFIRMED
                 and bos_source.state.direction is source.direction
                 and bos_source.state.resolved_at == candle.end
@@ -1521,7 +1545,7 @@ class CausalZoneTracker:
             self.protocol.protocol_hash,
             candle.symbol,
             candle.instrument_id,
-            Timeframe.M5,
+            self.timeframe,
             source.direction,
             *candidate.cluster_ids,
             source.entity_id,
@@ -1542,7 +1566,7 @@ class CausalZoneTracker:
             protocol_hash=self.protocol.protocol_hash,
             symbol=candle.symbol,
             instrument_id=candle.instrument_id,
-            timeframe=Timeframe.M5,
+            timeframe=self.timeframe,
             direction=source.direction,
             lifecycle=OrderBlockLifecycle.CREATED,
             source_displacement_id=source.entity_id,
@@ -1669,6 +1693,16 @@ class CausalZoneTracker:
         displacement: DisplacementUpdate,
         confirmed_bos: Iterable[ZoneBOSSource] = (),
     ) -> ZoneUpdate:
+        """The pre-2026-09 name: the tracker's scale was always 5m."""
+
+        return self.on_completed(candle, displacement, confirmed_bos)
+
+    def on_completed(
+        self,
+        candle: Candle,
+        displacement: DisplacementUpdate,
+        confirmed_bos: Iterable[ZoneBOSSource] = (),
+    ) -> ZoneUpdate:
         if self._failed:
             raise RuntimeError("Group 3 tracker is terminally failed")
         if not isinstance(candle, Candle):
@@ -1682,13 +1716,17 @@ class CausalZoneTracker:
             raise TypeError(
                 "Group 3 requires contract-bound BOS source envelopes"
             )
+        # A regular completed bar of this scale: the whole scheduled span was
+        # observed.  The span itself is the session's (a 4H block at the
+        # session tail is three hours), so it is not compared to a constant.
         if (
-            candle.timeframe is not Timeframe.M5
+            candle.timeframe is not self.timeframe
             or not candle.complete
-            or (candle.expected_minutes, candle.observed_minutes)
-            != (5, 5)
+            or candle.expected_minutes != candle.observed_minutes
         ):
-            raise ValueError("Group 3 requires a completed 5m candle")
+            raise ValueError(
+                f"Group 3 requires a completed {self.timeframe.value} candle"
+            )
         candle_input = (candle, displacement, bos_sources)
         if (
             self._last_input_kind in {"candle", "candle_boundary"}

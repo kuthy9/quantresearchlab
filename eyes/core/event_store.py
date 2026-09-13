@@ -3626,12 +3626,14 @@ class EventStore:
                 "mismatched zone identity"
             )
 
+        # An origin zone lives on one completed-bar scale above 1m; its
+        # terminal, its creation and every bar they cite share that scale.
         if (
-            event.timeframe is not Timeframe.M5
-            or created.timeframe is not Timeframe.M5
-            or transition_bar.timeframe is not Timeframe.M5
+            event.timeframe is Timeframe.M1
+            or created.timeframe is not event.timeframe
+            or transition_bar.timeframe is not event.timeframe
             or any(
-                parent.timeframe is not Timeframe.M5
+                parent.timeframe is not event.timeframe
                 for parent in created_parents
             )
             or event.direction is None

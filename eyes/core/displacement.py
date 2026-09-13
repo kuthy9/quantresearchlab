@@ -1002,12 +1002,15 @@ class CausalDisplacementTracker:
             return self.on_boundary("data_gap_history_reset", candle.end)
         if not candle.real_completed:
             return self.on_boundary("synthetic_interruption", candle.end)
-        minutes = self.timeframe.minutes
-        if (
-            candle.expected_minutes,
-            candle.real_minutes,
-            candle.observed_minutes,
-        ) != (minutes, minutes, minutes):
+        # A regular completed bar of this scale is one whose whole scheduled
+        # span was really observed; the span is the session's (a 4H block at
+        # the session tail is three hours), so it is not compared to a
+        # constant.
+        if not (
+            candle.expected_minutes
+            == candle.real_minutes
+            == candle.observed_minutes
+        ):
             return self.on_boundary("registered_session_reset", candle.end)
 
         values = (

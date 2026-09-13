@@ -998,27 +998,42 @@ class CausalObserver:
             raise ValueError(
                 "Group 3, displacement and observer tick sizes disagree"
             )
+        self._zone_trackers: dict[Timeframe, CausalZoneTracker] = {}
+        if zone_protocol is not None and self._displacement_downstream_authoritative:
+            for timeframe in zone_protocol.timeframes:
+                # A zone scale needs a displacement eye and a structure
+                # tracker on that same scale to source its FVG and origin
+                # zone facts.
+                if (
+                    timeframe in self._displacement_eyes
+                    and timeframe in self._active_timeframes
+                ):
+                    self._zone_trackers[timeframe] = CausalZoneTracker(
+                        zone_protocol,
+                        displacement_protocol_hash=(
+                            displacement_protocol.protocol_hash
+                            if displacement_protocol is not None
+                            else None
+                        ),
+                        structure_protocol_hash=(
+                            structure_config.protocol_hash
+                            if structure_config is not None
+                            else None
+                        ),
+                        timeframe=timeframe,
+                    )
+        # The protocol's first scale is the one the typed transition delta
+        # channel and ``zone_update`` name; the other scales publish their
+        # facts and their frames the same way.
         self._zone_tracker = (
-            CausalZoneTracker(
-                zone_protocol,
-                displacement_protocol_hash=(
-                    displacement_protocol.protocol_hash
-                    if displacement_protocol is not None
-                    else None
-                ),
-                structure_protocol_hash=(
-                    structure_config.protocol_hash
-                    if structure_config is not None
-                    else None
-                ),
-            )
-            if (
-                zone_protocol is not None
-                and self._displacement_downstream_authoritative
-            )
+            self._zone_trackers.get(zone_protocol.timeframes[0])
+            if zone_protocol is not None
             else None
         )
-        self._group3_hidden_entity_ids: set[str] = set()
+        self._secondary_zone_updates: dict[Timeframe, ZoneUpdate] = {}
+        self._group3_hidden_entity_ids: dict[Timeframe, set[str]] = {
+            timeframe: set() for timeframe in self._zone_trackers
+        }
         self._structure_trackers = (
             {
                 timeframe: StructureTracker(timeframe, structure_config)
@@ -1674,36 +1689,50 @@ class CausalObserver:
         update: ReaderUpdate,
         frames: Mapping[Timeframe, FrameObservation],
     ) -> ZoneUpdate | None:
-        if self._zone_tracker is None:
-            return None
-        if self._displacement_eye is None:
+        """Advance every zone scale; return the protocol's first scale's update."""
+
+        primary: ZoneUpdate | None = None
+        self._secondary_zone_updates = {}
+        for timeframe, tracker in self._zone_trackers.items():
+            result = self._observe_group3_scale(update, frames, timeframe, tracker)
+            if tracker is self._zone_tracker:
+                primary = result
+            else:
+                self._secondary_zone_updates[timeframe] = result
+        return primary
+
+    def _observe_group3_scale(
+        self,
+        update: ReaderUpdate,
+        frames: Mapping[Timeframe, FrameObservation],
+        timeframe: Timeframe,
+        tracker: CausalZoneTracker,
+    ) -> ZoneUpdate:
+        eye = self._displacement_eyes.get(timeframe)
+        if eye is None:
             raise RuntimeError(
                 "Group 3 lost its configured displacement source"
             )
         boundary = self._group3_boundary_reason(update.anomalies)
         if boundary is not None:
-            projected = self._visible_zone_update(
-                self._zone_tracker.on_boundary(
-                    boundary,
-                    update.asof,
-                )
+            return self._visible_zone_update(
+                tracker.on_boundary(boundary, update.asof),
+                timeframe,
             )
-            return projected
-        batch = self._displacement_eye.last_batch
-        expected = tuple(
-            update.newly_completed.get(Timeframe.M5, ())
-        )
+        batch = eye.last_batch
+        expected = tuple(update.newly_completed.get(timeframe, ()))
         if tuple(candle for candle, _ in batch) != expected:
             raise RuntimeError(
-                "Group 3 and displacement completed-M5 batches diverged"
+                f"Group 3 and displacement completed-{timeframe.value} "
+                "batches diverged"
             )
-        result = self._zone_tracker.current_update()
+        result = tracker.current_update()
         order_block_funnel = []
         fvg_transitions = []
         order_block_transitions = []
-        bos_states = frames[Timeframe.M5].structure_breaks
+        bos_states = frames[timeframe].structure_breaks
         for candle, displacement_update in batch:
-            result = self._zone_tracker.on_completed_5m(
+            result = tracker.on_completed(
                 candle,
                 displacement_update,
                 tuple(
@@ -1713,7 +1742,7 @@ class CausalObserver:
                         instrument_id=candle.instrument_id,
                         protocol_hash=(
                             self._structure_trackers[
-                                Timeframe.M5
+                                timeframe
                             ].config.protocol_hash
                         ),
                         tick_size=self.config.tick_size,
@@ -1743,12 +1772,14 @@ class CausalObserver:
                 ),
                 order_block_funnel=tuple(order_block_funnel),
             )
-        return self._visible_zone_update(result)
+        return self._visible_zone_update(result, timeframe)
 
     def _visible_zone_update(
         self,
         update: ZoneUpdate,
+        timeframe: Timeframe,
     ) -> ZoneUpdate:
+        hidden = self._group3_hidden_entity_ids[timeframe]
         retained_ids = {
             state.fvg_id
             for state in update.fair_value_gaps
@@ -1756,24 +1787,20 @@ class CausalObserver:
             state.order_block_id
             for state in update.order_blocks
         }
-        self._group3_hidden_entity_ids.intersection_update(
-            retained_ids
-        )
+        hidden.intersection_update(retained_ids)
         if update.boundary_reason in FVG_BOUNDARY_REASONS:
-            self._group3_hidden_entity_ids.update(retained_ids)
+            hidden.update(retained_ids)
         return replace(
             update,
             fair_value_gaps=tuple(
                 state
                 for state in update.fair_value_gaps
-                if state.fvg_id
-                not in self._group3_hidden_entity_ids
+                if state.fvg_id not in hidden
             ),
             order_blocks=tuple(
                 state
                 for state in update.order_blocks
-                if state.order_block_id
-                not in self._group3_hidden_entity_ids
+                if state.order_block_id not in hidden
             ),
         )
 
@@ -3073,11 +3100,18 @@ class CausalObserver:
             )
         try:
             zone_update = self._observe_group3(update, frames)
-            if zone_update is not None:
-                frames[Timeframe.M5] = replace(
-                    frames[Timeframe.M5],
-                    fair_value_gaps=zone_update.fair_value_gaps,
-                    order_blocks=zone_update.order_blocks,
+            for timeframe, scale_update in (
+                *(
+                    ()
+                    if zone_update is None
+                    else ((self._zone_tracker.timeframe, zone_update),)
+                ),
+                *self._secondary_zone_updates.items(),
+            ):
+                frames[timeframe] = replace(
+                    frames[timeframe],
+                    fair_value_gaps=scale_update.fair_value_gaps,
+                    order_blocks=scale_update.order_blocks,
                 )
         except Exception:
             self._terminal_failure = (
@@ -3283,13 +3317,14 @@ class CausalObserver:
                 "last checkpoint"
             )
             raise
-        if (
-            zone_update is not None
-            and zone_update.boundary_reason
-            not in FVG_BOUNDARY_REASONS
-        ):
+        for scale_update in (zone_update, *self._secondary_zone_updates.values()):
+            if (
+                scale_update is None
+                or scale_update.boundary_reason in FVG_BOUNDARY_REASONS
+            ):
+                continue
             try:
-                self._emitter._record_group3_events(zone_update)
+                self._emitter._record_group3_events(scale_update)
             except Exception:
                 self._terminal_failure = (
                     "Group 3 event projection failed after state may "

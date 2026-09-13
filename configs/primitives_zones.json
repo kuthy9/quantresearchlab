@@ -1,7 +1,7 @@
 {
   "protocol_version": "3.2.0-group3.4",
   "tick_size": 0.25,
-  "timeframe": "5m",
+  "timeframes": ["5m", "15m", "1H", "4H"],
   "fvg_source_bars": 3,
   "fvg_formation_atr_period": 14,
   "ob_anchor_history_bars": 64,

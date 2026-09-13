@@ -477,7 +477,7 @@ def _form_order_block(direction: Direction = Direction.LONG):
         ("protocol_hash", "0" * 63),
         ("protocol_version", ""),
         ("tick_size", 0.0),
-        ("timeframe", ""),
+        ("timeframes", ()),
         ("fvg_source_bars", 0),
         ("fvg_formation_atr_period", 0),
         ("ob_anchor_history_bars", 0),
@@ -505,7 +505,7 @@ def test_zone_protocol_tracks_current_config_and_rejects_invalid_ranges(
     ) == (
         payload["protocol_version"],
         payload["tick_size"],
-        payload["timeframe"],
+        payload["timeframes"][0],
         payload["fvg_source_bars"],
         payload["fvg_formation_atr_period"],
         payload["ob_anchor_history_bars"],

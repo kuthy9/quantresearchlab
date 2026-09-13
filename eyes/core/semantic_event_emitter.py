@@ -3166,7 +3166,7 @@ class SemanticEventEmitter:
         event = self._append_semantic_atomic(
             EventKind.BASE_ORIGIN_CORE_CREATED,
             core.observed_at,
-            Timeframe.M5,
+            core.timeframe,
             "below" if core.direction is Direction.LONG else "above",
             core.midpoint,
             0.0,
@@ -3213,7 +3213,7 @@ class SemanticEventEmitter:
             fvg_state_event = _event(
                     EventKind.FVG_STATE,
                     observed_at,
-                    Timeframe.M5,
+                    state.timeframe,
                     (
                         "below"
                         if state.direction is Direction.LONG
@@ -3303,7 +3303,7 @@ class SemanticEventEmitter:
                 created = self._append_semantic_atomic(
                     EventKind.FVG_CREATED,
                     state.confirmed_at,
-                    Timeframe.M5,
+                    state.timeframe,
                     (
                         "below"
                         if state.direction is Direction.LONG
@@ -3369,7 +3369,7 @@ class SemanticEventEmitter:
                 }[state.lifecycle]
                 try:
                     transition_bar_event_id = self._bar_event_id_at(
-                        Timeframe.M5,
+                        state.timeframe,
                         observed_at,
                     )
                 except ValueError:
@@ -3412,7 +3412,7 @@ class SemanticEventEmitter:
                     retest = self._append_semantic_atomic(
                         EventKind.FVG_FIRST_RETEST,
                         observed_at,
-                        Timeframe.M5,
+                        state.timeframe,
                         (
                             "below"
                             if state.direction is Direction.LONG
@@ -3438,7 +3438,7 @@ class SemanticEventEmitter:
                 lifecycle_event = self._append_semantic_atomic(
                     lifecycle_kind,
                     observed_at,
-                    Timeframe.M5,
+                    state.timeframe,
                     (
                         "below"
                         if state.direction is Direction.LONG
@@ -3470,7 +3470,7 @@ class SemanticEventEmitter:
             order_block_state_event = _event(
                     EventKind.ORDER_BLOCK_STATE,
                     observed_at,
-                    Timeframe.M5,
+                    state.timeframe,
                     (
                         "below"
                         if state.direction is Direction.LONG
@@ -3592,7 +3592,7 @@ class SemanticEventEmitter:
                 created = self._append_semantic_atomic(
                     EventKind.QUALIFIED_ORIGIN_ZONE_CREATED,
                     state.confirmed_at,
-                    Timeframe.M5,
+                    state.timeframe,
                     (
                         "below"
                         if state.direction is Direction.LONG
@@ -3639,7 +3639,7 @@ class SemanticEventEmitter:
                     )
                 try:
                     transition_bar_event_id = self._bar_event_id_at(
-                        Timeframe.M5,
+                        state.timeframe,
                         observed_at,
                     )
                 except ValueError:
@@ -3658,7 +3658,7 @@ class SemanticEventEmitter:
                         else EventKind.ORIGIN_ZONE_INVALIDATED
                     ),
                     observed_at,
-                    Timeframe.M5,
+                    state.timeframe,
                     (
                         "below"
                         if state.direction is Direction.LONG

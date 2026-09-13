@@ -2305,7 +2305,7 @@ class FairValueGapState:
             )
             or type(self.instrument_id) is not int
             or self.instrument_id < 0
-            or self.timeframe is not Timeframe.M5
+            or self.timeframe is Timeframe.M1
             or not isinstance(self.direction, Direction)
             or not isinstance(self.lifecycle, FairValueGapLifecycle)
             or not isinstance(self.qualification, FVGQualification)
@@ -2402,12 +2402,13 @@ class FairValueGapState:
             for value in self.source_candle_starts
         )
         object.__setattr__(self, "source_candle_starts", starts)
+        bar = pd.Timedelta(minutes=self.timeframe.minutes)
         if (
             len(starts) != 3
             or len(set(starts)) != 3
             or starts != tuple(sorted(starts))
-            or starts[1] - starts[0] != pd.Timedelta(minutes=5)
-            or starts[2] - starts[1] != pd.Timedelta(minutes=5)
+            or starts[1] - starts[0] != bar
+            or starts[2] - starts[1] != bar
         ):
             raise ValueError("FVG source candle clocks are invalid")
         for name in (
@@ -2448,8 +2449,7 @@ class FairValueGapState:
                 )
         if (
             starts[-1] > self.formed_at
-            or self.formed_at
-            != starts[-1] + pd.Timedelta(minutes=5)
+            or self.formed_at != starts[-1] + bar
             or self.confirmed_at != self.formed_at
             or self.state_started_at < self.confirmed_at
             or self.last_updated_at < self.state_started_at
@@ -2723,7 +2723,7 @@ class OrderBlockState:
             )
             or type(self.instrument_id) is not int
             or self.instrument_id < 0
-            or self.timeframe is not Timeframe.M5
+            or self.timeframe is Timeframe.M1
             or not isinstance(self.direction, Direction)
             or not isinstance(self.lifecycle, OrderBlockLifecycle)
             or (
@@ -2876,7 +2876,8 @@ class OrderBlockState:
             self.anchor_end <= self.anchor_start
             or self.anchor_end > self.formed_at
             or self.anchor_end
-            != self.source_displacement_started_at - pd.Timedelta(minutes=5)
+            != self.source_displacement_started_at
+            - pd.Timedelta(minutes=self.timeframe.minutes)
             or self.source_displacement_started_at
             > self.source_displacement_active_at
             or self.source_bos_pending_at > self.source_displacement_started_at

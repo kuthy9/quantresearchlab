@@ -117,7 +117,9 @@ def test_first_reentry_into_a_gap_is_published_once_with_frozen_entry_context() 
     observer = _replay()
     events = observer.audit_store.events()
 
-    created = [e for e in events if e.kind is EventKind.FVG_CREATED]
+    created = [
+            e for e in events if e.kind is EventKind.FVG_CREATED and e.timeframe is Timeframe.M5
+        ]
     assert created, "the crafted bars did not form an FVG"
     gap = created[-1]
     gap_id = gap.details["fvg_id"]
@@ -149,7 +151,11 @@ def test_first_retest_precedes_the_fill_observation_it_shares_a_bar_with() -> No
     events = observer.audit_store.events()
     order = {event.event_id: index for index, event in enumerate(events)}
 
-    retest = next(e for e in events if e.kind is EventKind.FVG_FIRST_RETEST)
+    retest = next(
+        e
+        for e in events
+        if e.kind is EventKind.FVG_FIRST_RETEST and e.timeframe is Timeframe.M5
+    )
     fill = next(
         e
         for e in events
