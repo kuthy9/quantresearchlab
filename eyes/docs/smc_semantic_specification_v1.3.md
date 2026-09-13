@@ -320,6 +320,11 @@ Formula by family: `bos_post_break_later_bars = 1`,
 `active_dealing_range_external_acceptance_completed_h1_closes = 1`.
 Emits `ACCEPTANCE_CONFIRMED`. 2022-02: 10,238 · 2022-03: 11,264.
 
+**`target_outcome`** *(added 2026-09-13)* — the terminal fate of one enumerated
+candidate target, on the target's own timeframe. Emits `LEVEL_REACHED` beside
+the first `LEVEL_TOUCHED` of an inventory item and `LEVEL_INVALIDATED` when the
+item leaves the candidate set untouched; exclusive per item.
+
 ### Delivery
 
 **`displacement`** — a registered impulse episode with a frozen lifecycle.

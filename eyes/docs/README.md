@@ -118,6 +118,30 @@ completed but whose confirmation bars have not closed is published in
 is published again as `confirmed` when it is. `test_one_formation_clock.py`
 guards that channel; it is not a lagged confirmation re-labelled.
 
+## Target outcomes on the target's own timeframe
+
+The Eye enumerates candidate targets — every `LiquidityInventoryItem`, with
+`formed_at` / `confirmed_at` and a lifecycle — and published what happened to
+them only as 1m crossing events (`LEVEL_TOUCHED` on `timeframe=1m`, the
+level's own scale buried in `details.source_timeframe`) plus the legacy
+`LIQUIDITY_RETIRED` transport, six times in four days. "Was the 5m target
+reached before the 15m one" had to be re-derived from the tape; the
+information-gain gate computed its first-passage targets from future highs
+and lows for exactly that reason.
+
+Every inventory item now ends in one of two atomic outcomes, registered under
+the `target_outcome` concept and published on the level's own timeframe with
+the level cited in `source_entity_ids`: `LEVEL_REACHED` beside the first
+`LEVEL_TOUCHED` of the item (citing the admission and that touch, known when
+the touch is known), and `LEVEL_INVALIDATED` when the item leaves the
+candidate set untouched (citing the admission and the last completed bar,
+with the removal reason — `reference_period_replaced` today; candidate
+retirement adds its own reasons). The two are exclusive per item. FVG and
+order-block outcomes already lived on their own timeframe.
+
+The registry bytes changed, so `atomic_definition_identity` moved from
+`f92b24c8…1f0c` to `af834d53…f301`; `configs/model.json` pins the new value.
+
 ## Scripts — `eyes/scripts/`
 
 Bounded, outcome-blind Eye studies and scans. `run_eye_authority_scan.py` is the

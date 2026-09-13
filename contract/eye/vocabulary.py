@@ -25,6 +25,8 @@ class EventKind(str, Enum):
     LEVEL_PENETRATED = "level_penetrated"
     SWEEP_CONFIRMED = "sweep_confirmed"
     ACCEPTANCE_CONFIRMED = "acceptance_confirmed"
+    LEVEL_REACHED = "level_reached"
+    LEVEL_INVALIDATED = "level_invalidated"
     DISPLACEMENT_OBSERVED = "displacement_observed"
     FVG_CREATED = "fvg_created"
     FVG_FIRST_RETEST = "fvg_first_retest"

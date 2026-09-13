@@ -90,6 +90,14 @@ _EXACT_AUTHORITATIVE_SOURCE_KINDS: Mapping[
         EventKind.LEVEL_PENETRATED,
         EventKind.BAR_COMPLETED,
     ),
+    EventKind.LEVEL_REACHED: (
+        EventKind.LIQUIDITY_LEVEL_CREATED,
+        EventKind.LEVEL_TOUCHED,
+    ),
+    EventKind.LEVEL_INVALIDATED: (
+        EventKind.LIQUIDITY_LEVEL_CREATED,
+        EventKind.BAR_COMPLETED,
+    ),
     EventKind.STRUCTURAL_LEG_CREATED: (
         EventKind.SWING_CONFIRMED,
         EventKind.SWING_CONFIRMED,

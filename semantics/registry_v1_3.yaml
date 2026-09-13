@@ -51,6 +51,16 @@
       "status": "canonical_emitted"
     },
     {
+      "concept": "target_outcome",
+      "event_kind": "level_reached",
+      "status": "canonical_emitted"
+    },
+    {
+      "concept": "target_outcome",
+      "event_kind": "level_invalidated",
+      "status": "canonical_emitted"
+    },
+    {
       "concept": "base_origin_core",
       "event_kind": "origin_zone_created",
       "status": "compatibility_alias_not_emitted"
@@ -337,6 +347,21 @@
         "incremental continuation information after trend, volatility, and session controls"
       ],
       "existing_binding": "the canonical crossing pipeline emits ACCEPTANCE_CONFIRMED for the same unique crossing_generation_id used by the competing Sweep resolution; BOS_POST_BREAK_STATE, LIQUIDITY_POOL_STATE, and MANIPULATION_STATE are legacy/context transports"
+    },
+    "target_outcome": {
+      "owner": "eye",
+      "domain_meaning": "The terminal fate of one enumerated candidate target: price reached it, or it left the candidate set untouched.",
+      "operational_definition": "For every liquidity inventory item emit exactly one outcome on the item's own timeframe. Emit LEVEL_REACHED at the first LEVEL_TOUCHED of that item, citing the candidate admission and that touch, known when the touch is known. Emit LEVEL_INVALIDATED when the item is removed from the candidate set without a touch, citing the candidate admission and the completed bar that removed it, with the removal reason. Reached and invalidated are mutually exclusive per item; a reached item is never invalidated.",
+      "hypothesized_relations": [
+        "first-passage order between candidate targets carries the draw-on-liquidity information the state alone does not"
+      ],
+      "falsification_conditions": [
+        "reached-before ordering between targets does not differ from ordering by distance alone"
+      ],
+      "oos_pass_criteria": [
+        "stable incremental first-passage information after distance, trend, session, and volatility controls"
+      ],
+      "existing_binding": "the inventory-crossing pipeline emits LEVEL_REACHED beside the first LEVEL_TOUCHED of each item; the reference-period rollover and candidate retirement emit LEVEL_INVALIDATED beside the legacy LIQUIDITY_RETIRED transport"
     },
     "displacement": {
       "owner": "eye",

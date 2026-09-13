@@ -1441,6 +1441,11 @@ _CANONICAL_ATOMIC_KINDS = frozenset(
     | {
         EventKind.RAW_BOUNDARY_BREAK,
         EventKind.MARKET_EPOCH_RESET,
+        # Target outcomes are facts about an inventory item, published on
+        # its own timeframe; the compact view already tracks the item, so
+        # they are admitted without a state branch, like RAW_BOUNDARY_BREAK.
+        EventKind.LEVEL_REACHED,
+        EventKind.LEVEL_INVALIDATED,
     }
 )
 

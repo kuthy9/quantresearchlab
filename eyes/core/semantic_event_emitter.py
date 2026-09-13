@@ -218,6 +218,10 @@ class SemanticEventEmitter:
             str,
         ] = {}
         self._candidate_level_event_ids: dict[str, str] = {}
+        # One outcome per inventory item: the item ids whose LEVEL_REACHED
+        # has been published, so a later crossing of the same item never
+        # publishes a second one.
+        self._reached_level_ids: set[str] = set()
         self._known_level_touch_ids: set[str] = set()
         # Source reducers expose complete touch histories for live zones.
         # Evicting these occurrence keys causes old touches to be rediscovered
@@ -289,6 +293,7 @@ class SemanticEventEmitter:
         for bar_events in self._real_bar_event_ids_by_timeframe.values():
             bar_events.clear()
         self._level_touch_event_ids.clear()
+        self._reached_level_ids.clear()
         self._candidate_level_event_ids.clear()
         self._known_level_touch_ids.clear()
         self._known_level_touch_order.clear()
@@ -325,6 +330,11 @@ class SemanticEventEmitter:
     ) -> None:
         """Emit the retirement terminals a replaced reference period leaves."""
 
+        self.emit_level_invalidations(
+            retired,
+            observed_at=observed_at,
+            reason="reference_period_replaced",
+        )
         for item in retired:
             self.memory.append(
                 _event(
@@ -343,6 +353,62 @@ class SemanticEventEmitter:
                         "reference_period_replaced"
                     ),
                 )
+            )
+
+    def emit_level_invalidations(
+        self,
+        retired: Sequence[LiquidityInventoryItem],
+        *,
+        observed_at: pd.Timestamp,
+        reason: str,
+    ) -> None:
+        """Publish the outcome of every retired item that was never reached.
+
+        An item that price already touched has its ``LEVEL_REACHED``; the two
+        outcomes are exclusive per item, so its retirement is bookkeeping and
+        not a second fate.
+        """
+
+        bar_event_id: str | None = None
+        for item in retired:
+            if item.item_id in self._reached_level_ids:
+                continue
+            candidate_event_id = self._candidate_level_event_ids.get(
+                item.item_id
+            )
+            if candidate_event_id is None:
+                # Never admitted as a canonical candidate (a projection-only
+                # or pre-warm-up item): it has no outcome to publish.
+                continue
+            if bar_event_id is None:
+                # Retirement is decided while the bar that opens the next
+                # period is still being observed, so its own BAR_COMPLETED
+                # is not appended yet; the last completed 1m bar the Eye has
+                # seen is the removal's evidence.
+                bar_event_id = self._latest_bar_event_id_at_or_before(
+                    Timeframe.M1, observed_at
+                )
+                if bar_event_id is None:
+                    return
+            self._append_semantic_atomic(
+                EventKind.LEVEL_INVALIDATED,
+                observed_at,
+                item.timeframe,
+                item.side,
+                item.price,
+                item.strength,
+                (candidate_event_id, bar_event_id),
+                {
+                    "level_id": item.item_id,
+                    "source_timeframe": item.timeframe.value,
+                    "source_kind": item.kind,
+                    "source_inventory_kind": item.kind,
+                    "reason": reason,
+                    "invalidated_at": observed_at.isoformat(),
+                },
+                event_time=observed_at,
+                zone=(item.lower_bound, item.upper_bound),
+                source_entity_ids=(item.item_id,),
             )
 
     def emit_boundary_structure_break_failed(
@@ -1289,6 +1355,19 @@ class SemanticEventEmitter:
                 "semantic source candle has no BAR_COMPLETED event: "
                 f"{candle_id}"
             ) from error
+
+    def _latest_bar_event_id_at_or_before(
+        self,
+        timeframe: Timeframe,
+        known_at: pd.Timestamp,
+    ) -> str | None:
+        clock = pd.Timestamp(known_at)
+        for event_clock, event_id in reversed(
+            self._real_bar_event_ids_by_timeframe[timeframe]
+        ):
+            if event_clock <= clock:
+                return event_id
+        return None
 
     def _bar_event_id_at(
         self,
@@ -4981,6 +5060,30 @@ class SemanticEventEmitter:
         if touch_event_id is None:
             raise ValueError(
                 "level penetration lacks its exact touch event"
+            )
+        if item.item_id not in self._reached_level_ids:
+            # The target's outcome, on the target's own timeframe: the
+            # crossing pipeline speaks the 1m clock, so a 5m level's touch is
+            # a 1m event and a consumer filtering ≥5m would never see it.
+            self._reached_level_ids.add(item.item_id)
+            self._append_semantic_atomic(
+                EventKind.LEVEL_REACHED,
+                candle.end,
+                item.timeframe,
+                item.side,
+                item.price,
+                item.strength,
+                (candidate_event_id, touch_event_id),
+                {
+                    "level_id": item.item_id,
+                    "source_timeframe": item.timeframe.value,
+                    "source_kind": semantic_source_kind,
+                    "source_inventory_kind": item.kind,
+                    "reached_at": candle.end.isoformat(),
+                },
+                event_time=candle.end,
+                zone=(item.lower_bound, item.upper_bound),
+                source_entity_ids=(item.item_id,),
             )
         crossing_generation_id = self._crossing_generation_id(
             level_id=item.item_id,
