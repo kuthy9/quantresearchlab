@@ -511,6 +511,10 @@ class SemanticEventEmitter:
             direction=direction,
             event_time=event_time or known_at,
             known_at=known_at,
+            # The formation clock is one field whatever produced the event:
+            # lifecycle transports fill ``formed_at``, and so does every
+            # atomic fact, from the same clock it carries as ``event_time``.
+            formed_at=event_time or known_at,
             evidence=payload,
             zone=zone,
             source_event_ids=source_event_ids,

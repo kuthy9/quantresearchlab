@@ -100,6 +100,24 @@ for entities; `entity_id` is reserved for typed lifecycle transports and the
 memory would try to build a timeline for it — so a consumer can tell them
 apart without parsing `details.level_id`.
 
+## One formation clock
+
+Every `MarketEvent` carries `formed_at` and `known_at`. The legacy lifecycle
+transports filled `formed_at`; the canonical atomic emitter carried the same
+clock only as `event_time` and left `formed_at` empty (41 % of events had it,
+none of them atomic), so a consumer had to know an event's origin to find when
+its fact formed. `_append_semantic_atomic` now fills `formed_at` from the
+clock it already carries as `event_time`. The confirmation lag is real and
+visible on that pair: on 2022-02-01, 29 % of events formed before the bar they
+became known on — a 1m swing two bars, a 5m swing three bars (15 min), a
+15m swing 45 min, a 1H swing 3 h.
+
+The candidate state was already its own channel: a swing whose pivot has
+completed but whose confirmation bars have not closed is published in
+`frames[tf].swings` as `forming` with no `confirmed_at`, and the same identity
+is published again as `confirmed` when it is. `test_one_formation_clock.py`
+guards that channel; it is not a lagged confirmation re-labelled.
+
 ## Scripts — `eyes/scripts/`
 
 Bounded, outcome-blind Eye studies and scans. `run_eye_authority_scan.py` is the
