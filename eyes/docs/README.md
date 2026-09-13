@@ -75,6 +75,31 @@ a `TimeframeState` it returns no longer carries those projections. A direct
 caller that reads `range_role`, `normalized_location_in_range` or candidate
 `rank` must settle the state first.
 
+## One crossing, one touch
+
+Two emitters published the same crossing. The structure frame's swing-break
+path publishes `LEVEL_TOUCHED` / `LEVEL_PENETRATED` when a confirmed swing
+breaks; the inventory-crossing path publishes them when the 1m candle crosses
+a candidate level. Each kept its own dedup registry, so a 1m swing broken on
+the bar that crossed it was published twice — identical facts, distinct
+`event_id`. Over 2022 that was 9.9 % of all events; on 2022-02-01 alone, 246
+touches and 246 penetrations. The registry binds `liquidity_sweep` as "first
+emit LEVEL_TOUCHED and LEVEL_PENETRATED for one frozen level and
+crossing_generation_id", so this was a violation, not a design.
+
+The two paths now share the `(level_id, clock)` touch registry and the
+`(level_id, 1m, clock)` penetration registry whenever they speak the same
+clock: whichever path sees the crossing first publishes it, the other reuses
+the id. A higher-timeframe break cites a different bar and stays its own
+crossing generation — the store refuses a 1m penetration whose touch cites a
+5m bar, and rightly so. Same-fact duplicates on 2022-02-01: 492 → 0.
+
+Two levels at one price are two entities, not a duplicate. Every crossing
+event now cites its level in `source_entity_ids` — the provenance namespace
+for entities; `entity_id` is reserved for typed lifecycle transports and the
+memory would try to build a timeline for it — so a consumer can tell them
+apart without parsing `details.level_id`.
+
 ## Scripts — `eyes/scripts/`
 
 Bounded, outcome-blind Eye studies and scans. `run_eye_authority_scan.py` is the

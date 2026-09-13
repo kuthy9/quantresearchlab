@@ -1897,31 +1897,59 @@ class SemanticEventEmitter:
                             frame.timeframe,
                             swing.broken_at,
                         )
-                        touch_event = self._append_semantic_atomic(
-                            EventKind.LEVEL_TOUCHED,
-                            swing.broken_at,
-                            frame.timeframe,
-                            (
-                                "above"
-                                if swing.side.value == "high"
-                                else "below"
-                            ),
-                            swing.price,
-                            clamp(swing.magnitude_atr),
-                            (candidate_event_id, break_bar_event_id),
-                            {
-                                "level_id": swing_level_id,
-                                "source_kind": "confirmed_swing",
-                                "target_swing_id": swing.swing_id,
-                                "touch_reason": "raw_swing_price_crossing",
-                            },
-                            event_time=swing.broken_at,
-                            zone=(swing.price, swing.price),
-                            source_entity_ids=(
-                                swing_level_id,
-                                swing.swing_id,
-                            ),
+                        # One frozen level crossed at one clock is one touch.
+                        # The inventory-crossing path publishes every
+                        # crossing on the 1m clock, so a 1m swing broken on
+                        # the bar that crossed it is the same fact seen twice;
+                        # share its registries so whichever path sees the
+                        # crossing first publishes it and the other reuses the
+                        # id.  A higher-timeframe break cites a different bar
+                        # and stays its own crossing generation.
+                        touch_clock = pd.Timestamp(swing.broken_at)
+                        shares_inventory_clock = frame.timeframe is Timeframe.M1
+                        touch_event_id = (
+                            self._level_touch_event_ids.get(
+                                (swing_level_id, touch_clock)
+                            )
+                            if shares_inventory_clock
+                            else None
                         )
+                        if touch_event_id is None:
+                            if shares_inventory_clock:
+                                self._remember_bounded(
+                                    f"{swing_level_id}|{touch_clock.isoformat()}",
+                                    known=self._known_level_touch_ids,
+                                    order=self._known_level_touch_order,
+                                )
+                            touch_event_id = self._append_semantic_atomic(
+                                EventKind.LEVEL_TOUCHED,
+                                swing.broken_at,
+                                frame.timeframe,
+                                (
+                                    "above"
+                                    if swing.side.value == "high"
+                                    else "below"
+                                ),
+                                swing.price,
+                                clamp(swing.magnitude_atr),
+                                (candidate_event_id, break_bar_event_id),
+                                {
+                                    "level_id": swing_level_id,
+                                    "source_kind": "confirmed_swing",
+                                    "target_swing_id": swing.swing_id,
+                                    "touch_reason": "raw_swing_price_crossing",
+                                },
+                                event_time=swing.broken_at,
+                                zone=(swing.price, swing.price),
+                                source_entity_ids=(
+                                    swing_level_id,
+                                    swing.swing_id,
+                                ),
+                            ).event_id
+                            if shares_inventory_clock:
+                                self._level_touch_event_ids[
+                                    (swing_level_id, touch_clock)
+                                ] = touch_event_id
                         crossing_generation_id = (
                             self._crossing_generation_id(
                                 level_id=swing_level_id,
@@ -1958,7 +1986,7 @@ class SemanticEventEmitter:
                             clamp(swing.magnitude_atr),
                             (
                                 candidate_event_id,
-                                touch_event.event_id,
+                                touch_event_id,
                                 break_bar_event_id,
                             ),
                             {
@@ -2508,6 +2536,7 @@ class SemanticEventEmitter:
                     },
                     event_time=touch_at,
                     zone=(pool.lower_bound, pool.upper_bound),
+                    source_entity_ids=(entity_id,),
                 )
                 self._level_touch_event_ids[
                     (entity_id, pd.Timestamp(touch_at))
@@ -4939,6 +4968,7 @@ class SemanticEventEmitter:
                 },
                 event_time=candle.end,
                 zone=(item.lower_bound, item.upper_bound),
+                source_entity_ids=(item.item_id,),
             )
             touch_event_id = touch_event.event_id
             self._level_touch_event_ids[
@@ -4953,47 +4983,52 @@ class SemanticEventEmitter:
             timeframe=Timeframe.M1,
             crossed_at=candle.end,
         )
-        penetration = self._append_semantic_atomic(
-            EventKind.LEVEL_PENETRATED,
-            candle.end,
-            Timeframe.M1,
-            item.side,
-            extreme,
-            clamp(distance / max(atr, self.config.tick_size)),
-            (candidate_event_id, touch_event_id, bar_event_id),
-            {
-                "level_id": item.item_id,
-                "source_timeframe": item.timeframe.value,
-                "source_kind": semantic_source_kind,
-                "source_inventory_kind": item.kind,
-                "penetration_points": max(0.0, distance),
-                "close_accepted_outside": outside,
-                "frozen_lower_bound": item.lower_bound,
-                "frozen_upper_bound": item.upper_bound,
-                "penetration_standard": (
-                    "intrabar_trade_beyond_frozen_candidate_level"
-                ),
-                "strict_close_beyond_confirmed_swing_price": bool(
-                    item.kind == "swing" and outside
-                ),
-                "crossing_generation_id": crossing_generation_id,
-                "crossed_at": candle.end.isoformat(),
-            },
-            direction=(
-                Direction.LONG
-                if item.side == "above"
-                else Direction.SHORT
-            ),
-            event_time=candle.end,
-            zone=(item.lower_bound, item.upper_bound),
+        penetration_key = self._penetration_key(
+            level_id=item.item_id,
+            timeframe=Timeframe.M1,
+            crossed_at=candle.end,
         )
-        self._penetration_event_ids[
-            self._penetration_key(
-                level_id=item.item_id,
-                timeframe=Timeframe.M1,
-                crossed_at=candle.end,
-            )
-        ] = penetration.event_id
+        # A 1m swing broken on this bar was already penetrated by the
+        # structure frame under this same key; one crossing generation is one
+        # penetration, so reuse it rather than publish the fact twice.
+        penetration_event_id = self._penetration_event_ids.get(penetration_key)
+        if penetration_event_id is None:
+            penetration_event_id = self._append_semantic_atomic(
+                EventKind.LEVEL_PENETRATED,
+                candle.end,
+                Timeframe.M1,
+                item.side,
+                extreme,
+                clamp(distance / max(atr, self.config.tick_size)),
+                (candidate_event_id, touch_event_id, bar_event_id),
+                {
+                    "level_id": item.item_id,
+                    "source_timeframe": item.timeframe.value,
+                    "source_kind": semantic_source_kind,
+                    "source_inventory_kind": item.kind,
+                    "penetration_points": max(0.0, distance),
+                    "close_accepted_outside": outside,
+                    "frozen_lower_bound": item.lower_bound,
+                    "frozen_upper_bound": item.upper_bound,
+                    "penetration_standard": (
+                        "intrabar_trade_beyond_frozen_candidate_level"
+                    ),
+                    "strict_close_beyond_confirmed_swing_price": bool(
+                        item.kind == "swing" and outside
+                    ),
+                    "crossing_generation_id": crossing_generation_id,
+                    "crossed_at": candle.end.isoformat(),
+                },
+                direction=(
+                    Direction.LONG
+                    if item.side == "above"
+                    else Direction.SHORT
+                ),
+                event_time=candle.end,
+                zone=(item.lower_bound, item.upper_bound),
+                source_entity_ids=(item.item_id,),
+            ).event_id
+            self._penetration_event_ids[penetration_key] = penetration_event_id
         self.memory.append(
             _event(
                 (
@@ -5024,7 +5059,7 @@ class SemanticEventEmitter:
                 item.side,
                 extreme,
                 clamp(distance / max(atr, self.config.tick_size)),
-                (penetration.event_id, bar_event_id),
+                (penetration_event_id, bar_event_id),
                 {
                     "level_id": item.item_id,
                     "resolution_bars": 0,

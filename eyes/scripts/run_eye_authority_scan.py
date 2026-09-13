@@ -42,7 +42,6 @@ from contract.market import (  # noqa: E402
 from contract.eye import MarketObservation  # noqa: E402
 from eyes.core.observation import CausalObserver, ObserverConfig  # noqa: E402
 from shares.core.scale_registry import parse_scale_specs  # noqa: E402
-from brain.core.validation import load_validation_protocol  # noqa: E402
 
 
 DEFAULT_CONFIG = ROOT / "configs/data_splits.json"
@@ -907,6 +906,10 @@ def run_scan(
         days=int(profile_payload["warmup_calendar_days"]),
         timezone=str(profile_payload["timezone"]),
     )
+    # The validation-protocol loader was retired with the typed Brain
+    # (5883241); this scan cannot classify its window until it is restored.
+    from brain.core.validation import load_validation_protocol
+
     validation = load_validation_protocol(DEFAULT_CONFIG)
     role = validation.classify_ohlcv(start, end)
     warmup_role = validation.classify_ohlcv(warmup_start, start)

@@ -4,7 +4,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from brain.core.calibration_replay import ReplayCheckpointStore
+import pickle
 from eyes.core.causal import CausalMarketReader, ReaderUpdate
 from eyes.core.displacement import (
     CausalDisplacementTracker,
@@ -35,9 +35,6 @@ ROOT = Path(__file__).resolve().parents[2]
 PROTOCOL_PATH = ROOT / "configs/primitives_displacement.json"
 GROUP12_PROTOCOL_PATH = ROOT / "configs/primitives_structure_liquidity.json"
 GROUP3_PROTOCOL_PATH = ROOT / "configs/primitives_zones.json"
-EXPERIMENT_ID = "EXP-SMC-3.0.2-013-CAUSAL-5M-DISPLACEMENT-RECOVERY-IDENTITY-CLOSURE"
-SEMANTIC_BASE_SHA = "0d7844635ee77a679da87fd47f284719adcca9afc71850ecd0da76addf62455b"
-PREREGISTRATION_SHA = "220ddd88eb6decf2d23af7b4368d5b9ea3867588c3f7310564f6160349a6de75"
 BASE = pd.Timestamp("2025-01-06T09:30:00-05:00")
 WHITELIST = frozenset((
     "contract_change_history_reset", "data_gap_history_reset",
@@ -745,30 +742,17 @@ def test_exp013_prefix_invariance_under_different_future_suffixes() -> None:
     assert left_prefix[-1].current_entity_id == right_prefix[-1].current_entity_id
 
 
-def _bindings() -> dict[str, str]:
-    return {
-        "experiment_id": EXPERIMENT_ID,
-        "semantic_base_sha256": SEMANTIC_BASE_SHA,
-        "preregistration_sha256": PREREGISTRATION_SHA,
-        "protocol_sha256": _protocol().protocol_hash,
-    }
-
-
 def test_exp013_checkpoint_resume_observation_equivalence(tmp_path: Path) -> None:
+    """A pickled displacement eye resumes with the observations it would have seen.
+
+    The typed Brain's ``ReplayCheckpointStore`` that once wrapped this pickle was
+    retired; the Eye-side property it exercised is the round trip itself.
+    """
     uninterrupted, index, checkpoint_observation = _started_eye()
-    store, bindings = ReplayCheckpointStore(tmp_path / "trusted-local"), _bindings()
-    state = {
-        "replay": uninterrupted, "last_source_start": None, "processed_bars": index,
-        "decision_rows": 0, "next_shard_index": 0, "committed_shards": [],
-    }
-    store.save(state, bindings=bindings)
-    assert store.exists
-    with pytest.raises(ValueError, match="bindings"):
-        store.load(expected_bindings={**bindings, "experiment_id": "EXP-SMC-3.0.2-011-CAUSAL-5M-DISPLACEMENT-ISOLATED-SHADOW"},
-                   expected_replay_type=CausalDisplacementEye)
-    loaded = store.load(expected_bindings=bindings,
-                        expected_replay_type=CausalDisplacementEye)
-    resumed = loaded["replay"]
+    checkpoint = tmp_path / "trusted-local" / "checkpoint.pkl"
+    checkpoint.parent.mkdir(parents=True)
+    checkpoint.write_bytes(pickle.dumps(uninterrupted))
+    resumed = pickle.loads(checkpoint.read_bytes())
     assert isinstance(resumed, CausalDisplacementEye)
     assert resumed.last_observation == checkpoint_observation
     assert resumed.last_batch == uninterrupted.last_batch

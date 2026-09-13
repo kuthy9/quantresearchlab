@@ -8,7 +8,12 @@ from types import SimpleNamespace
 import pytest
 
 from eyes.core import foundation_registry as foundation_module
-from shares.core.engine import ContinuousSMCEngine
+
+pytest.importorskip(
+    "brain.core.calibration",
+    reason="ContinuousSMCEngine still imports the typed Brain retired in 5883241",
+)
+from shares.core.engine import ContinuousSMCEngine  # noqa: E402
 from eyes.core.semantics import (
     SemanticRegistry,
     SemanticRegistryError,
