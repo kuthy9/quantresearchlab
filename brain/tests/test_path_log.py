@@ -1,0 +1,161 @@
+"""One row per new Group-5 step, with the geometry the Setup gate labels from,
+read at the bar the step is published."""
+from __future__ import annotations
+
+import json
+import math
+from types import SimpleNamespace
+
+import numpy as np
+import pandas as pd
+
+from brain.core.hypothesis_proposer import FEATURE_NAMES
+from brain.research.path_log import (
+    LEVEL_COLUMNS,
+    PATH_COLUMNS,
+    STRUCTURE_COLUMNS,
+    direction_sign,
+    empty_path_log,
+    minutes_since_open,
+    path_rows,
+    realized_volatility,
+)
+from contract.market import Direction, Timeframe
+
+AT = pd.Timestamp("2022-01-04T15:30", tz="UTC")
+
+
+def _step(step_id: str, kind: str, reason: str, strength: float) -> SimpleNamespace:
+    return SimpleNamespace(step_id=step_id, kind=kind, reason=reason, strength=strength, observed_at=AT)
+
+
+def _path(sequence_id: str, context_kind: str, context_id: str, direction, steps) -> SimpleNamespace:
+    return SimpleNamespace(
+        sequence_id=sequence_id, context_kind=context_kind, context_id=context_id,
+        direction=direction, formed_at=AT - pd.Timedelta(minutes=30), lifecycle="active", steps=tuple(steps),
+    )
+
+
+def _timeframe_state(bsl, ssl, ext=Direction.LONG):
+    return SimpleNamespace(
+        liquidity=SimpleNamespace(unswept_bsl=bsl, unswept_ssl=ssl),
+        structure=SimpleNamespace(external_direction=ext, internal_direction=Direction.SHORT, last_bos_direction=None),
+    )
+
+
+def _observation(update, manipulations=()):
+    snapshot = SimpleNamespace(
+        asof=AT,
+        timeframe_states={
+            Timeframe.M5: _timeframe_state([101.0, 103.0], [98.0, 99.5]),
+            Timeframe.M15: _timeframe_state([104.0], [97.0]),
+            Timeframe.H1: _timeframe_state([], [90.0], ext=Direction.SHORT),
+        },
+    )
+    return SimpleNamespace(market_snapshot=snapshot, asof=AT, interaction_update=update, manipulations=tuple(manipulations))
+
+
+def _rows(update, manipulations=()):
+    return path_rows(
+        _observation(update, manipulations), close=100.0, high=100.5, low=99.5, atr=2.0,
+        history=[100.0 + 0.1 * i for i in range(90)], features=tuple(float(i) for i in range(len(FEATURE_NAMES))),
+    )
+
+
+def test_zone_return_row_carries_zone_geometry_levels_structure_and_state() -> None:
+    first = _step("s:0", "zone_visible", "typed_entry_zone_registered", 0.6)
+    second = _step("s:1", "reacceptance_held", "held", 0.8)
+    path = _path("s", "zone_return", "loc-1", Direction.LONG, [first, second])
+    location = SimpleNamespace(
+        location_id="loc-1", lower_bound=99.0, upper_bound=99.8, near_edge=99.8, far_edge=99.0,
+        failure_boundary=98.7, source_zone_kind="fvg", entry_mode="touch", first_penetration_fraction=0.25,
+        nearest_visible_draw_distance_points=3.0,
+    )
+    update = SimpleNamespace(
+        milestone_transitions=(("s", second),), interaction_paths=(path,), interaction_path_transitions=(),
+        zone_interactions=(location,), reacceptance_interactions=(),
+    )
+    (row,) = _rows(update)
+    assert set(row) == set(PATH_COLUMNS)
+    assert row["known_at"] == AT and row["sequence_id"] == "s" and row["context_kind"] == "zone_return"
+    assert row["direction"] == 1.0 and row["context_found"] is True
+    assert row["step_kind"] == "reacceptance_held" and row["step_ordinal"] == 1
+    assert json.loads(row["steps_so_far"]) == [
+        ["zone_visible", "typed_entry_zone_registered", 0.6], ["reacceptance_held", "held", 0.8]
+    ]
+    assert row["failure_boundary"] == 98.7 and row["source_zone_kind"] == "fvg" and row["eye_draw_distance_points"] == 3.0
+    assert math.isnan(row["sweep_extreme"])
+    assert row["close"] == 100.0 and row["atr_1m"] == 2.0
+    assert (row["bsl_5m"], row["ssl_5m"], row["bsl_15m"], row["ssl_15m"]) == (101.0, 99.5, 104.0, 97.0)
+    assert math.isnan(row["bsl_1h"]) and row["ssl_1h"] == 90.0
+    assert (row["ext_dir_5m"], row["int_dir_5m"], row["last_bos_dir_5m"], row["ext_dir_1h"]) == (1.0, -1.0, 0.0, -1.0)
+    assert row[FEATURE_NAMES[0]] == 0.0 and row[FEATURE_NAMES[-1]] == float(len(FEATURE_NAMES) - 1)
+
+
+def test_pool_reversal_row_takes_failure_from_reacceptance_else_sweep_extreme() -> None:
+    step = _step("p:0", "pool_swept", "typed_pool_manipulation_swept", 0.4)
+    path = _path("p", "pool_reversal", "man-1", Direction.SHORT, [step])
+    manipulation = SimpleNamespace(
+        manipulation_id="man-1", source_lower_bound=104.0, source_upper_bound=104.5, sweep_extreme=105.2,
+        penetration_atr=0.35, timeframe=Timeframe.M5,
+    )
+    update = SimpleNamespace(
+        milestone_transitions=(("p", step),), interaction_paths=(), interaction_path_transitions=(path,),
+        zone_interactions=(), reacceptance_interactions=(),
+    )
+    (row,) = _rows(update, [manipulation])
+    assert row["direction"] == -1.0 and row["failure_boundary"] == 105.2 and row["source_timeframe"] == "5m"
+    assert math.isnan(row["reference_price"]) and math.isnan(row["lower_bound"])
+    reacceptance = SimpleNamespace(
+        context_id="man-1", reference_price=104.5, failure_boundary=105.6, reclaim_margin_atr=0.2, hold_margin_atr=0.1,
+    )
+    update = SimpleNamespace(
+        milestone_transitions=(("p", step),), interaction_paths=(path,), interaction_path_transitions=(),
+        zone_interactions=(), reacceptance_interactions=(reacceptance,),
+    )
+    (row,) = _rows(update, [manipulation])
+    assert row["failure_boundary"] == 105.6 and row["reference_price"] == 104.5 and row["hold_margin_atr"] == 0.1
+
+
+def test_missing_context_is_logged_with_nan_geometry_and_flagged() -> None:
+    step = _step("s:0", "zone_visible", "typed_entry_zone_registered", 0.6)
+    path = _path("s", "zone_return", "loc-missing", Direction.LONG, [step])
+    update = SimpleNamespace(
+        milestone_transitions=(("s", step),), interaction_paths=(path,), interaction_path_transitions=(),
+        zone_interactions=(), reacceptance_interactions=(),
+    )
+    (row,) = _rows(update)
+    assert row["context_found"] is False and math.isnan(row["failure_boundary"])
+    # a step whose path is not on the update at all cannot be typed
+    update = SimpleNamespace(
+        milestone_transitions=(("ghost", step),), interaction_paths=(), interaction_path_transitions=(),
+        zone_interactions=(), reacceptance_interactions=(),
+    )
+    (row,) = _rows(update)
+    assert row["context_kind"] is None and row["context_found"] is False
+
+
+def test_no_update_or_no_transitions_yields_nothing() -> None:
+    assert _rows(None) == []
+    empty = SimpleNamespace(
+        milestone_transitions=(), interaction_paths=(), interaction_path_transitions=(),
+        zone_interactions=(), reacceptance_interactions=(),
+    )
+    assert _rows(empty) == []
+
+
+def test_helpers() -> None:
+    assert direction_sign(Direction.LONG) == 1.0 and direction_sign("short") == -1.0 and direction_sign(None) == 0.0
+    # 15:30 UTC on 2022-01-04 is 10:30 New York, 16.5 h after the 18:00 open
+    assert minutes_since_open(AT) == 990.0
+    assert minutes_since_open(pd.Timestamp("2022-01-04T23:00", tz="UTC")) == 0.0  # 18:00 New York
+    closes = [100.0, 101.0, 100.0, 102.0]
+    assert realized_volatility(closes, 3, 2.0) == np.sqrt(1 + 1 + 4) / 2.0
+    assert math.isnan(realized_volatility([100.0], 3, 2.0))
+    assert list(empty_path_log().columns) == list(PATH_COLUMNS)
+    assert len(LEVEL_COLUMNS) == 6 and len(STRUCTURE_COLUMNS) == 9
+
+
+def test_path_columns_are_unique_and_the_eye_state_does_not_shadow_them() -> None:
+    assert len(PATH_COLUMNS) == len(set(PATH_COLUMNS))
+    assert not (set(FEATURE_NAMES) & (set(PATH_COLUMNS) - set(FEATURE_NAMES)))
