@@ -92,8 +92,18 @@ that import the retired `brain.core.calibration`, `calibration_replay` and
 blocks and the code behind them are removed or rebound to
 `brain/core/forecast.py`, the belief producer that replaced them, and
 `shares.ContinuousSMCEngine` is unavailable until then. Run the suite with
-`--ignore` on those eleven modules to exercise the other 1,151 tests, which
+`--ignore` on those eleven modules to exercise the other 1,155 tests, which
 pass.
+
+The Eye-to-Brain link itself does not go through the Engine and is verified
+on the real wiring by `brain/tests/test_eye_to_brain_link.py`: the registered
+Eye built from `configs/model.json` publishes `MarketSnapshot`s, and
+`HypothesisForecaster.observe(ForecastInput(snapshot=...))` publishes the same
+`MarketBeliefState`, revision for revision, as the dataset path
+(`observation_features` plus the snapshot's one-minute ATR) that
+`brain/research/trajectory_dataset.py` and the replay scripts feed. The Brain's
+runtime needs `scikit-learn` and `scipy` (both lazy imports, so an import smoke
+does not catch their absence); `uv sync` installs them from `uv.lock`.
 
 The Eye imports no downstream module — no `eyes/core/` module imports `brain`,
 `execution`, or the orchestration half of `shares`. `shares/core/scene_graph.py`

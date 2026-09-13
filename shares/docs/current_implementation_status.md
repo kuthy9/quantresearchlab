@@ -35,7 +35,10 @@ only producer of `MarketBelief`, so **the repository currently has no belief
 producer**. `shares/core/engine.py` still imports four retired modules and
 cannot be imported; eleven test modules cannot be collected — eight for the
 retired typed Brain and three for the retired calibration/validation surface —
-and the remaining 1,151 collected tests pass. Read every "integrated", "complete" or
+and the remaining 1,155 collected tests pass (2026-09-11: `uv.lock` now carries
+the `scikit-learn` and `scipy` the Brain's runtime imports lazily, and
+`brain/tests/test_eye_to_brain_link.py` drives the registered Eye into
+`HypothesisForecaster` on real snapshots). Read every "integrated", "complete" or
 "fail-closed" claim below as a record of what existed before that date.
 
 **Forecast skill (2026-09-10).** The local conditional Brain was measured on
