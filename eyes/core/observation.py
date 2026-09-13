@@ -926,11 +926,21 @@ class CausalObserver:
             if self.config.displacement_protocol is not None
             else None
         )
+        self._displacement_eyes: dict[Timeframe, CausalDisplacementEye] = {}
+        if displacement_protocol is not None:
+            for timeframe in displacement_protocol.timeframes:
+                if timeframe in self._active_timeframes:
+                    self._displacement_eyes[timeframe] = CausalDisplacementEye(
+                        displacement_protocol, timeframe=timeframe
+                    )
+        # The protocol's first scale is the one Group 3 zones consume and the
+        # one ``MarketObservation.displacement`` names.
         self._displacement_eye = (
-            CausalDisplacementEye(displacement_protocol)
+            self._displacement_eyes.get(displacement_protocol.timeframes[0])
             if displacement_protocol is not None
             else None
         )
+        self._secondary_displacements: dict[Timeframe, DisplacementObservation] = {}
         self._displacement_downstream_authoritative = bool(
             displacement_protocol is not None
             and displacement_protocol.downstream_authoritative
@@ -1135,8 +1145,9 @@ class CausalObserver:
             audit_store=self.audit_store,
         )
         self._terminal_failure: str | None = None
-        self._last_displacement_input: tuple[object, ...] | None = None
-        self._last_displacement_observation = None
+        self._last_displacement_inputs: dict[
+            Timeframe, tuple[tuple[object, ...], DisplacementObservation]
+        ] = {}
         self._prior: MarketObservation | None = None
         # One owner for canonical emission and the cross-detector event
         # ancestry index every emitted fact has to cite.
@@ -2744,26 +2755,38 @@ class CausalObserver:
                     "an earlier checkpoint"
                 )
                 raise
-        if self._displacement_eye is None:
-            displacement = None
-        else:
+        # Every displacement eye is memoized on its own input identity, so
+        # an exact retry of one update (a boundary re-observed after a
+        # failure downstream) re-reads the observation instead of feeding the
+        # tracker the same clock twice.
+        displacements: dict[Timeframe, DisplacementObservation] = {}
+        for timeframe, eye in self._displacement_eyes.items():
             displacement_input = (
                 update.asof,
                 update.completed_1m,
                 tuple(update.anomalies),
-                tuple(
-                    update.newly_completed.get(Timeframe.M5, ())
-                ),
+                tuple(update.newly_completed.get(timeframe, ())),
             )
-            if (
-                displacement_input == self._last_displacement_input
-                and self._last_displacement_observation is not None
-            ):
-                displacement = self._last_displacement_observation
+            memo = self._last_displacement_inputs.get(timeframe)
+            if memo is not None and memo[0] == displacement_input:
+                displacements[timeframe] = memo[1]
             else:
-                displacement = self._displacement_eye.on_update(update)
-                self._last_displacement_input = displacement_input
-                self._last_displacement_observation = displacement
+                displacements[timeframe] = eye.on_update(update)
+                self._last_displacement_inputs[timeframe] = (
+                    displacement_input,
+                    displacements[timeframe],
+                )
+        displacement = (
+            None
+            if self._displacement_eye is None
+            else displacements[self._displacement_eye.timeframe]
+        )
+        self._secondary_displacements = {
+            timeframe: observation
+            for timeframe, observation in displacements.items()
+            if self._displacement_eye is None
+            or timeframe is not self._displacement_eye.timeframe
+        }
         reset_anomalies = tuple(
             value
             for value in update.anomalies
@@ -2792,7 +2815,10 @@ class CausalObserver:
                         # bars.  Publish those immutable terminal facts before
                         # clearing the prior-epoch BAR lookup tables.
                         self._emitter._record_displacement_events(displacement)
+                        for secondary in self._secondary_displacements.values():
+                            self._emitter._record_displacement_events(secondary)
                         displacement = None
+                        self._secondary_displacements = {}
                     self._reset_contract_state(
                         reason=reason,
                         observed_at=update.asof,
@@ -3072,6 +3098,8 @@ class CausalObserver:
                 )
                 self._publish_reference_candidate_events()
                 self._emitter._record_displacement_events(displacement)
+                for secondary in self._secondary_displacements.values():
+                    self._emitter._record_displacement_events(secondary)
             except Exception:
                 self._terminal_failure = (
                     "normalized bar/reference/displacement semantic projection "
@@ -3735,6 +3763,14 @@ class CausalObserver:
                 execution=execution,
                 anomalies=tuple(dict.fromkeys(anomalies)),
                 displacement=displacement,
+                displacements={
+                    **(
+                        {}
+                        if displacement is None
+                        else {displacement.timeframe: displacement}
+                    ),
+                    **self._secondary_displacements,
+                },
                 liquidity_inventory=liquidity_inventory,
                 liquidity_pool_states=liquidity_pool_states,
                 event_ages_minutes=event_ages_minutes,

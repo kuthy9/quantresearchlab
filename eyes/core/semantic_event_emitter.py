@@ -1504,10 +1504,22 @@ class SemanticEventEmitter:
         self,
         known_at: pd.Timestamp,
     ) -> tuple[str, ...]:
-        """Return every clock-only M1 constituent of an incomplete M5 bar."""
+        """The pre-2026-09 name: the terminal's scale was always 5m."""
+
+        return self._synthetic_m1_context_event_ids_for_terminal(
+            known_at, timeframe=Timeframe.M5
+        )
+
+    def _synthetic_m1_context_event_ids_for_terminal(
+        self,
+        known_at: pd.Timestamp,
+        *,
+        timeframe: Timeframe = Timeframe.M5,
+    ) -> tuple[str, ...]:
+        """Return every clock-only M1 constituent of an incomplete bar."""
 
         clock = pd.Timestamp(known_at)
-        interval_start = clock - pd.Timedelta(minutes=5)
+        interval_start = clock - pd.Timedelta(minutes=timeframe.minutes)
         current_root_id = self._clock_root_event_id_at(Timeframe.M1, clock)
         current_root = self.memory.audit_event_including_pending(
             current_root_id
@@ -3673,6 +3685,7 @@ class SemanticEventEmitter:
     ) -> None:
         if displacement is None:
             return
+        timeframe = displacement.timeframe
         for transition in displacement.transitions_this_update:
             if not self._remember_bounded(
                 transition.transition_id,
@@ -3696,7 +3709,7 @@ class SemanticEventEmitter:
                 event is None
                 or event.origin is not EventOrigin.NORMALIZED_DATA
                 or event.kind is not EventKind.BAR_COMPLETED
-                or event.timeframe is not Timeframe.M5
+                or event.timeframe is not timeframe
                 or event.evidence.get("real_completed") is not True
                 or event.evidence.get("clock_only") is not False
                 or not isinstance(
@@ -3730,14 +3743,15 @@ class SemanticEventEmitter:
                 and transition.reason == "synthetic_interruption"
             ):
                 synthetic_context_event_ids = (
-                    self._synthetic_m1_context_event_ids_for_m5_terminal(
+                    self._synthetic_m1_context_event_ids_for_terminal(
                         transition.observed_at,
+                        timeframe=timeframe,
                     )
                 )
             displacement_event = self._append_semantic_atomic(
                 EventKind.DISPLACEMENT_OBSERVED,
                 transition.observed_at,
-                Timeframe.M5,
+                timeframe,
                 (
                     "above"
                     if transition.direction is Direction.LONG

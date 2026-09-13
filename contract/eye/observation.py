@@ -551,6 +551,7 @@ class DisplacementTransitionObservation:
     terminal_evidence_candle_id: str | None = None
     admitted_candle_ids: tuple[str, ...] = ()
     state_metrics: tuple[tuple[str, float], ...] = ()
+    timeframe: Timeframe = Timeframe.M5
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -618,6 +619,7 @@ class DisplacementObservation:
         DisplacementTransitionObservation, ...
     ] = ()
     reader_anomalies: tuple[str, ...] = ()
+    timeframe: Timeframe = Timeframe.M5
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -742,6 +744,12 @@ class MarketObservation:
     )
     anomalies: tuple[str, ...] = ()
     displacement: DisplacementObservation | None = None
+    # One displacement observation per scale the protocol publishes on;
+    # ``displacement`` is the protocol's first scale, kept for readers that
+    # predate multi-scale displacement.
+    displacements: Mapping[Timeframe, DisplacementObservation] = field(
+        default_factory=dict
+    )
     liquidity_inventory: tuple[LiquidityInventoryItem, ...] = ()
     liquidity_pool_states: tuple[LiquidityPoolState, ...] = ()
     event_ages_minutes: Mapping[str, int] = field(default_factory=dict)

@@ -2608,7 +2608,7 @@ class EventStore:
     ) -> None:
         if not source_parents:
             raise ValueError(
-                "authoritative displacement requires real M5 BAR parents"
+                "authoritative displacement requires real BAR parents"
             )
         EventStore._require_source_kind_multiset(
             event,
@@ -2619,20 +2619,23 @@ class EventStore:
             event,
             source_parents,
         )
+        # A displacement is observed on one completed-bar scale above 1m and
+        # cites only real bars of that same scale.
         if (
-            event.timeframe is not Timeframe.M5
+            event.timeframe is Timeframe.M1
             or event.direction not in {Direction.LONG, Direction.SHORT}
             or event.side
             != ("above" if event.direction is Direction.LONG else "below")
             or any(
-                parent.timeframe is not Timeframe.M5
+                parent.timeframe is not event.timeframe
                 or parent.evidence.get("real_completed") is not True
                 or parent.evidence.get("clock_only") is not False
                 for parent in source_parents
             )
         ):
             raise ValueError(
-                "authoritative displacement requires real normalized M5 BARs"
+                "authoritative displacement requires real normalized BARs "
+                "of its own scale"
             )
         bar_clocks = tuple(parent.known_at for parent in source_parents)
         if bar_clocks != tuple(sorted(bar_clocks)):

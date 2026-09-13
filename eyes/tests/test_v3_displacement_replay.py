@@ -344,7 +344,7 @@ def test_observer_reuses_displacement_on_exact_boundary_retry(
         match="frame failure after displacement",
     ):
         observer.observe(update)
-    cached = observer._last_displacement_observation
+    cached = observer._last_displacement_inputs[Timeframe.M5][1]
     monkeypatch.setattr(observer, "_observe_frame", original)
     retried = observer.observe(update)
     assert retried.displacement == cached

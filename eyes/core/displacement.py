@@ -65,10 +65,23 @@ class DisplacementProtocol:
     activation_body_continuity: float = 0.60
     consecutive_interruptions_max: int = 1
     downstream_authoritative: bool = False
+    # The scales the definition is applied on.  One tracker runs per scale;
+    # the definition itself does not change with the scale.
+    timeframes: tuple[Timeframe, ...] = (Timeframe.M5,)
 
     def __post_init__(self) -> None:
         if self.protocol_version != EPISODE_PROTOCOL_VERSION:
             raise ValueError("unsupported displacement protocol version")
+        if (
+            not self.timeframes
+            or any(not isinstance(value, Timeframe) for value in self.timeframes)
+            or len(set(self.timeframes)) != len(self.timeframes)
+            or Timeframe.M1 in self.timeframes
+        ):
+            raise ValueError(
+                "displacement protocol scales must be distinct completed-bar "
+                "timeframes above 1m"
+            )
         if (
             not isinstance(self.protocol_hash, str)
             or len(self.protocol_hash) != 64
@@ -124,8 +137,16 @@ class DisplacementProtocol:
         version = str(payload["protocol_version"])
         if version != EPISODE_PROTOCOL_VERSION:
             raise ValueError("unsupported displacement protocol version")
-        if payload.get("timeframe") != "5m":
-            raise ValueError("displacement episode protocol requires 5m")
+        raw_timeframes = payload.get("timeframes")
+        if raw_timeframes is None:
+            # The pre-2026-09 single-scale spelling.
+            raw_timeframes = [payload.get("timeframe")]
+        try:
+            timeframes = tuple(Timeframe(value) for value in raw_timeframes)
+        except (TypeError, ValueError) as error:
+            raise ValueError(
+                "displacement protocol scales must be registered timeframes"
+            ) from error
         tick_size = payload.get("tick_size")
         if tick_size is None:
             tick_size = payload["input_contract"]["tick_size"]
@@ -174,6 +195,7 @@ class DisplacementProtocol:
                 thresholds["consecutive_interruptions_max"]
             ),
             downstream_authoritative=payload["downstream_authoritative"],
+            timeframes=timeframes,
         )
         return protocol
 
@@ -286,13 +308,25 @@ def _identity(*parts: Any) -> str:
 class CausalDisplacementTracker:
     """The single incremental displacement-episode reducer."""
 
-    def __init__(self, protocol: DisplacementProtocol) -> None:
+    def __init__(
+        self,
+        protocol: DisplacementProtocol,
+        *,
+        timeframe: Timeframe | None = None,
+    ) -> None:
         if protocol.protocol_version != EPISODE_PROTOCOL_VERSION:
             raise ValueError(
                 "legacy displacement protocols are archived and cannot "
                 "drive the episode reducer"
             )
         self.protocol = protocol
+        # The one scale this tracker reads; the protocol's first scale when
+        # the caller does not say, which is the pre-2026-09 5m behaviour.
+        self.timeframe = (
+            protocol.timeframes[0] if timeframe is None else timeframe
+        )
+        if self.timeframe not in protocol.timeframes:
+            raise ValueError("displacement tracker scale is not in its protocol")
         self._trs: deque[float] = deque(
             maxlen=protocol.atr_baseline_bars
         )
@@ -454,7 +488,7 @@ class CausalDisplacementTracker:
             self.protocol.protocol_hash,
             candle.symbol,
             candle.instrument_id,
-            Timeframe.M5,
+            self.timeframe,
             direction,
             candle_id,
             candle.end,
@@ -464,7 +498,7 @@ class CausalDisplacementTracker:
             protocol_hash=self.protocol.protocol_hash,
             symbol=candle.symbol,
             instrument_id=candle.instrument_id,
-            timeframe=Timeframe.M5,
+            timeframe=self.timeframe,
             direction=direction,
             lifecycle=DisplacementLifecycle.STARTED,
             terminal_reason=None,
@@ -937,13 +971,20 @@ class CausalDisplacementTracker:
         self._open = opened
 
     def on_completed_5m(self, candle: Candle) -> DisplacementUpdate:
+        """The pre-2026-09 name: the tracker's scale was always 5m."""
+
+        return self.on_completed(candle)
+
+    def on_completed(self, candle: Candle) -> DisplacementUpdate:
         if self._failed:
             raise RuntimeError("displacement tracker is terminally failed")
         if not isinstance(candle, Candle):
             raise TypeError("a Candle input is required")
         candle.ohlc_ticks_for(self.protocol.tick_size)
-        if candle.timeframe is not Timeframe.M5 or not candle.complete:
-            raise ValueError("a completed 5m candle is required")
+        if candle.timeframe is not self.timeframe or not candle.complete:
+            raise ValueError(
+                f"a completed {self.timeframe.value} candle is required"
+            )
         if self._last_clock is not None and candle.end <= self._last_clock:
             self._failed = True
             raise ValueError("duplicate or out-of-order completed candle")
@@ -961,11 +1002,12 @@ class CausalDisplacementTracker:
             return self.on_boundary("data_gap_history_reset", candle.end)
         if not candle.real_completed:
             return self.on_boundary("synthetic_interruption", candle.end)
+        minutes = self.timeframe.minutes
         if (
             candle.expected_minutes,
             candle.real_minutes,
             candle.observed_minutes,
-        ) != (5, 5, 5):
+        ) != (minutes, minutes, minutes):
             return self.on_boundary("registered_session_reset", candle.end)
 
         values = (

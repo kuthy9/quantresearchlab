@@ -1,4 +1,4 @@
-"""Isolated causal projection of the frozen 5m displacement reducer."""
+"""Isolated causal projection of the frozen displacement reducer, one scale per eye."""
 from __future__ import annotations
 
 from collections import deque
@@ -146,6 +146,7 @@ def _transition_observation(
         terminal_evidence_candle_id=state.terminal_evidence_candle_id,
         admitted_candle_ids=state.admitted_candle_ids,
         state_metrics=_current_metrics(state, protocol),
+        timeframe=state.timeframe,
     )
 
 
@@ -173,10 +174,15 @@ def _current_metrics(
 class CausalDisplacementEye:
     """Consume reader outputs once and expose an isolated shadow view."""
 
-    def __init__(self, protocol: DisplacementProtocol) -> None:
+    def __init__(
+        self,
+        protocol: DisplacementProtocol,
+        *,
+        timeframe: Timeframe | None = None,
+    ) -> None:
         if not isinstance(protocol, DisplacementProtocol):
             raise TypeError("a frozen displacement protocol is required")
-        self._tracker = CausalDisplacementTracker(protocol)
+        self._tracker = CausalDisplacementTracker(protocol, timeframe=timeframe)
         self._transitions: deque[DisplacementTransitionObservation] = deque(
             maxlen=64
         )
@@ -193,6 +199,10 @@ class CausalDisplacementEye:
     @property
     def last_observation(self) -> DisplacementObservation | None:
         return self._last_observation
+
+    @property
+    def timeframe(self) -> Timeframe:
+        return self._tracker.timeframe
 
     @property
     def last_update(self) -> DisplacementUpdate | None:
@@ -218,10 +228,11 @@ class CausalDisplacementEye:
         boundary = _boundary_reason(anomalies)
         transitions: list[DisplacementTransition] = []
         batch: list[tuple[Candle, DisplacementUpdate]] = []
-        candles = tuple(update.newly_completed.get(Timeframe.M5, ()))
+        timeframe = self._tracker.timeframe
+        candles = tuple(update.newly_completed.get(timeframe, ()))
         invalid_candle = any(
             not isinstance(candle, Candle)
-            or candle.timeframe is not Timeframe.M5
+            or candle.timeframe is not timeframe
             or not candle.complete
             or candle.end > asof
             for candle in candles
@@ -231,7 +242,9 @@ class CausalDisplacementEye:
             for left, right in zip(candles[:-1], candles[1:])
         )
         if invalid_candle or invalid_order:
-            raise ValueError("reader supplied invalid ordered completed M5")
+            raise ValueError(
+                f"reader supplied invalid ordered completed {timeframe.name}"
+            )
         for candle in candles:
             candle.ohlc_ticks_for(self._tracker.protocol.tick_size)
 
@@ -242,7 +255,7 @@ class CausalDisplacementEye:
         else:
             state = self._tracker.snapshot()
             for candle in candles:
-                result = self._tracker.on_completed_5m(candle)
+                result = self._tracker.on_completed(candle)
                 batch.append((candle, result))
                 state = result.state
                 transitions.extend(result.transitions)
@@ -289,6 +302,7 @@ class CausalDisplacementEye:
             recent_transitions=recent,
             transitions_this_update=projected,
             reader_anomalies=anomalies,
+            timeframe=timeframe,
         )
         self._transitions.extend(projected)
         self._last_observation = observation
