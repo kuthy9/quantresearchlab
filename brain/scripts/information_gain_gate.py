@@ -92,7 +92,8 @@ def continuous_targets(
 
 
 def folds_for(
-    index: pd.DatetimeIndex, mask: np.ndarray, *, primary: tuple[int, int], rolling: tuple[int, int, int]
+    index: pd.DatetimeIndex, mask: np.ndarray, *, primary: tuple[int, int], rolling: tuple[int, int, int],
+    embargo_minutes: int = HORIZON,
 ) -> list[tuple[Fold, bool]]:
     """The primary fold, then the rolling folds, all on the clock's rows only.
     Row indices are mapped back to the full dataset."""
@@ -105,13 +106,13 @@ def folds_for(
 
     first = build_folds(
         sub, train_sessions=primary[0], holdout_sessions=primary[1],
-        embargo_minutes=HORIZON, step_sessions=10_000, start_session=None,
+        embargo_minutes=embargo_minutes, step_sessions=10_000, start_session=None,
     )[0]
     out: list[tuple[Fold, bool]] = [(remap(first, 0), True)]
     for number, fold in enumerate(
         build_folds(
             sub, train_sessions=rolling[0], holdout_sessions=rolling[1],
-            embargo_minutes=HORIZON, step_sessions=rolling[2], start_session=None,
+            embargo_minutes=embargo_minutes, step_sessions=rolling[2], start_session=None,
         ),
         start=1,
     ):
