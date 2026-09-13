@@ -5,6 +5,15 @@ Plans: [eye-per-bar-cost](../plans/2026-09-12-eye-per-bar-cost.md), [information
 
 ## Verdict: FAIL
 
+**Two runs, one verdict.** The tables from "The run" to "Ablation" are
+**run 1**, which placed the barriers in ATR₁ₘ; the spec correction of
+2026-09-12 (`4facecd`, `322237a`) found those cells degenerate — "neither"
+on 0.0 % of rows, so the label was the sign of the first tick — and voided
+them. **Run 2** below repeats the gate with the barriers in ATR₆₀ and
+non-degenerate classes, and fails all eighteen cells again. Run 1 is kept
+here because it was written before the defect was found; it is evidence
+of the harness, not of the market.
+
 None of the eighteen verdict cells — {`fp_1.0_1.0`, `fp_1.0_0.5`,
 `fp_0.5_1.0`} × {C1, C5, C15} × {logistic, lightgbm} — meets the
 pre-registered conditions of spec §5.9. Under the spec, C (the joint
@@ -149,6 +158,39 @@ retention semantics are redesigned (the never-retiring one-minute
 liquidity set of spec §2 is a candidate cause of the flat state features
 and was bounded, not fixed, by the weekly blocks). Those are new gates,
 each with its own pre-registration; this one is closed.
+
+## Run 2 (ATR₆₀ barriers, 2026-09-12 14:00): FAIL on all eighteen cells
+
+Same run id and blocks; `results.csv`, `verdict.csv` and `ablation.csv`
+under `aa4be1c91244d0c4/` are run 2's, run 1's are kept under `run1/`.
+Barriers at `multiplier · ATR₁ₘ · √60`; class shares on the primary training
+rows (neither / upper / lower): `fp_1.0_1.0` 0.668 / 0.154 / 0.177,
+`fp_1.0_0.5` 0.401 / 0.139 / 0.460, `fp_0.5_1.0` 0.400 / 0.440 / 0.160.
+
+Primary fold, Δ log-loss M₁ − M₀, session-block bootstrap intervals,
+rolling folds beating M₀ out of five:
+
+| clock | model | fp_1.0_1.0 | fp_1.0_0.5 | fp_0.5_1.0 |
+| --- | --- | --- | --- | --- |
+| C1 | lightgbm | −0.0059 [−0.0221, +0.0088] 2/5 | −0.0063 [−0.0256, +0.0106] 2/5 | +0.0047 [−0.0109, +0.0200] 3/5 |
+| C5 | lightgbm | +0.0036 [−0.0084, +0.0153] 0/5 | +0.0128 [−0.0006, +0.0244] 1/5 | −0.0012 [−0.0168, +0.0143] 0/5 |
+| C15 | lightgbm | +0.0158 [+0.0022, +0.0296] 0/5 | +0.0052 [−0.0075, +0.0182] 1/5 | +0.0092 [−0.0048, +0.0234] 1/5 |
+| C1 | logistic | +0.1658 [+0.0958, +0.2446] 0/5 | +0.1791 [+0.1032, +0.2644] 0/5 | +0.1554 [+0.0965, +0.2180] 0/5 |
+| C5 | logistic | +0.0952 [+0.0501, +0.1427] 0/5 | +0.1334 [+0.0753, +0.1967] 0/5 | +0.0961 [+0.0569, +0.1387] 0/5 |
+| C15 | logistic | +0.0777 [+0.0334, +0.1199] 0/5 | +0.1417 [+0.0887, +0.2025] 0/5 | +0.0838 [+0.0485, +0.1186] 0/5 |
+
+No LightGBM interval excludes zero on the favourable side; no cell beats
+M₀ on four of five rolling folds; Holm rejects nothing. The linear class is
+8–18 % worse with the 884 sequence columns on every cell.
+
+What M₀ itself does: its primary-fold log-loss against the class prior's
+entropy is 0.815–0.830 vs 0.864 on `fp_1.0_1.0`, 0.952–0.991 vs 0.998 on
+`fp_1.0_0.5`, and 0.998–1.023 vs 1.021 on `fp_0.5_1.0` (LightGBM; the
+logistic M₀ is 0.829–0.879, 0.961–0.998, 1.020–1.040). The 4–5 % gain on
+the symmetric target is the magnitude skill the predictability gate already
+measured — whether ±1 ATR₆₀ is reached at all — and it vanishes on the two
+asymmetric targets, where the question is which side first. Nothing here
+predicts the side, and the event sequence adds nothing to either.
 
 ## Commits
 
