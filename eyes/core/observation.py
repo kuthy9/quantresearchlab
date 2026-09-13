@@ -118,6 +118,11 @@ class ObserverConfig:
     eye_authority_mode: bool = False
     typed_transition_delta_transport: bool = False
     persist_state_projections: bool = True
+    # The scales whose events form the observation's main event clock.
+    # ``None`` publishes every active scale except 1m, which is
+    # microstructure: 84 % of all events, read by a trigger, not by the
+    # clock the Brain conditions on.
+    published_timeframes: tuple[Timeframe, ...] | None = None
 
 
 # These fields advance mechanically while an entity remains in the same
@@ -895,6 +900,18 @@ class CausalObserver:
             for spec in self.scale_specs
             if spec.enabled and spec.native_timeframe is not None
         )
+        if self.config.published_timeframes is None:
+            self._published_timeframes = tuple(
+                timeframe
+                for timeframe in self._active_timeframes
+                if timeframe is not Timeframe.M1
+            )
+        else:
+            self._published_timeframes = tuple(self.config.published_timeframes)
+            if not set(self._published_timeframes) <= set(self._active_timeframes):
+                raise ValueError(
+                    "published timeframes must be a subset of the active scales"
+                )
         if (
             len(self._active_timeframes)
             != len(set(self._active_timeframes))
@@ -3812,6 +3829,7 @@ class CausalObserver:
                 ),
                 interaction_update=interaction_update,
                 active_timeframes=self._active_timeframes,
+                published_timeframes=self._published_timeframes,
                 scale_registry_id=update.scale_registry_id,
             )
         except Exception:

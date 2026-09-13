@@ -142,6 +142,24 @@ order-block outcomes already lived on their own timeframe.
 The registry bytes changed, so `atomic_definition_identity` moved from
 `f92b24c8…1f0c` to `af834d53…f301`; `configs/model.json` pins the new value.
 
+## The 1m tape is microstructure
+
+On 2022-02-01→05 the 1m scale was 83.8 % of everything the Eye published and
+86.0 % of its transition events (`bar_completed` and `*_state` excluded); 48 %
+of the store was legacy `*_state` re-publication. The information-gain gate
+had to define its own clocks (≥5m, ≥15m) to see past it.
+
+`MarketObservation` (schema 6) now names the scales that form its main event
+clock in `published_timeframes` — every active scale except 1m unless
+`ObserverConfig.published_timeframes` says otherwise.
+`semantic_events_this_update` carries only those; the 1m events of the update
+move to `microstructure_events_this_update`, the channel a trigger reads;
+`events_this_update` is the union, and the two channels partition it — nothing
+is dropped, and the event store, the reducers and `recent_events` (the
+memory's window, which the risk engine reads for 1m sweeps) keep every scale.
+This had to wait for the crossing and outcome repairs above: until then a 5m
+level's touch was itself a 1m event.
+
 ## Scripts — `eyes/scripts/`
 
 Bounded, outcome-blind Eye studies and scans. `run_eye_authority_scan.py` is the

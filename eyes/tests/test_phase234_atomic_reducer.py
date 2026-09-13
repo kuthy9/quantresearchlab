@@ -3524,7 +3524,7 @@ def test_synthetic_no_trade_minute_is_replayable_clock_only_root() -> None:
     assert synthetic.price == synthetic_observation.price == first.price == 100.0
     synthetic_root = next(
         event
-        for event in synthetic_observation.semantic_events_this_update
+        for event in synthetic_observation.events_this_update
         if event.kind is EventKind.BAR_COMPLETED
         and event.timeframe is Timeframe.M1
     )
@@ -3584,7 +3584,7 @@ def test_synthetic_no_trade_minute_is_replayable_clock_only_root() -> None:
         ) == first_relation
     assert not any(
         event.origin is EventOrigin.SEMANTIC_ATOMIC
-        for event in synthetic_observation.semantic_events_this_update
+        for event in synthetic_observation.events_this_update
     )
 
     atomic_events = tuple(
@@ -3637,7 +3637,7 @@ def test_complete_nonreal_higher_timeframe_bar_is_published_as_clock_root() -> N
     assert final_observation is not None and prior_snapshot is not None
     roots = tuple(
         event
-        for event in final_observation.semantic_events_this_update
+        for event in final_observation.events_this_update
         if event.kind is EventKind.BAR_COMPLETED
         and event.origin is EventOrigin.NORMALIZED_DATA
         and event.known_at == _clock(5)

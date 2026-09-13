@@ -7,7 +7,7 @@ from __future__ import annotations
 from enum import Enum
 
 
-MARKET_OBSERVATION_SCHEMA_VERSION = 5
+MARKET_OBSERVATION_SCHEMA_VERSION = 6
 
 
 INTERACTION_UPDATE_SCHEMA_VERSION = 2

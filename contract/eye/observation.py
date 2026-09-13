@@ -812,6 +812,9 @@ class MarketObservation:
     ] = ()
     interaction_update: InteractionUpdate | None = None
     active_timeframes: tuple[Timeframe, ...] = ()
+    # The scales whose events form the main event clock; the rest of the
+    # active scales are microstructure.  Empty publishes every scale.
+    published_timeframes: tuple[Timeframe, ...] = ()
     scale_registry_id: str = ""
     scene_revision_id: str | None = None
     scene_added_node_ids: tuple[str, ...] = ()
@@ -851,11 +854,47 @@ class MarketObservation:
         return self._snapshot_free_identity[3]
 
     @property
-    def semantic_events_this_update(self) -> tuple[MarketEvent, ...]:
+    def events_this_update(self) -> tuple[MarketEvent, ...]:
+        """Every event of this update, on every scale."""
+
         if self.market_snapshot is not None:
             return self.market_snapshot.events_this_update
         assert self._snapshot_free_identity is not None
         return self._snapshot_free_identity[4]
+
+    @property
+    def semantic_events_this_update(self) -> tuple[MarketEvent, ...]:
+        """The main event clock: this update's events on the published scales.
+
+        An empty ``published_timeframes`` publishes every scale, which is the
+        pre-schema-6 behaviour.
+        """
+
+        if not self.published_timeframes:
+            return self.events_this_update
+        published = frozenset(self.published_timeframes)
+        return tuple(
+            event
+            for event in self.events_this_update
+            if event.timeframe in published
+        )
+
+    @property
+    def microstructure_events_this_update(self) -> tuple[MarketEvent, ...]:
+        """This update's events on the scales kept out of the main clock.
+
+        The 1m tape by default: the channel a trigger reads, and never
+        silently dropped -- the two channels partition ``events_this_update``.
+        """
+
+        if not self.published_timeframes:
+            return ()
+        published = frozenset(self.published_timeframes)
+        return tuple(
+            event
+            for event in self.events_this_update
+            if event.timeframe not in published
+        )
 
     def __post_init__(self) -> None:
         identity = self._snapshot_free_identity
