@@ -26,3 +26,17 @@ def test_the_last_block_ends_after_the_last_session_plus_horizon() -> None:
     assert pd.Timestamp(block.end) > pd.Timestamp("2022-01-07T17:00")
     assert block.emit_end == "2022-01-09T18:00"
     assert block.end == "2022-01-09T20:00"
+
+
+def test_recording_paths_changes_the_run_id_and_nothing_else_does() -> None:
+    from pathlib import Path
+
+    from brain.scripts.build_gate_blocks import run_id
+
+    root = Path(__file__).resolve().parents[2]
+    source = root / "data/processed/nq_1m_previous_session_front_v2_3_2017_2026.parquet"
+    model = root / "configs/model.json"
+    plain = run_id(source=source, model=model, first_session="2022-01-03", last_session="2022-06-06")
+    again = run_id(source=source, model=model, first_session="2022-01-03", last_session="2022-06-06", recorder=None)
+    paths = run_id(source=source, model=model, first_session="2022-01-03", last_session="2022-06-06", recorder="paths_v1")
+    assert plain == again and plain != paths and len(paths) == 16

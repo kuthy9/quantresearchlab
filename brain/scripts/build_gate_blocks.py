@@ -70,7 +70,9 @@ def globex_weeks(first_session: str, last_session: str, *, warmup_days: int = 7)
     return blocks
 
 
-def run_id(*, source: Path, model: Path, first_session: str, last_session: str) -> str:
+def run_id(
+    *, source: Path, model: Path, first_session: str, last_session: str, recorder: str | None = None,
+) -> str:
     from eyes.core.semantics import load_semantic_selection
 
     payload = json.loads(model.read_text(encoding="utf-8"))
@@ -86,13 +88,18 @@ def run_id(*, source: Path, model: Path, first_session: str, last_session: str) 
             (ROOT / "configs" / "data_splits.json").read_bytes()
         ).hexdigest(),
     }
+    if recorder is not None:
+        digest_input["recorder"] = recorder
     return hashlib.sha256(json.dumps(digest_input, sort_keys=True).encode()).hexdigest()[:16]
 
 
-def _build_one(job: tuple[Block, str, str, str]) -> str:
-    block, source, model, out_root = job
+def _build_one(job: tuple[Block, str, str, str, bool]) -> str:
+    block, source, model, out_root, record_paths = job
     out = Path(out_root) / block.week
-    if (out / "dataset.npz").exists() and (out / "events.parquet").exists():
+    cached = (out / "dataset.npz").exists() and (out / "events.parquet").exists()
+    if record_paths:
+        cached = cached and (out / "paths.parquet").exists()
+    if cached:
         return f"{block.week}: cached"
     started = time.monotonic()
     dataset = build_dataset(
@@ -102,11 +109,12 @@ def _build_one(job: tuple[Block, str, str, str]) -> str:
         end=block.end,
         model_path=Path(model),
         root=ROOT,
+        record_paths=record_paths,
     )
     save_block(dataset, out, emit_end=block.emit_end)
     return (
         f"{block.week}: {len(dataset.index)} clocks, {len(dataset.events)} events, "
-        f"{(time.monotonic() - started) / 60:.1f} min"
+        f"{len(dataset.paths)} path steps, {(time.monotonic() - started) / 60:.1f} min"
     )
 
 
@@ -118,12 +126,17 @@ def main() -> None:
     parser.add_argument("--last-session", default="2022-06-06")
     parser.add_argument("--output-root", default="outputs/information_gain_gate")
     parser.add_argument("--workers", type=int, default=1)
+    parser.add_argument(
+        "--record-paths", action="store_true",
+        help="also log every new Group-5 path step (the Setup gate's unit); changes the run id",
+    )
     args = parser.parse_args()
+    recorder = "paths_v1" if args.record_paths else None
 
     source, model = ROOT / args.source, ROOT / args.model
     identity = run_id(
         source=source, model=model,
-        first_session=args.first_session, last_session=args.last_session,
+        first_session=args.first_session, last_session=args.last_session, recorder=recorder,
     )
     out_root = ROOT / args.output_root / identity / "blocks"
     out_root.mkdir(parents=True, exist_ok=True)
@@ -137,13 +150,14 @@ def main() -> None:
                 "source": str(source),
                 "model": str(model),
                 "block_rule": BLOCK_RULE,
+                "recorder": recorder,
                 "blocks": [asdict(block) for block in blocks],
             },
             indent=2,
         )
     )
     print(f"run {identity}: {len(blocks)} blocks -> {out_root}", flush=True)
-    jobs = [(block, str(source), str(model), str(out_root)) for block in blocks]
+    jobs = [(block, str(source), str(model), str(out_root), args.record_paths) for block in blocks]
     started = time.monotonic()
     if args.workers > 1:
         with ProcessPoolExecutor(max_workers=args.workers) as pool:
