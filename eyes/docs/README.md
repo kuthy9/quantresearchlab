@@ -160,6 +160,39 @@ memory's window, which the risk engine reads for 1m sweeps) keep every scale.
 This had to wait for the crossing and outcome repairs above: until then a 5m
 level's touch was itself a 1m event.
 
+## A primitive is a definition, not a timeframe role
+
+Displacement, the FVG / order-block zones and the dealing range each ran on
+one scale fixed in their protocol file (5m, 5m, 1H) and repeated in the
+tracker, the entity validators, the emitter's recorder and the store's
+contract. On the 2022 gate dataset twelve of the Brain's 150 features were
+NaN on every row for that reason alone: `{1m,15m,1H,4H}_displacement_score`
+and `{1m,5m,15m,4H}_range_{width_atr,location}`. (The `*_dist_prot_*`
+features at 41–83 % NaN are a different thing — a protected swing exists only
+after a qualified BOS — and are left alone.)
+
+Structure and liquidity already ran one tracker per scale. Displacement and
+zones now do the same: `primitives_displacement.json` and
+`primitives_zones.json` name the scales they publish on (`timeframes`:
+5m, 15m, 1H, 4H), one tracker runs per active scale, every observation,
+transition and state carries its timeframe, the validators use the scale's
+own bar length (`Timeframe.minutes`), and a regular completed bar is one whose
+whole scheduled span was observed, so a session-tail 4H block counts. The
+protocol's first scale stays the one `MarketObservation.displacement`, the
+typed transition delta channel and the Group 5 entry contract read; the other
+scales publish their facts and their frames the same way. On 2022-02-01 the
+5m facts are unchanged in every kind, and 15m / 1H gained 35 / 3
+displacements, 14 / 3 FVGs and 10 / 1 base origin cores.
+
+**The dealing range is not generalized.** Group 4 is not a definition applied
+to a scale but a fusion of the 1H range with the 1m manipulation, reacceptance
+and entry-path machinery, and its registered parameters are written in those
+units (`candidate_real_h1_bars` 8–24, `range_manipulation_real_1m_bars`,
+`…_completed_h1_closes`). Running it at 15m would be a new definition with
+untested parameters, not the same one applied more widely, so
+`{1m,5m,15m,4H}_range_*` stay NaN until a per-scale range definition is
+registered.
+
 ## Scripts — `eyes/scripts/`
 
 Bounded, outcome-blind Eye studies and scans. `run_eye_authority_scan.py` is the
