@@ -26,6 +26,7 @@ from brain.core.hypothesis_proposer import (
     observation_features,
 )
 from brain.research.event_log import EVENT_COLUMNS, empty_event_log, event_row, is_transition
+from brain.research.path_log import PATH_COLUMNS, empty_path_log, path_rows
 from contract.brain.forecast import TRAJECTORY_CURVE_LENGTH
 from contract.market import Timeframe
 from eyes.core.causal import CausalMarketReader
@@ -107,6 +108,9 @@ class TrajectoryDataset:
     # One row per transition event published inside the emit window; the
     # gate's Δₜ source. Empty for every consumer that predates it.
     events: pd.DataFrame = field(default_factory=empty_event_log)
+    # One row per new Group-5 path step published inside the emit window;
+    # the Setup gate's unit. Empty for every consumer that predates it.
+    paths: pd.DataFrame = field(default_factory=empty_path_log)
 
     def __post_init__(self) -> None:
         rows = len(self.index)
@@ -136,6 +140,7 @@ def build_dataset(
     model_path: Path,
     root: Path,
     progress_every: int = 0,
+    record_paths: bool = False,
 ) -> TrajectoryDataset:
     """Run the Eye once and assemble every observation point with a full future."""
 
@@ -157,6 +162,7 @@ def build_dataset(
     future_low_rows: list[np.ndarray] = []
     history: list[float] = []
     event_rows: list[dict] = []
+    path_row_list: list[dict] = []
     seen = 0
 
     for bar in iter_completed_bars(frame):
@@ -175,6 +181,28 @@ def build_dataset(
         snapshot = observation.market_snapshot
         if snapshot is None or snapshot.asof < emit_from:
             continue
+        if len(history) <= CONTEXT_LOOKBACK_MINUTES:
+            continue
+        state = snapshot.timeframe_states.get(Timeframe.M1)
+        atr = getattr(getattr(state, "quality", None), "atr", None)
+        if atr is None or float(atr) <= 0.0:
+            continue
+        atr = float(atr)
+        features = observation_features(
+            snapshot,
+            closes=history[-(CONTEXT_LOOKBACK_MINUTES + 1):],
+            bar_high_low=(float(bar.high), float(bar.low)),
+        )
+        if record_paths:
+            # Paths are recorded on every warm emit-window bar: a step
+            # published in the last hour before a break is still a Setup,
+            # even though no sixty-minute future exists for the state row.
+            path_row_list.extend(
+                path_rows(
+                    observation, close=float(bar.close), high=float(bar.high), low=float(bar.low),
+                    atr=atr, history=history, features=features,
+                )
+            )
         index = position.get(snapshot.asof)
         if index is None or index + FUTURE_HORIZON_MINUTES >= len(frame):
             continue
@@ -186,24 +214,11 @@ def build_dataset(
             != pd.Timedelta(minutes=FUTURE_HORIZON_MINUTES)
         ):
             continue
-        if len(history) <= CONTEXT_LOOKBACK_MINUTES:
-            continue
-        state = snapshot.timeframe_states.get(Timeframe.M1)
-        atr = getattr(getattr(state, "quality", None), "atr", None)
-        if atr is None or float(atr) <= 0.0:
-            continue
-        atr = float(atr)
         window = slice(index + 1, index + 1 + FUTURE_HORIZON_MINUTES)
         future_close_rows.append(closes[window].copy())
         future_high_rows.append(highs[window].copy())
         future_low_rows.append(lows[window].copy())
-        feature_rows.append(
-            observation_features(
-                snapshot,
-                closes=history[-(CONTEXT_LOOKBACK_MINUTES + 1):],
-                bar_high_low=(float(bar.high), float(bar.low)),
-            )
-        )
+        feature_rows.append(features)
         stamps.append(snapshot.asof)
         price_rows.append(
             {
@@ -231,6 +246,11 @@ def build_dataset(
             pd.DataFrame(event_rows, columns=list(EVENT_COLUMNS))
             if event_rows
             else empty_event_log()
+        ),
+        paths=(
+            pd.DataFrame(path_row_list, columns=list(PATH_COLUMNS))
+            if path_row_list
+            else empty_path_log()
         ),
     )
 

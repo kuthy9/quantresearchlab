@@ -101,3 +101,34 @@ def test_a_clock_whose_future_crosses_a_session_gap_is_not_sampled(synthetic_blo
     assert not ((minute_of_day >= 16 * 60) & (minute_of_day <= 17 * 60)).any()
     assert (minute_of_day == 15 * 60 + 59).any()
     assert (minute_of_day >= 18 * 60).any()  # the evening half of the session is sampled
+
+
+def test_blocks_carry_a_path_log_cut_at_emit_end(tmp_path) -> None:
+    from brain.research.path_log import PATH_COLUMNS
+
+    source = write_synthetic_ohlcv(session_bars(3), tmp_path / "synthetic.parquet")
+    dataset = build_dataset(
+        source=source, warmup_start="2025-01-05", emit_start="2025-01-07", end="2025-01-09",
+        model_path=ROOT / "configs" / "model.json", root=ROOT, record_paths=True,
+    )
+    assert list(dataset.paths.columns) == list(PATH_COLUMNS)
+    save_block(dataset, tmp_path / "block", emit_end="2025-01-08T12:00")
+    assert (tmp_path / "block" / "paths.parquet").exists()
+    data = load_blocks(tmp_path)
+    assert list(data["paths"].columns) == list(PATH_COLUMNS)
+    limit = pd.Timestamp("2025-01-08T12:00", tz="America/New_York")
+    if len(data["paths"]):
+        assert (data["paths"]["known_at"] < limit).all()
+        assert data["paths"]["known_at"].dt.tz is not None
+
+
+def test_a_block_without_a_path_log_still_loads(tmp_path) -> None:
+    source = write_synthetic_ohlcv(session_bars(3), tmp_path / "synthetic.parquet")
+    dataset = build_dataset(
+        source=source, warmup_start="2025-01-05", emit_start="2025-01-07", end="2025-01-09",
+        model_path=ROOT / "configs" / "model.json", root=ROOT,
+    )
+    save_block(dataset, tmp_path / "block", emit_end=None)
+    (tmp_path / "block" / "paths.parquet").unlink()
+    data = load_blocks(tmp_path)
+    assert len(data["paths"]) == 0

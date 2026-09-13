@@ -13,6 +13,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from brain.research.path_log import PATH_COLUMNS, empty_path_log
 from contract.eye import EventKind, MarketEvent
 
 HEARTBEAT_KINDS: frozenset[str] = frozenset({"bar_completed", "market_epoch_reset"})
@@ -79,6 +80,13 @@ def save_block(dataset, out_dir: Path, *, emit_end: str | None) -> None:
             limit = pd.Timestamp(emit_end, tz="America/New_York")
             events = events[events["known_at"] < limit]
     events.to_parquet(out_dir / "events.parquet", index=False)
+    paths = getattr(dataset, "paths", None)
+    paths = paths.copy() if paths is not None else empty_path_log()
+    if len(paths):
+        paths["known_at"] = pd.to_datetime(paths["known_at"], utc=True)
+        if emit_end is not None:
+            paths = paths[paths["known_at"] < pd.Timestamp(emit_end, tz="America/New_York")]
+    paths.to_parquet(out_dir / "paths.parquet", index=False)
 
 
 def load_blocks(blocks_root: Path) -> dict:
@@ -105,5 +113,13 @@ def load_blocks(blocks_root: Path) -> dict:
         events["known_at"] = pd.to_datetime(events["known_at"], utc=True)
         events = events.sort_values(["known_at", "event_id"], kind="stable").reset_index(drop=True)
     merged["events"] = events[list(EVENT_COLUMNS)]
+    path_logs = [
+        pd.read_parquet(path / "paths.parquet") for path in parts if (path / "paths.parquet").exists()
+    ]
+    paths = pd.concat(path_logs, ignore_index=True) if path_logs else empty_path_log()
+    if len(paths):
+        paths["known_at"] = pd.to_datetime(paths["known_at"], utc=True)
+        paths = paths.sort_values(["known_at", "sequence_id", "step_id"], kind="stable").reset_index(drop=True)
+    merged["paths"] = paths[list(PATH_COLUMNS)] if len(paths) else paths
     merged["blocks"] = tuple(path.name for path in parts)
     return merged
