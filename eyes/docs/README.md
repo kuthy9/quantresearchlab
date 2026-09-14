@@ -341,7 +341,9 @@ once against its timeframe and clock and trusted until it changes, carries
 its rank map, and the geometry settle re-views only the Swings that moved
 (`ValidatedSwingHierarchy`, `test_swing_hierarchy_validation_cache.py`); and
 Group 3's terminal-until-capacity retention (+2.4 s in Group 5's source scan)
-became the exposure-based retention above.
+became the exposure-based retention above. Measured after both: late window
+35.5 s → 25.3 s (2.36× late/early against 4.23× at the start of the day),
+warm-up to bar 20,000 598 s → 415 s.
 
 ## What the runtime loads, and what was removed
 

@@ -47,14 +47,37 @@ growing owners; `sync_retained_entity_timelines` +4.1 s → +2.3 s (the swing
 keys are gone; what remains is the exposure-bounded set of frame swings, FVGs
 and zones, a plateau); `_record_frame_events` +2.9 s → +1.0 s.
 
-What remains, in order: the reducer's hierarchy working set (+5.1 s
+What remained, in order: the reducer's hierarchy working set (+5.1 s
 `reduce_timeframe_state`, +2.2 s `_settle_candidate_views`, +1.2 s
 `_settle_swing_geometry`), Group 5's source scan (+2.4 s), the liquidity
 snapshot's zone rebuild (+2.2 s), `_liquidity_state`'s sort over 97 1m
 candidates (+1.6 s), and structural-leg projection (+1.3 s; 330 vs 274 folds,
-market-dependent). None of these grows with the journal; the first two are
+market-dependent). None of these grows with the journal; the first two were
 design choices — `swing_hierarchy_hot_retention` (2048 per scale, with the
 registry's own evidence that a rank assignment reaches ≤ 4 swings back and the
 geometry tree ≤ 447) and Group 3's terminal-until-capacity retention, the
 pattern Groups 5 and the liquidity tracker replaced with an exposure-based
 retention.
+
+## After the two plateau owners (same day)
+
+The hierarchy is validated once per object and trusted until it changes, the
+rank map is carried by the validated tuple, and the geometry settle re-views
+only the Swings that moved (`ValidatedSwingHierarchy`); Group 3 terminal
+states are exposed once, then compacted (`terminal_state_retention_native_bars`,
+registered as `zone_terminal_state_retention`).
+
+| | before | after four | after six |
+|---|---|---|---|
+| late window 20,000–20,500 under profile | 47.6 s | 35.5 s | 25.3 s |
+| late / early ratio | 4.23× | 3.18× | 2.36× |
+| `observe` cumulative, late | 47.2 s | 35.1 s | 25.0 s |
+| function calls, late | 143.8 M | 137.3 M | 97.2 M |
+| warm-up bars 500 → 20,000 (no profiler) | 819 s | 598 s | 415 s |
+
+Remaining late-minus-early growth: `reduce_timeframe_state` +2.5 s,
+`_liquidity_state` +1.6 s and `_project_candidate_views` +1.6 s (97 1m
+candidates against ~30 early — the candidate-retirement plateau), the
+liquidity snapshot +1.5 s (88 S/R zones against 24), Group 5 +1.3 s, and
+structural-leg projection +1.2 s. All are bounded by registered retentions
+or by the market, none by the journal.
