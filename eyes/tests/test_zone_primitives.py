@@ -1761,8 +1761,8 @@ def test_pickle_resume_matches_uninterrupted_lifecycle() -> None:
     harness, created, _, _, _ = _form_fvg(Direction.LONG)
     harness.send((102.25, 102.5, 101.0, 101.75))
     direct_state = harness.group3.__getstate__()
-    assert zone_module.ZONE_TRACKER_CHECKPOINT_SCHEMA_VERSION == 1
-    assert direct_state["_zone_tracker_checkpoint_schema_version"] == 1
+    assert zone_module.ZONE_TRACKER_CHECKPOINT_SCHEMA_VERSION == 2
+    assert direct_state["_zone_tracker_checkpoint_schema_version"] == 2
     assert set(direct_state) == CausalZoneTracker._CHECKPOINT_FIELDS
     direct = pickle.loads(pickle.dumps(harness.group3))
     assert direct.current_update() == harness.group3.current_update()
@@ -1861,7 +1861,7 @@ def test_capacity_evicts_only_previously_exposed_terminal_state() -> None:
             mitigated_at=terminal_clock,
         )
         compactable._fvg_order.append(entity_id)
-        compactable._exposed_terminal_ids.add(entity_id)
+        compactable._terminal_exposures[entity_id] = 1
     compactable._admit_capacity(
         states=compactable._fair_value_gaps,
         order=compactable._fvg_order,

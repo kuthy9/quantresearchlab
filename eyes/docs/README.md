@@ -140,7 +140,7 @@ retirement adds its own reasons). The two are exclusive per item. FVG and
 order-block outcomes already lived on their own timeframe.
 
 The registry bytes changed, so `atomic_definition_identity` moved from
-`f92b24c8…1f0c` and, after the later protocol and registry changes in this series, settled at `29cc2ba1…500a`, then at `f43563d2…0b48` when the Group 5 terminal-context and liquidity terminal-state retention parameters were registered; `configs/model.json` pins the current value.
+`f92b24c8…1f0c` and, after the later protocol and registry changes in this series, settled at `29cc2ba1…500a`, then at `144f1d6c…e94d` when the Group 5 terminal-context, liquidity and Group 3 terminal-state retention parameters were registered; `configs/model.json` pins the current value.
 
 ## The 1m tape is microstructure
 
@@ -290,6 +290,16 @@ retention:
   legs a rebuild would produce, which the test checks field for field
   (`test_incremental_structural_legs.py`). A confirmation that sorts before a
   cached swing or an eviction from the middle of the order still rebuilds.
+- Group 3 (2026-09-14) kept every mitigated, invalidated, expired or failed
+  FVG and order block until `maximum_fvg_states` / `maximum_order_block_states`
+  (256 / 128 per scale) forced the oldest out, so the 5m frame handed Group 5
+  285 sources per bar at bar 20,000 of 2022-02 against 9 at bar 500 and each
+  terminal state held a live entity timeline. A terminal state is now
+  exposed in the output of the bar that produced it and compacted at the
+  start of the next completed native bar
+  (`terminal_state_retention_native_bars` (1) in
+  `configs/primitives_zones.json`, registered as
+  `zone_terminal_state_retention`; `test_zone_terminal_retention.py`).
 
 With every tracker's state bounded, a profile of bars 20,000–20,500 against
 0–500 on the 2022-02 tape (`observe` 11.0 s → 47.2 s, 4.29×) separated what
@@ -321,15 +331,17 @@ Four owners grew with the journal, each now bounded:
   own additions and removals (`test_event_provenance_contract.py`).
 
 Measured after the four: late window 47.6 s → 35.5 s under profile
-(4.23× → 3.18×), warm-up to bar 20,000 819 s → 598 s. What remains is not
-journal growth but a plateau reached late in the month: the per-scale
-`swing_hierarchy_hot_retention` working set (2048; 1m saturates near bar
-5,000, 5m is still filling at bar 20,000) is re-validated by
-`TimeframeState.__post_init__` on every `replace` and re-ranked per
-candidate projection (+5 s), and Group 3 retains terminal FVG/OB states
-until capacity (256 + 128 per scale), so Group 5 scans 285 sources per bar at
-bar 20,000 against 9 at bar 500 (+2.4 s). Both are design choices recorded in
-the evidence note, not fixed here.
+(4.23× → 3.18×), warm-up to bar 20,000 819 s → 598 s. What remained was not
+journal growth but a plateau reached late in the month, and both halves were
+then bounded: the per-scale `swing_hierarchy_hot_retention` working set
+(2048; 1m saturates near bar 5,000, 5m is still filling at bar 20,000) was
+re-validated by `TimeframeState.__post_init__` on every `replace` and
+re-ranked per candidate projection (+5 s) — a hierarchy is now validated
+once against its timeframe and clock and trusted until it changes, carries
+its rank map, and the geometry settle re-views only the Swings that moved
+(`ValidatedSwingHierarchy`, `test_swing_hierarchy_validation_cache.py`); and
+Group 3's terminal-until-capacity retention (+2.4 s in Group 5's source scan)
+became the exposure-based retention above.
 
 ## What the runtime loads, and what was removed
 

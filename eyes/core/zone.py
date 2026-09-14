@@ -55,7 +55,7 @@ WINDOW_RESET_REASONS = frozenset(
         "synthetic_interruption",
     }
 )
-ZONE_TRACKER_CHECKPOINT_SCHEMA_VERSION = 1
+ZONE_TRACKER_CHECKPOINT_SCHEMA_VERSION = 2
 
 
 @dataclass(frozen=True)
@@ -72,6 +72,10 @@ class ZoneProtocol:
     ob_anchor_history_bars: int = 64
     maximum_fvg_states: int = 256
     maximum_order_block_states: int = 128
+    # A terminal entity stays in the tracker for this many completed native
+    # bars, counting the bar that made it terminal, then is compacted; the
+    # terminal transition was delivered on its bar and the log owns the fact.
+    terminal_state_retention_native_bars: int = 1
 
     @property
     def timeframe(self) -> str:
@@ -103,6 +107,8 @@ class ZoneProtocol:
             or self.ob_anchor_history_bars != 64
             or self.maximum_fvg_states != 256
             or self.maximum_order_block_states != 128
+            or type(self.terminal_state_retention_native_bars) is not int
+            or self.terminal_state_retention_native_bars < 1
         ):
             raise ValueError("Group 3 protocol differs from its frozen contract")
 
@@ -132,6 +138,9 @@ class ZoneProtocol:
             maximum_order_block_states=payload[
                 "maximum_order_block_states"
             ],
+            terminal_state_retention_native_bars=payload["capacity"].get(
+                "terminal_state_retention_native_bars", -1
+            ),
         )
 
 
@@ -281,7 +290,7 @@ class CausalZoneTracker:
             "_fvg_order",
             "_order_blocks",
             "_order_block_order",
-            "_exposed_terminal_ids",
+            "_terminal_exposures",
             "_identity",
             "_window_epoch_known",
             "_source_displacement_protocol_hash",
@@ -326,7 +335,8 @@ class CausalZoneTracker:
         self._fvg_order: deque[str] = deque()
         self._order_blocks: dict[str, OrderBlockState] = {}
         self._order_block_order: deque[str] = deque()
-        self._exposed_terminal_ids: set[str] = set()
+        # Completed native outputs each terminal entity has been exposed in.
+        self._terminal_exposures: dict[str, int] = {}
         self._identity: tuple[str, int] | None = None
         self._window_epoch_known = False
         self._source_displacement_protocol_hash = (
@@ -435,9 +445,7 @@ class CausalZoneTracker:
         candidate._order_block_order = deque(
             self._order_block_order
         )
-        candidate._exposed_terminal_ids = set(
-            self._exposed_terminal_ids
-        )
+        candidate._terminal_exposures = dict(self._terminal_exposures)
         return candidate
 
     def _commit(self, candidate: "CausalZoneTracker") -> None:
@@ -552,16 +560,39 @@ class CausalZoneTracker:
         }
 
     def _mark_terminals_exposed(self) -> None:
-        self._exposed_terminal_ids.update(
-            state.fvg_id
-            for state in self._fair_value_gaps.values()
-            if self._is_fvg_terminal(state)
-        )
-        self._exposed_terminal_ids.update(
-            state.order_block_id
-            for state in self._order_blocks.values()
-            if self._is_order_block_terminal(state)
-        )
+        """Count one exposure for every terminal entity in this output."""
+
+        for entity_id, state in self._fair_value_gaps.items():
+            if self._is_fvg_terminal(state):
+                self._terminal_exposures[entity_id] = (
+                    self._terminal_exposures.get(entity_id, 0) + 1
+                )
+        for entity_id, state in self._order_blocks.items():
+            if self._is_order_block_terminal(state):
+                self._terminal_exposures[entity_id] = (
+                    self._terminal_exposures.get(entity_id, 0) + 1
+                )
+
+    def _compact_exposed_terminals(self) -> None:
+        """Drop every terminal entity exposed for the registered retention.
+
+        The terminal transition was delivered in the output that produced it
+        and the event log owns the fact; the tracker keeps the state for
+        ``terminal_state_retention_native_bars`` completed native bars and
+        no longer.  Capacity eviction below remains the fail-closed guard.
+        """
+
+        retention = self.protocol.terminal_state_retention_native_bars
+        for entity_id, exposures in tuple(self._terminal_exposures.items()):
+            if exposures < retention:
+                continue
+            if entity_id in self._fair_value_gaps:
+                self._fair_value_gaps.pop(entity_id)
+                self._fvg_order.remove(entity_id)
+            elif entity_id in self._order_blocks:
+                self._order_blocks.pop(entity_id)
+                self._order_block_order.remove(entity_id)
+            self._terminal_exposures.pop(entity_id)
 
     def _admit_capacity(
         self,
@@ -576,7 +607,7 @@ class CausalZoneTracker:
         evictable: list[tuple[pd.Timestamp, str]] = []
         for entity_id, state in states.items():
             if (
-                entity_id not in self._exposed_terminal_ids
+                entity_id not in self._terminal_exposures
                 or not terminal(state)
             ):
                 continue
@@ -600,7 +631,7 @@ class CausalZoneTracker:
         _, evicted_id = min(evictable)
         states.pop(evicted_id)
         order.remove(evicted_id)
-        self._exposed_terminal_ids.discard(evicted_id)
+        self._terminal_exposures.pop(evicted_id, None)
 
     def _clear_windows(self, *, clear_identity: bool) -> None:
         self._history.clear()
@@ -1643,6 +1674,7 @@ class CausalZoneTracker:
     ) -> ZoneUpdate:
         identity = (candle.symbol, int(candle.instrument_id))
         candle_id = self._candle_id(candle)
+        self._compact_exposed_terminals()
         fvg_transitions = self._advance_fvgs(candle)
         order_block_transitions = self._advance_order_blocks(candle)
         known_cores = set(self._base_origin_cores)

@@ -186,6 +186,14 @@
       "status": "frozen_existing_protocol",
       "source": "configs/primitives_structure_liquidity.json:liquidity_parameters",
       "threshold_semantics": "a consumed swing inventory item stays in the observation for one bar of its own scale, counting the bar of consumption (one 1m observation on 1m, five on 5m), then is dropped; LEVEL_TOUCHED / LEVEL_REACHED delivered the consumption and the event log owns it. The reducer's swept candidate is not retired by this rule: it keeps its disarm / re-arm lifecycle and leaves by candidate_retirement, so unswept_* and the candidate views are unchanged"
+    },
+    "zone_terminal_state_retention": {
+      "values": {
+        "terminal_state_retention_native_bars": 1
+      },
+      "status": "frozen_existing_protocol",
+      "source": "configs/primitives_zones.json:capacity",
+      "threshold_semantics": "a mitigated, invalidated, expired or failed Group 3 FVG or order block stays in its tracker for one completed native bar, the one that made it terminal, and is compacted at the start of the next; the terminal transition is delivered in that bar's output and the event log owns the fact, so retention changes what the frame repeats, not what the Eye states. Group 5 reads a source's failure from the frame that delivered it; a source it no longer sees is neither failed nor cold. maximum_fvg_states / maximum_order_block_states remain the capacity that live state may not exhaust"
     }
   }
 }

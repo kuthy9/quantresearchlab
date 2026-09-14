@@ -40,7 +40,7 @@ v1.2 → v1.3 delta, the lifecycle entities, and every defect the replay exposed
 are stated here rather than split across two files. Its status is
 `preregistered_development_contract_not_oos_trading_authority`: atomic identity
 `smc_semantics_v1.3` ·
-`f43563d23dc5e1ec49bd87a7d3043214abc4c90fbe7521f00b2b6d8dc1a40b48` (refrozen 2026-09-13: the target-outcome and candidate-retirement concepts, the multi-scale displacement and zone protocols, and the Group 5 terminal-context and liquidity terminal-state retention parameters), Foundation
+`144f1d6c6d6246931fda6c0f0e9cbc28d8260c851e41de7fdb9132214c3ee94d` (refrozen 2026-09-14: the target-outcome and candidate-retirement concepts, the multi-scale displacement and zone protocols, and the Group 5 terminal-context, liquidity and Group 3 terminal-state retention parameters), Foundation
 identity `smc_semantic_foundation_v2.1` ·
 `69428dbfd2a9b2aa19f0254391fca2da17aedb8d0206829572e69c0cc212a715`.
 
@@ -936,6 +936,18 @@ stay as the capacity live state may not exhaust, and the fail-closed rule for
 that case is unchanged. The transition events and the event log are
 untouched; what changed is what the current update and snapshot *repeat*, and
 therefore the state-projection fingerprint, exactly as for the Swing bound.
+
+Group 3 was the third capped population, and it followed on 2026-09-14: a
+mitigated, invalidated, expired or failed FVG or order block stayed in its
+tracker until `maximum_fvg_states` / `maximum_order_block_states` (256 / 128
+per scale) forced the oldest out, so the 5m frame handed Group 5 285 sources
+per bar at bar 20,000 of 2022-02 against 9 at bar 500, and each terminal
+state held a live entity timeline. `terminal_state_retention_native_bars`
+(zone protocol `capacity`, registered as `zone_terminal_state_retention`,
+**1**) now says the same thing for Group 3: the terminal state is repeated in
+the output of the bar that produced it and compacted at the start of the
+next completed native bar. Group 5 reads a source's failure from the frame
+that delivered it; a source it no longer sees is neither failed nor cold.
 
 ## The Structural Range is projected on 15m, 1H and 4H
 
