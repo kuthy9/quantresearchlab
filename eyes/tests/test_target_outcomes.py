@@ -94,18 +94,24 @@ def test_a_reference_level_replaced_untouched_is_invalidated_on_its_own_timefram
     three_sessions,
 ) -> None:
     events, _ = three_sessions
-    retired = [event for event in events if event.kind is EventKind.LIQUIDITY_RETIRED]
+    retired = [
+        event
+        for event in events
+        if event.kind is EventKind.LIQUIDITY_RETIRED
+        and event.details["reason"] == "reference_period_replaced"
+    ]
     assert retired, "three sessions replaced no reference level"
     reached = {_level(event) for event in events if event.kind is EventKind.LEVEL_REACHED}
     invalidated = {
         _level(event): event
         for event in events
         if event.kind is EventKind.LEVEL_INVALIDATED
+        and event.details["reason"] == "reference_period_replaced"
     }
-    untouched = {event.source_ids[0] for event in retired} - reached
+    assert all(event.details["replacement_period"] for event in retired)
+    untouched = {_level(event) for event in retired} - reached
     assert untouched, "every replaced reference level had already been reached"
     assert set(invalidated) == untouched
     for level_id, event in invalidated.items():
         assert event.timeframe.value == event.details["source_timeframe"]
-        assert event.details["reason"] == "reference_period_replaced"
         assert level_id in event.source_entity_ids

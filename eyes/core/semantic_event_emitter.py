@@ -14,7 +14,7 @@ names so the emission logic is unchanged by having a home.
 from __future__ import annotations
 
 from collections import deque
-from dataclasses import replace
+from dataclasses import dataclass, field, replace
 import hashlib
 import json
 from typing import Iterable, Mapping, Sequence
@@ -152,6 +152,22 @@ def _event(
     )
 
 
+@dataclass(frozen=True)
+class _CandidateRetirement:
+    """One candidate leaving the candidate set, as the emitter needs it."""
+
+    level_id: str
+    timeframe: Timeframe
+    side: str
+    price: float
+    lower_bound: float
+    upper_bound: float
+    strength: float
+    source_kind: str
+    reason: str
+    evidence: Mapping[str, object] = field(default_factory=dict)
+
+
 class SemanticEventEmitter:
     """Canonical event emitter plus the cross-detector ancestry index."""
 
@@ -222,6 +238,9 @@ class SemanticEventEmitter:
         # has been published, so a later crossing of the same item never
         # publishes a second one.
         self._reached_level_ids: set[str] = set()
+        # Retirement is one fact per identity: an id retired by the scan is
+        # not retired again by a later reference-period rollover.
+        self._retired_level_ids: set[str] = set()
         self._known_level_touch_ids: set[str] = set()
         # Source reducers expose complete touch histories for live zones.
         # Evicting these occurrence keys causes old touches to be rediscovered
@@ -294,6 +313,7 @@ class SemanticEventEmitter:
             bar_events.clear()
         self._level_touch_event_ids.clear()
         self._reached_level_ids.clear()
+        self._retired_level_ids.clear()
         self._candidate_level_event_ids.clear()
         self._known_level_touch_ids.clear()
         self._known_level_touch_order.clear()
@@ -330,85 +350,109 @@ class SemanticEventEmitter:
     ) -> None:
         """Emit the retirement terminals a replaced reference period leaves."""
 
-        self.emit_level_invalidations(
-            retired,
-            observed_at=observed_at,
-            reason="reference_period_replaced",
-        )
-        for item in retired:
-            self.memory.append(
-                _event(
-                    EventKind.LIQUIDITY_RETIRED,
-                    observed_at,
-                    Timeframe.M1,
-                    item.side,
-                    item.price,
-                    0.0,
-                    (item.item_id,),
-                    {
-                        "source_kind": item.kind,
-                        "replacement_period": replacement_period,
-                    },
-                    transition_reason=(
-                        "reference_period_replaced"
-                    ),
+        self.emit_candidate_retirements(
+            tuple(
+                _CandidateRetirement(
+                    level_id=item.item_id,
+                    timeframe=item.timeframe,
+                    side=item.side,
+                    price=item.price,
+                    lower_bound=item.lower_bound,
+                    upper_bound=item.upper_bound,
+                    strength=item.strength,
+                    source_kind=item.kind,
+                    reason="reference_period_replaced",
+                    evidence={"replacement_period": replacement_period},
                 )
-            )
+                for item in retired
+            ),
+            observed_at=observed_at,
+        )
 
-    def emit_level_invalidations(
+    def emit_candidate_retirements(
         self,
-        retired: Sequence[LiquidityInventoryItem],
+        retirements: Sequence["_CandidateRetirement"],
         *,
         observed_at: pd.Timestamp,
-        reason: str,
+        sequence_floor: int | None = None,
     ) -> None:
-        """Publish the outcome of every retired item that was never reached.
+        """Publish one atomic LIQUIDITY_RETIRED per candidate leaving the set.
 
-        An item that price already touched has its ``LEVEL_REACHED``; the two
-        outcomes are exclusive per item, so its retirement is bookkeeping and
-        not a second fate.
+        The reducer drops the candidate on this fact, so a cold replay of the
+        log agrees with the hot view about which levels are still candidates.
+        A level that retires and later forms again is a new candidate with a
+        new admission, so its registries are released here.
         """
 
         bar_event_id: str | None = None
-        for item in retired:
-            if item.item_id in self._reached_level_ids:
+        for retirement in retirements:
+            if retirement.level_id in self._retired_level_ids:
                 continue
             candidate_event_id = self._candidate_level_event_ids.get(
-                item.item_id
+                retirement.level_id
             )
             if candidate_event_id is None:
                 # Never admitted as a canonical candidate (a projection-only
                 # or pre-warm-up item): it has no outcome to publish.
                 continue
+            self._retired_level_ids.add(retirement.level_id)
             if bar_event_id is None:
-                # Retirement is decided while the bar that opens the next
-                # period is still being observed, so its own BAR_COMPLETED
-                # is not appended yet; the last completed 1m bar the Eye has
-                # seen is the removal's evidence.
+                # Retirement is derived from the published snapshot, or
+                # decided while the bar that opens the next period is still
+                # being observed, so that bar's own BAR_COMPLETED may not be
+                # appended yet; the last completed 1m bar the Eye has seen is
+                # the removal's evidence.
                 bar_event_id = self._latest_bar_event_id_at_or_before(
                     Timeframe.M1, observed_at
                 )
                 if bar_event_id is None:
                     return
+            if retirement.level_id not in self._reached_level_ids:
+                # The target's other outcome: it left the candidate set
+                # untouched.  A reached item's retirement is bookkeeping,
+                # not a second fate.
+                self._append_semantic_atomic(
+                    EventKind.LEVEL_INVALIDATED,
+                    observed_at,
+                    retirement.timeframe,
+                    retirement.side,
+                    retirement.price,
+                    retirement.strength,
+                    (candidate_event_id, bar_event_id),
+                    {
+                        "level_id": retirement.level_id,
+                        "source_timeframe": retirement.timeframe.value,
+                        "source_kind": retirement.source_kind,
+                        "source_inventory_kind": retirement.source_kind,
+                        "reason": retirement.reason,
+                        "invalidated_at": observed_at.isoformat(),
+                    },
+                    event_time=observed_at,
+                    zone=(retirement.lower_bound, retirement.upper_bound),
+                    source_entity_ids=(retirement.level_id,),
+                    sequence_floor=sequence_floor,
+                )
+            self._reached_level_ids.discard(retirement.level_id)
             self._append_semantic_atomic(
-                EventKind.LEVEL_INVALIDATED,
+                EventKind.LIQUIDITY_RETIRED,
                 observed_at,
-                item.timeframe,
-                item.side,
-                item.price,
-                item.strength,
+                retirement.timeframe,
+                retirement.side,
+                retirement.price,
+                retirement.strength,
                 (candidate_event_id, bar_event_id),
                 {
-                    "level_id": item.item_id,
-                    "source_timeframe": item.timeframe.value,
-                    "source_kind": item.kind,
-                    "source_inventory_kind": item.kind,
-                    "reason": reason,
-                    "invalidated_at": observed_at.isoformat(),
+                    "level_id": retirement.level_id,
+                    "source_timeframe": retirement.timeframe.value,
+                    "source_kind": retirement.source_kind,
+                    "reason": retirement.reason,
+                    "retired_at": observed_at.isoformat(),
+                    **retirement.evidence,
                 },
                 event_time=observed_at,
-                zone=(item.lower_bound, item.upper_bound),
-                source_entity_ids=(item.item_id,),
+                zone=(retirement.lower_bound, retirement.upper_bound),
+                source_entity_ids=(retirement.level_id,),
+                sequence_floor=sequence_floor,
             )
 
     def emit_boundary_structure_break_failed(

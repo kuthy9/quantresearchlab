@@ -1386,6 +1386,7 @@ _TIMEFRAME_REDUCER_KINDS = frozenset(
         EventKind.LEVEL_PENETRATED,
         EventKind.SWEEP_CONFIRMED,
         EventKind.ACCEPTANCE_CONFIRMED,
+        EventKind.LIQUIDITY_RETIRED,
         EventKind.DISPLACEMENT_OBSERVED,
         EventKind.FVG_CREATED,
         EventKind.FVG_FIRST_RETEST,
@@ -2493,6 +2494,22 @@ def reduce_timeframe_state(
             ),
             liquidity.recently_swept_ids,
         )
+    elif event.kind is EventKind.LIQUIDITY_RETIRED:
+        # The candidate set is bounded: a retired identity leaves it, and if
+        # the same level forms again it is admitted as a new candidate.
+        level_id = str(event.evidence["level_id"])
+        liquidity = _liquidity_state(
+            tuple(
+                item
+                for item in liquidity.candidates
+                if item.candidate_id != level_id
+            ),
+            tuple(
+                swept_id
+                for swept_id in liquidity.recently_swept_ids
+                if swept_id != level_id
+            ),
+        )
     elif event.kind is EventKind.DISPLACEMENT_OBSERVED:
         features = {
             str(key): float(value)
@@ -2803,6 +2820,15 @@ _DELIVERY_PHASE_TAIL_KINDS = frozenset(
     }
 )
 
+# The atomic facts the observer derives from a published snapshot and
+# appends after its projection tail.  The delivery-phase lifecycle is
+# derived from state and is not reduced back in; a candidate retirement is
+# reduced, so the next snapshot is already without the candidate.
+_POST_PUBLISH_TAIL_KINDS = _DELIVERY_PHASE_TAIL_KINDS | {
+    EventKind.LIQUIDITY_RETIRED,
+    EventKind.LEVEL_INVALIDATED,
+}
+
 _CURRENT_STATE_PROJECTION_KINDS = frozenset(
     {
         EventKind.TIMEFRAME_STATE_CHANGED,
@@ -3010,7 +3036,7 @@ class TimeframeEventReducer:
                 )
             if delivery_phase_only and not (
                 event.origin is EventOrigin.SEMANTIC_ATOMIC
-                and event.kind in _DELIVERY_PHASE_TAIL_KINDS
+                and event.kind in _POST_PUBLISH_TAIL_KINDS
             ):
                 raise ValueError(
                     "timeframe reducer delivery tail contains a foreign event"

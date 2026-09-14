@@ -79,7 +79,7 @@ from .market_state import (
     build_structural_legs,
 )
 from shares.core.scale_registry import ScaleSpec, scale_registry_id
-from .semantic_event_emitter import SemanticEventEmitter
+from .semantic_event_emitter import SemanticEventEmitter, _CandidateRetirement
 from .semantics import SemanticRegistry
 from .structure import StructureConfig, StructureTracker
 
@@ -783,6 +783,27 @@ def _typed_progression(
     return high_step, low_step, (high_step + low_step) / 2.0
 
 
+# Candidate sources whose retention is owned by another lifecycle — equal-
+# liquidity pools, mature range boundaries, and the previous-period reference
+# levels that retire when their period is replaced: the retirement scan
+# leaves them to that lifecycle.
+_LIFECYCLE_OWNED_CANDIDATE_KINDS = frozenset(
+    {
+        "equal_highs",
+        "equal_lows",
+        "formed_liquidity_pool",
+        "range_boundary",
+        "mature_range_boundary",
+        "previous_session_high",
+        "previous_session_low",
+        "previous_day_high",
+        "previous_day_low",
+        "previous_week_high",
+        "previous_week_low",
+    }
+)
+
+
 class CausalObserver:
     """Describes current market state without producing or accepting actions."""
 
@@ -1051,6 +1072,10 @@ class CausalObserver:
             if self.config.liquidity_protocol is not None
             else None
         )
+        self._liquidity_config = liquidity_config
+        # Candidate ids the observer has retired; they stay out of the
+        # inventory pipeline for the rest of the epoch.
+        self._retired_level_ids: set[str] = set()
         self._liquidity_trackers = (
             {
                 timeframe: CausalLiquidityTracker(
@@ -1337,6 +1362,7 @@ class CausalObserver:
             tracker.reset()
         self._liquidity_snapshot_cache.clear()
         self._inventory_consumption.clear()
+        self._retired_level_ids.clear()
         self._pending_pool_sweeps.clear()
         self._pending_level_crossings.clear()
         self._reference_periods.clear()
@@ -1773,6 +1799,61 @@ class CausalObserver:
                 order_block_funnel=tuple(order_block_funnel),
             )
         return self._visible_zone_update(result, timeframe)
+
+    def _candidate_retirements(
+        self,
+        snapshot: MarketSnapshot,
+    ) -> tuple[_CandidateRetirement, ...]:
+        """The candidates this snapshot shows have outlived their scale or reach.
+
+        The collection is bounded here rather than in the reducer so that the
+        bound is a fact in the log: the reducer drops a candidate on the
+        LIQUIDITY_RETIRED it publishes, and a cold replay agrees.
+        """
+
+        config = self._liquidity_config
+        if config is None:
+            return ()
+        max_age = config.candidate_retirement_max_native_age_bars
+        max_distance = config.candidate_retirement_max_distance_atr
+        retirements: list[_CandidateRetirement] = []
+        for timeframe, state in snapshot.timeframe_states.items():
+            # ``age_bars`` advances on every 1m owner fan-out, so it counts
+            # minutes on every scale; the limit is in the scale's own bars.
+            age_limit = max_age * timeframe.minutes
+            for candidate in state.liquidity.candidates:
+                if candidate.source_kind in _LIFECYCLE_OWNED_CANDIDATE_KINDS:
+                    # A pool or a range boundary is bounded and retired by
+                    # its own entity lifecycle, and the observation contract
+                    # requires the inventory to mirror that set exactly.
+                    continue
+                if candidate.age_bars > age_limit:
+                    reason = "candidate_aged_out"
+                elif (
+                    candidate.distance_atr is not None
+                    and candidate.distance_atr > max_distance
+                ):
+                    reason = "candidate_out_of_reach"
+                else:
+                    continue
+                retirements.append(
+                    _CandidateRetirement(
+                        level_id=candidate.candidate_id,
+                        timeframe=timeframe,
+                        side=candidate.side,
+                        price=candidate.price,
+                        lower_bound=candidate.lower_bound,
+                        upper_bound=candidate.upper_bound,
+                        strength=candidate.strength,
+                        source_kind=candidate.source_kind,
+                        reason=reason,
+                        evidence={
+                            "age_bars": candidate.age_bars,
+                            "distance_atr": candidate.distance_atr,
+                        },
+                    )
+                )
+        return tuple(retirements)
 
     def _visible_zone_update(
         self,
@@ -3190,6 +3271,18 @@ class CausalObserver:
             base_inventory.extend(native_inventory)
         if not self.config.range_auction_projection_only:
             base_inventory.extend(self._reference_inventory.values())
+        if self._retired_level_ids:
+            # A retired candidate is gone from the reducer's set; the tracker
+            # may still hold its source swing, so a still-visible item leaves
+            # the inventory pipeline here too, or a later crossing would reach
+            # a level the Eye no longer offers.  A consumed item is history
+            # and keeps its recorded outcome.
+            base_inventory = [
+                item
+                for item in base_inventory
+                if item.item_id not in self._retired_level_ids
+                or item.item_id in self._inventory_consumption
+            ]
         if not self.config.range_auction_projection_only:
             retained_liquidity_entities = {
                 item.zone_id
@@ -3595,8 +3688,20 @@ class CausalObserver:
             # the projection tail so the reducer never sees a physical fact in
             # that tail.  The next completed bar reduces it in stream order.
             self._emitter._record_delivery_phase_events(delivery_transitions)
+            retirements = self._candidate_retirements(market_snapshot)
+            if retirements:
+                self._retired_level_ids.update(
+                    retirement.level_id for retirement in retirements
+                )
+                self._emitter.emit_candidate_retirements(
+                    retirements,
+                    observed_at=update.asof,
+                    sequence_floor=(
+                        EventMemory._CANDIDATE_RETIREMENT_SEQUENCE_FLOOR
+                    ),
+                )
             self.memory.flush_audit()
-            if delivery_transitions:
+            if delivery_transitions or retirements:
                 self.market_snapshot_publisher._consume_committed_delivery_phase_tail()
             semantic_events = self.audit_store.events_since(audit_start)
             market_snapshot = replace(

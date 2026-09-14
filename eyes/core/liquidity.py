@@ -7,13 +7,13 @@ not rewrite the original zone.
 from __future__ import annotations
 
 from collections import deque
-import copy
+import dataclasses
 from dataclasses import dataclass, replace
 import hashlib
 import json
 import math
 from pathlib import Path
-from typing import Sequence
+from typing import Any, Sequence
 
 import pandas as pd
 
@@ -65,6 +65,11 @@ class LiquidityConfig:
     retained_zones: int = 128
     retained_pools: int = 128
     retained_touches: int = 128
+    # A candidate retires past this many bars of its own scale, or beyond
+    # this many of its scale's ATRs from the close; see the protocol's
+    # ``candidate_retirement`` note.
+    candidate_retirement_max_native_age_bars: int = 480
+    candidate_retirement_max_distance_atr: float = 20.0
 
     def __post_init__(self) -> None:
         try:
@@ -102,6 +107,10 @@ class LiquidityConfig:
             or self.retained_pools < 8
             or type(self.retained_touches) is not int
             or self.retained_touches < 8
+            or type(self.candidate_retirement_max_native_age_bars) is not int
+            or self.candidate_retirement_max_native_age_bars < 1
+            or not math.isfinite(float(self.candidate_retirement_max_distance_atr))
+            or self.candidate_retirement_max_distance_atr <= 0.0
         ):
             raise LiquidityProtocolError("invalid liquidity protocol")
 
@@ -138,6 +147,12 @@ class LiquidityConfig:
             retained_pools=int(parameters.get("retained_pools", -1)),
             retained_touches=int(
                 parameters.get("retained_touches", -1)
+            ),
+            candidate_retirement_max_native_age_bars=int(
+                parameters.get("candidate_retirement_max_native_age_bars", -1)
+            ),
+            candidate_retirement_max_distance_atr=float(
+                parameters.get("candidate_retirement_max_distance_atr", -1.0)
             ),
         )
 
@@ -1655,7 +1670,7 @@ class CausalLiquidityTracker:
             1 for _ in new_reference_items
         )
         rollback_state = (
-            copy.deepcopy(self.__dict__)
+            self._rollback_snapshot()
             if (
                 candle.real_completed
                 and (new_swing_ids or new_reference_count)
@@ -1722,6 +1737,35 @@ class CausalLiquidityTracker:
                 self.__dict__.clear()
                 self.__dict__.update(rollback_state)
             raise
+
+    def _rollback_snapshot(self) -> dict[str, Any]:
+        """A bounded copy of the state a failed update must restore.
+
+        Every container is copied one level deep and every mutable record
+        inside it is copied; the frozen states, tuples and timestamps under
+        them are shared, because nothing in an update mutates them.  A deep
+        copy of the whole ``__dict__`` walked all of that on every new swing
+        once retention was at capacity, and grew with the retained history.
+        """
+
+        snapshot: dict[str, Any] = {}
+        for name, value in self.__dict__.items():
+            if isinstance(value, dict):
+                snapshot[name] = {
+                    key: (
+                        dataclasses.replace(item)
+                        if isinstance(item, (_ZoneRecord, _PoolRecord, _PoolGeneration))
+                        else item
+                    )
+                    for key, item in value.items()
+                }
+            elif isinstance(value, deque):
+                snapshot[name] = deque(value, maxlen=value.maxlen)
+            elif isinstance(value, (set, list)):
+                snapshot[name] = type(value)(value)
+            else:
+                snapshot[name] = value
+        return snapshot
 
     def snapshot(
         self,

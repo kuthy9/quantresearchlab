@@ -2402,13 +2402,17 @@ class FairValueGapState:
             for value in self.source_candle_starts
         )
         object.__setattr__(self, "source_candle_starts", starts)
+        # Three consecutive completed bars of this scale.  A scheduled span
+        # can be shorter than the nominal bar (a session-tail 4H block is
+        # three hours), so consecutive means no gap longer than one bar.
         bar = pd.Timedelta(minutes=self.timeframe.minutes)
+        zero = pd.Timedelta(0)
         if (
             len(starts) != 3
             or len(set(starts)) != 3
             or starts != tuple(sorted(starts))
-            or starts[1] - starts[0] != bar
-            or starts[2] - starts[1] != bar
+            or not zero < starts[1] - starts[0] <= bar
+            or not zero < starts[2] - starts[1] <= bar
         ):
             raise ValueError("FVG source candle clocks are invalid")
         for name in (
@@ -2448,8 +2452,7 @@ class FairValueGapState:
                     aware_timestamp(value, name=f"fvg.{name}"),
                 )
         if (
-            starts[-1] > self.formed_at
-            or self.formed_at != starts[-1] + bar
+            not zero < self.formed_at - starts[-1] <= bar
             or self.confirmed_at != self.formed_at
             or self.state_started_at < self.confirmed_at
             or self.last_updated_at < self.state_started_at
@@ -2872,12 +2875,17 @@ class OrderBlockState:
                     name,
                     aware_timestamp(value, name=f"order_block.{name}"),
                 )
+        # The anchor is the bar before the displacement's first bar; that
+        # bar's scheduled span can be shorter than the nominal bar.
+        anchor_gap = self.source_displacement_started_at - self.anchor_end
         if (
             self.anchor_end <= self.anchor_start
             or self.anchor_end > self.formed_at
-            or self.anchor_end
-            != self.source_displacement_started_at
-            - pd.Timedelta(minutes=self.timeframe.minutes)
+            or not (
+                pd.Timedelta(0)
+                < anchor_gap
+                <= pd.Timedelta(minutes=self.timeframe.minutes)
+            )
             or self.source_displacement_started_at
             > self.source_displacement_active_at
             or self.source_bos_pending_at > self.source_displacement_started_at

@@ -61,6 +61,11 @@
       "status": "canonical_emitted"
     },
     {
+      "concept": "candidate_retirement",
+      "event_kind": "liquidity_retired",
+      "status": "canonical_emitted"
+    },
+    {
       "concept": "base_origin_core",
       "event_kind": "origin_zone_created",
       "status": "compatibility_alias_not_emitted"
@@ -362,6 +367,21 @@
         "stable incremental first-passage information after distance, trend, session, and volatility controls"
       ],
       "existing_binding": "the inventory-crossing pipeline emits LEVEL_REACHED beside the first LEVEL_TOUCHED of each item; the reference-period rollover and candidate retirement emit LEVEL_INVALIDATED beside the legacy LIQUIDITY_RETIRED transport"
+    },
+    "candidate_retirement": {
+      "owner": "eye",
+      "domain_meaning": "A candidate liquidity level leaves the candidate set because it has outlived its scale or sits out of reach, or because its reference period was replaced.",
+      "operational_definition": "On every published snapshot, retire each candidate whose age exceeds candidate_retirement_max_native_age_bars of its own scale or whose distance from the close exceeds candidate_retirement_max_distance_atr of its scale's ATR; retire every previous-period reference level when its period is replaced. Emit LIQUIDITY_RETIRED on the candidate's own timeframe citing the candidate admission and the completed bar, with the reason; the timeframe reducer removes the candidate on that fact so a cold replay agrees with the hot view. A retired candidate never reached also ends as LEVEL_INVALIDATED.",
+      "hypothesized_relations": [
+        "a bounded candidate set keeps draw-on-liquidity counts and distances comparable across run lengths"
+      ],
+      "falsification_conditions": [
+        "retired candidates are reached at the same rate as retained ones within the same horizon"
+      ],
+      "oos_pass_criteria": [
+        "candidate counts per scale stationary across a multi-month replay"
+      ],
+      "existing_binding": "the observer's post-publish retirement scan and the reference-period rollover emit LIQUIDITY_RETIRED atomically; the reducer's LIQUIDITY_RETIRED branch drops the candidate"
     },
     "displacement": {
       "owner": "eye",

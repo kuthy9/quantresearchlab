@@ -152,6 +152,15 @@
       "status": "frozen_existing_protocol",
       "source": "configs/primitives_interaction.json:engineering_parameters",
       "threshold_semantics": "bounded retention for physical interaction contexts and the steps inside one path; exhaustion fails the update closed rather than evicting a live context"
+    },
+    "candidate_retirement": {
+      "values": {
+        "candidate_retirement_max_native_age_bars": 480,
+        "candidate_retirement_max_distance_atr": 20.0
+      },
+      "status": "frozen_existing_protocol",
+      "source": "configs/primitives_structure_liquidity.json:liquidity_parameters",
+      "threshold_semantics": "a candidate level retires past 480 bars of its own scale (8 h on 1m, 40 h on 5m, five sessions on 15m) or beyond 20 of its scale's ATRs; the collection is bounded instead of append-only, and a retired identity that re-forms is a new candidate"
     }
   }
 }

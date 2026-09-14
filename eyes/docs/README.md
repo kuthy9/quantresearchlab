@@ -193,6 +193,70 @@ untested parameters, not the same one applied more widely, so
 `{1m,5m,15m,4H}_range_*` stay NaN until a per-scale range definition is
 registered.
 
+## Bounded candidates, and what still grows
+
+The candidate collection was append-only by design: a sweep disarmed a level
+and kept it so a re-approach could re-arm the same identity, and nothing ever
+removed one — 102 1m candidates at bar 500, 508 at bar 3,000, and the Brain's
+`unswept_*` counts taken over every level since the run started. A candidate
+now retires past `candidate_retirement_max_native_age_bars` of its own scale
+(480: 8 h on 1m, 40 h on 5m, five sessions on 15m) or beyond
+`candidate_retirement_max_distance_atr` (20) of its scale's ATR — both in
+`configs/primitives_structure_liquidity.json`, recorded in
+`semantics/parameters_v1_3.yaml`. Retirement is an atomic `LIQUIDITY_RETIRED`
+fact (concept `candidate_retirement`) derived from the published snapshot and
+appended after it, which the timeframe reducer consumes at once, so a cold
+replay of the log agrees with the hot view; a retired item never reached also
+ends as `LEVEL_INVALIDATED`, and its still-visible inventory item leaves the
+crossing pipeline so a later touch cannot reach a level the Eye no longer
+offers. Equal-liquidity pools, mature range boundaries and previous-period
+reference levels are bounded and retired by their own lifecycles and are left
+to them. At bar 2,500 on 2022-01-09→ the 1m set holds 126 candidates.
+
+That bound did not flatten the per-bar curve, because the candidate
+projection was only one of the owners. Profiling bars 2,000–2,500 against
+bars 0–500 attributed the remaining growth to three full-rebuild patterns,
+now replaced by bounded work:
+
+- `CausalLiquidityTracker` deep-copied its entire `__dict__` as a rollback on
+  every new swing once zone retention was at capacity (128 on 1m after a
+  day) — 6 M `deepcopy` calls per 500 bars. The rollback is now a one-level
+  snapshot that copies the mutable records and shares the frozen states
+  (`test_liquidity_rollback_cost.py`).
+- `InteractionUpdate.validate_canonical_bindings` re-admitted every nested
+  Group 5 DTO through its constructor on every bar, over every closed context
+  path retained up to `maximum_context_states` — +18.7 s per 500 bars. A DTO
+  admitted once is remembered with the values it was admitted with, under a
+  weak reference, and re-admitted only if those values changed
+  (`test_interaction_admission_memo.py`).
+- the store's structural-leg contract scanned the lifetime event map for the
+  eligible `BAR_COMPLETED` roots of a leg's scale on every leg — +8.6 s per
+  500 bars. The store keeps that sequence per (semantic version, scale,
+  contract) as bars commit (`test_event_store_eligible_bar_index.py`).
+
+Measured after those three, profiling bars 2,000–2,500 against 0–500 (call
+counts, which do not depend on machine load): `deepcopy` 530 k → 6.06 M calls
+before, 56 k → 57 k after; total function calls 66 M → 198 M per 500 bars, a
+2.99× late/early ratio against 3.0× before the candidate bound. The per-bar
+curve is flatter, not flat. What still grows, in order:
+
+- `InteractionUpdate` re-validates its whole Group 5 graph every bar, and the
+  graph carries every closed context path until `maximum_context_states`
+  (256) evicts the oldest — 169 of 187 paths were closed at bar 3,000, and
+  `_is_admitted` ran 696 k times per 500 bars over them. This is the Group 5
+  twin of the append-only candidate set; the fix is a retention rule for
+  exposed terminal paths (one published bar, then out of the current update
+  while the fact stays in the log), which is an interaction-protocol
+  parameter and is not made here.
+- `build_structural_legs` rebuilds a scale's legs from every retained swing
+  whenever a swing resolves (cumulative 21.9 s → 44.7 s per 500 bars).
+- `CausalLiquidityTracker.snapshot` rebuilds its zone and pool views on every
+  bar (9.2 s → 22.5 s).
+- `publish` and `flush_audit`/`append_batch` grow with the reduced state and
+  the appended batch (10.8 s → 23.8 s, 4.2 s → 11.4 s).
+
+Those are cumulative times under a loaded machine; the ratios are the fact.
+
 ## Scripts — `eyes/scripts/`
 
 Bounded, outcome-blind Eye studies and scans. `run_eye_authority_scan.py` is the

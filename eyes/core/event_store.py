@@ -14,7 +14,7 @@ from itertools import islice
 import json
 import math
 from pathlib import Path, PurePosixPath
-from typing import Any, Callable, Generic, Iterable, Mapping, TypeVar
+from typing import Any, Callable, Generic, Iterable, Mapping, Sequence, TypeVar
 
 import pandas as pd
 
@@ -95,6 +95,10 @@ _EXACT_AUTHORITATIVE_SOURCE_KINDS: Mapping[
         EventKind.LEVEL_TOUCHED,
     ),
     EventKind.LEVEL_INVALIDATED: (
+        EventKind.LIQUIDITY_LEVEL_CREATED,
+        EventKind.BAR_COMPLETED,
+    ),
+    EventKind.LIQUIDITY_RETIRED: (
         EventKind.LIQUIDITY_LEVEL_CREATED,
         EventKind.BAR_COMPLETED,
     ),
@@ -512,6 +516,13 @@ class EventStore:
             Timeframe, str
         ] = {}
         self._unresolved_forward_reference_ids: set[str] = set()
+        # The eligible BAR_COMPLETED roots of each (semantic version, scale,
+        # contract), in commit order, so the structural-leg contract reads
+        # its pivot and path bars from a sequence proportional to the scale's
+        # bar count instead of scanning the lifetime event count.
+        self._eligible_bar_index: dict[
+            tuple[str, Timeframe, object, object], list[MarketEvent]
+        ] = {}
         self._rebuild_fingerprint_cache()
 
     def _rebuild_fingerprint_cache(self) -> None:
@@ -651,6 +662,7 @@ class EventStore:
             unresolved_forward_reference_ids=(
                 self._unresolved_forward_reference_ids
             ),
+            eligible_bar_index=self._eligible_bar_index,
         )
         terminal_reservation = self._terminal_crossing_identity(
             event,
@@ -660,6 +672,9 @@ class EventStore:
             raise ValueError("event store append is out of known_at order")
         self._events.append(event)
         self._by_id[event.event_id] = event
+        eligible_key = self._eligible_bar_key(event)
+        if eligible_key is not None:
+            self._eligible_bar_index.setdefault(eligible_key, []).append(event)
         self._digests[event.event_id] = digest
         self._full_prefix_fingerprint_hasher.update(digest.encode("ascii"))
         if bar_reservation is not None:
@@ -699,6 +714,9 @@ class EventStore:
             staged_events,
             self._by_id,
         )
+        staged_eligible_bars: dict[
+            tuple[str, Timeframe, object, object], list[MarketEvent]
+        ] = {}
         staged_terminal_event_ids: dict[str, str] = {}
         terminal_event_ids: Mapping[str, str] = ChainMap(
             staged_terminal_event_ids,
@@ -768,7 +786,12 @@ class EventStore:
                 unresolved_forward_reference_ids=(
                     staged_unresolved_forward_reference_ids
                 ),
+                eligible_bar_index=self._eligible_bar_index,
+                staged_eligible_bars=staged_eligible_bars,
             )
+            eligible_key = self._eligible_bar_key(event)
+            if eligible_key is not None:
+                staged_eligible_bars.setdefault(eligible_key, []).append(event)
             terminal_reservation = self._terminal_crossing_identity(
                 event,
                 terminal_event_ids=terminal_event_ids,
@@ -814,6 +837,8 @@ class EventStore:
             self._full_prefix_fingerprint_hasher.update(
                 digest.encode("ascii")
             )
+        for eligible_key, bars in staged_eligible_bars.items():
+            self._eligible_bar_index.setdefault(eligible_key, []).extend(bars)
         self._terminal_crossing_event_ids.update(staged_terminal_event_ids)
         self._normalized_bar_event_ids.update(staged_bar_event_ids)
         self._latest_protected_assignment_event_ids.update(
@@ -935,6 +960,14 @@ class EventStore:
             Mapping[Timeframe, str] | None
         ) = None,
         unresolved_forward_reference_ids: set[str] | None = None,
+        eligible_bar_index: (
+            Mapping[tuple[str, Timeframe, object, object], Sequence[MarketEvent]]
+            | None
+        ) = None,
+        staged_eligible_bars: (
+            Mapping[tuple[str, Timeframe, object, object], Sequence[MarketEvent]]
+            | None
+        ) = None,
     ) -> None:
         """Validate the closed causal DAG for an authoritative semantic fact.
 
@@ -1052,6 +1085,8 @@ class EventStore:
             latest_protected_assignment_event_ids_by_timeframe=(
                 latest_protected_assignment_event_ids_by_timeframe
             ),
+            eligible_bar_index=eligible_bar_index,
+            staged_eligible_bars=staged_eligible_bars,
         )
 
     @staticmethod
@@ -1066,6 +1101,14 @@ class EventStore:
         latest_protected_assignment_event_ids_by_timeframe: Mapping[
             Timeframe, str
         ],
+        eligible_bar_index: (
+            Mapping[tuple[str, Timeframe, object, object], Sequence[MarketEvent]]
+            | None
+        ) = None,
+        staged_eligible_bars: (
+            Mapping[tuple[str, Timeframe, object, object], Sequence[MarketEvent]]
+            | None
+        ) = None,
     ) -> None:
         """Fail closed when a derived fact lacks its registered parent kinds."""
 
@@ -1096,6 +1139,15 @@ class EventStore:
                 event,
                 source_parents=source_parents,
                 available_events=available_events,
+                eligible_bars=(
+                    None
+                    if eligible_bar_index is None
+                    else EventStore._indexed_eligible_bars(
+                        event,
+                        eligible_bar_index=eligible_bar_index,
+                        staged_eligible_bars=staged_eligible_bars or {},
+                    )
+                ),
             )
 
         if event.kind is EventKind.LIQUIDITY_LEVEL_CREATED:
@@ -1573,11 +1625,81 @@ class EventStore:
             )
 
     @staticmethod
+    @staticmethod
+    def _eligible_bar_key(
+        event: MarketEvent,
+    ) -> tuple[str, Timeframe, object, object] | None:
+        """The index key of a BAR root the structural-leg contract may cite."""
+
+        if (
+            event.kind is not EventKind.BAR_COMPLETED
+            or event.origin is not EventOrigin.NORMALIZED_DATA
+            or event.event_time != event.known_at
+            or not bar_evidence_coverage(event.evidence).admits_definitional_path
+        ):
+            return None
+        return (
+            event.semantic_version,
+            event.timeframe,
+            event.evidence.get("symbol"),
+            event.evidence.get("instrument_id"),
+        )
+
+    @staticmethod
+    def _indexed_eligible_bars(
+        event: MarketEvent,
+        *,
+        eligible_bar_index: Mapping[
+            tuple[str, Timeframe, object, object], Sequence[MarketEvent]
+        ],
+        staged_eligible_bars: Mapping[
+            tuple[str, Timeframe, object, object], Sequence[MarketEvent]
+        ],
+    ) -> tuple[MarketEvent, ...]:
+        """The eligible bars of ``event``'s scale and contract, in clock order."""
+
+        key = (
+            event.semantic_version,
+            event.timeframe,
+            event.evidence.get("symbol"),
+            event.evidence.get("instrument_id"),
+        )
+        return tuple(
+            sorted(
+                (
+                    *eligible_bar_index.get(key, ()),
+                    *staged_eligible_bars.get(key, ()),
+                ),
+                key=lambda candidate: (candidate.known_at, candidate.event_id),
+            )
+        )
+
+    def _eligible_bars(
+        self,
+        event: MarketEvent,
+        *,
+        staged_bars: Sequence[MarketEvent] = (),
+    ) -> tuple[MarketEvent, ...]:
+        """The committed index view, plus any bars staged in the caller's batch."""
+
+        staged: dict[tuple[str, Timeframe, object, object], list[MarketEvent]] = {}
+        for bar in staged_bars:
+            key = self._eligible_bar_key(bar)
+            if key is not None:
+                staged.setdefault(key, []).append(bar)
+        return self._indexed_eligible_bars(
+            event,
+            eligible_bar_index=self._eligible_bar_index,
+            staged_eligible_bars=staged,
+        )
+
+    @staticmethod
     def _validate_structural_leg_contract(
         event: MarketEvent,
         *,
         source_parents: tuple[MarketEvent, ...],
         available_events: Mapping[str, MarketEvent],
+        eligible_bars: tuple[MarketEvent, ...] | None = None,
     ) -> None:
         start, end = source_parents
         leg_id = EventStore._required_authoritative_text(event, "leg_id")
@@ -1774,28 +1896,31 @@ class EventStore:
                 "foundation structural leg BAR ancestry must be ordered and unique"
             )
 
-        eligible_bars = tuple(
-            sorted(
-                (
-                    candidate
-                    for candidate in available_events.values()
-                    if candidate.kind is EventKind.BAR_COMPLETED
-                    and candidate.origin is EventOrigin.NORMALIZED_DATA
-                    and candidate.semantic_version == event.semantic_version
-                    and candidate.timeframe is event.timeframe
-                    and candidate.event_time == candidate.known_at
-                    and bar_evidence_coverage(
-                        candidate.evidence
-                    ).admits_definitional_path
-                    and candidate.evidence.get("symbol") == symbol
-                    and candidate.evidence.get("instrument_id") == instrument_id
-                ),
-                key=lambda candidate: (
-                    candidate.known_at,
-                    candidate.event_id,
-                ),
+        if eligible_bars is None:
+            # No index in hand (a reducer-input check on a bare mapping):
+            # derive the sequence by the scan the index mirrors.
+            eligible_bars = tuple(
+                sorted(
+                    (
+                        candidate
+                        for candidate in available_events.values()
+                        if candidate.kind is EventKind.BAR_COMPLETED
+                        and candidate.origin is EventOrigin.NORMALIZED_DATA
+                        and candidate.semantic_version == event.semantic_version
+                        and candidate.timeframe is event.timeframe
+                        and candidate.event_time == candidate.known_at
+                        and bar_evidence_coverage(
+                            candidate.evidence
+                        ).admits_definitional_path
+                        and candidate.evidence.get("symbol") == symbol
+                        and candidate.evidence.get("instrument_id") == instrument_id
+                    ),
+                    key=lambda candidate: (
+                        candidate.known_at,
+                        candidate.event_id,
+                    ),
+                )
             )
-        )
         # The registered session calendar truncates and restarts timeframe
         # buckets around the daily maintenance break, so a swing's pivot BAR is
         # the next real bar after its pivot clock, not one arithmetic stride

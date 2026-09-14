@@ -112,6 +112,7 @@ def test_v1_3_event_bindings_match_the_emitted_and_reserved_surface() -> None:
         EventKind.ACCEPTANCE_CONFIRMED,
         EventKind.LEVEL_REACHED,
         EventKind.LEVEL_INVALIDATED,
+        EventKind.LIQUIDITY_RETIRED,
         EventKind.DISPLACEMENT_OBSERVED,
         EventKind.RAW_BOUNDARY_BREAK,
         EventKind.STRUCTURE_DIRECTION_CONFIRMED,
