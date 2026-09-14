@@ -315,6 +315,10 @@ _SWING_RANK_DEPTH = {
 # by elapsed bars.  The window carries a wide margin over both, so eviction only
 # ever drops Swings that nothing reads.
 SWING_HIERARCHY_HOT_RETENTION = 2048
+# Checkpoint restore cold-replays the committed prefix to prove the compact
+# state; it streams the prefix through the store this many events at a time,
+# so a restore never holds the journal twice or needs it in memory at all.
+CHECKPOINT_REPLAY_CHUNK_EVENTS = 4096
 
 # How many structural legs one timeframe's frame carries: the newest legs of
 # the fold, whether projected in one pass or appended incrementally.
@@ -2216,6 +2220,48 @@ def _project_candidate_views(
     )
 
 
+def _fold_owned_state(state: TimeframeState) -> TimeframeState:
+    """The part of a timeframe state the event fold alone determines.
+
+    The publisher persists two snapshot-derived projections into the reducer
+    state on every publication -- each Swing's place in the cross-timeframe
+    geometry tree and each candidate's rank and range membership -- and a
+    rank keeps surviving its Swing's eviction from the hot hierarchy.  Those
+    values depend on *when* the publisher projected them, so a cold fold of
+    the committed prefix cannot reproduce them; it reproduces everything
+    else.  Checkpoint verification compares states through this view: the
+    projections are reset on both sides and the armed inventory is re-derived
+    from the reset candidates, which reads only price, side and lifecycle.
+    """
+
+    hierarchy = tuple(
+        replace(
+            view,
+            geometric_parent_id=None,
+            geometric_depth=0,
+            child_ids=(),
+        )
+        for view in state.swing_hierarchy
+    )
+    candidates = tuple(
+        replace(
+            candidate,
+            rank=DOLCandidateView.rank,
+            range_role=LiquidityRangeRole.UNRESOLVED,
+            normalized_location_in_range=None,
+        )
+        for candidate in state.liquidity.candidates
+    )
+    return replace(
+        state,
+        swing_hierarchy=hierarchy,
+        liquidity=_liquidity_state(
+            candidates,
+            state.liquidity.recently_swept_ids,
+        ),
+    )
+
+
 def _settled_candidate_state(state: TimeframeState) -> TimeframeState:
     """Return ``state`` carrying the projections a reader sees.
 
@@ -3048,9 +3094,9 @@ class TimeframeEventReducer:
         _ = self.latest_real_m1_event
         # Checkpoint restore is the explicit cold-validation boundary.  The
         # hot reducer never scans history; restore proves that compact state
-        # is exactly reproducible from the committed prefix.
-        prefix_store = EventStore.from_events(
-            self.event_store.events_since(0)[: self._cursor],
+        # is exactly reproducible from the committed prefix, streamed through
+        # the store one bounded chunk at a time.
+        prefix_store = EventStore(
             semantic_version=self.semantic_version,
             definition_identity=(
                 self.event_store.definition_identity
@@ -3063,9 +3109,20 @@ class TimeframeEventReducer:
             semantic_version=self.semantic_version,
             expected_timeframes=self._expected_timeframes,
         )
-        verifier.consume_available()
+        for chunk in self.event_store.iter_chunks(
+            0, self._cursor, CHECKPOINT_REPLAY_CHUNK_EVENTS
+        ):
+            prefix_store.append_batch(chunk)
+            verifier.consume_available()
         if (
-            verifier.states != self.states
+            {
+                timeframe: _fold_owned_state(state)
+                for timeframe, state in verifier.states.items()
+            }
+            != {
+                timeframe: _fold_owned_state(state)
+                for timeframe, state in self.states.items()
+            }
             or verifier._epoch_cursor != self._epoch_cursor
             or verifier._last_order_key != self._last_order_key
             or verifier._latest_real_m1_event_id
@@ -4674,10 +4731,10 @@ class MarketSnapshotPublisher:
             return
         expected_session = SessionStateReducer()
         if not self._boundary_reset_pending:
-            consumed_prefix = self.event_store.events_since(0)[
-                self._event_reducer._epoch_cursor :
-                self._event_reducer.cursor
-            ]
+            consumed_prefix = self.event_store.iter_events(
+                self._event_reducer._epoch_cursor,
+                self._event_reducer.cursor,
+            )
             for event in consumed_prefix:
                 if (
                     event.kind is EventKind.BAR_COMPLETED

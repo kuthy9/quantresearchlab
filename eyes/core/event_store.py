@@ -15,7 +15,7 @@ from itertools import islice
 import json
 import math
 from pathlib import Path, PurePosixPath
-from typing import Any, Callable, Container, Generic, Iterable, Mapping, Sequence, TypeVar
+from typing import Any, Callable, Container, Generic, Iterable, Iterator, Mapping, Sequence, TypeVar
 
 import pandas as pd
 
@@ -549,6 +549,10 @@ class EventStore:
         self._events: list[MarketEvent] = []
         self._by_id: dict[str, MarketEvent] = {}
         self._digests: dict[str, str] = {}
+        # Every committed digest in commit order, 32 raw bytes each: the
+        # prefix fingerprint and the journal length read this sequence, never
+        # the event objects, so a prefix commitment does not need the events.
+        self._digest_sequence = bytearray()
         self._terminal_crossing_event_ids: dict[str, str] = {}
         self._normalized_bar_event_ids: dict[
             tuple[Timeframe, pd.Timestamp], str
@@ -578,8 +582,9 @@ class EventStore:
             digest.update(self.semantic_version.encode("utf-8"))
             digest.update(b"\0")
             digest.update(self.semantic_definition_identity.encode("ascii"))
-        for event in self._events:
-            digest.update(self._digests[event.event_id].encode("ascii"))
+        sequence = self._digest_sequence
+        for offset in range(0, len(sequence), 32):
+            digest.update(sequence[offset : offset + 32].hex().encode("ascii"))
         self._full_prefix_fingerprint_hasher = digest
 
     @property
@@ -612,7 +617,35 @@ class EventStore:
             )
 
     def __len__(self) -> int:
-        return len(self._events)
+        return len(self._digest_sequence) // 32
+
+    def iter_events(self, start: int, stop: int) -> Iterator[MarketEvent]:
+        """Yield the committed events with indexes in ``[start, stop)``."""
+
+        if (
+            type(start) is not int
+            or type(stop) is not int
+            or not 0 <= start <= stop <= len(self)
+        ):
+            raise ValueError("event store index range is out of range")
+        yield from islice(self._events, start, stop)
+
+    def iter_chunks(
+        self,
+        start: int,
+        stop: int,
+        size: int,
+    ) -> Iterator[tuple[MarketEvent, ...]]:
+        """Yield ``[start, stop)`` as consecutive tuples of at most ``size``."""
+
+        if type(size) is not int or size < 1:
+            raise ValueError("event store chunk size must be positive")
+        events = self.iter_events(start, stop)
+        while True:
+            chunk = tuple(islice(events, size))
+            if not chunk:
+                return
+            yield chunk
 
     def __eq__(self, other: object) -> bool:
         return bool(
@@ -627,6 +660,7 @@ class EventStore:
         if (
             len(self._events) != len(self._digests)
             or len(self._events) != len(self._by_id)
+            or len(self._events) * 32 != len(self._digest_sequence)
         ):
             raise ValueError("event store contains mutated committed evidence")
         for event in self._events:
@@ -718,6 +752,7 @@ class EventStore:
         if eligible_key is not None:
             self._eligible_bar_index.setdefault(eligible_key, []).append(event)
         self._digests[event.event_id] = digest
+        self._digest_sequence += bytes.fromhex(digest)
         self._full_prefix_fingerprint_hasher.update(digest.encode("ascii"))
         if bar_reservation is not None:
             key, event_id = bar_reservation
@@ -876,6 +911,7 @@ class EventStore:
             self._events.append(event)
             self._by_id[event.event_id] = event
             self._digests[event.event_id] = digest
+            self._digest_sequence += bytes.fromhex(digest)
             self._full_prefix_fingerprint_hasher.update(
                 digest.encode("ascii")
             )
@@ -4199,12 +4235,13 @@ class EventStore:
             raise ValueError("event store prefix count is out of range")
         if event_count == len(self):
             return self.fingerprint()
+        sequence = self._digest_sequence
         return _fingerprint_from_digests(
             semantic_version=self.semantic_version,
             definition_identity=self.semantic_definition_identity,
             digests=(
-                self._digests[event.event_id]
-                for event in islice(self._events, event_count)
+                sequence[offset : offset + 32].hex()
+                for offset in range(0, 32 * event_count, 32)
             ),
         )
 
