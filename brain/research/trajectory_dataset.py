@@ -204,18 +204,19 @@ def build_dataset(
                     atr=atr, history=history, features=features,
                 )
             )
+        # ``asof`` is the end of the bar just completed, so the tape row
+        # stamped ``asof`` is the first bar the Eye has not seen: the future
+        # is that row and the fifty-nine after it.
         index = position.get(snapshot.asof)
-        if index is None or index + FUTURE_HORIZON_MINUTES >= len(frame):
+        if index is None or index + FUTURE_HORIZON_MINUTES > len(frame):
             continue
+        last = index + FUTURE_HORIZON_MINUTES - 1
         # A future is sixty consecutive traded minutes, not sixty rows: a
         # window that spans the maintenance break or a weekend would splice
         # the next session onto this one and label it as one path.
-        if (
-            frame.index[index + FUTURE_HORIZON_MINUTES] - frame.index[index]
-            != pd.Timedelta(minutes=FUTURE_HORIZON_MINUTES)
-        ):
+        if frame.index[last] - frame.index[index] != pd.Timedelta(minutes=last - index):
             continue
-        window = slice(index + 1, index + 1 + FUTURE_HORIZON_MINUTES)
+        window = slice(index, index + FUTURE_HORIZON_MINUTES)
         future_close_rows.append(closes[window].copy())
         future_high_rows.append(highs[window].copy())
         future_low_rows.append(lows[window].copy())

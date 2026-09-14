@@ -95,11 +95,11 @@ def test_a_clock_whose_future_crosses_a_session_gap_is_not_sampled(synthetic_blo
     local = pd.DatetimeIndex(data["index"]).tz_convert("America/New_York")
     minute_of_day = local.hour * 60 + local.minute
     # session_bars closes each synthetic day at 17:00. The dataset's future
-    # window is the sixty rows after the row at ``asof`` (closes at asof+2 ..
-    # asof+61, a one-minute offset the research path has always carried), so
-    # the last clock with a complete traded future is 15:59.
-    assert not ((minute_of_day >= 16 * 60) & (minute_of_day <= 17 * 60)).any()
-    assert (minute_of_day == 15 * 60 + 59).any()
+    # window is the sixty tape rows from the row at ``asof`` (the bars that
+    # close at asof+1 .. asof+60), so the last clock with a complete traded
+    # future is 16:00, whose window ends on the 16:59 bar.
+    assert not ((minute_of_day > 16 * 60) & (minute_of_day <= 17 * 60)).any()
+    assert (minute_of_day == 16 * 60).any()
     assert (minute_of_day >= 18 * 60).any()  # the evening half of the session is sampled
 
 
