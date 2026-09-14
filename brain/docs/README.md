@@ -609,6 +609,36 @@ LightGBM lost to Ridge on every cell. It reached *higher* raw correlation on the
 excursion targets (0.21 and 0.25) and still scored a negative R², which is
 overfitting and miscalibration rather than signal.
 
+#### The Setup gate: Group-5 paths against their own geometry
+
+The event-sequence gate of 2026-09-12 (FAIL on all eighteen cells, twice;
+`evidence/2026-09-12_information_gain_gate.md`) asked whether the Eye's
+transition *statistics* change a first-passage forecast over ATR barriers.
+The Setup gate asks the narrower question the Brain needs: at the moment
+the Eye registers or advances one of its own Setups — a Group-5
+`zone_return` or `pool_reversal` path, at the location (K0), the held
+reacceptance (K1) or the aligned micro-break (K2) — does knowing the Setup
+change the probability that price reaches the first unswept liquidity
+level at least 1R away before it reaches the Setup's failure boundary,
+beyond what the two distances, the time left in the session and the
+recent volatility already imply? The baseline is deliberately geometry
+only, because under a driftless walk that probability is `d_f/(d_t+d_f)`
+and a model that sees the distances gets it for free.
+
+23 warmed Globex-week blocks over 2022 H1, 38,153 path steps, 26,046
+labelled instances, ten judged cells. **FAIL.** No cell's session-block
+interval for Δ log-loss (M₁ − M₀) lies below zero; the best cell,
+K0:zone_return under LightGBM, is −0.0024 [−0.0055, +0.0005] on a baseline
+of 0.56, beating geometry on two rolling folds of five; Holm rejects
+nothing. The fitted geometry model is itself within 0.01 of the
+zero-parameter ratio on four cells, and on the sweep bar (K0:pool_reversal,
+7,698 instances, failure boundary a median 0.05 ATR₆₀ away) neither beats
+the class prior. Adding the 150 Eye-state components on top makes every
+cell but one worse. What the Setups do carry is conditional shape: a target
+that pays does so with a median adverse excursion of 0.02–0.13 ATR₆₀, a
+failure has already run 0.11–0.48 against the claim, and only the
+post-break clock lives for hours. Receipt: `evidence/2026-09-14_setup_gate.md`.
+
 ### The Eye's throughput, and why the long windows are expensive
 
 Driving the Eye degrades within a single run: 33.4 bars/s over the first five
