@@ -15,7 +15,7 @@ from itertools import islice
 import json
 import math
 from pathlib import Path, PurePosixPath
-from typing import Any, Callable, Generic, Iterable, Mapping, Sequence, TypeVar
+from typing import Any, Callable, Container, Generic, Iterable, Mapping, Sequence, TypeVar
 
 import pandas as pd
 
@@ -318,6 +318,47 @@ def event_order_key(event: MarketEvent) -> tuple[pd.Timestamp, int, str]:
     """Canonical availability order; event_time never controls availability."""
 
     return event.known_at, event.sequence_no, event.event_id
+
+
+class _ForwardReferenceOverlay:
+    """One batch's view of the open forward references, without a copy.
+
+    The committed set holds every forward identity the lifetime journal still
+    leaves open, so copying it per batch grew with the journal.  The overlay
+    answers membership against the committed set plus this batch's own
+    additions and removals, and commits exactly those by ``add``/``discard``
+    -- a failed batch leaves the committed set untouched.
+    """
+
+    __slots__ = ("_committed", "_added", "_removed")
+
+    def __init__(self, committed: set[str]) -> None:
+        self._committed = committed
+        self._added: set[str] = set()
+        self._removed: set[str] = set()
+
+    def __contains__(self, item: object) -> bool:
+        if item in self._added:
+            return True
+        return item in self._committed and item not in self._removed
+
+    def add(self, item: str) -> None:
+        self._removed.discard(item)
+        if item not in self._committed:
+            self._added.add(item)
+
+    def discard(self, item: str) -> None:
+        self._added.discard(item)
+        if item in self._committed:
+            self._removed.add(item)
+
+    def commit(self) -> None:
+        for item in self._removed:
+            self._committed.discard(item)
+        for item in self._added:
+            self._committed.add(item)
+        self._added.clear()
+        self._removed.clear()
 
 
 def _event_digest(event: MarketEvent) -> str:
@@ -746,7 +787,7 @@ class EventStore:
             staged_protected_assignment_event_ids_by_timeframe,
             self._latest_protected_assignment_event_ids_by_timeframe,
         )
-        staged_unresolved_forward_reference_ids = set(
+        staged_unresolved_forward_reference_ids = _ForwardReferenceOverlay(
             self._unresolved_forward_reference_ids
         )
         last_key = (
@@ -848,9 +889,7 @@ class EventStore:
         self._latest_protected_assignment_event_ids_by_timeframe.update(
             staged_protected_assignment_event_ids_by_timeframe
         )
-        self._unresolved_forward_reference_ids = (
-            staged_unresolved_forward_reference_ids
-        )
+        staged_unresolved_forward_reference_ids.commit()
         return appended
 
     @staticmethod
@@ -903,7 +942,7 @@ class EventStore:
         event: MarketEvent,
         *,
         available_event_ids: Iterable[str],
-        unresolved_reference_ids: set[str],
+        unresolved_reference_ids: "set[str] | _ForwardReferenceOverlay",
     ) -> None:
         """Maintain the only condition under which a DAG walk is necessary."""
 
@@ -960,7 +999,7 @@ class EventStore:
         latest_protected_assignment_event_ids_by_timeframe: (
             Mapping[Timeframe, str] | None
         ) = None,
-        unresolved_forward_reference_ids: set[str] | None = None,
+        unresolved_forward_reference_ids: Container[str] | None = None,
         eligible_bar_index: (
             Mapping[tuple[str, Timeframe, object, object], Sequence[MarketEvent]]
             | None
@@ -1656,8 +1695,16 @@ class EventStore:
         staged_eligible_bars: Mapping[
             tuple[str, Timeframe, object, object], Sequence[MarketEvent]
         ],
-    ) -> tuple[MarketEvent, ...]:
-        """The eligible bars of ``event``'s scale and contract, in clock order."""
+    ) -> Sequence[MarketEvent]:
+        """The eligible bars of ``event``'s scale and contract, in clock order.
+
+        Both inputs are already in that order: the store commits in
+        ``known_at`` order and reserves one normalized BAR root per (scale,
+        clock), so an index list is strictly increasing in ``known_at``, and a
+        batch stages only bars that follow its last committed event.  The
+        view is therefore the committed list followed by the staged tail --
+        never a re-sort of the scale's whole history per structural leg.
+        """
 
         key = (
             event.semantic_version,
@@ -1665,22 +1712,18 @@ class EventStore:
             event.evidence.get("symbol"),
             event.evidence.get("instrument_id"),
         )
-        return tuple(
-            sorted(
-                (
-                    *eligible_bar_index.get(key, ()),
-                    *staged_eligible_bars.get(key, ()),
-                ),
-                key=lambda candidate: (candidate.known_at, candidate.event_id),
-            )
-        )
+        committed = eligible_bar_index.get(key, ())
+        staged = staged_eligible_bars.get(key, ())
+        if not staged:
+            return committed
+        return (*committed, *staged)
 
     def _eligible_bars(
         self,
         event: MarketEvent,
         *,
         staged_bars: Sequence[MarketEvent] = (),
-    ) -> tuple[MarketEvent, ...]:
+    ) -> Sequence[MarketEvent]:
         """The committed index view, plus any bars staged in the caller's batch."""
 
         staged: dict[tuple[str, Timeframe, object, object], list[MarketEvent]] = {}
@@ -1700,7 +1743,7 @@ class EventStore:
         *,
         source_parents: tuple[MarketEvent, ...],
         available_events: Mapping[str, MarketEvent],
-        eligible_bars: tuple[MarketEvent, ...] | None = None,
+        eligible_bars: Sequence[MarketEvent] | None = None,
     ) -> None:
         start, end = source_parents
         leg_id = EventStore._required_authoritative_text(event, "leg_id")
@@ -4323,7 +4366,7 @@ def validate_canonical_event(
     latest_protected_assignment_event_ids_by_timeframe: (
         Mapping[Timeframe, str] | None
     ) = None,
-    unresolved_forward_reference_ids: set[str] | None = None,
+    unresolved_forward_reference_ids: Container[str] | None = None,
 ) -> None:
     """Validate one reducer input against the store's authority contract."""
 

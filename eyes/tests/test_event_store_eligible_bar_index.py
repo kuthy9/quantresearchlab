@@ -60,7 +60,7 @@ def test_index_matches_scan_for_every_structural_leg_event() -> None:
     assert len(scales) > 1, "the replay produced legs on one scale only"
     for leg in legs:
         indexed = store._eligible_bars(leg, staged_bars=())
-        assert indexed == _scanned(store, leg), leg.timeframe
+        assert tuple(indexed) == _scanned(store, leg), leg.timeframe
 
 
 def test_leg_contract_reads_only_the_bars_around_its_endpoints(monkeypatch) -> None:
@@ -117,3 +117,70 @@ def test_leg_contract_reads_only_the_bars_around_its_endpoints(monkeypatch) -> N
     # Fourteen ATR bars, the path, and the bars the contract inspects
     # directly -- never the scale's whole history.
     assert len(calls) <= 3 * (14 + duration) + 4, (len(calls), len(eligible))
+
+
+def test_eligible_view_is_the_append_ordered_index_plus_the_staged_tail(monkeypatch) -> None:
+    """The view concatenates two already-ordered sequences; it never re-sorts.
+
+    The store reserves one normalized BAR root per (scale, clock) and commits
+    in ``known_at`` order, so each index list is strictly increasing in
+    ``known_at`` and every bar staged in a batch sits after the committed
+    ones.  Sorting the whole scale on every structural leg cost
+    O(N log N) per leg -- +5.9 s per 500 bars at bar 20,000 on the 2022-02
+    tape -- for an order the index already had.
+    """
+    from eyes.core import event_store as store_module
+
+    reader = CausalMarketReader(scale_specs=MODEL_SCALE_SPECS)
+    observer = CausalObserver(
+        ObserverConfig(
+            structure_protocol="configs/primitives_structure_liquidity.json",
+            liquidity_protocol="configs/primitives_structure_liquidity.json",
+            scale_specs=MODEL_SCALE_SPECS,
+            project_scene_graph=False,
+        )
+    )
+    for bar in _noisy(session_bars(1)[:300]):
+        observer.observe(reader.on_bar(bar))
+    store = observer.audit_store
+    leg = max(
+        (
+            item
+            for item in store._by_id.values()
+            if item.kind is EventKind.STRUCTURAL_LEG_CREATED
+            and item.timeframe is Timeframe.M1
+        ),
+        key=lambda item: item.known_at,
+    )
+    key = EventStore._eligible_bar_key(
+        next(
+            bar
+            for bar in store._by_id.values()
+            if bar.timeframe is Timeframe.M1
+            and EventStore._eligible_bar_key(bar) is not None
+        )
+    )
+    full = list(store._eligible_bar_index[key])
+    assert len(full) > 100
+    committed, staged = full[:-3], full[-3:]
+
+    sorts: list[object] = []
+
+    def spy(*args, **kwargs):
+        sorts.append(args)
+        return sorted(*args, **kwargs)
+
+    monkeypatch.setattr(store_module, "sorted", spy, raising=False)
+    merged = EventStore._indexed_eligible_bars(
+        leg,
+        eligible_bar_index={key: committed},
+        staged_eligible_bars={key: staged},
+    )
+    assert list(merged) == full
+    alone = EventStore._indexed_eligible_bars(
+        leg,
+        eligible_bar_index={key: committed},
+        staged_eligible_bars={},
+    )
+    assert list(alone) == committed
+    assert sorts == []

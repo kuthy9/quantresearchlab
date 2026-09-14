@@ -1945,6 +1945,45 @@ def test_append_batch_uses_overlay_without_copying_lifetime_history() -> None:
     assert store.get(child.event_id) == child
 
 
+def test_append_batch_reads_the_unresolved_reference_set_by_membership_only() -> None:
+    """The batch overlay never copies the committed forward-reference set.
+
+    Every batch began with ``set(self._unresolved_forward_reference_ids)``
+    -- a copy of every forward identity the lifetime journal still holds
+    open, 54,963 of them at bar 20,000 of 2022-02, on each of the ~1.4
+    batches a completed minute flushes.  The overlay now records only this
+    batch's additions and removals against the committed set and commits
+    them by ``add``/``discard``.
+    """
+
+    class MembershipOnlyReferences:
+        def __init__(self, items):
+            self._items = set(items)
+
+        def __contains__(self, item):
+            return item in self._items
+
+        def add(self, item):
+            self._items.add(item)
+
+        def discard(self, item):
+            self._items.discard(item)
+
+    legacy_parent = _event("legacy-parent", 0, source_ids=("later-child",))
+    store = EventStore()
+    assert store.append(legacy_parent) is True
+    assert "later-child" in store._unresolved_forward_reference_ids
+    guarded = MembershipOnlyReferences(store._unresolved_forward_reference_ids)
+    store._unresolved_forward_reference_ids = guarded
+
+    resolving = _event("later-child", 1, canonical=True)
+    another_legacy = _event("legacy-two", 2, source_ids=("much-later",))
+    assert store.append_batch((resolving, another_legacy)) == 2
+    assert "later-child" not in guarded
+    assert "much-later" in guarded
+    assert store._unresolved_forward_reference_ids is guarded
+
+
 @pytest.mark.parametrize("namespace", ("source_event_ids", "context_event_ids"))
 def test_store_rejects_dangling_canonical_event_references_atomically(
     namespace: str,
