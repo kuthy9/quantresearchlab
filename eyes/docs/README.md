@@ -291,6 +291,46 @@ retention:
   (`test_incremental_structural_legs.py`). A confirmation that sorts before a
   cached swing or an eviction from the middle of the order still rebuilds.
 
+With every tracker's state bounded, a profile of bars 20,000–20,500 against
+0–500 on the 2022-02 tape (`observe` 11.0 s → 47.2 s, 4.29×) separated what
+still grew with the journal from what had merely reached a high plateau
+([evidence/eye_growth_profile_2022-02_2026-09-14.md](evidence/eye_growth_profile_2022-02_2026-09-14.md)).
+Four owners grew with the journal, each now bounded:
+
+- `EventStore._indexed_eligible_bars` re-sorted a scale's whole committed bar
+  index on every structural-leg validation (+5.9 s per 500 bars). The index
+  is appended in `known_at` order with one normalized root per scale and
+  clock, and a batch stages only later bars, so the view is the committed
+  list followed by the staged tail (`test_event_store_eligible_bar_index.py`).
+- `EventMemory` kept a swing's still-transitionable lifecycle prefix hot for
+  ever: the structure tracker drops the oldest confirmed swing from its
+  bounded deque and declines an ambiguous forming candidate without a fact,
+  and nothing else can transition a swing, so `swing:confirmed` grew
+  33 → 933 and `swing:forming` 33 → 770 over 20,000 bars while every minute
+  walked them all (+5.7 s). A swing prefix now stays hot only while the
+  tracker exposes the swing (`_OWNER_EXPOSED_TIMELINE_NAMESPACES`,
+  `test_swing_timeline_cooling.py`).
+- The emitter walked each scale's `(clock, event id)` bar-root list from the
+  front for a confirmed swing's pivot bar, rebuilt an id→clock dictionary
+  over all of it per swing window, and scanned it for the bar after a swing
+  crossing and for exact clock roots (+1.9 s). The lists are clock-ordered
+  with one root per clock, and every lookup is a bisection
+  (`test_emitter_bar_root_lookup.py`).
+- `append_batch` copied the whole open forward-reference set per batch
+  (54,963 entries at bar 20,000; +0.9 s). A small overlay records the batch's
+  own additions and removals (`test_event_provenance_contract.py`).
+
+Measured after the four: late window 47.6 s → 35.5 s under profile
+(4.23× → 3.18×), warm-up to bar 20,000 819 s → 598 s. What remains is not
+journal growth but a plateau reached late in the month: the per-scale
+`swing_hierarchy_hot_retention` working set (2048; 1m saturates near bar
+5,000, 5m is still filling at bar 20,000) is re-validated by
+`TimeframeState.__post_init__` on every `replace` and re-ranked per
+candidate projection (+5 s), and Group 3 retains terminal FVG/OB states
+until capacity (256 + 128 per scale), so Group 5 scans 285 sources per bar at
+bar 20,000 against 9 at bar 500 (+2.4 s). Both are design choices recorded in
+the evidence note, not fixed here.
+
 ## What the runtime loads, and what was removed
 
 `eyes/core/` is 74 k lines; the runtime path (`CausalObserver` and everything

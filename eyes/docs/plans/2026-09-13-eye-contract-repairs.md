@@ -10,9 +10,13 @@ had hidden: 897 → 92 1m candidates at month end),
 replaced three full rebuilds, and in a second pass gave the three remaining
 "terminal state retained until capacity" owners an explicit retention (Group 5
 context paths, liquidity zones and pools) and made structural-leg projection
-incremental; the late/early call ratio went 3.0× → 2.99× → 2.34×, and what still
-grows is bounded by the candidate-retirement age and named in
-[README.md](../README.md). The Foundation v2.1 stack is kept and marked as the
+incremental; the late/early call ratio went 3.0× → 2.99× → 2.34×. A third pass
+on 2026-09-14 profiled bar 20,000 of 2022-02 against bar 0 and bounded the four
+owners that still grew with the journal (eligible-bar index re-sort, swing
+lifecycle prefixes that never cooled, bar-root list scans, the per-batch
+forward-reference copy): late window 47.6 s → 35.5 s, warm-up to bar 20,000
+819 s → 598 s. What remains is the swing-hierarchy working set and Group 3's
+terminal-until-capacity retention, both named in [README.md](../README.md). The Foundation v2.1 stack is kept and marked as the
 next removal. Details per task in the README
 sections written beside each change.
 
