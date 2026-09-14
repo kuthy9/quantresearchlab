@@ -7,6 +7,7 @@ do not introduce a service, database, or second event model.
 """
 from __future__ import annotations
 
+from bisect import bisect_right
 from collections import ChainMap, Counter
 from dataclasses import dataclass, fields, replace
 import hashlib
@@ -1926,35 +1927,42 @@ class EventStore:
         # the next real bar after its pivot clock, not one arithmetic stride
         # later.  Deriving both endpoint clocks from the eligible sequence keeps
         # this contract in agreement with the producer, which builds the path
-        # from the candles it actually observed.
-        start_pivot_terminal = next(
-            (bar.known_at for bar in eligible_bars if bar.known_at > start_clock),
-            None,
+        # from the candles it actually observed.  The sequence is in clock
+        # order, so each clock is a bisect, not a walk over the scale's
+        # lifetime.
+        after_start = bisect_right(
+            eligible_bars, start_clock, key=lambda bar: bar.known_at
         )
-        path_terminal = next(
-            (bar.known_at for bar in eligible_bars if bar.known_at > end_clock),
-            None,
+        after_end = bisect_right(
+            eligible_bars, end_clock, key=lambda bar: bar.known_at
         )
-        if start_pivot_terminal is None or path_terminal is None:
+        if max(after_start, after_end) >= len(eligible_bars):
             raise ValueError(
                 "foundation structural leg endpoint lacks the completed BAR "
                 "that closes its pivot"
             )
+        start_pivot_terminal = eligible_bars[after_start].known_at
+        path_terminal = eligible_bars[after_end].known_at
         # The path may cross a densified no-trade bar, but ATR may not: the
         # producer selects its fourteen strict-prior bars from real ones only,
         # and this contract has to reach past the same bars it does.
-        eligible_prior = tuple(
-            bar
-            for bar in eligible_bars
-            if bar.known_at <= start_clock
-            and bar_evidence_coverage(bar.evidence).admits_atr_window
-        )
-        expected_atr_bars = eligible_prior[-14:]
-        expected_path_bars = tuple(
-            bar
-            for bar in eligible_bars
-            if start_clock < bar.known_at <= path_terminal
-        )
+        # Fifteen, not fourteen: the first ATR bar's true range reaches the
+        # close of the real bar before it, exactly as it did when the whole
+        # prior history was walked.
+        strict_prior: list[MarketEvent] = []
+        for index in range(after_start - 1, -1, -1):
+            bar = eligible_bars[index]
+            if bar_evidence_coverage(bar.evidence).admits_atr_window:
+                strict_prior.append(bar)
+                if len(strict_prior) == 15:
+                    break
+        strict_prior.reverse()
+        expected_atr_bars = strict_prior[-14:]
+        expected_path_bars = eligible_bars[
+            after_start : bisect_right(
+                eligible_bars, path_terminal, key=lambda bar: bar.known_at
+            )
+        ]
         if (
             len(expected_atr_bars) != 14
             or tuple(bar.event_id for bar in atr_bars)
@@ -2139,13 +2147,13 @@ class EventStore:
             )
 
         true_ranges: list[float] = []
-        for index, bar in enumerate(eligible_prior):
+        for index, bar in enumerate(strict_prior):
             high = EventStore._bar_number(bar, "high")
             low = EventStore._bar_number(bar, "low")
             true_range = high - low
             if index:
                 prior_close = EventStore._bar_number(
-                    eligible_prior[index - 1],
+                    strict_prior[index - 1],
                     "close",
                 )
                 true_range = max(

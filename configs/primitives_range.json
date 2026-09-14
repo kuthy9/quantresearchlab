@@ -12,7 +12,7 @@
   "tick_size": 0.25,
   "upstream": {
     "group12_protocol_version": "3.2.0-group12.7",
-    "group12_protocol_sha256": "a8b4a6576fff314961eb7fe58e90bebee32a6f998a11e0efaeb8aac861685ef5",
+    "group12_protocol_sha256": "fddf851fae699331f537a7a27e3179f28368a35468320e45dec2885f6cc2b7a4",
     "required_typed_sources": [
       "H1 SupportResistanceState",
       "LiquidityPoolState formation and lifecycle",

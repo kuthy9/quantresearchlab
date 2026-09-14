@@ -2766,9 +2766,9 @@ def test_reference_sr_has_real_source_identity_and_independent_lifecycle() -> No
     assert tracker.snapshot()[1] == ()
 
     # A current completed-period source remains queryable after reaching a
-    # terminal descriptive lifecycle.  Retention may evict older terminal
-    # history, but must not evict the still-live reference and then attempt to
-    # recreate it non-causally on a later bar.
+    # terminal descriptive lifecycle.  Retention compacts older terminal
+    # history once it has been exposed, but must not evict the still-live
+    # reference and then attempt to recreate it non-causally on a later bar.
     live_record = tracker._zones[zone.zone_id]
     for index in range(7):
         stale_id = f"stale-reference-zone-{index}"
@@ -2793,7 +2793,7 @@ def test_reference_sr_has_real_source_identity_and_independent_lifecycle() -> No
     )
     tracker._prune_zones()
     assert zone.zone_id in tracker._zones
-    assert len(tracker._zones) == 7
+    assert set(tracker._zones) == {zone.zone_id}
 
 
 def test_reference_sr_replacement_retires_old_source_without_fake_swing() -> None:
@@ -4302,13 +4302,11 @@ def test_zone_visibility_retires_stale_evidence_and_pins_unresolved_pool() -> No
         )
     zones, pools, inventory = pool_tracker.snapshot()
     assert retired_zone_id not in {item.zone_id for item in zones}
-    assert retained_pool_id in {item.pool_id for item in pools}
-    retained_pool_item = next(
-        item
-        for item in inventory
-        if item.item_id == f"pool:{retained_pool_id}"
-    )
-    assert retained_pool_item.lifecycle is LiquidityInventoryLifecycle.CONSUMED
+    # The rejected pool was exposed on its resolution bar and, like the
+    # zone, is compacted once that exposure is complete
+    # (``terminal_state_retention_native_bars``).
+    assert retained_pool_id not in {item.pool_id for item in pools}
+    assert f"pool:{retained_pool_id}" not in {item.item_id for item in inventory}
 
     break_tracker = CausalLiquidityTracker(Timeframe.M1)
     break_source = _swing(
@@ -4664,9 +4662,10 @@ def test_one_minute_pool_projection_is_authoritative_and_starts_new_generation()
         same_clock_touch.swing_id,
         third.swing_id,
     )
-    assert next(
-        item for item in pools if item.pool_id == resolved.pool_id
-    ).lifecycle is LiquidityPoolLifecycle.REJECTED
+    # The rejected generation was exposed on its resolution bar and has since
+    # been compacted (``terminal_state_retention_native_bars``); the new
+    # generation is a new pool identity, not a reopened one.
+    assert resolved.pool_id not in {item.pool_id for item in pools}
     assert len(zones[0].member_swing_ids) <= 8
     assert len(formed.member_swing_ids) <= 8
     assert zones[0].touch_count == len(all_swings)

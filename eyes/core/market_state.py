@@ -316,6 +316,10 @@ _SWING_RANK_DEPTH = {
 # ever drops Swings that nothing reads.
 SWING_HIERARCHY_HOT_RETENTION = 2048
 
+# How many structural legs one timeframe's frame carries: the newest legs of
+# the fold, whether projected in one pass or appended incrementally.
+STRUCTURAL_LEG_RETENTION = 128
+
 
 @dataclass(frozen=True)
 class SwingRankAssignment:
@@ -4009,7 +4013,7 @@ def build_structural_legs(
             )
         )
         anchor = current
-    return tuple(output[-128:])
+    return tuple(output[-STRUCTURAL_LEG_RETENTION:])
 
 
 class SessionStateReducer:

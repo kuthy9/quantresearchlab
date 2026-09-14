@@ -4,15 +4,16 @@
   "role": "causal_descriptive_physical_facts",
   "tick_size": 0.25,
   "upstream": {
-    "group12_protocol_sha256": "a8b4a6576fff314961eb7fe58e90bebee32a6f998a11e0efaeb8aac861685ef5",
+    "group12_protocol_sha256": "fddf851fae699331f537a7a27e3179f28368a35468320e45dec2885f6cc2b7a4",
     "group3_protocol_sha256": "61168f7d2f823d3194682c36b0cb283fcbb8b5fc09448abc66c064c49620c1ea",
-    "group4_protocol_sha256": "3e88d51b2de477f6ce66c49436128737ffe301a37866d4ecbfb72f578d213030"
+    "group4_protocol_sha256": "b8b4c829d8e12b076607474d2ada3ce8f663e3a3e7ae8c6656c0621f1bc4b08b"
   },
   "engineering_parameters": {
     "m1_atr_period": 14,
     "later_hold_bars": 1,
     "maximum_context_states": 256,
-    "maximum_steps_per_path": 16
+    "maximum_steps_per_path": 16,
+    "terminal_context_retention_real_1m_bars": 1
   },
   "physical_output": {
     "reacceptance_state": "ReacceptanceState",

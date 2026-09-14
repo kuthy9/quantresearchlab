@@ -46,6 +46,7 @@ from contract.market import (
     Candle,
     Direction,
     Timeframe,
+    candle_coverage,
     clamp,
 )
 from contract.execution import (
@@ -69,13 +70,16 @@ from contract.eye import (
     MarketObservation,
     PathSequenceState,
     RANGE_AUCTION_HARD_BOUNDARY_REASONS,
+    StructuralLegState,
     StructureLifecycle,
     SwingLifecycle,
+    SwingPoint,
     SwingRelation,
 )
 from .market_state import (
     MarketSnapshot,
     MarketSnapshotPublisher,
+    STRUCTURAL_LEG_RETENTION,
     build_structural_legs,
 )
 from shares.core.scale_registry import ScaleSpec, scale_registry_id
@@ -211,6 +215,16 @@ def _typed_native_transitions_or_baseline(
     if first_observation and boundary_reason is None:
         return tuple(current)
     return tuple(transitions)
+
+
+@dataclass(frozen=True)
+class _StructuralLegProjection:
+    """One scale's projected legs and the fold state that produced them."""
+
+    resolved_swing_ids: tuple[str, ...]
+    ordered_swing_ids: tuple[str, ...]
+    last_anchor: SwingPoint | None
+    legs: tuple[StructuralLegState, ...]
 
 
 @dataclass(frozen=True)
@@ -1202,7 +1216,7 @@ class CausalObserver:
         )
         self._structural_leg_cache: dict[
             Timeframe,
-            tuple[tuple[str, ...], tuple],
+            _StructuralLegProjection,
         ] = {}
         self._last_frame_cutoff: dict[Timeframe, pd.Timestamp] = {}
         self._boundary_terminal_breaks: dict[
@@ -1959,6 +1973,139 @@ class CausalObserver:
         # terminal FVG/OB look live after a data anomaly.
         keys.difference_update(terminal)
         return keys
+
+    def _project_structural_legs(
+        self,
+        timeframe: Timeframe,
+        swings: Sequence[SwingPoint],
+        candles: Sequence[Candle],
+        *,
+        resolved_swing_ids: tuple[str, ...],
+        atr: float,
+        protected_swing_ids: tuple[str, ...],
+        structural_swing_ids: tuple[str, ...],
+    ) -> tuple[StructuralLegState, ...]:
+        """Fold the swings that resolved since the last projection.
+
+        ``build_structural_legs`` is a left fold whose only carried state is
+        the last swing in pivot order, so when the resolved swings merely
+        extend the previous pivot order the legs already projected are kept
+        and the fold resumes from that anchor.  An out-of-order confirmation
+        or an evicted swing rebuilds from every retained swing; legs the
+        rebuild reprojects keep their first-projected values.
+        """
+
+        cached = self._structural_leg_cache.get(timeframe)
+        if (
+            cached is not None
+            and cached.resolved_swing_ids == resolved_swing_ids
+        ):
+            return cached.legs
+        ordered = sorted(
+            (
+                swing
+                for swing in swings
+                if swing.lifecycle
+                in {SwingLifecycle.CONFIRMED, SwingLifecycle.BROKEN}
+                and swing.confirmed_at is not None
+            ),
+            key=lambda item: (
+                item.pivot_start,
+                item.confirmed_at,
+                item.swing_id,
+            ),
+        )
+        ordered_ids = tuple(swing.swing_id for swing in ordered)
+        retained = self._retained_structural_leg_prefix(
+            cached,
+            ordered_ids,
+            candles=candles,
+            timeframe=timeframe,
+        )
+        if retained is not None:
+            kept, resume_from = retained
+            appended = build_structural_legs(
+                timeframe,
+                (cached.last_anchor, *ordered[resume_from:]),
+                candles,
+                atr=atr,
+                protected_swing_ids=protected_swing_ids,
+                structural_swing_ids=structural_swing_ids,
+            )
+            legs = (*kept, *appended)[-STRUCTURAL_LEG_RETENTION:]
+        else:
+            projected = build_structural_legs(
+                timeframe,
+                swings,
+                candles,
+                atr=atr,
+                protected_swing_ids=protected_swing_ids,
+                structural_swing_ids=structural_swing_ids,
+            )
+            frozen_by_id = {
+                item.leg_id: item
+                for item in (() if cached is None else cached.legs)
+            }
+            legs = tuple(
+                frozen_by_id.get(item.leg_id, item) for item in projected
+            )
+        self._structural_leg_cache[timeframe] = _StructuralLegProjection(
+            resolved_swing_ids=resolved_swing_ids,
+            ordered_swing_ids=ordered_ids,
+            last_anchor=ordered[-1] if ordered else None,
+            legs=legs,
+        )
+        return legs
+
+    @staticmethod
+    def _retained_structural_leg_prefix(
+        cached: _StructuralLegProjection | None,
+        ordered_ids: tuple[str, ...],
+        *,
+        candles: Sequence[Candle],
+        timeframe: Timeframe,
+    ) -> tuple[tuple[StructuralLegState, ...], int] | None:
+        """The cached legs a full rebuild would reproject, and where to resume.
+
+        The fold sets its anchor to every swing it visits, so the legs after
+        any swing do not depend on what came before it.  When the structure
+        tracker evicted swings from the front of the pivot order and later
+        ones resolved at the back, the rebuild would produce exactly the
+        cached legs whose start swing survived and whose start pivot is still
+        inside the candle history, followed by the fold over the new swings.
+        Any other change (a swing evicted from the middle, a confirmation
+        that sorts before a cached one) returns ``None`` for a full rebuild.
+        """
+
+        if cached is None or cached.last_anchor is None or not ordered_ids:
+            return None
+        cached_ids = cached.ordered_swing_ids
+        try:
+            front = cached_ids.index(ordered_ids[0])
+        except ValueError:
+            return None
+        remaining = cached_ids[front:]
+        if ordered_ids[: len(remaining)] != remaining:
+            return None
+        window_start = next(
+            (
+                candle.start
+                for candle in candles
+                if candle.timeframe is timeframe
+                and candle_coverage(candle).admits_definitional_path
+            ),
+            None,
+        )
+        if window_start is None:
+            return None
+        surviving = set(remaining)
+        kept = tuple(
+            leg
+            for leg in cached.legs
+            if leg.start_swing_id in surviving
+            and leg.start_event_time >= window_start
+        )
+        return kept, len(remaining)
 
     @staticmethod
     def _pool_formation_source(
@@ -3127,35 +3274,15 @@ class CausalObserver:
                     and item.confirmed_at is not None
                 )
             )
-            cached_legs = self._structural_leg_cache.get(timeframe)
-            if (
-                cached_legs is not None
-                and cached_legs[0] == resolved_swing_ids
-            ):
-                structural_legs = cached_legs[1]
-            else:
-                projected_legs = build_structural_legs(
-                    timeframe,
-                    swings,
-                    histories[timeframe],
-                    atr=atr,
-                    protected_swing_ids=protected_swing_ids,
-                    structural_swing_ids=structural_swing_ids,
-                )
-                frozen_by_id = {
-                    item.leg_id: item
-                    for item in (
-                        () if cached_legs is None else cached_legs[1]
-                    )
-                }
-                structural_legs = tuple(
-                    frozen_by_id.get(item.leg_id, item)
-                    for item in projected_legs
-                )
-                self._structural_leg_cache[timeframe] = (
-                    resolved_swing_ids,
-                    structural_legs,
-                )
+            structural_legs = self._project_structural_legs(
+                timeframe,
+                swings,
+                histories[timeframe],
+                resolved_swing_ids=resolved_swing_ids,
+                atr=atr,
+                protected_swing_ids=protected_swing_ids,
+                structural_swing_ids=structural_swing_ids,
+            )
             frames[timeframe] = replace(
                 frame,
                 metrics=metrics,

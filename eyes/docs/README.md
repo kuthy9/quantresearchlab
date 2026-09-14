@@ -140,7 +140,7 @@ retirement adds its own reasons). The two are exclusive per item. FVG and
 order-block outcomes already lived on their own timeframe.
 
 The registry bytes changed, so `atomic_definition_identity` moved from
-`f92b24c8…1f0c` and, after the later protocol and registry changes in this series, settled at `29cc2ba1…500a`; `configs/model.json` pins the current value.
+`f92b24c8…1f0c` and, after the later protocol and registry changes in this series, settled at `29cc2ba1…500a`, then at `edf27ca3…27c7` when the Group 5 terminal-context and liquidity terminal-state retention parameters were registered; `configs/model.json` pins the current value.
 
 ## The 1m tape is microstructure
 
@@ -238,24 +238,39 @@ Measured after those three, profiling bars 2,000–2,500 against 0–500 (call
 counts, which do not depend on machine load): `deepcopy` 530 k → 6.06 M calls
 before, 56 k → 57 k after; total function calls 66 M → 198 M per 500 bars, a
 2.99× late/early ratio against 3.0× before the candidate bound. The per-bar
-curve is flatter, not flat. What still grows, in order:
+curve was flatter, not flat, and the owners that remained were three more
+"retain terminal state until capacity" patterns, now each given an explicit
+retention:
 
-- `InteractionUpdate` re-validates its whole Group 5 graph every bar, and the
-  graph carries every closed context path until `maximum_context_states`
-  (256) evicts the oldest — 169 of 187 paths were closed at bar 3,000, and
-  `_is_admitted` ran 696 k times per 500 bars over them. This is the Group 5
-  twin of the append-only candidate set; the fix is a retention rule for
-  exposed terminal paths (one published bar, then out of the current update
-  while the fact stays in the log), which is an interaction-protocol
-  parameter and is not made here.
-- `build_structural_legs` rebuilds a scale's legs from every retained swing
-  whenever a swing resolves (cumulative 21.9 s → 44.7 s per 500 bars).
-- `CausalLiquidityTracker.snapshot` rebuilds its zone and pool views on every
-  bar (9.2 s → 22.5 s).
-- `publish` and `flush_audit`/`append_batch` grow with the reduced state and
-  the appended batch (10.8 s → 23.8 s, 4.2 s → 11.4 s).
-
-Those are cumulative times under a loaded machine; the ratios are the fact.
+- The Group 5 update carried every closed context path until
+  `maximum_context_states` (256) evicted the oldest — 169 of 187 paths were
+  closed at bar 3,000 — and re-validated its whole graph over them every bar
+  (`_is_admitted` 696 k calls per 500 bars). A terminal path is now exposed
+  in `terminal_context_retention_real_1m_bars` (1) completed outputs, the one
+  that closed it, and then compacted from the update; the closing transition
+  was delivered on that bar and stays in the log. The capacity rule still
+  refuses to evict a live context, and a source whose context was compacted
+  is not reported as cold (`configs/primitives_interaction.json`,
+  `test_terminal_context_retention.py`).
+- `CausalLiquidityTracker` kept every reaccepted/retired zone and every
+  accepted/rejected pool until `retained_zones`/`retained_pools` (128) forced
+  the oldest out — on 2022-01-09→ at bar 2,500, 90 of the 1m tracker's 128
+  zones and 123 of its 128 pools were terminal, rebuilt into every snapshot
+  and re-projected into every inventory (361 items, 330 of them consumed
+  history). A terminal record is now kept for
+  `terminal_state_retention_native_bars` (1) completed native bars, the one
+  that made it terminal, then compacted; zones a live pool or live reference
+  source cites are kept, and capacity still fails closed on live state
+  (`configs/primitives_structure_liquidity.json`,
+  `test_terminal_liquidity_retention.py`).
+- `build_structural_legs` rebuilt a scale's legs from every retained swing
+  whenever one swing resolved. The fold's only carried state is the last
+  swing in pivot order, so the observer now resumes it from that anchor over
+  the swings that resolved since, keeps the legs it already projected, and
+  drops those whose start swing the structure tracker evicted — exactly the
+  legs a rebuild would produce, which the test checks field for field
+  (`test_incremental_structural_legs.py`). A confirmation that sorts before a
+  cached swing or an eviction from the middle of the order still rebuilds.
 
 ## What the runtime loads, and what was removed
 

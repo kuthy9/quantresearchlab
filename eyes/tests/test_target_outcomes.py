@@ -69,7 +69,14 @@ def test_every_consumed_item_is_reached_exactly_once_on_its_own_timeframe(noisy)
     }
     reached = [event for event in events if event.kind is EventKind.LEVEL_REACHED]
     assert consumed, "the replay consumed no inventory item"
-    assert Counter(_level(event) for event in reached) == Counter(consumed)
+    reached_counts = Counter(_level(event) for event in reached)
+    assert set(reached_counts.values()) == {1}
+    assert consumed <= set(reached_counts)
+    # A reached pool leaves the inventory once its resolution has been
+    # exposed (``terminal_state_retention_native_bars``); it is never offered
+    # again as a visible level.
+    offered = {item.item_id for item in observation.liquidity_inventory}
+    assert not (set(reached_counts) - consumed) & offered
     for event in reached:
         assert event.timeframe.value == event.details["source_timeframe"]
         assert _level(event) in event.source_entity_ids

@@ -147,11 +147,12 @@
     "interaction_context_capacity": {
       "values": {
         "maximum_context_states": 256,
-        "maximum_steps_per_path": 16
+        "maximum_steps_per_path": 16,
+        "terminal_context_retention_real_1m_bars": 1
       },
       "status": "frozen_existing_protocol",
       "source": "configs/primitives_interaction.json:engineering_parameters",
-      "threshold_semantics": "bounded retention for physical interaction contexts and the steps inside one path; exhaustion fails the update closed rather than evicting a live context"
+      "threshold_semantics": "bounded retention for physical interaction contexts and the steps inside one path; exhaustion fails the update closed rather than evicting a live context. A closed or censored path is exposed in terminal_context_retention_real_1m_bars completed outputs, counting the one that closed it, and is then compacted from the update; its closing transition was delivered on that bar and the fact stays in the event log, so retention changes what the update repeats, not what the Eye states"
     },
     "candidate_retirement": {
       "values": {
@@ -161,6 +162,14 @@
       "status": "frozen_existing_protocol",
       "source": "configs/primitives_structure_liquidity.json:liquidity_parameters",
       "threshold_semantics": "a candidate level retires past 480 bars of its own scale (8 h on 1m, 40 h on 5m, five sessions on 15m) or beyond 20 of its scale's ATRs; the collection is bounded instead of append-only, and a retired identity that re-forms is a new candidate"
+    },
+    "terminal_state_retention": {
+      "values": {
+        "terminal_state_retention_native_bars": 1
+      },
+      "status": "frozen_existing_protocol",
+      "source": "configs/primitives_structure_liquidity.json:liquidity_parameters",
+      "threshold_semantics": "a reaccepted or retired support/resistance zone and an accepted or rejected equal pool stay in the tracker's snapshot for one completed native bar, the one that made them terminal, and are then compacted; the terminal transition is delivered on that bar and the event log owns the fact, so retention changes what the snapshot repeats, not what the Eye states. A zone a live pool or a live completed-period source still cites is kept regardless, and retained_zones / retained_pools remain the capacity that live state may not exhaust"
     }
   }
 }

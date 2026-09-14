@@ -3,10 +3,14 @@
 **Status (end of 2026-09-13):** Tasks 0, 4, 1, 5, 2 and 7 done as written. Task 3
 done for displacement and zones; the dealing range stays 1H (its Group 4
 parameters are written in 1H/1m units, so a per-scale range is a new definition,
-not the same one applied more widely). Task 6 bounded the candidate set and
-replaced three full rebuilds; the per-bar curve is flatter, not flat, and the
-remaining owners are named in [README.md](../README.md). The Foundation v2.1
-stack is kept and marked as the next removal. Details per task in the README
+not the same one applied more widely). Task 6 bounded the candidate set,
+replaced three full rebuilds, and in a second pass gave the three remaining
+"terminal state retained until capacity" owners an explicit retention (Group 5
+context paths, liquidity zones and pools) and made structural-leg projection
+incremental; the late/early call ratio went 3.0× → 2.99× → 2.34×, and what still
+grows is bounded by the candidate-retirement age and named in
+[README.md](../README.md). The Foundation v2.1 stack is kept and marked as the
+next removal. Details per task in the README
 sections written beside each change.
 
 Branch: `eyes` (worktree `.claude/worktrees/eyes`). Merge to `main` when every task

@@ -32,6 +32,8 @@
     "candidate_retirement_max_native_age_bars": 480,
     "candidate_retirement_max_distance_atr": 20.0,
     "candidate_retirement": "a candidate retires when it has outlived the maximum age in bars of its own scale or sits beyond the maximum distance in its scale's ATR; retirement is an atomic LIQUIDITY_RETIRED fact the reducer applies, and a retired candidate never reached also ends as LEVEL_INVALIDATED",
+    "terminal_state_retention_native_bars": 1,
+    "terminal_state_retention": "a reaccepted or retired zone and an accepted or rejected pool stay in the tracker for this many completed native bars, counting the bar that made them terminal, then are compacted; the terminal transition is delivered on its bar and the event log owns the fact. A zone a live pool or a live completed-period source still cites is kept regardless, and retained_zones / retained_pools remain the capacity that live state may not exhaust",
     "retention_exhaustion": "fail_closed_when_capacity_has_neither_a_previously_observed_terminal_candidate_nor_a_same_bar_terminal_exposure",
     "terminal_exposure_buffer": "overflow_is_bounded_by_same_bar_terminal_zone_or_pool_count_and_is_compacted_on_the_next_real_completed_bar",
     "zone_visibility": "admit_a_matching_newly_confirmed_swing_then_retire_after_all_member_swings_leave_the_current_authoritative_structure_snapshot_unless_an_unresolved_pool_pins_the_zone",
