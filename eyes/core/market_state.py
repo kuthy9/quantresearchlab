@@ -1047,6 +1047,69 @@ class TimeframeQualityState:
             raise ValueError("timeframe quality clocks or metrics are invalid")
 
 
+def _rebuild_validated_swing_hierarchy(
+    swings: tuple,
+    timeframe: Timeframe,
+    known_at: pd.Timestamp,
+) -> "ValidatedSwingHierarchy":
+    return ValidatedSwingHierarchy(swings, timeframe=timeframe, known_at=known_at)
+
+
+class ValidatedSwingHierarchy(tuple):
+    """A timeframe's swing hierarchy, validated once and trusted until it changes.
+
+    ``TimeframeState`` is rebuilt by ``replace`` on nearly every reduced event
+    and on every publication, and each rebuild re-validated the whole hot
+    working set (2,048 views once full) although it was the very tuple it had
+    validated a moment before.  The tuple carries the timeframe and the clock
+    it was validated against; a state carrying the same object at that clock
+    or later trusts it, any other sequence is validated afresh.  The derived
+    maps the projections read are computed once per object.
+    """
+
+    timeframe: Timeframe
+    known_at: pd.Timestamp
+
+    def __new__(
+        cls,
+        swings: Iterable[SwingHierarchyView],
+        *,
+        timeframe: Timeframe,
+        known_at: pd.Timestamp,
+    ) -> "ValidatedSwingHierarchy":
+        self = super().__new__(cls, swings)
+        self.timeframe = timeframe
+        self.known_at = known_at
+        self._ranks: dict[str, str] | None = None
+        self._swing_ids: frozenset[str] | None = None
+        return self
+
+    def __reduce__(self):
+        return (
+            _rebuild_validated_swing_hierarchy,
+            (tuple(self), self.timeframe, self.known_at),
+        )
+
+    def trusted_by(self, timeframe: Timeframe, known_at: pd.Timestamp) -> bool:
+        """Whether validation against this timeframe and clock already holds."""
+
+        return self.timeframe is timeframe and self.known_at <= known_at
+
+    @property
+    def ranks(self) -> Mapping[str, str]:
+        if self._ranks is None:
+            self._ranks = {
+                item.swing_id: item.semantic_rank.value for item in self
+            }
+        return self._ranks
+
+    @property
+    def swing_ids(self) -> frozenset[str]:
+        if self._swing_ids is None:
+            self._swing_ids = frozenset(item.swing_id for item in self)
+        return self._swing_ids
+
+
 @dataclass(frozen=True)
 class TimeframeState:
     timeframe: Timeframe
@@ -1062,7 +1125,6 @@ class TimeframeState:
     def __post_init__(self) -> None:
         object.__setattr__(self, "timeframe", Timeframe(self.timeframe))
         object.__setattr__(self, "structural_legs", tuple(self.structural_legs))
-        object.__setattr__(self, "swing_hierarchy", tuple(self.swing_hierarchy))
         if any(leg.timeframe is not self.timeframe for leg in self.structural_legs):
             raise ValueError("timeframe state contains a foreign structural leg")
         if any(
@@ -1070,17 +1132,30 @@ class TimeframeState:
             for candidate in self.liquidity.candidates
         ):
             raise ValueError("timeframe state contains a foreign DOL candidate")
-        if any(
-            swing.timeframe is not self.timeframe
-            for swing in self.swing_hierarchy
-        ) or len({swing.swing_id for swing in self.swing_hierarchy}) != len(
-            self.swing_hierarchy
-        ) or any(
-            assignment.assigned_at > self.quality.known_at
-            for swing in self.swing_hierarchy
-            for assignment in swing.assignments
+        hierarchy = self.swing_hierarchy
+        if not (
+            isinstance(hierarchy, ValidatedSwingHierarchy)
+            and hierarchy.trusted_by(self.timeframe, self.quality.known_at)
         ):
-            raise ValueError("timeframe state contains an invalid swing hierarchy")
+            hierarchy = tuple(hierarchy)
+            if any(
+                swing.timeframe is not self.timeframe for swing in hierarchy
+            ) or len({swing.swing_id for swing in hierarchy}) != len(
+                hierarchy
+            ) or any(
+                assignment.assigned_at > self.quality.known_at
+                for swing in hierarchy
+                for assignment in swing.assignments
+            ):
+                raise ValueError(
+                    "timeframe state contains an invalid swing hierarchy"
+                )
+            hierarchy = ValidatedSwingHierarchy(
+                hierarchy,
+                timeframe=self.timeframe,
+                known_at=self.quality.known_at,
+            )
+        object.__setattr__(self, "swing_hierarchy", hierarchy)
 
     @property
     def label(self) -> str:
@@ -1996,7 +2071,7 @@ class SwingGeometryTree:
         return touched
 
     def admit(self, swing: SwingHierarchyView) -> set[str]:
-        """Place one newly confirmed Swing; return every id whose place moved."""
+        """Place one newly confirmed Swing; return every id whose view changed."""
 
         if swing.window_start is None or swing.swing_id in self._nodes:
             return set()
@@ -2013,7 +2088,11 @@ class SwingGeometryTree:
         self._children.setdefault(swing.swing_id, [])
 
         moved = {swing.swing_id}
-        self._reparent(swing.swing_id, self._find_parent(swing))
+        parent_id = self._find_parent(swing)
+        self._reparent(swing.swing_id, parent_id)
+        if parent_id is not None:
+            # The parent's place is unchanged, but its children view is not.
+            moved.add(parent_id)
         for candidate_id in self._adoptable(swing):
             incumbent = self._parent.get(candidate_id)
             if incumbent is not None and (
@@ -2112,7 +2191,11 @@ def _project_candidate_views(
     derives it in -- is the same whether they run once or ten times.
     """
 
-    ranks = {item.swing_id: item.semantic_rank.value for item in hierarchy}
+    ranks = (
+        hierarchy.ranks
+        if isinstance(hierarchy, ValidatedSwingHierarchy)
+        else {item.swing_id: item.semantic_rank.value for item in hierarchy}
+    )
     return _liquidity_state(
         (
             _candidate_range_membership(
@@ -4988,11 +5071,25 @@ class MarketSnapshotPublisher:
             return states
         updated: dict[Timeframe, TimeframeState] = {}
         for timeframe, state in states.items():
+            current = state.swing_hierarchy
+            resident = (
+                current.swing_ids
+                if isinstance(current, ValidatedSwingHierarchy)
+                else {swing.swing_id for swing in current}
+            )
+            # ``admit`` names every Swing whose view changed -- the placed
+            # Swing, its parent, the adopted and their former parents, and the
+            # subtree whose depth settled -- so only those are re-viewed.
+            if moved.isdisjoint(resident):
+                updated[timeframe] = state
+                continue
             hierarchy = tuple(
                 self._swing_geometry.view_of(swing)
-                for swing in state.swing_hierarchy
+                if swing.swing_id in moved
+                else swing
+                for swing in current
             )
-            if hierarchy == state.swing_hierarchy:
+            if hierarchy == current:
                 updated[timeframe] = state
                 continue
             settled = replace(state, swing_hierarchy=hierarchy)
