@@ -127,6 +127,13 @@ class ObserverConfig:
     # microstructure: 84 % of all events, read by a trigger, not by the
     # clock the Brain conditions on.
     published_timeframes: tuple[Timeframe, ...] | None = None
+    # Where the audit store journals committed events that have left the hot
+    # window (``None`` keeps the whole journal in memory), and how far back
+    # from the current clock the hot window reaches.  Every event stays
+    # addressable by id and index either way; the window only decides which
+    # ones a lookup reads from the heap and which from the journal file.
+    audit_journal_dir: str | None = None
+    audit_hot_window_minutes: int = 3 * 24 * 60
 
 
 # These fields advance mechanically while an entity remains in the same
@@ -864,9 +871,15 @@ class CausalObserver:
                     "observer semantic registry path differs from selection"
                 )
         self.semantic_registry = semantic_registry
+        if (
+            type(self.config.audit_hot_window_minutes) is not int
+            or self.config.audit_hot_window_minutes < 1
+        ):
+            raise ValueError("observer audit hot window must be a positive int")
         self.audit_store = EventStore(
             semantic_version=self.semantic_registry.semantic_version,
             definition_identity=self.semantic_registry.definition_identity,
+            journal_dir=self.config.audit_journal_dir,
         )
         self.market_snapshot_publisher = MarketSnapshotPublisher(
             event_store=self.audit_store,
@@ -1987,6 +2000,24 @@ class CausalObserver:
                 for state in update.order_blocks
                 if state.order_block_id not in hidden
             ),
+        )
+
+    def _spill_cold_events(self, asof: pd.Timestamp) -> None:
+        """Journal the committed events that left the hot window this update.
+
+        The reducer's unconsumed suffix must stay on the heap -- it is read
+        by identity -- so the spill stops at its cursor whatever the window
+        says.
+        """
+
+        if self.config.audit_journal_dir is None:
+            return
+        cutoff = asof - pd.Timedelta(minutes=self.config.audit_hot_window_minutes)
+        self.audit_store.spill(
+            before_index=min(
+                self.market_snapshot_publisher._event_reducer.cursor,
+                self.audit_store.index_of_first_known_at(cutoff),
+            )
         )
 
     def _retained_timeline_keys(
@@ -3965,6 +3996,7 @@ class CausalObserver:
                 event_prefix_fingerprint=self.audit_store.fingerprint(),
             )
             self.last_market_snapshot = market_snapshot
+            self._spill_cold_events(update.asof)
         except Exception:
             self._terminal_failure = (
                 "hierarchical state publication or audit commit failed after "

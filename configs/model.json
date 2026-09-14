@@ -82,6 +82,8 @@
   "observer": {
     "atr_period": 14,
     "memory_events": 512,
+    "audit_journal_dir": "outputs/eye_journal",
+    "audit_hot_window_minutes": 4320,
     "structure_protocol": "configs/primitives_structure_liquidity.json",
     "liquidity_protocol": "configs/primitives_structure_liquidity.json",
     "displacement_protocol": "configs/primitives_displacement.json",
