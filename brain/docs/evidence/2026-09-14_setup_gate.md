@@ -161,6 +161,49 @@ level only) would fail — those are new gates with their own
 pre-registration; or that a longer history or a different year would not
 change the picture. This gate is closed.
 
+## Post-hoc diagnosis of run 1 (exploratory, whole sample; not the verdict)
+
+Asked after the verdict: is the FAIL a property of the Brain's measurement
+or of the Eye's Setups? Three whole-sample readings, each with a
+session-block interval where one is quoted.
+
+1. **The Setups reach their targets less often than a driftless walk
+   would.** `hit_target − d_f/(d_t+d_f)` per cell: K0:zone_return −0.043
+   [−0.068, −0.018], K0:pool_reversal −0.013 [−0.022, −0.005],
+   K1:pool_reversal −0.012 [−0.025, +0.000], K2:zone_return −0.031
+   [−0.053, −0.008], K2:pool_reversal −0.101 [−0.132, −0.068] (−0.041 on
+   resolved instances; the rest is censoring). The driftless ratio is
+   well calibrated in shape — realized hit rises monotonically with it
+   across deciles — but sits about ten percent below it everywhere. The
+   shortfall is not a bar-wick artefact: it *grows* with the failure
+   distance (−0.020 below 0.5 ATR₁ₘ, −0.034 at 2–4, −0.062 above 4, where
+   the median instance lives 64 minutes). At these milestones the Eye's
+   directional claim has a small negative edge against its own geometry.
+2. **Half the judged instances are noise-floor events.** K0:pool_reversal
+   (7,698 of ~15,500) fires on the sweep bar with the failure boundary a
+   median 0.39 ATR₁ₘ from the close; 56 % resolve within one minute and 52 %
+   fail within one minute. At the micro-break milestone a third of pool
+   paths (1,279 of 3,707) are already beyond their own failure boundary and
+   another 29 % have no unswept level at 1R in their direction; a quarter
+   of zone_return registrations (629 of 2,362) have no such level either;
+   the zone reacceptance milestone completed 315 times in six months.
+3. **No Setup attribute separates outcomes even in sample.** Zone kind,
+   entry mode, 15m/1h alignment and sweep penetration move the hit rate by
+   1–3 points with the shortfall intact in every stratum; the one monotone
+   pattern runs the wrong way — a stronger micro-break (K2:pool_reversal
+   strength terciles 0.235 → 0.223 → 0.171) and a deeper sweep (K0
+   0.173 → 0.148) hit the target *less*.
+
+Reading: the measurement did what it should — M₀ is the geometry, the
+calibration is sound, the folds are clean — and what it measured is that
+the Eye's Setups, at the milestones the Eye publishes, point slightly the
+wrong way and are often registered at the noise floor or after their own
+invalidation. That is an Eye-side finding about milestone timing,
+boundary placement and direction, not a Brain-side modelling gap. It is
+exploratory and would need its own pre-registered gate (a direction gate
+with a flipped-direction placebo, and a boundary-buffer variant) before
+anything is changed in the Eye's protocols.
+
 ## Commits
 
 `a41793c` spec · `70262b3` plan · `eff1907` gate_models · `545e881` path
