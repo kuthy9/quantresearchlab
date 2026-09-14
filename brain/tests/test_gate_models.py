@@ -30,9 +30,9 @@ def test_time_purge_drops_rows_whose_window_reaches_the_boundary() -> None:
     index = pd.date_range("2022-01-03T09:30", periods=100, freq="10min", tz="UTC")
     times = minutes_of(index)
     kept = purged_before(np.arange(50), 50, times=times, embargo_minutes=240, gap_rows=DEFAULT_GAP_ROWS)
-    assert kept.tolist() == list(range(27))  # 10·r + 240 ≤ 500 → r ≤ 26
+    assert kept.tolist() == list(range(26))  # 10·r + 240 < 500 → r ≤ 25
     after = purged_after(np.arange(50, 100), 49, times=times, embargo_minutes=240, gap_rows=DEFAULT_GAP_ROWS)
-    assert after.tolist() == list(range(73, 100))  # 10·r ≥ 490 + 240 → r ≥ 73
+    assert after.tolist() == list(range(74, 100))  # 10·r > 490 + 240 → r ≥ 74
 
 
 def test_minutes_of_is_integer_minutes() -> None:

@@ -71,11 +71,16 @@ def test_zone_return_row_carries_zone_geometry_levels_structure_and_state() -> N
         failure_boundary=98.7, source_zone_kind="fvg", entry_mode="touch", first_penetration_fraction=0.25,
         nearest_visible_draw_distance_points=3.0,
     )
+    # the zone's own reacceptance (context_kind "entry_zone", context_id = location_id)
+    reacceptance = SimpleNamespace(
+        context_id="loc-1", reference_price=99.8, failure_boundary=98.7, reclaim_margin_atr=0.3, hold_margin_atr=0.2,
+    )
     update = SimpleNamespace(
         milestone_transitions=(("s", second),), interaction_paths=(path,), interaction_path_transitions=(),
-        zone_interactions=(location,), reacceptance_interactions=(),
+        zone_interactions=(location,), reacceptance_interactions=(reacceptance,),
     )
     (row,) = _rows(update)
+    assert (row["reference_price"], row["reclaim_margin_atr"], row["hold_margin_atr"]) == (99.8, 0.3, 0.2)
     assert set(row) == set(PATH_COLUMNS)
     assert row["known_at"] == AT and row["sequence_id"] == "s" and row["context_kind"] == "zone_return"
     assert row["direction"] == 1.0 and row["context_found"] is True
@@ -92,29 +97,55 @@ def test_zone_return_row_carries_zone_geometry_levels_structure_and_state() -> N
     assert row[FEATURE_NAMES[0]] == 0.0 and row[FEATURE_NAMES[-1]] == float(len(FEATURE_NAMES) - 1)
 
 
-def test_pool_reversal_row_takes_failure_from_reacceptance_else_sweep_extreme() -> None:
+def test_pool_reversal_row_reads_the_group4_manipulation_state() -> None:
+    # A pool path's context is a Group-4 ManipulationState: its ``timeframe`` is
+    # the 1m clock it is maintained on, the swept pool's scale is
+    # ``source_timeframe``; there is no Group-5 ReacceptanceState for pools, so
+    # the reference is the swept boundary and the reclaim margin comes from
+    # ``reentry_price``.
     step = _step("p:0", "pool_swept", "typed_pool_manipulation_swept", 0.4)
     path = _path("p", "pool_reversal", "man-1", Direction.SHORT, [step])
     manipulation = SimpleNamespace(
-        manipulation_id="man-1", source_lower_bound=104.0, source_upper_bound=104.5, sweep_extreme=105.2,
-        penetration_atr=0.35, timeframe=Timeframe.M5,
+        manipulation_id="man-1", side="above", source_lower_bound=104.0, source_upper_bound=104.5,
+        sweep_extreme=105.2, penetration_atr=0.35, timeframe=Timeframe.M1, source_timeframe=Timeframe.M5,
+        reentry_price=None,
     )
     update = SimpleNamespace(
-        milestone_transitions=(("p", step),), interaction_paths=(), interaction_path_transitions=(path,),
+        milestone_transitions=(("p", step),), interaction_paths=(path,), interaction_path_transitions=(),
         zone_interactions=(), reacceptance_interactions=(),
     )
     (row,) = _rows(update, [manipulation])
     assert row["direction"] == -1.0 and row["failure_boundary"] == 105.2 and row["source_timeframe"] == "5m"
-    assert math.isnan(row["reference_price"]) and math.isnan(row["lower_bound"])
-    reacceptance = SimpleNamespace(
-        context_id="man-1", reference_price=104.5, failure_boundary=105.6, reclaim_margin_atr=0.2, hold_margin_atr=0.1,
-    )
-    update = SimpleNamespace(
-        milestone_transitions=(("p", step),), interaction_paths=(path,), interaction_path_transitions=(),
-        zone_interactions=(), reacceptance_interactions=(reacceptance,),
-    )
+    assert row["reference_price"] == 104.5 and math.isnan(row["reclaim_margin_atr"]) and math.isnan(row["hold_margin_atr"])
+    assert math.isnan(row["lower_bound"])
+    manipulation.reentry_price = 104.1
     (row,) = _rows(update, [manipulation])
-    assert row["failure_boundary"] == 105.6 and row["reference_price"] == 104.5 and row["hold_margin_atr"] == 0.1
+    assert row["reclaim_margin_atr"] == (104.5 - 104.1) / 2.0  # |reentry − reference| in ATR₁ₘ
+    manipulation.side = "below"
+    (row,) = _rows(update, [manipulation])
+    assert row["reference_price"] == 104.0
+
+
+def test_the_live_path_wins_over_a_same_bar_transition_copy() -> None:
+    # The reducer publishes a registered path in the transitions before it
+    # appends the same bar's departure step to the live copy.
+    first = _step("s:0", "zone_visible", "typed_entry_zone_registered", 0.6)
+    second = _step("s:1", "departure_confirmed", "formation_close_on_delivery_side", 0.5)
+    stale = _path("s", "zone_return", "loc-1", Direction.LONG, [first])
+    live = _path("s", "zone_return", "loc-1", Direction.LONG, [first, second])
+    update = SimpleNamespace(
+        milestone_transitions=(("s", second),), interaction_paths=(live,), interaction_path_transitions=(stale,),
+        zone_interactions=(), reacceptance_interactions=(),
+    )
+    (row,) = _rows(update)
+    assert row["step_ordinal"] == 1 and len(json.loads(row["steps_so_far"])) == 2
+    # a step the published path does not show is marked, not guessed
+    update = SimpleNamespace(
+        milestone_transitions=(("s", second),), interaction_paths=(stale,), interaction_path_transitions=(),
+        zone_interactions=(), reacceptance_interactions=(),
+    )
+    (row,) = _rows(update)
+    assert row["step_ordinal"] == -1 and json.loads(row["steps_so_far"]) == [["zone_visible", "typed_entry_zone_registered", 0.6]]
 
 
 def test_missing_context_is_logged_with_nan_geometry_and_flagged() -> None:

@@ -8,7 +8,7 @@
 
 **Tech Stack:** Python 3.12, numpy, pandas, pyarrow, scikit-learn, lightgbm (`.venv` already has them), the existing `brain/research/gate_family.py`, `brain/scripts/predictability_gate.py` (`build_folds`, `session_labels`, `standardize_pair`) and `brain/scripts/build_gate_blocks.py`.
 
-**Spec:** `brain/docs/specs/2026-09-13-setup-first-passage-gate-design.md`
+**Spec:** `brain/docs/specs/2026-09-13-setup-first-passage-gate-design.md` — read its §9 and §10 corrections: the target rule, the binary outcome and the pool-column sources in Tasks 2, 4 and 7 below were superseded before run 2.
 
 ## Global Constraints
 

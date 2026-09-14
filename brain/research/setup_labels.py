@@ -31,7 +31,7 @@ LABEL_COLUMNS: tuple[str, ...] = (
     "label", "hit_target", "target_price", "d_target_points", "d_failure_points", "unit_atr60", "d_target_atr",
     "d_failure_atr", "time_to_resolve", "mae_atr", "mfe_atr", "minutes_to_session_end", "same_bar", "drop_reason",
 )
-DROP_REASONS: tuple[str, ...] = ("no_path", "no_atr", "no_failure", "no_target", "past_failure", "no_tape")
+DROP_REASONS: tuple[str, ...] = ("no_path", "no_atr", "no_tape", "no_failure", "past_failure", "no_target")
 _MINUTE_NS = 60_000_000_000
 
 
@@ -95,6 +95,9 @@ def label_instances(
         if not math.isfinite(atr) or atr <= 0.0:
             labelled.append(_blank("no_atr"))
             continue
+        if start < 0:
+            labelled.append(_blank("no_tape"))
+            continue
         sign = float(row["direction"])
         failure = float(row.get("failure_boundary", float("nan")))
         if not math.isfinite(failure) or sign == 0.0:
@@ -110,9 +113,6 @@ def label_instances(
             labelled.append(_blank("no_target"))
             continue
         d_target = sign * (target - close)
-        if start < 0:
-            labelled.append(_blank("no_tape"))
-            continue
         stop = min(start + horizon_minutes - 1, int(ends[start]))
         h = highs[start : stop + 1]
         l = lows[start : stop + 1]

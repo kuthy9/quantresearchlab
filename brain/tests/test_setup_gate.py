@@ -62,8 +62,11 @@ def test_clock_instances_take_the_first_matching_step_per_path() -> None:
     frame.loc[1, "sequence_id"] = frame.loc[0, "sequence_id"]  # same path, two held steps
     frame.loc[0, "step_kind"] = "reacceptance_held"
     frame.loc[2, "drop_reason"] = "no_target"
+    frame.loc[4, "drop_reason"] = "past_failure"  # first held step dropped ...
+    frame.loc[5, "sequence_id"] = frame.loc[4, "sequence_id"]  # ... a later one labelled: still no instance
     out = clock_instances(frame, ("reacceptance_held",))
     assert out["sequence_id"].is_unique
+    assert frame.loc[4, "sequence_id"] not in set(out["sequence_id"])
     assert frame.loc[0, "known_at"] in set(out["known_at"]) and frame.loc[1, "known_at"] not in set(out["known_at"])
     assert frame.loc[2, "sequence_id"] not in set(out["sequence_id"])
     assert out["known_at"].is_monotonic_increasing

@@ -131,7 +131,7 @@ def main() -> None:
         help="also log every new Group-5 path step (the Setup gate's unit); changes the run id",
     )
     args = parser.parse_args()
-    recorder = "paths_v1" if args.record_paths else None
+    recorder = "paths_v2" if args.record_paths else None
 
     source, model = ROOT / args.source, ROOT / args.model
     identity = run_id(

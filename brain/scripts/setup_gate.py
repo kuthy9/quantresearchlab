@@ -73,11 +73,22 @@ class SetupGateError(RuntimeError):
     pass
 
 
+def first_occurrences(instances: pd.DataFrame, step_kinds: tuple[str, ...]) -> pd.DataFrame:
+    """One row per path: its first step of the clock's kinds, labelled or not."""
+
+    rows = instances[instances["step_kind"].isin(step_kinds)]
+    rows = rows.assign(known_at=pd.to_datetime(rows["known_at"], utc=True))
+    rows = rows.sort_values(["known_at", "sequence_id"], kind="stable")
+    return rows.drop_duplicates("sequence_id", keep="first").reset_index(drop=True)
+
+
 def clock_instances(instances: pd.DataFrame, step_kinds: tuple[str, ...]) -> pd.DataFrame:
-    kept = instances[(instances["drop_reason"] == "") & instances["step_kind"].isin(step_kinds)]
-    kept = kept.assign(known_at=pd.to_datetime(kept["known_at"], utc=True))
-    kept = kept.sort_values(["known_at", "sequence_id"], kind="stable")
-    return kept.drop_duplicates("sequence_id", keep="first").reset_index(drop=True)
+    """The clock's instances: each path's first occurrence of the step, kept
+    only when that occurrence was labelled (spec §4: a path contributes at
+    most one instance per clock, its first)."""
+
+    first = first_occurrences(instances, step_kinds)
+    return first[first["drop_reason"] == ""].reset_index(drop=True)
 
 
 def _analytic_loss(instances: pd.DataFrame, rows: np.ndarray) -> float:
@@ -133,7 +144,8 @@ def run_setup_gate(
         for kind in context_kinds:
             cell = f"{clock}:{kind}"
             raw = instances[(instances["context_kind"] == kind) & instances["step_kind"].isin(step_kinds)]
-            dropped = raw.loc[raw["drop_reason"] != "", "drop_reason"].value_counts()
+            first = first_occurrences(raw, step_kinds)
+            dropped = first.loc[first["drop_reason"] != "", "drop_reason"].value_counts()
             sub = clock_instances(raw, step_kinds)
             if len(sub) == 0:
                 log(f"{cell}: no instances")

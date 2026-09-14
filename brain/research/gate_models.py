@@ -4,7 +4,8 @@ Penalty selection and early stopping are purged inside the training window
 so the choice cannot see the holdout. The every-minute gates purge by a row
 gap (sixty rows = sixty minutes); a gate whose rows are Setup instances
 minutes or hours apart purges by clock instead: a row is kept for fitting
-when its label window, ``embargo_minutes`` long, ends before the boundary.
+when its label window, ``embargo_minutes`` long, ends strictly before the
+boundary's clock, so no bar is shared.
 """
 from __future__ import annotations
 
@@ -38,7 +39,7 @@ def purged_before(
     rows_before = np.asarray(rows_before, dtype=int)
     if times is None:
         return rows_before[rows_before < boundary - gap_rows]
-    return rows_before[times[rows_before] + embargo_minutes <= times[boundary]]
+    return rows_before[times[rows_before] + embargo_minutes < times[boundary]]
 
 
 def purged_after(
@@ -51,7 +52,7 @@ def purged_after(
     rows_after = np.asarray(rows_after, dtype=int)
     if times is None:
         return rows_after[rows_after > last_test + gap_rows]
-    return rows_after[times[rows_after] >= times[last_test] + embargo_minutes]
+    return rows_after[times[rows_after] > times[last_test] + embargo_minutes]
 
 
 def full_proba(estimator, x: np.ndarray, *, class_count: int = CLASS_COUNT) -> np.ndarray:

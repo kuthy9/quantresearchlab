@@ -127,20 +127,37 @@ def _zone(location: Any) -> dict[str, Any]:
     }
 
 
-def _pool(manipulation: Any, reacceptance: Any) -> dict[str, Any]:
-    failure = _number(reacceptance, "failure_boundary") if reacceptance is not None else _NAN
-    if not math.isfinite(failure):
-        failure = _number(manipulation, "sweep_extreme")
+def _reacceptance(reacceptance: Any) -> dict[str, Any]:
+    """A zone's own Group-5 reacceptance, when the update carries one."""
+
+    return {
+        "reference_price": _number(reacceptance, "reference_price"),
+        "reclaim_margin_atr": _number(reacceptance, "reclaim_margin_atr"),
+        "hold_margin_atr": _number(reacceptance, "hold_margin_atr"),
+    }
+
+
+def _pool(manipulation: Any, atr: float) -> dict[str, Any]:
+    """A pool path's context is a Group-4 ``ManipulationState``. Its
+    ``timeframe`` is the one-minute clock it is maintained on; the swept
+    pool's scale is ``source_timeframe``. Group 4 owns the reclaim, so the
+    reference is the swept boundary and the reclaim margin is how far the
+    re-entry close came back through it; there is no hold margin."""
+
+    side = _text(getattr(manipulation, "side", None))
+    reference = _number(manipulation, "source_upper_bound" if side == "above" else "source_lower_bound")
+    reentry = _number(manipulation, "reentry_price")
+    reclaim = abs(reentry - reference) / atr if math.isfinite(reentry) and math.isfinite(reference) and atr > 0 else _NAN
     return {
         "source_lower_bound": _number(manipulation, "source_lower_bound"),
         "source_upper_bound": _number(manipulation, "source_upper_bound"),
         "sweep_extreme": _number(manipulation, "sweep_extreme"),
         "penetration_atr": _number(manipulation, "penetration_atr"),
-        "source_timeframe": _text(getattr(manipulation, "timeframe", None)),
-        "reference_price": _number(reacceptance, "reference_price"),
-        "reclaim_margin_atr": _number(reacceptance, "reclaim_margin_atr"),
-        "hold_margin_atr": _number(reacceptance, "hold_margin_atr"),
-        "failure_boundary": failure,
+        "source_timeframe": _text(getattr(manipulation, "source_timeframe", None)),
+        "reference_price": reference,
+        "reclaim_margin_atr": reclaim,
+        "hold_margin_atr": _NAN,
+        "failure_boundary": _number(manipulation, "sweep_extreme"),
     }
 
 
@@ -166,8 +183,11 @@ def path_rows(
         return []
     snapshot = getattr(observation, "market_snapshot", None)
     asof = pd.Timestamp(getattr(snapshot, "asof", None) or getattr(observation, "asof"))
-    paths = {path.sequence_id: path for path in getattr(update, "interaction_paths", ())}
-    paths.update({path.sequence_id: path for path in getattr(update, "interaction_path_transitions", ())})
+    # The live set is authoritative; a transition copy can predate a step the
+    # reducer appended on the same bar, so it only fills in a path the live
+    # set does not carry.
+    paths = {path.sequence_id: path for path in getattr(update, "interaction_path_transitions", ())}
+    paths.update({path.sequence_id: path for path in getattr(update, "interaction_paths", ())})
     locations = {loc.location_id: loc for loc in getattr(update, "zone_interactions", ())}
     reacceptances = {item.context_id: item for item in getattr(update, "reacceptance_interactions", ())}
     manipulations = {item.manipulation_id: item for item in getattr(observation, "manipulations", ())}
@@ -193,14 +213,16 @@ def path_rows(
             rows.append(row)
             continue
         steps = tuple(getattr(path, "steps", ()))
-        ordinal = next((i for i, item in enumerate(steps) if item.step_id == row["step_id"]), len(steps) - 1)
+        # -1 when the published path does not show the step: recorded, not guessed.
+        ordinal = next((i for i, item in enumerate(steps) if item.step_id == row["step_id"]), -1)
+        shown = steps if ordinal < 0 else steps[: ordinal + 1]
         row.update({
             "context_kind": _text(path.context_kind), "context_id": path.context_id,
             "direction": direction_sign(path.direction),
             "path_formed_at": pd.Timestamp(path.formed_at) if getattr(path, "formed_at", None) is not None else None,
-            "path_lifecycle": _text(getattr(path, "lifecycle", None)), "step_ordinal": int(max(ordinal, 0)),
+            "path_lifecycle": _text(getattr(path, "lifecycle", None)), "step_ordinal": int(ordinal),
             "steps_so_far": json.dumps(
-                [[_text(item.kind), _text(item.reason), float(item.strength)] for item in steps[: ordinal + 1]]
+                [[_text(item.kind), _text(item.reason), float(item.strength)] for item in shown]
             ),
         })
         if row["context_kind"] == "zone_return":
@@ -208,10 +230,13 @@ def path_rows(
             if location is not None:
                 row.update(_zone(location))
                 row["context_found"] = True
+            reacceptance = reacceptances.get(path.context_id)
+            if reacceptance is not None:
+                row.update(_reacceptance(reacceptance))
         elif row["context_kind"] == "pool_reversal":
             manipulation = manipulations.get(path.context_id)
             if manipulation is not None:
-                row.update(_pool(manipulation, reacceptances.get(path.context_id)))
+                row.update(_pool(manipulation, float(atr)))
                 row["context_found"] = True
         rows.append(row)
     return rows

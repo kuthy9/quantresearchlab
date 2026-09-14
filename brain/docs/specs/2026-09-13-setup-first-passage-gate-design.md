@@ -309,3 +309,27 @@ Everything else — clocks, horizon, same-bar rule, feature sets, folds,
 bootstrap, Holm, the 200-row floor — is unchanged. The change was chosen on
 label shares of two sessions, not on any model's out-of-sample loss, and it
 is recorded so it cannot be mistaken for a pre-registered choice.
+
+## 10. Correction of 2026-09-14, after run 1 and before run 2
+
+Code review of run 1 (`796a4742275648f7`) found three of the §5.2 pool
+columns inert on every row and the pool scale wrong, so M₁ was narrower
+than fixed here. §5.2 assumed a `ReacceptanceState` bound to a
+`pool_reversal` context; the Eye publishes one only for `entry_zone`
+contexts (a zone_return path's `location_id`) — Group 4 owns the pool
+reclaim. And a `ManipulationState.timeframe` is the one-minute clock it is
+maintained on, not the swept pool's scale, which is `source_timeframe`.
+The recorder now reads, for a pool path, `source_timeframe`, the swept
+boundary as `reference_price`, `|reentry_price − reference| / ATR₁ₘ` as
+`reclaim_margin_atr` and no hold margin; for a zone path it joins the
+zone's own reacceptance for `reference_price` and the two margins. The
+same review found a same-bar transition copy overriding the live path
+(2,347 `departure_confirmed` rows with ordinal 0), a clock instance chosen
+as the first *labelled* rather than the first occurrence of the step, and
+the inner purge admitting one shared bar at equality; all three are fixed.
+Column identity for context kind, step reasons and pool scale now comes
+from the contract vocabularies rather than from the instances.
+
+Run 1's verdict stands as a first run on the narrower M₁ and is kept in
+the receipt; run 2 repeats the Eye pass under recorder `paths_v2` and is
+the record.

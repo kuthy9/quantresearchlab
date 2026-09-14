@@ -60,16 +60,17 @@ def test_setup_matrix_columns_and_values() -> None:
     col = {name: i for i, name in enumerate(names)}
     assert x[0, col["context_kind=zone_return"]] == 1.0 and x[1, col["context_kind=pool_reversal"]] == 1.0
     assert x[0, col["zone_kind=fvg"]] == 1.0 and x[2, col["zone_kind=ob"]] == 1.0 and x[1, col["zone_kind=fvg"]] == 0.0
-    assert x[1, col["source_tf=5m"]] == 1.0
+    assert x[1, col["source_tf=5m"]] == 1.0 and "source_tf=1H" in col and "context_kind=pool_reversal" in col
+    assert "reason=typed_entry_zone_registered" in col and "reason=held" not in col  # reasons come from the contract
     assert x[0, col["step_strength:reacceptance_held"]] == 0.8 and x[0, col["step_strength:micro_break_observed"]] == 0.0
     assert all(f"step_strength:{kind}" in col for kind in INTERACTION_PHYSICAL_PATH_STEP_KINDS)
-    assert x[0, col["reason=held"]] == 1.0
+    assert x[0, col["reason=typed_entry_zone_registered"]] == 1.0 and x[0, col["reason=formation_close_on_delivery_side"]] == 0.0
     assert x[0, col["path_age"]] == 30.0 and x[1, col["path_age"]] == 31.0
     assert np.isclose(x[0, col["zone_width_atr"]], 0.8 / np.sqrt(60))
     assert np.isnan(x[1, col["zone_width_atr"]])  # no zone on a pool path: NaN, imputed later
     # alignment flips with direction: ext 5m is +1 on row 0 (long) and +1 on row 1 (short)
     assert x[0, col["align_ext_5m"]] == 1.0 and x[1, col["align_ext_5m"]] == -1.0 and x[2, col["align_ext_5m"]] == -1.0
-    assert names == tuple(sorted(names, key=names.index))  # order is fixed by construction, not sorted later
+    assert len(names) == len(set(names))
 
 
 def test_eye_state_matrix_is_the_150_components_in_order() -> None:

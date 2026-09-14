@@ -188,15 +188,16 @@ def build_dataset(
         if atr is None or float(atr) <= 0.0:
             continue
         atr = float(atr)
-        features = observation_features(
-            snapshot,
-            closes=history[-(CONTEXT_LOOKBACK_MINUTES + 1):],
-            bar_high_low=(float(bar.high), float(bar.low)),
-        )
+        features: tuple[float, ...] | None = None
         if record_paths:
             # Paths are recorded on every warm emit-window bar: a step
             # published in the last hour before a break is still a Setup,
             # even though no sixty-minute future exists for the state row.
+            features = observation_features(
+                snapshot,
+                closes=history[-(CONTEXT_LOOKBACK_MINUTES + 1):],
+                bar_high_low=(float(bar.high), float(bar.low)),
+            )
             path_row_list.extend(
                 path_rows(
                     observation, close=float(bar.close), high=float(bar.high), low=float(bar.low),
@@ -218,6 +219,12 @@ def build_dataset(
         future_close_rows.append(closes[window].copy())
         future_high_rows.append(highs[window].copy())
         future_low_rows.append(lows[window].copy())
+        if features is None:
+            features = observation_features(
+                snapshot,
+                closes=history[-(CONTEXT_LOOKBACK_MINUTES + 1):],
+                bar_high_low=(float(bar.high), float(bar.low)),
+            )
         feature_rows.append(features)
         stamps.append(snapshot.asof)
         price_rows.append(

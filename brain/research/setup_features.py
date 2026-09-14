@@ -16,7 +16,12 @@ import pandas as pd
 
 from brain.core.hypothesis_proposer import FEATURE_NAMES
 from brain.research.first_passage import HORIZON_ATR_SCALE
-from contract.eye.vocabulary import INTERACTION_PHYSICAL_PATH_STEP_KINDS
+from contract.eye.vocabulary import (
+    GROUP5_CONTEXT_KINDS,
+    INTERACTION_PHYSICAL_PATH_STEP_KINDS,
+    _INTERACTION_PHYSICAL_PATH_STEP_REASONS,
+)
+from contract.market import Timeframe
 
 SESSION_MINUTES = 1380
 GEOMETRY_COLUMNS: tuple[str, ...] = (
@@ -24,6 +29,16 @@ GEOMETRY_COLUMNS: tuple[str, ...] = (
     "rv_30", "rv_60", "tod_sin", "tod_cos",
 )
 STEP_KINDS: tuple[str, ...] = tuple(sorted(INTERACTION_PHYSICAL_PATH_STEP_KINDS))
+STEP_REASONS: tuple[str, ...] = tuple(
+    sorted({reason for reasons in _INTERACTION_PHYSICAL_PATH_STEP_REASONS.values() for reason in reasons})
+)
+# Column identity comes from the contract where it names the values; zone
+# kinds and entry modes have no vocabulary and are read from the instances
+# (sorted unique values — an identity, not a fitted statistic).
+FIXED_CATEGORIES: dict[str, tuple[str, ...]] = {
+    "context_kind": tuple(sorted(GROUP5_CONTEXT_KINDS)),
+    "source_timeframe": tuple(tf.value for tf in Timeframe),
+}
 CATEGORICALS: tuple[tuple[str, str], ...] = (
     ("context_kind", "context_kind"), ("source_zone_kind", "zone_kind"),
     ("entry_mode", "entry_mode"), ("source_timeframe", "source_tf"),
@@ -54,6 +69,8 @@ def analytic_target_probability(instances: pd.DataFrame) -> np.ndarray:
 
 
 def _categories(frame: pd.DataFrame, name: str) -> tuple[str, ...]:
+    if name in FIXED_CATEGORIES:
+        return FIXED_CATEGORIES[name]
     if name not in frame:
         return ()
     values = {str(v) for v in frame[name].tolist() if v is not None and not (isinstance(v, float) and math.isnan(v))}
@@ -82,8 +99,7 @@ def setup_matrix(instances: pd.DataFrame) -> tuple[np.ndarray, tuple[str, ...]]:
     for kind in STEP_KINDS:
         names.append(f"step_strength:{kind}")
         columns.append(np.array([max((float(s[2]) for s in items if s[0] == kind), default=0.0) for items in steps]))
-    reasons = sorted({str(s[1]) for items in steps for s in items if s[1] is not None})
-    for reason in reasons:
+    for reason in STEP_REASONS:
         names.append(f"reason={reason}")
         columns.append(np.array([1.0 if any(str(s[1]) == reason for s in items) else 0.0 for items in steps]))
     known = pd.to_datetime(instances["known_at"], utc=True)

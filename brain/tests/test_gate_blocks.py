@@ -38,5 +38,5 @@ def test_recording_paths_changes_the_run_id_and_nothing_else_does() -> None:
     model = root / "configs/model.json"
     plain = run_id(source=source, model=model, first_session="2022-01-03", last_session="2022-06-06")
     again = run_id(source=source, model=model, first_session="2022-01-03", last_session="2022-06-06", recorder=None)
-    paths = run_id(source=source, model=model, first_session="2022-01-03", last_session="2022-06-06", recorder="paths_v1")
+    paths = run_id(source=source, model=model, first_session="2022-01-03", last_session="2022-06-06", recorder="paths_v2")
     assert plain == again and plain != paths and len(paths) == 16
