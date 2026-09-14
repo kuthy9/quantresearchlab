@@ -40,7 +40,7 @@ v1.2 → v1.3 delta, the lifecycle entities, and every defect the replay exposed
 are stated here rather than split across two files. Its status is
 `preregistered_development_contract_not_oos_trading_authority`: atomic identity
 `smc_semantics_v1.3` ·
-`edf27ca3e45c93c3c89056b3e2d6794f743aed3c8259e98722084c45855927c7` (refrozen 2026-09-13: the target-outcome and candidate-retirement concepts, the multi-scale displacement and zone protocols, and the Group 5 terminal-context and liquidity terminal-state retention parameters), Foundation
+`b83129ce186683a446e5b7a4ba277d26926d02343b72adbaf4d144c8a23b311e` (refrozen 2026-09-13: the target-outcome and candidate-retirement concepts, the multi-scale displacement and zone protocols, and the Group 5 terminal-context and liquidity terminal-state retention parameters), Foundation
 identity `smc_semantic_foundation_v2.1` ·
 `69428dbfd2a9b2aa19f0254391fca2da17aedb8d0206829572e69c0cc212a715`.
 
@@ -936,6 +936,24 @@ stay as the capacity live state may not exhaust, and the fail-closed rule for
 that case is unchanged. The transition events and the event log are
 untouched; what changed is what the current update and snapshot *repeat*, and
 therefore the state-projection fingerprint, exactly as for the Swing bound.
+
+## The Structural Range is projected on 15m, 1H and 4H
+
+**Date: 2026-09-14.** `configs/primitives_range.json` names `timeframes`
+(`15m`, `1H`, `4H`). The 1H range is unchanged in definition; the 15m and 4H
+ranges are the same definition applied more widely: every `*_h1_bars`
+parameter counts completed bars of the range's own scale (eight candidate
+bars are two hours on 15m, eight on 1H, thirty-two on 4H), the maturity,
+balance and break rules are the same, at most one live range per scale, and
+one manipulation funnel spans every scale's mature boundaries and every pool.
+Every range, boundary item, funnel snapshot and RANGE event carries its scale;
+the store's close-beyond contract requires the parents and the BAR on that
+scale. Field names such as `candidate_real_h1_bars` are kept so journals
+still reduce and mean native bars. This is registered under
+`smc_semantics_v1.3` as `dealing_range_scales`: no threshold moved, no scale
+was re-parameterised, and the 15m and 4H ranges' natural-observation coverage
+is not yet measured — the 1H coverage was already "sparse" (see the range
+protocol's `authority_review`).
 
 ## The Structural Range lifecycle drops its balance-derived states
 

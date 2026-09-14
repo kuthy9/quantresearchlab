@@ -12,7 +12,7 @@
     "schema_version": 1,
     "atomic_semantics_version": "smc_semantics_v1.3",
     "atomic_registry": "semantics/registry_v1_3.yaml",
-    "atomic_definition_identity": "edf27ca3e45c93c3c89056b3e2d6794f743aed3c8259e98722084c45855927c7",
+    "atomic_definition_identity": "b83129ce186683a446e5b7a4ba277d26926d02343b72adbaf4d144c8a23b311e",
     "foundation_projection_version": "smc_semantic_foundation_v2.1",
     "foundation_registry": "semantics/foundation_v2_1.yaml",
     "foundation_registry_identity": "69428dbfd2a9b2aa19f0254391fca2da17aedb8d0206829572e69c0cc212a715"

@@ -1,9 +1,10 @@
 # Eye Contract Repairs (2026-09-13)
 
-**Status (end of 2026-09-13):** Tasks 0, 4, 1, 5, 2 and 7 done as written. Task 3
-done for displacement and zones; the dealing range stays 1H (its Group 4
-parameters are written in 1H/1m units, so a per-scale range is a new definition,
-not the same one applied more widely). Task 6 bounded the candidate set,
+**Status (2026-09-14):** Tasks 0, 4, 1, 5, 2 and 7 done as written. Task 3
+done for displacement and zones on 2026-09-13 and for the dealing range on
+2026-09-14 (`2026-09-14-multiscale-dealing-range.md`: the bar-count
+parameters are read in the range's own scale, one manipulation funnel, same
+semantic version). Task 6 bounded the candidate set,
 replaced three full rebuilds, and in a second pass gave the three remaining
 "terminal state retained until capacity" owners an explicit retention (Group 5
 context paths, liquidity zones and pools) and made structural-leg projection

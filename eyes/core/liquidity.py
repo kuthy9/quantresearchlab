@@ -75,6 +75,10 @@ class LiquidityConfig:
     # compacted; ``retained_zones``/``retained_pools`` remain the capacity
     # that live state may not exhaust.
     terminal_state_retention_native_bars: int = 1
+    # A consumed swing inventory item stays in the observation for this many
+    # bars of its own scale, counting the bar of consumption, then is dropped;
+    # the reducer's candidate keeps its own disarm/re-arm and retirement rules.
+    consumed_item_retention_native_bars: int = 1
 
     def __post_init__(self) -> None:
         try:
@@ -118,6 +122,8 @@ class LiquidityConfig:
             or self.candidate_retirement_max_distance_atr <= 0.0
             or type(self.terminal_state_retention_native_bars) is not int
             or self.terminal_state_retention_native_bars < 1
+            or type(self.consumed_item_retention_native_bars) is not int
+            or self.consumed_item_retention_native_bars < 1
         ):
             raise LiquidityProtocolError("invalid liquidity protocol")
 
@@ -163,6 +169,9 @@ class LiquidityConfig:
             ),
             terminal_state_retention_native_bars=int(
                 parameters.get("terminal_state_retention_native_bars", -1)
+            ),
+            consumed_item_retention_native_bars=int(
+                parameters.get("consumed_item_retention_native_bars", -1)
             ),
         )
 

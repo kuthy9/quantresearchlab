@@ -3951,9 +3951,9 @@ class EventStore:
             EventKind.ACCEPTANCE_CONFIRMED,
         ):
             parent = parent_by_kind[kind]
-            if parent.timeframe is not Timeframe.H1:
+            if parent.timeframe is not event.timeframe:
                 raise ValueError(
-                    "close-beyond dealing-range parent must be H1: "
+                    "close-beyond dealing-range parent is on another scale: "
                     f"{parent.event_id} ({kind.value})"
                 )
             if parent.details.get("range_id") != range_id:
@@ -3983,9 +3983,9 @@ class EventStore:
             bar=parent_by_kind[EventKind.BAR_COMPLETED],
         )
         created = parent_by_kind[EventKind.DEALING_RANGE_CREATED]
-        if created.timeframe is not Timeframe.H1:
+        if created.timeframe is not event.timeframe:
             raise ValueError(
-                "close-beyond dealing-range parent must be H1: "
+                "close-beyond dealing-range parent is on another scale: "
                 f"{created.event_id} ({created.kind.value})"
             )
         if created.details.get("range_id") != range_id:
@@ -4000,18 +4000,19 @@ class EventStore:
         *,
         bar: MarketEvent,
     ) -> str:
-        if event.timeframe is not Timeframe.H1:
+        if event.timeframe is Timeframe.M1:
             raise ValueError(
-                "close-beyond dealing-range invalidation must be H1"
+                "close-beyond dealing-range invalidation cannot be 1m"
             )
         range_id = event.details.get("range_id")
         if not isinstance(range_id, str) or not range_id.strip():
             raise ValueError(
                 "close-beyond dealing-range invalidation requires range_id"
             )
-        if bar.timeframe is not Timeframe.H1:
+        if bar.timeframe is not event.timeframe:
             raise ValueError(
-                "close-beyond dealing-range invalidation requires an H1 BAR"
+                "close-beyond dealing-range invalidation requires a BAR of "
+                "the range's scale"
             )
         close_value = bar.details.get("close")
         if isinstance(close_value, bool):

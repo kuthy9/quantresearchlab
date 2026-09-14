@@ -1381,7 +1381,10 @@ class MarketObservation:
                 for item in self.group4_range_funnel
             )
             or len(
-                {item.observed_at for item in self.group4_range_funnel}
+                {
+                    (item.timeframe, item.observed_at)
+                    for item in self.group4_range_funnel
+                }
             )
             != len(self.group4_range_funnel)
         ):
@@ -1484,14 +1487,18 @@ class MarketObservation:
             timeframe: {swing.swing_id for swing in frame.swings}
             for timeframe, frame in self.frames.items()
         }
-        range_ids = {
-            item.range_id
-            for item in self.frames[Timeframe.H1].dealing_ranges
+        range_ids_by_timeframe = {
+            timeframe: {item.range_id for item in frame.dealing_ranges}
+            for timeframe, frame in self.frames.items()
         }
         for item in self.liquidity_inventory:
             if item.kind == "range_boundary" and (
-                item.timeframe is not Timeframe.H1
-                or len(set(item.source_ids) & range_ids) != 1
+                item.timeframe is Timeframe.M1
+                or len(
+                    set(item.source_ids)
+                    & range_ids_by_timeframe.get(item.timeframe, set())
+                )
+                != 1
             ):
                 raise ValueError(
                     "range-boundary inventory lacks one retained range identity"

@@ -1308,7 +1308,7 @@ class LiquidityPoolState:
 
 @dataclass(frozen=True)
 class RangeFormationFunnelSnapshot:
-    """One completed-H1 range-selection and maturity-gate diagnostic."""
+    """One scale's completed-bar range-selection and maturity diagnostic."""
 
     observed_at: pd.Timestamp
     pair_counts: tuple[tuple[str, int], ...]
@@ -1320,6 +1320,8 @@ class RangeFormationFunnelSnapshot:
         ...,
     ] = ()
     unmet_maturity_gates: tuple[str, ...] = ()
+    # The scale whose completed bar this diagnostic describes.
+    timeframe: Timeframe = Timeframe.H1
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -1330,6 +1332,11 @@ class RangeFormationFunnelSnapshot:
                 name="range_formation_funnel.observed_at",
             ),
         )
+        if (
+            not isinstance(self.timeframe, Timeframe)
+            or self.timeframe is Timeframe.M1
+        ):
+            raise ValueError("range formation funnel scale is invalid")
         counts = tuple(self.pair_counts)
         gates = tuple(self.maturity_gates)
         unmet = tuple(self.unmet_maturity_gates)
@@ -1427,7 +1434,12 @@ class RangeFormationFunnelSnapshot:
 
 @dataclass(frozen=True)
 class DealingRangeState:
-    """One H1 accumulation candidate and its frozen mature range."""
+    """One accumulation candidate and its frozen mature range, on its scale.
+
+    ``candidate_real_h1_bars`` and ``age_h1_bars`` count completed bars of
+    ``timeframe``; the names are the frozen contract's spelling from when the
+    range was 1H only.
+    """
 
     range_id: str
     protocol_hash: str
@@ -1508,7 +1520,8 @@ class DealingRangeState:
             or self.lower_source_zone_id == self.upper_source_zone_id
             or type(self.instrument_id) is not int
             or self.instrument_id < 0
-            or self.timeframe is not Timeframe.H1
+            or not isinstance(self.timeframe, Timeframe)
+            or self.timeframe is Timeframe.M1
             or not isinstance(self.lifecycle, DealingRangeLifecycle)
             or not self.protocol_hash
             or not self.source_group12_protocol_hash
@@ -1935,9 +1948,9 @@ class ManipulationState:
             raise ValueError("manipulation crossed source ids are invalid")
         if (
             self.source_kind == "mature_range_boundary"
-            and self.source_timeframe is not Timeframe.H1
+            and self.source_timeframe is Timeframe.M1
         ):
-            raise ValueError("range manipulation source must be H1")
+            raise ValueError("range manipulation source cannot be 1m")
         if (
             self.source_kind == "formed_liquidity_pool"
             and self.source_protocol_hash

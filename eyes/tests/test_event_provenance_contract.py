@@ -3854,10 +3854,10 @@ def test_external_range_invalidation_requires_complete_parent_chain() -> None:
     ("acceptance_range_id", "acceptance_timeframe", "message"),
     (
         ("range-other", Timeframe.H1, "parent range_id differs"),
-        ("range-1", Timeframe.M5, "parent must be H1"),
+        ("range-1", Timeframe.M5, "parent is on another scale"),
     ),
 )
-def test_external_range_acceptance_must_be_h1_and_same_range(
+def test_external_range_acceptance_must_share_scale_and_range(
     acceptance_range_id: str,
     acceptance_timeframe: Timeframe,
     message: str,

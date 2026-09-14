@@ -17,7 +17,7 @@ from collections import Counter
 
 import pytest
 
-from contract.eye import EventKind
+from contract.eye import EventKind, LiquidityInventoryLifecycle
 from eyes.core.causal import CausalMarketReader
 from eyes.core.observation import CausalObserver, ObserverConfig
 
@@ -39,9 +39,15 @@ def _replay(bars):
         )
     )
     observation = None
+    consumed_seen: set[str] = set()
     for bar in bars:
         observation = observer.observe(reader.on_bar(bar))
-    return observer.audit_store.events(), observation
+        consumed_seen.update(
+            item.item_id
+            for item in observation.liquidity_inventory
+            if item.lifecycle is LiquidityInventoryLifecycle.CONSUMED
+        )
+    return observer.audit_store.events(), observation, consumed_seen
 
 
 @pytest.fixture(scope="module")
@@ -59,31 +65,29 @@ def _level(event):
 
 
 def test_every_consumed_item_is_reached_exactly_once_on_its_own_timeframe(noisy) -> None:
-    from contract.eye import LiquidityInventoryLifecycle
-
-    events, observation = noisy
-    consumed = {
-        item.item_id
-        for item in observation.liquidity_inventory
-        if item.lifecycle is LiquidityInventoryLifecycle.CONSUMED
-    }
+    events, observation, consumed = noisy
     reached = [event for event in events if event.kind is EventKind.LEVEL_REACHED]
     assert consumed, "the replay consumed no inventory item"
     reached_counts = Counter(_level(event) for event in reached)
     assert set(reached_counts.values()) == {1}
-    assert consumed <= set(reached_counts)
-    # A reached pool leaves the inventory once its resolution has been
-    # exposed (``terminal_state_retention_native_bars``); it is never offered
-    # again as a visible level.
-    offered = {item.item_id for item in observation.liquidity_inventory}
-    assert not (set(reached_counts) - consumed) & offered
+    # Every item ever exposed as consumed was reached, and every reached
+    # level was exposed as consumed on its bar, before the retention rules
+    # (``consumed_item_retention_native_bars``,
+    # ``terminal_state_retention_native_bars``) dropped it.
+    assert consumed == set(reached_counts)
+    offered_now = {
+        item.item_id
+        for item in observation.liquidity_inventory
+        if item.lifecycle is not LiquidityInventoryLifecycle.CONSUMED
+    }
+    assert not set(reached_counts) & offered_now
     for event in reached:
         assert event.timeframe.value == event.details["source_timeframe"]
         assert _level(event) in event.source_entity_ids
 
 
 def test_reached_is_known_when_the_first_touch_is_known(noisy) -> None:
-    events, _ = noisy
+    events, _, _ = noisy
     by_id = {event.event_id: event for event in events}
     for event in events:
         if event.kind is EventKind.LEVEL_REACHED:
@@ -100,7 +104,7 @@ def test_reached_is_known_when_the_first_touch_is_known(noisy) -> None:
 def test_a_reference_level_replaced_untouched_is_invalidated_on_its_own_timeframe(
     three_sessions,
 ) -> None:
-    events, _ = three_sessions
+    events, _, _ = three_sessions
     retired = [
         event
         for event in events

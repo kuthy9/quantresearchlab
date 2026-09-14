@@ -32,7 +32,7 @@ refreeze:
   repository-root-relative string `semantics/parameters_v1_3.yaml`, and the
   registry's bytes are `registry_sha256`. Relocating the directory rewrites that
   line and moves `atomic_definition_identity` off
-  `edf27ca3e45c93c3c89056b3e2d6794f743aed3c8259e98722084c45855927c7`.
+  `b83129ce186683a446e5b7a4ba277d26926d02343b72adbaf4d144c8a23b311e`.
 
 Tests use `<subsystem>/tests/test_*.py`. Bounded studies write under `outputs/`;
 current explanations and receipts live in `<subsystem>/docs/` and

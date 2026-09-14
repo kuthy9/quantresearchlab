@@ -265,7 +265,9 @@ class SemanticEventEmitter:
         self._balance_range_observed_event_ids: dict[str, str] = {}
         self._range_terminal_event_ids: dict[str, str] = {}
         self._range_boundary_level_ids: dict[tuple[str, str], str] = {}
-        self._last_invalidated_range_event_id: str | None = None
+        # The last broken range per scale; a new active range on that scale
+        # replaces it.
+        self._last_invalidated_range_event_id: dict[Timeframe, str] = {}
         self._known_displacement_transition_ids: set[str] = set()
         self._known_displacement_transition_order: deque[str] = deque(
             maxlen=max(512, self.config.memory_events * 2)
@@ -332,7 +334,7 @@ class SemanticEventEmitter:
         self._balance_range_observed_event_ids.clear()
         self._range_terminal_event_ids.clear()
         self._range_boundary_level_ids.clear()
-        self._last_invalidated_range_event_id = None
+        self._last_invalidated_range_event_id.clear()
         self._known_displacement_transition_ids.clear()
         self._known_displacement_transition_order.clear()
         self._known_structure_events.clear()
@@ -3963,7 +3965,7 @@ class SemanticEventEmitter:
             range_state_event = _event(
                     EventKind.DEALING_RANGE_STATE,
                     state.state_started_at,
-                    Timeframe.H1,
+                    state.timeframe,
                     None,
                     state.midpoint,
                     state.strength,
@@ -4052,7 +4054,7 @@ class SemanticEventEmitter:
             )
             try:
                 transition_bar_event_id = self._bar_event_id_at(
-                    Timeframe.H1,
+                    state.timeframe,
                     state.state_started_at,
                 )
             except ValueError:
@@ -4117,13 +4119,13 @@ class SemanticEventEmitter:
                     )
                 crossing_generation_id = self._crossing_generation_id(
                     level_id=level_id,
-                    timeframe=Timeframe.H1,
+                    timeframe=state.timeframe,
                     crossed_at=state.state_started_at,
                 )
                 touch_event = self._append_semantic_atomic(
                     EventKind.LEVEL_TOUCHED,
                     state.state_started_at,
-                    Timeframe.H1,
+                    state.timeframe,
                     accepted_side,
                     accepted_price,
                     state.strength,
@@ -4141,7 +4143,7 @@ class SemanticEventEmitter:
                 penetrated_event = self._append_semantic_atomic(
                     EventKind.LEVEL_PENETRATED,
                     state.state_started_at,
-                    Timeframe.H1,
+                    state.timeframe,
                     accepted_side,
                     accepted_price,
                     state.strength,
@@ -4170,7 +4172,7 @@ class SemanticEventEmitter:
                 accepted_event = self._append_crossing_resolution(
                     EventKind.ACCEPTANCE_CONFIRMED,
                     state.state_started_at,
-                    Timeframe.H1,
+                    state.timeframe,
                     accepted_side,
                     accepted_price,
                     state.strength,
@@ -4228,7 +4230,7 @@ class SemanticEventEmitter:
             range_event = self._append_semantic_atomic(
                 range_kind,
                 state.state_started_at,
-                Timeframe.H1,
+                state.timeframe,
                 None,
                 state.midpoint,
                 state.strength,
@@ -4281,16 +4283,19 @@ class SemanticEventEmitter:
                 self._range_created_event_ids[state.range_id] = (
                     range_event.event_id
                 )
-                if self._last_invalidated_range_event_id is not None:
+                invalidated_event_id = (
+                    self._last_invalidated_range_event_id.get(state.timeframe)
+                )
+                if invalidated_event_id is not None:
                     self._append_semantic_atomic(
                         EventKind.DEALING_RANGE_REPLACED,
                         state.state_started_at,
-                        Timeframe.H1,
+                        state.timeframe,
                         None,
                         state.midpoint,
                         state.strength,
                         (
-                            self._last_invalidated_range_event_id,
+                            invalidated_event_id,
                             range_event.event_id,
                         ),
                         {
@@ -4302,12 +4307,14 @@ class SemanticEventEmitter:
                         event_time=state.formed_at,
                         zone=(state.lower_bound, state.upper_bound),
                     )
-                    self._last_invalidated_range_event_id = None
+                    self._last_invalidated_range_event_id.pop(
+                        state.timeframe, None
+                    )
             if state.lifecycle is DealingRangeLifecycle.BROKEN:
                 self._range_terminal_event_ids[state.range_id] = (
                     range_event.event_id
                 )
-                self._last_invalidated_range_event_id = (
+                self._last_invalidated_range_event_id[state.timeframe] = (
                     range_event.event_id
                 )
 
@@ -4681,7 +4688,7 @@ class SemanticEventEmitter:
                 continue
             try:
                 bar_event_id = self._bar_event_id_at(
-                    Timeframe.H1,
+                    state.timeframe,
                     state.last_updated_at,
                 )
             except ValueError:
@@ -4738,7 +4745,7 @@ class SemanticEventEmitter:
                 candidate = self._append_semantic_atomic(
                     EventKind.LIQUIDITY_LEVEL_CREATED,
                     state.balance_confirmed_at,
-                    Timeframe.H1,
+                    state.timeframe,
                     item.side,
                     item.price,
                     item.strength,
@@ -4801,7 +4808,7 @@ class SemanticEventEmitter:
         observed = self._append_semantic_atomic(
             EventKind.BALANCE_RANGE_OBSERVED,
             observed_at,
-            Timeframe.H1,
+            state.timeframe,
             None,
             state.midpoint,
             state.strength,

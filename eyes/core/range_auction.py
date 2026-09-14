@@ -9,7 +9,7 @@ import json
 import math
 from pathlib import Path
 from statistics import median
-from typing import Iterable, Sequence
+from typing import Iterable, Mapping, Sequence
 
 import pandas as pd
 
@@ -70,6 +70,16 @@ class RangeAuctionProtocol:
     balance_minimum_price_test_generations_each: int
     protocol_version: str = "3.2.0-group4.1"
     balance_sub_protocol_version: str = "balance_range_v1.2"
+    # The scales the range definition is applied on.  Every ``*_h1_bars``
+    # parameter counts bars of the range's own scale; the names are kept so
+    # the frozen contract and its journals read unchanged.
+    timeframes: tuple[Timeframe, ...] = (Timeframe.H1,)
+
+    @property
+    def timeframe(self) -> Timeframe:
+        """The protocol's first scale, the pre-2026-09 single scale."""
+
+        return self.timeframes[0]
 
     def __post_init__(self) -> None:
         hashes = (
@@ -83,6 +93,12 @@ class RangeAuctionProtocol:
                        for character in value)
                 for value in hashes
             )
+            or not self.timeframes
+            or any(
+                not isinstance(value, Timeframe) for value in self.timeframes
+            )
+            or len(set(self.timeframes)) != len(self.timeframes)
+            or Timeframe.M1 in self.timeframes
             or not self.protocol_version
             or not math.isfinite(float(self.tick_size))
             or self.tick_size <= 0.0
@@ -185,6 +201,10 @@ class RangeAuctionProtocol:
             balance_sub_protocol_version=payload[
                 "balance_sub_protocol_version"
             ],
+            timeframes=tuple(
+                Timeframe(value)
+                for value in payload.get("timeframes", [Timeframe.H1.value])
+            ),
         )
 
 
@@ -269,11 +289,16 @@ class RangeAuctionUpdate:
             for item in self.range_funnel
         ):
             raise TypeError("Group 4 range funnel record is not typed")
-        funnel_clocks = tuple(item.observed_at for item in self.range_funnel)
+        # One diagnostic per (scale, completed bar); scales that complete on
+        # the same clock sit beside each other in protocol order.
+        funnel_keys = tuple(
+            (item.observed_at, item.timeframe) for item in self.range_funnel
+        )
+        funnel_clocks = tuple(clock for clock, _ in funnel_keys)
         if (
             funnel_clocks != tuple(sorted(funnel_clocks))
-            or len(funnel_clocks) != len(set(funnel_clocks))
-            or (self.boundary_reason is not None and funnel_clocks)
+            or len(funnel_keys) != len(set(funnel_keys))
+            or (self.boundary_reason is not None and funnel_keys)
         ):
             raise ValueError("Group 4 range funnel clocks are invalid")
 
@@ -391,30 +416,46 @@ class CausalRangeAuctionTracker:
         self._range_inventory: dict[str, LiquidityInventoryItem] = {}
         self._manipulations: dict[str, ManipulationState] = {}
         self._manipulation_order: deque[str] = deque()
-        self._h1_true_ranges: deque[float] = deque(
-            maxlen=protocol.h1_atr_period
-        )
+        # Range-side state is kept per registered scale; the manipulation
+        # funnel below it is one, across every scale's boundaries and pools.
+        self._native_true_ranges: dict[Timeframe, deque[float]] = {
+            timeframe: deque(maxlen=protocol.h1_atr_period)
+            for timeframe in protocol.timeframes
+        }
         self._m1_true_ranges: deque[float] = deque(
             maxlen=protocol.m1_atr_period
         )
-        self._prior_h1_close: float | None = None
+        self._prior_native_close: dict[Timeframe, float | None] = {
+            timeframe: None for timeframe in protocol.timeframes
+        }
         self._prior_m1_close: float | None = None
         self._identity: tuple[str, int] | None = None
-        self._last_h1_end: pd.Timestamp | None = None
+        self._last_native_end: dict[Timeframe, pd.Timestamp | None] = {
+            timeframe: None for timeframe in protocol.timeframes
+        }
         self._last_m1_end: pd.Timestamp | None = None
-        self._last_h1_raw_end: pd.Timestamp | None = None
+        self._last_native_raw_end: dict[Timeframe, pd.Timestamp | None] = {
+            timeframe: None for timeframe in protocol.timeframes
+        }
         self._last_m1_raw_end: pd.Timestamp | None = None
         self._blocked_cold_pairs: set[tuple[str, str]] = set()
-        self._last_h1_input: tuple[object, ...] | None = None
+        self._last_native_input: dict[
+            Timeframe, tuple[object, ...] | None
+        ] = {timeframe: None for timeframe in protocol.timeframes}
         self._last_m1_input: tuple[object, ...] | None = None
-        self._last_h1_output: RangeAuctionUpdate | None = None
+        self._last_native_output: dict[
+            Timeframe, RangeAuctionUpdate | None
+        ] = {timeframe: None for timeframe in protocol.timeframes}
         self._last_m1_output: RangeAuctionUpdate | None = None
         self._last_boundary_input: tuple[object, ...] | None = None
         self._last_boundary_output: RangeAuctionUpdate | None = None
 
     @property
     def last_h1_end(self) -> pd.Timestamp | None:
-        return self._last_h1_end
+        return self._last_native_end.get(Timeframe.H1)
+
+    def last_native_end(self, timeframe: Timeframe) -> pd.Timestamp | None:
+        return self._last_native_end[timeframe]
 
     @property
     def last_m1_end(self) -> pd.Timestamp | None:
@@ -433,10 +474,15 @@ class CausalRangeAuctionTracker:
         candidate._manipulation_order = deque(
             self._manipulation_order
         )
-        candidate._h1_true_ranges = deque(
-            self._h1_true_ranges,
-            maxlen=self._h1_true_ranges.maxlen,
-        )
+        candidate._native_true_ranges = {
+            timeframe: deque(values, maxlen=values.maxlen)
+            for timeframe, values in self._native_true_ranges.items()
+        }
+        candidate._prior_native_close = dict(self._prior_native_close)
+        candidate._last_native_end = dict(self._last_native_end)
+        candidate._last_native_raw_end = dict(self._last_native_raw_end)
+        candidate._last_native_input = dict(self._last_native_input)
+        candidate._last_native_output = dict(self._last_native_output)
         candidate._m1_true_ranges = deque(
             self._m1_true_ranges,
             maxlen=self._m1_true_ranges.maxlen,
@@ -476,10 +522,12 @@ class CausalRangeAuctionTracker:
         zones = tuple(support_resistance)
         if any(
             not isinstance(zone, SupportResistanceState)
-            or zone.timeframe is not Timeframe.H1
+            or zone.timeframe not in self.protocol.timeframes
             for zone in zones
         ):
-            raise ValueError("Group 4 cold pair source is not typed H1")
+            raise ValueError(
+                "Group 4 cold pair source is not a typed range-scale zone"
+            )
         supports = tuple(
             zone
             for zone in zones
@@ -502,9 +550,11 @@ class CausalRangeAuctionTracker:
             (lower.zone_id, upper.zone_id)
             for lower in supports
             for upper in resistances
+            if lower.timeframe is upper.timeframe
         )
-        self._last_h1_input = None
-        self._last_h1_output = None
+        for timeframe in {zone.timeframe for zone in zones}:
+            self._last_native_input[timeframe] = None
+            self._last_native_output[timeframe] = None
         self._last_boundary_input = None
         self._last_boundary_output = None
 
@@ -549,23 +599,27 @@ class CausalRangeAuctionTracker:
             )
         self._identity = identity
 
-    def _validate_h1(
+    def _validate_native(
         self,
         candle: Candle,
         zones: Sequence[SupportResistanceState],
     ) -> None:
         if (
             not isinstance(candle, Candle)
-            or candle.timeframe is not Timeframe.H1
+            or candle.timeframe not in self.protocol.timeframes
             or not candle.complete
         ):
-            raise ValueError("Group 4 requires a completed H1 candle")
+            raise ValueError(
+                "Group 4 requires a completed candle of a registered scale"
+            )
         if any(
             not isinstance(zone, SupportResistanceState)
-            or zone.timeframe is not Timeframe.H1
+            or zone.timeframe is not candle.timeframe
             for zone in zones
         ):
-            raise ValueError("Group 4 received a non-H1 range source")
+            raise ValueError(
+                "Group 4 received a range source from another scale"
+            )
         zone_ids = tuple(zone.zone_id for zone in zones)
         if (
             len(zone_ids) != len(set(zone_ids))
@@ -583,24 +637,28 @@ class CausalRangeAuctionTracker:
             )
         ):
             raise ValueError(
-                "Group 4 H1 source identity or knowledge clock is invalid"
+                "Group 4 source identity or knowledge clock is invalid"
             )
         self._validate_contract(candle)
 
     @staticmethod
     def _live_range(
         ranges: Iterable[DealingRangeState],
+        timeframe: Timeframe,
     ) -> DealingRangeState | None:
         live = tuple(
             state
             for state in ranges
-            if state.lifecycle
+            if state.timeframe is timeframe
+            and state.lifecycle
             in {
                 DealingRangeLifecycle.ACTIVE,
             }
         )
         if len(live) > 1:
-            raise RuntimeError("Group 4 retained more than one live range")
+            raise RuntimeError(
+                "Group 4 retained more than one live range on one scale"
+            )
         return live[0] if live else None
 
     def _range_statistics(
@@ -861,7 +919,7 @@ class CausalRangeAuctionTracker:
         true_range: float,
         prior_atr: float,
     ) -> tuple[DealingRangeState | None, _RangeGateEvaluation | None]:
-        state = self._live_range(self._ranges.values())
+        state = self._live_range(self._ranges.values(), candle.timeframe)
         if state is None:
             return None, None
         lower = zones_by_id.get(state.lower_source_zone_id)
@@ -1123,16 +1181,18 @@ class CausalRangeAuctionTracker:
         zones: Sequence[SupportResistanceState],
         true_range: float,
     ) -> DealingRangeState | None:
-        if self._live_range(self._ranges.values()) is not None:
+        timeframe = candle.timeframe
+        if self._live_range(self._ranges.values(), timeframe) is not None:
             return None
-        if len(self._h1_true_ranges) < self.protocol.h1_atr_period:
+        true_ranges = self._native_true_ranges[timeframe]
+        if len(true_ranges) < self.protocol.h1_atr_period:
             return None
         pairs = self._eligible_pairs(candle, zones)
         if not pairs:
             return None
         lower, upper = pairs[0]
         formation_atr = max(
-            sum(self._h1_true_ranges) / len(self._h1_true_ranges),
+            sum(true_ranges) / len(true_ranges),
             self.protocol.tick_size,
         )
         lower_bound = float(lower.lower_bound)
@@ -1173,7 +1233,7 @@ class CausalRangeAuctionTracker:
             ),
             symbol=candle.symbol,
             instrument_id=int(candle.instrument_id),
-            timeframe=Timeframe.H1,
+            timeframe=timeframe,
             lifecycle=DealingRangeLifecycle.ACTIVE,
             lower_source_zone_id=lower.zone_id,
             upper_source_zone_id=upper.zone_id,
@@ -1265,7 +1325,7 @@ class CausalRangeAuctionTracker:
         ):
             item = LiquidityInventoryItem(
                 item_id=self._range_item_id(state, side),
-                timeframe=Timeframe.H1,
+                timeframe=state.timeframe,
                 side=side,
                 kind="range_boundary",
                 price=price,
@@ -1331,32 +1391,35 @@ class CausalRangeAuctionTracker:
                 if removable in item.source_ids:
                     self._range_inventory.pop(item_id)
 
-    def _apply_h1(
+    def _apply_native(
         self,
         candle: Candle,
         zones: tuple[SupportResistanceState, ...],
     ) -> RangeAuctionUpdate:
-        if (
-            self._last_h1_raw_end is not None
-            and candle.end <= self._last_h1_raw_end
-        ):
-            raise ValueError("duplicate or out-of-order Group 4 H1 candle")
-        self._last_h1_raw_end = candle.end
+        """Advance one scale's range side on that scale's completed candle."""
+
+        timeframe = candle.timeframe
+        last_raw_end = self._last_native_raw_end[timeframe]
+        if last_raw_end is not None and candle.end <= last_raw_end:
+            raise ValueError(
+                "duplicate or out-of-order Group 4 native candle"
+            )
+        self._last_native_raw_end[timeframe] = candle.end
         if not candle.real_completed:
             return self._output()
-        true_range = _true_range(candle, self._prior_h1_close)
+        true_ranges = self._native_true_ranges[timeframe]
+        prior_close = self._prior_native_close[timeframe]
+        true_range = _true_range(candle, prior_close)
         # The tolerance band is sized from the volatility known *before* this
         # bar, so it is read off the window before this bar joins it.
         prior_atr = (
-            sum(self._h1_true_ranges) / len(self._h1_true_ranges)
-            if self._h1_true_ranges
+            sum(true_ranges) / len(true_ranges)
+            if true_ranges
             else float(self.protocol.tick_size)
         )
-        if self._prior_h1_close is not None and true_range > 0.0:
-            self._h1_true_ranges.append(
-                max(true_range, self.protocol.tick_size)
-            )
-        self._prior_h1_close = float(candle.close)
+        if prior_close is not None and true_range > 0.0:
+            true_ranges.append(max(true_range, self.protocol.tick_size))
+        self._prior_native_close[timeframe] = float(candle.close)
         zones_by_id = {zone.zone_id: zone for zone in zones}
         transition, gate_evaluation = self._advance_live_range(
             candle,
@@ -1375,9 +1438,9 @@ class CausalRangeAuctionTracker:
             and transition.lifecycle is DealingRangeLifecycle.BROKEN
         ):
             same_bar_terminal_blocked = available_count
-        elif self._live_range(self._ranges.values()) is not None:
+        elif self._live_range(self._ranges.values(), timeframe) is not None:
             live_range_blocked = available_count
-        elif len(self._h1_true_ranges) < self.protocol.h1_atr_period:
+        elif len(true_ranges) < self.protocol.h1_atr_period:
             atr_unready = available_count
         else:
             eligible_count = available_count
@@ -1411,6 +1474,7 @@ class CausalRangeAuctionTracker:
             selected_pair = None
         range_funnel = RangeFormationFunnelSnapshot(
             observed_at=candle.end,
+            timeframe=timeframe,
             pair_counts=(
                 (
                     "live_structural_pairs",
@@ -1466,7 +1530,7 @@ class CausalRangeAuctionTracker:
             ),
         )
         self._ensure_range_capacity(set(zones_by_id))
-        self._last_h1_end = candle.end
+        self._last_native_end[timeframe] = candle.end
         return self._output(
             range_transitions=tuple(
                 value
@@ -1476,30 +1540,65 @@ class CausalRangeAuctionTracker:
             range_funnel=(range_funnel,),
         )
 
-    def on_completed_h1(
+    def _apply_completed_native(
+        self,
+        completed: Mapping[Timeframe, Candle],
+        zones_by_timeframe: Mapping[
+            Timeframe, tuple[SupportResistanceState, ...]
+        ],
+    ) -> tuple[
+        tuple[DealingRangeState, ...],
+        tuple[RangeFormationFunnelSnapshot, ...],
+    ]:
+        """Apply every scale that completed on this clock, largest first."""
+
+        range_transitions: list[DealingRangeState] = []
+        range_funnel: list[RangeFormationFunnelSnapshot] = []
+        for timeframe in sorted(
+            self.protocol.timeframes,
+            key=lambda value: value.minutes,
+            reverse=True,
+        ):
+            candle = completed.get(timeframe)
+            if candle is None:
+                continue
+            output = self._apply_native(
+                candle,
+                zones_by_timeframe.get(timeframe, ()),
+            )
+            range_transitions.extend(output.range_transitions)
+            range_funnel.extend(output.range_funnel)
+        return tuple(range_transitions), tuple(range_funnel)
+
+    def on_completed_native(
         self,
         candle: Candle,
         support_resistance: Iterable[SupportResistanceState],
     ) -> RangeAuctionUpdate:
         zones = tuple(support_resistance)
         input_value = (candle, zones)
+        timeframe = getattr(candle, "timeframe", None)
         if (
-            input_value == self._last_h1_input
-            and self._last_h1_output is not None
+            timeframe in self._last_native_input
+            and input_value == self._last_native_input[timeframe]
+            and self._last_native_output[timeframe] is not None
         ):
-            return self._last_h1_output
+            return self._last_native_output[timeframe]
         candidate = self._transaction_clone()
         try:
-            candidate._validate_h1(candle, zones)
-            output = candidate._apply_h1(candle, zones)
-            candidate._last_h1_input = input_value
-            candidate._last_h1_output = output
+            candidate._validate_native(candle, zones)
+            output = candidate._apply_native(candle, zones)
+            candidate._last_native_input[timeframe] = input_value
+            candidate._last_native_output[timeframe] = output
             candidate._last_boundary_input = None
             candidate._last_boundary_output = None
         except Exception:
             raise
         self._commit(candidate)
         return output
+
+    # The pre-2026-09 single-scale entry point.
+    on_completed_h1 = on_completed_native
 
     def _pool_by_inventory(
         self,
@@ -1606,7 +1705,7 @@ class CausalRangeAuctionTracker:
             if (
                 state is None
                 or state.balance_confirmed_at is None
-                or item.timeframe is not Timeframe.H1
+                or item.timeframe is not state.timeframe
                 or item.price != expected_price
                 or item.lower_bound != expected_price
                 or item.upper_bound != expected_price
@@ -1636,7 +1735,7 @@ class CausalRangeAuctionTracker:
                     source_kind="mature_range_boundary",
                     source_id=state.range_id,
                     source_protocol_hash=state.protocol_hash,
-                    source_timeframe=Timeframe.H1,
+                    source_timeframe=state.timeframe,
                     inventory=item,
                     formed_at=state.formed_at,
                     eligible_at=state.balance_confirmed_at,
@@ -2015,8 +2114,8 @@ class CausalRangeAuctionTracker:
         candle: Candle,
         prior_inventory: tuple[LiquidityInventoryItem, ...],
         pools: tuple[LiquidityPoolState, ...],
-        completed_h1: Candle | None,
-        h1_zones: tuple[SupportResistanceState, ...],
+        completed_native: Mapping[Timeframe, Candle],
+        native_zones: Mapping[Timeframe, tuple[SupportResistanceState, ...]],
     ) -> RangeAuctionUpdate:
         if (
             self._last_m1_raw_end is not None
@@ -2025,12 +2124,10 @@ class CausalRangeAuctionTracker:
             raise ValueError("duplicate or out-of-order Group 4 1m candle")
         self._last_m1_raw_end = candle.end
         if not candle.real_completed:
-            range_transitions: tuple[DealingRangeState, ...] = ()
-            range_funnel: tuple[RangeFormationFunnelSnapshot, ...] = ()
-            if completed_h1 is not None:
-                h1_output = self._apply_h1(completed_h1, h1_zones)
-                range_transitions = h1_output.range_transitions
-                range_funnel = h1_output.range_funnel
+            range_transitions, range_funnel = self._apply_completed_native(
+                completed_native,
+                native_zones,
+            )
             return self._output(
                 range_transitions=range_transitions,
                 range_funnel=range_funnel,
@@ -2114,12 +2211,10 @@ class CausalRangeAuctionTracker:
                     )
                 candidate_sources.append(source)
         self._consume_range_crossings(crossed_items, candle)
-        range_transitions: tuple[DealingRangeState, ...] = ()
-        range_funnel: tuple[RangeFormationFunnelSnapshot, ...] = ()
-        if completed_h1 is not None:
-            h1_output = self._apply_h1(completed_h1, h1_zones)
-            range_transitions = h1_output.range_transitions
-            range_funnel = h1_output.range_funnel
+        range_transitions, range_funnel = self._apply_completed_native(
+            completed_native,
+            native_zones,
+        )
         same_clock_invalidated_range_ids = {
             state.range_id
             for state in range_transitions
@@ -2313,7 +2408,19 @@ class CausalRangeAuctionTracker:
         h1_support_resistance: Iterable[
             SupportResistanceState
         ] = (),
+        completed_native: Mapping[Timeframe, Candle] | None = None,
+        native_support_resistance: Mapping[
+            Timeframe, Iterable[SupportResistanceState]
+        ] | None = None,
     ) -> RangeAuctionUpdate:
+        """Advance the 1m funnel and every scale that completed on this clock.
+
+        ``completed_native`` / ``native_support_resistance`` carry each
+        registered scale's completed candle and that scale's zones;
+        ``completed_h1`` / ``h1_support_resistance`` remain the single-scale
+        spelling for the 1H entry of those maps.
+        """
+
         if (
             not isinstance(candle, Candle)
             or candle.timeframe is not Timeframe.M1
@@ -2323,13 +2430,41 @@ class CausalRangeAuctionTracker:
             raise ValueError("Group 4 requires a completed 1m candle")
         inventory = tuple(prior_inventory)
         pools = tuple(liquidity_pools)
-        zones = tuple(h1_support_resistance)
+        completed: dict[Timeframe, Candle] = dict(completed_native or {})
+        zones_by_timeframe: dict[
+            Timeframe, tuple[SupportResistanceState, ...]
+        ] = {
+            timeframe: tuple(values)
+            for timeframe, values in (native_support_resistance or {}).items()
+        }
+        if completed_h1 is not None:
+            if Timeframe.H1 in completed:
+                raise ValueError("Group 4 received the 1H candle twice")
+            completed[Timeframe.H1] = completed_h1
+        h1_zones = tuple(h1_support_resistance)
+        if h1_zones:
+            if zones_by_timeframe.get(Timeframe.H1):
+                raise ValueError("Group 4 received the 1H sources twice")
+            zones_by_timeframe[Timeframe.H1] = h1_zones
+        ordered_completed = tuple(
+            (timeframe, completed[timeframe])
+            for timeframe in self.protocol.timeframes
+            if timeframe in completed
+        )
+        if len(ordered_completed) != len(completed):
+            raise ValueError(
+                "Group 4 received a completed candle of an unregistered scale"
+            )
+        ordered_zones = tuple(
+            (timeframe, zones_by_timeframe.get(timeframe, ()))
+            for timeframe in self.protocol.timeframes
+        )
         input_value = (
             candle,
             inventory,
             pools,
-            completed_h1,
-            zones,
+            ordered_completed,
+            ordered_zones,
         )
         if (
             input_value == self._last_m1_input
@@ -2356,25 +2491,25 @@ class CausalRangeAuctionTracker:
                 for pool in pools
             ):
                 raise TypeError("Group 4 pool source is not typed")
-            if completed_h1 is not None:
-                candidate._validate_h1(completed_h1, zones)
-                if completed_h1.end != candle.end:
+            for timeframe, native in ordered_completed:
+                candidate._validate_native(
+                    native,
+                    zones_by_timeframe.get(timeframe, ()),
+                )
+                if native.end != candle.end:
                     raise ValueError(
-                        "Group 4 H1 and 1m completion clocks disagree"
+                        "Group 4 native and 1m completion clocks disagree"
                     )
-                if (
-                    not candle.real_completed
-                    and completed_h1.real_completed
-                ):
+                if not candle.real_completed and native.real_completed:
                     raise ValueError(
-                        "synthetic Group 4 1m cannot carry a real H1 bar"
+                        "synthetic Group 4 1m cannot carry a real native bar"
                     )
             output = candidate._apply_m1(
                 candle,
                 inventory,
                 pools,
-                completed_h1,
-                zones,
+                dict(ordered_completed),
+                dict(ordered_zones),
             )
             candidate._last_m1_input = input_value
             candidate._last_m1_output = output
@@ -2510,8 +2645,8 @@ class CausalRangeAuctionTracker:
                     candle,
                     inventory,
                     pools,
-                    None,
-                    (),
+                    {},
+                    {},
                 )
                 transitions.extend(output.manipulation_transitions)
                 ambiguous.extend(output.ambiguous_sweep_item_ids)
@@ -2572,7 +2707,7 @@ class CausalRangeAuctionTracker:
         raw_ends = tuple(
             value
             for value in (
-                self._last_h1_raw_end,
+                *self._last_native_raw_end.values(),
                 self._last_m1_raw_end,
             )
             if value is not None
@@ -2614,14 +2749,17 @@ class CausalRangeAuctionTracker:
             candidate._range_inventory.clear()
             candidate._manipulations.clear()
             candidate._manipulation_order.clear()
-            candidate._h1_true_ranges.clear()
+            for timeframe in self.protocol.timeframes:
+                candidate._native_true_ranges[timeframe].clear()
+                candidate._prior_native_close[timeframe] = None
+                candidate._last_native_end[timeframe] = None
+                candidate._last_native_raw_end[timeframe] = None
+                candidate._last_native_input[timeframe] = None
+                candidate._last_native_output[timeframe] = None
             candidate._m1_true_ranges.clear()
-            candidate._prior_h1_close = None
             candidate._prior_m1_close = None
             candidate._identity = None
-            candidate._last_h1_end = None
             candidate._last_m1_end = None
-            candidate._last_h1_raw_end = None
             candidate._last_m1_raw_end = observed_at
             candidate._blocked_cold_pairs.clear()
             output = candidate._output(
@@ -2629,8 +2767,6 @@ class CausalRangeAuctionTracker:
                 manipulation_transitions=manipulation_transitions,
                 boundary_reason=reason,
             )
-            candidate._last_h1_input = None
-            candidate._last_h1_output = None
             candidate._last_m1_input = None
             candidate._last_m1_output = None
             candidate._last_boundary_input = input_value

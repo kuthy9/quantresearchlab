@@ -140,7 +140,7 @@ retirement adds its own reasons). The two are exclusive per item. FVG and
 order-block outcomes already lived on their own timeframe.
 
 The registry bytes changed, so `atomic_definition_identity` moved from
-`f92b24c8…1f0c` and, after the later protocol and registry changes in this series, settled at `29cc2ba1…500a`, then at `edf27ca3…27c7` when the Group 5 terminal-context and liquidity terminal-state retention parameters were registered; `configs/model.json` pins the current value.
+`f92b24c8…1f0c` and, after the later protocol and registry changes in this series, settled at `29cc2ba1…500a`, then at `b83129ce…311e` when the Group 5 terminal-context and liquidity terminal-state retention parameters were registered; `configs/model.json` pins the current value.
 
 ## The 1m tape is microstructure
 
@@ -184,14 +184,26 @@ scales publish their facts and their frames the same way. On 2022-02-01 the
 5m facts are unchanged in every kind, and 15m / 1H gained 35 / 3
 displacements, 14 / 3 FVGs and 10 / 1 base origin cores.
 
-**The dealing range is not generalized.** Group 4 is not a definition applied
-to a scale but a fusion of the 1H range with the 1m manipulation, reacceptance
-and entry-path machinery, and its registered parameters are written in those
-units (`candidate_real_h1_bars` 8–24, `range_manipulation_real_1m_bars`,
-`…_completed_h1_closes`). Running it at 15m would be a new definition with
-untested parameters, not the same one applied more widely, so
-`{1m,5m,15m,4H}_range_*` stay NaN until a per-scale range definition is
-registered.
+**The dealing range followed on 2026-09-14, under the same semantic
+version.** Group 4 fuses the range with the 1m manipulation machinery, and its
+range parameters are written in bars (`candidate_real_h1_bars` 8–24,
+`compression_*_real_h1_bars`); the decision was to read those counts as bars
+of the range's own scale rather than to write a second set per scale.
+`primitives_range.json` names `timeframes` (15m, 1H, 4H); the tracker keeps
+its ATR window, prior close, clocks and idempotency memo per scale and runs
+the same formation, balance and break rules on each scale's completed bar,
+with at most one live range per scale. The manipulation funnel is still one:
+mature boundaries of every scale and every pool feed the same
+one-live-at-a-time resolver, and a range boundary source carries its range's
+scale. Every range, boundary item, funnel snapshot and RANGE event carries
+its scale; the store's close-beyond contract requires the parents and the BAR
+on that scale; the DTO validators reject 1m only. Field names such as
+`candidate_real_h1_bars` and `age_h1_bars` are kept so journals still reduce
+and mean native bars. What this does *not* claim: the 1H range's natural
+observation coverage was "sparse" before and the 15m and 4H ranges have none
+yet — they are the same definition applied more widely, and their behaviour
+on tape is measured, not assumed (`test_ranges_on_every_scale.py` checks the
+contract, not the market).
 
 ## Bounded candidates, and what still grows
 

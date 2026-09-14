@@ -1090,6 +1090,9 @@ class CausalObserver:
         # Candidate ids the observer has retired; they stay out of the
         # inventory pipeline for the rest of the epoch.
         self._retired_level_ids: set[str] = set()
+        # Consumed swing items dropped after their retention; kept only while
+        # a tracker still offers the swing, so it cannot come back visible.
+        self._dropped_consumed_ids: set[str] = set()
         self._liquidity_trackers = (
             {
                 timeframe: CausalLiquidityTracker(
@@ -1108,24 +1111,38 @@ class CausalObserver:
             Timeframe,
             tuple[pd.Timestamp | None, tuple],
         ] = {}
-        if (
-            self.config.range_auction_protocol is not None
-            and (
-                structure_config is None
-                or liquidity_config is None
-                or Timeframe.H1 not in self._structure_trackers
-                or Timeframe.H1 not in self._liquidity_trackers
-            )
-        ):
-            raise ValueError(
-                "Group 4 requires typed H1 structure, "
-                "support/resistance and pools"
-            )
         range_auction_protocol = (
             RangeAuctionProtocol.from_file(self.config.range_auction_protocol)
             if self.config.range_auction_protocol is not None
             else None
         )
+        # The scales the dealing range is projected on: the protocol's scales
+        # that are active here, each with its typed structure and liquidity
+        # trackers; empty without Group 4.  As for zones, a registered scale
+        # this observer does not run is simply not projected.
+        self._range_timeframes: tuple[Timeframe, ...] = (
+            ()
+            if range_auction_protocol is None
+            else tuple(
+                timeframe
+                for timeframe in range_auction_protocol.timeframes
+                if timeframe in self._active_timeframes
+            )
+        )
+        if range_auction_protocol is not None and (
+            structure_config is None
+            or liquidity_config is None
+            or not self._range_timeframes
+            or any(
+                timeframe not in self._structure_trackers
+                or timeframe not in self._liquidity_trackers
+                for timeframe in self._range_timeframes
+            )
+        ):
+            raise ValueError(
+                "Group 4 requires typed structure, support/resistance and "
+                "pools on every active range scale"
+            )
         if range_auction_protocol is not None and (
             not math.isclose(
                 range_auction_protocol.tick_size,
@@ -1150,7 +1167,8 @@ class CausalObserver:
         self._group4_bootstrap_range_transitions: list[
             DealingRangeState
         ] = []
-        self._group4_cold_pairs_marked = False
+        # The range scales whose pre-coverage source pairs were marked cold.
+        self._group4_cold_pairs_marked: set[Timeframe] = set()
         if self.config.interaction_protocol is not None and (
             zone_protocol is None
             or range_auction_protocol is None
@@ -1309,7 +1327,7 @@ class CausalObserver:
             else None
         )
         self._group4_bootstrap_range_transitions.clear()
-        self._group4_cold_pairs_marked = False
+        self._group4_cold_pairs_marked.clear()
         failed_bos = tuple(
             item
             for tracker in self._structure_trackers.values()
@@ -1377,6 +1395,7 @@ class CausalObserver:
         self._liquidity_snapshot_cache.clear()
         self._inventory_consumption.clear()
         self._retired_level_ids.clear()
+        self._dropped_consumed_ids.clear()
         self._pending_pool_sweeps.clear()
         self._pending_level_crossings.clear()
         self._reference_periods.clear()
@@ -1612,7 +1631,7 @@ class CausalObserver:
                     )
                     self._invalidate_liquidity_snapshot(timeframe)
                     if (
-                        timeframe is Timeframe.H1
+                        timeframe in self._range_timeframes
                         and self._range_auction_tracker is not None
                         and self._prior is None
                     ):
@@ -1633,7 +1652,8 @@ class CausalObserver:
                         )
                         if (
                             within_group4_coverage
-                            and not self._group4_cold_pairs_marked
+                            and timeframe
+                            not in self._group4_cold_pairs_marked
                         ):
                             self._range_auction_tracker.mark_existing_source_pairs_ineligible(
                                 tuple(
@@ -1643,9 +1663,9 @@ class CausalObserver:
                                     < coverage_start
                                 )
                             )
-                            self._group4_cold_pairs_marked = True
+                            self._group4_cold_pairs_marked.add(timeframe)
                         range_auction_update = (
-                            self._range_auction_tracker.on_completed_h1(
+                            self._range_auction_tracker.on_completed_native(
                                 candle,
                                 (
                                     support_resistance
@@ -1868,6 +1888,49 @@ class CausalObserver:
                     )
                 )
         return tuple(retirements)
+
+    def _drop_consumed_past_retention(
+        self,
+        base_inventory: Sequence[LiquidityInventoryItem],
+        *,
+        asof: pd.Timestamp,
+    ) -> list[LiquidityInventoryItem]:
+        """Leave out consumed swings exposed for their scale's retention.
+
+        The crossing that consumed the item was delivered on its bar; the
+        item repeats that fact for ``consumed_item_retention_native_bars`` of
+        its own scale, counting the bar of consumption, and then leaves the
+        observation.  The tracker may keep offering the swing, so a dropped
+        id is remembered for as long as it does.
+        """
+
+        config = self._liquidity_config
+        offered = {item.item_id for item in base_inventory}
+        self._dropped_consumed_ids.intersection_update(offered)
+        if config is None:
+            return list(base_inventory)
+        retention = config.consumed_item_retention_native_bars
+        for item in base_inventory:
+            if (
+                item.kind != "swing"
+                or item.item_id in self._dropped_consumed_ids
+            ):
+                continue
+            consumed = self._inventory_consumption.get(item.item_id)
+            if consumed is None:
+                continue
+            consumed_at, _ = consumed
+            if asof - consumed_at >= pd.Timedelta(
+                minutes=retention * item.timeframe.minutes
+            ):
+                self._dropped_consumed_ids.add(item.item_id)
+        if not self._dropped_consumed_ids:
+            return list(base_inventory)
+        return [
+            item
+            for item in base_inventory
+            if item.item_id not in self._dropped_consumed_ids
+        ]
 
     def _visible_zone_update(
         self,
@@ -2175,7 +2238,9 @@ class CausalObserver:
         snapshot = (
             tracker.snapshot(
                 range_auction_sources_only=True,
-                include_support_resistance=(timeframe is Timeframe.H1),
+                include_support_resistance=(
+                    timeframe in self._range_timeframes
+                ),
             )
             if self.config.range_auction_projection_only
             else tracker.snapshot()
@@ -3398,6 +3463,10 @@ class CausalObserver:
             base_inventory.extend(native_inventory)
         if not self.config.range_auction_projection_only:
             base_inventory.extend(self._reference_inventory.values())
+        base_inventory = self._drop_consumed_past_retention(
+            base_inventory,
+            asof=update.asof,
+        )
         if self._retired_level_ids:
             # A retired candidate is gone from the reducer's set; the tracker
             # may still hold its source swing, so a still-visible item leaves
@@ -3455,13 +3524,18 @@ class CausalObserver:
                         )
                     )
                 else:
-                    completed_h1 = tuple(
-                        update.newly_completed.get(Timeframe.H1, ())
-                    )
-                    if len(completed_h1) > 1:
-                        raise RuntimeError(
-                            "one 1m update emitted multiple H1 candles"
+                    completed_native: dict[Timeframe, Candle] = {}
+                    for timeframe in self._range_timeframes:
+                        completed = tuple(
+                            update.newly_completed.get(timeframe, ())
                         )
+                        if len(completed) > 1:
+                            raise RuntimeError(
+                                "one 1m update emitted multiple "
+                                f"{timeframe.value} candles"
+                            )
+                        if completed:
+                            completed_native[timeframe] = completed[0]
                     range_auction_update = (
                         self._range_auction_tracker.on_completed_update(
                             update.completed_1m,
@@ -3469,22 +3543,24 @@ class CausalObserver:
                                 self._prior.liquidity_inventory
                             ),
                             liquidity_pools=pre_projection_pool_states,
-                            completed_h1=(
-                                completed_h1[0]
-                                if completed_h1
-                                else None
-                            ),
-                            h1_support_resistance=(
-                                frames[
-                                    Timeframe.H1
+                            completed_native=completed_native,
+                            native_support_resistance={
+                                timeframe: frames[
+                                    timeframe
                                 ].support_resistance
-                            ),
+                                for timeframe in self._range_timeframes
+                            },
                         )
                     )
-                frames[Timeframe.H1] = replace(
-                    frames[Timeframe.H1],
-                    dealing_ranges=range_auction_update.dealing_ranges,
-                )
+                for timeframe in self._range_timeframes:
+                    frames[timeframe] = replace(
+                        frames[timeframe],
+                        dealing_ranges=tuple(
+                            state
+                            for state in range_auction_update.dealing_ranges
+                            if state.timeframe is timeframe
+                        ),
+                    )
                 # Append each manipulation timeline in lifecycle order now.
                 # New SWEPT events carry a high same-clock sequence floor,
                 # so inventory, HTF sources and ranges still sort before
@@ -3874,7 +3950,11 @@ class CausalObserver:
         prior_observation = self._prior
         current_fvgs = frames[Timeframe.M5].fair_value_gaps
         current_order_blocks = frames[Timeframe.M5].order_blocks
-        current_ranges = frames[Timeframe.H1].dealing_ranges
+        current_ranges = tuple(
+            state
+            for timeframe in self._range_timeframes
+            for state in frames[timeframe].dealing_ranges
+        )
         current_manipulations = (
             ()
             if range_auction_update is None
