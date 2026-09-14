@@ -1,5 +1,14 @@
 # Eye Contract Repairs (2026-09-13)
 
+**Status (end of 2026-09-13):** Tasks 0, 4, 1, 5, 2 and 7 done as written. Task 3
+done for displacement and zones; the dealing range stays 1H (its Group 4
+parameters are written in 1H/1m units, so a per-scale range is a new definition,
+not the same one applied more widely). Task 6 bounded the candidate set and
+replaced three full rebuilds; the per-bar curve is flatter, not flat, and the
+remaining owners are named in [README.md](../README.md). The Foundation v2.1
+stack is kept and marked as the next removal. Details per task in the README
+sections written beside each change.
+
 Branch: `eyes` (worktree `.claude/worktrees/eyes`). Merge to `main` when every task
 below is green. Ordered by dependency, not by size. Every task is TDD: failing test,
 minimal change, `eyes/tests` green, one commit. The atomic identity and event

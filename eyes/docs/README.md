@@ -140,7 +140,7 @@ retirement adds its own reasons). The two are exclusive per item. FVG and
 order-block outcomes already lived on their own timeframe.
 
 The registry bytes changed, so `atomic_definition_identity` moved from
-`f92b24c8…1f0c` to `af834d53…f301`; `configs/model.json` pins the new value.
+`f92b24c8…1f0c` and, after the later protocol and registry changes in this series, settled at `29cc2ba1…500a`; `configs/model.json` pins the current value.
 
 ## The 1m tape is microstructure
 
@@ -257,12 +257,29 @@ curve is flatter, not flat. What still grows, in order:
 
 Those are cumulative times under a loaded machine; the ratios are the fact.
 
+## What the runtime loads, and what was removed
+
+`eyes/core/` is 74 k lines; the runtime path (`CausalObserver` and everything
+it imports) is 21 modules of them. On 2026-09-13 the pieces the runtime never
+loaded were removed: `eye_statistics.py` (an optional 4,268-line statistics
+projection whose only consumer was the authority scan), the 2023 authority
+scan and its case audit and the mature-range scan (all three imported the
+validation-protocol loader retired with the typed Brain and could not run),
+their three test modules, and the six `study_*.py` scripts (their receipts
+live in [evidence/](evidence/)). The Task 0 lazy-import shims went with the
+scripts.
+
+Kept, and marked as the next removal: the Foundation v2.1 projection stack —
+`semantic_foundation.py`, `semantic_lifecycle.py`, `semantic_zones.py`,
+`structural_outcome.py` (≈9,300 lines). No replay has ever published a
+`FOUNDATION_STATE_CHANGED` event, but the stack is wired into the semantic
+selection (`configs/model.json` names the Foundation registry and its
+identity, `eyes/core/semantics.py` validates it) and into the snapshot schema
+(`FOUNDATION_VERSION` on five `market_state` dataclasses), so removing it is
+a contract change, not a deletion.
+
 ## Scripts — `eyes/scripts/`
 
-Bounded, outcome-blind Eye studies and scans. `run_eye_authority_scan.py` is the
-registered 2023 authority scan (its `RUNTIME_CODE_FILES` list is hashed into the
-scan's provenance, so it must be updated whenever an Eye module moves);
-`audit_eye_authority_cases.py` replays sampled cases with images;
-`scan_eye_event_statistics.py` and `scan_mature_ranges.py` are census scans; the
-six `study_*.py` files are the balance-range and structure-reading studies whose
-receipts live in [evidence/](evidence/). Throwaway probes belong here too.
+`replay_hash_stream.py` is the per-bar hash-stream and timing harness for
+output-preserving cost changes; `scan_eye_event_statistics.py` is the event
+census. Throwaway probes belong here too.

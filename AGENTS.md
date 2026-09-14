@@ -32,7 +32,7 @@ refreeze:
   repository-root-relative string `semantics/parameters_v1_3.yaml`, and the
   registry's bytes are `registry_sha256`. Relocating the directory rewrites that
   line and moves `atomic_definition_identity` off
-  `f92b24c86bf942defc88de4edb7be16cc2a30dd64fde3b4432657780648b1f0c`.
+  `29cc2ba19a7d94a1dbbda40762059bc1787dda82a9762f71aba13de78156500a`.
 
 Tests use `<subsystem>/tests/test_*.py`. Bounded studies write under `outputs/`;
 current explanations and receipts live in `<subsystem>/docs/` and
@@ -106,7 +106,7 @@ owns the inert not-evaluated value beside `ExecutionObservation`;
 `ContinuousSMCEngine._score_execution` derives the score and the Eye only
 transports the result. That boundary is enforced by
 `eyes/tests/test_eye_module_boundary.py`, which resolves both the intra-package
-relative imports and the cross-package absolute ones. `eyes/core/eye_statistics.py`,
+relative imports and the cross-package absolute ones.
 `shares/core/visualization.py` and `shares/core/market_cases.py` are optional
 projections and study consumers. None of them may become a second market-state
 authority.
