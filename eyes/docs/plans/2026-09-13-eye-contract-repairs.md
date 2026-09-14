@@ -4,7 +4,9 @@
 done for displacement and zones on 2026-09-13 and for the dealing range on
 2026-09-14 (`2026-09-14-multiscale-dealing-range.md`: the bar-count
 parameters are read in the range's own scale, one manipulation funnel, same
-semantic version). Task 6 bounded the candidate set,
+semantic version). Task 6 bounded the candidate set (and, measured over
+2022-02 on 2026-09-14, closed the pool-candidate leak the one-week measurement
+had hidden: 897 → 92 1m candidates at month end),
 replaced three full rebuilds, and in a second pass gave the three remaining
 "terminal state retained until capacity" owners an explicit retention (Group 5
 context paths, liquidity zones and pools) and made structural-leg projection

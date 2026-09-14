@@ -140,7 +140,7 @@ retirement adds its own reasons). The two are exclusive per item. FVG and
 order-block outcomes already lived on their own timeframe.
 
 The registry bytes changed, so `atomic_definition_identity` moved from
-`f92b24c8…1f0c` and, after the later protocol and registry changes in this series, settled at `29cc2ba1…500a`, then at `b83129ce…311e` when the Group 5 terminal-context and liquidity terminal-state retention parameters were registered; `configs/model.json` pins the current value.
+`f92b24c8…1f0c` and, after the later protocol and registry changes in this series, settled at `29cc2ba1…500a`, then at `f43563d2…0b48` when the Group 5 terminal-context and liquidity terminal-state retention parameters were registered; `configs/model.json` pins the current value.
 
 ## The 1m tape is microstructure
 
@@ -221,9 +221,16 @@ appended after it, which the timeframe reducer consumes at once, so a cold
 replay of the log agrees with the hot view; a retired item never reached also
 ends as `LEVEL_INVALIDATED`, and its still-visible inventory item leaves the
 crossing pipeline so a later touch cannot reach a level the Eye no longer
-offers. Equal-liquidity pools, mature range boundaries and previous-period
-reference levels are bounded and retired by their own lifecycles and are left
-to them. At bar 2,500 on 2022-01-09→ the 1m set holds 126 candidates.
+offers. Previous-period reference levels are retired at their rollover.
+Equal-liquidity pools and range boundaries were first left to their own
+lifecycles — and that lifecycle ended in the tracker alone: a resolved pool was
+compacted from the snapshot and nothing told the reducer, so 177 of the 261
+1m candidates at bar 6,000 of 2022-02 were pools that no longer existed, and
+the set reached 897 by month end. A pool or range-boundary candidate now ends
+as `LIQUIDITY_RETIRED` (`pool_resolved` / `range_boundary_retired`) on the bar
+its entity leaves the authoritative set (`test_pool_candidate_retirement.py`);
+with that, the 1m set holds 83 candidates at bar 6,000, 5 of them older than
+the age limit and all of those reference levels waiting for rollover.
 
 That bound did not flatten the per-bar curve, because the candidate
 projection was only one of the owners. Profiling bars 2,000–2,500 against
@@ -309,4 +316,10 @@ a contract change, not a deletion.
 
 `replay_hash_stream.py` is the per-bar hash-stream and timing harness for
 output-preserving cost changes; `scan_eye_event_statistics.py` is the event
-census. Throwaway probes belong here too.
+census; `replay_coverage_stats.py` replays a window through the Eye alone
+and writes one JSON under `outputs/eye_coverage/` counting what each 2026-09
+repair changed (range coverage per scale, same-fact duplicates, formation
+lag, target outcomes, the two event channels, per-scale state availability,
+seconds per block and state sizes) — its 2022-02 reading is
+`docs/evidence/eye_coverage_2022-02_2026-09-14.md`. Throwaway probes belong
+here too.

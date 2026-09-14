@@ -5,11 +5,11 @@
   "tick_size": 0.25,
   "upstream": {
     "group12_protocol_version": "3.2.0-group12.7",
-    "group12_protocol_sha256": "cf81216bd32cd8604bd74d3bb3e102992964a57bae761251f4f165baadd0e079",
+    "group12_protocol_sha256": "d5afb0bcfcd6cfe59f13d83f54a5031668286f426150896d01edf077ff495892",
     "group3_protocol_version": "3.2.0-group3.4",
     "group3_protocol_sha256": "61168f7d2f823d3194682c36b0cb283fcbb8b5fc09448abc66c064c49620c1ea",
     "group4_protocol_version": "3.2.0-group4.1",
-    "group4_protocol_sha256": "5feb8dd818a32a895365ccbebbbbbdd1669e9bbb97f49dcbf8292d4a1c757147",
+    "group4_protocol_sha256": "1d1ebcd619633f14e757dc1dd11f63cca3e2fc16a4299aaacb95de34c2436bd4",
     "required_typed_sources": [
       "5m FairValueGapState",
       "5m OrderBlockState",

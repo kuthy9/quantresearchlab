@@ -801,6 +801,15 @@ def _typed_progression(
 # liquidity pools, mature range boundaries, and the previous-period reference
 # levels that retire when their period is replaced: the retirement scan
 # leaves them to that lifecycle.
+# Candidate kinds whose entity lifecycle ends in a tracker: the candidate
+# ends on the bar the entity leaves the authoritative set, with this reason.
+_ENTITY_OWNED_CANDIDATE_KINDS = {
+    "equal_highs": "pool_resolved",
+    "equal_lows": "pool_resolved",
+    "formed_liquidity_pool": "pool_resolved",
+    "range_boundary": "range_boundary_retired",
+    "mature_range_boundary": "range_boundary_retired",
+}
 _LIFECYCLE_OWNED_CANDIDATE_KINDS = frozenset(
     {
         "equal_highs",
@@ -1837,12 +1846,18 @@ class CausalObserver:
     def _candidate_retirements(
         self,
         snapshot: MarketSnapshot,
+        *,
+        offered_entity_ids: frozenset[str] = frozenset(),
     ) -> tuple[_CandidateRetirement, ...]:
         """The candidates this snapshot shows have outlived their scale or reach.
 
         The collection is bounded here rather than in the reducer so that the
         bound is a fact in the log: the reducer drops a candidate on the
-        LIQUIDITY_RETIRED it publishes, and a cold replay agrees.
+        LIQUIDITY_RETIRED it publishes, and a cold replay agrees.  A pool or a
+        range boundary is bounded by its own entity lifecycle instead of by
+        age or reach, so it ends here on the bar its entity leaves the
+        authoritative set (``offered_entity_ids``): the pool resolved and was
+        compacted, or the range broke and its boundary item left.
         """
 
         config = self._liquidity_config
@@ -1856,12 +1871,17 @@ class CausalObserver:
             # minutes on every scale; the limit is in the scale's own bars.
             age_limit = max_age * timeframe.minutes
             for candidate in state.liquidity.candidates:
-                if candidate.source_kind in _LIFECYCLE_OWNED_CANDIDATE_KINDS:
-                    # A pool or a range boundary is bounded and retired by
-                    # its own entity lifecycle, and the observation contract
-                    # requires the inventory to mirror that set exactly.
+                if candidate.source_kind in _ENTITY_OWNED_CANDIDATE_KINDS:
+                    if candidate.candidate_id in offered_entity_ids:
+                        continue
+                    reason = _ENTITY_OWNED_CANDIDATE_KINDS[
+                        candidate.source_kind
+                    ]
+                elif candidate.source_kind in _LIFECYCLE_OWNED_CANDIDATE_KINDS:
+                    # A completed-period reference level is replaced at its
+                    # rollover, which retires it there.
                     continue
-                if candidate.age_bars > age_limit:
+                elif candidate.age_bars > age_limit:
                     reason = "candidate_aged_out"
                 elif (
                     candidate.distance_atr is not None
@@ -3891,7 +3911,21 @@ class CausalObserver:
             # the projection tail so the reducer never sees a physical fact in
             # that tail.  The next completed bar reduces it in stream order.
             self._emitter._record_delivery_phase_events(delivery_transitions)
-            retirements = self._candidate_retirements(market_snapshot)
+            retirements = self._candidate_retirements(
+                market_snapshot,
+                offered_entity_ids=frozenset(
+                    {
+                        f"pool:{pool.pool_id}"
+                        for frame in frames.values()
+                        for pool in frame.liquidity_pools
+                    }
+                    | {
+                        item.item_id
+                        for item in liquidity_inventory
+                        if item.kind == "range_boundary"
+                    }
+                ),
+            )
             if retirements:
                 self._retired_level_ids.update(
                     retirement.level_id for retirement in retirements

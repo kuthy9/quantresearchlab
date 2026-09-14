@@ -17,7 +17,7 @@
   ],
   "upstream": {
     "group12_protocol_version": "3.2.0-group12.7",
-    "group12_protocol_sha256": "cf81216bd32cd8604bd74d3bb3e102992964a57bae761251f4f165baadd0e079",
+    "group12_protocol_sha256": "d5afb0bcfcd6cfe59f13d83f54a5031668286f426150896d01edf077ff495892",
     "required_typed_sources": [
       "H1 SupportResistanceState",
       "LiquidityPoolState formation and lifecycle",

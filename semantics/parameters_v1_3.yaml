@@ -169,7 +169,7 @@
       },
       "status": "frozen_existing_protocol",
       "source": "configs/primitives_structure_liquidity.json:liquidity_parameters",
-      "threshold_semantics": "a candidate level retires past 480 bars of its own scale (8 h on 1m, 40 h on 5m, five sessions on 15m) or beyond 20 of its scale's ATRs; the collection is bounded instead of append-only, and a retired identity that re-forms is a new candidate"
+      "threshold_semantics": "a candidate level retires past 480 bars of its own scale (8 h on 1m, 40 h on 5m, five sessions on 15m) or beyond 20 of its scale's ATRs; the collection is bounded instead of append-only, and a retired identity that re-forms is a new candidate. An equal-pool or range-boundary candidate is bounded by its entity instead: it retires (pool_resolved / range_boundary_retired) on the bar its pool leaves the authoritative pool set or its boundary item leaves the inventory"
     },
     "terminal_state_retention": {
       "values": {

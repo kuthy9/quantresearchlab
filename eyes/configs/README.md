@@ -19,7 +19,7 @@ of them stay at the repository root in `configs/`:
 and the `primitive_protocol_sha256` map keyed by `configs/primitives_*.json` —
 alongside the file contents, and `semantics/parameters_v1_3.yaml` (itself hashed)
 carries those strings. Moving any of these files would therefore change
-`b83129ce186683a446e5b7a4ba277d26926d02343b72adbaf4d144c8a23b311e` and break the
+`f43563d23dc5e1ec49bd87a7d3043214abc4c90fbe7521f00b2b6d8dc1a40b48` and break the
 fail-closed check in `eyes/core/semantics.py`. Leave them where they are; refreeze
 a new identity rather than relocating one.
 

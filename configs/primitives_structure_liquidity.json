@@ -31,7 +31,7 @@
     "retained_touches": 128,
     "candidate_retirement_max_native_age_bars": 480,
     "candidate_retirement_max_distance_atr": 20.0,
-    "candidate_retirement": "a candidate retires when it has outlived the maximum age in bars of its own scale or sits beyond the maximum distance in its scale's ATR; retirement is an atomic LIQUIDITY_RETIRED fact the reducer applies, and a retired candidate never reached also ends as LEVEL_INVALIDATED",
+    "candidate_retirement": "a candidate retires when it has outlived the maximum age in bars of its own scale or sits beyond the maximum distance in its scale's ATR; retirement is an atomic LIQUIDITY_RETIRED fact the reducer applies, and a retired candidate never reached also ends as LEVEL_INVALIDATED. An equal-pool or range-boundary candidate retires instead on the bar its entity leaves the authoritative set (pool_resolved / range_boundary_retired)",
     "terminal_state_retention_native_bars": 1,
     "terminal_state_retention": "a reaccepted or retired zone and an accepted or rejected pool stay in the tracker for this many completed native bars, counting the bar that made them terminal, then are compacted; the terminal transition is delivered on its bar and the event log owns the fact. A zone a live pool or a live completed-period source still cites is kept regardless, and retained_zones / retained_pools remain the capacity that live state may not exhaust",
     "consumed_item_retention_native_bars": 1,

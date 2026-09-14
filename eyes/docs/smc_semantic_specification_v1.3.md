@@ -40,7 +40,7 @@ v1.2 → v1.3 delta, the lifecycle entities, and every defect the replay exposed
 are stated here rather than split across two files. Its status is
 `preregistered_development_contract_not_oos_trading_authority`: atomic identity
 `smc_semantics_v1.3` ·
-`b83129ce186683a446e5b7a4ba277d26926d02343b72adbaf4d144c8a23b311e` (refrozen 2026-09-13: the target-outcome and candidate-retirement concepts, the multi-scale displacement and zone protocols, and the Group 5 terminal-context and liquidity terminal-state retention parameters), Foundation
+`f43563d23dc5e1ec49bd87a7d3043214abc4c90fbe7521f00b2b6d8dc1a40b48` (refrozen 2026-09-13: the target-outcome and candidate-retirement concepts, the multi-scale displacement and zone protocols, and the Group 5 terminal-context and liquidity terminal-state retention parameters), Foundation
 identity `smc_semantic_foundation_v2.1` ·
 `69428dbfd2a9b2aa19f0254391fca2da17aedb8d0206829572e69c0cc212a715`.
 
