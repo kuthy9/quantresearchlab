@@ -801,6 +801,13 @@ def _typed_progression(
 # liquidity pools, mature range boundaries, and the previous-period reference
 # levels that retire when their period is replaced: the retirement scan
 # leaves them to that lifecycle.
+# Timeline namespaces whose owner exposes every still-transitionable entity
+# in its frame.  A live lifecycle prefix normally outlives a snapshot that
+# omits its entity so a later terminal transition finds its history; a swing
+# can only transition through the structure tracker, which drops the oldest
+# confirmed swing from its bounded deque and declines an ambiguous forming
+# candidate without any fact, so a swing prefix cools with the exposure.
+_OWNER_EXPOSED_TIMELINE_NAMESPACES = frozenset({"swing"})
 # Candidate kinds whose entity lifecycle ends in a tracker: the candidate
 # ends on the bar the entity leaves the authoritative set, with this reason.
 _ENTITY_OWNED_CANDIDATE_KINDS = {
@@ -2047,8 +2054,18 @@ class CausalObserver:
         # A public reducer snapshot is intentionally bounded and can omit an
         # entity before a later lifecycle transition is emitted.  Keep only
         # still-transitionable prefixes hot; terminal histories cool as soon
-        # as the current typed snapshot no longer exposes them.
-        keys.update(set(self.memory.live_entity_keys()) - terminal)
+        # as the current typed snapshot no longer exposes them, and so does
+        # a prefix whose owner no longer exposes the entity at all.
+        keys.update(
+            key
+            for key in self.memory.live_entity_keys()
+            if key not in terminal
+            and (
+                key in keys
+                or key.partition(":")[0]
+                not in _OWNER_EXPOSED_TIMELINE_NAMESPACES
+            )
+        )
         # A reducer boundary may expose its terminal transition through the
         # dedicated boundary channel without appending that transition to the
         # hot EventMemory timeline.  Such an entity must cool immediately;
