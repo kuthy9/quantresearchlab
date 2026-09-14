@@ -54,10 +54,10 @@ def purged_after(
     return rows_after[times[rows_after] >= times[last_test] + embargo_minutes]
 
 
-def full_proba(estimator, x: np.ndarray) -> np.ndarray:
-    """Probabilities over all three classes even when training saw fewer."""
+def full_proba(estimator, x: np.ndarray, *, class_count: int = CLASS_COUNT) -> np.ndarray:
+    """Probabilities over every class even when training saw fewer."""
 
-    proba = np.full((x.shape[0], CLASS_COUNT), 1e-6)
+    proba = np.full((x.shape[0], class_count), 1e-6)
     partial = estimator.predict_proba(x)
     for position, label in enumerate(estimator.classes_):
         proba[:, int(label)] = partial[:, position]
@@ -66,7 +66,7 @@ def full_proba(estimator, x: np.ndarray) -> np.ndarray:
 
 def select_logistic_c(
     train_x: np.ndarray, train_y: np.ndarray, *, times: np.ndarray | None = None,
-    embargo_minutes: int = 240,
+    embargo_minutes: int = 240, class_count: int = CLASS_COUNT,
 ) -> float:
     """Blocked, purged selection of the L2 penalty, the same protocol
     ``predictability_gate.select_ridge_alpha`` uses for ridge."""
@@ -98,7 +98,13 @@ def select_logistic_c(
             continue
         for c in LOGISTIC_C_GRID:
             fitted = LogisticRegression(C=c, max_iter=500).fit(train_x[train], train_y[train])
-            scores[c].append(-float(log_loss_rows(full_proba(fitted, train_x[test]), train_y[test]).mean()))
+            scores[c].append(
+                -float(
+                    log_loss_rows(
+                        full_proba(fitted, train_x[test], class_count=class_count), train_y[test]
+                    ).mean()
+                )
+            )
     means = {c: float(np.mean(v)) for c, v in scores.items() if v}
     if not means:
         return LOGISTIC_C_GRID[0]
@@ -108,17 +114,20 @@ def select_logistic_c(
 def fit_predict_proba(
     model: str, train_x: np.ndarray, train_y: np.ndarray, test_x: np.ndarray, *,
     c: float | None = None, times: np.ndarray | None = None, embargo_minutes: int = 240,
+    class_count: int = CLASS_COUNT,
 ) -> np.ndarray:
     if model == "logistic":
         from sklearn.linear_model import LogisticRegression
 
         penalty = (
-            select_logistic_c(train_x, train_y, times=times, embargo_minutes=embargo_minutes)
+            select_logistic_c(
+                train_x, train_y, times=times, embargo_minutes=embargo_minutes, class_count=class_count,
+            )
             if c is None
             else c
         )
         fitted = LogisticRegression(C=penalty, max_iter=500).fit(train_x, train_y)
-        return full_proba(fitted, test_x)
+        return full_proba(fitted, test_x, class_count=class_count)
     if model == "lightgbm":
         import lightgbm as lgb
 
@@ -130,8 +139,9 @@ def fit_predict_proba(
         )
         fit_x, fit_y = train_x[fit], train_y[fit]
         tail_x, tail_y = train_x[cut:], train_y[cut:]
+        objective = {"objective": "binary"} if class_count == 2 else {"objective": "multiclass", "num_class": class_count}
         estimator = lgb.LGBMClassifier(
-            objective="multiclass", num_class=CLASS_COUNT, n_estimators=400,
+            **objective, n_estimators=400,
             learning_rate=0.03, num_leaves=15, min_child_samples=200, subsample=0.7,
             subsample_freq=1, colsample_bytree=0.7, reg_lambda=10.0, random_state=0,
             verbose=-1,
@@ -140,7 +150,7 @@ def fit_predict_proba(
             fit_x, fit_y, eval_set=[(tail_x, tail_y)],
             callbacks=[lgb.early_stopping(30, verbose=False)],
         )
-        return full_proba(estimator, test_x)
+        return full_proba(estimator, test_x, class_count=class_count)
     raise GateModelError(f"unknown classifier {model}")
 
 

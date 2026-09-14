@@ -50,10 +50,18 @@ def test_nearest_target_takes_the_closest_level_in_direction_across_scales() -> 
     assert np.isnan(nearest_target(_path(bsl_5m=np.nan, bsl_15m=np.nan).iloc[0], 1.0))
 
 
+def test_a_level_nearer_than_the_minimum_distance_is_not_a_target() -> None:
+    # R >= 1: the first level at least as far as the failure boundary
+    row = _path(bsl_15m=101.0).iloc[0]
+    assert nearest_target(row, 1.0) == 101.0
+    assert nearest_target(row, 1.0, minimum_distance=2.0) == 103.0
+    assert np.isnan(nearest_target(row, 1.0, minimum_distance=3.5))
+
+
 def test_target_first_with_time_and_excursions() -> None:
     tape = _tape([100.5, 101.0, 102.2, 100.0], [99.7, 99.0, 101.0, 99.5])
     row = _label(_path(), tape)
-    assert row["label"] == TARGET_FIRST and row["drop_reason"] == ""
+    assert row["label"] == TARGET_FIRST and row["hit_target"] == 1 and row["drop_reason"] == ""
     assert row["target_price"] == 102.0 and row["d_target_points"] == 2.0 and row["d_failure_points"] == 2.0
     assert row["unit_atr60"] == np.sqrt(60) and np.isclose(row["d_target_atr"], 2.0 / np.sqrt(60))
     assert row["time_to_resolve"] == 3  # third scanned bar
@@ -64,7 +72,8 @@ def test_target_first_with_time_and_excursions() -> None:
 
 def test_failure_first_and_same_bar_is_failure() -> None:
     tape = _tape([100.5, 100.8], [99.7, 97.9])
-    assert _label(_path(), tape)["label"] == FAILURE_FIRST
+    row = _label(_path(), tape)
+    assert row["label"] == FAILURE_FIRST and row["hit_target"] == 0
     tape = _tape([102.5], [97.5])
     row = _label(_path(), tape)
     assert row["label"] == FAILURE_FIRST and row["same_bar"] == True  # noqa: E712
@@ -81,7 +90,7 @@ def test_censored_at_the_horizon_and_at_the_session_end() -> None:
     n = HORIZON_MINUTES + 20
     quiet = _tape([100.5] * n, [99.5] * n)
     row = _label(_path(), quiet)
-    assert row["label"] == CENSORED and row["time_to_resolve"] == HORIZON_MINUTES
+    assert row["label"] == CENSORED and row["hit_target"] == 0 and row["time_to_resolve"] == HORIZON_MINUTES
     assert row["minutes_to_session_end"] == n
     # the target is reached only after the horizon: still censored
     late = quiet.copy(); late.iloc[HORIZON_MINUTES, 0] = 105.0
@@ -96,6 +105,16 @@ def test_censored_at_the_horizon_and_at_the_session_end() -> None:
 def test_session_end_positions_follow_gaps() -> None:
     tape = _tape([1.0] * 6, [1.0] * 6, gap_after=2)
     assert session_end_positions(tape.index).tolist() == [2, 2, 2, 5, 5, 5]
+
+
+def test_the_target_is_the_first_level_at_least_one_r_away() -> None:
+    # failure 2 points below; the 15m level one point above is inside 1R, so
+    # the target is the 5m level three points above, and the tape reaches it
+    tape = _tape([101.2, 103.1], [99.8, 100.5])
+    row = _label(_path(bsl_15m=101.0), tape)
+    assert row["target_price"] == 103.0 and row["d_target_points"] == 3.0 and row["label"] == TARGET_FIRST
+    # nothing at 1R or beyond: no target
+    assert _label(_path(bsl_5m=101.5, bsl_15m=101.0), tape)["drop_reason"] == "no_target"
 
 
 def test_drop_reasons() -> None:

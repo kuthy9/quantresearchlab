@@ -277,3 +277,35 @@ Verification before the receipt: `.venv/bin/python -m pytest brain/tests`
 green; one block built end to end on a two-session window and its
 `paths.parquet` inspected by hand; the full run in the background with
 `gate.log` cited in the receipt.
+
+## 9. Correction of 2026-09-13, before the first fit
+
+The smoke block the plan required (two sessions, 2022-01-03/04: 649 steps,
+195 paths, `context_found` 100 %, every clock populated) showed the §5.3
+target rule degenerate on the real tape. The nearest unswept ≥ 5m level in
+direction is, at the median, 0.19 ATR₆₀ from the close — inside a bar's
+range — so the median instance resolved in two minutes and the `censored`
+class held 2 % of instances (K0 2 %, K1 1 %, K2 1 %). Under §6 every cell
+would have been refused; the gate could not have returned an answer by
+construction. No model had been fitted when this was found.
+
+Two rules change, both fixed here before any fit:
+
+1. **Target = the first unswept level in direction at least 1R away**
+   (`d_t ≥ d_f`, the failure distance), over the same 5m ∪ 15m ∪ 1h union,
+   nearest such level wins. A level inside 1R is not a draw a Setup is
+   traded to. On the smoke block this leaves 374 of 497 labelled instances,
+   median resolution 3 minutes, 90th percentile 48.
+2. **The verdict outcome is binary**: `hit_target` = 1 when the target is
+   reached before the failure boundary within the horizon, 0 otherwise
+   (failure first, or censored). This is P(Target < Invalidation) as the
+   Brain would use it; a censored instance is a claim that did not pay.
+   The three-way label of §5.3 stays in the descriptives with its
+   time-to-resolve and MAE distributions. The §6 class guard applies to the
+   two outcomes. On the smoke block, `hit_target` = 1 on 21 % of instances
+   (K0 17 %, K1 23 %, K2 25 %).
+
+Everything else — clocks, horizon, same-bar rule, feature sets, folds,
+bootstrap, Holm, the 200-row floor — is unchanged. The change was chosen on
+label shares of two sessions, not on any model's out-of-sample loss, and it
+is recorded so it cannot be mistaken for a pre-registered choice.

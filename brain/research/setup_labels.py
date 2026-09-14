@@ -1,11 +1,17 @@
 """Which of a Setup's two levels the tape reaches first.
 
-The scan starts at the bar whose ``ts`` equals ``known_at``: the completed bar
-that published the step closed at ``known_at``, so that is the first bar not
-yet seen. It stops at ``min(horizon, session end)``, the session end being the
-last bar before the next gap longer than a minute in the tape. Both levels on
-one bar read as ``failure``, the conservative reading for the claim
-(spec §5.3). Distances are also expressed in ATR₆₀ = ATR₁ₘ·√60.
+The target is the first unswept level in the path's direction that is at least
+as far as the failure boundary (R ≥ 1): the nearest level of all is within a
+bar's range on the real tape and resolves in a minute or two, which is not a
+Setup's draw (spec correction of 2026-09-13). The scan starts at the bar whose
+``ts`` equals ``known_at``: the completed bar that published the step closed
+at ``known_at``, so that is the first bar not yet seen. It stops at
+``min(horizon, session end)``, the session end being the last bar before the
+next gap longer than a minute in the tape. Both levels on one bar read as
+``failure``, the conservative reading for the claim (spec §5.3). The
+three-way label is kept for the descriptives; the gate's outcome is
+``hit_target``: the target reached before the failure boundary within the
+horizon. Distances are also expressed in ATR₆₀ = ATR₁ₘ·√60.
 """
 from __future__ import annotations
 
@@ -22,7 +28,7 @@ HORIZON_MINUTES = 240
 TARGET_FIRST, FAILURE_FIRST, CENSORED = 0, 1, 2
 LABEL_NAMES: tuple[str, ...] = ("target", "failure", "censored")
 LABEL_COLUMNS: tuple[str, ...] = (
-    "label", "target_price", "d_target_points", "d_failure_points", "unit_atr60", "d_target_atr",
+    "label", "hit_target", "target_price", "d_target_points", "d_failure_points", "unit_atr60", "d_target_atr",
     "d_failure_atr", "time_to_resolve", "mae_atr", "mfe_atr", "minutes_to_session_end", "same_bar", "drop_reason",
 )
 DROP_REASONS: tuple[str, ...] = ("no_path", "no_atr", "no_failure", "no_target", "past_failure", "no_tape")
@@ -40,7 +46,11 @@ def session_end_positions(index: pd.DatetimeIndex) -> np.ndarray:
     return ends[np.searchsorted(ends, np.arange(stamps.size))]
 
 
-def nearest_target(row: Mapping[str, object], sign: float) -> float:
+def nearest_target(
+    row: Mapping[str, object], sign: float, *, minimum_distance: float = 0.0
+) -> float:
+    """The nearest level in direction at least ``minimum_distance`` points away."""
+
     close = float(row["close"])
     side = "bsl" if sign > 0 else "ssl"
     levels = []
@@ -49,7 +59,8 @@ def nearest_target(row: Mapping[str, object], sign: float) -> float:
         if value is None:
             continue
         value = float(value)
-        if math.isfinite(value) and sign * (value - close) > 0:
+        distance = sign * (value - close)
+        if math.isfinite(value) and distance > 0 and distance >= minimum_distance:
             levels.append(value)
     if not levels:
         return float("nan")
@@ -89,14 +100,14 @@ def label_instances(
         if not math.isfinite(failure) or sign == 0.0:
             labelled.append(_blank("no_failure"))
             continue
-        target = nearest_target(row, sign)
-        if not math.isfinite(target):
-            labelled.append(_blank("no_target"))
-            continue
         close = float(row["close"])
         d_failure = sign * (close - failure)
         if d_failure <= 0.0:
             labelled.append(_blank("past_failure"))
+            continue
+        target = nearest_target(row, sign, minimum_distance=d_failure)
+        if not math.isfinite(target):
+            labelled.append(_blank("no_target"))
             continue
         d_target = sign * (target - close)
         if start < 0:
@@ -124,7 +135,7 @@ def label_instances(
         else:
             mae, mfe = (seen_h.max() - close) / unit, (close - seen_l.min()) / unit
         labelled.append({
-            "label": label, "target_price": target, "d_target_points": d_target, "d_failure_points": d_failure,
+            "label": label, "hit_target": int(label == TARGET_FIRST), "target_price": target, "d_target_points": d_target, "d_failure_points": d_failure,
             "unit_atr60": unit / atr, "d_target_atr": d_target / unit, "d_failure_atr": d_failure / unit,
             "time_to_resolve": int(k + 1), "mae_atr": max(float(mae), 0.0), "mfe_atr": max(float(mfe), 0.0),
             "minutes_to_session_end": int(ends[start] - start + 1), "same_bar": same_bar, "drop_reason": "",

@@ -44,7 +44,8 @@ def _instances(*, sessions: int = 14, per_session: int = 160, effect: float = 0.
                 "penetration_atr": np.nan, "reclaim_margin_atr": np.nan, "hold_margin_atr": hold,
                 "d_target_atr": d_t, "d_failure_atr": d_f, "minutes_to_session_end": 400 - 2 * i,
                 "rv_30": rng.uniform(0.5, 1.5), "rv_60": rng.uniform(0.5, 1.5), "minutes_since_open": 930 + 2 * i,
-                "label": label, "time_to_resolve": int(rng.integers(1, 240)), "mae_atr": rng.uniform(0, 1),
+                "label": label, "hit_target": int(label == TARGET_FIRST),
+                "time_to_resolve": int(rng.integers(1, 240)), "mae_atr": rng.uniform(0, 1),
                 "same_bar": False, "drop_reason": "",
             }
             for scale in ("5m", "15m", "1h"):
@@ -99,7 +100,7 @@ def test_no_effect_fails(tmp_path: Path) -> None:
 
 def test_thin_and_one_sided_cells_are_refused_not_judged(tmp_path: Path) -> None:
     frame = _instances(effect=2.5)
-    frame.loc[frame["context_kind"] == "pool_reversal", "label"] = TARGET_FIRST  # one-sided
+    frame.loc[frame["context_kind"] == "pool_reversal", ["label", "hit_target"]] = [TARGET_FIRST, 1]  # one-sided
     verdict = run_setup_gate(
         frame, out_dir=tmp_path, primary=(9, 2), rolling=(6, 2, 2), models=("logistic",), minimum_oos_rows=100_000,
     )

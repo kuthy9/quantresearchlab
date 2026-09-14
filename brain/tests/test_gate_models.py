@@ -51,3 +51,15 @@ def test_fit_predict_proba_returns_three_columns_with_or_without_times() -> None
     assert plain.shape == (10, 3) and timed.shape == (10, 3)
     assert np.allclose(plain.sum(axis=1), 1.0)
     assert select_logistic_c(x, y, times=minutes_of(index)) in (0.01, 0.1, 1.0)
+
+
+def test_binary_fits_return_two_columns_for_both_models() -> None:
+    rng = np.random.default_rng(1)
+    x = rng.normal(size=(1200, 3))
+    y = (x[:, 0] + 0.3 * rng.normal(size=1200) > 0).astype(int)
+    index = pd.date_range("2022-01-03T09:30", periods=1200, freq="3min", tz="UTC")
+    for model in ("logistic", "lightgbm"):
+        proba = fit_predict_proba(model, x, y, x[:20], c=1.0, times=minutes_of(index), class_count=2)
+        assert proba.shape == (20, 2)
+        assert np.allclose(proba.sum(axis=1), 1.0)
+        assert (proba.argmax(axis=1) == y[:20]).mean() > 0.7

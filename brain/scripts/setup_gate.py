@@ -1,10 +1,14 @@
 """The Setup first-passage gate: does a Group-5 Setup change where price goes first?
 
-Pre-registered in brain/docs/specs/2026-09-13-setup-first-passage-gate-design.md.
-M₀ = geometry (``setup_features.GEOMETRY_COLUMNS``); M₁ = M₀ + the Setup
-(``setup_matrix``); M₂ = M₁ + the Eye state, reported only. Cells are
-{K0, K1, K2} × {zone_return, pool_reversal}; a cell is judged only with every
-class ≥ 5 % on its primary training rows and ≥ 200 primary OOS rows.
+Pre-registered in brain/docs/specs/2026-09-13-setup-first-passage-gate-design.md,
+with the correction of the same date: the target is the first level at least
+1R away and the outcome is binary — ``hit_target``, the target reached before
+the failure boundary within the horizon. M₀ = geometry
+(``setup_features.GEOMETRY_COLUMNS``); M₁ = M₀ + the Setup (``setup_matrix``);
+M₂ = M₁ + the Eye state, reported only. Cells are {K0, K1, K2} ×
+{zone_return, pool_reversal}; a cell is judged only with both outcomes ≥ 5 %
+on its primary training rows and ≥ 200 primary OOS rows. The three-way
+label (target / failure / censored) is reported in the descriptives.
 
 Usage::
 
@@ -30,7 +34,6 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from brain.research.event_log import load_blocks  # noqa: E402
-from brain.research.first_passage import CLASS_COUNT  # noqa: E402
 from brain.research.gate_family import family_verdict, log_loss_rows, session_block_bootstrap  # noqa: E402
 from brain.research.gate_models import Z_CLIP, fit_predict_proba, minutes_of, select_logistic_c  # noqa: E402
 from brain.research.setup_features import (  # noqa: E402
@@ -62,6 +65,7 @@ ROLLING: tuple[int, int, int] = (60, 10, 10)
 MODELS: tuple[str, ...] = ("logistic", "lightgbm")
 MINIMUM_CLASS_SHARE = 0.05
 MINIMUM_OOS_ROWS = 200
+OUTCOME_COUNT = 2  # hit_target: 0 / 1
 QUANTILES: tuple[float, ...] = (0.1, 0.5, 0.9)
 
 
@@ -77,14 +81,14 @@ def clock_instances(instances: pd.DataFrame, step_kinds: tuple[str, ...]) -> pd.
 
 
 def _analytic_loss(instances: pd.DataFrame, rows: np.ndarray) -> float:
-    """Two-class log-loss of the driftless ratio on resolved rows."""
+    """Log-loss of the driftless ratio against ``hit_target`` on the same rows
+    the models are scored on; the ratio knows nothing of censoring, which is
+    part of what it is a reference for."""
 
-    labels = instances["label"].to_numpy()[rows]
-    resolved = labels != CENSORED
-    if not resolved.any():
+    if rows.size == 0:
         return float("nan")
-    p = np.clip(analytic_target_probability(instances.iloc[rows])[resolved], 1e-6, 1 - 1e-6)
-    y = labels[resolved] == TARGET_FIRST
+    p = np.clip(analytic_target_probability(instances.iloc[rows]), 1e-6, 1 - 1e-6)
+    y = instances["hit_target"].to_numpy(dtype=int)[rows] == 1
     return float(-np.mean(np.where(y, np.log(p), np.log(1 - p))))
 
 
@@ -137,7 +141,7 @@ def run_setup_gate(
                 refused.append({"clock": cell, "refusal": "no_rows", "oos_rows": 0, "min_class_share": float("nan")})
                 continue
             index = pd.DatetimeIndex(sub["known_at"])
-            y = sub["label"].to_numpy(dtype=int)
+            y = sub["hit_target"].to_numpy(dtype=int)
             sessions = session_labels(index)
             try:
                 folds = folds_for(index, np.ones(len(sub), dtype=bool), primary=primary, rolling=rolling,
@@ -148,11 +152,11 @@ def run_setup_gate(
                 refused.append({"clock": cell, "refusal": "folds", "oos_rows": 0, "min_class_share": float("nan")})
                 continue
             first, _ = folds[0]
-            shares = np.bincount(y[first.train], minlength=CLASS_COUNT) / max(first.train.size, 1)
+            shares = np.bincount(y[first.train], minlength=OUTCOME_COUNT) / max(first.train.size, 1)
             oos_rows = int(first.holdout.size)
             descriptives.append(_descriptive(cell, sub, first, dropped))
             log(f"{cell}: {len(sub)} instances, primary train {first.train.size} / OOS {oos_rows}, "
-                f"class shares (target/failure/censored) {np.round(shares, 3).tolist()}")
+                f"hit_target shares (0/1) {np.round(shares, 3).tolist()}")
             refusal = None
             if shares.min() < MINIMUM_CLASS_SHARE:
                 refusal = "class_share"
@@ -179,10 +183,15 @@ def run_setup_gate(
                 if model == "logistic":
                     c = penalties.get(key)
                     if c is None:
-                        c = select_logistic_c(train_x, y[fold.train], times=times[fold.train], embargo_minutes=HORIZON_MINUTES)
+                        c = select_logistic_c(
+                            train_x, y[fold.train], times=times[fold.train], embargo_minutes=HORIZON_MINUTES,
+                            class_count=OUTCOME_COUNT,
+                        )
                         penalties[key] = c
-                proba = fit_predict_proba(model, train_x, y[fold.train], test_x, c=c,
-                                          times=times[fold.train], embargo_minutes=HORIZON_MINUTES)
+                proba = fit_predict_proba(
+                    model, train_x, y[fold.train], test_x, c=c, times=times[fold.train],
+                    embargo_minutes=HORIZON_MINUTES, class_count=OUTCOME_COUNT,
+                )
                 accuracy = float(np.mean(proba.argmax(axis=1) == y[fold.holdout]))
                 return log_loss_rows(proba, y[fold.holdout]), accuracy
 
