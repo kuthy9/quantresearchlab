@@ -213,6 +213,14 @@ mean claims no principled aggregation.
 | `cluster_study.py` | the k sweep, cross-window centroid reproduction, algorithm comparison |
 | `churn_diagnostics.py` | telling a real change of claim from clustering jitter |
 | `design_study.py` | the four measurements the v3 design rests on: representation, support identity, adaptive `k`, retrieval skill |
+| `event_log.py` | the Eye's transition events, one row each, and the per-block cache the gates read |
+| `event_sequence.py` | the causal Δₜ encoding of the event sequence, one track per scale |
+| `first_passage.py` | which ATR barrier the next sixty minutes reach first |
+| `gate_family.py` | session-block bootstrap, Holm, and the family verdict every gate applies |
+| `gate_models.py` | classifier fitting shared by the gates, purged by clock when rows are not minutes |
+| `path_log.py` | one row per new Group-5 path step with the geometry a Setup is labelled from |
+| `setup_labels.py` | which of a Setup's two levels the tape reaches first, and whether the target paid |
+| `setup_features.py` | the geometry-only and geometry-plus-Setup feature sets |
 
 Everything here reads the future by construction. Nothing may become a runtime
 authority, which is why `trajectory.py` and `observation_features` live in
@@ -657,6 +665,10 @@ Every threshold in it is a development default. None has been fitted.
 | `study_representation.py` | raw PCA against Direction + Shape, and whether retrieval beats random history |
 | `study_lifecycle.py` | support inheritance across clocks, and the adaptive cut against every fixed one |
 | `replay_hypothesis_belief.py` | replays the forecaster, reports the rebuild verdict and the churn diagnostics |
+| `predictability_gate.py` | the flat supervised question: does anything beat the climatological mean out of sample |
+| `build_gate_blocks.py` | drives the Eye over warmed Globex-week blocks; `--record-paths` adds the path log |
+| `information_gain_gate.py` | the event-sequence gate on event clocks (FAIL, receipt of 2026-09-12) |
+| `setup_gate.py` | the Setup first-passage gate on K0/K1/K2 × context kind against a geometry baseline |
 
 `_windows.py` holds the shared window slicing. Fit and holdout windows are named
 in exchange-local time because trading sessions are: a session runs 18:00 to
