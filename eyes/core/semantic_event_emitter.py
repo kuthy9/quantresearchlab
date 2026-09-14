@@ -13,6 +13,7 @@ names so the emission logic is unchanged by having a home.
 """
 from __future__ import annotations
 
+from bisect import bisect_left, bisect_right, insort_right
 from collections import deque
 from dataclasses import dataclass, field, replace
 import hashlib
@@ -69,6 +70,27 @@ from .range_auction import (
 from shares.core.scale_registry import _TIMEFRAME_MINUTES
 from .structure import StructureConfig
 from .zone import ZoneUpdate
+
+
+def _bar_root_clock(entry: tuple[pd.Timestamp, str]) -> pd.Timestamp:
+    return entry[0]
+
+
+def _bar_root_index_at(
+    bar_events: Sequence[tuple[pd.Timestamp, str]],
+    clock: pd.Timestamp,
+) -> int | None:
+    """Index of the root at exactly ``clock`` in a clock-ordered root list.
+
+    Every scale keeps its ``(clock, event id)`` bar roots in clock order --
+    one normalized root per clock -- so a lookup is a bisection, never a
+    walk over the scale's lifetime.
+    """
+
+    index = bisect_left(bar_events, clock, key=_bar_root_clock)
+    if index < len(bar_events) and bar_events[index][0] == clock:
+        return index
+    return None
 
 
 def _event(
@@ -1064,19 +1086,11 @@ class SemanticEventEmitter:
         prior = self._terminal_crossing_events.get(generation_id)
         if prior is not None:
             return prior
-        next_bar = next(
-            (
-                (clock, event_id)
-                for clock, event_id in self._real_bar_event_ids_by_timeframe[
-                    timeframe
-                ]
-                if swing.broken_at < clock <= asof
-            ),
-            None,
-        )
-        if next_bar is None:
+        bar_events = self._real_bar_event_ids_by_timeframe[timeframe]
+        index = bisect_right(bar_events, swing.broken_at, key=_bar_root_clock)
+        if index >= len(bar_events) or bar_events[index][0] > asof:
             return None
-        resolved_at, resolution_bar_event_id = next_bar
+        resolved_at, resolution_bar_event_id = bar_events[index]
         resolved_close = self._bar_close_by_event_id.get(
             resolution_bar_event_id
         )
@@ -1261,24 +1275,19 @@ class SemanticEventEmitter:
             self._bar_close_by_event_id[existing.event_id] = float(
                 candle.close
             )
-            if not any(
-                event_id == existing.event_id
-                for _, event_id in self._bar_event_ids_by_timeframe[
-                    candle.timeframe
-                ]
-            ):
-                self._bar_event_ids_by_timeframe[candle.timeframe].append(
-                    (candle.end, existing.event_id)
+            # One normalized root per (scale, clock): the root at this
+            # candle's clock, if any, is this event.
+            self._register_bar_root(
+                self._bar_event_ids_by_timeframe[candle.timeframe],
+                candle.end,
+                existing.event_id,
+            )
+            if candle.real_completed:
+                self._register_bar_root(
+                    self._real_bar_event_ids_by_timeframe[candle.timeframe],
+                    candle.end,
+                    existing.event_id,
                 )
-            if candle.real_completed and not any(
-                event_id == existing.event_id
-                for _, event_id in self._real_bar_event_ids_by_timeframe[
-                    candle.timeframe
-                ]
-            ):
-                self._real_bar_event_ids_by_timeframe[
-                    candle.timeframe
-                ].append((candle.end, existing.event_id))
             return existing
         self.memory.append(event, include_in_recent=False)
         self._bar_event_ids_by_candle_id[detector_candle_id] = event.event_id
@@ -1288,14 +1297,35 @@ class SemanticEventEmitter:
             float(candle.low),
             float(candle.high),
         )
-        self._bar_event_ids_by_timeframe[candle.timeframe].append(
-            (candle.end, event.event_id)
+        self._register_bar_root(
+            self._bar_event_ids_by_timeframe[candle.timeframe],
+            candle.end,
+            event.event_id,
         )
         if candle.real_completed:
-            self._real_bar_event_ids_by_timeframe[
-                candle.timeframe
-            ].append((candle.end, event.event_id))
+            self._register_bar_root(
+                self._real_bar_event_ids_by_timeframe[candle.timeframe],
+                candle.end,
+                event.event_id,
+            )
         return event
+
+    @staticmethod
+    def _register_bar_root(
+        bar_events: list[tuple[pd.Timestamp, str]],
+        clock: pd.Timestamp,
+        event_id: str,
+    ) -> None:
+        """Keep a scale's bar roots in clock order, one root per clock."""
+
+        index = _bar_root_index_at(bar_events, clock)
+        if index is None:
+            insort_right(bar_events, (clock, event_id), key=_bar_root_clock)
+        elif bar_events[index][1] != event_id:
+            raise ValueError(
+                "normalized BAR root clock already has another event: "
+                f"{clock.isoformat()} ({bar_events[index][1]})"
+            )
 
     def _append_available_bar_events(
         self,
@@ -1408,12 +1438,11 @@ class SemanticEventEmitter:
         known_at: pd.Timestamp,
     ) -> str | None:
         clock = pd.Timestamp(known_at)
-        for event_clock, event_id in reversed(
-            self._real_bar_event_ids_by_timeframe[timeframe]
-        ):
-            if event_clock <= clock:
-                return event_id
-        return None
+        bar_events = self._real_bar_event_ids_by_timeframe[timeframe]
+        index = bisect_right(bar_events, clock, key=_bar_root_clock) - 1
+        if index < 0:
+            return None
+        return bar_events[index][1]
 
     def _bar_event_id_at(
         self,
@@ -1421,13 +1450,10 @@ class SemanticEventEmitter:
         known_at: pd.Timestamp,
     ) -> str:
         clock = pd.Timestamp(known_at)
-        for event_clock, event_id in reversed(
-            self._real_bar_event_ids_by_timeframe[timeframe]
-        ):
-            if event_clock == clock:
-                return event_id
-            if event_clock < clock:
-                break
+        bar_events = self._real_bar_event_ids_by_timeframe[timeframe]
+        index = _bar_root_index_at(bar_events, clock)
+        if index is not None:
+            return bar_events[index][1]
         raise ValueError(
             "semantic occurrence has no exact completed-bar source: "
             f"{timeframe.value}@{clock.isoformat()}"
@@ -1460,12 +1486,12 @@ class SemanticEventEmitter:
         if not isinstance(atr, (int, float)) or not float(atr) > 0.0:
             return None
         previous_close: float | None = None
-        for event_clock, event_id in reversed(
-            self._real_bar_event_ids_by_timeframe[Timeframe.M5]
-        ):
-            if event_clock < observed_at:
-                previous_close = self._bar_close_by_event_id.get(event_id)
-                break
+        bar_events = self._real_bar_event_ids_by_timeframe[Timeframe.M5]
+        index = bisect_left(bar_events, observed_at, key=_bar_root_clock) - 1
+        if index >= 0:
+            previous_close = self._bar_close_by_event_id.get(
+                bar_events[index][1]
+            )
         if previous_close is None:
             return None
         near_edge = (
@@ -1522,12 +1548,13 @@ class SemanticEventEmitter:
         """Return one exact normalized BAR root, including clock-only M1."""
 
         clock = pd.Timestamp(known_at)
+        bar_events = self._bar_event_ids_by_timeframe[timeframe]
         matches = tuple(
             event_id
-            for event_clock, event_id in self._bar_event_ids_by_timeframe[
-                timeframe
+            for _, event_id in bar_events[
+                bisect_left(bar_events, clock, key=_bar_root_clock)
+                : bisect_right(bar_events, clock, key=_bar_root_clock)
             ]
-            if event_clock == clock
         )
         if len(matches) != 1:
             raise ValueError(
@@ -1580,11 +1607,11 @@ class SemanticEventEmitter:
         )
         interval_roots: list[tuple[pd.Timestamp, str]] = []
         roots: list[tuple[pd.Timestamp, str]] = []
-        for event_clock, event_id in self._bar_event_ids_by_timeframe[
-            Timeframe.M1
+        m1_roots = self._bar_event_ids_by_timeframe[Timeframe.M1]
+        for event_clock, event_id in m1_roots[
+            bisect_right(m1_roots, interval_start, key=_bar_root_clock)
+            : bisect_right(m1_roots, clock, key=_bar_root_clock)
         ]:
-            if not interval_start < event_clock <= clock:
-                continue
             event = self.memory.audit_event_including_pending(event_id)
             if (
                 event is None
@@ -1653,14 +1680,7 @@ class SemanticEventEmitter:
             raise ValueError("confirmed swing lacks a structure protocol")
         span = self._structure_config.span_for(swing.timeframe)
         bar_events = self._real_bar_event_ids_by_timeframe[swing.timeframe]
-        pivot_index = next(
-            (
-                index
-                for index, (clock, _) in enumerate(bar_events)
-                if clock == swing.pivot_end
-            ),
-            None,
-        )
+        pivot_index = _bar_root_index_at(bar_events, swing.pivot_end)
         if (
             pivot_index is None
             or pivot_index < span
@@ -1681,6 +1701,27 @@ class SemanticEventEmitter:
             )
         return window
 
+    def _real_bar_root_clock(
+        self,
+        timeframe: Timeframe,
+        event_id: str,
+    ) -> pd.Timestamp | None:
+        """The clock of ``event_id`` if it is a real bar root of ``timeframe``.
+
+        The bar event names its own clock; the root list confirms, by
+        bisection at that clock, that this scale registered exactly this
+        event there.
+        """
+
+        event = self.memory.audit_event_including_pending(event_id)
+        if event is None:
+            return None
+        bar_events = self._real_bar_event_ids_by_timeframe.get(timeframe, ())
+        index = _bar_root_index_at(bar_events, event.known_at)
+        if index is None or bar_events[index][1] != event_id:
+            return None
+        return bar_events[index][0]
+
     def _swing_window_geometry(
         self,
         source_bar_events: tuple[str, ...],
@@ -1696,22 +1737,21 @@ class SemanticEventEmitter:
         """
 
         native = Timeframe(timeframe)
-        clocks = {
-            event_id: clock
-            for clock, event_id in self._real_bar_event_ids_by_timeframe[native]
-        }
         ranges = tuple(
             self._bar_range_by_event_id.get(event_id)
+            for event_id in source_bar_events
+        )
+        window_clocks = tuple(
+            self._real_bar_root_clock(native, event_id)
             for event_id in source_bar_events
         )
         if (
             not source_bar_events
             or any(item is None for item in ranges)
-            or any(event_id not in clocks for event_id in source_bar_events)
+            or any(clock is None for clock in window_clocks)
         ):
             raise ValueError("confirmed swing window is not readable")
         minutes = _TIMEFRAME_MINUTES[native]
-        window_clocks = tuple(clocks[event_id] for event_id in source_bar_events)
         return {
             "window_start": (
                 min(window_clocks) - pd.Timedelta(minutes=minutes)
