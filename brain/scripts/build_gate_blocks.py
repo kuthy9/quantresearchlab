@@ -18,6 +18,7 @@ import json
 from pathlib import Path
 import subprocess
 import sys
+import tempfile
 import time
 
 import pandas as pd
@@ -117,15 +118,20 @@ def _build_one(job: tuple[Block, str, str, str, bool]) -> str:
     if cached:
         return f"{block.week}: cached"
     started = time.monotonic()
-    dataset = build_dataset(
-        source=Path(source),
-        warmup_start=block.warmup_start,
-        emit_start=block.emit_start,
-        end=block.end,
-        model_path=Path(model),
-        root=ROOT,
-        record_paths=record_paths,
-    )
+    # The Eye spills cold events to a journal it never empties (about a
+    # gigabyte per block); this pass keeps nothing of the Eye, so the
+    # journal lives and dies with the block's build.
+    with tempfile.TemporaryDirectory(prefix=f"eye_journal_{block.week}_") as journal:
+        dataset = build_dataset(
+            source=Path(source),
+            warmup_start=block.warmup_start,
+            emit_start=block.emit_start,
+            end=block.end,
+            model_path=Path(model),
+            root=ROOT,
+            record_paths=record_paths,
+            audit_journal_dir=journal,
+        )
     save_block(dataset, out, emit_end=block.emit_end)
     return (
         f"{block.week}: {len(dataset.index)} clocks, {len(dataset.events)} events, "
@@ -146,7 +152,8 @@ def main() -> None:
         help="also log every new Group-5 path step (the Setup gate's unit); changes the run id",
     )
     args = parser.parse_args()
-    recorder = "paths_v2" if args.record_paths else None
+    # paths_v3: the recorder remembers a pool path's Group-4 state past its compaction
+    recorder = "paths_v3" if args.record_paths else None
 
     source, model = ROOT / args.source, ROOT / args.model
     identity = run_id(

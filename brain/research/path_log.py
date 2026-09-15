@@ -171,13 +171,51 @@ def _blank() -> dict[str, Any]:
     return row
 
 
+def remember_pools(observation: Any, pool_memory: dict[str, Any]) -> None:
+    """Keep the last Group-4 state seen for every live pool path.
+
+    Cheap enough for every bar the Eye observes, and it must run on every
+    one: a pool swept before the emit window, or before the recorder is
+    warm, can still be the context of a step inside it.
+    """
+
+    update = getattr(observation, "interaction_update", None)
+    if update is None:
+        return
+    manipulations = {item.manipulation_id: item for item in getattr(observation, "manipulations", ())}
+    live_pools = {
+        path.context_id for path in getattr(update, "interaction_paths", ())
+        if _text(path.context_kind) == "pool_reversal"
+    }
+    for context_id in live_pools:
+        if context_id in manipulations:
+            pool_memory[context_id] = manipulations[context_id]
+    for context_id in tuple(pool_memory):
+        if context_id not in live_pools:
+            del pool_memory[context_id]
+
+
 def path_rows(
     observation: Any, *, close: float, high: float, low: float, atr: float,
     history: Sequence[float], features: Sequence[float],
+    pool_memory: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
+    """The rows for this bar's new path steps.
+
+    ``pool_memory`` is the caller's, kept across bars: the last Group-4
+    ``ManipulationState`` seen for each live pool path, keyed by
+    ``manipulation_id``. Group 4 compacts a resolved manipulation one
+    completed bar after it resolves, and a pool path's later steps come after
+    that; the remembered state is the geometry those steps are measured
+    against. Entries follow the live paths and leave with them.
+    """
+
     update = getattr(observation, "interaction_update", None)
     if update is None:
         return []
+    manipulations = {item.manipulation_id: item for item in getattr(observation, "manipulations", ())}
+    if pool_memory is not None:
+        remember_pools(observation, pool_memory)
     transitions = tuple(getattr(update, "milestone_transitions", ()) or ())
     if not transitions:
         return []
@@ -190,7 +228,6 @@ def path_rows(
     paths.update({path.sequence_id: path for path in getattr(update, "interaction_paths", ())})
     locations = {loc.location_id: loc for loc in getattr(update, "zone_interactions", ())}
     reacceptances = {item.context_id: item for item in getattr(update, "reacceptance_interactions", ())}
-    manipulations = {item.manipulation_id: item for item in getattr(observation, "manipulations", ())}
     common: dict[str, Any] = {
         "known_at": asof, "close": float(close), "high": float(high), "low": float(low), "atr_1m": float(atr),
         "rv_30": realized_volatility(history, 30, atr), "rv_60": realized_volatility(history, 60, atr),
@@ -235,6 +272,8 @@ def path_rows(
                 row.update(_reacceptance(reacceptance))
         elif row["context_kind"] == "pool_reversal":
             manipulation = manipulations.get(path.context_id)
+            if manipulation is None and pool_memory is not None:
+                manipulation = pool_memory.get(path.context_id)
             if manipulation is not None:
                 row.update(_pool(manipulation, float(atr)))
                 row["context_found"] = True
@@ -249,5 +288,5 @@ def empty_path_log() -> pd.DataFrame:
 __all__ = [
     "IDENTITY_COLUMNS", "LEVEL_COLUMNS", "LEVEL_SCALES", "PATH_COLUMNS", "POOL_COLUMNS",
     "STRUCTURE_COLUMNS", "TAPE_COLUMNS", "ZONE_COLUMNS", "direction_sign", "empty_path_log",
-    "minutes_since_open", "path_rows", "realized_volatility",
+    "minutes_since_open", "path_rows", "realized_volatility", "remember_pools",
 ]

@@ -26,7 +26,7 @@ from brain.core.hypothesis_proposer import (
     observation_features,
 )
 from brain.research.event_log import EVENT_COLUMNS, empty_event_log, event_row, is_transition
-from brain.research.path_log import PATH_COLUMNS, empty_path_log, path_rows
+from brain.research.path_log import PATH_COLUMNS, empty_path_log, path_rows, remember_pools
 from contract.brain.forecast import TRAJECTORY_CURVE_LENGTH
 from contract.market import Timeframe
 from eyes.core.causal import CausalMarketReader
@@ -40,6 +40,8 @@ FUTURE_HORIZON_MINUTES = TRAJECTORY_CURVE_LENGTH
 # The proposer's tape features look back an hour, so a context vector is only
 # complete once that much one-minute history has accumulated.
 CONTEXT_LOOKBACK_MINUTES = 60
+# ``build_eye``'s marker for "the journal directory the model configures".
+_CONFIGURED: str = "<configured>"
 
 _REGISTERED_TIMEFRAMES = (
     Timeframe.H4,
@@ -54,12 +56,18 @@ class TrajectoryDatasetError(RuntimeError):
     """The dataset builder refuses to fabricate an observation point."""
 
 
-def build_eye(model_path: str | Path, *, root: Path) -> tuple[CausalMarketReader, CausalObserver]:
+def build_eye(
+    model_path: str | Path, *, root: Path, audit_journal_dir: str | Path | None = _CONFIGURED,
+) -> tuple[CausalMarketReader, CausalObserver]:
     """Construct the registered graph-free Eye described by ``model_path``.
 
     ``persist_state_projections`` stays off: it only adds projection *events* to
     the Eye's memory, the authoritative ``MarketSnapshot`` is published either
     way, and leaving it on degrades a multi-day scan from ~30 bars/s to under 5.
+
+    ``audit_journal_dir`` overrides the model's shared journal directory (the
+    one the runtime spills cold events into and never empties) for a bounded
+    pass that owns its Eye and removes the journal with it.
     """
 
     model = json.loads(Path(model_path).read_text(encoding="utf-8"))
@@ -88,9 +96,9 @@ def build_eye(model_path: str | Path, *, root: Path) -> tuple[CausalMarketReader
             eye_authority_mode=True,
             persist_state_projections=False,
             audit_journal_dir=(
-                None
-                if raw.get("audit_journal_dir") is None
-                else str(root / raw["audit_journal_dir"])
+                (None if raw.get("audit_journal_dir") is None else str(root / raw["audit_journal_dir"]))
+                if audit_journal_dir is _CONFIGURED
+                else (None if audit_journal_dir is None else str(audit_journal_dir))
             ),
             audit_hot_window_minutes=int(
                 raw.get(
@@ -152,6 +160,7 @@ def build_dataset(
     root: Path,
     progress_every: int = 0,
     record_paths: bool = False,
+    audit_journal_dir: str | Path | None = _CONFIGURED,
 ) -> TrajectoryDataset:
     """Run the Eye once and assemble every observation point with a full future."""
 
@@ -162,7 +171,7 @@ def build_dataset(
     lows = frame["low"].to_numpy(dtype=float)
     position = {timestamp: i for i, timestamp in enumerate(frame.index)}
 
-    reader, observer = build_eye(model_path, root=root)
+    reader, observer = build_eye(model_path, root=root, audit_journal_dir=audit_journal_dir)
     emit_from = pd.Timestamp(emit_start, tz=frame.index.tz)
 
     stamps: list[pd.Timestamp] = []
@@ -174,6 +183,7 @@ def build_dataset(
     history: list[float] = []
     event_rows: list[dict] = []
     path_row_list: list[dict] = []
+    pool_memory: dict[str, object] = {}
     seen = 0
 
     for bar in iter_completed_bars(frame):
@@ -190,6 +200,8 @@ def build_dataset(
                 continue
             event_rows.append(row)
         history.append(float(bar.close))
+        if record_paths:
+            remember_pools(observation, pool_memory)
         if progress_every and seen % progress_every == 0:
             print(f"  {seen}/{len(frame)} bars, kept {len(stamps)}", flush=True)
         snapshot = observation.market_snapshot
@@ -215,7 +227,7 @@ def build_dataset(
             path_row_list.extend(
                 path_rows(
                     observation, close=float(bar.close), high=float(bar.high), low=float(bar.low),
-                    atr=atr, history=history, features=features,
+                    atr=atr, history=history, features=features, pool_memory=pool_memory,
                 )
             )
         # ``asof`` is the end of the bar just completed, so the tape row

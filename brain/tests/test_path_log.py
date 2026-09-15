@@ -126,6 +126,61 @@ def test_pool_reversal_row_reads_the_group4_manipulation_state() -> None:
     assert row["reference_price"] == 104.0
 
 
+def test_a_pool_context_outlives_its_compacted_manipulation_state() -> None:
+    # Group 4 keeps a resolved manipulation in the observation for one
+    # completed bar, then compacts it; the path's later steps (a micro-break,
+    # an opposite displacement) come after that. The recorder remembers the
+    # last state it saw for every live pool path and reads the Setup from it,
+    # so those rows carry the sweep extreme the path is still measured
+    # against; a context the recorder never saw is still logged as missing.
+    swept = _step("p:0", "pool_swept", "typed_pool_manipulation_swept", 0.4)
+    broke = _step("p:1", "micro_break_observed", "typed_1m_bos_confirmed", 0.7)
+    manipulation = SimpleNamespace(
+        manipulation_id="man-1", side="above", source_lower_bound=104.0, source_upper_bound=104.5,
+        sweep_extreme=105.2, penetration_atr=0.35, timeframe=Timeframe.M1, source_timeframe=Timeframe.M5,
+        reentry_price=None,
+    )
+    memory: dict = {}
+    first = SimpleNamespace(
+        milestone_transitions=(("p", swept),), interaction_paths=(_path("p", "pool_reversal", "man-1", Direction.SHORT, [swept]),),
+        interaction_path_transitions=(), zone_interactions=(), reacceptance_interactions=(),
+    )
+    (row,) = path_rows(_observation(first, [manipulation]), close=100.0, high=100.5, low=99.5, atr=2.0,
+                       history=[100.0] * 90, features=tuple(float(i) for i in range(len(FEATURE_NAMES))),
+                       pool_memory=memory)
+    assert row["context_found"] and row["failure_boundary"] == 105.2
+    # the resolution bar exposes the re-entry; the state is gone the bar after
+    manipulation.reentry_price = 104.1
+    resolved = SimpleNamespace(
+        milestone_transitions=(), interaction_paths=first.interaction_paths, interaction_path_transitions=(),
+        zone_interactions=(), reacceptance_interactions=(),
+    )
+    assert path_rows(_observation(resolved, [manipulation]), close=100.0, high=100.5, low=99.5, atr=2.0,
+                     history=[100.0] * 90, features=tuple(float(i) for i in range(len(FEATURE_NAMES))),
+                     pool_memory=memory) == []
+    later = SimpleNamespace(
+        milestone_transitions=(("p", broke),),
+        interaction_paths=(_path("p", "pool_reversal", "man-1", Direction.SHORT, [swept, broke]),),
+        interaction_path_transitions=(), zone_interactions=(), reacceptance_interactions=(),
+    )
+    (row,) = path_rows(_observation(later, []), close=100.0, high=100.5, low=99.5, atr=2.0,
+                       history=[100.0] * 90, features=tuple(float(i) for i in range(len(FEATURE_NAMES))),
+                       pool_memory=memory)
+    assert row["context_found"] and row["failure_boundary"] == 105.2 and row["source_timeframe"] == "5m"
+    assert row["reclaim_margin_atr"] == (104.5 - 104.1) / 2.0 and row["step_ordinal"] == 1
+    # without a memory the row is logged as missing, as before
+    (bare,) = _rows(later, [])
+    assert not bare["context_found"] and math.isnan(bare["failure_boundary"])
+    # the memory follows the live paths: a path that left takes its state with it
+    gone = SimpleNamespace(
+        milestone_transitions=(), interaction_paths=(), interaction_path_transitions=(),
+        zone_interactions=(), reacceptance_interactions=(),
+    )
+    path_rows(_observation(gone, []), close=100.0, high=100.5, low=99.5, atr=2.0,
+              history=[100.0] * 90, features=tuple(float(i) for i in range(len(FEATURE_NAMES))), pool_memory=memory)
+    assert memory == {}
+
+
 def test_the_live_path_wins_over_a_same_bar_transition_copy() -> None:
     # The reducer publishes a registered path in the transitions before it
     # appends the same bar's departure step to the live copy.

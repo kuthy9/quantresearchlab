@@ -38,7 +38,7 @@ def test_recording_paths_changes_the_run_id_and_nothing_else_does() -> None:
     model = root / "configs/model.json"
     plain = run_id(source=source, model=model, first_session="2022-01-03", last_session="2022-06-06")
     again = run_id(source=source, model=model, first_session="2022-01-03", last_session="2022-06-06", recorder=None)
-    paths = run_id(source=source, model=model, first_session="2022-01-03", last_session="2022-06-06", recorder="paths_v2")
+    paths = run_id(source=source, model=model, first_session="2022-01-03", last_session="2022-06-06", recorder="paths_v3")
     assert plain == again and plain != paths and len(paths) == 16
 
 
@@ -50,3 +50,19 @@ def test_the_eye_revision_is_recorded_beside_the_run_id() -> None:
 
     revision = eye_revision()
     assert revision is None or (isinstance(revision, str) and len(revision) >= 7)
+
+
+def test_the_eye_journals_where_the_caller_says(tmp_path) -> None:
+    # The model's observer section names a shared journal directory the
+    # runtime spills cold events into and never empties. A block build is a
+    # bounded pass that keeps nothing of the Eye afterwards, so the builder
+    # gives each block its own journal and removes it with the block's Eye.
+    from pathlib import Path
+
+    from brain.research.trajectory_dataset import build_eye
+
+    root = Path(__file__).resolve().parents[2]
+    _, shared = build_eye(root / "configs/model.json", root=root)
+    assert shared.config.audit_journal_dir == str(root / "outputs/eye_journal")
+    _, own = build_eye(root / "configs/model.json", root=root, audit_journal_dir=tmp_path / "journal")
+    assert own.config.audit_journal_dir == str(tmp_path / "journal")
