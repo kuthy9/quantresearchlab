@@ -402,6 +402,8 @@ _JOURNAL_RECORD_HEADER = struct.Struct(">I")
 # which the digests answer.  Both bounds sit far above what any later event
 # can cite; a miss fails closed exactly as an absent entry always did.
 ELIGIBLE_BAR_INDEX_RETENTION_PER_SCALE = 4096
+# Spelled-out constituent counts for the synthetic-terminal messages.
+_COUNT_WORDS = {5: "five", 15: "fifteen", 60: "sixty"}
 RESERVATION_MEMORY_RETENTION = 8192
 JOURNAL_FILE_SUFFIX = ".evlog"
 
@@ -3311,15 +3313,19 @@ class EventStore:
                     "exact synthetic-interruption terminal"
                 )
             return
-        interval_start = event.known_at - pd.Timedelta(5, unit="min")
+        # The terminal's incomplete bar is one bar of its own scale: five
+        # minutes on 5m, fifteen on 15m.
+        scale = event.timeframe.value
+        constituents = int(event.timeframe.minutes)
+        interval_start = event.known_at - pd.Timedelta(constituents, unit="min")
         if source_parents[-1].known_at != interval_start:
             raise ValueError(
                 "authoritative synthetic displacement terminal must retain "
-                "the immediately preceding real M5 BAR as its last source"
+                f"the immediately preceding real {scale} BAR as its last source"
             )
         expected_clocks = tuple(
             interval_start + pd.Timedelta(offset, unit="min")
-            for offset in range(1, 6)
+            for offset in range(1, constituents + 1)
         )
         interval_roots: list[MarketEvent] = []
         for clock in expected_clocks:
@@ -3337,10 +3343,11 @@ class EventStore:
             ):
                 raise ValueError(
                     "authoritative synthetic displacement terminal lacks "
-                    "five contiguous unique M1 BAR roots"
+                    f"{_COUNT_WORDS.get(constituents, constituents)} "
+                    "contiguous unique M1 BAR roots"
                 )
             interval_roots.append(root)
-        if len({root.event_id for root in interval_roots}) != 5:
+        if len({root.event_id for root in interval_roots}) != constituents:
             raise ValueError(
                 "authoritative synthetic displacement terminal repeats an "
                 "M1 BAR root"
@@ -3377,7 +3384,7 @@ class EventStore:
         if not expected_context or event.context_event_ids != expected_context:
             raise ValueError(
                 "authoritative synthetic displacement context must be the "
-                "exact clock-only M1 subset of its open-closed M5 interval"
+                f"exact clock-only M1 subset of its open-closed {scale} interval"
             )
 
     @staticmethod

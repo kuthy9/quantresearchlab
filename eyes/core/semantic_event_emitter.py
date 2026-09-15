@@ -119,6 +119,9 @@ def _entity_identity_is_live(identity: str, live: Container[str]) -> bool:
     return bool(separator and bare and namespace.isalpha()) and bare in live
 
 
+_COUNT_WORDS = {5: "five", 15: "fifteen", 60: "sixty"}
+
+
 def _bar_root_clock(entry: tuple[pd.Timestamp, str]) -> pd.Timestamp:
     return entry[0]
 
@@ -1762,10 +1765,16 @@ class SemanticEventEmitter:
         *,
         timeframe: Timeframe = Timeframe.M5,
     ) -> tuple[str, ...]:
-        """Return every clock-only M1 constituent of an incomplete bar."""
+        """Return every clock-only M1 constituent of an incomplete bar.
+
+        The bar's interval must be covered by exactly ``timeframe.minutes``
+        contiguous M1 roots -- five on 5m, fifteen on 15m -- so a terminal on
+        a secondary displacement scale cites its own constituents.
+        """
 
         clock = pd.Timestamp(known_at)
-        interval_start = clock - pd.Timedelta(minutes=timeframe.minutes)
+        constituents = int(timeframe.minutes)
+        interval_start = clock - pd.Timedelta(minutes=constituents)
         current_root_id = self._clock_root_event_id_at(Timeframe.M1, clock)
         current_root = self.memory.audit_event_including_pending(
             current_root_id
@@ -1795,7 +1804,8 @@ class SemanticEventEmitter:
                 or event.known_at != event_clock
             ):
                 raise ValueError(
-                    "synthetic displacement M5 interval has an invalid M1 root"
+                    f"synthetic displacement {timeframe.value} interval has "
+                    "an invalid M1 root"
                 )
             real_completed = event.evidence.get("real_completed")
             clock_only = event.evidence.get("clock_only")
@@ -1810,8 +1820,8 @@ class SemanticEventEmitter:
                 != market_identity
             ):
                 raise ValueError(
-                    "synthetic displacement M5 interval has inconsistent M1 "
-                    "root evidence"
+                    f"synthetic displacement {timeframe.value} interval has "
+                    "inconsistent M1 root evidence"
                 )
             interval_roots.append((event_clock, event.event_id))
             if clock_only:
@@ -1819,15 +1829,16 @@ class SemanticEventEmitter:
         ordered_interval = tuple(sorted(interval_roots))
         expected_clocks = tuple(
             interval_start + pd.Timedelta(minutes=offset)
-            for offset in range(1, 6)
+            for offset in range(1, constituents + 1)
         )
         if (
-            len(ordered_interval) != 5
+            len(ordered_interval) != constituents
             or tuple(item[0] for item in ordered_interval) != expected_clocks
-            or len({item[1] for item in ordered_interval}) != 5
+            or len({item[1] for item in ordered_interval}) != constituents
         ):
             raise ValueError(
-                "synthetic displacement M5 interval lacks five contiguous "
+                f"synthetic displacement {timeframe.value} interval lacks "
+                f"{_COUNT_WORDS.get(constituents, constituents)} contiguous "
                 "unique M1 roots"
             )
         ordered = tuple(sorted(roots))
@@ -1844,7 +1855,8 @@ class SemanticEventEmitter:
         clocks = tuple(item[0] for item in ordered)
         if len(clocks) != len(set(clocks)):
             raise ValueError(
-                "synthetic displacement M5 interval repeats an M1 root clock"
+                f"synthetic displacement {timeframe.value} interval repeats "
+                "an M1 root clock"
             )
         return tuple(item[1] for item in ordered)
 

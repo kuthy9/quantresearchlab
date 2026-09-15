@@ -760,3 +760,58 @@ def test_exp013_checkpoint_resume_observation_equivalence(tmp_path: Path) -> Non
     assert _send(uninterrupted, continuation) == _send(resumed, continuation)
     assert uninterrupted.last_batch == resumed.last_batch
     assert uninterrupted.tracker.snapshot() == resumed.tracker.snapshot()
+
+
+def test_synthetic_terminal_on_a_15m_scale_reads_fifteen_m1_constituents() -> None:
+    # A secondary displacement scale's synthetic-interruption terminal cites
+    # the clock-only minutes of its own incomplete bar: fifteen constituents
+    # on 15m, not the five of the 5m scale the check was first written for.
+    # The 2022-01-03 23:13 missing minute on the NQ tape raised
+    # "lacks five contiguous unique M1 roots" from a 15m terminal.
+    observer = CausalObserver(
+        ObserverConfig(
+            scale_specs=CORE_TEST_SCALE_SPECS,
+            displacement_protocol=str(PROTOCOL_PATH),
+        )
+    )
+    terminal_clock = BASE + pd.Timedelta(minutes=15)
+    synthetic_end = terminal_clock - pd.Timedelta(minutes=2)
+    for minute_offset in range(14, -1, -1):
+        update = _update(terminal_clock - pd.Timedelta(minutes=minute_offset))
+        if update.asof == synthetic_end:
+            synthetic_m1 = replace(
+                update.completed_1m,
+                volume=0.0,
+                real_minutes=0,
+                synthetic_minutes=1,
+            )
+            update = replace(
+                update,
+                completed_1m=synthetic_m1,
+                newly_completed={**update.newly_completed, Timeframe.M1: (synthetic_m1,)},
+                histories={**update.histories, Timeframe.M1: (synthetic_m1,)},
+            )
+        observer.observe(update)
+
+    context = observer._emitter._synthetic_m1_context_event_ids_for_terminal(
+        terminal_clock, timeframe=Timeframe.M15
+    )
+    roots = tuple(observer.audit_store.get(event_id) for event_id in context)
+    assert tuple(root.known_at for root in roots) == (synthetic_end,)
+    assert roots[0].evidence["clock_only"] is True
+
+    # Fourteen of the fifteen constituents is not a covered 15m interval.
+    gapped = CausalObserver(
+        ObserverConfig(
+            scale_specs=CORE_TEST_SCALE_SPECS,
+            displacement_protocol=str(PROTOCOL_PATH),
+        )
+    )
+    for minute_offset in range(14, -1, -1):
+        if minute_offset == 7:
+            continue
+        gapped.observe(_update(terminal_clock - pd.Timedelta(minutes=minute_offset)))
+    with pytest.raises(ValueError, match="fifteen contiguous unique M1 roots"):
+        gapped._emitter._synthetic_m1_context_event_ids_for_terminal(
+            terminal_clock, timeframe=Timeframe.M15
+        )

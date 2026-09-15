@@ -1565,39 +1565,42 @@ def _origin_zone_terminal_chain(
     return (*events, terminal_bar, terminal)
 
 
-def _synthetic_displacement_chain() -> tuple[MarketEvent, ...]:
+def _synthetic_displacement_chain(
+    timeframe: Timeframe = Timeframe.M5,
+) -> tuple[MarketEvent, ...]:
     template = next(
         event
         for event in _authoritative_phase23_chain()
         if event.kind is EventKind.DISPLACEMENT_OBSERVED
     )
+    span = int(timeframe.minutes)
     source_one = _normalized_bar(
         "synthetic-displacement-source-one",
         0,
-        timeframe=Timeframe.M5,
+        timeframe=timeframe,
     )
     source_two = _normalized_bar(
         "synthetic-displacement-source-two",
-        5,
-        timeframe=Timeframe.M5,
+        span,
+        timeframe=timeframe,
     )
     interval_roots = tuple(
         _normalized_bar(
             f"synthetic-displacement-m1-{minute}",
             minute,
             timeframe=Timeframe.M1,
-            real_completed=minute != 8,
+            real_completed=minute != span + 3,
             sequence_no=0,
         )
-        for minute in range(6, 11)
+        for minute in range(span + 1, 2 * span + 1)
     )
     synthetic_root = interval_roots[2]
     displacement = _event(
         "synthetic-displacement-terminal",
-        10,
+        2 * span,
         canonical=True,
         kind=EventKind.DISPLACEMENT_OBSERVED,
-        timeframe=Timeframe.M5,
+        timeframe=timeframe,
         direction=Direction.LONG,
         side="above",
         price=None,
@@ -1619,7 +1622,7 @@ def _synthetic_displacement_chain() -> tuple[MarketEvent, ...]:
                 "detector:synthetic-displacement-source-one",
                 "detector:synthetic-displacement-source-two",
             ),
-            "prefix_last_admitted_at": _clock(5).isoformat(),
+            "prefix_last_admitted_at": _clock(span).isoformat(),
             "state_metrics": dict(template.evidence["state_metrics"]),
         },
     )
@@ -2356,10 +2359,26 @@ def test_synthetic_displacement_context_is_exact_open_closed_m1_subset() -> None
         details=stale_payload,
         evidence=stale_payload,
     )
-    with pytest.raises(ValueError, match="immediately preceding real M5"):
+    with pytest.raises(ValueError, match="immediately preceding real 5m"):
         EventStore.from_events(
             (events[0], stale_source, *events[2:-1], stale_terminal)
         )
+
+
+def test_synthetic_displacement_context_spans_its_own_scale() -> None:
+    # A 15m secondary displacement censored by a clock-only minute cites the
+    # clock-only subset of its own fifteen-minute interval; the contract was
+    # first written for the 5m scale and rejected it as "not the immediately
+    # preceding real M5 BAR" (NQ tape, 2022-01-03 23:15).
+    events = _synthetic_displacement_chain(timeframe=Timeframe.M15)
+    store = EventStore.from_events(events)
+
+    assert store.events() == events
+    assert len(events) == 2 + 15 + 1
+    assert events[-1].context_event_ids == (events[2 + 2].event_id,)
+
+    with pytest.raises(ValueError, match="fifteen contiguous unique M1"):
+        EventStore.from_events((*events[:9], *events[10:]))
 
 
 def test_normalized_bar_index_retry_batch_pickle_and_checkpoint_are_atomic(
