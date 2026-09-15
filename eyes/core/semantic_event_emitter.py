@@ -18,7 +18,7 @@ from collections import deque
 from dataclasses import dataclass, field, replace
 import hashlib
 import json
-from typing import Iterable, Mapping, Sequence
+from typing import Callable, Container, Iterable, Mapping, Sequence
 
 import numpy as np
 import pandas as pd
@@ -95,6 +95,28 @@ from .zone import ZoneUpdate
 # whole run (eyes/docs/evidence/eye_memory_2022-02_2026-09-14.md).
 BAR_ROOT_RETENTION_PER_SCALE = 32768
 BAR_MEMORY_RETENTION = 32768
+
+
+def _identity_of_key(key: object) -> tuple[str, ...]:
+    return (key,)
+
+
+def _identity_at_key_head(key: object) -> tuple[str, ...]:
+    return (key[0],)
+
+
+def _entity_identity_is_live(identity: str, live: Container[str]) -> bool:
+    """Whether a memory key's identity is still cited, in either form.
+
+    Memories key some entries by the namespaced identity (``swing:…``) and
+    the harvest holds the bare id of every namespaced citation, so the
+    bare form is the one both sides always share.
+    """
+
+    if identity in live:
+        return True
+    namespace, separator, bare = identity.partition(":")
+    return bool(separator and bare and namespace.isalpha()) and bare in live
 
 
 def _bar_root_clock(entry: tuple[pd.Timestamp, str]) -> pd.Timestamp:
@@ -302,6 +324,9 @@ class SemanticEventEmitter:
         self._displacement_event_ids: dict[str, str] = {}
         self._protected_swing_event_ids: dict[str, str] = {}
         self._terminal_crossing_events: dict[str, MarketEvent] = {}
+        # The level each crossing generation belongs to, so the generation's
+        # terminal can follow the level's retention.
+        self._terminal_crossing_levels: dict[str, str] = {}
         self._fvg_created_event_ids: dict[str, str] = {}
         self._fvg_first_retest_event_ids: dict[str, str] = {}
         self._fvg_terminal_event_ids: dict[str, str] = {}
@@ -371,6 +396,7 @@ class SemanticEventEmitter:
         self._displacement_event_ids.clear()
         self._protected_swing_event_ids.clear()
         self._terminal_crossing_events.clear()
+        self._terminal_crossing_levels.clear()
         self._fvg_created_event_ids.clear()
         self._fvg_first_retest_event_ids.clear()
         self._fvg_terminal_event_ids.clear()
@@ -592,6 +618,124 @@ class SemanticEventEmitter:
         order.append(value)
         known.add(value)
         return True
+
+    # -- entity memory retention --------------------------------------------
+    #
+    # Every memory below keeps, per entity, the event that last spoke about
+    # it so a later event can cite it.  An entry is read for as long as some
+    # tracker or reducer retains the entity or another entity that cites it,
+    # so the observer harvests every identifier from the states it publishes
+    # (``eyes.core.entity_liveness``) and asks the emitter to drop the rest.
+    # Each rule names the memory and how a key yields the identities whose
+    # liveness keeps the entry; an entry with any live identity stays.
+
+    @staticmethod
+    def _level_of_touch_identity(value: str) -> tuple[str, ...]:
+        level_id, separator, _ = value.rpartition("|")
+        return (level_id,) if separator else (value,)
+
+    def _level_of_crossing_generation(self, generation_id: str) -> tuple[str, ...]:
+        return (self._terminal_crossing_levels.get(generation_id, generation_id),)
+
+    def _entity_memory_rules(
+        self,
+    ) -> tuple[tuple[str, Callable[[object], tuple[str, ...]]], ...]:
+        same = _identity_of_key
+        first = _identity_at_key_head
+        return (
+            ("_confirmed_swing_event_ids", same),
+            ("_structural_leg_event_ids", same),
+            ("_structure_direction_event_ids", same),
+            ("_level_touch_event_ids", first),
+            ("_candidate_level_event_ids", same),
+            ("_reached_level_ids", same),
+            ("_retired_level_ids", same),
+            ("_known_level_touch_ids", self._level_of_touch_identity),
+            ("_penetration_event_ids", first),
+            ("_raw_break_event_ids", same),
+            ("_displacement_event_ids", same),
+            ("_terminal_crossing_events", self._level_of_crossing_generation),
+            ("_fvg_created_event_ids", same),
+            ("_fvg_first_retest_event_ids", same),
+            ("_fvg_terminal_event_ids", same),
+            ("_base_origin_core_event_ids", same),
+            ("_origin_zone_created_event_ids", same),
+            ("_range_created_event_ids", same),
+            ("_range_active_event_ids", same),
+            ("_balance_range_observed_event_ids", same),
+            ("_range_terminal_event_ids", same),
+            ("_range_boundary_level_ids", first),
+            ("_liquidity_entity_revisions", same),
+        )
+
+    def entity_memory_entries(self) -> int:
+        """How many entries the per-entity memories hold together."""
+
+        return sum(
+            len(getattr(self, name)) for name, _ in self._entity_memory_rules()
+        ) + len(self._bar_event_ids_by_candle_id)
+
+    def dead_entity_memory_keys(
+        self, live: Container[str]
+    ) -> dict[str, list]:
+        """The keys of each memory that no live identity keeps."""
+
+        dead: dict[str, list] = {}
+        for name, identities in self._entity_memory_rules():
+            memory = getattr(self, name)
+            gone = [
+                key
+                for key in memory
+                if not any(
+                    _entity_identity_is_live(identity, live)
+                    for identity in identities(key)
+                )
+            ]
+            if gone:
+                dead[name] = gone
+        # A bar root is cited by the entities formed from it and by the
+        # readers of the recent window (the next root of a scale, a
+        # crossing's own bar); the window is the same clock window the
+        # bar-keyed price memories keep.
+        candles = self._bar_event_ids_by_candle_id
+        excess = len(candles) - BAR_MEMORY_RETENTION
+        if excess > 0:
+            gone = [
+                candle_id
+                for candle_id, _ in zip(candles, range(excess))
+                if candle_id not in live
+            ]
+            if gone:
+                dead["_bar_event_ids_by_candle_id"] = gone
+        return dead
+
+    def prune_entity_memories(self, live: Container[str]) -> int:
+        """Drop every entry no live identity keeps; return how many."""
+
+        dead = self.dead_entity_memory_keys(live)
+        pruned = 0
+        for name, keys in dead.items():
+            memory = getattr(self, name)
+            for key in keys:
+                if isinstance(memory, dict):
+                    del memory[key]
+                else:
+                    memory.discard(key)
+            pruned += len(keys)
+            if name == "_terminal_crossing_events":
+                for key in keys:
+                    self._terminal_crossing_levels.pop(key, None)
+        if "_known_level_touch_ids" in dead:
+            gone = set(dead["_known_level_touch_ids"])
+            self._known_level_touch_order = deque(
+                (
+                    value
+                    for value in self._known_level_touch_order
+                    if value not in gone
+                ),
+                maxlen=self._known_level_touch_order.maxlen,
+            )
+        return pruned
 
     def _append_semantic_atomic(
         self,
@@ -1034,6 +1178,7 @@ class SemanticEventEmitter:
             context_event_ids=context_ids,
         )
         self._terminal_crossing_events[generation_id] = event
+        self._terminal_crossing_levels[generation_id] = normalized_level_id
         opposite_assignment_direction = (
             Direction.SHORT
             if (

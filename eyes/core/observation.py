@@ -17,6 +17,7 @@ from .displacement_observer import (
     REGISTERED_CLOSURE_ANOMALIES,
     CausalDisplacementEye,
 )
+from .entity_liveness import harvest_entity_ids
 from .event_memory import EventMemory
 from .event_store import EventStore
 from .zone import (
@@ -815,6 +816,31 @@ def _typed_progression(
 # confirmed swing from its bounded deque and declines an ambiguous forming
 # candidate without any fact, so a swing prefix cools with the exposure.
 _OWNER_EXPOSED_TIMELINE_NAMESPACES = frozenset({"swing"})
+
+# The emitter's per-entity memories are pruned to the entities the published
+# states still cite whenever they have doubled since the last pass and hold
+# more than this many entries; ``None`` never prunes.  The floor keeps the
+# pass rare on short replays (a 1m month inserts about 150,000 entries and
+# retains about a fifth), and doubling bounds the pass to O(entries) per
+# doubling, so the memories peak at twice their live population.
+ENTITY_MEMORY_PRUNE_FLOOR: int | None = 65536
+
+# What the live-entity harvest reads off the observation: every tracker
+# state the emitter is fed (frames, displacement, inventory, pools,
+# interaction, Group 4), but not the events (whose citations reach back to
+# entities nothing retains), the execution layer, or the reducer's states --
+# the emitter never reads those, with one exception: the reducer's candidate
+# set, whose retirements the emitter publishes.
+_LIVENESS_EXCLUDED_OBSERVATION_FIELDS = frozenset(
+    {
+        "market_snapshot",
+        "recent_events",
+        "retained_entity_timelines",
+        "incomplete_entity_timeline_keys",
+        "execution",
+        "_snapshot_free_identity",
+    }
+)
 # Candidate kinds whose entity lifecycle ends in a tracker: the candidate
 # ends on the bar the entity leaves the authoritative set, with this reason.
 _ENTITY_OWNED_CANDIDATE_KINDS = {
@@ -1122,6 +1148,10 @@ class CausalObserver:
         # Consumed swing items dropped after their retention; kept only while
         # a tracker still offers the swing, so it cannot come back visible.
         self._dropped_consumed_ids: set[str] = set()
+        # Entries the emitter's per-entity memories held after the last
+        # liveness pass, and how many passes ran.
+        self._entity_memory_prune_mark = 0
+        self.entity_memory_prunes = 0
         self._liquidity_trackers = (
             {
                 timeframe: CausalLiquidityTracker(
@@ -4313,8 +4343,54 @@ class CausalObserver:
         self._boundary_reset_identity = None
         self._group4_boundary_update = None
         self._interaction_boundary_update = None
+        self._retire_entity_memories(observation)
         self._prior = observation
         return observation
+
+    def _retire_entity_memories(self, observation: MarketObservation) -> None:
+        """Drop the emitter's memories of entities nothing retains any more.
+
+        Runs when the memories have doubled since the last pass (above the
+        floor), harvesting every identifier the published tracker states
+        cite -- frames, displacement, inventory, pools, interaction -- plus
+        the reducer's candidate set and the observer's own inventory
+        bookkeeping, so an entry survives while any of them still names its
+        entity.
+        """
+
+        floor = ENTITY_MEMORY_PRUNE_FLOOR
+        if floor is None:
+            return
+        entries = self._emitter.entity_memory_entries()
+        if entries <= max(floor, 2 * self._entity_memory_prune_mark):
+            return
+        snapshot = observation.market_snapshot
+        live = harvest_entity_ids(
+            *(
+                getattr(observation, item.name)
+                for item in fields(observation)
+                if item.name not in _LIVENESS_EXCLUDED_OBSERVATION_FIELDS
+            ),
+            *(
+                ()
+                if snapshot is None
+                else (
+                    state.liquidity
+                    for state in snapshot.timeframe_states.values()
+                )
+            ),
+            self._reference_inventory,
+            {
+                "item_ids": (
+                    *self._retired_level_ids,
+                    *self._dropped_consumed_ids,
+                    *self._inventory_consumption,
+                )
+            },
+        )
+        self._emitter.prune_entity_memories(live)
+        self._entity_memory_prune_mark = self._emitter.entity_memory_entries()
+        self.entity_memory_prunes += 1
 
 
 __all__ = [
