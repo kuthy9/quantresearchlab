@@ -40,3 +40,13 @@ def test_recording_paths_changes_the_run_id_and_nothing_else_does() -> None:
     again = run_id(source=source, model=model, first_session="2022-01-03", last_session="2022-06-06", recorder=None)
     paths = run_id(source=source, model=model, first_session="2022-01-03", last_session="2022-06-06", recorder="paths_v2")
     assert plain == again and plain != paths and len(paths) == 16
+
+
+def test_the_eye_revision_is_recorded_beside_the_run_id() -> None:
+    # The run id digests the atomic definition identity, not the Eye's
+    # code; run.json names the revision the blocks were built under so a
+    # receipt can say which Eye it measured.
+    from brain.scripts.build_gate_blocks import eye_revision
+
+    revision = eye_revision()
+    assert revision is None or (isinstance(revision, str) and len(revision) >= 7)

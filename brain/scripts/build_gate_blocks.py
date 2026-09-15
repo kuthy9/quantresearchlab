@@ -16,6 +16,7 @@ from dataclasses import asdict, dataclass
 import hashlib
 import json
 from pathlib import Path
+import subprocess
 import sys
 import time
 
@@ -93,6 +94,20 @@ def run_id(
     return hashlib.sha256(json.dumps(digest_input, sort_keys=True).encode()).hexdigest()[:16]
 
 
+def eye_revision() -> str | None:
+    """The checkout's HEAD, recorded beside the run id (not digested into it:
+    a docs commit must not invalidate cached blocks, but a receipt must be
+    able to name the Eye it measured). ``None`` outside a git checkout."""
+
+    try:
+        return subprocess.run(
+            ["git", "-C", str(ROOT), "rev-parse", "--short=12", "HEAD"],
+            capture_output=True, text=True, check=True, timeout=10,
+        ).stdout.strip() or None
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
 def _build_one(job: tuple[Block, str, str, str, bool]) -> str:
     block, source, model, out_root, record_paths = job
     out = Path(out_root) / block.week
@@ -151,6 +166,7 @@ def main() -> None:
                 "model": str(model),
                 "block_rule": BLOCK_RULE,
                 "recorder": recorder,
+                "eye_revision": eye_revision(),
                 "blocks": [asdict(block) for block in blocks],
             },
             indent=2,

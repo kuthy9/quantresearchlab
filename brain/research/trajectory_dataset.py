@@ -179,7 +179,10 @@ def build_dataset(
     for bar in iter_completed_bars(frame):
         observation = observer.observe(reader.on_bar(bar))
         seen += 1
-        for event in observation.semantic_events_this_update:
+        # Every scale's events, not only the main clock: the Eye keeps the
+        # 1m tape out of ``semantic_events_this_update`` as microstructure,
+        # and the encoder tracks each scale separately.
+        for event in observation.events_this_update:
             if not is_transition(event.kind):
                 continue
             row = event_row(event)

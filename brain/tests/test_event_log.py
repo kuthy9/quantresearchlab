@@ -23,7 +23,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 def test_transition_kinds_exclude_state_republication_and_heartbeats() -> None:
-    assert len(TRANSITION_KINDS) == 49
+    assert len(TRANSITION_KINDS) == 51
     assert "bar_completed" not in TRANSITION_KINDS
     assert "market_epoch_reset" not in TRANSITION_KINDS
     assert not any(kind.endswith("_state") for kind in TRANSITION_KINDS)
@@ -179,3 +179,12 @@ def test_a_block_without_a_path_log_still_loads(tmp_path) -> None:
     (tmp_path / "block" / "paths.parquet").unlink()
     data = load_blocks(tmp_path)
     assert len(data["paths"]) == 0
+
+
+def test_the_log_keeps_the_microstructure_scale(synthetic_block) -> None:
+    # The Eye's main event clock excludes the 1m tape (schema 6); the log
+    # records every scale and leaves the choice of clock to the encoder,
+    # which tracks scales separately.
+    events = load_blocks(synthetic_block)["events"]
+    assert "1m" in set(events["timeframe"])
+    assert len(set(events["timeframe"])) > 1

@@ -3,7 +3,8 @@
 A transition is an ``EventKind`` that reports a change: not the ``*_state``
 re-publication of a retained entity, not the ``bar_completed`` heartbeat, not
 the epoch reset. On the real tape the excluded kinds fire on 67-100 % of
-bars; the 49 that remain are what an event clock is built from.
+bars; the 51 that remain (49 before the Eye published LEVEL_REACHED and
+LEVEL_INVALIDATED) are what an event clock is built from.
 """
 from __future__ import annotations
 

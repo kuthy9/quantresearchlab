@@ -114,7 +114,7 @@ def test_trigger_one_hot_marks_the_kinds_fired_at_t() -> None:
 def test_feature_width_is_fixed() -> None:
     x, names = sequence_features(_clocks(2), _events([]))
     assert x.shape == (2, len(names))
-    assert len(names) == 49 * 5 * 3 + 5 * 4 * 5 + 49
+    assert len(names) == 51 * 5 * 3 + 5 * 4 * 5 + 51
 
 
 def test_without_kind_drops_only_that_kind() -> None:
