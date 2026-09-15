@@ -10,9 +10,14 @@
   },
   "role": "causal_descriptive_development_contract",
   "tick_size": 0.25,
+  "timeframes": [
+    "15m",
+    "1H",
+    "4H"
+  ],
   "upstream": {
     "group12_protocol_version": "3.2.0-group12.7",
-    "group12_protocol_sha256": "5a8913907b92b22c5ea67df7056b5464518329adcce883435aadf9008dc7e0e0",
+    "group12_protocol_sha256": "d5afb0bcfcd6cfe59f13d83f54a5031668286f426150896d01edf077ff495892",
     "required_typed_sources": [
       "H1 SupportResistanceState",
       "LiquidityPoolState formation and lifecycle",
@@ -73,7 +78,8 @@
     "compression_windows": "the first four and most recent four candidate bars are non-overlapping at first eligibility and remain bounded thereafter",
     "maximum_compression_ratio": "a late-to-early median true-range ratio no greater than 0.80 records a material twenty-percent contraction rather than minor bar noise",
     "manipulation_resolution": "the sweep bar cannot resolve itself; reentry needs one additional inside hold bar, outside acceptance needs two consecutive closes, and unresolved state is censored after five later real completed 1m bars",
-    "retention_limits": "memory-safety limits only; they never qualify price structure or trading authority"
+    "retention_limits": "memory-safety limits only; they never qualify price structure or trading authority",
+    "timeframes": "the range definition is applied on each registered scale with the same thresholds; every *_h1_bars parameter counts completed bars of the range's own scale (8 candidate bars are two hours on 15m, eight hours on 1H, thirty-two hours on 4H). One manipulation funnel spans every scale's mature boundaries and every pool; at most one live range per scale"
   },
   "clock": {
     "decision_update": "one update per newly completed 1m bar",

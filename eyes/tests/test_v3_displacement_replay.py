@@ -4,7 +4,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from brain.core.calibration_replay import ReplayCheckpointStore
+import pickle
 from eyes.core.causal import CausalMarketReader, ReaderUpdate
 from eyes.core.displacement import (
     CausalDisplacementTracker,
@@ -35,9 +35,6 @@ ROOT = Path(__file__).resolve().parents[2]
 PROTOCOL_PATH = ROOT / "configs/primitives_displacement.json"
 GROUP12_PROTOCOL_PATH = ROOT / "configs/primitives_structure_liquidity.json"
 GROUP3_PROTOCOL_PATH = ROOT / "configs/primitives_zones.json"
-EXPERIMENT_ID = "EXP-SMC-3.0.2-013-CAUSAL-5M-DISPLACEMENT-RECOVERY-IDENTITY-CLOSURE"
-SEMANTIC_BASE_SHA = "0d7844635ee77a679da87fd47f284719adcca9afc71850ecd0da76addf62455b"
-PREREGISTRATION_SHA = "220ddd88eb6decf2d23af7b4368d5b9ea3867588c3f7310564f6160349a6de75"
 BASE = pd.Timestamp("2025-01-06T09:30:00-05:00")
 WHITELIST = frozenset((
     "contract_change_history_reset", "data_gap_history_reset",
@@ -347,7 +344,7 @@ def test_observer_reuses_displacement_on_exact_boundary_retry(
         match="frame failure after displacement",
     ):
         observer.observe(update)
-    cached = observer._last_displacement_observation
+    cached = observer._last_displacement_inputs[Timeframe.M5][1]
     monkeypatch.setattr(observer, "_observe_frame", original)
     retried = observer.observe(update)
     assert retried.displacement == cached
@@ -745,30 +742,17 @@ def test_exp013_prefix_invariance_under_different_future_suffixes() -> None:
     assert left_prefix[-1].current_entity_id == right_prefix[-1].current_entity_id
 
 
-def _bindings() -> dict[str, str]:
-    return {
-        "experiment_id": EXPERIMENT_ID,
-        "semantic_base_sha256": SEMANTIC_BASE_SHA,
-        "preregistration_sha256": PREREGISTRATION_SHA,
-        "protocol_sha256": _protocol().protocol_hash,
-    }
-
-
 def test_exp013_checkpoint_resume_observation_equivalence(tmp_path: Path) -> None:
+    """A pickled displacement eye resumes with the observations it would have seen.
+
+    The typed Brain's ``ReplayCheckpointStore`` that once wrapped this pickle was
+    retired; the Eye-side property it exercised is the round trip itself.
+    """
     uninterrupted, index, checkpoint_observation = _started_eye()
-    store, bindings = ReplayCheckpointStore(tmp_path / "trusted-local"), _bindings()
-    state = {
-        "replay": uninterrupted, "last_source_start": None, "processed_bars": index,
-        "decision_rows": 0, "next_shard_index": 0, "committed_shards": [],
-    }
-    store.save(state, bindings=bindings)
-    assert store.exists
-    with pytest.raises(ValueError, match="bindings"):
-        store.load(expected_bindings={**bindings, "experiment_id": "EXP-SMC-3.0.2-011-CAUSAL-5M-DISPLACEMENT-ISOLATED-SHADOW"},
-                   expected_replay_type=CausalDisplacementEye)
-    loaded = store.load(expected_bindings=bindings,
-                        expected_replay_type=CausalDisplacementEye)
-    resumed = loaded["replay"]
+    checkpoint = tmp_path / "trusted-local" / "checkpoint.pkl"
+    checkpoint.parent.mkdir(parents=True)
+    checkpoint.write_bytes(pickle.dumps(uninterrupted))
+    resumed = pickle.loads(checkpoint.read_bytes())
     assert isinstance(resumed, CausalDisplacementEye)
     assert resumed.last_observation == checkpoint_observation
     assert resumed.last_batch == uninterrupted.last_batch
@@ -776,3 +760,58 @@ def test_exp013_checkpoint_resume_observation_equivalence(tmp_path: Path) -> Non
     assert _send(uninterrupted, continuation) == _send(resumed, continuation)
     assert uninterrupted.last_batch == resumed.last_batch
     assert uninterrupted.tracker.snapshot() == resumed.tracker.snapshot()
+
+
+def test_synthetic_terminal_on_a_15m_scale_reads_fifteen_m1_constituents() -> None:
+    # A secondary displacement scale's synthetic-interruption terminal cites
+    # the clock-only minutes of its own incomplete bar: fifteen constituents
+    # on 15m, not the five of the 5m scale the check was first written for.
+    # The 2022-01-03 23:13 missing minute on the NQ tape raised
+    # "lacks five contiguous unique M1 roots" from a 15m terminal.
+    observer = CausalObserver(
+        ObserverConfig(
+            scale_specs=CORE_TEST_SCALE_SPECS,
+            displacement_protocol=str(PROTOCOL_PATH),
+        )
+    )
+    terminal_clock = BASE + pd.Timedelta(minutes=15)
+    synthetic_end = terminal_clock - pd.Timedelta(minutes=2)
+    for minute_offset in range(14, -1, -1):
+        update = _update(terminal_clock - pd.Timedelta(minutes=minute_offset))
+        if update.asof == synthetic_end:
+            synthetic_m1 = replace(
+                update.completed_1m,
+                volume=0.0,
+                real_minutes=0,
+                synthetic_minutes=1,
+            )
+            update = replace(
+                update,
+                completed_1m=synthetic_m1,
+                newly_completed={**update.newly_completed, Timeframe.M1: (synthetic_m1,)},
+                histories={**update.histories, Timeframe.M1: (synthetic_m1,)},
+            )
+        observer.observe(update)
+
+    context = observer._emitter._synthetic_m1_context_event_ids_for_terminal(
+        terminal_clock, timeframe=Timeframe.M15
+    )
+    roots = tuple(observer.audit_store.get(event_id) for event_id in context)
+    assert tuple(root.known_at for root in roots) == (synthetic_end,)
+    assert roots[0].evidence["clock_only"] is True
+
+    # Fourteen of the fifteen constituents is not a covered 15m interval.
+    gapped = CausalObserver(
+        ObserverConfig(
+            scale_specs=CORE_TEST_SCALE_SPECS,
+            displacement_protocol=str(PROTOCOL_PATH),
+        )
+    )
+    for minute_offset in range(14, -1, -1):
+        if minute_offset == 7:
+            continue
+        gapped.observe(_update(terminal_clock - pd.Timedelta(minutes=minute_offset)))
+    with pytest.raises(ValueError, match="fifteen contiguous unique M1 roots"):
+        gapped._emitter._synthetic_m1_context_event_ids_for_terminal(
+            terminal_clock, timeframe=Timeframe.M15
+        )

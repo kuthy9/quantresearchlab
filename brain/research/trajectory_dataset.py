@@ -87,6 +87,17 @@ def build_eye(model_path: str | Path, *, root: Path) -> tuple[CausalMarketReader
             range_auction_projection_only=False,
             eye_authority_mode=True,
             persist_state_projections=False,
+            audit_journal_dir=(
+                None
+                if raw.get("audit_journal_dir") is None
+                else str(root / raw["audit_journal_dir"])
+            ),
+            audit_hot_window_minutes=int(
+                raw.get(
+                    "audit_hot_window_minutes",
+                    ObserverConfig.audit_hot_window_minutes,
+                )
+            ),
         ),
         semantic_registry=selection.atomic_registry,
     )

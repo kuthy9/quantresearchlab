@@ -4,7 +4,7 @@
   "downstream_authoritative": true,
   "natural_authority_validated": true,
   "authority_semantics": "version .3 passed bounded 2023 lifecycle replay and stratified outcome-blind visual review; this is descriptive primitive authority, not profitability or broad-regime stability",
-  "timeframe": "5m",
+  "timeframes": ["5m", "15m", "1H", "4H"],
   "tick_size": 0.25,
   "input_contract": {
     "completed_real_bars_only": true,

@@ -7,6 +7,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass, fields
 import math
+import weakref
 from typing import Any, ClassVar
 import pandas as pd
 
@@ -357,6 +358,49 @@ class PathSequenceState:
             raise ValueError("censored path sequence reason is invalid")
 
 
+# DTO instances that have passed ``exact_values`` once, with the field values
+# they were admitted with.  Every nested DTO is a frozen dataclass, so an
+# instance that was canonical stays canonical unless something bypasses the
+# freeze; comparing the remembered values catches that at a fraction of the
+# cost of reconstructing the object through its validators.  Keyed by ``id``
+# with a weak reference so a freed object cannot leave an entry a recycled id
+# could hit, and the callback removes the entry when the object is collected.
+_ADMITTED: dict[int, tuple["weakref.ReferenceType[Any]", tuple[Any, ...]]] = {}
+
+
+def _is_admitted(value: Any, names: tuple[str, ...] = ()) -> bool:
+    entry = _ADMITTED.get(id(value))
+    if entry is None or entry[0]() is not value:
+        return False
+    remembered = entry[1]
+    names = names or tuple(item.name for item in fields(type(value)))
+    return all(
+        current is expected
+        or (
+            type(current) is type(expected)
+            and current == expected
+            # A clock that lost or changed its zone compares equal on the
+            # wall time; the admitted value's zone is part of what was admitted.
+            and getattr(current, "tzinfo", None) == getattr(expected, "tzinfo", None)
+        )
+        for current, expected in zip(
+            (getattr(value, name) for name in names), remembered, strict=True
+        )
+    )
+
+
+def _remember_admitted(value: Any, names: tuple[str, ...]) -> None:
+    key = id(value)
+
+    def _forget(_reference: Any, key: int = key) -> None:
+        _ADMITTED.pop(key, None)
+
+    _ADMITTED[key] = (
+        weakref.ref(value, _forget),
+        tuple(getattr(value, name) for name in names),
+    )
+
+
 @dataclass(frozen=True)
 class InteractionUpdate:
     """Canonical Eye output for physical zone/pool interaction facts.
@@ -414,6 +458,8 @@ class InteractionUpdate:
             names = tuple(item.name for item in fields(kind))
             expected = set(names)
             for value in values:
+                if _is_admitted(value, names):
+                    continue
                 if (
                     type(value) is not kind
                     or set(getattr(value, "__dict__", ())) != expected
@@ -434,6 +480,7 @@ class InteractionUpdate:
                     raise ValueError(
                         f"interaction {label} canonical state changed"
                     )
+                _remember_admitted(value, names)
 
         typed_collections = (
             (self.zone_interactions, EntryLocationState, "zone"),

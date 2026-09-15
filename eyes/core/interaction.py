@@ -279,6 +279,13 @@ def interaction_update_from_artifact_collections(
     )
 
 
+# A terminal context path is exposed in this many completed outputs, counting
+# the one that closed it, before the reducer compacts it.  The closing
+# transition is delivered on the closing bar and stays in the event log; the
+# retained path only repeats it.
+DEFAULT_TERMINAL_CONTEXT_RETENTION_BARS = 1
+
+
 @dataclass(frozen=True)
 class InteractionProtocol:
     """Executable physical-interaction contract."""
@@ -293,6 +300,9 @@ class InteractionProtocol:
     maximum_contexts: int
     maximum_steps_per_path: int
     protocol_version: str
+    terminal_context_retention_bars: int = (
+        DEFAULT_TERMINAL_CONTEXT_RETENTION_BARS
+    )
 
     def __post_init__(self) -> None:
         hashes = (
@@ -323,6 +333,7 @@ class InteractionProtocol:
                     self.later_hold_bars,
                     self.maximum_contexts,
                     self.maximum_steps_per_path,
+                    self.terminal_context_retention_bars,
                 )
             )
         ):
@@ -358,6 +369,10 @@ class InteractionProtocol:
                 "maximum_steps_per_path"
             ],
             protocol_version=payload["protocol_version"],
+            terminal_context_retention_bars=parameters.get(
+                "terminal_context_retention_real_1m_bars",
+                DEFAULT_TERMINAL_CONTEXT_RETENTION_BARS,
+            ),
         )
 
 @dataclass(frozen=True)
@@ -428,7 +443,11 @@ class InteractionSemantics:
         self._micro_break_facts: dict[str, MicroBreakFact] = {}
         self._paths: dict[str, PathSequenceState] = {}
         self._path_order: deque[str] = deque()
-        self._exposed_terminal_path_ids: set[str] = set()
+        # terminal path id -> completed outputs it has been exposed in
+        self._terminal_exposures: dict[str, int] = {}
+        # sources whose context was compacted and that may still be delivered
+        # upstream; they are observed, not cold
+        self._compacted_source_ids: set[str] = set()
         self._identity: tuple[str, int] | None = None
         self._last_raw_end: pd.Timestamp | None = None
         self._last_input: tuple[object, ...] | None = None
@@ -443,9 +462,8 @@ class InteractionSemantics:
         candidate._micro_break_facts = dict(self._micro_break_facts)
         candidate._paths = dict(self._paths)
         candidate._path_order = deque(self._path_order)
-        candidate._exposed_terminal_path_ids = set(
-            self._exposed_terminal_path_ids
-        )
+        candidate._terminal_exposures = dict(self._terminal_exposures)
+        candidate._compacted_source_ids = set(self._compacted_source_ids)
         return candidate
 
     def _commit(self, candidate: "InteractionSemantics") -> None:
@@ -894,7 +912,7 @@ class InteractionSemantics:
                 self._paths[path_id].ended_at,
                 path_id,
             )
-            for path_id in self._exposed_terminal_path_ids
+            for path_id in self._terminal_exposures
             if (
                 path_id in self._paths
                 and self._paths[path_id].lifecycle
@@ -910,11 +928,26 @@ class InteractionSemantics:
                 "Group 5 context capacity cannot evict live or same-bar state"
             )
         _, path_id = min(candidates)
+        self._evict_context(path_id)
+
+    def _compact_terminal_contexts(self) -> None:
+        """Drop terminal paths already exposed for the retention window."""
+
+        retention = self.protocol.terminal_context_retention_bars
+        for path_id, exposures in tuple(self._terminal_exposures.items()):
+            if exposures >= retention:
+                self._evict_context(path_id)
+
+    def _evict_context(self, path_id: str) -> None:
         path = self._paths.pop(path_id)
         self._path_order.remove(path_id)
-        self._exposed_terminal_path_ids.discard(path_id)
+        self._terminal_exposures.pop(path_id, None)
         if path.context_kind == "zone_return":
-            self._locations.pop(path.context_id, None)
+            location = self._locations.pop(path.context_id, None)
+            if location is not None:
+                self._compacted_source_ids.add(location.source_zone_id)
+        else:
+            self._compacted_source_ids.add(path.context_id)
         for key, state in tuple(self._reacceptances.items()):
             mapped_kind = (
                 "zone_return"
@@ -2200,6 +2233,7 @@ class InteractionSemantics:
             tuple[str, str, str]
         ] = []
         cold_source_ids: list[str] = []
+        self._compact_terminal_contexts()
         self._age_paths(candle)
 
         # Existing reacceptances advance before their locations consume the
@@ -2509,7 +2543,10 @@ class InteractionSemantics:
                     path_transitions,
                     step_transitions,
                 )
-            elif source.source_id not in registered_zone_ids:
+            elif (
+                source.source_id not in registered_zone_ids
+                and source.source_id not in self._compacted_source_ids
+            ):
                 cold_source_ids.append(source.source_id)
         registered_pool_ids = {
             path.context_id
@@ -2531,7 +2568,10 @@ class InteractionSemantics:
                     path_transitions,
                     step_transitions,
                 )
-            elif state.manipulation_id not in registered_pool_ids:
+            elif (
+                state.manipulation_id not in registered_pool_ids
+                and state.manipulation_id not in self._compacted_source_ids
+            ):
                 cold_source_ids.append(state.manipulation_id)
 
         output = self._snapshot()
@@ -2542,15 +2582,18 @@ class InteractionSemantics:
             cold_source_ids=tuple(sorted(set(cold_source_ids))),
         )
         # Only terminal contexts from a prior completed output are eligible
-        # for next-bar compaction.
-        self._exposed_terminal_path_ids.update(
-            path_id
-            for path_id, state in self._paths.items()
-            if state.lifecycle
-            in {
+        # for compaction; count the outputs each has been exposed in.
+        for path_id, state in self._paths.items():
+            if state.lifecycle in {
                 PathSequenceLifecycle.CLOSED,
                 PathSequenceLifecycle.CENSORED,
-            }
+            }:
+                self._terminal_exposures[path_id] = (
+                    self._terminal_exposures.get(path_id, 0) + 1
+                )
+        # A compacted source that upstream no longer delivers needs no memory.
+        self._compacted_source_ids.intersection_update(
+            {*source_by_id, *manipulation_by_id}
         )
         return output
 
@@ -2748,7 +2791,8 @@ class InteractionSemantics:
         candidate._micro_break_facts.clear()
         candidate._paths.clear()
         candidate._path_order.clear()
-        candidate._exposed_terminal_path_ids.clear()
+        candidate._terminal_exposures.clear()
+        candidate._compacted_source_ids.clear()
         candidate._identity = None
         candidate._last_raw_end = clock
         candidate._last_input = None

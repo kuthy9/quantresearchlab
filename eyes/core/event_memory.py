@@ -47,6 +47,9 @@ class EventMemory:
     # projection transport of the same clock.  Its floor keeps canonical
     # order equal to that append order.
     _DELIVERY_PHASE_SEQUENCE_FLOOR = 3_000_000
+    # Candidate retirements are derived from the published snapshot too and
+    # appended after the delivery-phase lifecycle of the same clock.
+    _CANDIDATE_RETIREMENT_SEQUENCE_FLOOR = 4_000_000
     _TIMELINE_TRANSITIONS: Mapping[
         str,
         Mapping[str, frozenset[str]],

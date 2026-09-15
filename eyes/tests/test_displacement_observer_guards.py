@@ -124,7 +124,7 @@ def test_a_state_clock_after_the_update_clock_is_refused(
     assert snapshot is not None
     monkeypatch.setattr(
         type(eye.tracker),
-        "on_completed_5m",
+        "on_completed",
         lambda _self, _candle: _FakeUpdate(
             replace(
                 snapshot,
@@ -151,7 +151,7 @@ def test_a_terminal_displacement_can_never_be_the_current_state(
     assert snapshot is not None
     monkeypatch.setattr(
         type(eye.tracker),
-        "on_completed_5m",
+        "on_completed",
         lambda _self, _candle: _FakeUpdate(
             replace(snapshot, lifecycle=DisplacementLifecycle.EXHAUSTED)
         ),

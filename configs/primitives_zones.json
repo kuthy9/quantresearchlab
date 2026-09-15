@@ -1,7 +1,7 @@
 {
   "protocol_version": "3.2.0-group3.4",
   "tick_size": 0.25,
-  "timeframe": "5m",
+  "timeframes": ["5m", "15m", "1H", "4H"],
   "fvg_source_bars": 3,
   "fvg_formation_atr_period": 14,
   "ob_anchor_history_bars": 64,
@@ -320,7 +320,9 @@
     "maximum_transitions_per_order_block": 4,
     "maximum_frozen_ob_candidates_per_live_displacement": 1,
     "live_eviction": "forbidden",
-    "terminal_eviction": "only a terminal entity already exposed in an earlier successful observation may be removed, oldest terminal clock then identity first",
+    "terminal_state_retention_native_bars": 1,
+    "terminal_state_retention": "a mitigated, invalidated, expired or failed entity stays in the tracker for this many completed native bars, counting the bar that made it terminal, then is compacted at the start of the next completed native bar; the terminal transition is delivered in the output of its own bar and the event log owns the fact. Registered under v1.3 as zone_terminal_state_retention, exactly as the Group 5 context and liquidity terminal-state retentions are",
+    "terminal_eviction": "only a terminal entity already exposed in an earlier successful observation may be removed, oldest terminal clock then identity first; with the retention above this guard is reached only when live state alone fills the maximum",
     "same_bar_terminal_exposure": "new terminal transitions remain visible through the successful observation that produced them",
     "exhaustion": "if compaction cannot admit the new entity, reject the entire completed-bar update and fail closed without partial clock, lifecycle or history mutation"
   },

@@ -1308,7 +1308,7 @@ class LiquidityPoolState:
 
 @dataclass(frozen=True)
 class RangeFormationFunnelSnapshot:
-    """One completed-H1 range-selection and maturity-gate diagnostic."""
+    """One scale's completed-bar range-selection and maturity diagnostic."""
 
     observed_at: pd.Timestamp
     pair_counts: tuple[tuple[str, int], ...]
@@ -1320,6 +1320,8 @@ class RangeFormationFunnelSnapshot:
         ...,
     ] = ()
     unmet_maturity_gates: tuple[str, ...] = ()
+    # The scale whose completed bar this diagnostic describes.
+    timeframe: Timeframe = Timeframe.H1
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -1330,6 +1332,11 @@ class RangeFormationFunnelSnapshot:
                 name="range_formation_funnel.observed_at",
             ),
         )
+        if (
+            not isinstance(self.timeframe, Timeframe)
+            or self.timeframe is Timeframe.M1
+        ):
+            raise ValueError("range formation funnel scale is invalid")
         counts = tuple(self.pair_counts)
         gates = tuple(self.maturity_gates)
         unmet = tuple(self.unmet_maturity_gates)
@@ -1427,7 +1434,12 @@ class RangeFormationFunnelSnapshot:
 
 @dataclass(frozen=True)
 class DealingRangeState:
-    """One H1 accumulation candidate and its frozen mature range."""
+    """One accumulation candidate and its frozen mature range, on its scale.
+
+    ``candidate_real_h1_bars`` and ``age_h1_bars`` count completed bars of
+    ``timeframe``; the names are the frozen contract's spelling from when the
+    range was 1H only.
+    """
 
     range_id: str
     protocol_hash: str
@@ -1508,7 +1520,8 @@ class DealingRangeState:
             or self.lower_source_zone_id == self.upper_source_zone_id
             or type(self.instrument_id) is not int
             or self.instrument_id < 0
-            or self.timeframe is not Timeframe.H1
+            or not isinstance(self.timeframe, Timeframe)
+            or self.timeframe is Timeframe.M1
             or not isinstance(self.lifecycle, DealingRangeLifecycle)
             or not self.protocol_hash
             or not self.source_group12_protocol_hash
@@ -1935,9 +1948,9 @@ class ManipulationState:
             raise ValueError("manipulation crossed source ids are invalid")
         if (
             self.source_kind == "mature_range_boundary"
-            and self.source_timeframe is not Timeframe.H1
+            and self.source_timeframe is Timeframe.M1
         ):
-            raise ValueError("range manipulation source must be H1")
+            raise ValueError("range manipulation source cannot be 1m")
         if (
             self.source_kind == "formed_liquidity_pool"
             and self.source_protocol_hash
@@ -2305,7 +2318,7 @@ class FairValueGapState:
             )
             or type(self.instrument_id) is not int
             or self.instrument_id < 0
-            or self.timeframe is not Timeframe.M5
+            or self.timeframe is Timeframe.M1
             or not isinstance(self.direction, Direction)
             or not isinstance(self.lifecycle, FairValueGapLifecycle)
             or not isinstance(self.qualification, FVGQualification)
@@ -2402,12 +2415,17 @@ class FairValueGapState:
             for value in self.source_candle_starts
         )
         object.__setattr__(self, "source_candle_starts", starts)
+        # Three consecutive completed bars of this scale.  A scheduled span
+        # can be shorter than the nominal bar (a session-tail 4H block is
+        # three hours), so consecutive means no gap longer than one bar.
+        bar = pd.Timedelta(minutes=self.timeframe.minutes)
+        zero = pd.Timedelta(0)
         if (
             len(starts) != 3
             or len(set(starts)) != 3
             or starts != tuple(sorted(starts))
-            or starts[1] - starts[0] != pd.Timedelta(minutes=5)
-            or starts[2] - starts[1] != pd.Timedelta(minutes=5)
+            or not zero < starts[1] - starts[0] <= bar
+            or not zero < starts[2] - starts[1] <= bar
         ):
             raise ValueError("FVG source candle clocks are invalid")
         for name in (
@@ -2447,9 +2465,7 @@ class FairValueGapState:
                     aware_timestamp(value, name=f"fvg.{name}"),
                 )
         if (
-            starts[-1] > self.formed_at
-            or self.formed_at
-            != starts[-1] + pd.Timedelta(minutes=5)
+            not zero < self.formed_at - starts[-1] <= bar
             or self.confirmed_at != self.formed_at
             or self.state_started_at < self.confirmed_at
             or self.last_updated_at < self.state_started_at
@@ -2723,7 +2739,7 @@ class OrderBlockState:
             )
             or type(self.instrument_id) is not int
             or self.instrument_id < 0
-            or self.timeframe is not Timeframe.M5
+            or self.timeframe is Timeframe.M1
             or not isinstance(self.direction, Direction)
             or not isinstance(self.lifecycle, OrderBlockLifecycle)
             or (
@@ -2872,11 +2888,17 @@ class OrderBlockState:
                     name,
                     aware_timestamp(value, name=f"order_block.{name}"),
                 )
+        # The anchor is the bar before the displacement's first bar; that
+        # bar's scheduled span can be shorter than the nominal bar.
+        anchor_gap = self.source_displacement_started_at - self.anchor_end
         if (
             self.anchor_end <= self.anchor_start
             or self.anchor_end > self.formed_at
-            or self.anchor_end
-            != self.source_displacement_started_at - pd.Timedelta(minutes=5)
+            or not (
+                pd.Timedelta(0)
+                < anchor_gap
+                <= pd.Timedelta(minutes=self.timeframe.minutes)
+            )
             or self.source_displacement_started_at
             > self.source_displacement_active_at
             or self.source_bos_pending_at > self.source_displacement_started_at

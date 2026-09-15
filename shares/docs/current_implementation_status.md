@@ -4,7 +4,7 @@ Status date: 2026-09-07
 Runtime semantic identity: `smc_semantics_v1.3`
 Canonical foundation identity: `smc_semantic_foundation_v2.1`
 Canonical foundation registry identity: `69428dbfd2a9b2aa19f0254391fca2da17aedb8d0206829572e69c0cc212a715`
-Atomic registry identity: `f92b24c86bf942defc88de4edb7be16cc2a30dd64fde3b4432657780648b1f0c`
+Atomic registry identity: `144f1d6c6d6246931fda6c0f0e9cbc28d8260c851e41de7fdb9132214c3ee94d` (refrozen 2026-09-13 on the `eyes` branch, last for the Group 5 terminal-context and liquidity terminal-state retention parameters; it was `f92b24c8…1f0c` from 2026-09-08 until then)
 The frozen `smc_semantics_v1.2` / `smc_semantic_foundation_v2.0` pair remains
 the identity of every historical artifact below; it is not the runtime.
 

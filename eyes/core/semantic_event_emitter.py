@@ -13,16 +13,18 @@ names so the emission logic is unchanged by having a home.
 """
 from __future__ import annotations
 
+from bisect import bisect_left, bisect_right, insort_right
 from collections import deque
-from dataclasses import replace
+from dataclasses import dataclass, field, replace
 import hashlib
 import json
-from typing import Iterable, Mapping, Sequence
+from typing import Callable, Container, Iterable, Mapping, Sequence
 
 import numpy as np
 import pandas as pd
 
 from .causal import ReaderUpdate
+from .bounded import BoundedDict
 from .event_memory import EventMemory
 from .event_store import EventStore
 from .interaction import InteractionUpdate
@@ -69,6 +71,76 @@ from .range_auction import (
 from shares.core.scale_registry import _TIMEFRAME_MINUTES
 from .structure import StructureConfig
 from .zone import ZoneUpdate
+
+
+# How many bar roots each scale keeps, and how many entries the bar-keyed
+# memories (close and range by root id) keep.  Both are read within a clock
+# window fixed when the reader forms: a Swing freezes the range of its own
+# confirmation window, a crossing resolves at the next root of its scale, a
+# leg reaches its start pivot (at most 256 retained swings back on its
+# scale), and the farthest read of all, a previous-week reference level
+# citing the 1m root of its extreme, at most two trading weeks (about
+# 14,000 1m roots).  32,768 roots of one scale are more than two 1m months;
+# the bar-keyed memories are shared by every scale and evict in clock
+# order, so 32,768 entries are about eleven trading days against the 84
+# hours the widest 4H swing window reaches back.  Every reader fails closed
+# on a miss, and ``test_bounded_entity_memories`` proves a two-session
+# replay emits identical events under a bound a small fraction of these.
+#
+# The per-entity memories (the event that last spoke about a swing, level,
+# BOS, zone or range) are deliberately not count-bounded: the emitter
+# re-walks every retained entity on every frame, so a memory is read for as
+# long as the slowest scale retains the entity -- 256 4H swings is months
+# -- and the 2022-02 month replay measured lookups reaching back over the
+# whole run (eyes/docs/evidence/eye_memory_2022-02_2026-09-14.md).
+BAR_ROOT_RETENTION_PER_SCALE = 32768
+BAR_MEMORY_RETENTION = 32768
+
+
+def _identity_of_key(key: object) -> tuple[str, ...]:
+    return (key,)
+
+
+def _identity_at_key_head(key: object) -> tuple[str, ...]:
+    return (key[0],)
+
+
+def _entity_identity_is_live(identity: str, live: Container[str]) -> bool:
+    """Whether a memory key's identity is still cited, in either form.
+
+    Memories key some entries by the namespaced identity (``swing:…``) and
+    the harvest holds the bare id of every namespaced citation, so the
+    bare form is the one both sides always share.
+    """
+
+    if identity in live:
+        return True
+    namespace, separator, bare = identity.partition(":")
+    return bool(separator and bare and namespace.isalpha()) and bare in live
+
+
+_COUNT_WORDS = {5: "five", 15: "fifteen", 60: "sixty"}
+
+
+def _bar_root_clock(entry: tuple[pd.Timestamp, str]) -> pd.Timestamp:
+    return entry[0]
+
+
+def _bar_root_index_at(
+    bar_events: Sequence[tuple[pd.Timestamp, str]],
+    clock: pd.Timestamp,
+) -> int | None:
+    """Index of the root at exactly ``clock`` in a clock-ordered root list.
+
+    Every scale keeps its ``(clock, event id)`` bar roots in clock order --
+    one normalized root per clock -- so a lookup is a bisection, never a
+    walk over the scale's lifetime.
+    """
+
+    index = bisect_left(bar_events, clock, key=_bar_root_clock)
+    if index < len(bar_events) and bar_events[index][0] == clock:
+        return index
+    return None
 
 
 def _event(
@@ -152,6 +224,22 @@ def _event(
     )
 
 
+@dataclass(frozen=True)
+class _CandidateRetirement:
+    """One candidate leaving the candidate set, as the emitter needs it."""
+
+    level_id: str
+    timeframe: Timeframe
+    side: str
+    price: float
+    lower_bound: float
+    upper_bound: float
+    strength: float
+    source_kind: str
+    reason: str
+    evidence: Mapping[str, object] = field(default_factory=dict)
+
+
 class SemanticEventEmitter:
     """Canonical event emitter plus the cross-detector ancestry index."""
 
@@ -191,11 +279,11 @@ class SemanticEventEmitter:
             str,
         ] = {}
         self._bar_event_ids_by_candle_id: dict[str, str] = {}
-        self._bar_close_by_candle_id: dict[str, float] = {}
-        self._bar_close_by_event_id: dict[str, float] = {}
+        self._bar_close_by_candle_id: BoundedDict[str, float] = BoundedDict(BAR_MEMORY_RETENTION)
+        self._bar_close_by_event_id: BoundedDict[str, float] = BoundedDict(BAR_MEMORY_RETENTION)
         # (low, high) of each real BAR, so a confirmed Swing can freeze
         # the price envelope of its own definitional window.
-        self._bar_range_by_event_id: dict[str, tuple[float, float]] = {}
+        self._bar_range_by_event_id: BoundedDict[str, tuple[float, float]] = BoundedDict(BAR_MEMORY_RETENTION)
         self._bar_event_ids_by_timeframe: dict[
             Timeframe,
             list[tuple[pd.Timestamp, str]],
@@ -218,6 +306,13 @@ class SemanticEventEmitter:
             str,
         ] = {}
         self._candidate_level_event_ids: dict[str, str] = {}
+        # One outcome per inventory item: the item ids whose LEVEL_REACHED
+        # has been published, so a later crossing of the same item never
+        # publishes a second one.
+        self._reached_level_ids: set[str] = set()
+        # Retirement is one fact per identity: an id retired by the scan is
+        # not retired again by a later reference-period rollover.
+        self._retired_level_ids: set[str] = set()
         self._known_level_touch_ids: set[str] = set()
         # Source reducers expose complete touch histories for live zones.
         # Evicting these occurrence keys causes old touches to be rediscovered
@@ -232,6 +327,9 @@ class SemanticEventEmitter:
         self._displacement_event_ids: dict[str, str] = {}
         self._protected_swing_event_ids: dict[str, str] = {}
         self._terminal_crossing_events: dict[str, MarketEvent] = {}
+        # The level each crossing generation belongs to, so the generation's
+        # terminal can follow the level's retention.
+        self._terminal_crossing_levels: dict[str, str] = {}
         self._fvg_created_event_ids: dict[str, str] = {}
         self._fvg_first_retest_event_ids: dict[str, str] = {}
         self._fvg_terminal_event_ids: dict[str, str] = {}
@@ -242,7 +340,9 @@ class SemanticEventEmitter:
         self._balance_range_observed_event_ids: dict[str, str] = {}
         self._range_terminal_event_ids: dict[str, str] = {}
         self._range_boundary_level_ids: dict[tuple[str, str], str] = {}
-        self._last_invalidated_range_event_id: str | None = None
+        # The last broken range per scale; a new active range on that scale
+        # replaces it.
+        self._last_invalidated_range_event_id: dict[Timeframe, str] = {}
         self._known_displacement_transition_ids: set[str] = set()
         self._known_displacement_transition_order: deque[str] = deque(
             maxlen=max(512, self.config.memory_events * 2)
@@ -289,6 +389,8 @@ class SemanticEventEmitter:
         for bar_events in self._real_bar_event_ids_by_timeframe.values():
             bar_events.clear()
         self._level_touch_event_ids.clear()
+        self._reached_level_ids.clear()
+        self._retired_level_ids.clear()
         self._candidate_level_event_ids.clear()
         self._known_level_touch_ids.clear()
         self._known_level_touch_order.clear()
@@ -297,6 +399,7 @@ class SemanticEventEmitter:
         self._displacement_event_ids.clear()
         self._protected_swing_event_ids.clear()
         self._terminal_crossing_events.clear()
+        self._terminal_crossing_levels.clear()
         self._fvg_created_event_ids.clear()
         self._fvg_first_retest_event_ids.clear()
         self._fvg_terminal_event_ids.clear()
@@ -307,7 +410,7 @@ class SemanticEventEmitter:
         self._balance_range_observed_event_ids.clear()
         self._range_terminal_event_ids.clear()
         self._range_boundary_level_ids.clear()
-        self._last_invalidated_range_event_id = None
+        self._last_invalidated_range_event_id.clear()
         self._known_displacement_transition_ids.clear()
         self._known_displacement_transition_order.clear()
         self._known_structure_events.clear()
@@ -325,24 +428,109 @@ class SemanticEventEmitter:
     ) -> None:
         """Emit the retirement terminals a replaced reference period leaves."""
 
-        for item in retired:
-            self.memory.append(
-                _event(
-                    EventKind.LIQUIDITY_RETIRED,
-                    observed_at,
-                    Timeframe.M1,
-                    item.side,
-                    item.price,
-                    0.0,
-                    (item.item_id,),
-                    {
-                        "source_kind": item.kind,
-                        "replacement_period": replacement_period,
-                    },
-                    transition_reason=(
-                        "reference_period_replaced"
-                    ),
+        self.emit_candidate_retirements(
+            tuple(
+                _CandidateRetirement(
+                    level_id=item.item_id,
+                    timeframe=item.timeframe,
+                    side=item.side,
+                    price=item.price,
+                    lower_bound=item.lower_bound,
+                    upper_bound=item.upper_bound,
+                    strength=item.strength,
+                    source_kind=item.kind,
+                    reason="reference_period_replaced",
+                    evidence={"replacement_period": replacement_period},
                 )
+                for item in retired
+            ),
+            observed_at=observed_at,
+        )
+
+    def emit_candidate_retirements(
+        self,
+        retirements: Sequence["_CandidateRetirement"],
+        *,
+        observed_at: pd.Timestamp,
+        sequence_floor: int | None = None,
+    ) -> None:
+        """Publish one atomic LIQUIDITY_RETIRED per candidate leaving the set.
+
+        The reducer drops the candidate on this fact, so a cold replay of the
+        log agrees with the hot view about which levels are still candidates.
+        A level that retires and later forms again is a new candidate with a
+        new admission, so its registries are released here.
+        """
+
+        bar_event_id: str | None = None
+        for retirement in retirements:
+            if retirement.level_id in self._retired_level_ids:
+                continue
+            candidate_event_id = self._candidate_level_event_ids.get(
+                retirement.level_id
+            )
+            if candidate_event_id is None:
+                # Never admitted as a canonical candidate (a projection-only
+                # or pre-warm-up item): it has no outcome to publish.
+                continue
+            self._retired_level_ids.add(retirement.level_id)
+            if bar_event_id is None:
+                # Retirement is derived from the published snapshot, or
+                # decided while the bar that opens the next period is still
+                # being observed, so that bar's own BAR_COMPLETED may not be
+                # appended yet; the last completed 1m bar the Eye has seen is
+                # the removal's evidence.
+                bar_event_id = self._latest_bar_event_id_at_or_before(
+                    Timeframe.M1, observed_at
+                )
+                if bar_event_id is None:
+                    return
+            if retirement.level_id not in self._reached_level_ids:
+                # The target's other outcome: it left the candidate set
+                # untouched.  A reached item's retirement is bookkeeping,
+                # not a second fate.
+                self._append_semantic_atomic(
+                    EventKind.LEVEL_INVALIDATED,
+                    observed_at,
+                    retirement.timeframe,
+                    retirement.side,
+                    retirement.price,
+                    retirement.strength,
+                    (candidate_event_id, bar_event_id),
+                    {
+                        "level_id": retirement.level_id,
+                        "source_timeframe": retirement.timeframe.value,
+                        "source_kind": retirement.source_kind,
+                        "source_inventory_kind": retirement.source_kind,
+                        "reason": retirement.reason,
+                        "invalidated_at": observed_at.isoformat(),
+                    },
+                    event_time=observed_at,
+                    zone=(retirement.lower_bound, retirement.upper_bound),
+                    source_entity_ids=(retirement.level_id,),
+                    sequence_floor=sequence_floor,
+                )
+            self._reached_level_ids.discard(retirement.level_id)
+            self._append_semantic_atomic(
+                EventKind.LIQUIDITY_RETIRED,
+                observed_at,
+                retirement.timeframe,
+                retirement.side,
+                retirement.price,
+                retirement.strength,
+                (candidate_event_id, bar_event_id),
+                {
+                    "level_id": retirement.level_id,
+                    "source_timeframe": retirement.timeframe.value,
+                    "source_kind": retirement.source_kind,
+                    "reason": retirement.reason,
+                    "retired_at": observed_at.isoformat(),
+                    **retirement.evidence,
+                },
+                event_time=observed_at,
+                zone=(retirement.lower_bound, retirement.upper_bound),
+                source_entity_ids=(retirement.level_id,),
+                sequence_floor=sequence_floor,
             )
 
     def emit_boundary_structure_break_failed(
@@ -434,6 +622,124 @@ class SemanticEventEmitter:
         known.add(value)
         return True
 
+    # -- entity memory retention --------------------------------------------
+    #
+    # Every memory below keeps, per entity, the event that last spoke about
+    # it so a later event can cite it.  An entry is read for as long as some
+    # tracker or reducer retains the entity or another entity that cites it,
+    # so the observer harvests every identifier from the states it publishes
+    # (``eyes.core.entity_liveness``) and asks the emitter to drop the rest.
+    # Each rule names the memory and how a key yields the identities whose
+    # liveness keeps the entry; an entry with any live identity stays.
+
+    @staticmethod
+    def _level_of_touch_identity(value: str) -> tuple[str, ...]:
+        level_id, separator, _ = value.rpartition("|")
+        return (level_id,) if separator else (value,)
+
+    def _level_of_crossing_generation(self, generation_id: str) -> tuple[str, ...]:
+        return (self._terminal_crossing_levels.get(generation_id, generation_id),)
+
+    def _entity_memory_rules(
+        self,
+    ) -> tuple[tuple[str, Callable[[object], tuple[str, ...]]], ...]:
+        same = _identity_of_key
+        first = _identity_at_key_head
+        return (
+            ("_confirmed_swing_event_ids", same),
+            ("_structural_leg_event_ids", same),
+            ("_structure_direction_event_ids", same),
+            ("_level_touch_event_ids", first),
+            ("_candidate_level_event_ids", same),
+            ("_reached_level_ids", same),
+            ("_retired_level_ids", same),
+            ("_known_level_touch_ids", self._level_of_touch_identity),
+            ("_penetration_event_ids", first),
+            ("_raw_break_event_ids", same),
+            ("_displacement_event_ids", same),
+            ("_terminal_crossing_events", self._level_of_crossing_generation),
+            ("_fvg_created_event_ids", same),
+            ("_fvg_first_retest_event_ids", same),
+            ("_fvg_terminal_event_ids", same),
+            ("_base_origin_core_event_ids", same),
+            ("_origin_zone_created_event_ids", same),
+            ("_range_created_event_ids", same),
+            ("_range_active_event_ids", same),
+            ("_balance_range_observed_event_ids", same),
+            ("_range_terminal_event_ids", same),
+            ("_range_boundary_level_ids", first),
+            ("_liquidity_entity_revisions", same),
+        )
+
+    def entity_memory_entries(self) -> int:
+        """How many entries the per-entity memories hold together."""
+
+        return sum(
+            len(getattr(self, name)) for name, _ in self._entity_memory_rules()
+        ) + len(self._bar_event_ids_by_candle_id)
+
+    def dead_entity_memory_keys(
+        self, live: Container[str]
+    ) -> dict[str, list]:
+        """The keys of each memory that no live identity keeps."""
+
+        dead: dict[str, list] = {}
+        for name, identities in self._entity_memory_rules():
+            memory = getattr(self, name)
+            gone = [
+                key
+                for key in memory
+                if not any(
+                    _entity_identity_is_live(identity, live)
+                    for identity in identities(key)
+                )
+            ]
+            if gone:
+                dead[name] = gone
+        # A bar root is cited by the entities formed from it and by the
+        # readers of the recent window (the next root of a scale, a
+        # crossing's own bar); the window is the same clock window the
+        # bar-keyed price memories keep.
+        candles = self._bar_event_ids_by_candle_id
+        excess = len(candles) - BAR_MEMORY_RETENTION
+        if excess > 0:
+            gone = [
+                candle_id
+                for candle_id, _ in zip(candles, range(excess))
+                if candle_id not in live
+            ]
+            if gone:
+                dead["_bar_event_ids_by_candle_id"] = gone
+        return dead
+
+    def prune_entity_memories(self, live: Container[str]) -> int:
+        """Drop every entry no live identity keeps; return how many."""
+
+        dead = self.dead_entity_memory_keys(live)
+        pruned = 0
+        for name, keys in dead.items():
+            memory = getattr(self, name)
+            for key in keys:
+                if isinstance(memory, dict):
+                    del memory[key]
+                else:
+                    memory.discard(key)
+            pruned += len(keys)
+            if name == "_terminal_crossing_events":
+                for key in keys:
+                    self._terminal_crossing_levels.pop(key, None)
+        if "_known_level_touch_ids" in dead:
+            gone = set(dead["_known_level_touch_ids"])
+            self._known_level_touch_order = deque(
+                (
+                    value
+                    for value in self._known_level_touch_order
+                    if value not in gone
+                ),
+                maxlen=self._known_level_touch_order.maxlen,
+            )
+        return pruned
+
     def _append_semantic_atomic(
         self,
         kind: EventKind,
@@ -511,6 +817,10 @@ class SemanticEventEmitter:
             direction=direction,
             event_time=event_time or known_at,
             known_at=known_at,
+            # The formation clock is one field whatever produced the event:
+            # lifecycle transports fill ``formed_at``, and so does every
+            # atomic fact, from the same clock it carries as ``event_time``.
+            formed_at=event_time or known_at,
             evidence=payload,
             zone=zone,
             source_event_ids=source_event_ids,
@@ -871,6 +1181,7 @@ class SemanticEventEmitter:
             context_event_ids=context_ids,
         )
         self._terminal_crossing_events[generation_id] = event
+        self._terminal_crossing_levels[generation_id] = normalized_level_id
         opposite_assignment_direction = (
             Direction.SHORT
             if (
@@ -948,19 +1259,11 @@ class SemanticEventEmitter:
         prior = self._terminal_crossing_events.get(generation_id)
         if prior is not None:
             return prior
-        next_bar = next(
-            (
-                (clock, event_id)
-                for clock, event_id in self._real_bar_event_ids_by_timeframe[
-                    timeframe
-                ]
-                if swing.broken_at < clock <= asof
-            ),
-            None,
-        )
-        if next_bar is None:
+        bar_events = self._real_bar_event_ids_by_timeframe[timeframe]
+        index = bisect_right(bar_events, swing.broken_at, key=_bar_root_clock)
+        if index >= len(bar_events) or bar_events[index][0] > asof:
             return None
-        resolved_at, resolution_bar_event_id = next_bar
+        resolved_at, resolution_bar_event_id = bar_events[index]
         resolved_close = self._bar_close_by_event_id.get(
             resolution_bar_event_id
         )
@@ -1145,24 +1448,19 @@ class SemanticEventEmitter:
             self._bar_close_by_event_id[existing.event_id] = float(
                 candle.close
             )
-            if not any(
-                event_id == existing.event_id
-                for _, event_id in self._bar_event_ids_by_timeframe[
-                    candle.timeframe
-                ]
-            ):
-                self._bar_event_ids_by_timeframe[candle.timeframe].append(
-                    (candle.end, existing.event_id)
+            # One normalized root per (scale, clock): the root at this
+            # candle's clock, if any, is this event.
+            self._register_bar_root(
+                self._bar_event_ids_by_timeframe[candle.timeframe],
+                candle.end,
+                existing.event_id,
+            )
+            if candle.real_completed:
+                self._register_bar_root(
+                    self._real_bar_event_ids_by_timeframe[candle.timeframe],
+                    candle.end,
+                    existing.event_id,
                 )
-            if candle.real_completed and not any(
-                event_id == existing.event_id
-                for _, event_id in self._real_bar_event_ids_by_timeframe[
-                    candle.timeframe
-                ]
-            ):
-                self._real_bar_event_ids_by_timeframe[
-                    candle.timeframe
-                ].append((candle.end, existing.event_id))
             return existing
         self.memory.append(event, include_in_recent=False)
         self._bar_event_ids_by_candle_id[detector_candle_id] = event.event_id
@@ -1172,14 +1470,38 @@ class SemanticEventEmitter:
             float(candle.low),
             float(candle.high),
         )
-        self._bar_event_ids_by_timeframe[candle.timeframe].append(
-            (candle.end, event.event_id)
+        self._register_bar_root(
+            self._bar_event_ids_by_timeframe[candle.timeframe],
+            candle.end,
+            event.event_id,
         )
         if candle.real_completed:
-            self._real_bar_event_ids_by_timeframe[
-                candle.timeframe
-            ].append((candle.end, event.event_id))
+            self._register_bar_root(
+                self._real_bar_event_ids_by_timeframe[candle.timeframe],
+                candle.end,
+                event.event_id,
+            )
         return event
+
+    @staticmethod
+    def _register_bar_root(
+        bar_events: list[tuple[pd.Timestamp, str]],
+        clock: pd.Timestamp,
+        event_id: str,
+    ) -> None:
+        """Keep a scale's bar roots in clock order, one root per clock."""
+
+        index = _bar_root_index_at(bar_events, clock)
+        if index is None:
+            insort_right(bar_events, (clock, event_id), key=_bar_root_clock)
+            excess = len(bar_events) - BAR_ROOT_RETENTION_PER_SCALE
+            if excess > 0:
+                del bar_events[:excess]
+        elif bar_events[index][1] != event_id:
+            raise ValueError(
+                "normalized BAR root clock already has another event: "
+                f"{clock.isoformat()} ({bar_events[index][1]})"
+            )
 
     def _append_available_bar_events(
         self,
@@ -1286,19 +1608,28 @@ class SemanticEventEmitter:
                 f"{candle_id}"
             ) from error
 
+    def _latest_bar_event_id_at_or_before(
+        self,
+        timeframe: Timeframe,
+        known_at: pd.Timestamp,
+    ) -> str | None:
+        clock = pd.Timestamp(known_at)
+        bar_events = self._real_bar_event_ids_by_timeframe[timeframe]
+        index = bisect_right(bar_events, clock, key=_bar_root_clock) - 1
+        if index < 0:
+            return None
+        return bar_events[index][1]
+
     def _bar_event_id_at(
         self,
         timeframe: Timeframe,
         known_at: pd.Timestamp,
     ) -> str:
         clock = pd.Timestamp(known_at)
-        for event_clock, event_id in reversed(
-            self._real_bar_event_ids_by_timeframe[timeframe]
-        ):
-            if event_clock == clock:
-                return event_id
-            if event_clock < clock:
-                break
+        bar_events = self._real_bar_event_ids_by_timeframe[timeframe]
+        index = _bar_root_index_at(bar_events, clock)
+        if index is not None:
+            return bar_events[index][1]
         raise ValueError(
             "semantic occurrence has no exact completed-bar source: "
             f"{timeframe.value}@{clock.isoformat()}"
@@ -1331,12 +1662,12 @@ class SemanticEventEmitter:
         if not isinstance(atr, (int, float)) or not float(atr) > 0.0:
             return None
         previous_close: float | None = None
-        for event_clock, event_id in reversed(
-            self._real_bar_event_ids_by_timeframe[Timeframe.M5]
-        ):
-            if event_clock < observed_at:
-                previous_close = self._bar_close_by_event_id.get(event_id)
-                break
+        bar_events = self._real_bar_event_ids_by_timeframe[Timeframe.M5]
+        index = bisect_left(bar_events, observed_at, key=_bar_root_clock) - 1
+        if index >= 0:
+            previous_close = self._bar_close_by_event_id.get(
+                bar_events[index][1]
+            )
         if previous_close is None:
             return None
         near_edge = (
@@ -1393,12 +1724,13 @@ class SemanticEventEmitter:
         """Return one exact normalized BAR root, including clock-only M1."""
 
         clock = pd.Timestamp(known_at)
+        bar_events = self._bar_event_ids_by_timeframe[timeframe]
         matches = tuple(
             event_id
-            for event_clock, event_id in self._bar_event_ids_by_timeframe[
-                timeframe
+            for _, event_id in bar_events[
+                bisect_left(bar_events, clock, key=_bar_root_clock)
+                : bisect_right(bar_events, clock, key=_bar_root_clock)
             ]
-            if event_clock == clock
         )
         if len(matches) != 1:
             raise ValueError(
@@ -1421,10 +1753,28 @@ class SemanticEventEmitter:
         self,
         known_at: pd.Timestamp,
     ) -> tuple[str, ...]:
-        """Return every clock-only M1 constituent of an incomplete M5 bar."""
+        """The pre-2026-09 name: the terminal's scale was always 5m."""
+
+        return self._synthetic_m1_context_event_ids_for_terminal(
+            known_at, timeframe=Timeframe.M5
+        )
+
+    def _synthetic_m1_context_event_ids_for_terminal(
+        self,
+        known_at: pd.Timestamp,
+        *,
+        timeframe: Timeframe = Timeframe.M5,
+    ) -> tuple[str, ...]:
+        """Return every clock-only M1 constituent of an incomplete bar.
+
+        The bar's interval must be covered by exactly ``timeframe.minutes``
+        contiguous M1 roots -- five on 5m, fifteen on 15m -- so a terminal on
+        a secondary displacement scale cites its own constituents.
+        """
 
         clock = pd.Timestamp(known_at)
-        interval_start = clock - pd.Timedelta(minutes=5)
+        constituents = int(timeframe.minutes)
+        interval_start = clock - pd.Timedelta(minutes=constituents)
         current_root_id = self._clock_root_event_id_at(Timeframe.M1, clock)
         current_root = self.memory.audit_event_including_pending(
             current_root_id
@@ -1439,11 +1789,11 @@ class SemanticEventEmitter:
         )
         interval_roots: list[tuple[pd.Timestamp, str]] = []
         roots: list[tuple[pd.Timestamp, str]] = []
-        for event_clock, event_id in self._bar_event_ids_by_timeframe[
-            Timeframe.M1
+        m1_roots = self._bar_event_ids_by_timeframe[Timeframe.M1]
+        for event_clock, event_id in m1_roots[
+            bisect_right(m1_roots, interval_start, key=_bar_root_clock)
+            : bisect_right(m1_roots, clock, key=_bar_root_clock)
         ]:
-            if not interval_start < event_clock <= clock:
-                continue
             event = self.memory.audit_event_including_pending(event_id)
             if (
                 event is None
@@ -1454,7 +1804,8 @@ class SemanticEventEmitter:
                 or event.known_at != event_clock
             ):
                 raise ValueError(
-                    "synthetic displacement M5 interval has an invalid M1 root"
+                    f"synthetic displacement {timeframe.value} interval has "
+                    "an invalid M1 root"
                 )
             real_completed = event.evidence.get("real_completed")
             clock_only = event.evidence.get("clock_only")
@@ -1469,8 +1820,8 @@ class SemanticEventEmitter:
                 != market_identity
             ):
                 raise ValueError(
-                    "synthetic displacement M5 interval has inconsistent M1 "
-                    "root evidence"
+                    f"synthetic displacement {timeframe.value} interval has "
+                    "inconsistent M1 root evidence"
                 )
             interval_roots.append((event_clock, event.event_id))
             if clock_only:
@@ -1478,15 +1829,16 @@ class SemanticEventEmitter:
         ordered_interval = tuple(sorted(interval_roots))
         expected_clocks = tuple(
             interval_start + pd.Timedelta(minutes=offset)
-            for offset in range(1, 6)
+            for offset in range(1, constituents + 1)
         )
         if (
-            len(ordered_interval) != 5
+            len(ordered_interval) != constituents
             or tuple(item[0] for item in ordered_interval) != expected_clocks
-            or len({item[1] for item in ordered_interval}) != 5
+            or len({item[1] for item in ordered_interval}) != constituents
         ):
             raise ValueError(
-                "synthetic displacement M5 interval lacks five contiguous "
+                f"synthetic displacement {timeframe.value} interval lacks "
+                f"{_COUNT_WORDS.get(constituents, constituents)} contiguous "
                 "unique M1 roots"
             )
         ordered = tuple(sorted(roots))
@@ -1503,7 +1855,8 @@ class SemanticEventEmitter:
         clocks = tuple(item[0] for item in ordered)
         if len(clocks) != len(set(clocks)):
             raise ValueError(
-                "synthetic displacement M5 interval repeats an M1 root clock"
+                f"synthetic displacement {timeframe.value} interval repeats "
+                "an M1 root clock"
             )
         return tuple(item[1] for item in ordered)
 
@@ -1512,14 +1865,7 @@ class SemanticEventEmitter:
             raise ValueError("confirmed swing lacks a structure protocol")
         span = self._structure_config.span_for(swing.timeframe)
         bar_events = self._real_bar_event_ids_by_timeframe[swing.timeframe]
-        pivot_index = next(
-            (
-                index
-                for index, (clock, _) in enumerate(bar_events)
-                if clock == swing.pivot_end
-            ),
-            None,
-        )
+        pivot_index = _bar_root_index_at(bar_events, swing.pivot_end)
         if (
             pivot_index is None
             or pivot_index < span
@@ -1540,6 +1886,27 @@ class SemanticEventEmitter:
             )
         return window
 
+    def _real_bar_root_clock(
+        self,
+        timeframe: Timeframe,
+        event_id: str,
+    ) -> pd.Timestamp | None:
+        """The clock of ``event_id`` if it is a real bar root of ``timeframe``.
+
+        The bar event names its own clock; the root list confirms, by
+        bisection at that clock, that this scale registered exactly this
+        event there.
+        """
+
+        event = self.memory.audit_event_including_pending(event_id)
+        if event is None:
+            return None
+        bar_events = self._real_bar_event_ids_by_timeframe.get(timeframe, ())
+        index = _bar_root_index_at(bar_events, event.known_at)
+        if index is None or bar_events[index][1] != event_id:
+            return None
+        return bar_events[index][0]
+
     def _swing_window_geometry(
         self,
         source_bar_events: tuple[str, ...],
@@ -1555,22 +1922,21 @@ class SemanticEventEmitter:
         """
 
         native = Timeframe(timeframe)
-        clocks = {
-            event_id: clock
-            for clock, event_id in self._real_bar_event_ids_by_timeframe[native]
-        }
         ranges = tuple(
             self._bar_range_by_event_id.get(event_id)
+            for event_id in source_bar_events
+        )
+        window_clocks = tuple(
+            self._real_bar_root_clock(native, event_id)
             for event_id in source_bar_events
         )
         if (
             not source_bar_events
             or any(item is None for item in ranges)
-            or any(event_id not in clocks for event_id in source_bar_events)
+            or any(clock is None for clock in window_clocks)
         ):
             raise ValueError("confirmed swing window is not readable")
         minutes = _TIMEFRAME_MINUTES[native]
-        window_clocks = tuple(clocks[event_id] for event_id in source_bar_events)
         return {
             "window_start": (
                 min(window_clocks) - pd.Timedelta(minutes=minutes)
@@ -1897,31 +2263,59 @@ class SemanticEventEmitter:
                             frame.timeframe,
                             swing.broken_at,
                         )
-                        touch_event = self._append_semantic_atomic(
-                            EventKind.LEVEL_TOUCHED,
-                            swing.broken_at,
-                            frame.timeframe,
-                            (
-                                "above"
-                                if swing.side.value == "high"
-                                else "below"
-                            ),
-                            swing.price,
-                            clamp(swing.magnitude_atr),
-                            (candidate_event_id, break_bar_event_id),
-                            {
-                                "level_id": swing_level_id,
-                                "source_kind": "confirmed_swing",
-                                "target_swing_id": swing.swing_id,
-                                "touch_reason": "raw_swing_price_crossing",
-                            },
-                            event_time=swing.broken_at,
-                            zone=(swing.price, swing.price),
-                            source_entity_ids=(
-                                swing_level_id,
-                                swing.swing_id,
-                            ),
+                        # One frozen level crossed at one clock is one touch.
+                        # The inventory-crossing path publishes every
+                        # crossing on the 1m clock, so a 1m swing broken on
+                        # the bar that crossed it is the same fact seen twice;
+                        # share its registries so whichever path sees the
+                        # crossing first publishes it and the other reuses the
+                        # id.  A higher-timeframe break cites a different bar
+                        # and stays its own crossing generation.
+                        touch_clock = pd.Timestamp(swing.broken_at)
+                        shares_inventory_clock = frame.timeframe is Timeframe.M1
+                        touch_event_id = (
+                            self._level_touch_event_ids.get(
+                                (swing_level_id, touch_clock)
+                            )
+                            if shares_inventory_clock
+                            else None
                         )
+                        if touch_event_id is None:
+                            if shares_inventory_clock:
+                                self._remember_bounded(
+                                    f"{swing_level_id}|{touch_clock.isoformat()}",
+                                    known=self._known_level_touch_ids,
+                                    order=self._known_level_touch_order,
+                                )
+                            touch_event_id = self._append_semantic_atomic(
+                                EventKind.LEVEL_TOUCHED,
+                                swing.broken_at,
+                                frame.timeframe,
+                                (
+                                    "above"
+                                    if swing.side.value == "high"
+                                    else "below"
+                                ),
+                                swing.price,
+                                clamp(swing.magnitude_atr),
+                                (candidate_event_id, break_bar_event_id),
+                                {
+                                    "level_id": swing_level_id,
+                                    "source_kind": "confirmed_swing",
+                                    "target_swing_id": swing.swing_id,
+                                    "touch_reason": "raw_swing_price_crossing",
+                                },
+                                event_time=swing.broken_at,
+                                zone=(swing.price, swing.price),
+                                source_entity_ids=(
+                                    swing_level_id,
+                                    swing.swing_id,
+                                ),
+                            ).event_id
+                            if shares_inventory_clock:
+                                self._level_touch_event_ids[
+                                    (swing_level_id, touch_clock)
+                                ] = touch_event_id
                         crossing_generation_id = (
                             self._crossing_generation_id(
                                 level_id=swing_level_id,
@@ -1958,7 +2352,7 @@ class SemanticEventEmitter:
                             clamp(swing.magnitude_atr),
                             (
                                 candidate_event_id,
-                                touch_event.event_id,
+                                touch_event_id,
                                 break_bar_event_id,
                             ),
                             {
@@ -2508,6 +2902,7 @@ class SemanticEventEmitter:
                     },
                     event_time=touch_at,
                     zone=(pool.lower_bound, pool.upper_bound),
+                    source_entity_ids=(entity_id,),
                 )
                 self._level_touch_event_ids[
                     (entity_id, pd.Timestamp(touch_at))
@@ -3042,7 +3437,7 @@ class SemanticEventEmitter:
         event = self._append_semantic_atomic(
             EventKind.BASE_ORIGIN_CORE_CREATED,
             core.observed_at,
-            Timeframe.M5,
+            core.timeframe,
             "below" if core.direction is Direction.LONG else "above",
             core.midpoint,
             0.0,
@@ -3089,7 +3484,7 @@ class SemanticEventEmitter:
             fvg_state_event = _event(
                     EventKind.FVG_STATE,
                     observed_at,
-                    Timeframe.M5,
+                    state.timeframe,
                     (
                         "below"
                         if state.direction is Direction.LONG
@@ -3179,7 +3574,7 @@ class SemanticEventEmitter:
                 created = self._append_semantic_atomic(
                     EventKind.FVG_CREATED,
                     state.confirmed_at,
-                    Timeframe.M5,
+                    state.timeframe,
                     (
                         "below"
                         if state.direction is Direction.LONG
@@ -3245,7 +3640,7 @@ class SemanticEventEmitter:
                 }[state.lifecycle]
                 try:
                     transition_bar_event_id = self._bar_event_id_at(
-                        Timeframe.M5,
+                        state.timeframe,
                         observed_at,
                     )
                 except ValueError:
@@ -3288,7 +3683,7 @@ class SemanticEventEmitter:
                     retest = self._append_semantic_atomic(
                         EventKind.FVG_FIRST_RETEST,
                         observed_at,
-                        Timeframe.M5,
+                        state.timeframe,
                         (
                             "below"
                             if state.direction is Direction.LONG
@@ -3314,7 +3709,7 @@ class SemanticEventEmitter:
                 lifecycle_event = self._append_semantic_atomic(
                     lifecycle_kind,
                     observed_at,
-                    Timeframe.M5,
+                    state.timeframe,
                     (
                         "below"
                         if state.direction is Direction.LONG
@@ -3346,7 +3741,7 @@ class SemanticEventEmitter:
             order_block_state_event = _event(
                     EventKind.ORDER_BLOCK_STATE,
                     observed_at,
-                    Timeframe.M5,
+                    state.timeframe,
                     (
                         "below"
                         if state.direction is Direction.LONG
@@ -3468,7 +3863,7 @@ class SemanticEventEmitter:
                 created = self._append_semantic_atomic(
                     EventKind.QUALIFIED_ORIGIN_ZONE_CREATED,
                     state.confirmed_at,
-                    Timeframe.M5,
+                    state.timeframe,
                     (
                         "below"
                         if state.direction is Direction.LONG
@@ -3515,7 +3910,7 @@ class SemanticEventEmitter:
                     )
                 try:
                     transition_bar_event_id = self._bar_event_id_at(
-                        Timeframe.M5,
+                        state.timeframe,
                         observed_at,
                     )
                 except ValueError:
@@ -3534,7 +3929,7 @@ class SemanticEventEmitter:
                         else EventKind.ORIGIN_ZONE_INVALIDATED
                     ),
                     observed_at,
-                    Timeframe.M5,
+                    state.timeframe,
                     (
                         "below"
                         if state.direction is Direction.LONG
@@ -3561,6 +3956,7 @@ class SemanticEventEmitter:
     ) -> None:
         if displacement is None:
             return
+        timeframe = displacement.timeframe
         for transition in displacement.transitions_this_update:
             if not self._remember_bounded(
                 transition.transition_id,
@@ -3584,7 +3980,7 @@ class SemanticEventEmitter:
                 event is None
                 or event.origin is not EventOrigin.NORMALIZED_DATA
                 or event.kind is not EventKind.BAR_COMPLETED
-                or event.timeframe is not Timeframe.M5
+                or event.timeframe is not timeframe
                 or event.evidence.get("real_completed") is not True
                 or event.evidence.get("clock_only") is not False
                 or not isinstance(
@@ -3618,14 +4014,15 @@ class SemanticEventEmitter:
                 and transition.reason == "synthetic_interruption"
             ):
                 synthetic_context_event_ids = (
-                    self._synthetic_m1_context_event_ids_for_m5_terminal(
+                    self._synthetic_m1_context_event_ids_for_terminal(
                         transition.observed_at,
+                        timeframe=timeframe,
                     )
                 )
             displacement_event = self._append_semantic_atomic(
                 EventKind.DISPLACEMENT_OBSERVED,
                 transition.observed_at,
-                Timeframe.M5,
+                timeframe,
                 (
                     "above"
                     if transition.direction is Direction.LONG
@@ -3793,7 +4190,7 @@ class SemanticEventEmitter:
             range_state_event = _event(
                     EventKind.DEALING_RANGE_STATE,
                     state.state_started_at,
-                    Timeframe.H1,
+                    state.timeframe,
                     None,
                     state.midpoint,
                     state.strength,
@@ -3882,7 +4279,7 @@ class SemanticEventEmitter:
             )
             try:
                 transition_bar_event_id = self._bar_event_id_at(
-                    Timeframe.H1,
+                    state.timeframe,
                     state.state_started_at,
                 )
             except ValueError:
@@ -3947,13 +4344,13 @@ class SemanticEventEmitter:
                     )
                 crossing_generation_id = self._crossing_generation_id(
                     level_id=level_id,
-                    timeframe=Timeframe.H1,
+                    timeframe=state.timeframe,
                     crossed_at=state.state_started_at,
                 )
                 touch_event = self._append_semantic_atomic(
                     EventKind.LEVEL_TOUCHED,
                     state.state_started_at,
-                    Timeframe.H1,
+                    state.timeframe,
                     accepted_side,
                     accepted_price,
                     state.strength,
@@ -3971,7 +4368,7 @@ class SemanticEventEmitter:
                 penetrated_event = self._append_semantic_atomic(
                     EventKind.LEVEL_PENETRATED,
                     state.state_started_at,
-                    Timeframe.H1,
+                    state.timeframe,
                     accepted_side,
                     accepted_price,
                     state.strength,
@@ -4000,7 +4397,7 @@ class SemanticEventEmitter:
                 accepted_event = self._append_crossing_resolution(
                     EventKind.ACCEPTANCE_CONFIRMED,
                     state.state_started_at,
-                    Timeframe.H1,
+                    state.timeframe,
                     accepted_side,
                     accepted_price,
                     state.strength,
@@ -4058,7 +4455,7 @@ class SemanticEventEmitter:
             range_event = self._append_semantic_atomic(
                 range_kind,
                 state.state_started_at,
-                Timeframe.H1,
+                state.timeframe,
                 None,
                 state.midpoint,
                 state.strength,
@@ -4111,16 +4508,19 @@ class SemanticEventEmitter:
                 self._range_created_event_ids[state.range_id] = (
                     range_event.event_id
                 )
-                if self._last_invalidated_range_event_id is not None:
+                invalidated_event_id = (
+                    self._last_invalidated_range_event_id.get(state.timeframe)
+                )
+                if invalidated_event_id is not None:
                     self._append_semantic_atomic(
                         EventKind.DEALING_RANGE_REPLACED,
                         state.state_started_at,
-                        Timeframe.H1,
+                        state.timeframe,
                         None,
                         state.midpoint,
                         state.strength,
                         (
-                            self._last_invalidated_range_event_id,
+                            invalidated_event_id,
                             range_event.event_id,
                         ),
                         {
@@ -4132,12 +4532,14 @@ class SemanticEventEmitter:
                         event_time=state.formed_at,
                         zone=(state.lower_bound, state.upper_bound),
                     )
-                    self._last_invalidated_range_event_id = None
+                    self._last_invalidated_range_event_id.pop(
+                        state.timeframe, None
+                    )
             if state.lifecycle is DealingRangeLifecycle.BROKEN:
                 self._range_terminal_event_ids[state.range_id] = (
                     range_event.event_id
                 )
-                self._last_invalidated_range_event_id = (
+                self._last_invalidated_range_event_id[state.timeframe] = (
                     range_event.event_id
                 )
 
@@ -4511,7 +4913,7 @@ class SemanticEventEmitter:
                 continue
             try:
                 bar_event_id = self._bar_event_id_at(
-                    Timeframe.H1,
+                    state.timeframe,
                     state.last_updated_at,
                 )
             except ValueError:
@@ -4568,7 +4970,7 @@ class SemanticEventEmitter:
                 candidate = self._append_semantic_atomic(
                     EventKind.LIQUIDITY_LEVEL_CREATED,
                     state.balance_confirmed_at,
-                    Timeframe.H1,
+                    state.timeframe,
                     item.side,
                     item.price,
                     item.strength,
@@ -4631,7 +5033,7 @@ class SemanticEventEmitter:
         observed = self._append_semantic_atomic(
             EventKind.BALANCE_RANGE_OBSERVED,
             observed_at,
-            Timeframe.H1,
+            state.timeframe,
             None,
             state.midpoint,
             state.strength,
@@ -4939,6 +5341,7 @@ class SemanticEventEmitter:
                 },
                 event_time=candle.end,
                 zone=(item.lower_bound, item.upper_bound),
+                source_entity_ids=(item.item_id,),
             )
             touch_event_id = touch_event.event_id
             self._level_touch_event_ids[
@@ -4948,52 +5351,81 @@ class SemanticEventEmitter:
             raise ValueError(
                 "level penetration lacks its exact touch event"
             )
+        if item.item_id not in self._reached_level_ids:
+            # The target's outcome, on the target's own timeframe: the
+            # crossing pipeline speaks the 1m clock, so a 5m level's touch is
+            # a 1m event and a consumer filtering ≥5m would never see it.
+            self._reached_level_ids.add(item.item_id)
+            self._append_semantic_atomic(
+                EventKind.LEVEL_REACHED,
+                candle.end,
+                item.timeframe,
+                item.side,
+                item.price,
+                item.strength,
+                (candidate_event_id, touch_event_id),
+                {
+                    "level_id": item.item_id,
+                    "source_timeframe": item.timeframe.value,
+                    "source_kind": semantic_source_kind,
+                    "source_inventory_kind": item.kind,
+                    "reached_at": candle.end.isoformat(),
+                },
+                event_time=candle.end,
+                zone=(item.lower_bound, item.upper_bound),
+                source_entity_ids=(item.item_id,),
+            )
         crossing_generation_id = self._crossing_generation_id(
             level_id=item.item_id,
             timeframe=Timeframe.M1,
             crossed_at=candle.end,
         )
-        penetration = self._append_semantic_atomic(
-            EventKind.LEVEL_PENETRATED,
-            candle.end,
-            Timeframe.M1,
-            item.side,
-            extreme,
-            clamp(distance / max(atr, self.config.tick_size)),
-            (candidate_event_id, touch_event_id, bar_event_id),
-            {
-                "level_id": item.item_id,
-                "source_timeframe": item.timeframe.value,
-                "source_kind": semantic_source_kind,
-                "source_inventory_kind": item.kind,
-                "penetration_points": max(0.0, distance),
-                "close_accepted_outside": outside,
-                "frozen_lower_bound": item.lower_bound,
-                "frozen_upper_bound": item.upper_bound,
-                "penetration_standard": (
-                    "intrabar_trade_beyond_frozen_candidate_level"
-                ),
-                "strict_close_beyond_confirmed_swing_price": bool(
-                    item.kind == "swing" and outside
-                ),
-                "crossing_generation_id": crossing_generation_id,
-                "crossed_at": candle.end.isoformat(),
-            },
-            direction=(
-                Direction.LONG
-                if item.side == "above"
-                else Direction.SHORT
-            ),
-            event_time=candle.end,
-            zone=(item.lower_bound, item.upper_bound),
+        penetration_key = self._penetration_key(
+            level_id=item.item_id,
+            timeframe=Timeframe.M1,
+            crossed_at=candle.end,
         )
-        self._penetration_event_ids[
-            self._penetration_key(
-                level_id=item.item_id,
-                timeframe=Timeframe.M1,
-                crossed_at=candle.end,
-            )
-        ] = penetration.event_id
+        # A 1m swing broken on this bar was already penetrated by the
+        # structure frame under this same key; one crossing generation is one
+        # penetration, so reuse it rather than publish the fact twice.
+        penetration_event_id = self._penetration_event_ids.get(penetration_key)
+        if penetration_event_id is None:
+            penetration_event_id = self._append_semantic_atomic(
+                EventKind.LEVEL_PENETRATED,
+                candle.end,
+                Timeframe.M1,
+                item.side,
+                extreme,
+                clamp(distance / max(atr, self.config.tick_size)),
+                (candidate_event_id, touch_event_id, bar_event_id),
+                {
+                    "level_id": item.item_id,
+                    "source_timeframe": item.timeframe.value,
+                    "source_kind": semantic_source_kind,
+                    "source_inventory_kind": item.kind,
+                    "penetration_points": max(0.0, distance),
+                    "close_accepted_outside": outside,
+                    "frozen_lower_bound": item.lower_bound,
+                    "frozen_upper_bound": item.upper_bound,
+                    "penetration_standard": (
+                        "intrabar_trade_beyond_frozen_candidate_level"
+                    ),
+                    "strict_close_beyond_confirmed_swing_price": bool(
+                        item.kind == "swing" and outside
+                    ),
+                    "crossing_generation_id": crossing_generation_id,
+                    "crossed_at": candle.end.isoformat(),
+                },
+                direction=(
+                    Direction.LONG
+                    if item.side == "above"
+                    else Direction.SHORT
+                ),
+                event_time=candle.end,
+                zone=(item.lower_bound, item.upper_bound),
+                source_entity_ids=(item.item_id,),
+            ).event_id
+            self._penetration_event_ids[penetration_key] = penetration_event_id
         self.memory.append(
             _event(
                 (
@@ -5024,7 +5456,7 @@ class SemanticEventEmitter:
                 item.side,
                 extreme,
                 clamp(distance / max(atr, self.config.tick_size)),
-                (penetration.event_id, bar_event_id),
+                (penetration_event_id, bar_event_id),
                 {
                     "level_id": item.item_id,
                     "resolution_bars": 0,

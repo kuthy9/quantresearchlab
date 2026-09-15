@@ -551,6 +551,7 @@ class DisplacementTransitionObservation:
     terminal_evidence_candle_id: str | None = None
     admitted_candle_ids: tuple[str, ...] = ()
     state_metrics: tuple[tuple[str, float], ...] = ()
+    timeframe: Timeframe = Timeframe.M5
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -618,6 +619,7 @@ class DisplacementObservation:
         DisplacementTransitionObservation, ...
     ] = ()
     reader_anomalies: tuple[str, ...] = ()
+    timeframe: Timeframe = Timeframe.M5
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -742,6 +744,12 @@ class MarketObservation:
     )
     anomalies: tuple[str, ...] = ()
     displacement: DisplacementObservation | None = None
+    # One displacement observation per scale the protocol publishes on;
+    # ``displacement`` is the protocol's first scale, kept for readers that
+    # predate multi-scale displacement.
+    displacements: Mapping[Timeframe, DisplacementObservation] = field(
+        default_factory=dict
+    )
     liquidity_inventory: tuple[LiquidityInventoryItem, ...] = ()
     liquidity_pool_states: tuple[LiquidityPoolState, ...] = ()
     event_ages_minutes: Mapping[str, int] = field(default_factory=dict)
@@ -812,6 +820,9 @@ class MarketObservation:
     ] = ()
     interaction_update: InteractionUpdate | None = None
     active_timeframes: tuple[Timeframe, ...] = ()
+    # The scales whose events form the main event clock; the rest of the
+    # active scales are microstructure.  Empty publishes every scale.
+    published_timeframes: tuple[Timeframe, ...] = ()
     scale_registry_id: str = ""
     scene_revision_id: str | None = None
     scene_added_node_ids: tuple[str, ...] = ()
@@ -851,11 +862,47 @@ class MarketObservation:
         return self._snapshot_free_identity[3]
 
     @property
-    def semantic_events_this_update(self) -> tuple[MarketEvent, ...]:
+    def events_this_update(self) -> tuple[MarketEvent, ...]:
+        """Every event of this update, on every scale."""
+
         if self.market_snapshot is not None:
             return self.market_snapshot.events_this_update
         assert self._snapshot_free_identity is not None
         return self._snapshot_free_identity[4]
+
+    @property
+    def semantic_events_this_update(self) -> tuple[MarketEvent, ...]:
+        """The main event clock: this update's events on the published scales.
+
+        An empty ``published_timeframes`` publishes every scale, which is the
+        pre-schema-6 behaviour.
+        """
+
+        if not self.published_timeframes:
+            return self.events_this_update
+        published = frozenset(self.published_timeframes)
+        return tuple(
+            event
+            for event in self.events_this_update
+            if event.timeframe in published
+        )
+
+    @property
+    def microstructure_events_this_update(self) -> tuple[MarketEvent, ...]:
+        """This update's events on the scales kept out of the main clock.
+
+        The 1m tape by default: the channel a trigger reads, and never
+        silently dropped -- the two channels partition ``events_this_update``.
+        """
+
+        if not self.published_timeframes:
+            return ()
+        published = frozenset(self.published_timeframes)
+        return tuple(
+            event
+            for event in self.events_this_update
+            if event.timeframe not in published
+        )
 
     def __post_init__(self) -> None:
         identity = self._snapshot_free_identity
@@ -1334,7 +1381,10 @@ class MarketObservation:
                 for item in self.group4_range_funnel
             )
             or len(
-                {item.observed_at for item in self.group4_range_funnel}
+                {
+                    (item.timeframe, item.observed_at)
+                    for item in self.group4_range_funnel
+                }
             )
             != len(self.group4_range_funnel)
         ):
@@ -1437,14 +1487,18 @@ class MarketObservation:
             timeframe: {swing.swing_id for swing in frame.swings}
             for timeframe, frame in self.frames.items()
         }
-        range_ids = {
-            item.range_id
-            for item in self.frames[Timeframe.H1].dealing_ranges
+        range_ids_by_timeframe = {
+            timeframe: {item.range_id for item in frame.dealing_ranges}
+            for timeframe, frame in self.frames.items()
         }
         for item in self.liquidity_inventory:
             if item.kind == "range_boundary" and (
-                item.timeframe is not Timeframe.H1
-                or len(set(item.source_ids) & range_ids) != 1
+                item.timeframe is Timeframe.M1
+                or len(
+                    set(item.source_ids)
+                    & range_ids_by_timeframe.get(item.timeframe, set())
+                )
+                != 1
             ):
                 raise ValueError(
                     "range-boundary inventory lacks one retained range identity"

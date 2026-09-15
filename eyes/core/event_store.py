@@ -7,14 +7,20 @@ do not introduce a service, database, or second event model.
 """
 from __future__ import annotations
 
+from array import array
+from bisect import bisect_left, bisect_right
 from collections import ChainMap, Counter
+from collections.abc import Mapping as MappingABC
+import pickle
+import struct
+import uuid
 from dataclasses import dataclass, fields, replace
 import hashlib
 from itertools import islice
 import json
 import math
 from pathlib import Path, PurePosixPath
-from typing import Any, Callable, Generic, Iterable, Mapping, TypeVar
+from typing import Any, Callable, Container, Generic, Iterable, Iterator, Mapping, Sequence, TypeVar
 
 import pandas as pd
 
@@ -27,6 +33,7 @@ from shares.core.artifact_stream import (
     write_stream_manifest,
     write_stream_shard,
 )
+from .bounded import BoundedDict
 from .foundation_registry import FOUNDATION_VERSION
 from shares.core.market_clock import validate_registered_native_bar_root
 from contract.market import (
@@ -88,6 +95,18 @@ _EXACT_AUTHORITATIVE_SOURCE_KINDS: Mapping[
     ),
     EventKind.ACCEPTANCE_CONFIRMED: (
         EventKind.LEVEL_PENETRATED,
+        EventKind.BAR_COMPLETED,
+    ),
+    EventKind.LEVEL_REACHED: (
+        EventKind.LIQUIDITY_LEVEL_CREATED,
+        EventKind.LEVEL_TOUCHED,
+    ),
+    EventKind.LEVEL_INVALIDATED: (
+        EventKind.LIQUIDITY_LEVEL_CREATED,
+        EventKind.BAR_COMPLETED,
+    ),
+    EventKind.LIQUIDITY_RETIRED: (
+        EventKind.LIQUIDITY_LEVEL_CREATED,
         EventKind.BAR_COMPLETED,
     ),
     EventKind.STRUCTURAL_LEG_CREATED: (
@@ -307,6 +326,130 @@ def event_order_key(event: MarketEvent) -> tuple[pd.Timestamp, int, str]:
     return event.known_at, event.sequence_no, event.event_id
 
 
+# The lifecycle namespaces of typed entities.  A ``namespace:identity`` source
+# id names an entity, never an event, so it is never an open forward
+# reference; raw opaque identities keep their forward standing.
+_ENTITY_IDENTITY_NAMESPACES = frozenset(
+    {
+        "bos",
+        "entry_path",
+        "fvg",
+        "manipulation",
+        "order_block",
+        "pool",
+        "range",
+        "structure",
+        "swing",
+        "zone",
+    }
+)
+
+
+def _is_entity_identity(reference_id: str) -> bool:
+    namespace, separator, identity = reference_id.partition(":")
+    return bool(separator and identity) and namespace in _ENTITY_IDENTITY_NAMESPACES
+
+
+class _ForwardReferenceOverlay:
+    """One batch's view of the open forward references, without a copy.
+
+    The committed set holds every forward identity the lifetime journal still
+    leaves open, so copying it per batch grew with the journal.  The overlay
+    answers membership against the committed set plus this batch's own
+    additions and removals, and commits exactly those by ``add``/``discard``
+    -- a failed batch leaves the committed set untouched.
+    """
+
+    __slots__ = ("_committed", "_added", "_removed")
+
+    def __init__(self, committed: set[str]) -> None:
+        self._committed = committed
+        self._added: set[str] = set()
+        self._removed: set[str] = set()
+
+    def __contains__(self, item: object) -> bool:
+        if item in self._added:
+            return True
+        return item in self._committed and item not in self._removed
+
+    def add(self, item: str) -> None:
+        self._removed.discard(item)
+        if item not in self._committed:
+            self._added.add(item)
+
+    def discard(self, item: str) -> None:
+        self._added.discard(item)
+        if item in self._committed:
+            self._removed.add(item)
+
+    def commit(self) -> None:
+        for item in self._removed:
+            self._committed.discard(item)
+        for item in self._added:
+            self._committed.add(item)
+        self._added.clear()
+        self._removed.clear()
+
+
+_JOURNAL_RECORD_HEADER = struct.Struct(">I")
+# How many eligible BAR roots each scale's index keeps for the structural-leg
+# contract (a leg reaches its start pivot, at most the structure tracker's
+# 256 retained swings back, plus fourteen strict-prior ATR bars), and how
+# many entries the reservation memories keep (one normalized root per scale
+# and clock, one terminal per crossing generation, the latest protected
+# assignment per swing).  Appends are monotone in known_at, so a reservation
+# older than the newest clock can only ever be met by an idempotent retry,
+# which the digests answer.  Both bounds sit far above what any later event
+# can cite; a miss fails closed exactly as an absent entry always did.
+ELIGIBLE_BAR_INDEX_RETENTION_PER_SCALE = 4096
+# Spelled-out constituent counts for the synthetic-terminal messages.
+_COUNT_WORDS = {5: "five", 15: "fifteen", 60: "sixty"}
+RESERVATION_MEMORY_RETENTION = 8192
+JOURNAL_FILE_SUFFIX = ".evlog"
+
+
+class _CommittedJournal(MappingABC):
+    """Every committed event by id: the hot dictionary, then the cold file.
+
+    Provenance validation and ``get`` read committed events through this
+    view, so an event spilled to the journal is still an available parent --
+    at the cost of one record read instead of a dictionary hit.
+    """
+
+    __slots__ = ("_store",)
+
+    def __init__(self, store: "EventStore") -> None:
+        self._store = store
+
+    def __getitem__(self, event_id: str) -> MarketEvent:
+        event = self._store._by_id.get(event_id)
+        if event is not None:
+            return event
+        index = self._store._cold_ids.get(event_id)
+        if index is None:
+            raise KeyError(event_id)
+        return self._store._read_cold(index)
+
+    def get(self, event_id, default=None):
+        event = self._store._by_id.get(event_id)
+        if event is not None:
+            return event
+        index = self._store._cold_ids.get(event_id)
+        if index is None:
+            return default
+        return self._store._read_cold(index)
+
+    def __contains__(self, event_id: object) -> bool:
+        return event_id in self._store._by_id or event_id in self._store._cold_ids
+
+    def __iter__(self) -> Iterator[str]:
+        yield from self._store._cold_ids
+        yield from self._store._by_id
+
+    def __len__(self) -> int:
+        return len(self._store._cold_ids) + len(self._store._by_id)
+
+
 def _event_digest(event: MarketEvent) -> str:
     # ``sequence_no`` is an EventMemory transport ordinal, not semantic
     # identity. A bounded-memory replay may rediscover the same immutable
@@ -481,6 +624,7 @@ class EventStore:
         definition_identity: (
             SemanticDefinitionIdentity | Mapping[str, Any] | str | None
         ) = None,
+        journal_dir: str | Path | None = None,
     ) -> None:
         if not isinstance(semantic_version, str) or not semantic_version:
             raise ValueError("event store semantic_version is required")
@@ -495,15 +639,42 @@ class EventStore:
         self._events: list[MarketEvent] = []
         self._by_id: dict[str, MarketEvent] = {}
         self._digests: dict[str, str] = {}
-        self._terminal_crossing_event_ids: dict[str, str] = {}
-        self._normalized_bar_event_ids: dict[
+        # Every committed digest in commit order, 32 raw bytes each: the
+        # prefix fingerprint and the journal length read this sequence, never
+        # the event objects, so a prefix commitment does not need the events.
+        self._digest_sequence = bytearray()
+        self._last_order_key: tuple[pd.Timestamp, int, str] | None = None
+        # The cold tier: events with index < _cold_count live in the journal
+        # file as length-prefixed pickled records, addressed by index through
+        # _cold_offsets and by id through _cold_ids.  ``_events``/``_by_id``
+        # hold only the hot suffix.
+        self._journal_dir = None if journal_dir is None else Path(journal_dir)
+        self._journal_path: Path | None = None
+        self._journal_handle = None
+        self._cold_count = 0
+        self._cold_offsets = array("q")
+        self._cold_ids: dict[str, int] = {}
+        self._journal = _CommittedJournal(self)
+        self._terminal_crossing_event_ids: BoundedDict[str, str] = BoundedDict(
+            RESERVATION_MEMORY_RETENTION
+        )
+        self._normalized_bar_event_ids: BoundedDict[
             tuple[Timeframe, pd.Timestamp], str
-        ] = {}
-        self._latest_protected_assignment_event_ids: dict[str, str] = {}
+        ] = BoundedDict(RESERVATION_MEMORY_RETENTION)
+        self._latest_protected_assignment_event_ids: BoundedDict[str, str] = (
+            BoundedDict(RESERVATION_MEMORY_RETENTION)
+        )
         self._latest_protected_assignment_event_ids_by_timeframe: dict[
             Timeframe, str
         ] = {}
         self._unresolved_forward_reference_ids: set[str] = set()
+        # The eligible BAR_COMPLETED roots of each (semantic version, scale,
+        # contract), in commit order, so the structural-leg contract reads
+        # its pivot and path bars from a sequence proportional to the scale's
+        # bar count instead of scanning the lifetime event count.
+        self._eligible_bar_index: dict[
+            tuple[str, Timeframe, object, object], list[MarketEvent]
+        ] = {}
         self._rebuild_fingerprint_cache()
 
     def _rebuild_fingerprint_cache(self) -> None:
@@ -517,8 +688,9 @@ class EventStore:
             digest.update(self.semantic_version.encode("utf-8"))
             digest.update(b"\0")
             digest.update(self.semantic_definition_identity.encode("ascii"))
-        for event in self._events:
-            digest.update(self._digests[event.event_id].encode("ascii"))
+        sequence = self._digest_sequence
+        for offset in range(0, len(sequence), 32):
+            digest.update(sequence[offset : offset + 32].hex().encode("ascii"))
         self._full_prefix_fingerprint_hasher = digest
 
     @property
@@ -551,7 +723,178 @@ class EventStore:
             )
 
     def __len__(self) -> int:
-        return len(self._events)
+        return len(self._digest_sequence) // 32
+
+    def iter_events(self, start: int, stop: int) -> Iterator[MarketEvent]:
+        """Yield the committed events with indexes in ``[start, stop)``."""
+
+        if (
+            type(start) is not int
+            or type(stop) is not int
+            or not 0 <= start <= stop <= len(self)
+        ):
+            raise ValueError("event store index range is out of range")
+        for index in range(start, min(stop, self._cold_count)):
+            yield self._read_cold(index)
+        hot_start = max(start, self._cold_count) - self._cold_count
+        yield from islice(self._events, hot_start, stop - self._cold_count)
+
+    def iter_chunks(
+        self,
+        start: int,
+        stop: int,
+        size: int,
+    ) -> Iterator[tuple[MarketEvent, ...]]:
+        """Yield ``[start, stop)`` as consecutive tuples of at most ``size``."""
+
+        if type(size) is not int or size < 1:
+            raise ValueError("event store chunk size must be positive")
+        events = self.iter_events(start, stop)
+        while True:
+            chunk = tuple(islice(events, size))
+            if not chunk:
+                return
+            yield chunk
+
+    def index_of_first_known_at(self, cutoff: pd.Timestamp) -> int:
+        """The index of the first hot event known at or after ``cutoff``.
+
+        Cold events are all older than the hot ones, so the answer is never
+        below ``cold_count``; when every hot event is older, it is ``len``.
+        """
+
+        clock = aware_timestamp(cutoff, name="event_store.cutoff")
+        return self._cold_count + bisect_left(
+            self._events, clock, key=lambda event: event.known_at
+        )
+
+    @property
+    def cold_count(self) -> int:
+        """How many committed events, from index 0, live in the journal file."""
+
+        return self._cold_count
+
+    @property
+    def journal_path(self) -> Path | None:
+        return self._journal_path
+
+    def _committed_digest(self, event_id: str) -> str | None:
+        digest = self._digests.get(event_id)
+        if digest is not None:
+            return digest
+        index = self._cold_ids.get(event_id)
+        if index is None:
+            return None
+        return self._digest_sequence[32 * index : 32 * index + 32].hex()
+
+    def _open_journal(self) -> None:
+        if self._journal_handle is not None:
+            return
+        if self._journal_dir is None:
+            raise ValueError("event store has no journal directory to spill to")
+        if self._journal_path is None:
+            self._journal_dir.mkdir(parents=True, exist_ok=True)
+            self._journal_path = (
+                self._journal_dir / f"{uuid.uuid4().hex}{JOURNAL_FILE_SUFFIX}"
+            )
+            self._journal_path.touch(exist_ok=False)
+        self._journal_handle = open(self._journal_path, "r+b")
+
+    def _read_cold(self, index: int) -> MarketEvent:
+        self._open_journal()
+        handle = self._journal_handle
+        handle.seek(self._cold_offsets[index])
+        header = handle.read(_JOURNAL_RECORD_HEADER.size)
+        (length,) = _JOURNAL_RECORD_HEADER.unpack(header)
+        return pickle.loads(handle.read(length))
+
+    def _write_cold(self, event: MarketEvent) -> int:
+        handle = self._journal_handle
+        handle.seek(0, 2)
+        offset = handle.tell()
+        payload = pickle.dumps(event, protocol=pickle.HIGHEST_PROTOCOL)
+        handle.write(_JOURNAL_RECORD_HEADER.pack(len(payload)))
+        handle.write(payload)
+        return offset
+
+    def spill(self, *, before_index: int) -> int:
+        """Move committed events with index < ``before_index`` to the journal.
+
+        The caller decides the hot window; it must keep every event a hot
+        consumer still reads by identity -- the reducer's unconsumed suffix
+        above all -- so ``before_index`` is capped at nothing else.  Returns
+        how many events were spilled.
+        """
+
+        if type(before_index) is not int or before_index < 0:
+            raise ValueError("event store spill index must be a non-negative int")
+        if self._journal_dir is None:
+            raise ValueError("event store has no journal directory to spill to")
+        count = min(before_index, len(self)) - self._cold_count
+        if count <= 0:
+            return 0
+        self._open_journal()
+        for event in islice(self._events, count):
+            offset = self._write_cold(event)
+            self._cold_offsets.append(offset)
+            self._cold_ids[event.event_id] = self._cold_count
+            self._cold_count += 1
+            self._by_id.pop(event.event_id)
+            self._digests.pop(event.event_id)
+        self._journal_handle.flush()
+        del self._events[:count]
+        return count
+
+    def _index_eligible_bars(
+        self,
+        key: tuple[str, Timeframe, object, object],
+        bars: Iterable[MarketEvent],
+    ) -> None:
+        index = self._eligible_bar_index.setdefault(key, [])
+        index.extend(bars)
+        excess = len(index) - ELIGIBLE_BAR_INDEX_RETENTION_PER_SCALE
+        if excess > 0:
+            del index[:excess]
+
+    def _index_cold_record(self, event: MarketEvent, *, offset: int) -> None:
+        """Register one journal record on restore, without re-validating it."""
+
+        self._cold_offsets.append(offset)
+        self._cold_ids[event.event_id] = self._cold_count
+        self._cold_count += 1
+        self._advance_derived_indexes(event, cold=True)
+
+    def _advance_derived_indexes(self, event: MarketEvent, *, cold: bool) -> None:
+        eligible_key = self._eligible_bar_key(event)
+        if eligible_key is not None:
+            self._index_eligible_bars(eligible_key, (event,))
+        bar_reservation = self._normalized_bar_identity(
+            event,
+            bar_event_ids=self._normalized_bar_event_ids,
+        )
+        if bar_reservation is not None:
+            key, event_id = bar_reservation
+            self._normalized_bar_event_ids[key] = event_id
+        terminal_reservation = self._terminal_crossing_identity(
+            event,
+            terminal_event_ids=self._terminal_crossing_event_ids,
+        )
+        if terminal_reservation is not None:
+            generation_id, event_id = terminal_reservation
+            self._terminal_crossing_event_ids[generation_id] = event_id
+        protected_reservation = self._protected_assignment_identity(event)
+        if protected_reservation is not None:
+            protected_id, event_id = protected_reservation
+            self._latest_protected_assignment_event_ids[protected_id] = event_id
+            self._latest_protected_assignment_event_ids_by_timeframe[
+                event.timeframe
+            ] = event_id
+        self._advance_unresolved_forward_references(
+            event,
+            available_event_ids=self._journal,
+            unresolved_reference_ids=self._unresolved_forward_reference_ids,
+        )
+        self._last_order_key = event_order_key(event)
 
     def __eq__(self, other: object) -> bool:
         return bool(
@@ -559,13 +902,18 @@ class EventStore:
             and self.semantic_version == other.semantic_version
             and self.semantic_definition_identity
             == other.semantic_definition_identity
-            and self._events == other._events
+            and len(self) == len(other)
+            and self.fingerprint() == other.fingerprint()
         )
 
     def _require_committed_integrity(self) -> None:
         if (
             len(self._events) != len(self._digests)
             or len(self._events) != len(self._by_id)
+            or len(self._cold_ids) != self._cold_count
+            or len(self._cold_offsets) != self._cold_count
+            or (self._cold_count + len(self._events)) * 32
+            != len(self._digest_sequence)
         ):
             raise ValueError("event store contains mutated committed evidence")
         for event in self._events:
@@ -582,7 +930,7 @@ class EventStore:
         # Carry canonical evidence exactly once.  All maps and the prefix
         # hasher are derived and are rebuilt/revalidated by ``__setstate__``.
         self._require_committed_integrity()
-        return {
+        state = {
             "semantic_version": self.semantic_version,
             "_definition_identity": self._definition_identity,
             "_definition_identity_digest": (
@@ -590,6 +938,16 @@ class EventStore:
             ),
             "_events": self._events,
         }
+        if self._journal_path is not None:
+            if self._journal_handle is not None:
+                self._journal_handle.flush()
+            state["_journal"] = {
+                "path": str(self._journal_path),
+                "cold_count": self._cold_count,
+                "cold_offsets": self._cold_offsets.tobytes(),
+                "digest_sequence": bytes(self._digest_sequence),
+            }
+        return state
 
     def __setstate__(self, state: Mapping[str, Any]) -> None:
         """Revalidate serialized history and rebuild every derived authority."""
@@ -606,13 +964,97 @@ class EventStore:
         definition_identity = state.get("_definition_identity")
         if definition_identity is None:
             definition_identity = state.get("_definition_identity_digest")
-        rebuilt = EventStore(
-            semantic_version=semantic_version,
-            definition_identity=definition_identity,
-        )
-        rebuilt.append_batch(events)
+        journal = state.get("_journal")
+        if journal is None:
+            rebuilt = EventStore(
+                semantic_version=semantic_version,
+                definition_identity=definition_identity,
+            )
+            rebuilt.append_batch(events)
+        else:
+            rebuilt = EventStore._restore_journaled(
+                events,
+                journal,
+                semantic_version=semantic_version,
+                definition_identity=definition_identity,
+            )
         self.__dict__.clear()
         self.__dict__.update(rebuilt.__dict__)
+
+    @classmethod
+    def _restore_journaled(
+        cls,
+        hot_events: Sequence[MarketEvent],
+        journal: Mapping[str, Any],
+        *,
+        semantic_version: str,
+        definition_identity: Any,
+    ) -> "EventStore":
+        """Rebind a journal file, proving every cold record by its digest.
+
+        The cold records were validated when they were first committed and
+        the digest sequence commits to their exact bytes, so restore streams
+        them once to prove the file is intact and to rebuild the derived
+        indexes; only the hot events are appended with full validation, with
+        the cold records available as parents.
+        """
+
+        path = Path(str(journal.get("path")))
+        cold_count = journal.get("cold_count")
+        offsets = journal.get("cold_offsets")
+        sequence = journal.get("digest_sequence")
+        if (
+            type(cold_count) is not int
+            or cold_count < 0
+            or not isinstance(offsets, (bytes, bytearray))
+            or not isinstance(sequence, (bytes, bytearray))
+            or len(sequence) != 32 * (cold_count + len(hot_events))
+            or not path.is_file()
+        ):
+            raise ValueError("event store journal checkpoint is invalid")
+        cold_offsets = array("q")
+        cold_offsets.frombytes(bytes(offsets))
+        if len(cold_offsets) != cold_count:
+            raise ValueError("event store journal checkpoint is invalid")
+        rebuilt = cls(
+            semantic_version=semantic_version,
+            definition_identity=definition_identity,
+            journal_dir=path.parent,
+        )
+        rebuilt._journal_path = path
+        rebuilt._open_journal()
+        expected_size = path.stat().st_size
+        for index in range(cold_count):
+            offset = cold_offsets[index]
+            if offset < 0 or offset >= expected_size:
+                raise ValueError("event store journal record is out of range")
+            rebuilt._cold_offsets.append(offset)
+            try:
+                event = rebuilt._read_cold(index)
+            except Exception as error:
+                raise ValueError(
+                    "event store journal record is unreadable"
+                ) from error
+            del rebuilt._cold_offsets[-1]
+            if (
+                not isinstance(event, MarketEvent)
+                or event.semantic_version != semantic_version
+                or event.event_id in rebuilt._cold_ids
+                or bytes.fromhex(_event_digest(event))
+                != bytes(sequence[32 * index : 32 * index + 32])
+            ):
+                raise ValueError(
+                    "event store journal record differs from its committed digest"
+                )
+            rebuilt._digest_sequence += bytes(sequence[32 * index : 32 * index + 32])
+            rebuilt._index_cold_record(event, offset=offset)
+        rebuilt._rebuild_fingerprint_cache()
+        rebuilt.append_batch(hot_events)
+        if bytes(rebuilt._digest_sequence) != bytes(sequence):
+            raise ValueError(
+                "event store journal checkpoint digests differ from its events"
+            )
+        return rebuilt
 
     def append(self, event: MarketEvent) -> bool:
         """Append once, returning false only for an exact idempotent retry."""
@@ -621,9 +1063,9 @@ class EventStore:
         if event.semantic_version != self.semantic_version:
             raise ValueError("event store cannot mix semantic versions")
         digest = _event_digest(event)
-        previous = self._by_id.get(event.event_id)
-        if previous is not None:
-            if self._digests[event.event_id] != digest:
+        previous_digest = self._committed_digest(event.event_id)
+        if previous_digest is not None:
+            if previous_digest != digest:
                 raise ValueError("event id conflicts with immutable history")
             return False
         bar_reservation = self._normalized_bar_identity(
@@ -632,7 +1074,7 @@ class EventStore:
         )
         self._validate_canonical_provenance(
             event,
-            available_events=self._by_id,
+            available_events=self._journal,
             normalized_bar_event_ids=self._normalized_bar_event_ids,
             latest_protected_assignment_event_ids=(
                 self._latest_protected_assignment_event_ids
@@ -643,16 +1085,24 @@ class EventStore:
             unresolved_forward_reference_ids=(
                 self._unresolved_forward_reference_ids
             ),
+            eligible_bar_index=self._eligible_bar_index,
         )
         terminal_reservation = self._terminal_crossing_identity(
             event,
             terminal_event_ids=self._terminal_crossing_event_ids,
         )
-        if self._events and event_order_key(event) < event_order_key(self._events[-1]):
+        if (
+            self._last_order_key is not None
+            and event_order_key(event) < self._last_order_key
+        ):
             raise ValueError("event store append is out of known_at order")
         self._events.append(event)
         self._by_id[event.event_id] = event
+        eligible_key = self._eligible_bar_key(event)
+        if eligible_key is not None:
+            self._index_eligible_bars(eligible_key, (event,))
         self._digests[event.event_id] = digest
+        self._digest_sequence += bytes.fromhex(digest)
         self._full_prefix_fingerprint_hasher.update(digest.encode("ascii"))
         if bar_reservation is not None:
             key, event_id = bar_reservation
@@ -671,9 +1121,10 @@ class EventStore:
             ] = event_id
         self._advance_unresolved_forward_references(
             event,
-            available_event_ids=self._by_id.keys(),
+            available_event_ids=self._journal,
             unresolved_reference_ids=self._unresolved_forward_reference_ids,
         )
+        self._last_order_key = event_order_key(event)
         return True
 
     def append_batch(self, events: Iterable[MarketEvent]) -> int:
@@ -689,8 +1140,11 @@ class EventStore:
         staged_events: dict[str, MarketEvent] = {}
         available_events: Mapping[str, MarketEvent] = ChainMap(
             staged_events,
-            self._by_id,
+            self._journal,
         )
+        staged_eligible_bars: dict[
+            tuple[str, Timeframe, object, object], list[MarketEvent]
+        ] = {}
         staged_terminal_event_ids: dict[str, str] = {}
         terminal_event_ids: Mapping[str, str] = ChainMap(
             staged_terminal_event_ids,
@@ -719,21 +1173,17 @@ class EventStore:
             staged_protected_assignment_event_ids_by_timeframe,
             self._latest_protected_assignment_event_ids_by_timeframe,
         )
-        staged_unresolved_forward_reference_ids = set(
+        staged_unresolved_forward_reference_ids = _ForwardReferenceOverlay(
             self._unresolved_forward_reference_ids
         )
-        last_key = (
-            event_order_key(self._events[-1])
-            if self._events
-            else None
-        )
+        last_key = self._last_order_key
         appended = 0
         for event in incoming:
             _require_exact_market_event(event)
             if event.semantic_version != self.semantic_version:
                 raise ValueError("event store cannot mix semantic versions")
             digest = _event_digest(event)
-            prior_digest = self._digests.get(event.event_id)
+            prior_digest = self._committed_digest(event.event_id)
             if prior_digest is None:
                 prior_digest = staged_digests.get(event.event_id)
             if prior_digest is not None:
@@ -760,7 +1210,12 @@ class EventStore:
                 unresolved_forward_reference_ids=(
                     staged_unresolved_forward_reference_ids
                 ),
+                eligible_bar_index=self._eligible_bar_index,
+                staged_eligible_bars=staged_eligible_bars,
             )
+            eligible_key = self._eligible_bar_key(event)
+            if eligible_key is not None:
+                staged_eligible_bars.setdefault(eligible_key, []).append(event)
             terminal_reservation = self._terminal_crossing_identity(
                 event,
                 terminal_event_ids=terminal_event_ids,
@@ -792,7 +1247,7 @@ class EventStore:
                 ] = assignment_event_id
             self._advance_unresolved_forward_references(
                 event,
-                available_event_ids=available_events.keys(),
+                available_event_ids=available_events,
                 unresolved_reference_ids=(
                     staged_unresolved_forward_reference_ids
                 ),
@@ -803,9 +1258,12 @@ class EventStore:
             self._events.append(event)
             self._by_id[event.event_id] = event
             self._digests[event.event_id] = digest
+            self._digest_sequence += bytes.fromhex(digest)
             self._full_prefix_fingerprint_hasher.update(
                 digest.encode("ascii")
             )
+        for eligible_key, bars in staged_eligible_bars.items():
+            self._index_eligible_bars(eligible_key, bars)
         self._terminal_crossing_event_ids.update(staged_terminal_event_ids)
         self._normalized_bar_event_ids.update(staged_bar_event_ids)
         self._latest_protected_assignment_event_ids.update(
@@ -814,9 +1272,9 @@ class EventStore:
         self._latest_protected_assignment_event_ids_by_timeframe.update(
             staged_protected_assignment_event_ids_by_timeframe
         )
-        self._unresolved_forward_reference_ids = (
-            staged_unresolved_forward_reference_ids
-        )
+        staged_unresolved_forward_reference_ids.commit()
+        if last_key is not None:
+            self._last_order_key = last_key
         return appended
 
     @staticmethod
@@ -869,7 +1327,7 @@ class EventStore:
         event: MarketEvent,
         *,
         available_event_ids: Iterable[str],
-        unresolved_reference_ids: set[str],
+        unresolved_reference_ids: "set[str] | _ForwardReferenceOverlay",
     ) -> None:
         """Maintain the only condition under which a DAG walk is necessary."""
 
@@ -879,7 +1337,9 @@ class EventStore:
             *event.source_event_ids,
             *event.context_event_ids,
         ):
-            if reference_id not in available:
+            if reference_id not in available and not _is_entity_identity(
+                reference_id
+            ):
                 unresolved_reference_ids.add(reference_id)
 
     @staticmethod
@@ -926,7 +1386,15 @@ class EventStore:
         latest_protected_assignment_event_ids_by_timeframe: (
             Mapping[Timeframe, str] | None
         ) = None,
-        unresolved_forward_reference_ids: set[str] | None = None,
+        unresolved_forward_reference_ids: Container[str] | None = None,
+        eligible_bar_index: (
+            Mapping[tuple[str, Timeframe, object, object], Sequence[MarketEvent]]
+            | None
+        ) = None,
+        staged_eligible_bars: (
+            Mapping[tuple[str, Timeframe, object, object], Sequence[MarketEvent]]
+            | None
+        ) = None,
     ) -> None:
         """Validate the closed causal DAG for an authoritative semantic fact.
 
@@ -1044,6 +1512,8 @@ class EventStore:
             latest_protected_assignment_event_ids_by_timeframe=(
                 latest_protected_assignment_event_ids_by_timeframe
             ),
+            eligible_bar_index=eligible_bar_index,
+            staged_eligible_bars=staged_eligible_bars,
         )
 
     @staticmethod
@@ -1058,6 +1528,14 @@ class EventStore:
         latest_protected_assignment_event_ids_by_timeframe: Mapping[
             Timeframe, str
         ],
+        eligible_bar_index: (
+            Mapping[tuple[str, Timeframe, object, object], Sequence[MarketEvent]]
+            | None
+        ) = None,
+        staged_eligible_bars: (
+            Mapping[tuple[str, Timeframe, object, object], Sequence[MarketEvent]]
+            | None
+        ) = None,
     ) -> None:
         """Fail closed when a derived fact lacks its registered parent kinds."""
 
@@ -1088,6 +1566,15 @@ class EventStore:
                 event,
                 source_parents=source_parents,
                 available_events=available_events,
+                eligible_bars=(
+                    None
+                    if eligible_bar_index is None
+                    else EventStore._indexed_eligible_bars(
+                        event,
+                        eligible_bar_index=eligible_bar_index,
+                        staged_eligible_bars=staged_eligible_bars or {},
+                    )
+                ),
             )
 
         if event.kind is EventKind.LIQUIDITY_LEVEL_CREATED:
@@ -1565,11 +2052,85 @@ class EventStore:
             )
 
     @staticmethod
+    @staticmethod
+    def _eligible_bar_key(
+        event: MarketEvent,
+    ) -> tuple[str, Timeframe, object, object] | None:
+        """The index key of a BAR root the structural-leg contract may cite."""
+
+        if (
+            event.kind is not EventKind.BAR_COMPLETED
+            or event.origin is not EventOrigin.NORMALIZED_DATA
+            or event.event_time != event.known_at
+            or not bar_evidence_coverage(event.evidence).admits_definitional_path
+        ):
+            return None
+        return (
+            event.semantic_version,
+            event.timeframe,
+            event.evidence.get("symbol"),
+            event.evidence.get("instrument_id"),
+        )
+
+    @staticmethod
+    def _indexed_eligible_bars(
+        event: MarketEvent,
+        *,
+        eligible_bar_index: Mapping[
+            tuple[str, Timeframe, object, object], Sequence[MarketEvent]
+        ],
+        staged_eligible_bars: Mapping[
+            tuple[str, Timeframe, object, object], Sequence[MarketEvent]
+        ],
+    ) -> Sequence[MarketEvent]:
+        """The eligible bars of ``event``'s scale and contract, in clock order.
+
+        Both inputs are already in that order: the store commits in
+        ``known_at`` order and reserves one normalized BAR root per (scale,
+        clock), so an index list is strictly increasing in ``known_at``, and a
+        batch stages only bars that follow its last committed event.  The
+        view is therefore the committed list followed by the staged tail --
+        never a re-sort of the scale's whole history per structural leg.
+        """
+
+        key = (
+            event.semantic_version,
+            event.timeframe,
+            event.evidence.get("symbol"),
+            event.evidence.get("instrument_id"),
+        )
+        committed = eligible_bar_index.get(key, ())
+        staged = staged_eligible_bars.get(key, ())
+        if not staged:
+            return committed
+        return (*committed, *staged)
+
+    def _eligible_bars(
+        self,
+        event: MarketEvent,
+        *,
+        staged_bars: Sequence[MarketEvent] = (),
+    ) -> Sequence[MarketEvent]:
+        """The committed index view, plus any bars staged in the caller's batch."""
+
+        staged: dict[tuple[str, Timeframe, object, object], list[MarketEvent]] = {}
+        for bar in staged_bars:
+            key = self._eligible_bar_key(bar)
+            if key is not None:
+                staged.setdefault(key, []).append(bar)
+        return self._indexed_eligible_bars(
+            event,
+            eligible_bar_index=self._eligible_bar_index,
+            staged_eligible_bars=staged,
+        )
+
+    @staticmethod
     def _validate_structural_leg_contract(
         event: MarketEvent,
         *,
         source_parents: tuple[MarketEvent, ...],
         available_events: Mapping[str, MarketEvent],
+        eligible_bars: Sequence[MarketEvent] | None = None,
     ) -> None:
         start, end = source_parents
         leg_id = EventStore._required_authoritative_text(event, "leg_id")
@@ -1766,62 +2327,72 @@ class EventStore:
                 "foundation structural leg BAR ancestry must be ordered and unique"
             )
 
-        eligible_bars = tuple(
-            sorted(
-                (
-                    candidate
-                    for candidate in available_events.values()
-                    if candidate.kind is EventKind.BAR_COMPLETED
-                    and candidate.origin is EventOrigin.NORMALIZED_DATA
-                    and candidate.semantic_version == event.semantic_version
-                    and candidate.timeframe is event.timeframe
-                    and candidate.event_time == candidate.known_at
-                    and bar_evidence_coverage(
-                        candidate.evidence
-                    ).admits_definitional_path
-                    and candidate.evidence.get("symbol") == symbol
-                    and candidate.evidence.get("instrument_id") == instrument_id
-                ),
-                key=lambda candidate: (
-                    candidate.known_at,
-                    candidate.event_id,
-                ),
+        if eligible_bars is None:
+            # No index in hand (a reducer-input check on a bare mapping):
+            # derive the sequence by the scan the index mirrors.
+            eligible_bars = tuple(
+                sorted(
+                    (
+                        candidate
+                        for candidate in available_events.values()
+                        if candidate.kind is EventKind.BAR_COMPLETED
+                        and candidate.origin is EventOrigin.NORMALIZED_DATA
+                        and candidate.semantic_version == event.semantic_version
+                        and candidate.timeframe is event.timeframe
+                        and candidate.event_time == candidate.known_at
+                        and bar_evidence_coverage(
+                            candidate.evidence
+                        ).admits_definitional_path
+                        and candidate.evidence.get("symbol") == symbol
+                        and candidate.evidence.get("instrument_id") == instrument_id
+                    ),
+                    key=lambda candidate: (
+                        candidate.known_at,
+                        candidate.event_id,
+                    ),
+                )
             )
-        )
         # The registered session calendar truncates and restarts timeframe
         # buckets around the daily maintenance break, so a swing's pivot BAR is
         # the next real bar after its pivot clock, not one arithmetic stride
         # later.  Deriving both endpoint clocks from the eligible sequence keeps
         # this contract in agreement with the producer, which builds the path
-        # from the candles it actually observed.
-        start_pivot_terminal = next(
-            (bar.known_at for bar in eligible_bars if bar.known_at > start_clock),
-            None,
+        # from the candles it actually observed.  The sequence is in clock
+        # order, so each clock is a bisect, not a walk over the scale's
+        # lifetime.
+        after_start = bisect_right(
+            eligible_bars, start_clock, key=lambda bar: bar.known_at
         )
-        path_terminal = next(
-            (bar.known_at for bar in eligible_bars if bar.known_at > end_clock),
-            None,
+        after_end = bisect_right(
+            eligible_bars, end_clock, key=lambda bar: bar.known_at
         )
-        if start_pivot_terminal is None or path_terminal is None:
+        if max(after_start, after_end) >= len(eligible_bars):
             raise ValueError(
                 "foundation structural leg endpoint lacks the completed BAR "
                 "that closes its pivot"
             )
+        start_pivot_terminal = eligible_bars[after_start].known_at
+        path_terminal = eligible_bars[after_end].known_at
         # The path may cross a densified no-trade bar, but ATR may not: the
         # producer selects its fourteen strict-prior bars from real ones only,
         # and this contract has to reach past the same bars it does.
-        eligible_prior = tuple(
-            bar
-            for bar in eligible_bars
-            if bar.known_at <= start_clock
-            and bar_evidence_coverage(bar.evidence).admits_atr_window
-        )
-        expected_atr_bars = eligible_prior[-14:]
-        expected_path_bars = tuple(
-            bar
-            for bar in eligible_bars
-            if start_clock < bar.known_at <= path_terminal
-        )
+        # Fifteen, not fourteen: the first ATR bar's true range reaches the
+        # close of the real bar before it, exactly as it did when the whole
+        # prior history was walked.
+        strict_prior: list[MarketEvent] = []
+        for index in range(after_start - 1, -1, -1):
+            bar = eligible_bars[index]
+            if bar_evidence_coverage(bar.evidence).admits_atr_window:
+                strict_prior.append(bar)
+                if len(strict_prior) == 15:
+                    break
+        strict_prior.reverse()
+        expected_atr_bars = strict_prior[-14:]
+        expected_path_bars = eligible_bars[
+            after_start : bisect_right(
+                eligible_bars, path_terminal, key=lambda bar: bar.known_at
+            )
+        ]
         if (
             len(expected_atr_bars) != 14
             or tuple(bar.event_id for bar in atr_bars)
@@ -2006,13 +2577,13 @@ class EventStore:
             )
 
         true_ranges: list[float] = []
-        for index, bar in enumerate(eligible_prior):
+        for index, bar in enumerate(strict_prior):
             high = EventStore._bar_number(bar, "high")
             low = EventStore._bar_number(bar, "low")
             true_range = high - low
             if index:
                 prior_close = EventStore._bar_number(
-                    eligible_prior[index - 1],
+                    strict_prior[index - 1],
                     "close",
                 )
                 true_range = max(
@@ -2600,7 +3171,7 @@ class EventStore:
     ) -> None:
         if not source_parents:
             raise ValueError(
-                "authoritative displacement requires real M5 BAR parents"
+                "authoritative displacement requires real BAR parents"
             )
         EventStore._require_source_kind_multiset(
             event,
@@ -2611,20 +3182,23 @@ class EventStore:
             event,
             source_parents,
         )
+        # A displacement is observed on one completed-bar scale above 1m and
+        # cites only real bars of that same scale.
         if (
-            event.timeframe is not Timeframe.M5
+            event.timeframe is Timeframe.M1
             or event.direction not in {Direction.LONG, Direction.SHORT}
             or event.side
             != ("above" if event.direction is Direction.LONG else "below")
             or any(
-                parent.timeframe is not Timeframe.M5
+                parent.timeframe is not event.timeframe
                 or parent.evidence.get("real_completed") is not True
                 or parent.evidence.get("clock_only") is not False
                 for parent in source_parents
             )
         ):
             raise ValueError(
-                "authoritative displacement requires real normalized M5 BARs"
+                "authoritative displacement requires real normalized BARs "
+                "of its own scale"
             )
         bar_clocks = tuple(parent.known_at for parent in source_parents)
         if bar_clocks != tuple(sorted(bar_clocks)):
@@ -2739,15 +3313,19 @@ class EventStore:
                     "exact synthetic-interruption terminal"
                 )
             return
-        interval_start = event.known_at - pd.Timedelta(5, unit="min")
+        # The terminal's incomplete bar is one bar of its own scale: five
+        # minutes on 5m, fifteen on 15m.
+        scale = event.timeframe.value
+        constituents = int(event.timeframe.minutes)
+        interval_start = event.known_at - pd.Timedelta(constituents, unit="min")
         if source_parents[-1].known_at != interval_start:
             raise ValueError(
                 "authoritative synthetic displacement terminal must retain "
-                "the immediately preceding real M5 BAR as its last source"
+                f"the immediately preceding real {scale} BAR as its last source"
             )
         expected_clocks = tuple(
             interval_start + pd.Timedelta(offset, unit="min")
-            for offset in range(1, 6)
+            for offset in range(1, constituents + 1)
         )
         interval_roots: list[MarketEvent] = []
         for clock in expected_clocks:
@@ -2765,10 +3343,11 @@ class EventStore:
             ):
                 raise ValueError(
                     "authoritative synthetic displacement terminal lacks "
-                    "five contiguous unique M1 BAR roots"
+                    f"{_COUNT_WORDS.get(constituents, constituents)} "
+                    "contiguous unique M1 BAR roots"
                 )
             interval_roots.append(root)
-        if len({root.event_id for root in interval_roots}) != 5:
+        if len({root.event_id for root in interval_roots}) != constituents:
             raise ValueError(
                 "authoritative synthetic displacement terminal repeats an "
                 "M1 BAR root"
@@ -2805,7 +3384,7 @@ class EventStore:
         if not expected_context or event.context_event_ids != expected_context:
             raise ValueError(
                 "authoritative synthetic displacement context must be the "
-                "exact clock-only M1 subset of its open-closed M5 interval"
+                f"exact clock-only M1 subset of its open-closed {scale} interval"
             )
 
     @staticmethod
@@ -3615,12 +4194,14 @@ class EventStore:
                 "mismatched zone identity"
             )
 
+        # An origin zone lives on one completed-bar scale above 1m; its
+        # terminal, its creation and every bar they cite share that scale.
         if (
-            event.timeframe is not Timeframe.M5
-            or created.timeframe is not Timeframe.M5
-            or transition_bar.timeframe is not Timeframe.M5
+            event.timeframe is Timeframe.M1
+            or created.timeframe is not event.timeframe
+            or transition_bar.timeframe is not event.timeframe
             or any(
-                parent.timeframe is not Timeframe.M5
+                parent.timeframe is not event.timeframe
                 for parent in created_parents
             )
             or event.direction is None
@@ -3805,9 +4386,9 @@ class EventStore:
             EventKind.ACCEPTANCE_CONFIRMED,
         ):
             parent = parent_by_kind[kind]
-            if parent.timeframe is not Timeframe.H1:
+            if parent.timeframe is not event.timeframe:
                 raise ValueError(
-                    "close-beyond dealing-range parent must be H1: "
+                    "close-beyond dealing-range parent is on another scale: "
                     f"{parent.event_id} ({kind.value})"
                 )
             if parent.details.get("range_id") != range_id:
@@ -3837,9 +4418,9 @@ class EventStore:
             bar=parent_by_kind[EventKind.BAR_COMPLETED],
         )
         created = parent_by_kind[EventKind.DEALING_RANGE_CREATED]
-        if created.timeframe is not Timeframe.H1:
+        if created.timeframe is not event.timeframe:
             raise ValueError(
-                "close-beyond dealing-range parent must be H1: "
+                "close-beyond dealing-range parent is on another scale: "
                 f"{created.event_id} ({created.kind.value})"
             )
         if created.details.get("range_id") != range_id:
@@ -3854,18 +4435,19 @@ class EventStore:
         *,
         bar: MarketEvent,
     ) -> str:
-        if event.timeframe is not Timeframe.H1:
+        if event.timeframe is Timeframe.M1:
             raise ValueError(
-                "close-beyond dealing-range invalidation must be H1"
+                "close-beyond dealing-range invalidation cannot be 1m"
             )
         range_id = event.details.get("range_id")
         if not isinstance(range_id, str) or not range_id.strip():
             raise ValueError(
                 "close-beyond dealing-range invalidation requires range_id"
             )
-        if bar.timeframe is not Timeframe.H1:
+        if bar.timeframe is not event.timeframe:
             raise ValueError(
-                "close-beyond dealing-range invalidation requires an H1 BAR"
+                "close-beyond dealing-range invalidation requires a BAR of "
+                "the range's scale"
             )
         close_value = bar.details.get("close")
         if isinstance(close_value, bool):
@@ -3927,12 +4509,14 @@ class EventStore:
     def events_since(self, index: int) -> tuple[MarketEvent, ...]:
         """Return the append-only suffix beginning at ``index``."""
 
-        if type(index) is not int or not 0 <= index <= len(self._events):
+        if type(index) is not int or not 0 <= index <= len(self):
             raise ValueError("event store suffix index is out of range")
-        return tuple(self._events[index:])
+        if index >= self._cold_count:
+            return tuple(self._events[index - self._cold_count :])
+        return tuple(self.iter_events(index, len(self)))
 
     def get(self, event_id: str) -> MarketEvent | None:
-        return self._by_id.get(event_id)
+        return self._journal.get(event_id)
 
     def normalized_bar_at(
         self,
@@ -3960,10 +4544,10 @@ class EventStore:
     def event_digest(self, event_id: str) -> str:
         """Return the exact immutable digest for one committed event."""
 
-        try:
-            return self._digests[event_id]
-        except KeyError as error:
-            raise KeyError(f"event store has no event: {event_id}") from error
+        digest = self._committed_digest(event_id)
+        if digest is None:
+            raise KeyError(f"event store has no event: {event_id}")
+        return digest
 
     def recompute_event_digest(self, event: MarketEvent) -> str:
         """Digest supplied bytes for comparison with the same audit identity."""
@@ -3980,9 +4564,13 @@ class EventStore:
         known_at: pd.Timestamp | None = None,
     ) -> tuple[MarketEvent, ...]:
         if known_at is None:
-            return tuple(self._events)
+            return tuple(self.iter_events(0, len(self)))
         cutoff = aware_timestamp(known_at, name="event_store.known_at")
-        return tuple(event for event in self._events if event.known_at <= cutoff)
+        return tuple(
+            event
+            for event in self.iter_events(0, len(self))
+            if event.known_at <= cutoff
+        )
 
     def fingerprint(self, *, known_at: pd.Timestamp | None = None) -> str:
         if known_at is None:
@@ -4009,12 +4597,13 @@ class EventStore:
             raise ValueError("event store prefix count is out of range")
         if event_count == len(self):
             return self.fingerprint()
+        sequence = self._digest_sequence
         return _fingerprint_from_digests(
             semantic_version=self.semantic_version,
             definition_identity=self.semantic_definition_identity,
             digests=(
-                self._digests[event.event_id]
-                for event in islice(self._events, event_count)
+                sequence[offset : offset + 32].hex()
+                for offset in range(0, 32 * event_count, 32)
             ),
         )
 
@@ -4036,7 +4625,9 @@ class EventStore:
         """Content-bound metadata for an external replay checkpoint."""
 
         self._require_committed_integrity()
-        last_known_at = self._events[-1].known_at if self._events else None
+        last_known_at = (
+            None if self._last_order_key is None else self._last_order_key[0]
+        )
         return {
             **self.metadata(),
             "checkpoint_schema_version": 1,
@@ -4157,8 +4748,8 @@ class EventStore:
             or checkpoint_metadata.get("last_known_at")
             != (
                 None
-                if not store._events
-                else store._events[-1].known_at.isoformat()
+                if store._last_order_key is None
+                else store._last_order_key[0].isoformat()
             )
         ):
             raise ValueError("event store checkpoint content binding is invalid")
@@ -4176,7 +4767,7 @@ def validate_canonical_event(
     latest_protected_assignment_event_ids_by_timeframe: (
         Mapping[Timeframe, str] | None
     ) = None,
-    unresolved_forward_reference_ids: set[str] | None = None,
+    unresolved_forward_reference_ids: Container[str] | None = None,
 ) -> None:
     """Validate one reducer input against the store's authority contract."""
 

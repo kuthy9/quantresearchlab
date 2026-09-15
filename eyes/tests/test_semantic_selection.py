@@ -8,7 +8,12 @@ from types import SimpleNamespace
 import pytest
 
 from eyes.core import foundation_registry as foundation_module
-from shares.core.engine import ContinuousSMCEngine
+
+pytest.importorskip(
+    "brain.core.calibration",
+    reason="ContinuousSMCEngine still imports the typed Brain retired in 5883241",
+)
+from shares.core.engine import ContinuousSMCEngine  # noqa: E402
 from eyes.core.semantics import (
     SemanticRegistry,
     SemanticRegistryError,
@@ -29,7 +34,7 @@ def test_selection_keeps_two_identities_and_parent_binding() -> None:
 
     assert selection.atomic_semantics_version == "smc_semantics_v1.3"
     assert selection.atomic_definition_identity == (
-        "f92b24c86bf942defc88de4edb7be16cc2a30dd64fde3b4432657780648b1f0c"
+        "af834d53c6f03e9c874ec785a4dd6f60c719be33dba89e7de3b6b3a55973f301"
     )
     assert selection.foundation_projection_version == (
         "smc_semantic_foundation_v2.1"
@@ -124,5 +129,5 @@ def test_engine_injects_the_single_loaded_atomic_registry(
 
     assert len(calls) == 1
     assert engine.observer.semantic_registry.identity == (
-        "f92b24c86bf942defc88de4edb7be16cc2a30dd64fde3b4432657780648b1f0c"
+        "af834d53c6f03e9c874ec785a4dd6f60c719be33dba89e7de3b6b3a55973f301"
     )

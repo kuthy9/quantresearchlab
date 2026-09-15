@@ -17,6 +17,7 @@ from .displacement_observer import (
     REGISTERED_CLOSURE_ANOMALIES,
     CausalDisplacementEye,
 )
+from .entity_liveness import harvest_entity_ids
 from .event_memory import EventMemory
 from .event_store import EventStore
 from .zone import (
@@ -46,6 +47,7 @@ from contract.market import (
     Candle,
     Direction,
     Timeframe,
+    candle_coverage,
     clamp,
 )
 from contract.execution import (
@@ -69,17 +71,20 @@ from contract.eye import (
     MarketObservation,
     PathSequenceState,
     RANGE_AUCTION_HARD_BOUNDARY_REASONS,
+    StructuralLegState,
     StructureLifecycle,
     SwingLifecycle,
+    SwingPoint,
     SwingRelation,
 )
 from .market_state import (
     MarketSnapshot,
     MarketSnapshotPublisher,
+    STRUCTURAL_LEG_RETENTION,
     build_structural_legs,
 )
 from shares.core.scale_registry import ScaleSpec, scale_registry_id
-from .semantic_event_emitter import SemanticEventEmitter
+from .semantic_event_emitter import SemanticEventEmitter, _CandidateRetirement
 from .semantics import SemanticRegistry
 from .structure import StructureConfig, StructureTracker
 
@@ -118,6 +123,18 @@ class ObserverConfig:
     eye_authority_mode: bool = False
     typed_transition_delta_transport: bool = False
     persist_state_projections: bool = True
+    # The scales whose events form the observation's main event clock.
+    # ``None`` publishes every active scale except 1m, which is
+    # microstructure: 84 % of all events, read by a trigger, not by the
+    # clock the Brain conditions on.
+    published_timeframes: tuple[Timeframe, ...] | None = None
+    # Where the audit store journals committed events that have left the hot
+    # window (``None`` keeps the whole journal in memory), and how far back
+    # from the current clock the hot window reaches.  Every event stays
+    # addressable by id and index either way; the window only decides which
+    # ones a lookup reads from the heap and which from the journal file.
+    audit_journal_dir: str | None = None
+    audit_hot_window_minutes: int = 3 * 24 * 60
 
 
 # These fields advance mechanically while an entity remains in the same
@@ -206,6 +223,16 @@ def _typed_native_transitions_or_baseline(
     if first_observation and boundary_reason is None:
         return tuple(current)
     return tuple(transitions)
+
+
+@dataclass(frozen=True)
+class _StructuralLegProjection:
+    """One scale's projected legs and the fold state that produced them."""
+
+    resolved_swing_ids: tuple[str, ...]
+    ordered_swing_ids: tuple[str, ...]
+    last_anchor: SwingPoint | None
+    legs: tuple[StructuralLegState, ...]
 
 
 @dataclass(frozen=True)
@@ -778,6 +805,68 @@ def _typed_progression(
     return high_step, low_step, (high_step + low_step) / 2.0
 
 
+# Candidate sources whose retention is owned by another lifecycle — equal-
+# liquidity pools, mature range boundaries, and the previous-period reference
+# levels that retire when their period is replaced: the retirement scan
+# leaves them to that lifecycle.
+# Timeline namespaces whose owner exposes every still-transitionable entity
+# in its frame.  A live lifecycle prefix normally outlives a snapshot that
+# omits its entity so a later terminal transition finds its history; a swing
+# can only transition through the structure tracker, which drops the oldest
+# confirmed swing from its bounded deque and declines an ambiguous forming
+# candidate without any fact, so a swing prefix cools with the exposure.
+_OWNER_EXPOSED_TIMELINE_NAMESPACES = frozenset({"swing"})
+
+# The emitter's per-entity memories are pruned to the entities the published
+# states still cite whenever they have doubled since the last pass and hold
+# more than this many entries; ``None`` never prunes.  The floor keeps the
+# pass rare on short replays (a 1m month inserts about 150,000 entries and
+# retains about a fifth), and doubling bounds the pass to O(entries) per
+# doubling, so the memories peak at twice their live population.
+ENTITY_MEMORY_PRUNE_FLOOR: int | None = 65536
+
+# What the live-entity harvest reads off the observation: every tracker
+# state the emitter is fed (frames, displacement, inventory, pools,
+# interaction, Group 4), but not the events (whose citations reach back to
+# entities nothing retains), the execution layer, or the reducer's states --
+# the emitter never reads those, with one exception: the reducer's candidate
+# set, whose retirements the emitter publishes.
+_LIVENESS_EXCLUDED_OBSERVATION_FIELDS = frozenset(
+    {
+        "market_snapshot",
+        "recent_events",
+        "retained_entity_timelines",
+        "incomplete_entity_timeline_keys",
+        "execution",
+        "_snapshot_free_identity",
+    }
+)
+# Candidate kinds whose entity lifecycle ends in a tracker: the candidate
+# ends on the bar the entity leaves the authoritative set, with this reason.
+_ENTITY_OWNED_CANDIDATE_KINDS = {
+    "equal_highs": "pool_resolved",
+    "equal_lows": "pool_resolved",
+    "formed_liquidity_pool": "pool_resolved",
+    "range_boundary": "range_boundary_retired",
+    "mature_range_boundary": "range_boundary_retired",
+}
+_LIFECYCLE_OWNED_CANDIDATE_KINDS = frozenset(
+    {
+        "equal_highs",
+        "equal_lows",
+        "formed_liquidity_pool",
+        "range_boundary",
+        "mature_range_boundary",
+        "previous_session_high",
+        "previous_session_low",
+        "previous_day_high",
+        "previous_day_low",
+        "previous_week_high",
+        "previous_week_low",
+    }
+)
+
+
 class CausalObserver:
     """Describes current market state without producing or accepting actions."""
 
@@ -808,9 +897,15 @@ class CausalObserver:
                     "observer semantic registry path differs from selection"
                 )
         self.semantic_registry = semantic_registry
+        if (
+            type(self.config.audit_hot_window_minutes) is not int
+            or self.config.audit_hot_window_minutes < 1
+        ):
+            raise ValueError("observer audit hot window must be a positive int")
         self.audit_store = EventStore(
             semantic_version=self.semantic_registry.semantic_version,
             definition_identity=self.semantic_registry.definition_identity,
+            journal_dir=self.config.audit_journal_dir,
         )
         self.market_snapshot_publisher = MarketSnapshotPublisher(
             event_store=self.audit_store,
@@ -895,6 +990,18 @@ class CausalObserver:
             for spec in self.scale_specs
             if spec.enabled and spec.native_timeframe is not None
         )
+        if self.config.published_timeframes is None:
+            self._published_timeframes = tuple(
+                timeframe
+                for timeframe in self._active_timeframes
+                if timeframe is not Timeframe.M1
+            )
+        else:
+            self._published_timeframes = tuple(self.config.published_timeframes)
+            if not set(self._published_timeframes) <= set(self._active_timeframes):
+                raise ValueError(
+                    "published timeframes must be a subset of the active scales"
+                )
         if (
             len(self._active_timeframes)
             != len(set(self._active_timeframes))
@@ -909,11 +1016,21 @@ class CausalObserver:
             if self.config.displacement_protocol is not None
             else None
         )
+        self._displacement_eyes: dict[Timeframe, CausalDisplacementEye] = {}
+        if displacement_protocol is not None:
+            for timeframe in displacement_protocol.timeframes:
+                if timeframe in self._active_timeframes:
+                    self._displacement_eyes[timeframe] = CausalDisplacementEye(
+                        displacement_protocol, timeframe=timeframe
+                    )
+        # The protocol's first scale is the one Group 3 zones consume and the
+        # one ``MarketObservation.displacement`` names.
         self._displacement_eye = (
-            CausalDisplacementEye(displacement_protocol)
+            self._displacement_eyes.get(displacement_protocol.timeframes[0])
             if displacement_protocol is not None
             else None
         )
+        self._secondary_displacements: dict[Timeframe, DisplacementObservation] = {}
         self._displacement_downstream_authoritative = bool(
             displacement_protocol is not None
             and displacement_protocol.downstream_authoritative
@@ -971,27 +1088,42 @@ class CausalObserver:
             raise ValueError(
                 "Group 3, displacement and observer tick sizes disagree"
             )
+        self._zone_trackers: dict[Timeframe, CausalZoneTracker] = {}
+        if zone_protocol is not None and self._displacement_downstream_authoritative:
+            for timeframe in zone_protocol.timeframes:
+                # A zone scale needs a displacement eye and a structure
+                # tracker on that same scale to source its FVG and origin
+                # zone facts.
+                if (
+                    timeframe in self._displacement_eyes
+                    and timeframe in self._active_timeframes
+                ):
+                    self._zone_trackers[timeframe] = CausalZoneTracker(
+                        zone_protocol,
+                        displacement_protocol_hash=(
+                            displacement_protocol.protocol_hash
+                            if displacement_protocol is not None
+                            else None
+                        ),
+                        structure_protocol_hash=(
+                            structure_config.protocol_hash
+                            if structure_config is not None
+                            else None
+                        ),
+                        timeframe=timeframe,
+                    )
+        # The protocol's first scale is the one the typed transition delta
+        # channel and ``zone_update`` name; the other scales publish their
+        # facts and their frames the same way.
         self._zone_tracker = (
-            CausalZoneTracker(
-                zone_protocol,
-                displacement_protocol_hash=(
-                    displacement_protocol.protocol_hash
-                    if displacement_protocol is not None
-                    else None
-                ),
-                structure_protocol_hash=(
-                    structure_config.protocol_hash
-                    if structure_config is not None
-                    else None
-                ),
-            )
-            if (
-                zone_protocol is not None
-                and self._displacement_downstream_authoritative
-            )
+            self._zone_trackers.get(zone_protocol.timeframes[0])
+            if zone_protocol is not None
             else None
         )
-        self._group3_hidden_entity_ids: set[str] = set()
+        self._secondary_zone_updates: dict[Timeframe, ZoneUpdate] = {}
+        self._group3_hidden_entity_ids: dict[Timeframe, set[str]] = {
+            timeframe: set() for timeframe in self._zone_trackers
+        }
         self._structure_trackers = (
             {
                 timeframe: StructureTracker(timeframe, structure_config)
@@ -1009,6 +1141,17 @@ class CausalObserver:
             if self.config.liquidity_protocol is not None
             else None
         )
+        self._liquidity_config = liquidity_config
+        # Candidate ids the observer has retired; they stay out of the
+        # inventory pipeline for the rest of the epoch.
+        self._retired_level_ids: set[str] = set()
+        # Consumed swing items dropped after their retention; kept only while
+        # a tracker still offers the swing, so it cannot come back visible.
+        self._dropped_consumed_ids: set[str] = set()
+        # Entries the emitter's per-entity memories held after the last
+        # liveness pass, and how many passes ran.
+        self._entity_memory_prune_mark = 0
+        self.entity_memory_prunes = 0
         self._liquidity_trackers = (
             {
                 timeframe: CausalLiquidityTracker(
@@ -1027,24 +1170,38 @@ class CausalObserver:
             Timeframe,
             tuple[pd.Timestamp | None, tuple],
         ] = {}
-        if (
-            self.config.range_auction_protocol is not None
-            and (
-                structure_config is None
-                or liquidity_config is None
-                or Timeframe.H1 not in self._structure_trackers
-                or Timeframe.H1 not in self._liquidity_trackers
-            )
-        ):
-            raise ValueError(
-                "Group 4 requires typed H1 structure, "
-                "support/resistance and pools"
-            )
         range_auction_protocol = (
             RangeAuctionProtocol.from_file(self.config.range_auction_protocol)
             if self.config.range_auction_protocol is not None
             else None
         )
+        # The scales the dealing range is projected on: the protocol's scales
+        # that are active here, each with its typed structure and liquidity
+        # trackers; empty without Group 4.  As for zones, a registered scale
+        # this observer does not run is simply not projected.
+        self._range_timeframes: tuple[Timeframe, ...] = (
+            ()
+            if range_auction_protocol is None
+            else tuple(
+                timeframe
+                for timeframe in range_auction_protocol.timeframes
+                if timeframe in self._active_timeframes
+            )
+        )
+        if range_auction_protocol is not None and (
+            structure_config is None
+            or liquidity_config is None
+            or not self._range_timeframes
+            or any(
+                timeframe not in self._structure_trackers
+                or timeframe not in self._liquidity_trackers
+                for timeframe in self._range_timeframes
+            )
+        ):
+            raise ValueError(
+                "Group 4 requires typed structure, support/resistance and "
+                "pools on every active range scale"
+            )
         if range_auction_protocol is not None and (
             not math.isclose(
                 range_auction_protocol.tick_size,
@@ -1069,7 +1226,8 @@ class CausalObserver:
         self._group4_bootstrap_range_transitions: list[
             DealingRangeState
         ] = []
-        self._group4_cold_pairs_marked = False
+        # The range scales whose pre-coverage source pairs were marked cold.
+        self._group4_cold_pairs_marked: set[Timeframe] = set()
         if self.config.interaction_protocol is not None and (
             zone_protocol is None
             or range_auction_protocol is None
@@ -1118,8 +1276,9 @@ class CausalObserver:
             audit_store=self.audit_store,
         )
         self._terminal_failure: str | None = None
-        self._last_displacement_input: tuple[object, ...] | None = None
-        self._last_displacement_observation = None
+        self._last_displacement_inputs: dict[
+            Timeframe, tuple[tuple[object, ...], DisplacementObservation]
+        ] = {}
         self._prior: MarketObservation | None = None
         # One owner for canonical emission and the cross-detector event
         # ancestry index every emitted fact has to cite.
@@ -1134,7 +1293,7 @@ class CausalObserver:
         )
         self._structural_leg_cache: dict[
             Timeframe,
-            tuple[tuple[str, ...], tuple],
+            _StructuralLegProjection,
         ] = {}
         self._last_frame_cutoff: dict[Timeframe, pd.Timestamp] = {}
         self._boundary_terminal_breaks: dict[
@@ -1227,7 +1386,7 @@ class CausalObserver:
             else None
         )
         self._group4_bootstrap_range_transitions.clear()
-        self._group4_cold_pairs_marked = False
+        self._group4_cold_pairs_marked.clear()
         failed_bos = tuple(
             item
             for tracker in self._structure_trackers.values()
@@ -1294,6 +1453,8 @@ class CausalObserver:
             tracker.reset()
         self._liquidity_snapshot_cache.clear()
         self._inventory_consumption.clear()
+        self._retired_level_ids.clear()
+        self._dropped_consumed_ids.clear()
         self._pending_pool_sweeps.clear()
         self._pending_level_crossings.clear()
         self._reference_periods.clear()
@@ -1529,7 +1690,7 @@ class CausalObserver:
                     )
                     self._invalidate_liquidity_snapshot(timeframe)
                     if (
-                        timeframe is Timeframe.H1
+                        timeframe in self._range_timeframes
                         and self._range_auction_tracker is not None
                         and self._prior is None
                     ):
@@ -1550,7 +1711,8 @@ class CausalObserver:
                         )
                         if (
                             within_group4_coverage
-                            and not self._group4_cold_pairs_marked
+                            and timeframe
+                            not in self._group4_cold_pairs_marked
                         ):
                             self._range_auction_tracker.mark_existing_source_pairs_ineligible(
                                 tuple(
@@ -1560,9 +1722,9 @@ class CausalObserver:
                                     < coverage_start
                                 )
                             )
-                            self._group4_cold_pairs_marked = True
+                            self._group4_cold_pairs_marked.add(timeframe)
                         range_auction_update = (
-                            self._range_auction_tracker.on_completed_h1(
+                            self._range_auction_tracker.on_completed_native(
                                 candle,
                                 (
                                     support_resistance
@@ -1646,36 +1808,50 @@ class CausalObserver:
         update: ReaderUpdate,
         frames: Mapping[Timeframe, FrameObservation],
     ) -> ZoneUpdate | None:
-        if self._zone_tracker is None:
-            return None
-        if self._displacement_eye is None:
+        """Advance every zone scale; return the protocol's first scale's update."""
+
+        primary: ZoneUpdate | None = None
+        self._secondary_zone_updates = {}
+        for timeframe, tracker in self._zone_trackers.items():
+            result = self._observe_group3_scale(update, frames, timeframe, tracker)
+            if tracker is self._zone_tracker:
+                primary = result
+            else:
+                self._secondary_zone_updates[timeframe] = result
+        return primary
+
+    def _observe_group3_scale(
+        self,
+        update: ReaderUpdate,
+        frames: Mapping[Timeframe, FrameObservation],
+        timeframe: Timeframe,
+        tracker: CausalZoneTracker,
+    ) -> ZoneUpdate:
+        eye = self._displacement_eyes.get(timeframe)
+        if eye is None:
             raise RuntimeError(
                 "Group 3 lost its configured displacement source"
             )
         boundary = self._group3_boundary_reason(update.anomalies)
         if boundary is not None:
-            projected = self._visible_zone_update(
-                self._zone_tracker.on_boundary(
-                    boundary,
-                    update.asof,
-                )
+            return self._visible_zone_update(
+                tracker.on_boundary(boundary, update.asof),
+                timeframe,
             )
-            return projected
-        batch = self._displacement_eye.last_batch
-        expected = tuple(
-            update.newly_completed.get(Timeframe.M5, ())
-        )
+        batch = eye.last_batch
+        expected = tuple(update.newly_completed.get(timeframe, ()))
         if tuple(candle for candle, _ in batch) != expected:
             raise RuntimeError(
-                "Group 3 and displacement completed-M5 batches diverged"
+                f"Group 3 and displacement completed-{timeframe.value} "
+                "batches diverged"
             )
-        result = self._zone_tracker.current_update()
+        result = tracker.current_update()
         order_block_funnel = []
         fvg_transitions = []
         order_block_transitions = []
-        bos_states = frames[Timeframe.M5].structure_breaks
+        bos_states = frames[timeframe].structure_breaks
         for candle, displacement_update in batch:
-            result = self._zone_tracker.on_completed_5m(
+            result = tracker.on_completed(
                 candle,
                 displacement_update,
                 tuple(
@@ -1685,7 +1861,7 @@ class CausalObserver:
                         instrument_id=candle.instrument_id,
                         protocol_hash=(
                             self._structure_trackers[
-                                Timeframe.M5
+                                timeframe
                             ].config.protocol_hash
                         ),
                         tick_size=self.config.tick_size,
@@ -1715,12 +1891,123 @@ class CausalObserver:
                 ),
                 order_block_funnel=tuple(order_block_funnel),
             )
-        return self._visible_zone_update(result)
+        return self._visible_zone_update(result, timeframe)
+
+    def _candidate_retirements(
+        self,
+        snapshot: MarketSnapshot,
+        *,
+        offered_entity_ids: frozenset[str] = frozenset(),
+    ) -> tuple[_CandidateRetirement, ...]:
+        """The candidates this snapshot shows have outlived their scale or reach.
+
+        The collection is bounded here rather than in the reducer so that the
+        bound is a fact in the log: the reducer drops a candidate on the
+        LIQUIDITY_RETIRED it publishes, and a cold replay agrees.  A pool or a
+        range boundary is bounded by its own entity lifecycle instead of by
+        age or reach, so it ends here on the bar its entity leaves the
+        authoritative set (``offered_entity_ids``): the pool resolved and was
+        compacted, or the range broke and its boundary item left.
+        """
+
+        config = self._liquidity_config
+        if config is None:
+            return ()
+        max_age = config.candidate_retirement_max_native_age_bars
+        max_distance = config.candidate_retirement_max_distance_atr
+        retirements: list[_CandidateRetirement] = []
+        for timeframe, state in snapshot.timeframe_states.items():
+            # ``age_bars`` advances on every 1m owner fan-out, so it counts
+            # minutes on every scale; the limit is in the scale's own bars.
+            age_limit = max_age * timeframe.minutes
+            for candidate in state.liquidity.candidates:
+                if candidate.source_kind in _ENTITY_OWNED_CANDIDATE_KINDS:
+                    if candidate.candidate_id in offered_entity_ids:
+                        continue
+                    reason = _ENTITY_OWNED_CANDIDATE_KINDS[
+                        candidate.source_kind
+                    ]
+                elif candidate.source_kind in _LIFECYCLE_OWNED_CANDIDATE_KINDS:
+                    # A completed-period reference level is replaced at its
+                    # rollover, which retires it there.
+                    continue
+                elif candidate.age_bars > age_limit:
+                    reason = "candidate_aged_out"
+                elif (
+                    candidate.distance_atr is not None
+                    and candidate.distance_atr > max_distance
+                ):
+                    reason = "candidate_out_of_reach"
+                else:
+                    continue
+                retirements.append(
+                    _CandidateRetirement(
+                        level_id=candidate.candidate_id,
+                        timeframe=timeframe,
+                        side=candidate.side,
+                        price=candidate.price,
+                        lower_bound=candidate.lower_bound,
+                        upper_bound=candidate.upper_bound,
+                        strength=candidate.strength,
+                        source_kind=candidate.source_kind,
+                        reason=reason,
+                        evidence={
+                            "age_bars": candidate.age_bars,
+                            "distance_atr": candidate.distance_atr,
+                        },
+                    )
+                )
+        return tuple(retirements)
+
+    def _drop_consumed_past_retention(
+        self,
+        base_inventory: Sequence[LiquidityInventoryItem],
+        *,
+        asof: pd.Timestamp,
+    ) -> list[LiquidityInventoryItem]:
+        """Leave out consumed swings exposed for their scale's retention.
+
+        The crossing that consumed the item was delivered on its bar; the
+        item repeats that fact for ``consumed_item_retention_native_bars`` of
+        its own scale, counting the bar of consumption, and then leaves the
+        observation.  The tracker may keep offering the swing, so a dropped
+        id is remembered for as long as it does.
+        """
+
+        config = self._liquidity_config
+        offered = {item.item_id for item in base_inventory}
+        self._dropped_consumed_ids.intersection_update(offered)
+        if config is None:
+            return list(base_inventory)
+        retention = config.consumed_item_retention_native_bars
+        for item in base_inventory:
+            if (
+                item.kind != "swing"
+                or item.item_id in self._dropped_consumed_ids
+            ):
+                continue
+            consumed = self._inventory_consumption.get(item.item_id)
+            if consumed is None:
+                continue
+            consumed_at, _ = consumed
+            if asof - consumed_at >= pd.Timedelta(
+                minutes=retention * item.timeframe.minutes
+            ):
+                self._dropped_consumed_ids.add(item.item_id)
+        if not self._dropped_consumed_ids:
+            return list(base_inventory)
+        return [
+            item
+            for item in base_inventory
+            if item.item_id not in self._dropped_consumed_ids
+        ]
 
     def _visible_zone_update(
         self,
         update: ZoneUpdate,
+        timeframe: Timeframe,
     ) -> ZoneUpdate:
+        hidden = self._group3_hidden_entity_ids[timeframe]
         retained_ids = {
             state.fvg_id
             for state in update.fair_value_gaps
@@ -1728,25 +2015,39 @@ class CausalObserver:
             state.order_block_id
             for state in update.order_blocks
         }
-        self._group3_hidden_entity_ids.intersection_update(
-            retained_ids
-        )
+        hidden.intersection_update(retained_ids)
         if update.boundary_reason in FVG_BOUNDARY_REASONS:
-            self._group3_hidden_entity_ids.update(retained_ids)
+            hidden.update(retained_ids)
         return replace(
             update,
             fair_value_gaps=tuple(
                 state
                 for state in update.fair_value_gaps
-                if state.fvg_id
-                not in self._group3_hidden_entity_ids
+                if state.fvg_id not in hidden
             ),
             order_blocks=tuple(
                 state
                 for state in update.order_blocks
-                if state.order_block_id
-                not in self._group3_hidden_entity_ids
+                if state.order_block_id not in hidden
             ),
+        )
+
+    def _spill_cold_events(self, asof: pd.Timestamp) -> None:
+        """Journal the committed events that left the hot window this update.
+
+        The reducer's unconsumed suffix must stay on the heap -- it is read
+        by identity -- so the spill stops at its cursor whatever the window
+        says.
+        """
+
+        if self.config.audit_journal_dir is None:
+            return
+        cutoff = asof - pd.Timedelta(minutes=self.config.audit_hot_window_minutes)
+        self.audit_store.spill(
+            before_index=min(
+                self.market_snapshot_publisher._event_reducer.cursor,
+                self.audit_store.index_of_first_known_at(cutoff),
+            )
         )
 
     def _retained_timeline_keys(
@@ -1814,8 +2115,18 @@ class CausalObserver:
         # A public reducer snapshot is intentionally bounded and can omit an
         # entity before a later lifecycle transition is emitted.  Keep only
         # still-transitionable prefixes hot; terminal histories cool as soon
-        # as the current typed snapshot no longer exposes them.
-        keys.update(set(self.memory.live_entity_keys()) - terminal)
+        # as the current typed snapshot no longer exposes them, and so does
+        # a prefix whose owner no longer exposes the entity at all.
+        keys.update(
+            key
+            for key in self.memory.live_entity_keys()
+            if key not in terminal
+            and (
+                key in keys
+                or key.partition(":")[0]
+                not in _OWNER_EXPOSED_TIMELINE_NAMESPACES
+            )
+        )
         # A reducer boundary may expose its terminal transition through the
         # dedicated boundary channel without appending that transition to the
         # hot EventMemory timeline.  Such an entity must cool immediately;
@@ -1823,6 +2134,139 @@ class CausalObserver:
         # terminal FVG/OB look live after a data anomaly.
         keys.difference_update(terminal)
         return keys
+
+    def _project_structural_legs(
+        self,
+        timeframe: Timeframe,
+        swings: Sequence[SwingPoint],
+        candles: Sequence[Candle],
+        *,
+        resolved_swing_ids: tuple[str, ...],
+        atr: float,
+        protected_swing_ids: tuple[str, ...],
+        structural_swing_ids: tuple[str, ...],
+    ) -> tuple[StructuralLegState, ...]:
+        """Fold the swings that resolved since the last projection.
+
+        ``build_structural_legs`` is a left fold whose only carried state is
+        the last swing in pivot order, so when the resolved swings merely
+        extend the previous pivot order the legs already projected are kept
+        and the fold resumes from that anchor.  An out-of-order confirmation
+        or an evicted swing rebuilds from every retained swing; legs the
+        rebuild reprojects keep their first-projected values.
+        """
+
+        cached = self._structural_leg_cache.get(timeframe)
+        if (
+            cached is not None
+            and cached.resolved_swing_ids == resolved_swing_ids
+        ):
+            return cached.legs
+        ordered = sorted(
+            (
+                swing
+                for swing in swings
+                if swing.lifecycle
+                in {SwingLifecycle.CONFIRMED, SwingLifecycle.BROKEN}
+                and swing.confirmed_at is not None
+            ),
+            key=lambda item: (
+                item.pivot_start,
+                item.confirmed_at,
+                item.swing_id,
+            ),
+        )
+        ordered_ids = tuple(swing.swing_id for swing in ordered)
+        retained = self._retained_structural_leg_prefix(
+            cached,
+            ordered_ids,
+            candles=candles,
+            timeframe=timeframe,
+        )
+        if retained is not None:
+            kept, resume_from = retained
+            appended = build_structural_legs(
+                timeframe,
+                (cached.last_anchor, *ordered[resume_from:]),
+                candles,
+                atr=atr,
+                protected_swing_ids=protected_swing_ids,
+                structural_swing_ids=structural_swing_ids,
+            )
+            legs = (*kept, *appended)[-STRUCTURAL_LEG_RETENTION:]
+        else:
+            projected = build_structural_legs(
+                timeframe,
+                swings,
+                candles,
+                atr=atr,
+                protected_swing_ids=protected_swing_ids,
+                structural_swing_ids=structural_swing_ids,
+            )
+            frozen_by_id = {
+                item.leg_id: item
+                for item in (() if cached is None else cached.legs)
+            }
+            legs = tuple(
+                frozen_by_id.get(item.leg_id, item) for item in projected
+            )
+        self._structural_leg_cache[timeframe] = _StructuralLegProjection(
+            resolved_swing_ids=resolved_swing_ids,
+            ordered_swing_ids=ordered_ids,
+            last_anchor=ordered[-1] if ordered else None,
+            legs=legs,
+        )
+        return legs
+
+    @staticmethod
+    def _retained_structural_leg_prefix(
+        cached: _StructuralLegProjection | None,
+        ordered_ids: tuple[str, ...],
+        *,
+        candles: Sequence[Candle],
+        timeframe: Timeframe,
+    ) -> tuple[tuple[StructuralLegState, ...], int] | None:
+        """The cached legs a full rebuild would reproject, and where to resume.
+
+        The fold sets its anchor to every swing it visits, so the legs after
+        any swing do not depend on what came before it.  When the structure
+        tracker evicted swings from the front of the pivot order and later
+        ones resolved at the back, the rebuild would produce exactly the
+        cached legs whose start swing survived and whose start pivot is still
+        inside the candle history, followed by the fold over the new swings.
+        Any other change (a swing evicted from the middle, a confirmation
+        that sorts before a cached one) returns ``None`` for a full rebuild.
+        """
+
+        if cached is None or cached.last_anchor is None or not ordered_ids:
+            return None
+        cached_ids = cached.ordered_swing_ids
+        try:
+            front = cached_ids.index(ordered_ids[0])
+        except ValueError:
+            return None
+        remaining = cached_ids[front:]
+        if ordered_ids[: len(remaining)] != remaining:
+            return None
+        window_start = next(
+            (
+                candle.start
+                for candle in candles
+                if candle.timeframe is timeframe
+                and candle_coverage(candle).admits_definitional_path
+            ),
+            None,
+        )
+        if window_start is None:
+            return None
+        surviving = set(remaining)
+        kept = tuple(
+            leg
+            for leg in cached.legs
+            if leg.start_swing_id in surviving
+            and leg.start_event_time >= window_start
+        )
+        return kept, len(remaining)
 
     @staticmethod
     def _pool_formation_source(
@@ -1892,7 +2336,9 @@ class CausalObserver:
         snapshot = (
             tracker.snapshot(
                 range_auction_sources_only=True,
-                include_support_resistance=(timeframe is Timeframe.H1),
+                include_support_resistance=(
+                    timeframe in self._range_timeframes
+                ),
             )
             if self.config.range_auction_projection_only
             else tracker.snapshot()
@@ -2727,26 +3173,38 @@ class CausalObserver:
                     "an earlier checkpoint"
                 )
                 raise
-        if self._displacement_eye is None:
-            displacement = None
-        else:
+        # Every displacement eye is memoized on its own input identity, so
+        # an exact retry of one update (a boundary re-observed after a
+        # failure downstream) re-reads the observation instead of feeding the
+        # tracker the same clock twice.
+        displacements: dict[Timeframe, DisplacementObservation] = {}
+        for timeframe, eye in self._displacement_eyes.items():
             displacement_input = (
                 update.asof,
                 update.completed_1m,
                 tuple(update.anomalies),
-                tuple(
-                    update.newly_completed.get(Timeframe.M5, ())
-                ),
+                tuple(update.newly_completed.get(timeframe, ())),
             )
-            if (
-                displacement_input == self._last_displacement_input
-                and self._last_displacement_observation is not None
-            ):
-                displacement = self._last_displacement_observation
+            memo = self._last_displacement_inputs.get(timeframe)
+            if memo is not None and memo[0] == displacement_input:
+                displacements[timeframe] = memo[1]
             else:
-                displacement = self._displacement_eye.on_update(update)
-                self._last_displacement_input = displacement_input
-                self._last_displacement_observation = displacement
+                displacements[timeframe] = eye.on_update(update)
+                self._last_displacement_inputs[timeframe] = (
+                    displacement_input,
+                    displacements[timeframe],
+                )
+        displacement = (
+            None
+            if self._displacement_eye is None
+            else displacements[self._displacement_eye.timeframe]
+        )
+        self._secondary_displacements = {
+            timeframe: observation
+            for timeframe, observation in displacements.items()
+            if self._displacement_eye is None
+            or timeframe is not self._displacement_eye.timeframe
+        }
         reset_anomalies = tuple(
             value
             for value in update.anomalies
@@ -2775,7 +3233,10 @@ class CausalObserver:
                         # bars.  Publish those immutable terminal facts before
                         # clearing the prior-epoch BAR lookup tables.
                         self._emitter._record_displacement_events(displacement)
+                        for secondary in self._secondary_displacements.values():
+                            self._emitter._record_displacement_events(secondary)
                         displacement = None
+                        self._secondary_displacements = {}
                     self._reset_contract_state(
                         reason=reason,
                         observed_at=update.asof,
@@ -2976,35 +3437,15 @@ class CausalObserver:
                     and item.confirmed_at is not None
                 )
             )
-            cached_legs = self._structural_leg_cache.get(timeframe)
-            if (
-                cached_legs is not None
-                and cached_legs[0] == resolved_swing_ids
-            ):
-                structural_legs = cached_legs[1]
-            else:
-                projected_legs = build_structural_legs(
-                    timeframe,
-                    swings,
-                    histories[timeframe],
-                    atr=atr,
-                    protected_swing_ids=protected_swing_ids,
-                    structural_swing_ids=structural_swing_ids,
-                )
-                frozen_by_id = {
-                    item.leg_id: item
-                    for item in (
-                        () if cached_legs is None else cached_legs[1]
-                    )
-                }
-                structural_legs = tuple(
-                    frozen_by_id.get(item.leg_id, item)
-                    for item in projected_legs
-                )
-                self._structural_leg_cache[timeframe] = (
-                    resolved_swing_ids,
-                    structural_legs,
-                )
+            structural_legs = self._project_structural_legs(
+                timeframe,
+                swings,
+                histories[timeframe],
+                resolved_swing_ids=resolved_swing_ids,
+                atr=atr,
+                protected_swing_ids=protected_swing_ids,
+                structural_swing_ids=structural_swing_ids,
+            )
             frames[timeframe] = replace(
                 frame,
                 metrics=metrics,
@@ -3030,11 +3471,18 @@ class CausalObserver:
             )
         try:
             zone_update = self._observe_group3(update, frames)
-            if zone_update is not None:
-                frames[Timeframe.M5] = replace(
-                    frames[Timeframe.M5],
-                    fair_value_gaps=zone_update.fair_value_gaps,
-                    order_blocks=zone_update.order_blocks,
+            for timeframe, scale_update in (
+                *(
+                    ()
+                    if zone_update is None
+                    else ((self._zone_tracker.timeframe, zone_update),)
+                ),
+                *self._secondary_zone_updates.items(),
+            ):
+                frames[timeframe] = replace(
+                    frames[timeframe],
+                    fair_value_gaps=scale_update.fair_value_gaps,
+                    order_blocks=scale_update.order_blocks,
                 )
         except Exception:
             self._terminal_failure = (
@@ -3055,6 +3503,8 @@ class CausalObserver:
                 )
                 self._publish_reference_candidate_events()
                 self._emitter._record_displacement_events(displacement)
+                for secondary in self._secondary_displacements.values():
+                    self._emitter._record_displacement_events(secondary)
             except Exception:
                 self._terminal_failure = (
                     "normalized bar/reference/displacement semantic projection "
@@ -3111,6 +3561,26 @@ class CausalObserver:
             base_inventory.extend(native_inventory)
         if not self.config.range_auction_projection_only:
             base_inventory.extend(self._reference_inventory.values())
+        base_inventory = self._drop_consumed_past_retention(
+            base_inventory,
+            asof=update.asof,
+        )
+        if self._retired_level_ids:
+            # A retired candidate is gone from the reducer's set; the tracker
+            # may still hold its source swing, so a still-visible item leaves
+            # the inventory pipeline here too, or a later crossing would reach
+            # a level the Eye no longer offers.  A consumed item is history
+            # and keeps its recorded outcome.  An id the trackers no longer
+            # offer can never be offered again, so the set follows the offer.
+            self._retired_level_ids.intersection_update(
+                {item.item_id for item in base_inventory}
+            )
+            base_inventory = [
+                item
+                for item in base_inventory
+                if item.item_id not in self._retired_level_ids
+                or item.item_id in self._inventory_consumption
+            ]
         if not self.config.range_auction_projection_only:
             retained_liquidity_entities = {
                 item.zone_id
@@ -3156,13 +3626,18 @@ class CausalObserver:
                         )
                     )
                 else:
-                    completed_h1 = tuple(
-                        update.newly_completed.get(Timeframe.H1, ())
-                    )
-                    if len(completed_h1) > 1:
-                        raise RuntimeError(
-                            "one 1m update emitted multiple H1 candles"
+                    completed_native: dict[Timeframe, Candle] = {}
+                    for timeframe in self._range_timeframes:
+                        completed = tuple(
+                            update.newly_completed.get(timeframe, ())
                         )
+                        if len(completed) > 1:
+                            raise RuntimeError(
+                                "one 1m update emitted multiple "
+                                f"{timeframe.value} candles"
+                            )
+                        if completed:
+                            completed_native[timeframe] = completed[0]
                     range_auction_update = (
                         self._range_auction_tracker.on_completed_update(
                             update.completed_1m,
@@ -3170,22 +3645,24 @@ class CausalObserver:
                                 self._prior.liquidity_inventory
                             ),
                             liquidity_pools=pre_projection_pool_states,
-                            completed_h1=(
-                                completed_h1[0]
-                                if completed_h1
-                                else None
-                            ),
-                            h1_support_resistance=(
-                                frames[
-                                    Timeframe.H1
+                            completed_native=completed_native,
+                            native_support_resistance={
+                                timeframe: frames[
+                                    timeframe
                                 ].support_resistance
-                            ),
+                                for timeframe in self._range_timeframes
+                            },
                         )
                     )
-                frames[Timeframe.H1] = replace(
-                    frames[Timeframe.H1],
-                    dealing_ranges=range_auction_update.dealing_ranges,
-                )
+                for timeframe in self._range_timeframes:
+                    frames[timeframe] = replace(
+                        frames[timeframe],
+                        dealing_ranges=tuple(
+                            state
+                            for state in range_auction_update.dealing_ranges
+                            if state.timeframe is timeframe
+                        ),
+                    )
                 # Append each manipulation timeline in lifecycle order now.
                 # New SWEPT events carry a high same-clock sequence floor,
                 # so inventory, HTF sources and ranges still sort before
@@ -3238,13 +3715,14 @@ class CausalObserver:
                 "last checkpoint"
             )
             raise
-        if (
-            zone_update is not None
-            and zone_update.boundary_reason
-            not in FVG_BOUNDARY_REASONS
-        ):
+        for scale_update in (zone_update, *self._secondary_zone_updates.values()):
+            if (
+                scale_update is None
+                or scale_update.boundary_reason in FVG_BOUNDARY_REASONS
+            ):
+                continue
             try:
-                self._emitter._record_group3_events(zone_update)
+                self._emitter._record_group3_events(scale_update)
             except Exception:
                 self._terminal_failure = (
                     "Group 3 event projection failed after state may "
@@ -3515,8 +3993,34 @@ class CausalObserver:
             # the projection tail so the reducer never sees a physical fact in
             # that tail.  The next completed bar reduces it in stream order.
             self._emitter._record_delivery_phase_events(delivery_transitions)
+            retirements = self._candidate_retirements(
+                market_snapshot,
+                offered_entity_ids=frozenset(
+                    {
+                        f"pool:{pool.pool_id}"
+                        for frame in frames.values()
+                        for pool in frame.liquidity_pools
+                    }
+                    | {
+                        item.item_id
+                        for item in liquidity_inventory
+                        if item.kind == "range_boundary"
+                    }
+                ),
+            )
+            if retirements:
+                self._retired_level_ids.update(
+                    retirement.level_id for retirement in retirements
+                )
+                self._emitter.emit_candidate_retirements(
+                    retirements,
+                    observed_at=update.asof,
+                    sequence_floor=(
+                        EventMemory._CANDIDATE_RETIREMENT_SEQUENCE_FLOOR
+                    ),
+                )
             self.memory.flush_audit()
-            if delivery_transitions:
+            if delivery_transitions or retirements:
                 self.market_snapshot_publisher._consume_committed_delivery_phase_tail()
             semantic_events = self.audit_store.events_since(audit_start)
             market_snapshot = replace(
@@ -3526,6 +4030,7 @@ class CausalObserver:
                 event_prefix_fingerprint=self.audit_store.fingerprint(),
             )
             self.last_market_snapshot = market_snapshot
+            self._spill_cold_events(update.asof)
         except Exception:
             self._terminal_failure = (
                 "hierarchical state publication or audit commit failed after "
@@ -3562,7 +4067,11 @@ class CausalObserver:
         prior_observation = self._prior
         current_fvgs = frames[Timeframe.M5].fair_value_gaps
         current_order_blocks = frames[Timeframe.M5].order_blocks
-        current_ranges = frames[Timeframe.H1].dealing_ranges
+        current_ranges = tuple(
+            state
+            for timeframe in self._range_timeframes
+            for state in frames[timeframe].dealing_ranges
+        )
         current_manipulations = (
             ()
             if range_auction_update is None
@@ -3718,6 +4227,14 @@ class CausalObserver:
                 execution=execution,
                 anomalies=tuple(dict.fromkeys(anomalies)),
                 displacement=displacement,
+                displacements={
+                    **(
+                        {}
+                        if displacement is None
+                        else {displacement.timeframe: displacement}
+                    ),
+                    **self._secondary_displacements,
+                },
                 liquidity_inventory=liquidity_inventory,
                 liquidity_pool_states=liquidity_pool_states,
                 event_ages_minutes=event_ages_minutes,
@@ -3812,6 +4329,7 @@ class CausalObserver:
                 ),
                 interaction_update=interaction_update,
                 active_timeframes=self._active_timeframes,
+                published_timeframes=self._published_timeframes,
                 scale_registry_id=update.scale_registry_id,
             )
         except Exception:
@@ -3825,8 +4343,54 @@ class CausalObserver:
         self._boundary_reset_identity = None
         self._group4_boundary_update = None
         self._interaction_boundary_update = None
+        self._retire_entity_memories(observation)
         self._prior = observation
         return observation
+
+    def _retire_entity_memories(self, observation: MarketObservation) -> None:
+        """Drop the emitter's memories of entities nothing retains any more.
+
+        Runs when the memories have doubled since the last pass (above the
+        floor), harvesting every identifier the published tracker states
+        cite -- frames, displacement, inventory, pools, interaction -- plus
+        the reducer's candidate set and the observer's own inventory
+        bookkeeping, so an entry survives while any of them still names its
+        entity.
+        """
+
+        floor = ENTITY_MEMORY_PRUNE_FLOOR
+        if floor is None:
+            return
+        entries = self._emitter.entity_memory_entries()
+        if entries <= max(floor, 2 * self._entity_memory_prune_mark):
+            return
+        snapshot = observation.market_snapshot
+        live = harvest_entity_ids(
+            *(
+                getattr(observation, item.name)
+                for item in fields(observation)
+                if item.name not in _LIVENESS_EXCLUDED_OBSERVATION_FIELDS
+            ),
+            *(
+                ()
+                if snapshot is None
+                else (
+                    state.liquidity
+                    for state in snapshot.timeframe_states.values()
+                )
+            ),
+            self._reference_inventory,
+            {
+                "item_ids": (
+                    *self._retired_level_ids,
+                    *self._dropped_consumed_ids,
+                    *self._inventory_consumption,
+                )
+            },
+        )
+        self._emitter.prune_entity_memories(live)
+        self._entity_memory_prune_mark = self._emitter.entity_memory_entries()
+        self.entity_memory_prunes += 1
 
 
 __all__ = [

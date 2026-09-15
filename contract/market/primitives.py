@@ -210,6 +210,12 @@ class Timeframe(str, Enum):
     # Optional context bridge enabled through the explicit ScaleSpec registry.
     M15 = "15m"
 
+    @property
+    def minutes(self) -> int:
+        """The completed-bar length of this scale."""
+
+        return {"1m": 1, "5m": 5, "15m": 15, "1H": 60, "4H": 240}[self.value]
+
 
 CORE_TIMEFRAMES = (
     Timeframe.H4,

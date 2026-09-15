@@ -7,13 +7,13 @@ not rewrite the original zone.
 from __future__ import annotations
 
 from collections import deque
-import copy
+import dataclasses
 from dataclasses import dataclass, replace
 import hashlib
 import json
 import math
 from pathlib import Path
-from typing import Sequence
+from typing import Any, Sequence
 
 import pandas as pd
 
@@ -65,6 +65,20 @@ class LiquidityConfig:
     retained_zones: int = 128
     retained_pools: int = 128
     retained_touches: int = 128
+    # A candidate retires past this many bars of its own scale, or beyond
+    # this many of its scale's ATRs from the close; see the protocol's
+    # ``candidate_retirement`` note.
+    candidate_retirement_max_native_age_bars: int = 480
+    candidate_retirement_max_distance_atr: float = 20.0
+    # A terminal zone or pool stays in the tracker for this many completed
+    # native bars, counting the bar that made it terminal, then is
+    # compacted; ``retained_zones``/``retained_pools`` remain the capacity
+    # that live state may not exhaust.
+    terminal_state_retention_native_bars: int = 1
+    # A consumed swing inventory item stays in the observation for this many
+    # bars of its own scale, counting the bar of consumption, then is dropped;
+    # the reducer's candidate keeps its own disarm/re-arm and retirement rules.
+    consumed_item_retention_native_bars: int = 1
 
     def __post_init__(self) -> None:
         try:
@@ -102,6 +116,14 @@ class LiquidityConfig:
             or self.retained_pools < 8
             or type(self.retained_touches) is not int
             or self.retained_touches < 8
+            or type(self.candidate_retirement_max_native_age_bars) is not int
+            or self.candidate_retirement_max_native_age_bars < 1
+            or not math.isfinite(float(self.candidate_retirement_max_distance_atr))
+            or self.candidate_retirement_max_distance_atr <= 0.0
+            or type(self.terminal_state_retention_native_bars) is not int
+            or self.terminal_state_retention_native_bars < 1
+            or type(self.consumed_item_retention_native_bars) is not int
+            or self.consumed_item_retention_native_bars < 1
         ):
             raise LiquidityProtocolError("invalid liquidity protocol")
 
@@ -139,6 +161,18 @@ class LiquidityConfig:
             retained_touches=int(
                 parameters.get("retained_touches", -1)
             ),
+            candidate_retirement_max_native_age_bars=int(
+                parameters.get("candidate_retirement_max_native_age_bars", -1)
+            ),
+            candidate_retirement_max_distance_atr=float(
+                parameters.get("candidate_retirement_max_distance_atr", -1.0)
+            ),
+            terminal_state_retention_native_bars=int(
+                parameters.get("terminal_state_retention_native_bars", -1)
+            ),
+            consumed_item_retention_native_bars=int(
+                parameters.get("consumed_item_retention_native_bars", -1)
+            ),
         )
 
 
@@ -149,6 +183,7 @@ class _ZoneRecord:
     total_touches: int
     reaction_total_atr: float
     contact_active: bool = False
+    terminal_index: int | None = None
 
 
 @dataclass
@@ -161,6 +196,7 @@ class _PoolRecord:
     is_protected_swing: bool
     visibility_strength: float
     earliest_suppressed_touch_at: pd.Timestamp | None = None
+    terminal_index: int | None = None
 
 
 @dataclass
@@ -507,8 +543,7 @@ class CausalLiquidityTracker:
                         SupportResistanceLifecycle.REACCEPTED,
                         SupportResistanceLifecycle.RETIRED,
                     }
-                    and self._zone_terminal_at(record)
-                    != self._last_end
+                    and self._terminal_exposure_complete(record)
                 )
             ]
             if not candidates:
@@ -517,8 +552,7 @@ class CausalLiquidityTracker:
                     and self._live_reference_source_ids.isdisjoint(
                         record.state.source_ids
                     )
-                    and self._zone_terminal_at(record)
-                    == self._last_end
+                    and record.terminal_index is not None
                     for record in self._zones.values()
                 )
                 current_overflow = max(
@@ -526,8 +560,8 @@ class CausalLiquidityTracker:
                     len(self._zones) - self.config.retained_zones,
                 )
                 if current_overflow < current_terminal_count:
-                    # Keep same-bar terminal states visible until the next
-                    # real completed bar compacts the exposure buffer.
+                    # Keep terminal states inside their retention visible
+                    # until a later real completed bar compacts them.
                     return
                 raise LiquidityProtocolError(
                     "zone retention is exhausted by nonterminal state"
@@ -543,10 +577,29 @@ class CausalLiquidityTracker:
             self._zones.pop(zone_id, None)
             self._pool_generations.pop(zone_id, None)
 
-    def _compact_observed_zone_overflow(self) -> None:
+    def _terminal_exposure_complete(
+        self,
+        record: "_ZoneRecord | _PoolRecord",
+    ) -> bool:
+        """True once a terminal record has had its retention of native bars."""
+
+        return (
+            record.terminal_index is not None
+            and self._bar_index - record.terminal_index
+            >= self.config.terminal_state_retention_native_bars
+        )
+
+    def _compact_terminal_zones(self) -> None:
+        """Drop terminal zones past their retention; fail closed on overflow.
+
+        Every terminal zone was exposed on the bar that made it terminal, so
+        after ``terminal_state_retention_native_bars`` it is history the event
+        log owns.  A zone a live pool or a live reference source still cites
+        is kept regardless.  The capacity rule stays: an overflow that only
+        live or same-bar state could absorb is an error, never an eviction.
+        """
+
         overflow = len(self._zones) - self.config.retained_zones
-        if overflow <= 0:
-            return
         pinned_zone_ids = {
             record.zone_id
             for record in self._pools.values()
@@ -565,9 +618,7 @@ class CausalLiquidityTracker:
                     and self._live_reference_source_ids.isdisjoint(
                         record.state.source_ids
                     )
-                    and self._zone_terminal_at(record) is not None
-                    and self._zone_terminal_at(record)
-                    != self._last_end
+                    and self._terminal_exposure_complete(record)
                 )
             ),
             key=lambda item: (
@@ -579,7 +630,7 @@ class CausalLiquidityTracker:
             raise LiquidityProtocolError(
                 "zone exposure overflow lacks observed terminal states"
             )
-        for victim in candidates[:overflow]:
+        for victim in candidates:
             zone_id = victim.state.zone_id
             self._zones.pop(zone_id, None)
             self._pool_generations.pop(zone_id, None)
@@ -640,6 +691,7 @@ class CausalLiquidityTracker:
                     SUPPORT_RESISTANCE_RETIREMENT_REASON
                 ),
             )
+            record.terminal_index = self._bar_index
             self._pool_generations.pop(state.zone_id, None)
 
     def _prune_pools(self) -> None:
@@ -653,17 +705,12 @@ class CausalLiquidityTracker:
                         LiquidityPoolLifecycle.ACCEPTED,
                         LiquidityPoolLifecycle.REJECTED,
                     }
-                    and record.state.resolved_at != self._last_end
+                    and self._terminal_exposure_complete(record)
                 )
             ]
             if not candidates:
                 current_terminal_count = sum(
-                    record.state.lifecycle
-                    in {
-                        LiquidityPoolLifecycle.ACCEPTED,
-                        LiquidityPoolLifecycle.REJECTED,
-                    }
-                    and record.state.resolved_at == self._last_end
+                    record.terminal_index is not None
                     for record in self._pools.values()
                 )
                 current_overflow = max(
@@ -684,10 +731,10 @@ class CausalLiquidityTracker:
             )
             self._pools.pop(victim.state.pool_id, None)
 
-    def _compact_observed_pool_overflow(self) -> None:
+    def _compact_terminal_pools(self) -> None:
+        """Drop resolved pools past retention; fail closed on overflow."""
+
         overflow = len(self._pools) - self.config.retained_pools
-        if overflow <= 0:
-            return
         candidates = sorted(
             (
                 record
@@ -698,7 +745,7 @@ class CausalLiquidityTracker:
                         LiquidityPoolLifecycle.ACCEPTED,
                         LiquidityPoolLifecycle.REJECTED,
                     }
-                    and record.state.resolved_at != self._last_end
+                    and self._terminal_exposure_complete(record)
                 )
             ),
             key=lambda item: (
@@ -710,7 +757,7 @@ class CausalLiquidityTracker:
             raise LiquidityProtocolError(
                 "pool exposure overflow lacks observed terminal states"
             )
-        for victim in candidates[:overflow]:
+        for victim in candidates:
             self._pools.pop(victim.state.pool_id, None)
 
     def _mark_generation_terminal(self, record: _PoolRecord) -> None:
@@ -1019,6 +1066,7 @@ class CausalLiquidityTracker:
                 transition_reason=SUPPORT_RESISTANCE_RETIREMENT_REASON,
                 metadata_observed_at=candle.end,
             )
+            record.terminal_index = self._bar_index
             record.contact_active = False
 
     def _add_touch(
@@ -1355,6 +1403,14 @@ class CausalLiquidityTracker:
                 else "close_returned_inside"
             ),
         )
+        # A completed-1m projection lands before the native bar that carries
+        # its clock is processed; the terminal bar is that native bar, so the
+        # record is still exposed in its snapshot before retention counts.
+        record.terminal_index = self._bar_index + (
+            1
+            if self._last_end is not None and observed_at > self._last_end
+            else 0
+        )
         self._mark_generation_terminal(record)
         return record.state
 
@@ -1502,6 +1558,7 @@ class CausalLiquidityTracker:
                         reaccepted_at=candle.end,
                         transition_reason="close_reentered_frozen_zone",
                     )
+                    record.terminal_index = self._bar_index
 
     def _update_pools(self, candle: Candle) -> None:
         for record in self._pools.values():
@@ -1554,6 +1611,7 @@ class CausalLiquidityTracker:
                         else "close_returned_inside"
                     ),
                 )
+                record.terminal_index = self._bar_index
                 self._mark_generation_terminal(record)
 
     def on_candle(
@@ -1655,7 +1713,7 @@ class CausalLiquidityTracker:
             1 for _ in new_reference_items
         )
         rollback_state = (
-            copy.deepcopy(self.__dict__)
+            self._rollback_snapshot()
             if (
                 candle.real_completed
                 and (new_swing_ids or new_reference_count)
@@ -1682,8 +1740,8 @@ class CausalLiquidityTracker:
             }
             self._bar_index += 1
             self._remember_strict_prior_atr(candle)
-            self._compact_observed_zone_overflow()
-            self._compact_observed_pool_overflow()
+            self._compact_terminal_zones()
+            self._compact_terminal_pools()
             # A replaced completed-period source becomes cold before this
             # bar's price is interpreted.  The replacement bar cannot
             # retroactively test, break or reaccept the old reference zone.
@@ -1722,6 +1780,35 @@ class CausalLiquidityTracker:
                 self.__dict__.clear()
                 self.__dict__.update(rollback_state)
             raise
+
+    def _rollback_snapshot(self) -> dict[str, Any]:
+        """A bounded copy of the state a failed update must restore.
+
+        Every container is copied one level deep and every mutable record
+        inside it is copied; the frozen states, tuples and timestamps under
+        them are shared, because nothing in an update mutates them.  A deep
+        copy of the whole ``__dict__`` walked all of that on every new swing
+        once retention was at capacity, and grew with the retained history.
+        """
+
+        snapshot: dict[str, Any] = {}
+        for name, value in self.__dict__.items():
+            if isinstance(value, dict):
+                snapshot[name] = {
+                    key: (
+                        dataclasses.replace(item)
+                        if isinstance(item, (_ZoneRecord, _PoolRecord, _PoolGeneration))
+                        else item
+                    )
+                    for key, item in value.items()
+                }
+            elif isinstance(value, deque):
+                snapshot[name] = deque(value, maxlen=value.maxlen)
+            elif isinstance(value, (set, list)):
+                snapshot[name] = type(value)(value)
+            else:
+                snapshot[name] = value
+        return snapshot
 
     def snapshot(
         self,

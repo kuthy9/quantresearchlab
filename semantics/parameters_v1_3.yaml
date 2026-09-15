@@ -60,7 +60,15 @@
       },
       "status": "frozen_existing_protocol_by_event_family",
       "source": "configs/primitives_structure_liquidity.json:bos.post_break_acceptance and configs/primitives_range.json:engineering_parameters.outside_acceptance_closes plus configs/primitives_range.json:dealing_range.break.mature_break",
-      "scope_note": "the two-close setting belongs to the real-1m range-manipulation resolver; active dealing-range external acceptance is the first completed H1 close strictly outside the frozen range"
+      "scope_note": "the two-close setting belongs to the real-1m range-manipulation resolver; active dealing-range external acceptance is the first completed close of the range's own scale strictly outside the frozen range"
+    },
+    "dealing_range_scales": {
+      "values": {
+        "timeframes": ["15m", "1H", "4H"]
+      },
+      "status": "frozen_existing_protocol",
+      "source": "configs/primitives_range.json:timeframes",
+      "threshold_semantics": "the scales the dealing-range definition is applied on, with one set of thresholds: every *_h1_bars parameter counts completed bars of the range's own scale (the eight candidate bars are two hours on 15m, eight on 1H, thirty-two on 4H) and the maturity, balance and break rules are the same. At most one live range per scale; one manipulation funnel spans every scale's mature boundaries and every pool. Registered 2026-09-14 under smc_semantics_v1.3 with the 1H range unchanged in definition; the 15m and 4H ranges are the same definition applied more widely, not a re-parameterisation, and their natural-observation coverage is not yet measured"
     },
     "min_fvg_ticks": {
       "value": 1,
@@ -147,11 +155,45 @@
     "interaction_context_capacity": {
       "values": {
         "maximum_context_states": 256,
-        "maximum_steps_per_path": 16
+        "maximum_steps_per_path": 16,
+        "terminal_context_retention_real_1m_bars": 1
       },
       "status": "frozen_existing_protocol",
       "source": "configs/primitives_interaction.json:engineering_parameters",
-      "threshold_semantics": "bounded retention for physical interaction contexts and the steps inside one path; exhaustion fails the update closed rather than evicting a live context"
+      "threshold_semantics": "bounded retention for physical interaction contexts and the steps inside one path; exhaustion fails the update closed rather than evicting a live context. A closed or censored path is exposed in terminal_context_retention_real_1m_bars completed outputs, counting the one that closed it, and is then compacted from the update; its closing transition was delivered on that bar and the fact stays in the event log, so retention changes what the update repeats, not what the Eye states"
+    },
+    "candidate_retirement": {
+      "values": {
+        "candidate_retirement_max_native_age_bars": 480,
+        "candidate_retirement_max_distance_atr": 20.0
+      },
+      "status": "frozen_existing_protocol",
+      "source": "configs/primitives_structure_liquidity.json:liquidity_parameters",
+      "threshold_semantics": "a candidate level retires past 480 bars of its own scale (8 h on 1m, 40 h on 5m, five sessions on 15m) or beyond 20 of its scale's ATRs; the collection is bounded instead of append-only, and a retired identity that re-forms is a new candidate. An equal-pool or range-boundary candidate is bounded by its entity instead: it retires (pool_resolved / range_boundary_retired) on the bar its pool leaves the authoritative pool set or its boundary item leaves the inventory"
+    },
+    "terminal_state_retention": {
+      "values": {
+        "terminal_state_retention_native_bars": 1
+      },
+      "status": "frozen_existing_protocol",
+      "source": "configs/primitives_structure_liquidity.json:liquidity_parameters",
+      "threshold_semantics": "a reaccepted or retired support/resistance zone and an accepted or rejected equal pool stay in the tracker's snapshot for one completed native bar, the one that made them terminal, and are then compacted; the terminal transition is delivered on that bar and the event log owns the fact, so retention changes what the snapshot repeats, not what the Eye states. A zone a live pool or a live completed-period source still cites is kept regardless, and retained_zones / retained_pools remain the capacity that live state may not exhaust"
+    },
+    "consumed_item_retention": {
+      "values": {
+        "consumed_item_retention_native_bars": 1
+      },
+      "status": "frozen_existing_protocol",
+      "source": "configs/primitives_structure_liquidity.json:liquidity_parameters",
+      "threshold_semantics": "a consumed swing inventory item stays in the observation for one bar of its own scale, counting the bar of consumption (one 1m observation on 1m, five on 5m), then is dropped; LEVEL_TOUCHED / LEVEL_REACHED delivered the consumption and the event log owns it. The reducer's swept candidate is not retired by this rule: it keeps its disarm / re-arm lifecycle and leaves by candidate_retirement, so unswept_* and the candidate views are unchanged"
+    },
+    "zone_terminal_state_retention": {
+      "values": {
+        "terminal_state_retention_native_bars": 1
+      },
+      "status": "frozen_existing_protocol",
+      "source": "configs/primitives_zones.json:capacity",
+      "threshold_semantics": "a mitigated, invalidated, expired or failed Group 3 FVG or order block stays in its tracker for one completed native bar, the one that made it terminal, and is compacted at the start of the next; the terminal transition is delivered in that bar's output and the event log owns the fact, so retention changes what the frame repeats, not what the Eye states. Group 5 reads a source's failure from the frame that delivered it; a source it no longer sees is neither failed nor cold. maximum_fvg_states / maximum_order_block_states remain the capacity that live state may not exhaust"
     }
   }
 }

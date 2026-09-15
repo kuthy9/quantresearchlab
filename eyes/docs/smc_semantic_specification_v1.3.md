@@ -40,7 +40,7 @@ v1.2 → v1.3 delta, the lifecycle entities, and every defect the replay exposed
 are stated here rather than split across two files. Its status is
 `preregistered_development_contract_not_oos_trading_authority`: atomic identity
 `smc_semantics_v1.3` ·
-`f92b24c86bf942defc88de4edb7be16cc2a30dd64fde3b4432657780648b1f0c`, Foundation
+`144f1d6c6d6246931fda6c0f0e9cbc28d8260c851e41de7fdb9132214c3ee94d` (refrozen 2026-09-14: the target-outcome and candidate-retirement concepts, the multi-scale displacement and zone protocols, and the Group 5 terminal-context, liquidity and Group 3 terminal-state retention parameters), Foundation
 identity `smc_semantic_foundation_v2.1` ·
 `69428dbfd2a9b2aa19f0254391fca2da17aedb8d0206829572e69c0cc212a715`.
 
@@ -319,6 +319,11 @@ Formula by family: `bos_post_break_later_bars = 1`,
 `range_manipulation_real_1m_outside_closes = 2`,
 `active_dealing_range_external_acceptance_completed_h1_closes = 1`.
 Emits `ACCEPTANCE_CONFIRMED`. 2022-02: 10,238 · 2022-03: 11,264.
+
+**`target_outcome`** *(added 2026-09-13)* — the terminal fate of one enumerated
+candidate target, on the target's own timeframe. Emits `LEVEL_REACHED` beside
+the first `LEVEL_TOUCHED` of an inventory item and `LEVEL_INVALIDATED` when the
+item leaves the candidate set untouched; exclusive per item.
 
 ### Delivery
 
@@ -911,6 +916,56 @@ default) returns an identical event count of 70,859 in both arms with a
 different `event_prefix_fingerprint` for exactly that reason. An identical
 count with a different fingerprint is the signature of projection transport
 moving, not of a detector moving.
+
+### The same bound, applied to terminal state (2026-09-13)
+
+The Swing set was not the only population that grew for the life of the
+process; it was the only one that grew *without a cap*. Three others were
+capped, and each kept its terminal records until the cap forced the oldest
+out: the Group 5 interaction update carried every closed context path until
+`maximum_context_states` (256); the liquidity tracker carried every
+reaccepted or retired zone and every accepted or rejected pool until
+`retained_zones` / `retained_pools` (128). On the real tape those caps were
+reached within a session and the terminal share then stayed near 90 %, so
+every snapshot, validation and inventory projection walked history. Two
+registered parameters now say how long a terminal record is repeated after
+its transition has been delivered — `terminal_context_retention_real_1m_bars`
+(interaction protocol) and `terminal_state_retention_native_bars` (liquidity
+protocol), both **1**, counting the bar of the transition itself. The caps
+stay as the capacity live state may not exhaust, and the fail-closed rule for
+that case is unchanged. The transition events and the event log are
+untouched; what changed is what the current update and snapshot *repeat*, and
+therefore the state-projection fingerprint, exactly as for the Swing bound.
+
+Group 3 was the third capped population, and it followed on 2026-09-14: a
+mitigated, invalidated, expired or failed FVG or order block stayed in its
+tracker until `maximum_fvg_states` / `maximum_order_block_states` (256 / 128
+per scale) forced the oldest out, so the 5m frame handed Group 5 285 sources
+per bar at bar 20,000 of 2022-02 against 9 at bar 500, and each terminal
+state held a live entity timeline. `terminal_state_retention_native_bars`
+(zone protocol `capacity`, registered as `zone_terminal_state_retention`,
+**1**) now says the same thing for Group 3: the terminal state is repeated in
+the output of the bar that produced it and compacted at the start of the
+next completed native bar. Group 5 reads a source's failure from the frame
+that delivered it; a source it no longer sees is neither failed nor cold.
+
+## The Structural Range is projected on 15m, 1H and 4H
+
+**Date: 2026-09-14.** `configs/primitives_range.json` names `timeframes`
+(`15m`, `1H`, `4H`). The 1H range is unchanged in definition; the 15m and 4H
+ranges are the same definition applied more widely: every `*_h1_bars`
+parameter counts completed bars of the range's own scale (eight candidate
+bars are two hours on 15m, eight on 1H, thirty-two on 4H), the maturity,
+balance and break rules are the same, at most one live range per scale, and
+one manipulation funnel spans every scale's mature boundaries and every pool.
+Every range, boundary item, funnel snapshot and RANGE event carries its scale;
+the store's close-beyond contract requires the parents and the BAR on that
+scale. Field names such as `candidate_real_h1_bars` are kept so journals
+still reduce and mean native bars. This is registered under
+`smc_semantics_v1.3` as `dealing_range_scales`: no threshold moved, no scale
+was re-parameterised, and the 15m and 4H ranges' natural-observation coverage
+is not yet measured — the 1H coverage was already "sparse" (see the range
+protocol's `authority_review`).
 
 ## The Structural Range lifecycle drops its balance-derived states
 

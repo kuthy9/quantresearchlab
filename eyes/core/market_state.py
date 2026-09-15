@@ -315,6 +315,14 @@ _SWING_RANK_DEPTH = {
 # by elapsed bars.  The window carries a wide margin over both, so eviction only
 # ever drops Swings that nothing reads.
 SWING_HIERARCHY_HOT_RETENTION = 2048
+# Checkpoint restore cold-replays the committed prefix to prove the compact
+# state; it streams the prefix through the store this many events at a time,
+# so a restore never holds the journal twice or needs it in memory at all.
+CHECKPOINT_REPLAY_CHUNK_EVENTS = 4096
+
+# How many structural legs one timeframe's frame carries: the newest legs of
+# the fold, whether projected in one pass or appended incrementally.
+STRUCTURAL_LEG_RETENTION = 128
 
 
 @dataclass(frozen=True)
@@ -1043,6 +1051,69 @@ class TimeframeQualityState:
             raise ValueError("timeframe quality clocks or metrics are invalid")
 
 
+def _rebuild_validated_swing_hierarchy(
+    swings: tuple,
+    timeframe: Timeframe,
+    known_at: pd.Timestamp,
+) -> "ValidatedSwingHierarchy":
+    return ValidatedSwingHierarchy(swings, timeframe=timeframe, known_at=known_at)
+
+
+class ValidatedSwingHierarchy(tuple):
+    """A timeframe's swing hierarchy, validated once and trusted until it changes.
+
+    ``TimeframeState`` is rebuilt by ``replace`` on nearly every reduced event
+    and on every publication, and each rebuild re-validated the whole hot
+    working set (2,048 views once full) although it was the very tuple it had
+    validated a moment before.  The tuple carries the timeframe and the clock
+    it was validated against; a state carrying the same object at that clock
+    or later trusts it, any other sequence is validated afresh.  The derived
+    maps the projections read are computed once per object.
+    """
+
+    timeframe: Timeframe
+    known_at: pd.Timestamp
+
+    def __new__(
+        cls,
+        swings: Iterable[SwingHierarchyView],
+        *,
+        timeframe: Timeframe,
+        known_at: pd.Timestamp,
+    ) -> "ValidatedSwingHierarchy":
+        self = super().__new__(cls, swings)
+        self.timeframe = timeframe
+        self.known_at = known_at
+        self._ranks: dict[str, str] | None = None
+        self._swing_ids: frozenset[str] | None = None
+        return self
+
+    def __reduce__(self):
+        return (
+            _rebuild_validated_swing_hierarchy,
+            (tuple(self), self.timeframe, self.known_at),
+        )
+
+    def trusted_by(self, timeframe: Timeframe, known_at: pd.Timestamp) -> bool:
+        """Whether validation against this timeframe and clock already holds."""
+
+        return self.timeframe is timeframe and self.known_at <= known_at
+
+    @property
+    def ranks(self) -> Mapping[str, str]:
+        if self._ranks is None:
+            self._ranks = {
+                item.swing_id: item.semantic_rank.value for item in self
+            }
+        return self._ranks
+
+    @property
+    def swing_ids(self) -> frozenset[str]:
+        if self._swing_ids is None:
+            self._swing_ids = frozenset(item.swing_id for item in self)
+        return self._swing_ids
+
+
 @dataclass(frozen=True)
 class TimeframeState:
     timeframe: Timeframe
@@ -1058,7 +1129,6 @@ class TimeframeState:
     def __post_init__(self) -> None:
         object.__setattr__(self, "timeframe", Timeframe(self.timeframe))
         object.__setattr__(self, "structural_legs", tuple(self.structural_legs))
-        object.__setattr__(self, "swing_hierarchy", tuple(self.swing_hierarchy))
         if any(leg.timeframe is not self.timeframe for leg in self.structural_legs):
             raise ValueError("timeframe state contains a foreign structural leg")
         if any(
@@ -1066,17 +1136,30 @@ class TimeframeState:
             for candidate in self.liquidity.candidates
         ):
             raise ValueError("timeframe state contains a foreign DOL candidate")
-        if any(
-            swing.timeframe is not self.timeframe
-            for swing in self.swing_hierarchy
-        ) or len({swing.swing_id for swing in self.swing_hierarchy}) != len(
-            self.swing_hierarchy
-        ) or any(
-            assignment.assigned_at > self.quality.known_at
-            for swing in self.swing_hierarchy
-            for assignment in swing.assignments
+        hierarchy = self.swing_hierarchy
+        if not (
+            isinstance(hierarchy, ValidatedSwingHierarchy)
+            and hierarchy.trusted_by(self.timeframe, self.quality.known_at)
         ):
-            raise ValueError("timeframe state contains an invalid swing hierarchy")
+            hierarchy = tuple(hierarchy)
+            if any(
+                swing.timeframe is not self.timeframe for swing in hierarchy
+            ) or len({swing.swing_id for swing in hierarchy}) != len(
+                hierarchy
+            ) or any(
+                assignment.assigned_at > self.quality.known_at
+                for swing in hierarchy
+                for assignment in swing.assignments
+            ):
+                raise ValueError(
+                    "timeframe state contains an invalid swing hierarchy"
+                )
+            hierarchy = ValidatedSwingHierarchy(
+                hierarchy,
+                timeframe=self.timeframe,
+                known_at=self.quality.known_at,
+            )
+        object.__setattr__(self, "swing_hierarchy", hierarchy)
 
     @property
     def label(self) -> str:
@@ -1386,6 +1469,7 @@ _TIMEFRAME_REDUCER_KINDS = frozenset(
         EventKind.LEVEL_PENETRATED,
         EventKind.SWEEP_CONFIRMED,
         EventKind.ACCEPTANCE_CONFIRMED,
+        EventKind.LIQUIDITY_RETIRED,
         EventKind.DISPLACEMENT_OBSERVED,
         EventKind.FVG_CREATED,
         EventKind.FVG_FIRST_RETEST,
@@ -1441,6 +1525,11 @@ _CANONICAL_ATOMIC_KINDS = frozenset(
     | {
         EventKind.RAW_BOUNDARY_BREAK,
         EventKind.MARKET_EPOCH_RESET,
+        # Target outcomes are facts about an inventory item, published on
+        # its own timeframe; the compact view already tracks the item, so
+        # they are admitted without a state branch, like RAW_BOUNDARY_BREAK.
+        EventKind.LEVEL_REACHED,
+        EventKind.LEVEL_INVALIDATED,
     }
 )
 
@@ -1986,7 +2075,7 @@ class SwingGeometryTree:
         return touched
 
     def admit(self, swing: SwingHierarchyView) -> set[str]:
-        """Place one newly confirmed Swing; return every id whose place moved."""
+        """Place one newly confirmed Swing; return every id whose view changed."""
 
         if swing.window_start is None or swing.swing_id in self._nodes:
             return set()
@@ -2003,7 +2092,11 @@ class SwingGeometryTree:
         self._children.setdefault(swing.swing_id, [])
 
         moved = {swing.swing_id}
-        self._reparent(swing.swing_id, self._find_parent(swing))
+        parent_id = self._find_parent(swing)
+        self._reparent(swing.swing_id, parent_id)
+        if parent_id is not None:
+            # The parent's place is unchanged, but its children view is not.
+            moved.add(parent_id)
         for candidate_id in self._adoptable(swing):
             incumbent = self._parent.get(candidate_id)
             if incumbent is not None and (
@@ -2102,7 +2195,11 @@ def _project_candidate_views(
     derives it in -- is the same whether they run once or ten times.
     """
 
-    ranks = {item.swing_id: item.semantic_rank.value for item in hierarchy}
+    ranks = (
+        hierarchy.ranks
+        if isinstance(hierarchy, ValidatedSwingHierarchy)
+        else {item.swing_id: item.semantic_rank.value for item in hierarchy}
+    )
     return _liquidity_state(
         (
             _candidate_range_membership(
@@ -2120,6 +2217,48 @@ def _project_candidate_views(
             for candidate in liquidity.candidates
         ),
         liquidity.recently_swept_ids,
+    )
+
+
+def _fold_owned_state(state: TimeframeState) -> TimeframeState:
+    """The part of a timeframe state the event fold alone determines.
+
+    The publisher persists two snapshot-derived projections into the reducer
+    state on every publication -- each Swing's place in the cross-timeframe
+    geometry tree and each candidate's rank and range membership -- and a
+    rank keeps surviving its Swing's eviction from the hot hierarchy.  Those
+    values depend on *when* the publisher projected them, so a cold fold of
+    the committed prefix cannot reproduce them; it reproduces everything
+    else.  Checkpoint verification compares states through this view: the
+    projections are reset on both sides and the armed inventory is re-derived
+    from the reset candidates, which reads only price, side and lifecycle.
+    """
+
+    hierarchy = tuple(
+        replace(
+            view,
+            geometric_parent_id=None,
+            geometric_depth=0,
+            child_ids=(),
+        )
+        for view in state.swing_hierarchy
+    )
+    candidates = tuple(
+        replace(
+            candidate,
+            rank=DOLCandidateView.rank,
+            range_role=LiquidityRangeRole.UNRESOLVED,
+            normalized_location_in_range=None,
+        )
+        for candidate in state.liquidity.candidates
+    )
+    return replace(
+        state,
+        swing_hierarchy=hierarchy,
+        liquidity=_liquidity_state(
+            candidates,
+            state.liquidity.recently_swept_ids,
+        ),
     )
 
 
@@ -2488,6 +2627,22 @@ def reduce_timeframe_state(
             ),
             liquidity.recently_swept_ids,
         )
+    elif event.kind is EventKind.LIQUIDITY_RETIRED:
+        # The candidate set is bounded: a retired identity leaves it, and if
+        # the same level forms again it is admitted as a new candidate.
+        level_id = str(event.evidence["level_id"])
+        liquidity = _liquidity_state(
+            tuple(
+                item
+                for item in liquidity.candidates
+                if item.candidate_id != level_id
+            ),
+            tuple(
+                swept_id
+                for swept_id in liquidity.recently_swept_ids
+                if swept_id != level_id
+            ),
+        )
     elif event.kind is EventKind.DISPLACEMENT_OBSERVED:
         features = {
             str(key): float(value)
@@ -2798,6 +2953,15 @@ _DELIVERY_PHASE_TAIL_KINDS = frozenset(
     }
 )
 
+# The atomic facts the observer derives from a published snapshot and
+# appends after its projection tail.  The delivery-phase lifecycle is
+# derived from state and is not reduced back in; a candidate retirement is
+# reduced, so the next snapshot is already without the candidate.
+_POST_PUBLISH_TAIL_KINDS = _DELIVERY_PHASE_TAIL_KINDS | {
+    EventKind.LIQUIDITY_RETIRED,
+    EventKind.LEVEL_INVALIDATED,
+}
+
 _CURRENT_STATE_PROJECTION_KINDS = frozenset(
     {
         EventKind.TIMEFRAME_STATE_CHANGED,
@@ -2930,9 +3094,9 @@ class TimeframeEventReducer:
         _ = self.latest_real_m1_event
         # Checkpoint restore is the explicit cold-validation boundary.  The
         # hot reducer never scans history; restore proves that compact state
-        # is exactly reproducible from the committed prefix.
-        prefix_store = EventStore.from_events(
-            self.event_store.events_since(0)[: self._cursor],
+        # is exactly reproducible from the committed prefix, streamed through
+        # the store one bounded chunk at a time.
+        prefix_store = EventStore(
             semantic_version=self.semantic_version,
             definition_identity=(
                 self.event_store.definition_identity
@@ -2945,9 +3109,20 @@ class TimeframeEventReducer:
             semantic_version=self.semantic_version,
             expected_timeframes=self._expected_timeframes,
         )
-        verifier.consume_available()
+        for chunk in self.event_store.iter_chunks(
+            0, self._cursor, CHECKPOINT_REPLAY_CHUNK_EVENTS
+        ):
+            prefix_store.append_batch(chunk)
+            verifier.consume_available()
         if (
-            verifier.states != self.states
+            {
+                timeframe: _fold_owned_state(state)
+                for timeframe, state in verifier.states.items()
+            }
+            != {
+                timeframe: _fold_owned_state(state)
+                for timeframe, state in self.states.items()
+            }
             or verifier._epoch_cursor != self._epoch_cursor
             or verifier._last_order_key != self._last_order_key
             or verifier._latest_real_m1_event_id
@@ -3005,7 +3180,7 @@ class TimeframeEventReducer:
                 )
             if delivery_phase_only and not (
                 event.origin is EventOrigin.SEMANTIC_ATOMIC
-                and event.kind in _DELIVERY_PHASE_TAIL_KINDS
+                and event.kind in _POST_PUBLISH_TAIL_KINDS
             ):
                 raise ValueError(
                     "timeframe reducer delivery tail contains a foreign event"
@@ -3978,7 +4153,7 @@ def build_structural_legs(
             )
         )
         anchor = current
-    return tuple(output[-128:])
+    return tuple(output[-STRUCTURAL_LEG_RETENTION:])
 
 
 class SessionStateReducer:
@@ -4556,10 +4731,10 @@ class MarketSnapshotPublisher:
             return
         expected_session = SessionStateReducer()
         if not self._boundary_reset_pending:
-            consumed_prefix = self.event_store.events_since(0)[
-                self._event_reducer._epoch_cursor :
-                self._event_reducer.cursor
-            ]
+            consumed_prefix = self.event_store.iter_events(
+                self._event_reducer._epoch_cursor,
+                self._event_reducer.cursor,
+            )
             for event in consumed_prefix:
                 if (
                     event.kind is EventKind.BAR_COMPLETED
@@ -4953,11 +5128,25 @@ class MarketSnapshotPublisher:
             return states
         updated: dict[Timeframe, TimeframeState] = {}
         for timeframe, state in states.items():
+            current = state.swing_hierarchy
+            resident = (
+                current.swing_ids
+                if isinstance(current, ValidatedSwingHierarchy)
+                else {swing.swing_id for swing in current}
+            )
+            # ``admit`` names every Swing whose view changed -- the placed
+            # Swing, its parent, the adopted and their former parents, and the
+            # subtree whose depth settled -- so only those are re-viewed.
+            if moved.isdisjoint(resident):
+                updated[timeframe] = state
+                continue
             hierarchy = tuple(
                 self._swing_geometry.view_of(swing)
-                for swing in state.swing_hierarchy
+                if swing.swing_id in moved
+                else swing
+                for swing in current
             )
-            if hierarchy == state.swing_hierarchy:
+            if hierarchy == current:
                 updated[timeframe] = state
                 continue
             settled = replace(state, swing_hierarchy=hierarchy)

@@ -1760,7 +1760,7 @@ def test_h1_synthetic_bar_advances_only_the_raw_causal_cutoff() -> None:
     assert tracker.on_completed_h1(synthetic, ()) is output
     with pytest.raises(
         ValueError,
-        match="duplicate or out-of-order Group 4 H1 candle",
+        match="duplicate or out-of-order Group 4 native candle",
     ):
         tracker.on_completed_h1(_h1(0), ())
     real = _h1(1)

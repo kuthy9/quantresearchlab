@@ -55,7 +55,7 @@ WINDOW_RESET_REASONS = frozenset(
         "synthetic_interruption",
     }
 )
-ZONE_TRACKER_CHECKPOINT_SCHEMA_VERSION = 1
+ZONE_TRACKER_CHECKPOINT_SCHEMA_VERSION = 2
 
 
 @dataclass(frozen=True)
@@ -65,12 +65,23 @@ class ZoneProtocol:
     protocol_hash: str
     tick_size: float
     protocol_version: str = "3.2.0-group3.4"
-    timeframe: str = "5m"
+    # The scales the definition is applied on; one tracker runs per scale.
+    timeframes: tuple[Timeframe, ...] = (Timeframe.M5,)
     fvg_source_bars: int = 3
     fvg_formation_atr_period: int = 14
     ob_anchor_history_bars: int = 64
     maximum_fvg_states: int = 256
     maximum_order_block_states: int = 128
+    # A terminal entity stays in the tracker for this many completed native
+    # bars, counting the bar that made it terminal, then is compacted; the
+    # terminal transition was delivered on its bar and the log owns the fact.
+    terminal_state_retention_native_bars: int = 1
+
+    @property
+    def timeframe(self) -> str:
+        """The protocol's first scale, the pre-2026-09 single scale."""
+
+        return self.timeframes[0].value
 
     def __post_init__(self) -> None:
         if (
@@ -81,7 +92,10 @@ class ZoneProtocol:
                 for character in self.protocol_hash
             )
             or self.protocol_version != "3.2.0-group3.4"
-            or self.timeframe != "5m"
+            or not self.timeframes
+            or any(not isinstance(value, Timeframe) for value in self.timeframes)
+            or len(set(self.timeframes)) != len(self.timeframes)
+            or Timeframe.M1 in self.timeframes
             or not math.isclose(
                 float(self.tick_size),
                 0.25,
@@ -93,6 +107,8 @@ class ZoneProtocol:
             or self.ob_anchor_history_bars != 64
             or self.maximum_fvg_states != 256
             or self.maximum_order_block_states != 128
+            or type(self.terminal_state_retention_native_bars) is not int
+            or self.terminal_state_retention_native_bars < 1
         ):
             raise ValueError("Group 3 protocol differs from its frozen contract")
 
@@ -107,7 +123,10 @@ class ZoneProtocol:
             protocol_hash=hashlib.sha256(raw).hexdigest(),
             protocol_version=payload["protocol_version"],
             tick_size=payload["tick_size"],
-            timeframe=payload["timeframe"],
+            timeframes=tuple(
+                Timeframe(value)
+                for value in payload.get("timeframes", [payload.get("timeframe")])
+            ),
             fvg_source_bars=payload["fvg_source_bars"],
             fvg_formation_atr_period=payload[
                 "fvg_formation_atr_period"
@@ -119,6 +138,9 @@ class ZoneProtocol:
             maximum_order_block_states=payload[
                 "maximum_order_block_states"
             ],
+            terminal_state_retention_native_bars=payload["capacity"].get(
+                "terminal_state_retention_native_bars", -1
+            ),
         )
 
 
@@ -214,7 +236,7 @@ class ZoneBOSSource:
     def __post_init__(self) -> None:
         if (
             not isinstance(self.state, BreakOfStructureState)
-            or self.state.timeframe is not Timeframe.M5
+            or self.state.timeframe is Timeframe.M1
             or not isinstance(self.symbol, str)
             or not self.symbol
             or type(self.instrument_id) is not int
@@ -258,6 +280,7 @@ class CausalZoneTracker:
     _CHECKPOINT_FIELDS = frozenset(
         {
             "protocol",
+            "timeframe",
             "_history",
             "_episode_membership",
             "_active_transition_ids",
@@ -267,7 +290,7 @@ class CausalZoneTracker:
             "_fvg_order",
             "_order_blocks",
             "_order_block_order",
-            "_exposed_terminal_ids",
+            "_terminal_exposures",
             "_identity",
             "_window_epoch_known",
             "_source_displacement_protocol_hash",
@@ -288,10 +311,16 @@ class CausalZoneTracker:
         *,
         displacement_protocol_hash: str | None = None,
         structure_protocol_hash: str | None = None,
+        timeframe: Timeframe | None = None,
     ) -> None:
         if not isinstance(protocol, ZoneProtocol):
             raise TypeError("a frozen Group 3 protocol is required")
         self.protocol = protocol
+        self.timeframe = (
+            protocol.timeframes[0] if timeframe is None else timeframe
+        )
+        if self.timeframe not in protocol.timeframes:
+            raise ValueError("Group 3 tracker scale is not in its protocol")
         self._history: deque[Candle] = deque(
             maxlen=protocol.ob_anchor_history_bars
         )
@@ -306,7 +335,8 @@ class CausalZoneTracker:
         self._fvg_order: deque[str] = deque()
         self._order_blocks: dict[str, OrderBlockState] = {}
         self._order_block_order: deque[str] = deque()
-        self._exposed_terminal_ids: set[str] = set()
+        # Completed native outputs each terminal entity has been exposed in.
+        self._terminal_exposures: dict[str, int] = {}
         self._identity: tuple[str, int] | None = None
         self._window_epoch_known = False
         self._source_displacement_protocol_hash = (
@@ -415,9 +445,7 @@ class CausalZoneTracker:
         candidate._order_block_order = deque(
             self._order_block_order
         )
-        candidate._exposed_terminal_ids = set(
-            self._exposed_terminal_ids
-        )
+        candidate._terminal_exposures = dict(self._terminal_exposures)
         return candidate
 
     def _commit(self, candidate: "CausalZoneTracker") -> None:
@@ -532,16 +560,39 @@ class CausalZoneTracker:
         }
 
     def _mark_terminals_exposed(self) -> None:
-        self._exposed_terminal_ids.update(
-            state.fvg_id
-            for state in self._fair_value_gaps.values()
-            if self._is_fvg_terminal(state)
-        )
-        self._exposed_terminal_ids.update(
-            state.order_block_id
-            for state in self._order_blocks.values()
-            if self._is_order_block_terminal(state)
-        )
+        """Count one exposure for every terminal entity in this output."""
+
+        for entity_id, state in self._fair_value_gaps.items():
+            if self._is_fvg_terminal(state):
+                self._terminal_exposures[entity_id] = (
+                    self._terminal_exposures.get(entity_id, 0) + 1
+                )
+        for entity_id, state in self._order_blocks.items():
+            if self._is_order_block_terminal(state):
+                self._terminal_exposures[entity_id] = (
+                    self._terminal_exposures.get(entity_id, 0) + 1
+                )
+
+    def _compact_exposed_terminals(self) -> None:
+        """Drop every terminal entity exposed for the registered retention.
+
+        The terminal transition was delivered in the output that produced it
+        and the event log owns the fact; the tracker keeps the state for
+        ``terminal_state_retention_native_bars`` completed native bars and
+        no longer.  Capacity eviction below remains the fail-closed guard.
+        """
+
+        retention = self.protocol.terminal_state_retention_native_bars
+        for entity_id, exposures in tuple(self._terminal_exposures.items()):
+            if exposures < retention:
+                continue
+            if entity_id in self._fair_value_gaps:
+                self._fair_value_gaps.pop(entity_id)
+                self._fvg_order.remove(entity_id)
+            elif entity_id in self._order_blocks:
+                self._order_blocks.pop(entity_id)
+                self._order_block_order.remove(entity_id)
+            self._terminal_exposures.pop(entity_id)
 
     def _admit_capacity(
         self,
@@ -556,7 +607,7 @@ class CausalZoneTracker:
         evictable: list[tuple[pd.Timestamp, str]] = []
         for entity_id, state in states.items():
             if (
-                entity_id not in self._exposed_terminal_ids
+                entity_id not in self._terminal_exposures
                 or not terminal(state)
             ):
                 continue
@@ -580,7 +631,7 @@ class CausalZoneTracker:
         _, evicted_id = min(evictable)
         states.pop(evicted_id)
         order.remove(evicted_id)
-        self._exposed_terminal_ids.discard(evicted_id)
+        self._terminal_exposures.pop(evicted_id, None)
 
     def _clear_windows(self, *, clear_identity: bool) -> None:
         self._history.clear()
@@ -681,13 +732,17 @@ class CausalZoneTracker:
         displacement: DisplacementUpdate,
         bos_sources: tuple[ZoneBOSSource, ...],
     ) -> None:
+        # A regular completed bar of this scale: the whole scheduled span was
+        # observed.  The span itself is the session's (a 4H block at the
+        # session tail is three hours), so it is not compared to a constant.
         if (
-            candle.timeframe is not Timeframe.M5
+            candle.timeframe is not self.timeframe
             or not candle.complete
-            or (candle.expected_minutes, candle.observed_minutes)
-            != (5, 5)
+            or candle.expected_minutes != candle.observed_minutes
         ):
-            raise ValueError("Group 3 requires a completed 5m candle")
+            raise ValueError(
+                f"Group 3 requires a completed {self.timeframe.value} candle"
+            )
         if (
             self._last_clock is not None
             and candle.end <= self._last_clock
@@ -725,7 +780,7 @@ class CausalZoneTracker:
                 name="displacement",
             )
             if (
-                state.timeframe is not Timeframe.M5
+                state.timeframe is not self.timeframe
                 or state.symbol != candle.symbol
                 or state.instrument_id != candle.instrument_id
                 or state.observed_at > candle.end
@@ -745,7 +800,7 @@ class CausalZoneTracker:
             if (
                 transition_state.observed_at > candle.end
                 or transition_state.prefix_last_admitted_at > candle.end
-                or transition_state.timeframe is not Timeframe.M5
+                or transition_state.timeframe is not self.timeframe
                 or transition_state.symbol != candle.symbol
                 or transition_state.instrument_id != candle.instrument_id
             ):
@@ -822,7 +877,7 @@ class CausalZoneTracker:
         if (
             self._identity is None
             or source_identity != self._identity
-            or state.timeframe is not Timeframe.M5
+            or state.timeframe is not self.timeframe
             or state.terminal_reason != expected_terminal_reason
             or state.observed_at != candle.end
             or state.terminal_at != candle.end
@@ -1207,7 +1262,7 @@ class CausalZoneTracker:
             self.protocol.protocol_hash,
             candle.symbol,
             candle.instrument_id,
-            Timeframe.M5,
+            self.timeframe,
             state.direction,
             *cluster_ids,
             state.entity_id,
@@ -1231,7 +1286,7 @@ class CausalZoneTracker:
             protocol_hash=self.protocol.protocol_hash,
             symbol=candle.symbol,
             instrument_id=int(candle.instrument_id),
-            timeframe=Timeframe.M5,
+            timeframe=self.timeframe,
             direction=state.direction,
             source_displacement_id=state.entity_id,
             source_displacement_transition_id=(
@@ -1331,7 +1386,7 @@ class CausalZoneTracker:
             self.protocol.protocol_hash,
             c3.symbol,
             c3.instrument_id,
-            Timeframe.M5,
+            self.timeframe,
             direction,
             c1_id,
             c2_id,
@@ -1352,7 +1407,7 @@ class CausalZoneTracker:
             protocol_hash=self.protocol.protocol_hash,
             symbol=c3.symbol,
             instrument_id=c3.instrument_id,
-            timeframe=Timeframe.M5,
+            timeframe=self.timeframe,
             direction=direction,
             lifecycle=FairValueGapLifecycle.OPEN,
             qualification=(
@@ -1441,7 +1496,7 @@ class CausalZoneTracker:
             bos_source
             for bos_source in bos_sources
             if (
-                bos_source.state.timeframe is Timeframe.M5
+                bos_source.state.timeframe is self.timeframe
                 and bos_source.state.lifecycle is BOSLifecycle.CONFIRMED
                 and bos_source.state.direction is source.direction
                 and bos_source.state.resolved_at == candle.end
@@ -1521,7 +1576,7 @@ class CausalZoneTracker:
             self.protocol.protocol_hash,
             candle.symbol,
             candle.instrument_id,
-            Timeframe.M5,
+            self.timeframe,
             source.direction,
             *candidate.cluster_ids,
             source.entity_id,
@@ -1542,7 +1597,7 @@ class CausalZoneTracker:
             protocol_hash=self.protocol.protocol_hash,
             symbol=candle.symbol,
             instrument_id=candle.instrument_id,
-            timeframe=Timeframe.M5,
+            timeframe=self.timeframe,
             direction=source.direction,
             lifecycle=OrderBlockLifecycle.CREATED,
             source_displacement_id=source.entity_id,
@@ -1619,6 +1674,7 @@ class CausalZoneTracker:
     ) -> ZoneUpdate:
         identity = (candle.symbol, int(candle.instrument_id))
         candle_id = self._candle_id(candle)
+        self._compact_exposed_terminals()
         fvg_transitions = self._advance_fvgs(candle)
         order_block_transitions = self._advance_order_blocks(candle)
         known_cores = set(self._base_origin_cores)
@@ -1669,6 +1725,16 @@ class CausalZoneTracker:
         displacement: DisplacementUpdate,
         confirmed_bos: Iterable[ZoneBOSSource] = (),
     ) -> ZoneUpdate:
+        """The pre-2026-09 name: the tracker's scale was always 5m."""
+
+        return self.on_completed(candle, displacement, confirmed_bos)
+
+    def on_completed(
+        self,
+        candle: Candle,
+        displacement: DisplacementUpdate,
+        confirmed_bos: Iterable[ZoneBOSSource] = (),
+    ) -> ZoneUpdate:
         if self._failed:
             raise RuntimeError("Group 3 tracker is terminally failed")
         if not isinstance(candle, Candle):
@@ -1682,13 +1748,17 @@ class CausalZoneTracker:
             raise TypeError(
                 "Group 3 requires contract-bound BOS source envelopes"
             )
+        # A regular completed bar of this scale: the whole scheduled span was
+        # observed.  The span itself is the session's (a 4H block at the
+        # session tail is three hours), so it is not compared to a constant.
         if (
-            candle.timeframe is not Timeframe.M5
+            candle.timeframe is not self.timeframe
             or not candle.complete
-            or (candle.expected_minutes, candle.observed_minutes)
-            != (5, 5)
+            or candle.expected_minutes != candle.observed_minutes
         ):
-            raise ValueError("Group 3 requires a completed 5m candle")
+            raise ValueError(
+                f"Group 3 requires a completed {self.timeframe.value} candle"
+            )
         candle_input = (candle, displacement, bos_sources)
         if (
             self._last_input_kind in {"candle", "candle_boundary"}

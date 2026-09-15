@@ -1565,39 +1565,42 @@ def _origin_zone_terminal_chain(
     return (*events, terminal_bar, terminal)
 
 
-def _synthetic_displacement_chain() -> tuple[MarketEvent, ...]:
+def _synthetic_displacement_chain(
+    timeframe: Timeframe = Timeframe.M5,
+) -> tuple[MarketEvent, ...]:
     template = next(
         event
         for event in _authoritative_phase23_chain()
         if event.kind is EventKind.DISPLACEMENT_OBSERVED
     )
+    span = int(timeframe.minutes)
     source_one = _normalized_bar(
         "synthetic-displacement-source-one",
         0,
-        timeframe=Timeframe.M5,
+        timeframe=timeframe,
     )
     source_two = _normalized_bar(
         "synthetic-displacement-source-two",
-        5,
-        timeframe=Timeframe.M5,
+        span,
+        timeframe=timeframe,
     )
     interval_roots = tuple(
         _normalized_bar(
             f"synthetic-displacement-m1-{minute}",
             minute,
             timeframe=Timeframe.M1,
-            real_completed=minute != 8,
+            real_completed=minute != span + 3,
             sequence_no=0,
         )
-        for minute in range(6, 11)
+        for minute in range(span + 1, 2 * span + 1)
     )
     synthetic_root = interval_roots[2]
     displacement = _event(
         "synthetic-displacement-terminal",
-        10,
+        2 * span,
         canonical=True,
         kind=EventKind.DISPLACEMENT_OBSERVED,
-        timeframe=Timeframe.M5,
+        timeframe=timeframe,
         direction=Direction.LONG,
         side="above",
         price=None,
@@ -1619,7 +1622,7 @@ def _synthetic_displacement_chain() -> tuple[MarketEvent, ...]:
                 "detector:synthetic-displacement-source-one",
                 "detector:synthetic-displacement-source-two",
             ),
-            "prefix_last_admitted_at": _clock(5).isoformat(),
+            "prefix_last_admitted_at": _clock(span).isoformat(),
             "state_metrics": dict(template.evidence["state_metrics"]),
         },
     )
@@ -1943,6 +1946,71 @@ def test_append_batch_uses_overlay_without_copying_lifetime_history() -> None:
 
     assert store.append_batch((child,)) == 1
     assert store.get(child.event_id) == child
+
+
+def test_append_batch_reads_the_unresolved_reference_set_by_membership_only() -> None:
+    """The batch overlay never copies the committed forward-reference set.
+
+    Every batch began with ``set(self._unresolved_forward_reference_ids)``
+    -- a copy of every forward identity the lifetime journal still holds
+    open, 54,963 of them at bar 20,000 of 2022-02, on each of the ~1.4
+    batches a completed minute flushes.  The overlay now records only this
+    batch's additions and removals against the committed set and commits
+    them by ``add``/``discard``.
+    """
+
+    class MembershipOnlyReferences:
+        def __init__(self, items):
+            self._items = set(items)
+
+        def __contains__(self, item):
+            return item in self._items
+
+        def add(self, item):
+            self._items.add(item)
+
+        def discard(self, item):
+            self._items.discard(item)
+
+    legacy_parent = _event("legacy-parent", 0, source_ids=("later-child",))
+    store = EventStore()
+    assert store.append(legacy_parent) is True
+    assert "later-child" in store._unresolved_forward_reference_ids
+    guarded = MembershipOnlyReferences(store._unresolved_forward_reference_ids)
+    store._unresolved_forward_reference_ids = guarded
+
+    resolving = _event("later-child", 1, canonical=True)
+    another_legacy = _event("legacy-two", 2, source_ids=("much-later",))
+    assert store.append_batch((resolving, another_legacy)) == 2
+    assert "later-child" not in guarded
+    assert "much-later" in guarded
+    assert store._unresolved_forward_reference_ids is guarded
+
+
+def test_entity_identities_are_not_registered_as_open_forward_references() -> None:
+    """A ``namespace:identity`` source id names an entity, never an event.
+
+    Legacy-transport state events carry entity identities in ``source_ids``
+    (``swing:…``, ``pool:…``); every one was registered as an open forward
+    reference that no later event could ever resolve -- 54,963 of them at
+    bar 20,000 of 2022-02.  A raw opaque identity keeps its forward standing
+    (a canonical child may still close it into a cycle); an identity in a
+    registered entity namespace is skipped.
+    """
+
+    store = EventStore()
+    legacy = _event(
+        "legacy-state",
+        0,
+        source_ids=("swing:abc123", "pool:def456", "raw-forward-id"),
+    )
+    assert store.append(legacy) is True
+    assert store._unresolved_forward_reference_ids == {"raw-forward-id"}
+    # The namespaces are the typed lifecycle registry's, kept in step.
+    from eyes.core.event_memory import EventMemory
+    from eyes.core.event_store import _ENTITY_IDENTITY_NAMESPACES
+
+    assert _ENTITY_IDENTITY_NAMESPACES == frozenset(EventMemory._TIMELINE_TRANSITIONS)
 
 
 @pytest.mark.parametrize("namespace", ("source_event_ids", "context_event_ids"))
@@ -2291,10 +2359,26 @@ def test_synthetic_displacement_context_is_exact_open_closed_m1_subset() -> None
         details=stale_payload,
         evidence=stale_payload,
     )
-    with pytest.raises(ValueError, match="immediately preceding real M5"):
+    with pytest.raises(ValueError, match="immediately preceding real 5m"):
         EventStore.from_events(
             (events[0], stale_source, *events[2:-1], stale_terminal)
         )
+
+
+def test_synthetic_displacement_context_spans_its_own_scale() -> None:
+    # A 15m secondary displacement censored by a clock-only minute cites the
+    # clock-only subset of its own fifteen-minute interval; the contract was
+    # first written for the 5m scale and rejected it as "not the immediately
+    # preceding real M5 BAR" (NQ tape, 2022-01-03 23:15).
+    events = _synthetic_displacement_chain(timeframe=Timeframe.M15)
+    store = EventStore.from_events(events)
+
+    assert store.events() == events
+    assert len(events) == 2 + 15 + 1
+    assert events[-1].context_event_ids == (events[2 + 2].event_id,)
+
+    with pytest.raises(ValueError, match="fifteen contiguous unique M1"):
+        EventStore.from_events((*events[:9], *events[10:]))
 
 
 def test_normalized_bar_index_retry_batch_pickle_and_checkpoint_are_atomic(
@@ -3854,10 +3938,10 @@ def test_external_range_invalidation_requires_complete_parent_chain() -> None:
     ("acceptance_range_id", "acceptance_timeframe", "message"),
     (
         ("range-other", Timeframe.H1, "parent range_id differs"),
-        ("range-1", Timeframe.M5, "parent must be H1"),
+        ("range-1", Timeframe.M5, "parent is on another scale"),
     ),
 )
-def test_external_range_acceptance_must_be_h1_and_same_range(
+def test_external_range_acceptance_must_share_scale_and_range(
     acceptance_range_id: str,
     acceptance_timeframe: Timeframe,
     message: str,
