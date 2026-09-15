@@ -345,6 +345,79 @@ became the exposure-based retention above. Measured after both: late window
 35.5 s → 25.3 s (2.36× late/early against 4.23× at the start of the day),
 warm-up to bar 20,000 598 s → 415 s.
 
+## What stays in memory, and what goes to the journal
+
+With per-bar *time* bounded, per-bar *memory* was not: the audit store held
+every event object of the run in three maps (about 2 KB per event on the
+heap, 26 MB per 1,000 bars, a gigabyte per month of 1m replay), and the
+emitter and store kept a per-entity or per-bar memory for everything they
+had ever spoken about. Four changes, in the order they depend on each other:
+
+- **Checkpoint restore streams the prefix.** Restoring a reducer or publisher
+  checkpoint cold-replays the committed prefix to prove the compact state;
+  it did so by taking `events_since(0)` as one tuple and building a second
+  full store from it. The prefix fingerprint and the journal length now
+  read a raw digest sequence, and the verifier streams the prefix through
+  the store `CHECKPOINT_REPLAY_CHUNK_EVENTS` (4,096) events at a time. The
+  same verification had also failed for every checkpoint taken after the
+  first settled Swing, as far back as `a52241f`: the publisher persists the
+  geometry views and the candidate rank / range-membership projections into
+  the reducer state, and those depend on *when* they were projected, so a
+  cold fold never reproduced them. Verification now compares the fold-owned
+  part of each state (`_fold_owned_state`: projections reset, armed
+  inventory re-derived); the projections travel in the checkpoint bytes
+  (`test_checkpoint_replay_streams_the_prefix.py`).
+- **A journal file for cold events.** With `audit_journal_dir` set
+  (`configs/model.json`: `outputs/eye_journal`, hot window
+  `audit_hot_window_minutes` = 4,320), the observer spills events below the
+  reducer cursor and older than the window to an append-only file of
+  length-prefixed pickled records. The store still answers `get`,
+  `iter_events` and `events_since` for them through the file, keeps 32 bytes
+  of digest and one id→index entry per cold event, and its fingerprint is
+  unchanged; a checkpoint carries the journal path, the cold offsets and the
+  digest sequence, and restore proves every cold record against its digest
+  before re-appending the hot events with full validation
+  (`test_event_store_cold_journal.py`). A journal has one owner: a second
+  store bound to the same file would interleave its appends. Nothing
+  removes a journal — a checkpoint may still name it — so a month of 1m
+  replay leaves 480 MB (1.39 KB per event) under `audit_journal_dir` per
+  observer; a lifetime rule is an open item.
+- **Bounded bar-keyed memories.** The emitter's close and price range per
+  bar root and each scale's clock-ordered root list, and the store's
+  eligible-bar index and same-clock reservations, are read within a window
+  fixed when the reader forms: a Swing freezes the range of its own
+  confirmation window, a crossing resolves at the next root of its scale,
+  a leg reaches its start pivot (at most 256 retained swings back on its
+  scale), a previous-week reference level cites the 1m root of its extreme
+  (at most two trading weeks back). Each keeps its newest entries
+  (`BoundedDict`, `eyes/core/bounded.py`; `BAR_ROOT_RETENTION_PER_SCALE`
+  and `BAR_MEMORY_RETENTION` 32,768, `ELIGIBLE_BAR_INDEX_RETENTION_PER_SCALE`
+  4,096, `RESERVATION_MEMORY_RETENTION` 8,192); a miss fails closed exactly
+  as an absent entry always did, and `test_bounded_entity_memories.py`
+  proves a two-session replay emits identical events under bounds a small
+  fraction of these while the memories are actually evicting. The
+  per-entity memories — the event that last spoke about a swing, level,
+  BOS, zone or range — are deliberately *not* count-bounded: the emitter
+  re-walks every retained entity on every frame, so such a memory is read
+  for as long as the slowest scale retains the entity (256 4H swings is
+  months), and a month replay with every memory instrumented measured
+  lookups reaching back over the whole run (a first attempt at 16,384
+  entries failed the month replay at bar 25,000 with "BOS post-break
+  resolution lacks its canonical penetration event"). They cost about
+  75 MB a month of 1m tape; bounding them means dropping an entry when no
+  tracker retains its entity any more, which is the open item below.
+- **Entity identities are not forward references.** Legacy-transport state
+  events name entities in `source_ids` (`swing:…`, `pool:…`); each was an
+  open forward reference no later event could resolve. An identity in a
+  registered entity namespace is skipped; raw opaque identities keep their
+  forward standing.
+
+Measured on 1,500 bars of the real tape with a 60-minute hot window, heap
+growth fell from 26 MB to 12 MB per 1,000 bars before the bar-keyed bounds;
+the month replay in [evidence/eye_memory_2022-02_2026-09-14.md](evidence/eye_memory_2022-02_2026-09-14.md)
+carries the final numbers, the per-memory reach table, and the proof that
+none of the four changes altered an emitted event.
+
 ## What the runtime loads, and what was removed
 
 `eyes/core/` is 74 k lines; the runtime path (`CausalObserver` and everything

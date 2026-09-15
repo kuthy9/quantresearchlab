@@ -10,7 +10,7 @@ under ``outputs/eye_coverage/``.  The sections map onto the 2026-09 repairs:
 - ``target_outcomes`` created / reached / invalidated / retired per scale (Task 5)
 - ``event_clock``     events per scale on the main and 1m channels (Task 2)
 - ``scales``          facts and reduced-state availability per scale (Task 3)
-- ``growth``          seconds per block and state sizes at checkpoints (Task 6)
+- ``growth``          seconds, peak RSS and journal split per block, state sizes at checkpoints (Task 6)
 """
 from __future__ import annotations
 
@@ -18,6 +18,7 @@ import argparse
 from collections import Counter, defaultdict
 import json
 from pathlib import Path
+import resource
 import sys
 import time
 
@@ -219,8 +220,24 @@ def main() -> None:
                     record["break_reason"] = state.transition_reason
 
         if number % args.block == 0:
-            blocks.append({"bars_done": number, "seconds": round(block_seconds, 1), "bars_per_s": round(args.block / block_seconds, 1)})
-            print(f"bars {number - args.block:6d}-{number:6d}: {block_seconds:6.1f}s ({args.block / block_seconds:5.1f} bars/s)", flush=True)
+            max_rss_mb = round(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1e6, 1)
+            store = observer.audit_store
+            blocks.append(
+                {
+                    "bars_done": number,
+                    "seconds": round(block_seconds, 1),
+                    "bars_per_s": round(args.block / block_seconds, 1),
+                    "max_rss_mb": max_rss_mb,
+                    "events": len(store),
+                    "hot_events": len(store) - store.cold_count,
+                }
+            )
+            print(
+                f"bars {number - args.block:6d}-{number:6d}: {block_seconds:6.1f}s "
+                f"({args.block / block_seconds:5.1f} bars/s)  rss {max_rss_mb:7.1f} MB  "
+                f"events {len(store)} (hot {len(store) - store.cold_count})",
+                flush=True,
+            )
             block_seconds = 0.0
         if number % args.checkpoint_every == 0 or number == len(bars):
             interaction = observation.interaction_update
