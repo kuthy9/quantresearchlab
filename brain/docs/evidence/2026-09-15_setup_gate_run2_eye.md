@@ -66,6 +66,63 @@ written where `configs/model.json` points, grows by about a gigabyte per
 block and is never emptied, so each block now journals into a temporary
 directory removed with it.
 
+## Is the FAIL the Eye's? Three tests on the 19 blocks (exploratory)
+
+The gate asks whether the Setup adds to geometry. Three simpler questions
+say where the absence comes from; all on run 2's 19 blocks (96 sessions),
+first occurrence per path and clock, session-block bootstrap 5–95 %.
+
+**1. Direction alone.** Ignore targets and boundaries: from the Setup's
+close, does price travel +R in the Setup's direction before −R? Driftless
+is 0.5 exactly. At R = 1 ATR₁ₘ and R = 3 ATR₁ₘ every cell is a coin flip:
+K0:zone 0.493 [0.471, 0.515] / 0.506 [0.484, 0.530]; K0:pool 0.509 [0.500,
+0.517] / 0.494 [0.485, 0.504]; K1:pool 0.507 / 0.483 [0.469, 0.497];
+K2:zone 0.517 / 0.519; K2:pool 0.495 / 0.491; K1:zone (n 247) 0.522 / 0.556
+[0.510, 0.602]. At R = the Eye's own failure distance the same, with 27 %
+of K0:pool instances touching both ±R on the sweep bar itself. By pool
+scale (1m / 5m / 15m), zone kind (FVG / OB), entry mode and session hour
+(RTH / overnight) no subgroup leaves 0.5 beyond what fifty unadjusted
+comparisons produce; 5m-pool sweeps at K0 lean *against* the direction at
+3 ATR₁ₘ (0.428 [0.380, 0.478], n 284).
+
+**2. The Eye's own target.** For zone paths, the Eye publishes its own draw
+(`nearest_visible_draw_distance_points`). P(draw before failure boundary)
+against d_f / (d_draw + d_f): K0 0.660 vs 0.662 (−0.002 [−0.023, +0.016],
+n 1,835); K1 0.593 vs 0.556 (+0.037 [−0.009, +0.085], n 241); K2 0.461 vs
+0.455 (+0.006 [−0.013, +0.025], n 1,334). With the Eye's own target the
+Setups pay exactly what a driftless walk pays. The shortfall reported
+under the Brain's 1R rule is therefore a property of that rule (levels
+selected ≥ 1R away are reached less often than the ratio says), not
+evidence about the Eye's direction; it does not bias the verdict, which
+compares M₁ and M₀ on the same labels.
+
+**3. Survivors.** Instances still unresolved after 5 / 15 / 30 minutes,
+against the driftless ratio re-anchored at that minute's close (the
+time-0 ratio is stale for a survivor, whose price has by construction
+moved away from the boundary — against the stale ratio K0:pool shows a
+spurious +0.19). Re-anchored, pools stay driftless at every checkpoint
+(K0:pool after 30 min 0.440 vs 0.445; K1:pool 0.380 vs 0.403) and zones
+and K2:pool fall further behind the longer they live (K0:zone after 30
+min 0.288 vs 0.359, −0.072 [−0.110, −0.036]; K2:pool −0.149 [−0.188,
+−0.113]). Nothing the Setup earns by surviving is information; what it
+loses is.
+
+**Reading.** The FAIL is not a Brain-side artefact: with the Eye's own
+boundary, the Eye's own target and no target at all, price after the
+Eye's milestones, in the Eye's direction, is a driftless walk or slightly
+worse. No label, feature set or model downstream can recover an edge from
+a direction that is 0.5 and a target reached at the driftless rate. Nor is
+it an Eye *implementation* bug in the sense of the seven repairs, which
+left the Group-5 population untouched. It is the Eye's Setup
+*definitions* — where the milestones fire (a 0.39 ATR₁ₘ boundary at the
+sweep; a micro-break that in 34 % of pool paths fires past the boundary),
+which direction they assert, and how rarely the held-reacceptance clock
+fires on zones — that on this tape carry no directional information. The
+alternative reading, that these event types carry no edge on NQ at all,
+cannot be separated from this one without a different, pre-registered
+Setup definition; the ICT claim the Eye encodes (sweep → reversal) is not
+borne out by its own sweeps.
+
 ## The two Eye failures, reproduced
 
 Both reproduce with a fresh Eye (`build_eye`, `configs/model.json`) driven
