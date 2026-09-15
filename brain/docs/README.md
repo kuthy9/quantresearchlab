@@ -639,6 +639,17 @@ that pays does so with a median adverse excursion of 0.02–0.13 ATR₆₀, a
 failure has already run 0.11–0.48 against the claim, and only the
 post-break clock lives for hours. Receipt: `evidence/2026-09-14_setup_gate.md`.
 
+Run 2 against the repaired Eye (`main` merged 2026-09-15) has no verdict
+yet: 19 of its 23 weeks build, four raise inside the Eye (a base-origin
+core pruned before its order block qualifies; a 15m dealing range
+confirming balance on one upper touch), and 96 sessions cannot form the
+primary fold. On the 19 common weeks the repairs leave Group 5 bit-for-bit
+unchanged — same 31,772 steps, same 8,878 paths, same milestones and
+boundaries — and move only the target inventory through candidate
+retirement; every finding of the run-1 diagnosis survives. The pass itself
+is nine minutes a block instead of an hour. Status and the two
+reproductions: `evidence/2026-09-15_setup_gate_run2_eye.md`.
+
 ### The Eye's throughput, and why the long windows are expensive
 
 Driving the Eye degrades within a single run: 33.4 bars/s over the first five

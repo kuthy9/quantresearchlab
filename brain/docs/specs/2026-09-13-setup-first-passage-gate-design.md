@@ -333,3 +333,42 @@ from the contract vocabularies rather than from the instances.
 Run 1's verdict stands as a first run on the narrower M₁ and is kept in
 the receipt; run 2 repeats the Eye pass under recorder `paths_v2` and is
 the record.
+
+## 11. Correction of 2026-09-15, before run 2 was built
+
+Run 2 is built against the Eye merged from `main` at `3fa40ab` (the seven
+repairs of 2026-09-13/14: one formation clock, the 1m tape as
+microstructure, no scale hard-coding in displacement / zones / ranges, one
+crossing published once, `LEVEL_REACHED` / `LEVEL_INVALIDATED` target
+outcomes, candidate retirement, per-entity memories following tracker
+retention with a cold-event journal). Two things about that Eye reached the
+recorder.
+
+Group 4 now compacts a resolved manipulation one completed bar after it
+resolves (`terminal_state_retention_native_bars` = 1). A pool path's later
+steps — the micro-break, the opposite displacement — come after that, so
+the §5.2 per-bar join on `observation.manipulations` found no state for
+them: on the first two run-2 blocks `context_found` was 74.7 %, every
+`micro_break_observed` / `opposite_displacement` pool row had no failure
+boundary, and K2:pool_reversal would have had no labelled instance. The
+recorder keeps the last Group-4 state it saw for every live pool path, on
+every bar the Eye observes, and reads a pool Setup from that when the
+observation no longer carries it; entries leave with their paths. The Eye's
+own statement is unchanged — retention changes what the update repeats,
+not what the Eye states — and a context the recorder never saw is still
+logged as missing. Recorder tag `paths_v3`.
+
+The Eye's journal of cold events is written where `configs/model.json`
+points and never emptied — about a gigabyte per block. A block build owns
+its Eye and keeps nothing of it, so each block journals into a temporary
+directory removed with it; where the journal lives does not change what
+the Eye publishes.
+
+The run id digests the atomic definition identity, which moved with the
+Eye's registry, so run 2 cannot reuse a block cached under the old Eye;
+`run.json` now also names the checkout revision the blocks were built
+under. The Brain's event log records `events_this_update` (every scale)
+rather than the new main clock, so its 1m track is what it was; the
+transition vocabulary grows to 51 kinds with the two target outcomes. None
+of this touches the labels, the feature sets, the folds or the verdict
+rule.
