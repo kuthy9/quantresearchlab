@@ -45,11 +45,42 @@ def test_recording_paths_changes_the_run_id_and_nothing_else_does() -> None:
 def test_the_eye_revision_is_recorded_beside_the_run_id() -> None:
     # The run id digests the atomic definition identity, not the Eye's
     # code; run.json names the revision the blocks were built under so a
-    # receipt can say which Eye it measured.
-    from brain.scripts.build_gate_blocks import eye_revision
+    # receipt can say which Eye it measured. A build from an uncommitted
+    # tree says so.
+    import subprocess
+
+    from brain.scripts.build_gate_blocks import ROOT, eye_revision
 
     revision = eye_revision()
-    assert revision is None or (isinstance(revision, str) and len(revision) >= 7)
+    assert isinstance(revision, str) and len(revision) >= 12
+    described = subprocess.run(
+        ["git", "-C", str(ROOT), "describe", "--always", "--dirty", "--abbrev=12"],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    assert revision == described
+
+
+def test_a_rerun_over_cached_blocks_keeps_the_revision_they_were_built_under(tmp_path) -> None:
+    # The revision is not digested into the run id, so a rerun at a later
+    # HEAD serves cached blocks; run.json must keep naming the Eye that
+    # built them, not the HEAD that happened to serve them.
+    import json
+
+    from brain.scripts.build_gate_blocks import recorded_revision
+
+    run_root = tmp_path / "run"
+    blocks = run_root / "blocks"
+    blocks.mkdir(parents=True)
+    # a fresh run records the current revision
+    assert recorded_revision(run_root, current="bbbb", cached=()) == "bbbb"
+    (run_root / "run.json").write_text(json.dumps({"eye_revision": "aaaa"}))
+    # cached blocks: the stored revision stands
+    assert recorded_revision(run_root, current="bbbb", cached=("2022-01-03",)) == "aaaa"
+    # nothing cached: the stored one is stale and the current one is the record
+    assert recorded_revision(run_root, current="bbbb", cached=()) == "bbbb"
+    # an older run.json without the field cannot name its Eye
+    (run_root / "run.json").write_text(json.dumps({"run_id": "x"}))
+    assert recorded_revision(run_root, current="bbbb", cached=("2022-01-03",)) is None
 
 
 def test_the_eye_journals_where_the_caller_says(tmp_path) -> None:
@@ -61,8 +92,13 @@ def test_the_eye_journals_where_the_caller_says(tmp_path) -> None:
 
     from brain.research.trajectory_dataset import build_eye
 
+    import json
+
     root = Path(__file__).resolve().parents[2]
+    configured = json.loads((root / "configs/model.json").read_text())["observer"]["audit_journal_dir"]
     _, shared = build_eye(root / "configs/model.json", root=root)
-    assert shared.config.audit_journal_dir == str(root / "outputs/eye_journal")
+    assert shared.config.audit_journal_dir == str(root / configured)
     _, own = build_eye(root / "configs/model.json", root=root, audit_journal_dir=tmp_path / "journal")
     assert own.config.audit_journal_dir == str(tmp_path / "journal")
+    _, silent = build_eye(root / "configs/model.json", root=root, audit_journal_dir=None)
+    assert silent.config.audit_journal_dir is None

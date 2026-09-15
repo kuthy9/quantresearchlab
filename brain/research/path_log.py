@@ -176,15 +176,19 @@ def remember_pools(observation: Any, pool_memory: dict[str, Any]) -> None:
 
     Cheap enough for every bar the Eye observes, and it must run on every
     one: a pool swept before the emit window, or before the recorder is
-    warm, can still be the context of a step inside it.
+    warm, can still be the context of a step inside it. Idempotent —
+    ``path_rows`` calls it again for the bar it is given.
     """
 
     update = getattr(observation, "interaction_update", None)
     if update is None:
         return
     manipulations = {item.manipulation_id: item for item in getattr(observation, "manipulations", ())}
+    # Live paths and the bar's transition copies alike: a step is looked up
+    # by the path that carries it, whichever tuple published that path.
     live_pools = {
-        path.context_id for path in getattr(update, "interaction_paths", ())
+        path.context_id
+        for path in (*getattr(update, "interaction_paths", ()), *getattr(update, "interaction_path_transitions", ()))
         if _text(path.context_kind) == "pool_reversal"
     }
     for context_id in live_pools:

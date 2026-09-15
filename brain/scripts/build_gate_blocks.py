@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import asdict, dataclass
+import gc
 import hashlib
 import json
 from pathlib import Path
@@ -96,26 +97,46 @@ def run_id(
 
 
 def eye_revision() -> str | None:
-    """The checkout's HEAD, recorded beside the run id (not digested into it:
-    a docs commit must not invalidate cached blocks, but a receipt must be
-    able to name the Eye it measured). ``None`` outside a git checkout."""
+    """The checkout's HEAD, ``-dirty`` when tracked files are modified,
+    recorded beside the run id (not digested into it: a docs commit must not
+    invalidate cached blocks, but a receipt must be able to name the Eye it
+    measured). ``None`` outside a git checkout."""
 
     try:
         return subprocess.run(
-            ["git", "-C", str(ROOT), "rev-parse", "--short=12", "HEAD"],
+            ["git", "-C", str(ROOT), "describe", "--always", "--dirty", "--abbrev=12"],
             capture_output=True, text=True, check=True, timeout=10,
         ).stdout.strip() or None
     except (OSError, subprocess.SubprocessError):
         return None
 
 
-def _build_one(job: tuple[Block, str, str, str, bool]) -> str:
-    block, source, model, out_root, record_paths = job
-    out = Path(out_root) / block.week
+def recorded_revision(run_root: Path, *, current: str | None, cached: tuple[str, ...]) -> str | None:
+    """The revision ``run.json`` should name: the one already stored when any
+    block is served from the cache (those blocks were built under it), the
+    current one when every block is about to be built."""
+
+    manifest = Path(run_root) / "run.json"
+    if cached and manifest.exists():
+        return json.loads(manifest.read_text(encoding="utf-8")).get("eye_revision")
+    return current
+
+
+def cached_weeks(out_root: Path, blocks: list[Block], *, record_paths: bool) -> tuple[str, ...]:
+    return tuple(block.week for block in blocks if _is_cached(Path(out_root) / block.week, record_paths))
+
+
+def _is_cached(out: Path, record_paths: bool) -> bool:
     cached = (out / "dataset.npz").exists() and (out / "events.parquet").exists()
     if record_paths:
         cached = cached and (out / "paths.parquet").exists()
-    if cached:
+    return cached
+
+
+def _build_one(job: tuple[Block, str, str, str, bool]) -> str:
+    block, source, model, out_root, record_paths = job
+    out = Path(out_root) / block.week
+    if _is_cached(out, record_paths):
         return f"{block.week}: cached"
     started = time.monotonic()
     # The Eye spills cold events to a journal it never empties (about a
@@ -132,6 +153,9 @@ def _build_one(job: tuple[Block, str, str, str, bool]) -> str:
             record_paths=record_paths,
             audit_journal_dir=journal,
         )
+        # The store keeps its journal handle in a reference cycle; collect
+        # it here so the unlinked journal's disk is freed with the directory.
+        gc.collect()
     save_block(dataset, out, emit_end=block.emit_end)
     return (
         f"{block.week}: {len(dataset.index)} clocks, {len(dataset.events)} events, "
@@ -163,6 +187,13 @@ def main() -> None:
     out_root = ROOT / args.output_root / identity / "blocks"
     out_root.mkdir(parents=True, exist_ok=True)
     blocks = globex_weeks(args.first_session, args.last_session)
+    current = eye_revision()
+    revision = recorded_revision(
+        out_root.parent, current=current,
+        cached=cached_weeks(out_root, blocks, record_paths=args.record_paths),
+    )
+    if revision != current:
+        print(f"cached blocks were built under {revision}; this checkout is {current}", flush=True)
     (out_root.parent / "run.json").write_text(
         json.dumps(
             {
@@ -173,7 +204,7 @@ def main() -> None:
                 "model": str(model),
                 "block_rule": BLOCK_RULE,
                 "recorder": recorder,
-                "eye_revision": eye_revision(),
+                "eye_revision": revision,
                 "blocks": [asdict(block) for block in blocks],
             },
             indent=2,
