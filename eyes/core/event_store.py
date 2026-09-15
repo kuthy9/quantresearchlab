@@ -33,6 +33,7 @@ from shares.core.artifact_stream import (
     write_stream_manifest,
     write_stream_shard,
 )
+from .bounded import BoundedDict
 from .foundation_registry import FOUNDATION_VERSION
 from shares.core.market_clock import validate_registered_native_bar_root
 from contract.market import (
@@ -367,6 +368,17 @@ class _ForwardReferenceOverlay:
 
 
 _JOURNAL_RECORD_HEADER = struct.Struct(">I")
+# How many eligible BAR roots each scale's index keeps for the structural-leg
+# contract (a leg reaches its start pivot, at most the structure tracker's
+# 256 retained swings back, plus fourteen strict-prior ATR bars), and how
+# many entries the reservation memories keep (one normalized root per scale
+# and clock, one terminal per crossing generation, the latest protected
+# assignment per swing).  Appends are monotone in known_at, so a reservation
+# older than the newest clock can only ever be met by an idempotent retry,
+# which the digests answer.  Both bounds sit far above what any later event
+# can cite; a miss fails closed exactly as an absent entry always did.
+ELIGIBLE_BAR_INDEX_RETENTION_PER_SCALE = 4096
+RESERVATION_MEMORY_RETENTION = 8192
 JOURNAL_FILE_SUFFIX = ".evlog"
 
 
@@ -617,11 +629,15 @@ class EventStore:
         self._cold_offsets = array("q")
         self._cold_ids: dict[str, int] = {}
         self._journal = _CommittedJournal(self)
-        self._terminal_crossing_event_ids: dict[str, str] = {}
-        self._normalized_bar_event_ids: dict[
+        self._terminal_crossing_event_ids: BoundedDict[str, str] = BoundedDict(
+            RESERVATION_MEMORY_RETENTION
+        )
+        self._normalized_bar_event_ids: BoundedDict[
             tuple[Timeframe, pd.Timestamp], str
-        ] = {}
-        self._latest_protected_assignment_event_ids: dict[str, str] = {}
+        ] = BoundedDict(RESERVATION_MEMORY_RETENTION)
+        self._latest_protected_assignment_event_ids: BoundedDict[str, str] = (
+            BoundedDict(RESERVATION_MEMORY_RETENTION)
+        )
         self._latest_protected_assignment_event_ids_by_timeframe: dict[
             Timeframe, str
         ] = {}
@@ -803,6 +819,17 @@ class EventStore:
         del self._events[:count]
         return count
 
+    def _index_eligible_bars(
+        self,
+        key: tuple[str, Timeframe, object, object],
+        bars: Iterable[MarketEvent],
+    ) -> None:
+        index = self._eligible_bar_index.setdefault(key, [])
+        index.extend(bars)
+        excess = len(index) - ELIGIBLE_BAR_INDEX_RETENTION_PER_SCALE
+        if excess > 0:
+            del index[:excess]
+
     def _index_cold_record(self, event: MarketEvent, *, offset: int) -> None:
         """Register one journal record on restore, without re-validating it."""
 
@@ -814,7 +841,7 @@ class EventStore:
     def _advance_derived_indexes(self, event: MarketEvent, *, cold: bool) -> None:
         eligible_key = self._eligible_bar_key(event)
         if eligible_key is not None:
-            self._eligible_bar_index.setdefault(eligible_key, []).append(event)
+            self._index_eligible_bars(eligible_key, (event,))
         bar_reservation = self._normalized_bar_identity(
             event,
             bar_event_ids=self._normalized_bar_event_ids,
@@ -1047,7 +1074,7 @@ class EventStore:
         self._by_id[event.event_id] = event
         eligible_key = self._eligible_bar_key(event)
         if eligible_key is not None:
-            self._eligible_bar_index.setdefault(eligible_key, []).append(event)
+            self._index_eligible_bars(eligible_key, (event,))
         self._digests[event.event_id] = digest
         self._digest_sequence += bytes.fromhex(digest)
         self._full_prefix_fingerprint_hasher.update(digest.encode("ascii"))
@@ -1210,7 +1237,7 @@ class EventStore:
                 digest.encode("ascii")
             )
         for eligible_key, bars in staged_eligible_bars.items():
-            self._eligible_bar_index.setdefault(eligible_key, []).extend(bars)
+            self._index_eligible_bars(eligible_key, bars)
         self._terminal_crossing_event_ids.update(staged_terminal_event_ids)
         self._normalized_bar_event_ids.update(staged_bar_event_ids)
         self._latest_protected_assignment_event_ids.update(

@@ -24,6 +24,7 @@ import numpy as np
 import pandas as pd
 
 from .causal import ReaderUpdate
+from .bounded import BoundedDict, BoundedSet
 from .event_memory import EventMemory
 from .event_store import EventStore
 from .interaction import InteractionUpdate
@@ -70,6 +71,28 @@ from .range_auction import (
 from shares.core.scale_registry import _TIMEFRAME_MINUTES
 from .structure import StructureConfig
 from .zone import ZoneUpdate
+
+
+# How many entries each per-entity memory keeps (the event that last spoke
+# about a swing, level, leg, displacement, zone or range, so a later event
+# can cite it), and how many bar roots each scale keeps.  Both sit far above
+# any population a later event can still cite -- five scales of 256 retained
+# swings, the candidate set, 128 legs per scale, the zone and range
+# capacities; a swing window or leg contract reaches a few dozen bars back,
+# and the farthest read of all, a previous-week reference level citing the
+# 1m root of its extreme, at most two trading weeks (about 14,000 1m roots)
+# -- so eviction only ever drops entries nothing reads, and every reader of
+# these memories fails closed on a miss.  ``test_bounded_entity_memories``
+# proves a two-session replay emits identical events under a bound a small
+# fraction of these.
+ENTITY_MEMORY_RETENTION = 16384
+BAR_ROOT_RETENTION_PER_SCALE = 32768
+# The bar-keyed memories (close and range by root id, root id by candle id)
+# are shared by every scale and evict in clock order, so their bound is a
+# clock window: the newest 32,768 roots of all scales together are about
+# eleven trading days, against the 84 hours the widest 4H swing window can
+# reach back.
+BAR_MEMORY_RETENTION = 32768
 
 
 def _bar_root_clock(entry: tuple[pd.Timestamp, str]) -> pd.Timestamp:
@@ -221,19 +244,19 @@ class SemanticEventEmitter:
         self._known_structural_leg_order: deque[str] = deque(
             maxlen=max(2048, self.config.memory_events * 4)
         )
-        self._confirmed_swing_event_ids: dict[str, str] = {}
-        self._structural_leg_event_ids: dict[str, str] = {}
-        self._structure_direction_event_ids: dict[str, str] = {}
+        self._confirmed_swing_event_ids: BoundedDict[str, str] = BoundedDict(ENTITY_MEMORY_RETENTION)
+        self._structural_leg_event_ids: BoundedDict[str, str] = BoundedDict(ENTITY_MEMORY_RETENTION)
+        self._structure_direction_event_ids: BoundedDict[str, str] = BoundedDict(ENTITY_MEMORY_RETENTION)
         self._latest_structure_direction_event_ids: dict[
             Timeframe,
             str,
         ] = {}
-        self._bar_event_ids_by_candle_id: dict[str, str] = {}
-        self._bar_close_by_candle_id: dict[str, float] = {}
-        self._bar_close_by_event_id: dict[str, float] = {}
+        self._bar_event_ids_by_candle_id: BoundedDict[str, str] = BoundedDict(BAR_MEMORY_RETENTION)
+        self._bar_close_by_candle_id: BoundedDict[str, float] = BoundedDict(BAR_MEMORY_RETENTION)
+        self._bar_close_by_event_id: BoundedDict[str, float] = BoundedDict(BAR_MEMORY_RETENTION)
         # (low, high) of each real BAR, so a confirmed Swing can freeze
         # the price envelope of its own definitional window.
-        self._bar_range_by_event_id: dict[str, tuple[float, float]] = {}
+        self._bar_range_by_event_id: BoundedDict[str, tuple[float, float]] = BoundedDict(BAR_MEMORY_RETENTION)
         self._bar_event_ids_by_timeframe: dict[
             Timeframe,
             list[tuple[pd.Timestamp, str]],
@@ -251,42 +274,44 @@ class SemanticEventEmitter:
         ] = {
             timeframe: [] for timeframe in self._active_timeframes
         }
-        self._level_touch_event_ids: dict[
+        self._level_touch_event_ids: BoundedDict[
             tuple[str, pd.Timestamp],
             str,
-        ] = {}
-        self._candidate_level_event_ids: dict[str, str] = {}
+        ] = BoundedDict(ENTITY_MEMORY_RETENTION)
+        self._candidate_level_event_ids: BoundedDict[str, str] = BoundedDict(ENTITY_MEMORY_RETENTION)
         # One outcome per inventory item: the item ids whose LEVEL_REACHED
         # has been published, so a later crossing of the same item never
         # publishes a second one.
-        self._reached_level_ids: set[str] = set()
+        self._reached_level_ids: BoundedSet[str] = BoundedSet(ENTITY_MEMORY_RETENTION)
         # Retirement is one fact per identity: an id retired by the scan is
         # not retired again by a later reference-period rollover.
-        self._retired_level_ids: set[str] = set()
+        self._retired_level_ids: BoundedSet[str] = BoundedSet(ENTITY_MEMORY_RETENTION)
         self._known_level_touch_ids: set[str] = set()
         # Source reducers expose complete touch histories for live zones.
         # Evicting these occurrence keys causes old touches to be rediscovered
         # on every later frame, so retain the compact IDs for the contract
         # epoch and clear them only at a hard boundary.
-        self._known_level_touch_order: deque[str] = deque()
-        self._penetration_event_ids: dict[
+        self._known_level_touch_order: deque[str] = deque(
+            maxlen=ENTITY_MEMORY_RETENTION
+        )
+        self._penetration_event_ids: BoundedDict[
             tuple[str, Timeframe, pd.Timestamp],
             str,
-        ] = {}
-        self._raw_break_event_ids: dict[str, str] = {}
-        self._displacement_event_ids: dict[str, str] = {}
-        self._protected_swing_event_ids: dict[str, str] = {}
-        self._terminal_crossing_events: dict[str, MarketEvent] = {}
-        self._fvg_created_event_ids: dict[str, str] = {}
-        self._fvg_first_retest_event_ids: dict[str, str] = {}
-        self._fvg_terminal_event_ids: dict[str, str] = {}
-        self._base_origin_core_event_ids: dict[str, str] = {}
-        self._origin_zone_created_event_ids: dict[str, str] = {}
-        self._range_created_event_ids: dict[str, str] = {}
-        self._range_active_event_ids: dict[str, str] = {}
-        self._balance_range_observed_event_ids: dict[str, str] = {}
-        self._range_terminal_event_ids: dict[str, str] = {}
-        self._range_boundary_level_ids: dict[tuple[str, str], str] = {}
+        ] = BoundedDict(ENTITY_MEMORY_RETENTION)
+        self._raw_break_event_ids: BoundedDict[str, str] = BoundedDict(ENTITY_MEMORY_RETENTION)
+        self._displacement_event_ids: BoundedDict[str, str] = BoundedDict(ENTITY_MEMORY_RETENTION)
+        self._protected_swing_event_ids: BoundedDict[str, str] = BoundedDict(ENTITY_MEMORY_RETENTION)
+        self._terminal_crossing_events: BoundedDict[str, MarketEvent] = BoundedDict(ENTITY_MEMORY_RETENTION)
+        self._fvg_created_event_ids: BoundedDict[str, str] = BoundedDict(ENTITY_MEMORY_RETENTION)
+        self._fvg_first_retest_event_ids: BoundedDict[str, str] = BoundedDict(ENTITY_MEMORY_RETENTION)
+        self._fvg_terminal_event_ids: BoundedDict[str, str] = BoundedDict(ENTITY_MEMORY_RETENTION)
+        self._base_origin_core_event_ids: BoundedDict[str, str] = BoundedDict(ENTITY_MEMORY_RETENTION)
+        self._origin_zone_created_event_ids: BoundedDict[str, str] = BoundedDict(ENTITY_MEMORY_RETENTION)
+        self._range_created_event_ids: BoundedDict[str, str] = BoundedDict(ENTITY_MEMORY_RETENTION)
+        self._range_active_event_ids: BoundedDict[str, str] = BoundedDict(ENTITY_MEMORY_RETENTION)
+        self._balance_range_observed_event_ids: BoundedDict[str, str] = BoundedDict(ENTITY_MEMORY_RETENTION)
+        self._range_terminal_event_ids: BoundedDict[str, str] = BoundedDict(ENTITY_MEMORY_RETENTION)
+        self._range_boundary_level_ids: BoundedDict[tuple[str, str], str] = BoundedDict(ENTITY_MEMORY_RETENTION)
         # The last broken range per scale; a new active range on that scale
         # replaces it.
         self._last_invalidated_range_event_id: dict[Timeframe, str] = {}
@@ -306,10 +331,10 @@ class SemanticEventEmitter:
         self._known_sequence_event_order: deque[
             tuple[str, StructureLifecycle]
         ] = deque(maxlen=max(512, self.config.memory_events * 2))
-        self._liquidity_entity_revisions: dict[
+        self._liquidity_entity_revisions: BoundedDict[
             str,
             tuple[object, ...],
-        ] = {}
+        ] = BoundedDict(ENTITY_MEMORY_RETENTION)
 
     def rebind_memory(self, memory: EventMemory) -> None:
         """Follow the observer onto the memory it rebuilt for a new epoch."""
@@ -1321,6 +1346,9 @@ class SemanticEventEmitter:
         index = _bar_root_index_at(bar_events, clock)
         if index is None:
             insort_right(bar_events, (clock, event_id), key=_bar_root_clock)
+            excess = len(bar_events) - BAR_ROOT_RETENTION_PER_SCALE
+            if excess > 0:
+                del bar_events[:excess]
         elif bar_events[index][1] != event_id:
             raise ValueError(
                 "normalized BAR root clock already has another event: "

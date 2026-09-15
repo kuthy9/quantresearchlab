@@ -3540,7 +3540,11 @@ class CausalObserver:
             # may still hold its source swing, so a still-visible item leaves
             # the inventory pipeline here too, or a later crossing would reach
             # a level the Eye no longer offers.  A consumed item is history
-            # and keeps its recorded outcome.
+            # and keeps its recorded outcome.  An id the trackers no longer
+            # offer can never be offered again, so the set follows the offer.
+            self._retired_level_ids.intersection_update(
+                {item.item_id for item in base_inventory}
+            )
             base_inventory = [
                 item
                 for item in base_inventory
