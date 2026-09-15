@@ -397,15 +397,33 @@ had ever spoken about. Four changes, in the order they depend on each other:
   proves a two-session replay emits identical events under bounds a small
   fraction of these while the memories are actually evicting. The
   per-entity memories — the event that last spoke about a swing, level,
-  BOS, zone or range — are deliberately *not* count-bounded: the emitter
-  re-walks every retained entity on every frame, so such a memory is read
-  for as long as the slowest scale retains the entity (256 4H swings is
-  months), and a month replay with every memory instrumented measured
-  lookups reaching back over the whole run (a first attempt at 16,384
-  entries failed the month replay at bar 25,000 with "BOS post-break
-  resolution lacks its canonical penetration event"). They cost about
-  75 MB a month of 1m tape; bounding them means dropping an entry when no
-  tracker retains its entity any more, which is the open item below.
+  BOS, zone or range — are *not* count-bounded: the emitter re-walks every
+  retained entity on every frame, so such a memory is read for as long as
+  the slowest scale retains the entity (256 4H swings is months), and a
+  month replay with every memory instrumented measured lookups reaching
+  back over the whole run (a first attempt at 16,384 entries failed the
+  month replay at bar 25,000 with "BOS post-break resolution lacks its
+  canonical penetration event"). They follow retention instead, below.
+- **Per-entity memories follow tracker retention.** An entry is read for
+  as long as some tracker retains its entity or another entity that cites
+  it (a BOS names its target swing, an FVG its source candles, a leg its
+  ATR bars) — and no longer, since nothing the Eye publishes can then name
+  it. Whenever the memories have doubled since the last pass (above
+  `ENTITY_MEMORY_PRUNE_FLOOR`, 65,536 entries), the observer harvests
+  every identifier field from the tracker states it publishes — frames,
+  displacement, inventory, pools, interaction, Group 4 — plus the reducer's
+  candidate set (whose retirements the emitter publishes) and its own
+  inventory bookkeeping (`eyes/core/entity_liveness.py`), and the emitter
+  drops every entry none of them names (`prune_entity_memories`; a memory
+  keyed `swing:…` survives on its bare id, a crossing generation on its
+  level, a touch identity on its level; the candle-id memory also keeps a
+  `BAR_MEMORY_RETENTION` window). The reducer's own states are not
+  harvested: the emitter never reads them, and their swing hierarchy holds
+  2,048 swings per scale. On the month replay the pass ran three times,
+  dropped 48,650 / 38,277 / 30,827 entries against 4,000–4,900 live ids,
+  and a tombstone on every dropped key was never read again; the full
+  audit log was identical to the baseline's on every bar
+  (`test_entity_memory_pruning.py`, and the evidence note).
 - **Entity identities are not forward references.** Legacy-transport state
   events name entities in `source_ids` (`swing:…`, `pool:…`); each was an
   open forward reference no later event could resolve. An identity in a
