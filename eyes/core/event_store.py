@@ -326,6 +326,30 @@ def event_order_key(event: MarketEvent) -> tuple[pd.Timestamp, int, str]:
     return event.known_at, event.sequence_no, event.event_id
 
 
+# The lifecycle namespaces of typed entities.  A ``namespace:identity`` source
+# id names an entity, never an event, so it is never an open forward
+# reference; raw opaque identities keep their forward standing.
+_ENTITY_IDENTITY_NAMESPACES = frozenset(
+    {
+        "bos",
+        "entry_path",
+        "fvg",
+        "manipulation",
+        "order_block",
+        "pool",
+        "range",
+        "structure",
+        "swing",
+        "zone",
+    }
+)
+
+
+def _is_entity_identity(reference_id: str) -> bool:
+    namespace, separator, identity = reference_id.partition(":")
+    return bool(separator and identity) and namespace in _ENTITY_IDENTITY_NAMESPACES
+
+
 class _ForwardReferenceOverlay:
     """One batch's view of the open forward references, without a copy.
 
@@ -1311,7 +1335,9 @@ class EventStore:
             *event.source_event_ids,
             *event.context_event_ids,
         ):
-            if reference_id not in available:
+            if reference_id not in available and not _is_entity_identity(
+                reference_id
+            ):
                 unresolved_reference_ids.add(reference_id)
 
     @staticmethod

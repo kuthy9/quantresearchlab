@@ -1984,6 +1984,32 @@ def test_append_batch_reads_the_unresolved_reference_set_by_membership_only() ->
     assert store._unresolved_forward_reference_ids is guarded
 
 
+def test_entity_identities_are_not_registered_as_open_forward_references() -> None:
+    """A ``namespace:identity`` source id names an entity, never an event.
+
+    Legacy-transport state events carry entity identities in ``source_ids``
+    (``swing:…``, ``pool:…``); every one was registered as an open forward
+    reference that no later event could ever resolve -- 54,963 of them at
+    bar 20,000 of 2022-02.  A raw opaque identity keeps its forward standing
+    (a canonical child may still close it into a cycle); an identity in a
+    registered entity namespace is skipped.
+    """
+
+    store = EventStore()
+    legacy = _event(
+        "legacy-state",
+        0,
+        source_ids=("swing:abc123", "pool:def456", "raw-forward-id"),
+    )
+    assert store.append(legacy) is True
+    assert store._unresolved_forward_reference_ids == {"raw-forward-id"}
+    # The namespaces are the typed lifecycle registry's, kept in step.
+    from eyes.core.event_memory import EventMemory
+    from eyes.core.event_store import _ENTITY_IDENTITY_NAMESPACES
+
+    assert _ENTITY_IDENTITY_NAMESPACES == frozenset(EventMemory._TIMELINE_TRANSITIONS)
+
+
 @pytest.mark.parametrize("namespace", ("source_event_ids", "context_event_ids"))
 def test_store_rejects_dangling_canonical_event_references_atomically(
     namespace: str,
