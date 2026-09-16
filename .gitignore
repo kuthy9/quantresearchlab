@@ -30,7 +30,7 @@ archive/
 .coverage
 .coverage.*
 
-# macOS/iCloud sync duplicates ("observation 2.py", "registry_v1_3 2.yaml").
-# The Desktop is iCloud-synced, so conflicting saves land as " 2" siblings that
-# are byte-identical to the original and belong to no commit.
-* 2.*
+# macOS/iCloud sync duplicates ("observation 2.py", "registry_v1_3 3.yaml").
+# The Desktop is iCloud-synced, so conflicting saves land as " 2", " 3", …
+# siblings that are byte-identical to the original and belong to no commit.
+* [0-9].*

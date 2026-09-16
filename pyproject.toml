@@ -41,4 +41,4 @@ include = ["eyes*", "brain*", "execution*", "shares*", "contract*"]
 
 [tool.pytest.ini_options]
 testpaths = ["eyes/tests", "brain/tests", "execution/tests", "shares/tests"]
-addopts = "-q"
+addopts = "-q --ignore-glob=\"* [0-9].py\""

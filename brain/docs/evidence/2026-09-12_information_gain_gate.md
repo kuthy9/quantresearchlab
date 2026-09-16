@@ -1,3 +1,7 @@
+> **Retired 2026-09-16.** This receipt measured the mechanical (kNN) Brain, which
+> was replaced by the LLM Brain ([spec](../specs/2026-09-16-llm-brain-design.md)).
+> The code it describes no longer exists; the numbers stand as the record of why.
+
 # Information-gain gate — receipt, 2026-09-12
 
 Spec: [2026-09-11-information-gain-gate-design.md](../specs/2026-09-11-information-gain-gate-design.md).

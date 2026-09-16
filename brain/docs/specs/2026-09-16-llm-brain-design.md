@@ -431,11 +431,11 @@ Deleted:
 - `brain/research/` (all), `brain/scripts/` (all; `build_eye` moves to `shares/core/eye_factory.py`)
 - `brain/tests/` (all sixteen retired modules)
 - `brain/docs/plans/*` and `brain/docs/specs/*` written for the retired gates
-- `contract/brain/{belief, forecast}.py`; `contract/decision/action.py` (replaced by `opportunity.py`); `contract/risk/` and `contract/research/` (packages bound to the retired decision / risk / engine); `CONTRACT_ORDER` becomes `market → execution → eye → brain → decision`
+- `contract/brain/forecast.py` (the kNN Brain's `MarketBeliefState` and its representation constants)
 - `shares/core/engine.py`; `shares/tests/{test_io_engine, test_scene_graph_scale_contract, test_v2_protocols}.py`; `execution/core/simulation.py`; `execution/tests/test_sequential_replay.py` — every one bound to the retired typed vertical and uncollectable today
 - `configs/model.json`: the `hypothesis_protocol`, `action_pipeline`, `decision` and `risk` blocks (read only by deleted modules; not part of the atomic identity, verified by the existing `eyes/tests/test_semantic_selection.py`)
 
-Kept: `brain/core/brain_entry_sequence.py`; `contract/brain/{context, hypothesis, plan, vocabulary}.py` (the neutral-projection contracts `scene_graph`, `market_cases` and their tests still consume); `brain/docs/evidence/*` (historical, with a retired banner).
+Kept: `brain/core/brain_entry_sequence.py`; `contract/brain/{belief, context, hypothesis, plan, vocabulary}.py`, `contract/decision/action.py`, `contract/risk/` and `contract/research/` — the typed-vertical contracts that `shares/core/scene_graph.py`, `shares/core/visualization.py`, `market_cases.py` and the shares test helpers still consume as inert dataclasses (measured during Task 3: deleting them cascades into the visualization projection and four passing test modules). `CONTRACT_ORDER` is unchanged; `contract/decision/opportunity.py` sits beside `action.py`. `brain/docs/evidence/*` stay (historical, with a retired banner). `eyes/tests/test_semantic_selection.py`, skipped since the engine's retirement, is revived on `shares.core.eye_factory.build_eye` with the current identity.
 
 Re-bound: `eyes/scripts/replay_hash_stream.py` → `shares.core.eye_factory.build_eye`; `eyes/tests/test_v3_group12_primitives.py` and `test_range_auction_primitives.py` → `brain.core.eye_view.visible_liquidity_ids`.
 

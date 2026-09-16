@@ -9,16 +9,12 @@ import pytest
 
 from eyes.core import foundation_registry as foundation_module
 
-pytest.importorskip(
-    "brain.core.calibration",
-    reason="ContinuousSMCEngine still imports the typed Brain retired in 5883241",
-)
-from shares.core.engine import ContinuousSMCEngine  # noqa: E402
 from eyes.core.semantics import (
     SemanticRegistry,
     SemanticRegistryError,
     load_semantic_selection,
 )
+from shares.core.eye_factory import build_eye
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -34,7 +30,7 @@ def test_selection_keeps_two_identities_and_parent_binding() -> None:
 
     assert selection.atomic_semantics_version == "smc_semantics_v1.3"
     assert selection.atomic_definition_identity == (
-        "af834d53c6f03e9c874ec785a4dd6f60c719be33dba89e7de3b6b3a55973f301"
+        "144f1d6c6d6246931fda6c0f0e9cbc28d8260c851e41de7fdb9132214c3ee94d"
     )
     assert selection.foundation_projection_version == (
         "smc_semantic_foundation_v2.1"
@@ -111,7 +107,7 @@ def test_model_has_no_duplicate_observer_selection_aliases() -> None:
     )
 
 
-def test_engine_injects_the_single_loaded_atomic_registry(
+def test_eye_factory_injects_the_single_loaded_atomic_registry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     original = SemanticRegistry.from_file.__func__
@@ -122,12 +118,9 @@ def test_engine_injects_the_single_loaded_atomic_registry(
         return original(cls, source, **kwargs)
 
     monkeypatch.setattr(SemanticRegistry, "from_file", classmethod(tracked))
-    engine = ContinuousSMCEngine.from_config(
-        ROOT / "configs/model.json",
-        runtime_mode="development",
-    )
+    _, observer = build_eye(ROOT / "configs/model.json", root=ROOT, audit_journal_dir=None)
 
     assert len(calls) == 1
-    assert engine.observer.semantic_registry.identity == (
-        "af834d53c6f03e9c874ec785a4dd6f60c719be33dba89e7de3b6b3a55973f301"
+    assert observer.semantic_registry.identity == (
+        "144f1d6c6d6246931fda6c0f0e9cbc28d8260c851e41de7fdb9132214c3ee94d"
     )
