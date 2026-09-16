@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "wake": {
+    "timeframes_any_reaction": ["15m", "1H", "4H"],
+    "reaction_kinds_excluded": [
+      "swing_confirmed", "structural_leg_created", "liquidity_level_created",
+      "structure_break_failed", "raw_boundary_break", "delivery_phase_updated",
+      "level_penetrated", "level_touched", "liquidity_retired", "level_invalidated",
+      "fvg_created", "base_origin_core_created", "fvg_invalidated",
+      "fvg_partially_filled", "fvg_fully_filled", "fvg_midpoint_touched",
+      "dealing_range_replaced"
+    ],
+    "timeframe_specific_kinds": {
+      "5m": ["mss_core_confirmed", "qualified_bos", "sweep_confirmed"]
+    }
+  },
+  "evidence": {
+    "timeframes": ["5m", "15m", "1H", "4H"],
+    "tape_timeframe": "1m",
+    "tape_reaction_kinds": ["sweep_confirmed", "acceptance_confirmed", "mss_core_confirmed", "qualified_bos", "liquidity_sweep", "level_reached"],
+    "tape_recent_limit": 8,
+    "heartbeat_kinds_excluded": ["bar_completed", "market_epoch_reset"],
+    "state_republication_suffix": "_state"
+  }
+}
