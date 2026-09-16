@@ -89,11 +89,16 @@ def test_no_llm_call_without_evidence_and_unresolved_blocks_sleep(observations) 
     assert refused
 
 
-def test_incident_keeps_active(observations) -> None:
-    results, _ = run(observations, EchoClient(fail_calls=range(2, 7)))
+def test_incident_keeps_active_and_is_journaled_with_its_message(observations, tmp_path: Path) -> None:
+    journal = BrainJournal(tmp_path, run_id="incident")
+    results, _ = run(observations, EchoClient(fail_calls=range(2, 7)), journal=journal)
     incidents = [r for r in results if r.incident]
     assert incidents and incidents[0].incident == "LLMTimeout"
     assert incidents[0].status_after is RuntimeStatus.ACTIVE and incidents[0].llm_called
+    reader = JournalReader(tmp_path)
+    recorded = [r for ep in reader.episode_ids() for r in reader.records(ep) if r.record == "incident"]
+    assert recorded and recorded[0].payload["kind"] == "LLMTimeout"
+    assert recorded[0].payload["message"] == "echo client scripted timeout"
 
 
 def test_open_position_forces_active(observations) -> None:

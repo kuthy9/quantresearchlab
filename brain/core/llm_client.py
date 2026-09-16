@@ -15,10 +15,13 @@ import hashlib
 import json
 import os
 import socket
+import ssl
 import time
 from typing import Any, Protocol
 import urllib.error
 import urllib.request
+
+import certifi
 
 from contract.brain.llm import LLM_UPDATE_EXAMPLE, MalformedReply
 
@@ -99,6 +102,9 @@ class DeepSeekClient:
         self.max_tokens = int(max_tokens)
         self.base_url = (base_url or os.environ.get(BASE_URL_ENV) or DEFAULT_DEEPSEEK_BASE_URL).rstrip("/")
         self._opener = opener
+        # python.org's macOS builds ship without a CA bundle, so a bare
+        # urlopen fails TLS verification; certifi's bundle is the authority.
+        self._ssl_context = ssl.create_default_context(cafile=certifi.where())
 
     def request_body(self, *, system: str, user: str) -> dict[str, Any]:
         return {
@@ -126,7 +132,7 @@ class DeepSeekClient:
         )
         started = time.monotonic()
         try:
-            with self._opener(request, timeout=self.timeout_s) as response:
+            with self._opener(request, timeout=self.timeout_s, context=self._ssl_context) as response:
                 raw = response.read()
         except urllib.error.HTTPError as error:
             status = int(error.code)
@@ -146,7 +152,12 @@ class DeepSeekClient:
             reason = getattr(error, "reason", None)
             if isinstance(reason, (socket.timeout, TimeoutError)) or "timed out" in str(reason).lower():
                 raise LLMTimeout(f"DeepSeek request timed out after {self.timeout_s}s") from None
+            if isinstance(reason, ssl.SSLError):
+                # A certificate or protocol failure does not fix itself on retry.
+                raise LLMRequestRejected(f"DeepSeek TLS failure: {reason}") from None
             raise LLMServerError(f"DeepSeek transport failure: {reason}") from None
+        except ssl.SSLError as error:
+            raise LLMRequestRejected(f"DeepSeek TLS failure: {error}") from None
         latency_ms = int((time.monotonic() - started) * 1000)
         try:
             payload = json.loads(raw.decode("utf-8"))
@@ -290,6 +301,7 @@ class CallOutcome:
     incident: str | None
     attempts: int
     repaired: bool
+    incident_message: str | None = None
 
 
 def call_with_policy(
@@ -310,11 +322,11 @@ def call_with_policy(
         try:
             reply = client.complete(system=system, user=prompt)
         except LLMRequestRejected as error:
-            return CallOutcome(None, None, type(error).__name__, attempts, repaired)
+            return CallOutcome(None, None, type(error).__name__, attempts, repaired, str(error))
         except (LLMTimeout, LLMRateLimited, LLMServerError) as error:
             transport_failures += 1
             if transport_failures > policy.max_retries:
-                return CallOutcome(None, None, type(error).__name__, attempts, repaired)
+                return CallOutcome(None, None, type(error).__name__, attempts, repaired, str(error))
             if isinstance(error, LLMRateLimited):
                 delay = error.retry_after
             else:
@@ -323,7 +335,7 @@ def call_with_policy(
             continue
         except MalformedReply as error:
             if repaired:
-                return CallOutcome(None, None, "MalformedReply", attempts, repaired)
+                return CallOutcome(None, None, "MalformedReply", attempts, repaired, str(error))
             repaired = True
             prompt = user + REPAIR_SUFFIX.format(error=error)
             continue
@@ -331,7 +343,7 @@ def call_with_policy(
             update = parse(reply.content)
         except MalformedReply as error:
             if repaired:
-                return CallOutcome(None, reply, "MalformedReply", attempts, repaired)
+                return CallOutcome(None, reply, "MalformedReply", attempts, repaired, str(error))
             repaired = True
             prompt = user + REPAIR_SUFFIX.format(error=error)
             continue

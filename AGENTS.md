@@ -149,8 +149,8 @@ for the Foundation projection.
 ## Build, Test, and Development Commands
 
 Create the environment with `uv sync --all-extras`; there is no compile step.
-`--extra test` alone prunes `torch` and `databento`, which the MBO protocol
-tests need. The `data/` payload is gitignored, so a fresh worktree must link or
+`--extra test` alone prunes `databento`, which only the raw DBN readers in
+`shares/core/io.py` import. The `data/` payload is gitignored, so a fresh worktree must link or
 materialize it before the real-tape tests and the MBO protocol tests can pass.
 `pyproject.toml` ignores iCloud's `* 2.py`-style duplicates (`--ignore-glob`).
 

@@ -152,12 +152,36 @@ def test_deepseek_timeout_maps(monkeypatch) -> None:
 
     monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
 
-    def slow(request, timeout):
+    def slow(request, timeout, context=None):
         raise socket.timeout("timed out")
 
     client = DeepSeekClient(model="deepseek-flash", timeout_s=0.01, max_tokens=10, base_url="http://127.0.0.1:9", opener=slow)
     with pytest.raises(LLMTimeout):
         client.complete(system="s", user="u")
+
+
+def test_deepseek_tls_failure_is_not_retried(monkeypatch) -> None:
+    import ssl
+    import urllib.error
+
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
+    seen: dict[str, object] = {}
+
+    def refuse(request, timeout, context=None):
+        seen["context"] = context
+        raise urllib.error.URLError(ssl.SSLCertVerificationError(1, "certificate verify failed"))
+
+    client = DeepSeekClient(model="deepseek-flash", timeout_s=1, max_tokens=10, base_url="http://127.0.0.1:9", opener=refuse)
+    with pytest.raises(LLMRequestRejected, match="TLS"):
+        client.complete(system="s", user="u")
+    assert isinstance(seen["context"], ssl.SSLContext) and seen["context"].verify_mode == ssl.CERT_REQUIRED
+    out = call_with_policy(client, system="s", user="u", parse=parse_ok, policy=RetryPolicy(max_retries=3, backoff_base_s=0.0), sleep=lambda s: None)
+    assert out.incident == "LLMRequestRejected" and out.attempts == 1 and "certificate verify failed" in out.incident_message
+
+
+def test_incident_message_is_kept() -> None:
+    out, _, _ = run([LLMTimeout("slow upstream")] * 3)
+    assert out.incident_message == "slow upstream"
 
 
 def test_missing_key_refuses_construction(monkeypatch) -> None:

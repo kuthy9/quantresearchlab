@@ -176,6 +176,7 @@ class BrainRuntime:
                 known_at=context.known_at,
                 payload={
                     "kind": step.result.incident,
+                    "message": outcome.incident_message,
                     "attempts": outcome.attempts,
                     "input_sha": step.llm_input.input_sha,
                 },
