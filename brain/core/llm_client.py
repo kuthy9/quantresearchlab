@@ -61,6 +61,7 @@ class LLMReply:
     usage: Mapping[str, int]
     latency_ms: int
     model: str
+    finish_reason: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -69,6 +70,7 @@ class LLMReply:
             "usage": dict(self.usage),
             "latency_ms": int(self.latency_ms),
             "model": self.model,
+            "finish_reason": self.finish_reason,
         }
 
 
@@ -164,12 +166,19 @@ class DeepSeekClient:
         except (UnicodeDecodeError, ValueError):
             raise MalformedReply("DeepSeek response body is not JSON") from None
         try:
-            message = payload["choices"][0]["message"]
+            choice = payload["choices"][0]
+            message = choice["message"]
         except (KeyError, IndexError, TypeError):
             raise MalformedReply("DeepSeek response has no choices[0].message") from None
+        finish_reason = choice.get("finish_reason") if isinstance(choice, Mapping) else None
         content = message.get("content") if isinstance(message, Mapping) else None
         if not isinstance(content, str) or not content.strip():
             raise MalformedReply("DeepSeek reply content is empty")
+        if finish_reason == "length":
+            # Reasoning tokens count against max_tokens; a cut reply is never valid JSON.
+            raise MalformedReply(
+                f"DeepSeek reply truncated at max_tokens={self.max_tokens} (finish_reason=length)"
+            )
         reasoning = message.get("reasoning_content")
         usage_raw = payload.get("usage") or {}
         usage = {
@@ -183,6 +192,7 @@ class DeepSeekClient:
             usage=usage,
             latency_ms=latency_ms,
             model=str(payload.get("model", self.model)),
+            finish_reason=str(finish_reason) if finish_reason is not None else None,
         )
 
 
@@ -302,6 +312,10 @@ class CallOutcome:
     attempts: int
     repaired: bool
     incident_message: str | None = None
+    # Why the first reply was refused, when a repair attempt followed; and the
+    # refused reply itself, so the journal keeps what the model actually said.
+    repair_reason: str | None = None
+    rejected_reply: LLMReply | None = None
 
 
 def call_with_policy(
@@ -316,17 +330,19 @@ def call_with_policy(
     attempts = 0
     transport_failures = 0
     repaired = False
+    repair_reason: str | None = None
+    rejected: LLMReply | None = None
     prompt = user
     while True:
         attempts += 1
         try:
             reply = client.complete(system=system, user=prompt)
         except LLMRequestRejected as error:
-            return CallOutcome(None, None, type(error).__name__, attempts, repaired, str(error))
+            return CallOutcome(None, None, type(error).__name__, attempts, repaired, str(error), repair_reason, rejected)
         except (LLMTimeout, LLMRateLimited, LLMServerError) as error:
             transport_failures += 1
             if transport_failures > policy.max_retries:
-                return CallOutcome(None, None, type(error).__name__, attempts, repaired, str(error))
+                return CallOutcome(None, None, type(error).__name__, attempts, repaired, str(error), repair_reason, rejected)
             if isinstance(error, LLMRateLimited):
                 delay = error.retry_after
             else:
@@ -335,19 +351,22 @@ def call_with_policy(
             continue
         except MalformedReply as error:
             if repaired:
-                return CallOutcome(None, None, "MalformedReply", attempts, repaired, str(error))
+                return CallOutcome(None, None, "MalformedReply", attempts, repaired, str(error), repair_reason, rejected)
             repaired = True
+            repair_reason = str(error)
             prompt = user + REPAIR_SUFFIX.format(error=error)
             continue
         try:
             update = parse(reply.content)
         except MalformedReply as error:
             if repaired:
-                return CallOutcome(None, reply, "MalformedReply", attempts, repaired, str(error))
+                return CallOutcome(None, reply, "MalformedReply", attempts, repaired, str(error), repair_reason, rejected)
             repaired = True
+            repair_reason = str(error)
+            rejected = reply
             prompt = user + REPAIR_SUFFIX.format(error=error)
             continue
-        return CallOutcome(update, reply, None, attempts, repaired)
+        return CallOutcome(update, reply, None, attempts, repaired, None, repair_reason, rejected)
 
 
 __all__ = [

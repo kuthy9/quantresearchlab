@@ -167,6 +167,8 @@ class BrainRuntime:
                 "reply": None if outcome.reply is None else outcome.reply.to_dict(),
                 "attempts": outcome.attempts,
                 "repaired": outcome.repaired,
+                "repair_reason": outcome.repair_reason,
+                "rejected_reply": None if outcome.rejected_reply is None else outcome.rejected_reply.to_dict(),
             },
         )
         if step.result.incident is not None:

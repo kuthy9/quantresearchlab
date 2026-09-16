@@ -65,6 +65,7 @@ def test_server_error_retried_and_bad_request_not() -> None:
 def test_malformed_gets_exactly_one_repair_attempt() -> None:
     out, client, _ = run([reply("BAD"), reply("GOOD")])
     assert out.update == "UPDATE" and out.repaired is True and "bad" in client.calls[1][1]
+    assert out.repair_reason == "bad" and out.rejected_reply.content == "BAD"
     assert client.calls[0][1] == "u"
     out, client, _ = run([reply("BAD"), reply("BAD")])
     assert out.incident == "MalformedReply" and len(client.calls) == 2 and out.reply is not None
@@ -109,12 +110,12 @@ def test_deepseek_client_request_shape_and_reply(server, monkeypatch) -> None:
     monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
     _Handler.scenario = [(200, {}, {
         "model": "deepseek-flash", "usage": {"prompt_tokens": 10, "completion_tokens": 5},
-        "choices": [{"message": {"content": "{\"x\":1}", "reasoning_content": "thought"}}],
+        "choices": [{"finish_reason": "stop", "message": {"content": "{\"x\":1}", "reasoning_content": "thought"}}],
     })]
     client = DeepSeekClient(model="deepseek-flash", timeout_s=5, max_tokens=100, base_url=server)
     out = client.complete(system="SYS", user="USER")
     assert out.content == '{"x":1}' and out.reasoning_content == "thought" and out.usage["prompt_tokens"] == 10
-    assert out.model == "deepseek-flash" and out.latency_ms >= 0
+    assert out.model == "deepseek-flash" and out.latency_ms >= 0 and out.finish_reason == "stop"
     body = _Handler.bodies[-1]
     assert body["model"] == "deepseek-flash" and body["response_format"] == {"type": "json_object"}
     assert body["max_tokens"] == 100 and body["stream"] is False
@@ -137,6 +138,14 @@ def test_deepseek_client_maps_http_errors(server, monkeypatch, status, headers, 
     if expected is LLMRateLimited:
         assert info.value.retry_after == 3.0
     assert "test-key" not in str(info.value)
+
+
+def test_deepseek_truncated_reply_is_malformed(server, monkeypatch) -> None:
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
+    _Handler.scenario = [(200, {}, {"choices": [{"finish_reason": "length", "message": {"content": "{\"cut"}}], "usage": {}})]
+    client = DeepSeekClient(model="deepseek-flash", timeout_s=5, max_tokens=100, base_url=server)
+    with pytest.raises(MalformedReply, match="max_tokens"):
+        client.complete(system="s", user="u")
 
 
 def test_deepseek_empty_content_is_malformed(server, monkeypatch) -> None:

@@ -248,6 +248,7 @@ class JournalReader:
                     usage=reply.get("usage", {}),
                     latency_ms=int(reply.get("latency_ms", 0)),
                     model=str(reply.get("model", "")),
+                    finish_reason=reply.get("finish_reason"),
                 )
         return FrozenDict(replies)
 
