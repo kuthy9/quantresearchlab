@@ -105,8 +105,10 @@ and any evidence id that was not in `new_evidence`; there is no numeric price
 field to refuse.
 
 DeepSeek: `POST {DEEPSEEK_BASE_URL}/chat/completions` in JSON mode, model
-from `configs/main_brain.json` (`deepseek-flash`); `reasoning_content` is
-journaled, never parsed. Retry policy: timeouts, 429 (honouring
+from `configs/main_brain.json` (`deepseek-flash`, `max_tokens` 32768 —
+reasoning tokens count against the cap, and a reply with
+`finish_reason=length` is refused as malformed); TLS is verified against
+certifi's bundle; `reasoning_content` is journaled, never parsed. Retry policy: timeouts, 429 (honouring
 `Retry-After`) and 5xx retry with exponential backoff up to `max_retries`; a
 malformed reply gets exactly one repair attempt; anything past that is an
 *incident* — the state carries forward and the runtime stays ACTIVE.
@@ -166,9 +168,10 @@ and, at the end, the counts of every decision, the LLM calls and incidents.
 Records, each `{seq, record, episode_id, known_at, prev_hash, hash, payload}`
 with `hash = sha256(prev_hash + canonical(body))` chaining from `run_id`:
 `episode_opened → wake → llm_call (input_sha, the full input, the reply,
-reasoning_content, usage, latency, attempts) → state (the full BrainState,
-rejections) | tick (revision) → opportunity (opportunity + geometry) →
-incident → sleep`. `trade` is reserved for the ledger. The writer refuses a
+reasoning_content, usage, latency, finish_reason, attempts, the repair
+reason and the refused reply when a repair was needed) → state (the full
+BrainState, rejections) | tick (revision) → opportunity (opportunity +
+geometry) → incident (kind, message) → sleep`. `trade` is reserved for the ledger. The writer refuses a
 record whose `known_at` steps back or whose revision is not the previous plus
 one.
 
@@ -194,6 +197,13 @@ synthetic tape, including a tampered record and a dropped revision.
 `--client echo` needs no key: a contract-valid reply for every call, for
 smoke runs. `DEEPSEEK_API_KEY` is read from the environment only; it is never
 written to a file, a command line the repository owns, or a journal.
+
+## Receipts — `brain/docs/evidence/`
+
+[2026-09-16_llm_brain_e2e_2022-01-04.md](evidence/2026-09-16_llm_brain_e2e_2022-01-04.md):
+the first real DeepSeek run (2022-01-04 08:30–11:30 NY, 45 LLM revisions,
+replay OK) and what it changed. The three earlier receipts measure the
+mechanical Brain this design replaced.
 
 ## Tests — `brain/tests/`
 

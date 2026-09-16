@@ -76,6 +76,10 @@ This is a framework for thinking, not a form to fill.
   in this input's `price_relations` (or in `prior_state.object_registry`).
   Never invent one, never write a price. Prices, stops, targets and reward-
   to-risk are computed by code from the objects you name.
+- **Geometry must agree with direction.** For `LONG` the target object lies
+  above the entry object and the invalidation object below it; for `SHORT`
+  the target lies below and the invalidation above. Code refuses any other
+  arrangement and downgrades the opportunity to `NONE`.
 - **No signal without structure.** An FVG, OB or retracement is a place to
   express a reading, not a reason to have one.
 - **A counter candle is not delivery** (step 7).
