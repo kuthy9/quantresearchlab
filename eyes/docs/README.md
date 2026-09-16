@@ -203,7 +203,20 @@ and mean native bars. What this does *not* claim: the 1H range's natural
 observation coverage was "sparse" before and the 15m and 4H ranges have none
 yet — they are the same definition applied more widely, and their behaviour
 on tape is measured, not assumed (`test_ranges_on_every_scale.py` checks the
-contract, not the market).
+contract, not the market). The first settled balance claim on tape was a 15m
+range's (2022-05-30 19:30 New York; none of the 288 ranges of 2022 Q1 on any
+scale reached one), and it found the frozen contract still demanding what
+`balance_range_v1.2` had retired: two structural touches and a tested clock
+on each source zone. The settled claim now validates on the price-test
+generations the reducer gates on (`DealingRangeState`, "mature dealing-range
+evidence is invalid"); the structural touch counts stay beside them as the
+separate fact they are (`test_balance_range_split.py`). The same range's
+break, 75 minutes later, found the store's close-beyond contract still
+requiring a `BALANCE_RANGE_MATURED` parent — reserved and never emitted
+since the lifecycle dropped its grades — while the emitter cites the
+creation event the promoted boundaries descend from; the contract now
+requires exactly what is emitted: creation, the breaking BAR and the
+Acceptance (`test_event_provenance_contract.py`).
 
 ## Bounded candidates, and what still grows
 
@@ -412,7 +425,12 @@ had ever spoken about. Four changes, in the order they depend on each other:
   `ENTITY_MEMORY_PRUNE_FLOOR`, 65,536 entries), the observer harvests
   every identifier field from the tracker states it publishes — frames,
   displacement, inventory, pools, interaction, Group 4 — plus the reducer's
-  candidate set (whose retirements the emitter publishes) and its own
+  candidate set (whose retirements the emitter publishes), the zone
+  trackers' pending base-origin cores (`pending_base_origin_core_ids`: a
+  core is published once when its impulse locks the cluster, and until a
+  break qualifies the order block nothing published names it — the first
+  pass over a Brain block kept 1 of 320 cores and the next order block
+  raised "qualified origin zone lacks the base origin core") and its own
   inventory bookkeeping (`eyes/core/entity_liveness.py`), and the emitter
   drops every entry none of them names (`prune_entity_memories`; a memory
   keyed `swing:…` survives on its bare id, a crossing generation on its
@@ -423,7 +441,8 @@ had ever spoken about. Four changes, in the order they depend on each other:
   dropped 48,650 / 38,277 / 30,827 entries against 4,000–4,900 live ids,
   and a tombstone on every dropped key was never read again; the full
   audit log was identical to the baseline's on every bar
-  (`test_entity_memory_pruning.py`, and the evidence note).
+  (`test_entity_memory_pruning.py`, which also prunes on every bar of a
+  two-session replay, and the evidence note).
 - **Entity identities are not forward references.** Legacy-transport state
   events name entities in `source_ids` (`swing:…`, `pool:…`); each was an
   open forward reference no later event could resolve. An identity in a

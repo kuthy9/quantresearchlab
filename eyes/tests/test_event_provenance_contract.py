@@ -1644,16 +1644,9 @@ def _external_range_chain(
         details={"range_id": "range-1"},
         zone=(90.0, 110.0),
     )
-    activated = _event(
-        "range-activated",
-        21,
-        canonical=True,
-        kind=EventKind.BALANCE_RANGE_MATURED,
-        timeframe=Timeframe.H1,
-        details={"range_id": "range-1"},
-        zone=(90.0, 110.0),
-        source_event_ids=(created.event_id,),
-    )
+    # The Structural Range no longer matures (BALANCE_RANGE_MATURED is
+    # reserved, never emitted): a settled balance claim promotes the
+    # boundaries under the creation event, and the break cites that.
     bar = _normalized_bar(
         "range-break-bar",
         22,
@@ -1765,7 +1758,6 @@ def _external_range_chain(
         zone=(90.0, 110.0),
         source_event_ids=(
             created.event_id,
-            activated.event_id,
             bar.event_id,
             acceptance.event_id,
         ),
@@ -1777,7 +1769,6 @@ def _external_range_chain(
     )
     return (
         created,
-        activated,
         candidate,
         *crossing_events,
         touch,
@@ -3907,11 +3898,6 @@ def test_external_range_invalidation_requires_complete_parent_chain() -> None:
     created = next(
         event for event in events if event.kind is EventKind.DEALING_RANGE_CREATED
     )
-    activated = next(
-        event
-        for event in events
-        if event.kind is EventKind.BALANCE_RANGE_MATURED
-    )
     bar = next(event for event in events if event.event_id == "range-break-bar")
     invalidated = next(
         event
@@ -3920,12 +3906,8 @@ def test_external_range_invalidation_requires_complete_parent_chain() -> None:
     )
     missing_acceptance = replace(
         invalidated,
-        source_ids=(created.event_id, activated.event_id, bar.event_id),
-        source_event_ids=(
-            created.event_id,
-            activated.event_id,
-            bar.event_id,
-        ),
+        source_ids=(created.event_id, bar.event_id),
+        source_event_ids=(created.event_id, bar.event_id),
     )
     store = EventStore()
 

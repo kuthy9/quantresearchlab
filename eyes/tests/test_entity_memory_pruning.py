@@ -55,7 +55,7 @@ ENTITY_MEMORIES = (
 )
 
 
-def _replay(bars):
+def _replay(bars, *, every_bar: bool = False):
     reader = CausalMarketReader(scale_specs=MODEL_SCALE_SPECS)
     observer = CausalObserver(
         ObserverConfig(
@@ -73,6 +73,9 @@ def _replay(bars):
     )
     rows = []
     for bar in bars:
+        if every_bar:
+            # Pull the doubling mark back so the pass runs on every bar.
+            observer._entity_memory_prune_mark = 0
         observer.observe(reader.on_bar(bar))
         rows.append((observer.audit_store.fingerprint(), len(observer.audit_store)))
     return tuple(rows), observer
@@ -124,6 +127,21 @@ def test_pruning_at_every_doubling_changes_no_event(bars, unpruned, monkeypatch)
     } <= shrank, shrank
     assert after["_terminal_crossing_levels"] == after["_terminal_crossing_events"]
     assert not any(after[name] > before[name] for name in ENTITY_MEMORIES)
+
+
+def test_pruning_on_every_bar_changes_no_event(bars, unpruned, monkeypatch) -> None:
+    # However often the pass runs, it must keep every entity a tracker can
+    # still cite.  A base-origin core is the case the published states miss:
+    # its impulse publishes it once, and until a break qualifies the order
+    # block only the zone tracker's pending candidate holds it.
+    reference, _ = unpruned
+    monkeypatch.setattr(observation_module, "ENTITY_MEMORY_PRUNE_FLOOR", 0)
+    pruned, observer = _replay(bars, every_bar=True)
+    assert pruned == reference
+    assert observer.entity_memory_prunes > len(bars) // 2
+    cores = observer._emitter._base_origin_core_event_ids
+    for tracker in observer._zone_trackers.values():
+        assert tracker.pending_base_origin_core_ids() <= cores.keys()
 
 
 def test_a_namespaced_key_survives_on_its_bare_identity(unpruned) -> None:
