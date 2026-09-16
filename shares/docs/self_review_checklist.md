@@ -280,10 +280,10 @@ governance artifacts during ordinary development.
   only `acceptance_continuation` and `displacement_impact` enter the Phase 7
   allowlist, unsupported/underpowered mechanisms remain excluded, and no
   unregistered Week 3 is opened. The mechanism code and runners were retired on
-  2026-09-06; the allowlist survives only as the `phase6_*` bindings in
-  `brain/configs/hypothesis_protocol.json`, which `hypothesis_proposer.load_hypothesis_protocol`
-  validates fail-closed. (`path_hypotheses.json` and `market_belief.py` were
-  retired on 2026-09-09.)
+  2026-09-06; the `phase6_*` bindings that survived in
+  `brain/configs/hypothesis_protocol.json` went with the kNN Brain on
+  2026-09-16. (`path_hypotheses.json` and `market_belief.py` were retired on
+  2026-09-09.) No allowlist remains in the repository.
 - [ ] Missing MBO remains missing and is not replaced with constant execution
   reality.
 - [ ] Checkpoint, shards, progress, resume and portfolio before-bar /

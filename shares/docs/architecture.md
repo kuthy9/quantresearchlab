@@ -82,21 +82,21 @@ independent parent/child RelationState
 MarketSnapshot (atomic event-reducer authority + compact replay projection)
         ├── versioned factual StructuralOutcomeEngine (research output,
         │   not MarketSnapshot state)
-        ───── optional existing development-trader downstream ─────
-Temporal Market Scene Graph + GlobalMarketContext
+        ───── the LLM Brain (brain/core/, 2026-09-16) ─────
+EyeContext: aliased objects per scale, this bar's evidence, price relations
         ↓
-playbook-neutral OpenMarketThesis + FocusState
+Sleep Controller: WAKE / STAY_ASLEEP / UPDATE / TICK
         ↓
-        ✕ no belief producer — the typed Brain was retired 2026-09-07
+Main Brain (DeepSeek, fourteen-step framework) → LLMUpdate
         ↓
-enter / wait / hold / protect / exit / abstain utility comparison   (no input)
+BrainStateReducer: verdicts, opportunity validation, the five sleep conditions
         ↓
-independent structural, cost, deadline, data and fillability development vetoes
+BrainJournal (hash-chained, replayable)  →  OpportunityGeometry
         ↓
-optional one-next-bar conservative simulation → position feedback
+        ✕ Risk veto and Execution — a later phase (PositionLedger is the boundary)
 
-brain/core/forecast.py publishes one MarketBeliefState per clock
-from the conditional future cloud (contract/brain/forecast.py)
+Temporal Market Scene Graph + GlobalMarketContext survive as study
+projections (shares/core/scene_graph.py) with no runtime owner.
 ```
 
 ### Reasoning responsibilities
@@ -109,13 +109,13 @@ question and may consume only already-known outputs from the layer above it:
 | Data fact admission | `io`, `market_clock`, `CausalMarketReader` | Which completed clocks and prices are legally knowable now? | No structure, probability, or action interpretation. |
 | Atomic observation | `CausalObserver`, Group 1–5 trackers, `EventStore` | Which preregistered v1.2 market facts occurred, and from which exact sources? | No rewriting history and no trade decision. |
 | State and relation projection | timeframe/session reducers, `RelationResolver`, Foundation v2, `MarketSnapshotPublisher` | What is the deterministic current state, lifecycle, geometry, and cross-frame relation? | Foundation is an additive v1.2 projection, not a new detector or full-stack v2 authority. |
-| Competing-hypothesis reasoning | Scene Graph, `hypothesis_proposer` → `hypothesis_pool` → `belief_updater` → `forecast` (the typed Brain, DOL and Signal Policy were retired 2026-09-07; the frozen six-path set and the global mode library 2026-09-09) | Given a context like this one, which sixty-minute trajectories actually followed, and which are still consistent with the realized path? | At most three live hypotheses plus a measured residual; `shadow_only`, no action authority. |
+| Market reasoning | `brain/core/main_brain.py` behind `sleep_controller.py`, over `eye_view.py` (the typed Brain, DOL and Signal Policy were retired 2026-09-07; the frozen six-path set and the global mode library 2026-09-09; the kNN hypothesis engine 2026-09-16) | Given the Eye's objects and what changed since the last reading, does the market understanding still hold, what should happen next, and is there an opportunity worth expressing at a named object? | One `BrainState` per episode, evolved incrementally; objects only, no prices; no action authority. |
 | Action constraint and validation | Decision, Risk, simulator (Trade Intent and the execution FSM were retired 2026-09-07) | Is an already-described candidate allowed to become a simulated action or a no-order audit fact? | No retroactive semantic change, broker authority, profit claim, or sealed-OOS access. |
 
-The `Decision`/`Risk`/sequential simulator path remains the only registered
-runtime action authority under `legacy_decision_risk_compat`, and it currently
-has no belief to act on. The `TradeIntent`/risk-approval/execution-FSM contracts
-that used to sit beside it were retired on 2026-09-07. The rule they existed to
+There is no runtime action authority. The `Decision`/`Risk`/sequential
+simulator path that held the `legacy_decision_risk_compat` mode was deleted on
+2026-09-16 with the engine; the `TradeIntent`/risk-approval/execution-FSM
+contracts that used to sit beside it were retired on 2026-09-07. The rule they existed to
 enforce still holds and must hold for whatever replaces them: this prevents two
 simultaneous action owners without claiming the vertical migration is complete.
 The per-file owner/consumer census that used to live in a repository file
@@ -402,7 +402,25 @@ not a validated model.
   `ContinuousSMCEngine`, `ExecutionFSM` or `RiskApprovedTradeIntent`. Rebinding
   that orchestration to a new belief producer is the next piece of work.
 
-### What replaced the belief side
+### The LLM Brain (2026-09-16)
+
+The belief side described below was measured three times on 2022-01 and never
+beat the driftless rate, and was retired on 2026-09-16 together with its
+research gates, the old decision / risk pair and the un-importable engine.
+The current Brain is an LLM behind a deterministic Sleep Controller:
+`brain/core/eye_view.py` aliases the Eye's objects, `sleep_controller.py`
+wakes on the configured reaction kinds, `main_brain.py` evolves a persistent
+`BrainState` through DeepSeek under the fourteen-step framework, `reducer.py`
+keeps the books and grants sleep only when nothing is pending, and
+`journal.py` records every step in a hash chain that
+`brain/scripts/replay_journal.py` reproduces from the Eye alone. The LLM names
+objects; `opportunity_geometry.py` resolves them to prices. See
+[brain/docs/README.md](../../brain/docs/README.md) and the
+[design](../../brain/docs/specs/2026-09-16-llm-brain-design.md). Everything
+from here to "Decision, risk and the retired execution boundary" is the
+history of what it replaced.
+
+### What replaced the belief side (2026-09-09, retired 2026-09-16)
 
 `brain/core/market_belief.py` and `brain/configs/path_hypotheses.json` were
 retired on 2026-09-09. The six named paths — continuation, deeper retracement,
@@ -489,12 +507,13 @@ last label intentionally combines non-fill and expiry. A simulated fill may
 create one position, and same-bar stop/target ambiguity is adverse-first.
 Position/risk feedback entered the next Brain update.
 
-Decision and Risk are intact as code and untouched by the Brain retirement, but
-they have no input: Decision reads `MarketBelief.thesis_candidates` and
-`position_management_candidates`, which no module now fills. The simulator in
-`execution/core/simulation.py` is likewise intact but imports
-`shares/core/engine.py`, which cannot be imported. Both wait on a new belief
-producer.
+`brain/core/decision.py`, `brain/core/risk.py`, `execution/core/simulation.py`
+and `shares/core/engine.py` were deleted on 2026-09-16: none had an input
+since the typed Brain's retirement. The paragraphs above describe them as
+they were. The Risk veto and Execution that will act on the LLM Brain's
+`OpportunityGeometry` are a later phase; `brain/core/position_ledger.py` is
+the boundary they attach to, and the LLM Brain forces its episode to stay
+ACTIVE while a position is open.
 
 **Order FSM v1.5 was retired on 2026-09-07** together with the Trade Intent it
 took into custody. `execution/core/execution_fsm.py` implemented immutable

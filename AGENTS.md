@@ -9,7 +9,7 @@ state, Brain and execution ownership boundaries rather than redrawing them:
 | package | owns |
 | --- | --- |
 | `eyes/` | the Trading Eye — normalization, the six detectors, semantic-event emission, the event store and market-state reduction |
-| `brain/` | the local conditional hypothesis engine (trajectory geometry, retrieval, pool, belief updater, forecast), decision and risk. The typed playbooks, DOL and Signal Policy were retired on 2026-09-07; the frozen six-path competition set and the global mode library on 2026-09-09 |
+| `brain/` | the LLM Trading Brain behind a Sleep Controller: the aliased Eye view, the controller, the Main Brain (DeepSeek, 14-step framework), the pure state reducer, the hash-chained journal and the SLEEP ↔ ACTIVE runtime. The typed playbooks, DOL and Signal Policy were retired on 2026-09-07; the frozen six-path set and the global mode library on 2026-09-09; the kNN hypothesis engine, its research gates and the old decision/risk on 2026-09-16 |
 | `execution/` | execution reality, MBO reconstruction and sequential simulation (the order FSM and trade intent were retired on 2026-09-07) |
 | `shares/` | data access, the session clock, the scale registry, orchestration (`engine.py`) and the study projections the other three consume |
 | `contract/` | every payload that crosses a subsystem boundary, one package per boundary (`market`, `execution`, `eye`, `brain`, `decision`, `risk`, `research`) |
@@ -66,55 +66,36 @@ Bar
              └─ SessionStateReducer   → SessionState
                  └─ MarketSnapshot    — current market view
                      (published as contract/eye/observation.MarketObservation)
- └─ ContinuousSMCEngine    shares/core/engine.py            orchestration
-     ├─ shares/core/scene_graph.py       Engine-owned research/visualisation view
-     ├─ execution/core/execution.py      execution-reality scoring
-     │                                   (contract: contract/execution/reality.py)
-     ├─ brain/core/brain_entry_sequence.py
-     │                                   Brain interpretation of Eye facts
-     ├─ neutral projection               one OpenMarketThesis per clock
-     ├─ brain/core/forecast.py           the belief producer: one
-     │   ├─ trajectory.py                MarketBeliefState per clock
-     │   ├─ hypothesis_proposer.py       (contract: contract/brain/forecast.py)
-     │   ├─ hypothesis_pool.py           hypotheses are extracted per clock from
-     │   └─ belief_updater.py            a conditional future cloud, then kept
-     │                                   alive by inherited support
-     └─ brain/core/decision.py → risk.py sole runtime action authority
+ └─ BrainRuntime            brain/core/runtime.py            SLEEP ↔ ACTIVE, one step per bar
+     ├─ brain/core/eye_view.py         EyeContext: aliased objects, events, price relations
+     │   └─ object_registry.py         FVG_5m_3 ↔ Eye entity id, stable per episode
+     ├─ brain/core/sleep_controller.py WAKE / UPDATE / TICK from transition events
+     ├─ brain/core/main_brain.py       LLMInput → DeepSeek (llm_client.py) → LLMUpdate
+     │   └─ reducer.py                 BrainState_t + evidence + update → BrainState_t+1
+     │       └─ opportunity_geometry.py aliases → entry / stop / target prices, R
+     ├─ brain/core/position_ledger.py  open positions (Execution's future boundary)
+     └─ brain/core/journal.py          hash-chained JSONL per episode; replayable
 ```
 
-**`shares/core/engine.py` cannot currently be imported.** It still imports
-`brain.core.playbooks`, `brain.core.playbook_registry`,
-`brain.core.dol_probability` and `brain.core.signal_policy`, all of which were
-removed with the typed Brain. It also binds `model.path_hypotheses`, which went
-with the six-path retirement on 2026-09-09. Together with three further modules
-that import the retired `brain.core.calibration`, `calibration_replay` and
-`validation`, **eleven test modules cannot be collected** until those import
-blocks and the code behind them are removed or rebound to
-`brain/core/forecast.py`, the belief producer that replaced them, and
-`shares.ContinuousSMCEngine` is unavailable until then. Run the suite with
-`--ignore` on those eleven modules to exercise the other 1,155 tests, which
-pass.
-
-The Eye-to-Brain link itself does not go through the Engine and is verified
-on the real wiring by `brain/tests/test_eye_to_brain_link.py`: the registered
-Eye built from `configs/model.json` publishes `MarketSnapshot`s, and
-`HypothesisForecaster.observe(ForecastInput(snapshot=...))` publishes the same
-`MarketBeliefState`, revision for revision, as the dataset path
-(`observation_features` plus the snapshot's one-minute ATR) that
-`brain/research/trajectory_dataset.py` and the replay scripts feed. The Brain's
-runtime needs `scikit-learn` and `scipy` (both lazy imports, so an import smoke
-does not catch their absence); `uv sync` installs them from `uv.lock`.
+`shares/core/engine.py`, the orchestration bound to the typed Brain retired on
+2026-09-07, was deleted on 2026-09-16 together with the kNN Brain
+(`brain/core/forecast.py` and its research gates), `execution/core/simulation.py`
+and the test modules that could not be collected without them. The Eye is
+built through `shares/core/eye_factory.build_eye` from `configs/model.json`;
+`brain/scripts/run_llm_brain.py` drives it over a window and
+`brain/scripts/replay_journal.py` proves a journal reproduces from the Eye
+alone. The Eye-to-Brain link on the real tape is
+`brain/tests/test_eye_link_real_tape.py` (`research_orchestration`). The
+design and its receipts: [brain/docs/README.md](brain/docs/README.md),
+[brain/docs/specs/2026-09-16-llm-brain-design.md](brain/docs/specs/2026-09-16-llm-brain-design.md).
 
 The Eye imports no downstream module — no `eyes/core/` module imports `brain`,
 `execution`, or the orchestration half of `shares`. `shares/core/scene_graph.py`
-is owned by `ContinuousSMCEngine`, which advances it over one completed Eye
-observation and stamps the resulting `scene_*` delta identities; a graph failure
-poisons the observer through `CausalObserver.mark_terminal_failure` because the
-reducers have already advanced. `execution/core/execution.py` owns
+is a study projection with no runtime owner since the engine's retirement; the
+Eye runs with `project_scene_graph=False`. `execution/core/execution.py` owns
 `ExecutionRealityInput` and the cost/fillability score; `contract/execution/reality.py`
 owns the inert not-evaluated value beside `ExecutionObservation`;
-`ContinuousSMCEngine._score_execution` derives the score and the Eye only
-transports the result. That boundary is enforced by
+the retired engine derived the score and the Eye only transports the result. That boundary is enforced by
 `eyes/tests/test_eye_module_boundary.py`, which resolves both the intra-package
 relative imports and the cross-package absolute ones.
 `shares/core/visualization.py` and `shares/core/market_cases.py` are optional
@@ -170,19 +151,19 @@ for the Foundation projection.
 Create the environment with `uv sync --all-extras`; there is no compile step.
 `--extra test` alone prunes `torch` and `databento`, which the MBO protocol
 tests need. The `data/` payload is gitignored, so a fresh worktree must link or
-materialize it before `brain/tests/test_data_splits.py` and the MBO protocol
-tests can pass.
+materialize it before the real-tape tests and the MBO protocol tests can pass.
+`pyproject.toml` ignores iCloud's `* 2.py`-style duplicates (`--ignore-glob`).
 
 - `env PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider`
   runs daily semantic/runtime tests; the research-orchestration group is
   excluded by `pyproject.toml`.
 - `.venv/bin/python -m pytest -m 'research_orchestration' -q -p no:cacheprovider`
-  runs the remaining bounded study-orchestration tests, currently the Eye
-  authority-scan group in `eyes/tests/test_eye_authority_scan.py`. They are excluded
-  from the default loop, so run them after touching a study script or a runtime
-  identity binding. `research_orchestration` is the only registered marker; the
-  `historical_frozen` and `research_runner` markers were dropped on 2026-09-06
-  once the retirements left them with no test.
+  runs the minutes-long real-tape tests, currently the Eye-to-Brain link in
+  `brain/tests/test_eye_link_real_tape.py` (needs `data/`). They are excluded
+  from the default loop, so run them after touching the controller, `eye_view`
+  or a runtime identity binding. `research_orchestration` is the only
+  registered marker (re-registered 2026-09-16; the Eye authority-scan group
+  that first carried it went on 2026-09-13).
 - `.venv/bin/python -m pytest eyes/tests/test_semantic_foundation_projection.py -q -p no:cacheprovider`
   runs a focused contract file.
 - `.venv/bin/python -m pytest eyes/tests -q -p no:cacheprovider` runs one
@@ -220,9 +201,12 @@ consumers are their focused tests. Retain those definitions; do not present them
 as hot state and do not build a second lifecycle engine beside them.
 
 Do not restore production `FOUNDATION_STATE_CHANGED` emission; its decoder is
-legacy-read-only. The configured action authority remains
-`legacy_decision_risk_compat` until one registered TradeIntent-to-FSM migration
-replaces it; `engine.py` rejects a non-zero `TradeIntent` before Decision/Risk.
+legacy-read-only. There is no action authority in the repository: the LLM Brain
+names objects, `brain/core/opportunity_geometry.py` resolves them to prices,
+and the Risk veto engine and Execution that will act on an
+`OpportunityGeometry` are a later phase. The LLM never writes a price; the
+reducer refuses any opportunity whose objects are not visible or whose
+geometry is incoherent.
 
 Never create a second history, state, thesis, lifecycle, or execution authority.
 A compatibility decoder or adapter may exist, but it may not become a production

@@ -1,12 +1,51 @@
 # Current SMC Refactor Implementation Status
 
-Status date: 2026-09-07
+Status date: 2026-09-16
 Runtime semantic identity: `smc_semantics_v1.3`
 Canonical foundation identity: `smc_semantic_foundation_v2.1`
 Canonical foundation registry identity: `69428dbfd2a9b2aa19f0254391fca2da17aedb8d0206829572e69c0cc212a715`
 Atomic registry identity: `144f1d6c6d6246931fda6c0f0e9cbc28d8260c851e41de7fdb9132214c3ee94d` (refrozen 2026-09-13 on the `eyes` branch, last for the Group 5 terminal-context and liquidity terminal-state retention parameters; it was `f92b24c8…1f0c` from 2026-09-08 until then)
 The frozen `smc_semantics_v1.2` / `smc_semantic_foundation_v2.0` pair remains
 the identity of every historical artifact below; it is not the runtime.
+
+**LLM Brain (2026-09-16).** The mechanical Brain is gone. `brain/core/` now
+holds the LLM Trading Brain behind a Sleep Controller
+([spec](../../brain/docs/specs/2026-09-16-llm-brain-design.md),
+[README](../../brain/docs/README.md)): `eye_view.py` turns each
+`MarketObservation` into an aliased, causal `EyeContext`; `sleep_controller.py`
+decides WAKE / UPDATE / TICK from the Eye's transition events (wake on any
+non-formation 15m+ reaction or a 5m MSS / qualified BOS / sweep — ≈ 87 bars
+per Globex day on the cached 2022-01 log); `main_brain.py` builds the
+`LLMInput`, calls DeepSeek (`deepseek-flash`, JSON mode, key from
+`DEEPSEEK_API_KEY`) under a retry policy and parses the strict `LLMUpdate`;
+`reducer.py` is the pure function `BrainState_t + evidence + update →
+BrainState_t+1` that keeps the verdict books, validates opportunities against
+visible objects and geometry, forces ACTIVE while a position is open and
+grants sleep only when the five exit conditions hold; `journal.py` writes a
+hash-chained JSONL per episode that `brain/scripts/replay_journal.py`
+reproduces from the Eye alone (proved on the synthetic Eye and on the echo
+run over 2022-01-04: 661 bars, 137 calls, 661 revisions, byte-for-byte).
+The LLM never writes a price: `opportunity_geometry.py` resolves the objects it
+names to entry / stop / target and R. Position sizing, hard stops, the Risk
+veto and Execution are not built; `PositionLedger` is their boundary.
+
+Removed with it: `brain/core/{forecast, hypothesis_proposer, hypothesis_pool,
+belief_updater, trajectory, decision, risk}.py`, `brain/research/`,
+`brain/scripts/` (the gate builders; `build_eye` moved to
+`shares/core/eye_factory.py`), `contract/brain/forecast.py`,
+`shares/core/engine.py`, `execution/core/simulation.py` and the sixteen
+Brain, three shares and one execution test modules bound to them (eleven of
+which had been uncollectable since 2026-09-07). `configs/model.json` lost its
+`hypothesis_protocol`, `action_pipeline`, `decision` and `risk` blocks (only
+those modules read them; the atomic identity is unchanged and
+`eyes/tests/test_semantic_selection.py`, skipped since the engine's
+retirement, runs again on `build_eye`). The typed contract packages
+`contract/decision/action.py`, `contract/risk/`, `contract/research/` and
+`contract/brain/{belief, context, hypothesis, plan}.py` stay as inert
+dataclasses for `shares/core/scene_graph.py`, `visualization.py`,
+`market_cases.py` and their tests. Every "belief producer" sentence below is
+history; the three gate receipts under `brain/docs/evidence/` carry a retired
+banner and record why the mechanical Brain was replaced.
 
 **Typed-Brain retirement (2026-09-07).** Everything this document says about
 `PlaybookBrain`, the three typed playbooks, DOL ranking, DOL probability, Signal

@@ -156,7 +156,7 @@ clock in `published_timeframes` — every active scale except 1m unless
 move to `microstructure_events_this_update`, the channel a trigger reads;
 `events_this_update` is the union, and the two channels partition it — nothing
 is dropped, and the event store, the reducers and `recent_events` (the
-memory's window, which the risk engine reads for 1m sweeps) keep every scale.
+memory's window, which `brain/core/eye_view.py` reads for the 1m tape) keep every scale.
 This had to wait for the crossing and outcome repairs above: until then a 5m
 level's touch was itself a 1m event.
 

@@ -23,15 +23,25 @@ market  ->  execution  ->  eye  ->  brain  ->  decision  ->  risk  ->  research
 | | `entities.py` | one immutable dataclass per market object — swings, structure, BOS, S/R, pools, ranges, manipulations, FVGs, order blocks, entry locations, reacceptance, inventory |
 | | `interaction.py` | `MicroBreakFact` `MicroBOSReference` `PathSequenceStep` `PathSequenceState` `InteractionUpdate` |
 | | `observation.py` | `MarketEvent` `FrameObservation` `DisplacementObservation` and **`MarketObservation`** — the Eye's sole output |
-| `brain` | `vocabulary.py` | conflict roles, the neutral-state schema version |
+| `brain` | `state.py` | **`BrainState`** — the LLM Brain's persistent state: `ActiveExpectation` `EvidenceItem` `EvidenceLedger` `WatchItem` `Opportunity` `RegisteredObject` `LastUpdate` and the enums `BrainStatus` `OpportunityState` `TradeDirection` `Confidence` `Verdict` |
+| | `llm.py` | **`LLMInput`** (the exact payload sent, hashed as `input_sha`) and **`LLMUpdate`** (the one JSON object the model may reply with), `EvidenceVerdict`, `parse_update` — the gate that refuses any reply with an unknown alias, a missing key or a price — `LLM_UPDATE_EXAMPLE`, `MalformedReply`, `canonical_json` |
+| | `vocabulary.py` | conflict roles, the neutral-state schema version (neutral-projection contracts, kept for `shares/core/scene_graph.py`) |
 | | `plan.py` | `DrawSelection` `LiquidityRoute` `TradePlan` `PlanFeasibility` and the frozen trigger/context objects |
 | | `hypothesis.py` | `Evidence` `HypothesisSequenceState` **`HypothesisBelief`** |
 | | `context.py` | `AuthorityLayer` `BalanceContext` obstructions, `OpenMarketThesis`, the Context/Episode lifecycles, `GlobalMarketContext` `NeutralMarketState` |
 | | `belief.py` | **`MarketBelief`** `FrozenThesis` |
-| | `forecast.py` | the local conditional forecast: `PathAttributes` `TrajectoryNode` `ConditionalCloud` `Hypothesis` `LifecycleRecord` `BeliefUncertainty` and **`MarketBeliefState`**, plus the representation constants (`DIRECTION_DIM` `SHAPE_COMPONENT_COUNT` `REPRESENTATION_DIM`) and the derivations every consumer must read the same way (`node_identity` `belief_revision_id` `mode_ambiguity` `retrieval_confidence` `support_overlap`) |
-| `decision` | `action.py` | `Action` `ActionUtility` `Decision` |
-| `risk` | `assessment.py` | `VetoCode` `RiskAssessment` |
-| `research` | `snapshot.py` | `EngineSnapshot` `NeutralEngineSnapshot` |
+| `decision` | `opportunity.py` | **`OpportunityGeometry`** (entry / stop / target price and reward-to-risk, resolved by code from the objects the LLM named), `OpportunityProposal` (= `Opportunity`), `GeometryError` |
+| | `action.py` | `Action` `ActionUtility` `Decision` — the retired typed vertical's vocabulary, kept for `shares/core/visualization.py` and the shares test helpers |
+| `risk` | `assessment.py` | `VetoCode` `RiskAssessment` — same status as `decision/action.py`; the Risk engine that will attach to `OpportunityGeometry` is a later phase |
+| `research` | `snapshot.py` | `EngineSnapshot` `NeutralEngineSnapshot` — same status; consumed by `shares/core/visualization.py` |
+
+`brain/plan.py`, `hypothesis.py`, `context.py` and `belief.py` are the
+neutral-projection contracts of the typed Brain retired on 2026-09-07 and
+2026-09-16; they stay because `shares/core/scene_graph.py`,
+`shares/core/market_cases.py`, `shares/core/visualization.py` and their tests
+read them as inert dataclasses. No runtime module produces them.
+`brain/forecast.py` (the kNN Brain's `MarketBeliefState`) was deleted on
+2026-09-16 with the mechanical Brain.
 
 `execution` sits before `eye` because `MarketObservation` carries an
 `ExecutionObservation`: the engine scores execution reality and the Eye only
@@ -44,7 +54,7 @@ boundaries it actually depends on:
 
 ```python
 from contract.eye.observation import MarketObservation
-from contract.brain.belief import MarketBelief
+from contract.brain.state import BrainState
 ```
 
 Each package's `__init__.py` re-exports its own modules, so
