@@ -30,9 +30,9 @@ DEFAULT_SOURCE = "data/processed/nq_1m_previous_session_front_v2_3_2017_2026.par
 
 
 def build_eye(model_path: Path, *, root: Path) -> tuple[CausalMarketReader, CausalObserver]:
-    """The same construction ``brain/research/trajectory_dataset.build_eye`` uses."""
+    """The same construction ``shares/core/eye_factory.build_eye`` uses."""
 
-    from brain.research.trajectory_dataset import build_eye as _build_eye
+    from shares.core.eye_factory import build_eye as _build_eye
 
     return _build_eye(model_path, root=root)
 
