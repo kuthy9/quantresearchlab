@@ -293,6 +293,10 @@ class RecordedClient:
             raise _INCIDENT_CLASSES[incident]("recorded incident")
         reply = self._replies.get(sha)
         if reply is None:
+            if incident == "MalformedReply":
+                # The original call never yielded parseable content (an empty
+                # reply, a non-JSON body); replay it as the same refusal.
+                raise MalformedReply("recorded incident: malformed reply")
             raise LLMClientError(f"no recorded reply for input {sha[:16]}")
         return reply
 

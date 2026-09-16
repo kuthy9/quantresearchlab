@@ -205,6 +205,15 @@ def test_base_url_env_is_honoured(monkeypatch) -> None:
     assert DeepSeekClient(model="m", timeout_s=1, max_tokens=1).base_url == "http://proxy.local/v1"
 
 
+def test_recorded_client_replays_a_malformed_incident_without_a_reply() -> None:
+    sha = hashlib.sha256(b"u").hexdigest()
+    client = RecordedClient({}, {sha: "MalformedReply"})
+    with pytest.raises(MalformedReply):
+        client.complete(system="s", user="u")
+    out = call_with_policy(client, system="s", user="u", parse=parse_ok, policy=RetryPolicy(max_retries=1, backoff_base_s=0.0), sleep=lambda s: None)
+    assert out.incident == "MalformedReply" and out.attempts == 2
+
+
 def test_recorded_client_answers_by_input_sha() -> None:
     client = RecordedClient({hashlib.sha256(b"u").hexdigest(): reply("GOOD")})
     assert client.complete(system="s", user="u").content == "GOOD"

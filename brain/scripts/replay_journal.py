@@ -19,7 +19,7 @@ from pathlib import Path
 import sys
 
 from brain.core.journal import JournalError, JournalReader, JournalRecord
-from brain.core.llm_client import RecordedClient
+from brain.core.llm_client import LLMClientError, RecordedClient
 from brain.core.main_brain import MainBrain, MainBrainConfig
 from brain.core.position_ledger import InMemoryPositionLedger
 from brain.core.runtime import BrainRuntime, StepResult
@@ -40,6 +40,10 @@ class ReplayVerdict:
     llm_calls: int
     revisions: int
     mismatches: tuple[str, ...]
+
+
+class _ReplayDiverged(RuntimeError):
+    """The replay asked the recorded client for an input the run never sent."""
 
 
 class _Expectation:
@@ -122,18 +126,29 @@ def replay_run(
         journal=None, ledger=ledger, tick=tick, on_step=on_step,
     )
 
-    if observations is not None:
-        for observation in observations:
+    def step(observation: MarketObservation) -> None:
+        try:
             runtime.step(observation)
-    else:
-        window = RunWindow(Path(run["window"]["source"]), run["window"]["warmup_start"], run["window"]["emit_start"], run["window"]["end"])
-        source = window.source if window.source.is_absolute() else ROOT / window.source
-        window = RunWindow(source, window.warmup_start, window.emit_start, window.end)
-        drive(
-            window, model_path=model_path or ROOT / DEFAULT_MODEL, root=ROOT,
-            on_observation=lambda observation, emitting: runtime.step(observation) if emitting else None,
-            progress_every=2000, log=log,
-        )
+        except LLMClientError as error:
+            # The journal holds neither a reply nor an incident for this input:
+            # the replay diverged from the run before this call.
+            raise _ReplayDiverged(f"{runtime.state.episode_id if runtime.state else '?'}: {error}") from None
+
+    try:
+        if observations is not None:
+            for observation in observations:
+                step(observation)
+        else:
+            window = RunWindow(Path(run["window"]["source"]), run["window"]["warmup_start"], run["window"]["emit_start"], run["window"]["end"])
+            source = window.source if window.source.is_absolute() else ROOT / window.source
+            window = RunWindow(source, window.warmup_start, window.emit_start, window.end)
+            drive(
+                window, model_path=model_path or ROOT / DEFAULT_MODEL, root=ROOT,
+                on_observation=lambda observation, emitting: step(observation) if emitting else None,
+                progress_every=2000, log=log,
+            )
+    except _ReplayDiverged as error:
+        mismatches.append(str(error))
 
     for episode_id, expectation in expectations.items():
         if expectation.call_cursor != len(expectation.calls):
