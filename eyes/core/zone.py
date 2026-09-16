@@ -465,6 +465,25 @@ class CausalZoneTracker:
 
         return self._update()
 
+    def pending_base_origin_core_ids(self) -> frozenset[str]:
+        """The cores whose frozen cluster can still qualify an order block.
+
+        A core is published once, when its impulse locks the cluster; until
+        a break qualifies the order block, this candidate is the only thing
+        that names it.  The candidate lives exactly as long as its
+        displacement is active, which is as long as a break can still use it.
+        """
+
+        return frozenset(
+            self._base_origin_core_id(
+                candidate.source_displacement_state,
+                candidate.cluster_ids,
+                candidate.candle,
+            )
+            for candidate in self._ob_candidates.values()
+            if candidate is not None
+        )
+
     def _snapshots(
         self,
     ) -> tuple[

@@ -4353,9 +4353,9 @@ class CausalObserver:
         Runs when the memories have doubled since the last pass (above the
         floor), harvesting every identifier the published tracker states
         cite -- frames, displacement, inventory, pools, interaction -- plus
-        the reducer's candidate set and the observer's own inventory
-        bookkeeping, so an entry survives while any of them still names its
-        entity.
+        the reducer's candidate set, the zone trackers' pending base-origin
+        cores and the observer's own inventory bookkeeping, so an entry
+        survives while any of them still names its entity.
         """
 
         floor = ENTITY_MEMORY_PRUNE_FLOOR
@@ -4385,7 +4385,15 @@ class CausalObserver:
                     *self._retired_level_ids,
                     *self._dropped_consumed_ids,
                     *self._inventory_consumption,
-                )
+                ),
+                # A base-origin core is published once; until a break
+                # qualifies its order block only the zone tracker's pending
+                # candidate holds it.
+                "base_origin_core_ids": tuple(
+                    core_id
+                    for tracker in self._zone_trackers.values()
+                    for core_id in tracker.pending_base_origin_core_ids()
+                ),
             },
         )
         self._emitter.prune_entity_memories(live)

@@ -13,10 +13,14 @@ from dataclasses import replace
 
 import pandas as pd
 
+import pytest
+
 from contract.eye import (
     DealingRangeLifecycle,
     EventKind,
 )
+from contract.eye.vocabulary import BALANCE_CLAIM_CONFIRMED
+from contract.market import Timeframe
 from eyes.core.observation import CausalObserver, ObserverConfig
 from eyes.core.range_auction import RangeAuctionUpdate
 from eyes.core.semantics import SemanticRegistry
@@ -324,3 +328,71 @@ def test_the_live_balance_claim_is_published_once_and_never_restated() -> None:
         if event.kind is EventKind.BALANCE_RANGE_OBSERVED
     ]
     assert len(observed) == 1
+
+
+def _settled_on_price_tests(**overrides):
+    """The reducer's settled claim as it reaches the contract on the 15m scale.
+
+    The registered standard (``balance_range_v1.2``) is met on the price
+    tests alone; the source zones' structural touches are what they were --
+    the upper source has one, and no tested clock -- exactly as the tape
+    reads once a scale tests its boundaries more often than confirmed swings
+    form inside them.
+    """
+
+    tested = _two_sided_tested()
+    settled_at = tested.formed_at + pd.Timedelta(hours=2)
+    fields = {
+        "timeframe": Timeframe.M15,
+        "candidate_real_h1_bars": 9,
+        "midpoint_crossings": 2,
+        "compression_ratio": 0.5,
+        "lower_touch_count": 3,
+        "lower_source_tested_at": tested.formed_at + pd.Timedelta(minutes=30),
+        "upper_touch_count": 1,
+        "upper_source_tested_at": None,
+        "balance_confirmed_at": settled_at,
+        "state_started_at": settled_at,
+        "last_updated_at": settled_at,
+        "age_h1_bars": 8,
+        "transition_reason": BALANCE_CLAIM_CONFIRMED,
+        **overrides,
+    }
+    compression = 1.0 - fields["compression_ratio"]
+    boundary_tests = (
+        min(fields["lower_touch_count"], fields["upper_touch_count"]) / 3.0
+    )
+    crossings = fields["midpoint_crossings"] / 4.0
+    return replace(
+        tested,
+        **fields,
+        compression_strength=compression,
+        boundary_test_strength=boundary_tests,
+        crossing_strength=crossings,
+        strength=(
+            tested.narrowness_strength
+            + compression
+            + boundary_tests
+            + crossings
+            + tested.inside_close_fraction
+        )
+        / 5.0,
+    )
+
+
+def test_the_settled_claim_is_valid_on_the_price_tests_alone() -> None:
+    settled = _settled_on_price_tests()
+    assert settled.balance_confirmed_at is not None
+    assert (settled.balance_lower_test_generations, settled.balance_upper_test_generations) == (2, 2)
+    assert (settled.lower_touch_count, settled.upper_touch_count) == (3, 1)
+    assert settled.upper_source_tested_at is None
+
+
+def test_the_settled_claim_needs_two_price_test_generations_each_side() -> None:
+    with pytest.raises(ValueError, match="mature dealing-range evidence"):
+        _settled_on_price_tests(
+            balance_upper_test_generations=1,
+            balance_upper_test_kinds=("touch_only",),
+            upper_touch_count=2,
+            upper_source_tested_at=_two_sided_tested().formed_at + pd.Timedelta(hours=1),
+        )

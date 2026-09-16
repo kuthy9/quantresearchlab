@@ -164,9 +164,11 @@ _ORIGIN_ZONE_TERMINAL_SOURCE_KINDS = (
     EventKind.BAR_COMPLETED,
 )
 
+# A settled range breaks under the creation event that froze it: the
+# Structural Range no longer matures (BALANCE_RANGE_MATURED is reserved,
+# never emitted), so its promoted boundaries and its break cite creation.
 _RANGE_INVALIDATION_SOURCE_KINDS = (
     EventKind.DEALING_RANGE_CREATED,
-    EventKind.BALANCE_RANGE_MATURED,
     EventKind.BAR_COMPLETED,
     EventKind.ACCEPTANCE_CONFIRMED,
 )
@@ -4382,7 +4384,6 @@ class EventStore:
         )
         for kind in (
             EventKind.DEALING_RANGE_CREATED,
-            EventKind.BALANCE_RANGE_MATURED,
             EventKind.ACCEPTANCE_CONFIRMED,
         ):
             parent = parent_by_kind[kind]

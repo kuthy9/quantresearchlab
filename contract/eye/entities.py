@@ -1751,18 +1751,19 @@ class DealingRangeState:
                 raise ValueError(
                     "repeated range-boundary touches require a tested clock"
                 )
+        # The settled claim stands on the price tests (balance_range_v1.2):
+        # two generations against each frozen boundary.  The source zones'
+        # structural touches are a different fact and may still be one.
         if self.balance_confirmed_at is not None and (
             self.balance_confirmed_at < self.formed_at
             or self.balance_confirmed_at > self.last_updated_at
             or self.candidate_real_h1_bars < 8
-            or self.lower_touch_count < 2
-            or self.upper_touch_count < 2
+            or self.balance_lower_test_generations < 2
+            or self.balance_upper_test_generations < 2
             or self.midpoint_crossings < 2
             or self.inside_close_fraction < 0.8
             or self.width_atr_at_formation > 4.0
             or self.compression_ratio > 0.8
-            or self.lower_source_tested_at is None
-            or self.upper_source_tested_at is None
         ):
             raise ValueError("mature dealing-range evidence is invalid")
         if self.broken_at is not None and (
