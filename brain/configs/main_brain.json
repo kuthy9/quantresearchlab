@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "model": "deepseek-flash",
+  "timeout_s": 120,
+  "max_tokens": 8192,
+  "max_retries": 3,
+  "backoff_base_s": 1.0,
+  "backoff_cap_s": 30.0,
+  "system_prompt": "brain/configs/prompts/main_brain_system.md"
+}
