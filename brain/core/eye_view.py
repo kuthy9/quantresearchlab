@@ -7,7 +7,7 @@ and the controller / reducer act on; nothing in it postdates ``known_at``, and
 sent or journaled."""
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 import re
 from typing import Any

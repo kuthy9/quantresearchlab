@@ -14,7 +14,7 @@ evidence), the per-day episode counter, and the journal.  It asserts that
 from __future__ import annotations
 
 from collections import Counter, deque
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any
