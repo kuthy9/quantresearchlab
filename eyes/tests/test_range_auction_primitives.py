@@ -42,7 +42,7 @@ from eyes.core.observation import (
 )
 from eyes.core.semantic_event_emitter import _event
 from shares.core.scene_graph import current_dol_inventory
-from brain.core.risk import _visible_level_ids
+from brain.core.eye_view import visible_liquidity_ids as _visible_level_ids
 
 from shares.tests.helpers import CORE_TEST_SCALE_SPECS, market_observation
 
