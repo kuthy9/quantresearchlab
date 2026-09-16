@@ -40,6 +40,11 @@ class MainBrainConfig:
     system_prompt: str
     sha256: str
     prompt_sha256: str
+    # How many of the most recent supporting / contradicting evidence items the
+    # LLM sees in ``prior_state``.  The state keeps the whole ledger; the input
+    # carries a bounded tail plus the counts, or a long episode's input grows
+    # without limit (measured: 12k → 190k characters over one Globex session).
+    prior_evidence_limit: int = 20
 
     @classmethod
     def from_json(cls, path: Path, *, root: Path | None = None) -> "MainBrainConfig":
@@ -65,6 +70,7 @@ class MainBrainConfig:
             system_prompt=prompt,
             sha256=hashlib.sha256(raw_bytes).hexdigest(),
             prompt_sha256=hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
+            prior_evidence_limit=int(payload["prior_evidence_limit"]),
         )
 
     @property
@@ -129,10 +135,29 @@ class MainBrain:
             ),
             tape_since_last_update=tape,
             price_relations=context.price_relations,
-            prior_state=None if prior is None else prior.to_dict(),
+            prior_state=None if prior is None else self._prior_view(prior),
         )
         assert_causal(llm_input.to_dict(), context.known_at)
         return llm_input
+
+    def _prior_view(self, prior: BrainState) -> dict[str, Any]:
+        """The prior state as the LLM sees it: the full state with the evidence
+        ledger bounded to its most recent items, plus the counts it dropped."""
+        payload = prior.to_dict()
+        limit = self._config.prior_evidence_limit
+        ledger = payload["evidence"]
+        bounded = {
+            "supporting": ledger["supporting"][-limit:],
+            "contradicting": ledger["contradicting"][-limit:],
+            "unresolved": ledger["unresolved"],
+            "counts": {
+                "supporting": len(ledger["supporting"]),
+                "contradicting": len(ledger["contradicting"]),
+                "unresolved": len(ledger["unresolved"]),
+            },
+        }
+        payload["evidence"] = bounded
+        return payload
 
     def step(
         self,

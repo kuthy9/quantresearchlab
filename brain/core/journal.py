@@ -251,6 +251,15 @@ class JournalReader:
                 )
         return FrozenDict(replies)
 
+    def recorded_incidents(self) -> Mapping[str, str]:
+        """``input_sha`` → incident kind, for every llm_call that ended in one."""
+        incidents: dict[str, str] = {}
+        for episode_id in self.episode_ids():
+            for record in self.records(episode_id):
+                if record.record == "incident" and "input_sha" in record.payload:
+                    incidents[str(record.payload["input_sha"])] = str(record.payload["kind"])
+        return FrozenDict(incidents)
+
     def index(self) -> tuple[Mapping[str, Any], ...]:
         path = self.run_dir / INDEX_FILE
         if not path.exists():

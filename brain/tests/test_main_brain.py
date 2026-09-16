@@ -90,6 +90,21 @@ def test_update_step_carries_state_forward_on_incident(context) -> None:
     assert second.llm_input.to_dict()["prior_state"]["revision"] == 0
 
 
+def test_prior_state_evidence_is_bounded_with_counts(context) -> None:
+    import pandas as pd
+    from contract.brain.state import EvidenceItem, EvidenceLedger, Verdict
+    from brain.tests.test_brain_state import make_state
+
+    ctx, registry = context
+    many = tuple(EvidenceItem(f"ev_{i}", pd.Timestamp("2022-01-04T14:41:00Z"), "k", "5m", None, Verdict.SUPPORT) for i in range(50))
+    prior = make_state(evidence=EvidenceLedger(supporting=many), watch_next=(), destination_candidates=())
+    brain = MainBrain(client=ScriptedClient([]), config=CONFIG, ledger=InMemoryPositionLedger())
+    payload = brain.build_input(episode_id="EP_1", context=ctx, trigger_kind="UPDATE", reasons=[], tape=EMPTY_TAPE, prior=prior).to_dict()
+    evidence = payload["prior_state"]["evidence"]
+    assert len(evidence["supporting"]) == CONFIG.prior_evidence_limit == 20
+    assert evidence["supporting"][-1]["evidence_id"] == "ev_49" and evidence["counts"]["supporting"] == 50
+
+
 def test_opportunity_naming_a_visible_object_survives_reduce(context) -> None:
     ctx, registry = context
     zones = [v for v in ctx.objects if v.kind in {"fvg", "ob"}]

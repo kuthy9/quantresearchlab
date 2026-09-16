@@ -69,6 +69,12 @@ class LLMReply:
         }
 
 
+REPAIR_SUFFIX = (
+    "\n\nYour previous reply was rejected: {error}. "
+    "Reply again with one JSON object that follows the contract exactly."
+)
+
+
 class LLMClient(Protocol):
     def complete(self, *, system: str, user: str) -> LLMReply: ...
 
@@ -229,14 +235,41 @@ class EchoClient:
         return LLMReply(json.dumps(payload), None, {}, 1, "echo")
 
 
-class RecordedClient:
-    """Answers every input with the reply a journal recorded for its sha."""
+_INCIDENT_CLASSES: Mapping[str, type[LLMClientError]] = {
+    "LLMTimeout": LLMTimeout,
+    "LLMRateLimited": LLMRateLimited,
+    "LLMServerError": LLMServerError,
+    "LLMRequestRejected": LLMRequestRejected,
+}
 
-    def __init__(self, replies_by_input_sha: Mapping[str, LLMReply]) -> None:
+
+class RecordedClient:
+    """Answers every input with what a journal recorded for its sha: the reply,
+    or the transport incident the original call ended in.  A repair prompt is
+    keyed by the input it repairs, so a twice-malformed reply replays as such."""
+
+    def __init__(
+        self,
+        replies_by_input_sha: Mapping[str, LLMReply],
+        incidents_by_input_sha: Mapping[str, str] | None = None,
+    ) -> None:
         self._replies = dict(replies_by_input_sha)
+        self._incidents = dict(incidents_by_input_sha or {})
+
+    @staticmethod
+    def input_sha(user: str) -> str:
+        marker = REPAIR_SUFFIX.split("{error}")[0]
+        cut = user.find(marker)
+        original = user if cut < 0 else user[:cut]
+        return hashlib.sha256(original.encode("utf-8")).hexdigest()
 
     def complete(self, *, system: str, user: str) -> LLMReply:
-        sha = hashlib.sha256(user.encode("utf-8")).hexdigest()
+        sha = self.input_sha(user)
+        incident = self._incidents.get(sha)
+        if incident is not None and incident in _INCIDENT_CLASSES:
+            if incident == "LLMRateLimited":
+                raise LLMRateLimited("recorded incident", retry_after=0.0)
+            raise _INCIDENT_CLASSES[incident]("recorded incident")
         reply = self._replies.get(sha)
         if reply is None:
             raise LLMClientError(f"no recorded reply for input {sha[:16]}")
@@ -257,12 +290,6 @@ class CallOutcome:
     incident: str | None
     attempts: int
     repaired: bool
-
-
-REPAIR_SUFFIX = (
-    "\n\nYour previous reply was rejected: {error}. "
-    "Reply again with one JSON object that follows the contract exactly."
-)
 
 
 def call_with_policy(
@@ -325,6 +352,7 @@ __all__ = [
     "LLMRequestRejected",
     "LLMServerError",
     "LLMTimeout",
+    "REPAIR_SUFFIX",
     "RecordedClient",
     "RetryPolicy",
     "ScriptedClient",
