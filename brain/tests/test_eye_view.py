@@ -92,8 +92,18 @@ def test_context_is_causal_and_aliases_every_object(synthetic_observations) -> N
             assert item.evidence_id.startswith("ev_")
             seen_evidence = True
         assert {rel["object_id"] for rel in ctx.price_relations} == ctx.visible_aliases()
+        objects = ctx.object_map()
         for rel in ctx.price_relations:
-            assert rel["relation"] in {"above", "inside", "below"}
+            # the row says where the OBJECT lies relative to price, signed the same way
+            assert set(rel) == {"object_id", "position", "offset_atr"}
+            view = objects[rel["object_id"]]
+            if rel["position"] == "above_price":
+                assert view.lower > ctx.close and (rel["offset_atr"] is None or rel["offset_atr"] > 0.0)
+            elif rel["position"] == "below_price":
+                assert view.upper < ctx.close and (rel["offset_atr"] is None or rel["offset_atr"] < 0.0)
+            else:
+                assert rel["position"] == "contains_price" and view.lower <= ctx.close <= view.upper and rel["offset_atr"] in (0.0, None)
+            assert ctx.relation_of(rel["object_id"]) == rel["position"]
         assert set(ctx.scales) <= {"4H", "1H", "15m", "5m", "1m"}
         assert "structure" in ctx.scales["1m"] and "zones" not in ctx.scales["1m"]
     assert seen_alias and seen_evidence
@@ -113,3 +123,65 @@ def test_assert_causal_rejects_future_timestamps() -> None:
     with pytest.raises(CausalityError):
         assert_causal({"a": [{"t": "2022-01-04T15:00:00Z"}]}, pd.Timestamp("2022-01-04T14:59:00Z"))
     assert_causal({"a": [{"t": "2022-01-04T14:59:00Z"}], "n": 3, "s": "not a date"}, pd.Timestamp("2022-01-04T14:59:00Z"))
+
+
+def _step(step_id: str, kind: str, at: str, source: str, *, prev: str | None = None) -> "PathSequenceStep":
+    from contract.eye import PathSequenceStep
+    from contract.market import Direction
+
+    return PathSequenceStep(
+        step_id=step_id, kind=kind, observed_at=pd.Timestamp(at), source_event_id=None, source_entity_id=source,
+        predecessor_step_ids=() if prev is None else (prev,), same_clock_relation="origin" if prev is None else "strictly_after",
+        direction=Direction.LONG, strength=0.5, reason="test",
+    )
+
+
+def _path(context_kind: str, context_id: str, steps, *, active: bool = True) -> "PathSequenceState":
+    from contract.eye import PathSequenceLifecycle, PathSequenceState
+    from contract.market import Direction
+
+    last = max(step.observed_at for step in steps)
+    return PathSequenceState(
+        sequence_id=f"seq-{context_id}", protocol_hash="p", symbol="NQ", instrument_id=1,
+        context_kind=context_kind, context_id=context_id, direction=Direction.LONG,
+        lifecycle=PathSequenceLifecycle.ACTIVE if active else PathSequenceLifecycle.CLOSED,
+        formed_at=steps[0].observed_at, state_started_at=steps[0].observed_at, last_updated_at=last,
+        age_real_1m_bars=0, state_duration_real_1m_bars=0, steps=tuple(steps),
+        ended_at=None if active else last, transition_reason="context_registered" if active else "closed",
+    )
+
+
+def test_interaction_rows_alias_their_source_object_and_say_when_they_last_stepped() -> None:
+    from brain.core.eye_view import interaction_rows
+    from brain.core.object_registry import ObjectRegistry
+
+    registry = ObjectRegistry()
+    fvg = registry.alias_for("zone-1", kind="fvg", timeframe="5m")
+    pool = registry.alias_for("inv-7", kind="bsl", timeframe="15m")
+    known_at = pd.Timestamp("2022-01-03T14:05:00Z")
+    zone_path = _path("zone_return", "loc-1", [
+        _step("s1", "zone_visible", "2022-01-03T13:50:00Z", "zone-1"),
+        _step("s2", "departure_confirmed", "2022-01-03T14:05:00Z", "zone-1", prev="s1"),
+    ])
+    pool_path = _path("pool_reversal", "man-1", [
+        _step("s3", "pool_swept", "2022-01-03T13:31:00Z", "man-1"),
+        _step("s4", "reacceptance_held", "2022-01-03T13:40:00Z", "man-1", prev="s3"),
+    ])
+    orphan = _path("pool_reversal", "man-2", [_step("s5", "pool_swept", "2022-01-03T14:00:00Z", "man-9")])
+    closed = _path("zone_return", "loc-2", [_step("s6", "zone_visible", "2022-01-03T14:05:00Z", "zone-1")], active=False)
+
+    rows = interaction_rows(
+        (zone_path, pool_path, orphan, closed), manipulation_sources={"man-1": "inv-7"},
+        registry=registry, known_at=known_at, since=pd.Timestamp("2022-01-03T14:02:00Z"),
+    )
+    assert [row["context_kind"] for row in rows] == ["zone_return", "pool_reversal", "pool_reversal"]
+    assert [row["object_id"] for row in rows] == [fvg, pool, None]
+    assert [row["last_step"] for row in rows] == ["departure_confirmed", "reacceptance_held", "pool_swept"]
+    assert [row["last_step_at"] for row in rows] == ["2022-01-03T14:05:00Z", "2022-01-03T13:40:00Z", "2022-01-03T14:00:00Z"]
+    assert [row["stepped_since_last_call"] for row in rows] == [True, False, False]
+
+    # No previous call (a wake): only a step on this very bar counts as open.
+    rows = interaction_rows((pool_path, orphan), manipulation_sources={}, registry=registry, known_at=known_at, since=None)
+    assert [row["stepped_since_last_call"] for row in rows] == [False, False]
+    rows = interaction_rows((zone_path,), manipulation_sources={}, registry=registry, known_at=known_at, since=None)
+    assert rows[0]["stepped_since_last_call"] is True

@@ -17,7 +17,44 @@ decides WAKE / UPDATE / TICK from the Eye's transition events (wake on any
 non-formation 15m+ reaction or a 5m MSS / qualified BOS / sweep — ≈ 87 bars
 per Globex day on the cached 2022-01 log); `main_brain.py` builds the
 `LLMInput`, calls DeepSeek (`deepseek-flash`, JSON mode, key from
-`DEEPSEEK_API_KEY`) under a retry policy and parses the strict `LLMUpdate`;
+`DEEPSEEK_API_KEY` or the gitignored `brain/configs/deepseek.key`;
+`reasoning_effort` configurable) under a retry policy and parses the strict
+`LLMUpdate`; the controller (schema 2) wakes on 5m displacement as well and
+calls the LLM only on reactions, deferring bookkeeping evidence; the runtime
+archives an episode after `idle_archive_after_updates` idle updates.
+**Risk gate and Execution FSM (2026-09-16).** `risk/core/gate.py` sizes or
+vetoes the `TradePlan` that `execution/core/plan.py` builds from an ACTIONABLE
+opportunity; `execution/core/order_fsm.py` places one bracket per intent
+through `execution/core/simulated_executor.py` (`SimulatedExecutor`, OHLCV matching on a virtual account) or
+`execution/core/ibkr_broker.py` (`ib_async`, paper only); `execution/core/stack.py`
+runs Brain → plan → machine per bar and `run_llm_brain.py --broker` selects
+the broker. Spec: [execution/docs/specs/2026-09-16-risk-execution-design.md](../../execution/docs/specs/2026-09-16-risk-execution-design.md);
+**Execution feedback and the week backtest (2026-09-17).** The machine's
+`execution_view()` (working order, position, last outcome, last Risk veto)
+reaches the LLM as `prior_state.execution`; a veto is journaled per LLM
+proposal, a closed position blocks its signature until the plan changes,
+`summarize_run.py` measures a journal, `--reasoning-effort` enters the run
+identity, per-component timings land in `run.json`, and the order lifecycle
+is proved on the real 2022-01-03 tape (`execution/tests/test_order_scenarios_real_tape.py`).
+Spec: [brain/docs/specs/2026-09-17-veto-feedback-week-backtest-design.md](../../brain/docs/specs/2026-09-17-veto-feedback-week-backtest-design.md);
+receipt: [brain/docs/evidence/2026-09-17_week_backtest_2022-01-03_07.md](../../brain/docs/evidence/2026-09-17_week_backtest_2022-01-03_07.md);
+**Thesis lifecycle and Risk v2 (2026-09-17).** The root cause of the day
+run's 23 stops ([brain/docs/evidence/2026-09-17_trade_quality_root_cause_2022-01-03.md](../../brain/docs/evidence/2026-09-17_trade_quality_root_cause_2022-01-03.md))
+led to: `opportunity.thesis_id` / `governing_timeframe` / `grade` /
+`invalidation_mode` in the LLM contract, the reducer's invalidation-scale
+rule, a `CLOSE_BEYOND` hard stop with a scaled-ATR buffer and an exit at
+market on a scale close beyond the object, the `ThesisBook`
+(`execution/core/thesis.py`: one expression per thesis, two per episode,
+closed after a stop or a target, a 30-bar cooldown after any stop-out), an
+order machine with several intents (three same-direction positions), a
+gate that sizes 1.5 % / 2 % by grade (the larger only at 3 R+), caps
+leverage at 8×, stops the session at −2.5 % and halts the run at −6.5 %
+from the peak (flattening everything), a controller (schema 3) that no
+longer re-reasons on 5m relation flips, and a prompt that never moves the
+invalidation to satisfy a veto. Spec:
+[execution/docs/specs/2026-09-17-thesis-lifecycle-risk-v2-design.md](../../execution/docs/specs/2026-09-17-thesis-lifecycle-risk-v2-design.md);
+the three earlier regression baselines are retired until the first run of
+this design completes.
 `reducer.py` is the pure function `BrainState_t + evidence + update →
 BrainState_t+1` that keeps the verdict books, validates opportunities against
 visible objects and geometry, forces ACTIVE while a position is open and

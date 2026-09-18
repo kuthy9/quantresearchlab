@@ -1,7 +1,9 @@
 """The LLM behind the Main Brain, and the policy that calls it.
 
 ``DeepSeekClient`` speaks DeepSeek's chat-completions API over ``urllib``
-(no dependency), in JSON mode, reading its key from ``DEEPSEEK_API_KEY`` only.
+(no dependency), in JSON mode.  Its key comes from ``DEEPSEEK_API_KEY`` or,
+failing that, from the gitignored key file (``DEEPSEEK_API_KEY_FILE``, default
+``brain/configs/deepseek.key``); it is never written to a journal or a log.
 ``ScriptedClient`` and ``EchoClient`` serve tests and key-less smoke runs;
 ``RecordedClient`` answers a replay from the journal.  ``call_with_policy``
 owns retries: transport errors back off and retry, a malformed reply earns
@@ -12,8 +14,10 @@ from __future__ import annotations
 from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
 import hashlib
+import http.client
 import json
 import os
+from pathlib import Path
 import socket
 import ssl
 import time
@@ -27,7 +31,30 @@ from contract.brain.llm import LLM_UPDATE_EXAMPLE, MalformedReply
 
 DEFAULT_DEEPSEEK_BASE_URL = "https://api.deepseek.com"
 API_KEY_ENV = "DEEPSEEK_API_KEY"
+API_KEY_FILE_ENV = "DEEPSEEK_API_KEY_FILE"
+# Gitignored (``*.key``); the one place a key may live inside the repository.
+DEFAULT_API_KEY_FILE = Path(__file__).resolve().parents[1] / "configs" / "deepseek.key"
 BASE_URL_ENV = "DEEPSEEK_BASE_URL"
+
+
+def resolve_api_key(explicit: str | None = None) -> str:
+    """The DeepSeek key: the argument, else ``DEEPSEEK_API_KEY``, else the
+    key file named by ``DEEPSEEK_API_KEY_FILE`` (default
+    ``brain/configs/deepseek.key``).  ``LLMClientError`` when none is set."""
+    if explicit:
+        return explicit
+    from_env = os.getenv(API_KEY_ENV, "").strip()
+    if from_env:
+        return from_env
+    path = Path(os.getenv(API_KEY_FILE_ENV) or DEFAULT_API_KEY_FILE)
+    if path.is_file():
+        from_file = path.read_text(encoding="utf-8").strip()
+        if from_file:
+            return from_file
+    raise LLMClientError(
+        f"no DeepSeek key: set {API_KEY_ENV}, or put the key in {path} "
+        f"(the path is overridable with {API_KEY_FILE_ENV})"
+    )
 
 
 class LLMClientError(RuntimeError):
@@ -94,22 +121,22 @@ class DeepSeekClient:
         api_key: str | None = None,
         base_url: str | None = None,
         opener: Callable[..., Any] = urllib.request.urlopen,
+        reasoning_effort: str | None = None,
     ) -> None:
-        key = api_key if api_key is not None else os.environ.get(API_KEY_ENV)
-        if not key:
-            raise LLMClientError(f"{API_KEY_ENV} is not set; the DeepSeek client reads its key from the environment only")
-        self._key = key
+        self._key = resolve_api_key(api_key)
         self.model = model
         self.timeout_s = float(timeout_s)
         self.max_tokens = int(max_tokens)
-        self.base_url = (base_url or os.environ.get(BASE_URL_ENV) or DEFAULT_DEEPSEEK_BASE_URL).rstrip("/")
+        # DeepSeek's thinking budget: low / high / max (its default is high).
+        self.reasoning_effort = reasoning_effort
+        self.base_url = (base_url or os.getenv(BASE_URL_ENV) or DEFAULT_DEEPSEEK_BASE_URL).rstrip("/")
         self._opener = opener
         # python.org's macOS builds ship without a CA bundle, so a bare
         # urlopen fails TLS verification; certifi's bundle is the authority.
         self._ssl_context = ssl.create_default_context(cafile=certifi.where())
 
     def request_body(self, *, system: str, user: str) -> dict[str, Any]:
-        return {
+        body = {
             "model": self.model,
             "messages": [
                 {"role": "system", "content": system},
@@ -119,6 +146,9 @@ class DeepSeekClient:
             "max_tokens": self.max_tokens,
             "stream": False,
         }
+        if self.reasoning_effort is not None:
+            body["reasoning_effort"] = self.reasoning_effort
+        return body
 
     def complete(self, *, system: str, user: str) -> LLMReply:
         body = json.dumps(self.request_body(system=system, user=user)).encode("utf-8")
@@ -160,6 +190,10 @@ class DeepSeekClient:
             raise LLMServerError(f"DeepSeek transport failure: {reason}") from None
         except ssl.SSLError as error:
             raise LLMRequestRejected(f"DeepSeek TLS failure: {error}") from None
+        except (http.client.HTTPException, OSError) as error:
+            # The server dropped the connection (RemoteDisconnected, a reset,
+            # a bad status line): urlopen raises these bare, not as URLError.
+            raise LLMServerError(f"DeepSeek transport failure: {type(error).__name__}: {error}") from None
         latency_ms = int((time.monotonic() - started) * 1000)
         try:
             payload = json.loads(raw.decode("utf-8"))
@@ -217,8 +251,9 @@ class EchoClient:
     """A contract-valid reply for any input, with no reasoning behind it.
 
     Verdicts every piece of evidence NEUTRAL until ``sleep_after`` calls, then
-    SUPPORT with ``continue_active`` false so the episode can close.  For
-    key-less smoke runs and tests only."""
+    SUPPORT with ``continue_active`` false so the episode can close (items an
+    incident left pending arrive back in ``new_evidence`` and are verdicted
+    like the rest).  For key-less smoke runs and tests only."""
 
     def __init__(self, *, sleep_after: int | None = None, fail_calls: Collection[int] = ()) -> None:
         self.calls = 0
@@ -246,13 +281,6 @@ class EchoClient:
         payload["watch_next"] = []
         payload["destination_candidates"] = []
         payload["continue_active"] = not closing
-        if closing:
-            # Spend this call's verdicts resolving what earlier calls left open,
-            # one pending item per new evidence, so the exit conditions can hold.
-            prior = request.get("prior_state") or {}
-            pending = [item["evidence_id"] for item in (prior.get("evidence") or {}).get("unresolved", [])]
-            for target, verdict in zip(pending, payload["evidence_verdicts"]):
-                verdict.update(verdict="RESOLVE", resolves_evidence_id=target, resolution="SUPPORT")
         return LLMReply(json.dumps(payload), None, {}, 1, "echo")
 
 
@@ -375,7 +403,9 @@ def call_with_policy(
 
 __all__ = [
     "API_KEY_ENV",
+    "API_KEY_FILE_ENV",
     "BASE_URL_ENV",
+    "DEFAULT_API_KEY_FILE",
     "DEFAULT_DEEPSEEK_BASE_URL",
     "CallOutcome",
     "DeepSeekClient",
@@ -392,4 +422,5 @@ __all__ = [
     "RetryPolicy",
     "ScriptedClient",
     "call_with_policy",
+    "resolve_api_key",
 ]

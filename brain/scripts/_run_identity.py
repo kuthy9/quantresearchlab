@@ -20,8 +20,10 @@ import time
 import pandas as pd
 
 from contract.eye import MarketObservation
+from contract.market.primitives import Bar
 from shares.core.eye_factory import build_eye
 from shares.core.io import iter_completed_bars, load_ohlcv
+from shares.core.timing import NO_TIMINGS, Timings, timed
 
 ROOT = Path(__file__).resolve().parents[2]
 MARKET_TIMEZONE = "America/New_York"
@@ -121,11 +123,18 @@ def drive(
     *,
     model_path: Path,
     root: Path,
-    on_observation: Callable[[MarketObservation, bool], None],
+    on_observation: Callable[[MarketObservation, bool, Bar], None],
     progress_every: int = 0,
     log: Callable[[str], None] = print,
+    timings: Timings = NO_TIMINGS,
+    stop: Callable[[], bool] | None = None,
 ) -> int:
     """Feed the Eye every completed bar of the window; return the bars seen.
+    The callback receives the observation, whether it falls in the emit
+    window, and the completed bar itself (the simulated broker fills on it).
+    ``timings`` records ``eye`` (the Eye's work per bar) and ``bar`` (the
+    callback, per emitted bar).  ``stop`` is asked after every bar; true
+    ends the pass (the run's drawdown halt).
 
     The Eye spills cold events to a journal it never empties, so the journal
     lives in a temporary directory that dies with this pass."""
@@ -137,11 +146,19 @@ def drive(
     with tempfile.TemporaryDirectory(prefix="eye_journal_brain_run_") as journal:
         reader, observer = build_eye(model_path, root=root, audit_journal_dir=journal)
         for bar in iter_completed_bars(frame):
-            observation = observer.observe(reader.on_bar(bar))
+            with timed(timings, "eye"):
+                observation = observer.observe(reader.on_bar(bar))
             seen += 1
             if observation.market_snapshot is not None:
                 emitting = observation.asof.tz_convert(MARKET_TIMEZONE) >= emit_from
-                on_observation(observation, emitting)
+                if emitting:
+                    with timed(timings, "bar"):
+                        on_observation(observation, emitting, bar)
+                else:
+                    on_observation(observation, emitting, bar)
+            if stop is not None and stop():
+                log(f"stopped after {seen} bars at {observation.asof}")
+                break
             if progress_every and seen % progress_every == 0:
                 log(f"{seen} bars, {observation.asof}, {(time.monotonic() - started) / 60:.1f} min")
         del observer, reader

@@ -13,6 +13,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass, fields
 from enum import Enum
+import re
 import json
 from typing import Any
 
@@ -37,6 +38,21 @@ class OpportunityState(str, Enum):
 class TradeDirection(str, Enum):
     LONG = "LONG"
     SHORT = "SHORT"
+
+
+class ThesisGrade(str, Enum):
+    BASE = "BASE"
+    A_PLUS = "A_PLUS"
+
+
+class InvalidationMode(str, Enum):
+    TOUCH = "TOUCH"
+    CLOSE_BEYOND = "CLOSE_BEYOND"
+
+
+# The scales a thesis may rest on (the 1m scale is never governing).
+GOVERNING_TIMEFRAMES: tuple[str, ...] = ("4H", "1H", "15m", "5m")
+THESIS_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,32}$")
 
 
 class Confidence(str, Enum):
@@ -168,11 +184,22 @@ class WatchItem:
 
 @dataclass(frozen=True)
 class Opportunity:
+    """The trade the Brain proposes: three objects, and since 2026-09-17 the
+    thesis it expresses (``thesis_id``, stable while the reading holds), the
+    scale the thesis rests on, the Brain's grade and how the invalidation
+    object falsifies it.  ``thesis_id`` and ``governing_timeframe`` are
+    ``None`` only when the state is NONE; the grade and the mode default for
+    states journaled before they existed."""
+
     state: OpportunityState = OpportunityState.NONE
     direction: TradeDirection | None = None
     entry_object_id: str | None = None
     invalidation_object_id: str | None = None
     target_object_id: str | None = None
+    thesis_id: str | None = None
+    governing_timeframe: str | None = None
+    grade: ThesisGrade = ThesisGrade.BASE
+    invalidation_mode: InvalidationMode = InvalidationMode.TOUCH
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "state", _enum(OpportunityState, self.state, name="opportunity.state"))
@@ -180,10 +207,16 @@ class Opportunity:
             object.__setattr__(
                 self, "direction", _enum(TradeDirection, self.direction, name="opportunity.direction")
             )
+        object.__setattr__(self, "grade", _enum(ThesisGrade, self.grade, name="opportunity.grade"))
+        object.__setattr__(
+            self, "invalidation_mode", _enum(InvalidationMode, self.invalidation_mode, name="opportunity.invalidation_mode")
+        )
         ids = (self.entry_object_id, self.invalidation_object_id, self.target_object_id)
         if self.state is OpportunityState.NONE:
             if self.direction is not None or any(value is not None for value in ids):
                 raise ValueError("opportunity NONE carries no direction and no object ids")
+            if self.thesis_id is not None or self.governing_timeframe is not None:
+                raise ValueError("opportunity NONE carries no thesis_id and no governing_timeframe")
             return
         if self.direction is None:
             raise ValueError("opportunity direction is required when the state is not NONE")
@@ -191,6 +224,10 @@ class Opportunity:
             raise ValueError("opportunity requires entry, invalidation and target object ids")
         if len(set(ids)) != 3:
             raise ValueError("opportunity object ids must be distinct")
+        if self.thesis_id is not None and (not isinstance(self.thesis_id, str) or not THESIS_ID_PATTERN.match(self.thesis_id)):
+            raise ValueError("opportunity thesis_id must match [A-Za-z0-9_-]{1,32}")
+        if self.governing_timeframe is not None and self.governing_timeframe not in GOVERNING_TIMEFRAMES:
+            raise ValueError(f"opportunity governing_timeframe must be one of {list(GOVERNING_TIMEFRAMES)}")
 
     @property
     def object_ids(self) -> tuple[str, ...]:
@@ -207,6 +244,10 @@ class Opportunity:
             "entry_object_id": self.entry_object_id,
             "invalidation_object_id": self.invalidation_object_id,
             "target_object_id": self.target_object_id,
+            "thesis_id": self.thesis_id,
+            "governing_timeframe": self.governing_timeframe,
+            "grade": None if self.state is OpportunityState.NONE else self.grade.value,
+            "invalidation_mode": None if self.state is OpportunityState.NONE else self.invalidation_mode.value,
         }
 
     @classmethod
@@ -217,6 +258,10 @@ class Opportunity:
             payload.get("entry_object_id"),
             payload.get("invalidation_object_id"),
             payload.get("target_object_id"),
+            thesis_id=payload.get("thesis_id"),
+            governing_timeframe=payload.get("governing_timeframe"),
+            grade=payload.get("grade") or ThesisGrade.BASE,
+            invalidation_mode=payload.get("invalidation_mode") or InvalidationMode.TOUCH,
         )
 
 

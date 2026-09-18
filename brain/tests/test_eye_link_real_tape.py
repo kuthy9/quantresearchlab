@@ -26,7 +26,7 @@ def test_controller_wakes_on_the_real_tape_but_never_on_1m_alone() -> None:
     emitted = 0
     aliased = 0
 
-    def on_obs(obs, emitting: bool) -> None:
+    def on_obs(obs, emitting: bool, bar) -> None:
         nonlocal wakes, one_minute_only_wakes, emitted, aliased
         if not emitting:
             return

@@ -6,7 +6,7 @@ import pandas as pd
 import pytest
 
 from contract.brain.llm import LLM_UPDATE_EXAMPLE, LLMInput, MalformedReply, parse_update
-from contract.brain.state import OpportunityState, Verdict
+from contract.brain.state import InvalidationMode, OpportunityState, ThesisGrade, Verdict
 
 EVIDENCE = {"ev_1", "ev_2"}
 OBJECTS = {"FVG_5m_3", "SSL_5m_2", "BSL_1H_1"}
@@ -20,6 +20,15 @@ def _reply(**overrides) -> str:
     ]
     payload.update(overrides)
     return json.dumps(payload)
+
+
+def _actionable(**over) -> dict:
+    payload = {
+        "state": "ACTIONABLE", "direction": "LONG", "entry_object_id": "FVG_5m_3", "invalidation_object_id": "SSL_5m_2",
+        "target_object_id": "BSL_1H_1", "thesis_id": "T1", "governing_timeframe": "15m", "grade": "BASE", "invalidation_mode": "TOUCH",
+    }
+    payload.update(over)
+    return payload
 
 
 def test_example_reply_parses() -> None:
@@ -45,9 +54,17 @@ def test_resolve_verdict_carries_its_resolution() -> None:
     _reply(extra_key=1),
     _reply(reasoning_confidence="SURE"),
     _reply(continue_active="yes"),
-    _reply(opportunity={"state": "ACTIONABLE", "direction": "LONG", "entry_object_id": "FVG_5m_3", "invalidation_object_id": "SSL_5m_2", "target_object_id": "NOPE_1"}),
-    _reply(opportunity={"state": "ACTIONABLE", "direction": "LONG", "entry_object_id": "FVG_5m_3", "invalidation_object_id": "SSL_5m_2", "target_object_id": 4500.0}),
-    _reply(opportunity={"state": "ACTIONABLE", "direction": "LONG", "entry_object_id": "FVG_5m_3", "invalidation_object_id": "SSL_5m_2"}),
+    _reply(opportunity=_actionable(target_object_id="NOPE_1")),
+    _reply(opportunity=_actionable(target_object_id=4500.0)),
+    _reply(opportunity={k: v for k, v in _actionable().items() if k != "target_object_id"}),
+    _reply(opportunity=_actionable(thesis_id=None)),
+    _reply(opportunity=_actionable(thesis_id="has space")),
+    _reply(opportunity=_actionable(thesis_id="x" * 33)),
+    _reply(opportunity=_actionable(governing_timeframe="1m")),
+    _reply(opportunity=_actionable(grade="A+")),
+    _reply(opportunity=_actionable(invalidation_mode="CLOSE")),
+    _reply(opportunity={**_actionable(), "state": "NONE", "direction": None, "entry_object_id": None, "invalidation_object_id": None, "target_object_id": None}),
+    _reply(opportunity={k: v for k, v in _actionable().items() if k != "thesis_id"}),
     _reply(evidence_verdicts=[{"evidence_id": "ev_9", "verdict": "SUPPORT", "note": "", "resolves_evidence_id": None, "resolution": None}]),
     _reply(evidence_verdicts=[{"evidence_id": "ev_1", "verdict": "RESOLVE", "note": "", "resolves_evidence_id": "ev_0", "resolution": None}]),
     _reply(evidence_verdicts=[{"evidence_id": "ev_1", "verdict": "SUPPORT", "note": "", "resolves_evidence_id": None, "resolution": "SUPPORT"}]),
@@ -80,3 +97,18 @@ def test_llm_input_hashes_canonically() -> None:
     assert a.input_sha == b.input_sha
     assert json.loads(a.to_json())["known_at"] == "2022-01-04T14:41:00Z"
     assert json.loads(a.to_json())["schema_version"] == 1
+
+
+def test_actionable_opportunity_carries_thesis_scale_grade_and_mode() -> None:
+    update = parse_update(_reply(opportunity=_actionable(grade="A_PLUS", invalidation_mode="CLOSE_BEYOND")), evidence_ids=EVIDENCE, object_ids=OBJECTS)
+    o = update.opportunity
+    assert o.thesis_id == "T1" and o.governing_timeframe == "15m"
+    assert o.grade is ThesisGrade.A_PLUS and o.invalidation_mode is InvalidationMode.CLOSE_BEYOND
+    assert update.to_dict()["opportunity"]["invalidation_mode"] == "CLOSE_BEYOND"
+
+
+def test_example_none_opportunity_carries_null_thesis_fields() -> None:
+    assert LLM_UPDATE_EXAMPLE["opportunity"] == {
+        "state": "NONE", "direction": None, "entry_object_id": None, "invalidation_object_id": None, "target_object_id": None,
+        "thesis_id": None, "governing_timeframe": None, "grade": None, "invalidation_mode": None,
+    }

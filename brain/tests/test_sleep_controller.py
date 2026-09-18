@@ -31,6 +31,7 @@ def ev(kind: EventKind, tf: Timeframe) -> MarketEvent:
     (EventKind.FVG_STATE, Timeframe.H4, Decision.STAY_ASLEEP),
     (EventKind.BAR_COMPLETED, Timeframe.H4, Decision.STAY_ASLEEP),
     (EventKind.DISPLACEMENT_OBSERVED, Timeframe.M15, Decision.WAKE),
+    (EventKind.DISPLACEMENT_OBSERVED, Timeframe.M5, Decision.WAKE),
 ])
 def test_wake_rule(kind, tf, expected) -> None:
     d = decide([ev(kind, tf)], active=False, config=CFG)
@@ -39,8 +40,13 @@ def test_wake_rule(kind, tf, expected) -> None:
         assert d.reasons == (f"ev_{kind.value}:{tf.value}",)
 
 
-def test_active_updates_on_any_5m_plus_transition_or_relation_change() -> None:
-    assert decide([ev(EventKind.FVG_CREATED, Timeframe.M5)], active=True, config=CFG).decision is Decision.UPDATE
+def test_active_updates_on_a_5m_plus_reaction_or_relation_change_not_on_bookkeeping() -> None:
+    # Bookkeeping kinds (formation, touches, level creation) are evidence but do not wake the LLM.
+    assert decide([ev(EventKind.FVG_CREATED, Timeframe.M5)], active=True, config=CFG).decision is Decision.TICK
+    assert decide([ev(EventKind.LEVEL_TOUCHED, Timeframe.M15)], active=True, config=CFG).decision is Decision.TICK
+    assert decide([ev(EventKind.SWEEP_CONFIRMED, Timeframe.M5)], active=True, config=CFG).decision is Decision.UPDATE
+    assert decide([ev(EventKind.DISPLACEMENT_OBSERVED, Timeframe.M5)], active=True, config=CFG).decision is Decision.UPDATE
+    assert decide([ev(EventKind.ACCEPTANCE_CONFIRMED, Timeframe.M5)], active=True, config=CFG).decision is Decision.UPDATE
     assert decide([ev(EventKind.SWEEP_CONFIRMED, Timeframe.M1)], active=True, config=CFG).decision is Decision.TICK
     assert decide([ev(EventKind.FVG_STATE, Timeframe.M5)], active=True, config=CFG).decision is Decision.TICK
     assert decide([], active=True, config=CFG).decision is Decision.TICK
@@ -53,3 +59,21 @@ def test_tape_rule_and_hash() -> None:
     assert not CFG.is_tape_event(ev(EventKind.SWEEP_CONFIRMED, Timeframe.M5))
     assert not CFG.is_tape_event(ev(EventKind.LEVEL_TOUCHED, Timeframe.M1))
     assert len(CFG.sha256) == 64 and CFG.tape_recent_limit == 8
+
+
+def test_idle_archive_threshold_is_configured() -> None:
+    assert CFG.idle_archive_after_updates == 6
+    assert "fvg_created" in CFG.bookkeeping_kinds and "displacement_observed" not in CFG.bookkeeping_kinds
+
+
+def test_relation_changes_count_only_on_the_configured_scales(tmp_path: Path) -> None:
+    import json
+
+    assert CFG.relation_change_timeframes == frozenset({"15m", "1H", "4H"})
+    payload = json.loads((ROOT / "brain" / "configs" / "sleep_controller.json").read_text(encoding="utf-8"))
+    payload["schema_version"] = 2
+    del payload["relation_change_timeframes"]
+    old = tmp_path / "v2.json"
+    old.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(ValueError, match="schema_version"):
+        ControllerConfig.from_json(old)

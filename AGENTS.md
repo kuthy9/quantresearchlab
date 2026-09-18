@@ -2,17 +2,19 @@
 
 ## Project Structure & Module Organization
 
-Runtime code is split into four subsystem packages. Each owns its own `core/`,
+Runtime code is split into five subsystem packages. Each owns its own `core/`,
 `tests/`, `configs/` and `docs/`, and the split preserves the existing Eye,
-state, Brain and execution ownership boundaries rather than redrawing them:
+state, Brain, risk and execution ownership boundaries rather than redrawing
+them:
 
 | package | owns |
 | --- | --- |
 | `eyes/` | the Trading Eye — normalization, the six detectors, semantic-event emission, the event store and market-state reduction |
 | `brain/` | the LLM Trading Brain behind a Sleep Controller: the aliased Eye view, the controller, the Main Brain (DeepSeek, 14-step framework), the pure state reducer, the hash-chained journal and the SLEEP ↔ ACTIVE runtime. The typed playbooks, DOL and Signal Policy were retired on 2026-09-07; the frozen six-path set and the global mode library on 2026-09-09; the kNN hypothesis engine, its research gates and the old decision/risk on 2026-09-16 |
-| `execution/` | execution reality, MBO reconstruction and sequential simulation (the order FSM and trade intent were retired on 2026-09-07) |
+| `risk/` | the Risk gate (added 2026-09-16, v2 on 2026-09-17): sizes or vetoes the Brain's `TradePlan` against the broker's `AccountSnapshot` and the executor's positions — reward-to-risk floor and preferred ratio, a risk fraction per thesis grade, three same-direction positions, a leverage cap, staleness, a daily stop and a drawdown halt — with `risk/configs/risk.json` (schema 2) |
+| `execution/` | execution reality and MBO reconstruction, plus (2026-09-16) the order machine that acts on an approved plan through the `Broker` boundary: `SimulatedExecutor` (OHLCV matching, a virtual account) for replay and tests, `IBKRBroker` (`ib_async`, paper accounts only) for TWS; since 2026-09-17 several intents (up to three positions), the `ThesisBook` (one expression per thesis, closed after a stop, a cooldown after any stop-out), the close-beyond exit and the drawdown halt at market; the FSM retired on 2026-09-07 was rebuilt on the LLM Brain's opportunity |
 | `shares/` | data access, the session clock, the scale registry, orchestration (`engine.py`) and the study projections the other three consume |
-| `contract/` | every payload that crosses a subsystem boundary, one package per boundary (`market`, `execution`, `eye`, `brain`, `decision`, `risk`, `research`) |
+| `contract/` | every payload that crosses a subsystem boundary, one package per boundary (`market`, `execution` — now also the account and order facts, `eye`, `brain`, `decision`, `risk` — now also `TradePlan` / `RiskVerdict`, `research`) |
 
 Each package also owns a `scripts/` directory holding its bounded studies,
 materializers and throwaway probes; a script that drives the whole stack
@@ -73,8 +75,13 @@ Bar
      ├─ brain/core/main_brain.py       LLMInput → DeepSeek (llm_client.py) → LLMUpdate
      │   └─ reducer.py                 BrainState_t + evidence + update → BrainState_t+1
      │       └─ opportunity_geometry.py aliases → entry / stop / target prices, R
-     ├─ brain/core/position_ledger.py  open positions (Execution's future boundary)
+     ├─ brain/core/position_ledger.py  the engaged check (position or working order) and the executor's view for the LLM
      └─ brain/core/journal.py          hash-chained JSONL per episode; replayable
+ └─ TradingStack             execution/core/stack.py          Brain step → plan → order machine, per bar
+     ├─ execution/core/plan.py         ACTIONABLE opportunity → TradePlan (aliases, Eye entity ids, geometry)
+     ├─ risk/core/gate.py              RiskGate: size or veto against the AccountSnapshot
+     ├─ execution/core/order_fsm.py    OrderMachine: one bracket per intent, journal `trade` records, `execution_view()` → `prior_state.execution`
+     └─ execution/core/broker.py       Broker protocol; simulated_executor.SimulatedExecutor (replay) / ibkr_broker.IBKRBroker (paper)
 ```
 
 `shares/core/engine.py`, the orchestration bound to the typed Brain retired on
@@ -82,10 +89,16 @@ Bar
 (`brain/core/forecast.py` and its research gates), `execution/core/simulation.py`
 and the test modules that could not be collected without them. The Eye is
 built through `shares/core/eye_factory.build_eye` from `configs/model.json`;
-`brain/scripts/run_llm_brain.py` drives it over a window and
+`brain/scripts/run_llm_brain.py` drives it over a window (`--broker
+none|sim|ibkr` adds the Risk gate and the order machine) and
 `brain/scripts/replay_journal.py` proves a journal reproduces from the Eye
-alone. The Eye-to-Brain link on the real tape is
-`brain/tests/test_eye_link_real_tape.py` (`research_orchestration`). The
+alone (a `sim` run's trade records included); `brain/scripts/summarize_run.py`
+reads a journal into one `summary.json` (calls, tokens, cost, sleeps, vetoes
+and their repeats, the order lifecycle, the account, timings). The Eye-to-Brain link on the real tape is
+`brain/tests/test_eye_link_real_tape.py` (`research_orchestration`), and the
+frozen week backtest of 2026-09-17 is `brain/tests/test_regression_baseline.py`
+(`research_orchestration`: replays the baseline journals named in
+`brain/docs/evidence/regression_baselines.json` and compares their summaries). The
 design and its receipts: [brain/docs/README.md](brain/docs/README.md),
 [brain/docs/specs/2026-09-16-llm-brain-design.md](brain/docs/specs/2026-09-16-llm-brain-design.md).
 
@@ -167,7 +180,16 @@ materialize it before the real-tape tests and the MBO protocol tests can pass.
 - `.venv/bin/python -m pytest eyes/tests/test_semantic_foundation_projection.py -q -p no:cacheprovider`
   runs a focused contract file.
 - `.venv/bin/python -m pytest eyes/tests -q -p no:cacheprovider` runs one
-  subsystem's tests; swap in `brain/tests`, `execution/tests` or `shares/tests`.
+  subsystem's tests; swap in `brain/tests`, `execution/tests`, `risk/tests` or
+  `shares/tests`.
+- `.venv/bin/python -m execution.scripts.ibkr_paper_check` is the read-only
+  check of the IBKR paper session (`uv sync --all-extras` installs `ib_async`);
+  it never places an order. `execution.scripts.ibkr_paper_exercise` does — by
+  hand, with `--i-place-paper-orders`, on the paper account only — to record
+  what TWS reports for working / cancel / replace / fill / flatten; nothing
+  else outside `--broker ibkr` sends an order.
+- `shares/tests/test_no_wall_clock.py` keeps every `*/core` module off the
+  wall clock: the bar's `known_at` is the only time a component sees.
 - `git diff --check` catches whitespace errors before commit.
 
 No formal-research runner or frozen manifest remains in the repository. Any new
@@ -201,12 +223,14 @@ consumers are their focused tests. Retain those definitions; do not present them
 as hot state and do not build a second lifecycle engine beside them.
 
 Do not restore production `FOUNDATION_STATE_CHANGED` emission; its decoder is
-legacy-read-only. There is no action authority in the repository: the LLM Brain
-names objects, `brain/core/opportunity_geometry.py` resolves them to prices,
-and the Risk veto engine and Execution that will act on an
-`OpportunityGeometry` are a later phase. The LLM never writes a price; the
-reducer refuses any opportunity whose objects are not visible or whose
-geometry is incoherent.
+legacy-read-only. The LLM Brain names objects, `brain/core/opportunity_geometry.py`
+resolves them to prices, `risk/core/gate.py` sizes or vetoes the resulting
+`TradePlan`, and `execution/core/order_fsm.py` places at most one bracket per
+intent through a `Broker` — the simulated one in replay, the IBKR paper
+adapter live. `configs/model.json` keeps `live_execution_allowed: false`; the
+IBKR adapter refuses to construct otherwise and refuses any non-`DU` account.
+The LLM never writes a price; the reducer refuses any opportunity whose
+objects are not visible or whose geometry is incoherent.
 
 Never create a second history, state, thesis, lifecycle, or execution authority.
 A compatibility decoder or adapter may exist, but it may not become a production

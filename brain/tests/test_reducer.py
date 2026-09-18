@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pandas as pd
 import pytest
 
@@ -31,6 +33,7 @@ def ctx(**over) -> ReduceContext:
     base = dict(
         known_at=T2, has_open_position=False, open_interaction=False,
         visible_aliases=frozenset(REG), registry=REG, coherence=lambda o: None,
+        idle_updates=0, idle_archive_after=None,
     )
     base.update(over)
     return ReduceContext(**base)
@@ -214,3 +217,123 @@ def test_determinism() -> None:
     prev = quiet()
     kwargs = dict(episode_id=prev.episode_id, evidence=[item("ev_11")], update=upd(evidence_verdicts=(EvidenceVerdict("ev_11", Verdict.SUPPORT, "x"),)), ctx=ctx())
     assert apply(prev, **kwargs).state.to_json() == apply(prev, **kwargs).state.to_json()
+
+
+def pending(i: str) -> EvidenceItem:
+    """Evidence the LLM never saw: parked by an incident bar, verdict None."""
+    return item(i)
+
+
+def neutral(i: str) -> EvidenceItem:
+    return EvidenceItem(i, T2, "sweep_confirmed", "5m", "SSL_5m_2", Verdict.NEUTRAL, "not bearing on the thesis")
+
+
+def test_neutral_evidence_is_judged_and_does_not_block_sleep() -> None:
+    prev = quiet(evidence=EvidenceLedger(unresolved=(neutral("ev_7"),)))
+    assert sleep_blockers(prev, has_open_position=False, open_interaction=False) == ()
+    r = apply(prev, episode_id=prev.episode_id, evidence=[], update=upd(continue_active=False), ctx=ctx())
+    assert r.slept is True and r.rejections == ()
+    assert [e.evidence_id for e in r.state.evidence.unresolved] == ["ev_7"]
+
+
+def test_pending_evidence_blocks_sleep_until_it_is_verdicted() -> None:
+    prev = quiet(evidence=EvidenceLedger(unresolved=(pending("ev_7"),)))
+    assert sleep_blockers(prev, has_open_position=False, open_interaction=False) == ("unresolved_evidence",)
+    r = apply(prev, episode_id=prev.episode_id, evidence=[item("ev_7")], update=upd(continue_active=False), ctx=ctx())
+    assert r.slept is False
+    assert set(r.rejections) == {"evidence_without_verdict:ev_7", "sleep_refused:unresolved_evidence"}
+    assert [e.evidence_id for e in r.state.evidence.unresolved] == ["ev_7"]
+
+
+def test_pending_evidence_reoffered_takes_its_verdict_without_a_duplicate() -> None:
+    prev = quiet(evidence=EvidenceLedger(unresolved=(pending("ev_7"),)))
+    r = apply(
+        prev, episode_id=prev.episode_id, evidence=[item("ev_7"), item("ev_8")],
+        update=upd(
+            evidence_verdicts=(EvidenceVerdict("ev_7", Verdict.SUPPORT, "late"), EvidenceVerdict("ev_8", Verdict.CONTRADICT, "")),
+            continue_active=False,
+        ),
+        ctx=ctx(),
+    )
+    assert r.rejections == () and r.slept is True
+    assert [e.evidence_id for e in r.state.evidence.supporting] == ["ev_7"]
+    assert [e.evidence_id for e in r.state.evidence.contradicting] == ["ev_8"]
+    assert r.state.evidence.unresolved == ()
+    assert r.state.last_update.verdicts == {"SUPPORT": 1, "CONTRADICT": 1, "NEUTRAL": 0, "RESOLVE": 0}
+
+
+def test_pending_evidence_resolved_by_a_carrier_is_not_re_filed() -> None:
+    prev = quiet(evidence=EvidenceLedger(unresolved=(pending("ev_7"),)))
+    r = apply(
+        prev, episode_id=prev.episode_id, evidence=[item("ev_8"), item("ev_7")],
+        update=upd(evidence_verdicts=(EvidenceVerdict("ev_8", Verdict.RESOLVE, "", "ev_7", Verdict.CONTRADICT),)),
+        ctx=ctx(),
+    )
+    assert r.rejections == ()
+    assert [e.evidence_id for e in r.state.evidence.contradicting] == ["ev_8"]
+    assert r.state.evidence.unresolved == ()
+
+
+def test_pending_evidence_stays_pending_through_another_incident() -> None:
+    prev = quiet(evidence=EvidenceLedger(unresolved=(pending("ev_7"),)))
+    r = apply(
+        prev, episode_id=prev.episode_id, evidence=[item("ev_7"), item("ev_8")], update=None, ctx=ctx(), incident="LLMTimeout",
+    )
+    assert r.rejections == ("evidence_without_verdict:ev_8",)
+    assert [e.evidence_id for e in r.state.evidence.unresolved] == ["ev_7", "ev_8"]
+
+
+def test_idle_archive_after_n_updates_without_opportunity_or_new_understanding() -> None:
+    prev = make_state()  # watch_next is non-empty: the LLM would never be allowed to sleep on its own
+    r = apply(prev, episode_id=prev.episode_id, evidence=[], update=upd(market_understanding=prev.market_understanding), ctx=ctx(idle_updates=5, idle_archive_after=6))
+    assert r.slept is True and r.sleep_reason == "idle" and r.state.status.value == "ARCHIVED" and r.state.continue_active is False
+    r = apply(prev, episode_id=prev.episode_id, evidence=[], update=upd(), ctx=ctx(idle_updates=4, idle_archive_after=6))
+    assert r.slept is False and r.sleep_reason is None
+    r = apply(quiet(), episode_id=prev.episode_id, evidence=[], update=upd(continue_active=False), ctx=ctx())
+    assert r.slept is True and r.sleep_reason == "continue_active=false"
+
+
+@pytest.mark.parametrize("over,ctx_over", [
+    ({"opportunity": Opportunity(OpportunityState.DEVELOPING, TradeDirection.LONG, "FVG_5m_3", "SSL_5m_2", "BSL_1H_1")}, {}),
+    ({"understanding_holds": False, "market_understanding": "new", "active_expectation": ActiveExpectation("new t", (), ())}, {}),
+    ({}, {"has_open_position": True}),
+    ({}, {"idle_archive_after": None}),
+])
+def test_idle_archive_is_not_granted_when(over, ctx_over) -> None:
+    prev = make_state()
+    base = dict(idle_updates=5, idle_archive_after=6); base.update(ctx_over)
+    r = apply(prev, episode_id=prev.episode_id, evidence=[], update=upd(**over), ctx=ctx(**base))
+    assert r.slept is False
+
+
+def test_idle_archive_waits_for_pending_evidence() -> None:
+    prev = make_state(evidence=EvidenceLedger(unresolved=(pending("ev_7"),)))
+    r = apply(prev, episode_id=prev.episode_id, evidence=[], update=upd(), ctx=ctx(idle_updates=5, idle_archive_after=6))
+    assert r.slept is False
+
+
+def _scale(alias: str) -> str:
+    return alias.split("_")[-2]
+
+
+def test_invalidation_more_than_one_scale_below_the_governing_one_is_refused() -> None:
+    opportunity = Opportunity("ACTIONABLE", "SHORT", "FVG_5m_3", "SSL_5m_2", "BSL_1H_1", thesis_id="T1", governing_timeframe="1H")
+    res = apply(None, episode_id="EP", evidence=(), update=upd(opportunity=opportunity), ctx=ctx(timeframe_of=_scale))
+    assert "opportunity_invalidation_scale:SSL_5m_2" in res.rejections and res.state.opportunity.state is OpportunityState.NONE
+
+
+def test_invalidation_on_the_governing_scale_or_one_below_is_accepted() -> None:
+    opportunity = Opportunity("ACTIONABLE", "SHORT", "FVG_5m_3", "SSL_5m_2", "BSL_1H_1", thesis_id="T1", governing_timeframe="15m")
+    res = apply(None, episode_id="EP", evidence=(), update=upd(opportunity=opportunity), ctx=ctx(timeframe_of=_scale))
+    assert res.state.opportunity.state is OpportunityState.ACTIONABLE and res.rejections == ()
+    unknown = apply(None, episode_id="EP", evidence=(), update=upd(opportunity=opportunity), ctx=ctx(timeframe_of=lambda alias: None))
+    assert unknown.state.opportunity.state is OpportunityState.ACTIONABLE, "an object of unknown scale is not judged"
+
+
+def test_a_thesis_id_that_flips_direction_is_refused() -> None:
+    first = apply(None, episode_id="EP", evidence=(), update=upd(opportunity=Opportunity("DEVELOPING", "SHORT", "FVG_5m_3", "SSL_5m_2", "BSL_1H_1", thesis_id="T1", governing_timeframe="5m")), ctx=ctx())
+    flipped = Opportunity("ACTIONABLE", "LONG", "BSL_1H_1", "SSL_5m_2", "FVG_5m_3", thesis_id="T1", governing_timeframe="5m")
+    res = apply(first.state, episode_id="EP", evidence=(), update=upd(opportunity=flipped), ctx=ctx())
+    assert "thesis_direction_changed:T1" in res.rejections and res.state.opportunity.state is OpportunityState.NONE
+    renamed = apply(first.state, episode_id="EP", evidence=(), update=upd(opportunity=replace(flipped, thesis_id="T2")), ctx=ctx())
+    assert renamed.state.opportunity.state is OpportunityState.ACTIONABLE

@@ -20,10 +20,11 @@ from brain.core.eye_view import EyeContext, assert_causal
 from brain.core.llm_client import CallOutcome, LLMClient, RetryPolicy, call_with_policy
 from brain.core.object_registry import ObjectRegistry
 from brain.core.opportunity_geometry import coherence_error
-from brain.core.position_ledger import PositionLedger
-from brain.core.reducer import ReduceContext, ReduceResult, apply
+from brain.core.position_ledger import PositionLedger, engaged
+from brain.core.reducer import ReduceContext, ReduceResult, apply, pending_evidence
 from contract.brain.llm import LLM_UPDATE_EXAMPLE, LLMInput, parse_update
-from contract.brain.state import BrainState, Opportunity
+from contract.brain.state import BrainState, EvidenceItem, Opportunity, isoformat_utc
+from shares.core.timing import NO_TIMINGS, Timings, timed
 
 MAIN_BRAIN_SCHEMA_VERSION = 1
 EXAMPLE_TOKEN = "{EXAMPLE}"
@@ -45,6 +46,13 @@ class MainBrainConfig:
     # carries a bounded tail plus the counts, or a long episode's input grows
     # without limit (measured: 12k → 190k characters over one Globex session).
     prior_evidence_limit: int = 20
+    # Evidence notes are cut to this many characters in ``prior_state``.
+    note_limit: int = 160
+    # Only objects within this many 1m ATRs of the close are listed in
+    # ``price_relations`` — plus every object the prior state names.
+    relation_atr_limit: float | None = 4.0
+    # DeepSeek's reasoning budget (low / high / max); None sends nothing.
+    reasoning_effort: str | None = None
 
     @classmethod
     def from_json(cls, path: Path, *, root: Path | None = None) -> "MainBrainConfig":
@@ -71,6 +79,9 @@ class MainBrainConfig:
             sha256=hashlib.sha256(raw_bytes).hexdigest(),
             prompt_sha256=hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
             prior_evidence_limit=int(payload["prior_evidence_limit"]),
+            note_limit=int(payload["note_limit"]),
+            relation_atr_limit=None if payload["relation_atr_limit"] is None else float(payload["relation_atr_limit"]),
+            reasoning_effort=None if payload.get("reasoning_effort") is None else str(payload["reasoning_effort"]),
         )
 
     @property
@@ -93,11 +104,13 @@ class MainBrain:
         config: MainBrainConfig,
         ledger: PositionLedger,
         sleep: Callable[[float], None] = time.sleep,
+        timings: Timings = NO_TIMINGS,
     ) -> None:
         self._client = client
         self._config = config
         self._ledger = ledger
         self._sleep = sleep
+        self._timings = timings
 
     @property
     def config(self) -> MainBrainConfig:
@@ -112,7 +125,10 @@ class MainBrain:
         reasons: Sequence[str],
         tape: Mapping[str, Any],
         prior: BrainState | None,
+        deferred: Sequence[EvidenceItem] = (),
     ) -> LLMInput:
+        evidence = self.evidence_for(context, prior, deferred)
+        fresh = len(context.events) + len(deferred)
         llm_input = LLMInput(
             episode_id=episode_id,
             known_at=context.known_at,
@@ -129,31 +145,81 @@ class MainBrain:
                     "direction": item.direction,
                     "side": item.side,
                     "object_id": item.object_id,
-                    "known_at": item.to_dict()["known_at"],
+                    "known_at": isoformat_utc(item.known_at),
+                    # Set on an item an incident bar left unjudged: it is
+                    # re-offered on every call until the LLM verdicts it.
+                    "pending_since": None if index < fresh else isoformat_utc(item.known_at),
                 }
-                for item in context.events
+                for index, item in enumerate(evidence)
             ),
             tape_since_last_update=tape,
-            price_relations=context.price_relations,
+            price_relations=self._relations_view(context, prior),
             prior_state=None if prior is None else self._prior_view(prior),
         )
         assert_causal(llm_input.to_dict(), context.known_at)
         return llm_input
 
+    @staticmethod
+    def evidence_for(
+        context: EyeContext, prior: BrainState | None, deferred: Sequence[EvidenceItem] = ()
+    ) -> tuple[EvidenceItem, ...]:
+        """This bar's evidence, then the bookkeeping evidence of the TICK bars
+        since the last call, then the prior state's pending items — what the
+        LLM must verdict, and what the reducer files."""
+        pending = () if prior is None else pending_evidence(prior.evidence)
+        return tuple(context.events) + tuple(deferred) + pending
+
+    def _relations_view(self, context: EyeContext, prior: BrainState | None) -> tuple[Mapping[str, Any], ...]:
+        """``price_relations`` bounded to the objects near price, plus every
+        object the prior state names (watched, destination, opportunity)."""
+        limit = self._config.relation_atr_limit
+        if limit is None:
+            return context.price_relations
+        named: set[str] = set()
+        if prior is not None:
+            named.update(item.object_id for item in prior.watch_next)
+            named.update(prior.destination_candidates)
+            named.update(prior.opportunity.object_ids)
+        return tuple(
+            row for row in context.price_relations
+            if row["object_id"] in named or row["offset_atr"] is None or abs(row["offset_atr"]) <= limit
+        )
+
     def _prior_view(self, prior: BrainState) -> dict[str, Any]:
-        """The prior state as the LLM sees it: the full state with the evidence
-        ledger bounded to its most recent items, plus the counts it dropped."""
+        """The prior state as the LLM sees it: the state without its registry
+        (the LLM names aliases; entity ids are the journal's business), the
+        evidence ledger bounded to its most recent items in a compact shape,
+        plus the counts it dropped, and ``execution`` — what the executor did
+        with the last opportunity (the ledger's view: working order, position,
+        last outcome, last veto).  Pending items are not listed here — they
+        travel in ``new_evidence``."""
         payload = prior.to_dict()
+        payload.pop("object_registry")
+        payload["execution"] = dict(self._ledger.execution_view())
         limit = self._config.prior_evidence_limit
+        note_limit = self._config.note_limit
+
+        def compact(item: Mapping[str, Any]) -> dict[str, Any]:
+            return {
+                "evidence_id": item["evidence_id"],
+                "kind": item["kind"],
+                "timeframe": item["timeframe"],
+                "object_id": item["object_id"],
+                "verdict": item["verdict"],
+                "note": item["note"][:note_limit],
+            }
+
         ledger = payload["evidence"]
+        judged = [item for item in ledger["unresolved"] if item["verdict"] is not None]
         bounded = {
-            "supporting": ledger["supporting"][-limit:],
-            "contradicting": ledger["contradicting"][-limit:],
-            "unresolved": ledger["unresolved"],
+            "supporting": [compact(item) for item in ledger["supporting"][-limit:]],
+            "contradicting": [compact(item) for item in ledger["contradicting"][-limit:]],
+            "unresolved": [compact(item) for item in judged[-limit:]],
             "counts": {
                 "supporting": len(ledger["supporting"]),
                 "contradicting": len(ledger["contradicting"]),
-                "unresolved": len(ledger["unresolved"]),
+                "unresolved": len(judged),
+                "pending": len(ledger["unresolved"]) - len(judged),
             },
         }
         payload["evidence"] = bounded
@@ -170,12 +236,17 @@ class MainBrain:
         prior: BrainState | None,
         registry: ObjectRegistry,
         tick: float,
+        deferred: Sequence[EvidenceItem] = (),
+        idle_updates: int = 0,
+        idle_archive_after: int | None = None,
     ) -> BrainStep:
-        llm_input = self.build_input(
-            episode_id=episode_id, context=context, trigger_kind=trigger_kind,
-            reasons=reasons, tape=tape, prior=prior,
-        )
-        evidence_ids = {item.evidence_id for item in context.events}
+        with timed(self._timings, "input"):
+            llm_input = self.build_input(
+                episode_id=episode_id, context=context, trigger_kind=trigger_kind,
+                reasons=reasons, tape=tape, prior=prior, deferred=deferred,
+            )
+        evidence = self.evidence_for(context, prior, deferred)
+        evidence_ids = {item.evidence_id for item in evidence}
         object_ids = set(context.visible_aliases())
         if prior is not None:
             object_ids |= set(prior.object_registry)
@@ -183,35 +254,44 @@ class MainBrain:
         def parse(text: str):
             return parse_update(text, evidence_ids=evidence_ids, object_ids=object_ids)
 
-        outcome = call_with_policy(
-            self._client,
-            system=self._config.system_prompt,
-            user=llm_input.to_json(),
-            parse=parse,
-            policy=self._config.retry_policy,
-            sleep=self._sleep,
-        )
+        with timed(self._timings, "llm"):
+            outcome = call_with_policy(
+                self._client,
+                system=self._config.system_prompt,
+                user=llm_input.to_json(),
+                parse=parse,
+                policy=self._config.retry_policy,
+                sleep=self._sleep,
+            )
         geometries = context.geometries()
 
         def coherence(opportunity: Opportunity) -> str | None:
-            return coherence_error(opportunity, geometries, close=context.close, tick=tick)
+            return coherence_error(opportunity, geometries, close=context.close, tick=tick, atr_1m=context.atr_1m)
+
+        def timeframe_of(alias: str) -> str | None:
+            view = geometries.get(alias)
+            return None if view is None else view.timeframe
 
         ctx = ReduceContext(
             known_at=context.known_at,
-            has_open_position=self._ledger.has_open_position(),
+            has_open_position=engaged(self._ledger),
             open_interaction=context.open_interaction,
             visible_aliases=context.visible_aliases(),
             registry=registry.snapshot(),
             coherence=coherence,
+            idle_updates=idle_updates,
+            idle_archive_after=idle_archive_after,
+            timeframe_of=timeframe_of,
         )
-        result = apply(
-            prior,
-            episode_id=episode_id,
-            evidence=context.events,
-            update=outcome.update,
-            ctx=ctx,
-            incident=outcome.incident,
-        )
+        with timed(self._timings, "reduce"):
+            result = apply(
+                prior,
+                episode_id=episode_id,
+                evidence=evidence,
+                update=outcome.update,
+                ctx=ctx,
+                incident=outcome.incident,
+            )
         return BrainStep(result=result, llm_input=llm_input, outcome=outcome)
 
 

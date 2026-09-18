@@ -89,7 +89,7 @@ reads Eye types on the Brain side. It publishes, per completed bar:
 | `interaction` | `observation.interaction_update` via `brain_entry_sequence` | open interaction paths: alias of the object being interacted with, step kind, direction |
 | `events` | `observation.events_this_update`, transition kinds at 5m and above | `{evidence_id, kind, timeframe, direction, side, object_id (alias or null), known_at}` — the reducer's evidence |
 | `tape` | 1m transition events since the last LLM call | counts per kind, plus the last eight reaction events (`sweep_confirmed`, `acceptance_confirmed`, `mss_core_confirmed`, `qualified_bos`, `liquidity_sweep`, `level_reached`) with their object alias — context only, never evidence |
-| `price_relations` | computed | for every published object: `above` / `inside` / `below` and signed distance in `atr_1m` |
+| `price_relations` | computed | for every published object: its `position` relative to price (`above_price` / `below_price` / `contains_price`) and `offset_atr`, its signed distance in `atr_1m` (positive above price); until 2026-09-17 `relation` / `distance_atr` from price's point of view, which the model inverted |
 
 Rules:
 
@@ -230,10 +230,24 @@ outside evidence notes, so a state hashes stably.
   "interaction": [...],
   "new_evidence": [{"evidence_id": "ev_…", "kind": "…", "timeframe": "5m", "direction": "up", "side": null, "object_id": "SSL_5m_2", "known_at": "…"}],
   "tape_since_last_update": {"bars": 3, "counts": {"level_touched": 4}, "recent": [{"kind": "sweep_confirmed", "object_id": "SSL_1m_9", "known_at": "…"}]},
-  "price_relations": [{"object_id": "FVG_5m_3", "relation": "above", "distance_atr": 1.4}],
+  "price_relations": [{"object_id": "FVG_5m_3", "position": "above_price", "offset_atr": 1.4}],
   "prior_state": { …BrainState or null on WAKE… }
 }
 ```
+
+Amended 2026-09-17: `price_relations` rows are `{object_id, position,
+offset_atr}` — the *object's* place relative to price (`above_price` /
+`below_price` / `contains_price`, offset signed the same way). The earlier
+`{relation: above|inside|below, distance_atr}` described where *price* sat
+against the object; every real run read it the other way round, so every
+stop and target landed on the wrong side and died as
+`opportunity_incoherent` (25 of 25 proposals on the 2022-01-03 RTH day at
+low effort, 11 of 11 in run 3). `prior_state` carries no `object_registry`, its
+evidence lists are bounded (`prior_evidence_limit`, `note_limit`), and it
+gains `execution` — the order machine's view of the last opportunity
+(status, working order, position, last outcome, last Risk veto, as aliases
+and counts) so the LLM knows a veto, an order or a position exists; design
+in [2026-09-17-veto-feedback-week-backtest-design.md](2026-09-17-veto-feedback-week-backtest-design.md).
 
 The system prompt (`brain/configs/prompts/main_brain_system.md`) carries the
 14-step framework, the output contract, and the rule that the model reasons
@@ -263,10 +277,22 @@ rejected, enums checked, every `evidence_id` must be in `new_evidence`, every
 `object_id` must be an alias the input published. A reply that fails is a
 `MalformedReply` incident (§ 9); the LLM is never asked to emit a price.
 
+Amended 2026-09-17 (thesis lifecycle): `opportunity` also carries
+`thesis_id`, `governing_timeframe` (`4H` / `1H` / `15m` / `5m`), `grade`
+(`BASE` / `A_PLUS`) and `invalidation_mode` (`TOUCH` / `CLOSE_BEYOND`) —
+all `null` when the state is `NONE`, required otherwise. The reducer's
+rule 4 refuses an invalidation object more than one scale below the
+governing one (`opportunity_invalidation_scale`) and a thesis id that flips
+direction (`thesis_direction_changed`); `resolve_geometry` puts a
+`CLOSE_BEYOND` hard stop one 1m ATR × √(scale minutes) beyond the object.
+The controller (schema 3) remembers watched relations only on
+`relation_change_timeframes`. Design:
+[../../../execution/docs/specs/2026-09-17-thesis-lifecycle-risk-v2-design.md](../../../execution/docs/specs/2026-09-17-thesis-lifecycle-risk-v2-design.md).
+
 ### 7.3 DeepSeek client
 
 `DeepSeekClient(model="deepseek-flash", base_url=env DEEPSEEK_BASE_URL or
-"https://api.deepseek.com", api_key=env DEEPSEEK_API_KEY, timeout_s, max_retries)`.
+"https://api.deepseek.com", api_key=env DEEPSEEK_API_KEY or the gitignored brain/configs/deepseek.key, timeout_s, max_retries)`.
 `POST {base_url}/chat/completions` with `response_format={"type":"json_object"}`,
 `messages=[system, user(LLMInput as JSON)]`, `max_tokens` from config. Raw
 HTTP through `urllib.request` — no new dependency. The reply's
@@ -306,7 +332,13 @@ Rules, in order:
    id from `unresolved` and appends the new item to `supporting` or
    `contradicting` according to `resolution`, which a RESOLVE verdict must
    carry as `SUPPORT` or `CONTRADICT` (null on every other verdict).
-   Evidence without a verdict goes to `unresolved` and is a rejection.
+   Evidence without a verdict goes to `unresolved` and is a rejection; such
+   an item is *pending* (`verdict` null) and the Main Brain re-offers it in
+   `new_evidence` (marked `pending_since`) on every later call until the LLM
+   verdicts it — a pending item is then filed by that verdict, never rejected
+   as a duplicate (amended 2026-09-16 after the first real run: an incident
+   bar's evidence could otherwise only leave through a RESOLVE carried by a
+   new item, and 112 items accumulated in one session).
 3. **Understanding**: if `understanding_holds` is false, `market_understanding`
    and `active_expectation.thesis` must both differ from `prev`; otherwise the
    update is rejected as a whole (state carried forward, incident
@@ -320,14 +352,30 @@ Rules, in order:
 5. **Position**: `ledger.has_open_position()` ⇒ `continue_active = true`
    regardless of the reply.
 6. **Sleep eligibility**: the reply's `continue_active = false` is honoured only
-   when all five hold — no open position; no open interaction path on the
-   Eye's interaction update; `unresolved` empty; `watch_next` empty;
+   when all five hold — no open position; no open interaction path — one
+   whose latest step was observed after the previous LLM call, or on the
+   wake bar itself (amended 2026-09-16: the Eye keeps a path ACTIVE for as
+   long as its context lives, and every bar of the real tape carried one, so
+   the original "no ACTIVE path" reading made sleep unreachable; the rows
+   now name the path's source object and carry `last_step_at` /
+   `stepped_since_last_call`); no *pending* item in `unresolved` (a `NEUTRAL`
+   item is judged and never blocks sleep — amended 2026-09-16: 74 NEUTRAL
+   verdicts in one session had made sleep unreachable); `watch_next` empty;
    `opportunity.state == NONE`. If the reply asked to sleep but a condition
    fails, `continue_active` is forced true and a rejection
    `sleep_refused:<condition>` is recorded. `slept` is true only when the
    final `continue_active` is false; the runtime then archives.
 7. **TICK** (`update is None`): revision advances, `updated_at` advances,
    `last_update.llm_called = false`, nothing else changes.
+8. **Idle archive** (added 2026-09-16 after the second real run, in which
+   the model never set `continue_active` false): `ReduceContext` carries
+   `idle_updates` (the runtime's count of consecutive accepted updates with
+   no opportunity and an unchanged understanding) and `idle_archive_after`
+   (from `sleep_controller.json`). An accepted update that keeps the
+   understanding and proposes no opportunity, with `idle_updates + 1` at the
+   threshold, sleeps with `sleep_reason = "idle"` unless a position is open
+   or an item is still unjudged; `watch_next` and the interaction gate do
+   not hold an idle episode open.
 
 The reducer is a pure function of its arguments; the same journal replays to
 the same states.

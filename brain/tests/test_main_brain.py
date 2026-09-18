@@ -58,7 +58,9 @@ def test_input_carries_prior_state_and_every_alias(context) -> None:
     llm_input = brain.build_input(episode_id="EP_1", context=ctx, trigger_kind="WAKE", reasons=["ev_x"], tape=EMPTY_TAPE, prior=None)
     payload = llm_input.to_dict()
     assert payload["prior_state"] is None and payload["trigger"] == {"kind": "WAKE", "reasons": ["ev_x"]}
-    assert {rel["object_id"] for rel in payload["price_relations"]} == ctx.visible_aliases()
+    listed = {rel["object_id"] for rel in payload["price_relations"]}
+    assert listed <= ctx.visible_aliases() and listed
+    assert all(rel["offset_atr"] is None or abs(rel["offset_atr"]) <= CONFIG.relation_atr_limit for rel in payload["price_relations"])
     assert "close" in payload["bar"] and payload["known_at"] == llm_input.known_at.strftime("%Y-%m-%dT%H:%M:%SZ")
     assert payload["tape_since_last_update"] == EMPTY_TAPE
 
@@ -101,8 +103,9 @@ def test_prior_state_evidence_is_bounded_with_counts(context) -> None:
     brain = MainBrain(client=ScriptedClient([]), config=CONFIG, ledger=InMemoryPositionLedger())
     payload = brain.build_input(episode_id="EP_1", context=ctx, trigger_kind="UPDATE", reasons=[], tape=EMPTY_TAPE, prior=prior).to_dict()
     evidence = payload["prior_state"]["evidence"]
-    assert len(evidence["supporting"]) == CONFIG.prior_evidence_limit == 20
+    assert len(evidence["supporting"]) == CONFIG.prior_evidence_limit == 12
     assert evidence["supporting"][-1]["evidence_id"] == "ev_49" and evidence["counts"]["supporting"] == 50
+    assert "object_registry" not in payload["prior_state"]
 
 
 def test_opportunity_naming_a_visible_object_survives_reduce(context) -> None:
@@ -117,7 +120,138 @@ def test_opportunity_naming_a_visible_object_survives_reduce(context) -> None:
         "state": "DEVELOPING", "direction": "LONG", "entry_object_id": zone.alias,
         "invalidation_object_id": min(pools_below, key=lambda v: v.upper).alias,
         "target_object_id": max(pools_above, key=lambda v: v.lower).alias,
+        "thesis_id": "T1", "governing_timeframe": "5m", "grade": "BASE", "invalidation_mode": "TOUCH",
     }
     brain = MainBrain(client=ScriptedClient([good_reply(ctx, opportunity=opportunity)]), config=CONFIG, ledger=InMemoryPositionLedger())
     step = brain.step(episode_id="EP_1", context=ctx, trigger_kind="WAKE", reasons=[], tape=EMPTY_TAPE, prior=None, registry=registry, tick=0.25)
     assert step.result.state.opportunity.entry_object_id == zone.alias and step.result.rejections == ()
+
+
+def test_pending_evidence_is_reoffered_and_neutral_history_is_bounded(context) -> None:
+    import pandas as pd
+    from contract.brain.state import EvidenceItem, EvidenceLedger, Verdict
+    from brain.tests.test_brain_state import make_state
+
+    ctx, registry = context
+    at = pd.Timestamp("2022-01-04T14:41:00Z")
+    pending = EvidenceItem("ev_pending", at, "sweep_confirmed", "5m", None)
+    neutral = tuple(EvidenceItem(f"ev_n{i}", at, "k", "5m", None, Verdict.NEUTRAL) for i in range(30))
+    prior = make_state(evidence=EvidenceLedger(unresolved=neutral + (pending,)), watch_next=(), destination_candidates=())
+    brain = MainBrain(client=ScriptedClient([]), config=CONFIG, ledger=InMemoryPositionLedger())
+    llm_input = brain.build_input(episode_id="EP_1", context=ctx, trigger_kind="UPDATE", reasons=[], tape=EMPTY_TAPE, prior=prior)
+    payload = llm_input.to_dict()
+    ids = [e["evidence_id"] for e in payload["new_evidence"]]
+    assert ids == [e.evidence_id for e in ctx.events] + ["ev_pending"]
+    assert payload["new_evidence"][-1]["pending_since"] == "2022-01-04T14:41:00Z"
+    evidence = payload["prior_state"]["evidence"]
+    assert all(e["evidence_id"] != "ev_pending" for e in evidence["unresolved"])
+    assert len(evidence["unresolved"]) == CONFIG.prior_evidence_limit
+    assert evidence["counts"] == {"supporting": 0, "contradicting": 0, "unresolved": 30, "pending": 1}
+    assert set(evidence["unresolved"][0]) == {"evidence_id", "kind", "timeframe", "object_id", "verdict", "note"}
+
+
+def test_update_step_files_a_pending_item_by_the_verdict_it_finally_gets(context) -> None:
+    import pandas as pd
+    from contract.brain.state import EvidenceItem, EvidenceLedger
+    from brain.tests.test_brain_state import make_state
+
+    ctx, registry = context
+    pending = EvidenceItem("ev_pending", pd.Timestamp("2022-01-04T14:41:00Z"), "sweep_confirmed", "5m", None)
+    prior = make_state(evidence=EvidenceLedger(unresolved=(pending,)), watch_next=(), destination_candidates=())
+    verdicts = [
+        {"evidence_id": e.evidence_id, "verdict": "NEUTRAL", "note": "", "resolves_evidence_id": None, "resolution": None}
+        for e in ctx.events
+    ] + [{"evidence_id": "ev_pending", "verdict": "SUPPORT", "note": "late", "resolves_evidence_id": None, "resolution": None}]
+    client = ScriptedClient([good_reply(ctx, evidence_verdicts=verdicts, continue_active=False)])
+    brain = MainBrain(client=client, config=CONFIG, ledger=InMemoryPositionLedger())
+    step = brain.step(
+        episode_id="EP_1", context=ctx, trigger_kind="UPDATE", reasons=[], tape=EMPTY_TAPE, prior=prior, registry=registry, tick=0.25,
+    )
+    assert step.result.incident is None
+    assert [e.evidence_id for e in step.result.state.evidence.supporting] == ["ev_pending"]
+    assert not any(e.verdict is None for e in step.result.state.evidence.unresolved)
+    assert "sleep_refused:unresolved_evidence" not in step.result.rejections
+
+
+def test_prior_notes_are_truncated_and_relations_are_bounded_by_atr_distance(context) -> None:
+    import dataclasses
+    import pandas as pd
+    from contract.brain.state import EvidenceItem, EvidenceLedger, Verdict, WatchItem
+    from brain.tests.test_brain_state import make_state
+
+    ctx, registry = context
+    far = max(ctx.price_relations, key=lambda r: abs(r["offset_atr"] or 0.0))
+    if not far["offset_atr"] or abs(far["offset_atr"]) < 0.5:
+        pytest.skip("synthetic tape has no object beyond 0.5 ATR")
+    prior = make_state(
+        evidence=EvidenceLedger(supporting=(EvidenceItem("ev_1", pd.Timestamp("2022-01-04T14:41:00Z"), "k", "5m", None, Verdict.SUPPORT, "x" * 500),)),
+        watch_next=(WatchItem(far["object_id"], "far but watched"),), destination_candidates=(),
+        object_registry={far["object_id"]: registry.get(far["object_id"])},
+    )
+    config = dataclasses.replace(CONFIG, relation_atr_limit=0.25, note_limit=40)
+    brain = MainBrain(client=ScriptedClient([]), config=config, ledger=InMemoryPositionLedger())
+    payload = brain.build_input(episode_id="EP_1", context=ctx, trigger_kind="UPDATE", reasons=[], tape=EMPTY_TAPE, prior=prior).to_dict()
+    assert len(payload["prior_state"]["evidence"]["supporting"][0]["note"]) == 40
+    kept = {r["object_id"]: r for r in payload["price_relations"]}
+    assert far["object_id"] in kept, "a watched object is kept whatever its distance"
+    for alias, rel in kept.items():
+        assert alias == far["object_id"] or rel["offset_atr"] is None or abs(rel["offset_atr"]) <= 0.25
+    assert len(kept) < len(ctx.price_relations)
+
+
+def test_deferred_bookkeeping_evidence_rides_the_next_call(context) -> None:
+    import pandas as pd
+    from contract.brain.state import EvidenceItem
+
+    ctx, registry = context
+    deferred = EvidenceItem("ev_deferred", pd.Timestamp("2022-01-04T14:41:00Z"), "fvg_created", "5m", None)
+    brain = MainBrain(client=ScriptedClient([]), config=CONFIG, ledger=InMemoryPositionLedger())
+    payload = brain.build_input(episode_id="EP_1", context=ctx, trigger_kind="UPDATE", reasons=[], tape=EMPTY_TAPE, prior=None, deferred=(deferred,)).to_dict()
+    ids = [e["evidence_id"] for e in payload["new_evidence"]]
+    assert ids == [e.evidence_id for e in ctx.events] + ["ev_deferred"]
+    assert payload["new_evidence"][-1]["pending_since"] is None
+
+
+def test_prior_state_carries_the_execution_view_and_a_wake_call_does_not(context) -> None:
+    from brain.core.position_ledger import IDLE_VIEW
+
+    ctx, registry = context
+
+    class Engaged(InMemoryPositionLedger):
+        def execution_view(self):
+            return {**IDLE_VIEW, "status": "WORKING", "order": {"direction": "LONG", "entry_object_id": "FVG_5m_1", "bars_working": 2}}
+
+    brain = MainBrain(client=ScriptedClient([good_reply(ctx)]), config=CONFIG, ledger=Engaged())
+    first = brain.step(episode_id="EP_1", context=ctx, trigger_kind="WAKE", reasons=[], tape=EMPTY_TAPE, prior=None, registry=registry, tick=0.25)
+    assert first.llm_input.to_dict()["prior_state"] is None
+    payload = brain.build_input(episode_id="EP_1", context=ctx, trigger_kind="UPDATE", reasons=[], tape=EMPTY_TAPE, prior=first.result.state).to_dict()
+    idle_view = json.loads(json.dumps(dict(IDLE_VIEW)))  # the input is JSON: tuples become lists
+    assert payload["prior_state"]["execution"] == {**idle_view, "status": "WORKING", "order": {"direction": "LONG", "entry_object_id": "FVG_5m_1", "bars_working": 2}}
+    assert set(payload["prior_state"]["execution"]) == {"status", "order", "positions", "theses", "cooldown_bars_left", "daily_stop", "halted", "last_outcome", "last_veto"}
+    idle = MainBrain(client=ScriptedClient([]), config=CONFIG, ledger=InMemoryPositionLedger())
+    payload = idle.build_input(episode_id="EP_1", context=ctx, trigger_kind="UPDATE", reasons=[], tape=EMPTY_TAPE, prior=first.result.state).to_dict()
+    assert payload["prior_state"]["execution"] == idle_view
+
+
+def test_the_prompt_explains_the_execution_view() -> None:
+    assert "prior_state.execution" in CONFIG.system_prompt and "last_veto" in CONFIG.system_prompt
+    for word in ("thesis_id", "governing_timeframe", "CLOSE_BEYOND", "A_PLUS", "cooldown_bars_left", "daily_stop", "halted", "theses"):
+        assert word in CONFIG.system_prompt, word
+    assert "name a nearer invalidation" not in CONFIG.system_prompt and "never move the invalidation" in CONFIG.system_prompt
+
+
+def test_the_prompt_defines_position_and_offset() -> None:
+    assert "`position`" in CONFIG.system_prompt and "`offset_atr`" in CONFIG.system_prompt
+    assert "above_price" in CONFIG.system_prompt and "below_price" in CONFIG.system_prompt and "contains_price" in CONFIG.system_prompt
+    assert "distance_atr" not in CONFIG.system_prompt
+
+
+def test_timings_split_input_call_and_reduce(context) -> None:
+    from shares.core.timing import Timings
+
+    ctx, registry = context
+    timings = Timings()
+    brain = MainBrain(client=ScriptedClient([good_reply(ctx)]), config=CONFIG, ledger=InMemoryPositionLedger(), timings=timings)
+    brain.step(episode_id="EP_1", context=ctx, trigger_kind="WAKE", reasons=[], tape=EMPTY_TAPE, prior=None, registry=registry, tick=0.25)
+    summary = timings.summary()
+    assert {"input", "llm", "reduce"} <= set(summary) and all(summary[k]["count"] == 1 for k in ("input", "llm", "reduce"))

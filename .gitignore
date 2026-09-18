@@ -26,6 +26,14 @@ archive/
 # went with the Phase 5 and Phase 6 runners on the same date. No research
 # manifest template is tracked any more.
 
+# API keys. brain/core/llm_client.py reads DeepSeek's key from
+# brain/configs/deepseek.key when DEEPSEEK_API_KEY is not set; no key file
+# is ever tracked.
+*.key
+
+# Local broker credentials must never be tracked.
+ibkr account&password.md
+
 # coverage artefacts
 .coverage
 .coverage.*

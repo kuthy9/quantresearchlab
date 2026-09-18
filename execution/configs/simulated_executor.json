@@ -1,0 +1,6 @@
+{
+  "schema_version": 1,
+  "initial_equity": 100000.0,
+  "margin_per_contract": 20000.0,
+  "max_fill_per_bar": null
+}

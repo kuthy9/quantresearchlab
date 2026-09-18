@@ -24,6 +24,15 @@ class VetoCode(str, Enum):
     REWARD_RISK = "reward_risk"
     NO_PLAN = "no_plan"
     PROTECTION_NOT_TIGHTER = "protection_not_tighter"
+    # Added 2026-09-16 with the Risk gate: exposure and sizing vetoes.
+    EXPOSURE = "exposure"
+    WORKING_ORDER = "working_order"
+    POSITION_SIZE = "position_size"
+    # Added 2026-09-17 with Risk v2: the session's loss limit, the run's
+    # drawdown halt, the notional cap.
+    DAILY_STOP = "daily_stop"
+    HALTED = "halted"
+    LEVERAGE = "leverage"
 
 
 @dataclass(frozen=True)

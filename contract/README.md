@@ -18,7 +18,7 @@ market  ->  execution  ->  eye  ->  brain  ->  decision  ->  risk  ->  research
 | package | module | owns |
 | --- | --- | --- |
 | `market` | `primitives.py` | `Direction` `Timeframe` `Playbook` `PlaybookPhase` `MarketMode` `ScaleRelation`; the price-grid arithmetic (`price_to_ticks`, `ticks_to_price`, `ohlc_to_ticks`); `Bar` `Candle` `BarCoverage`; `LiquidityLevel` `StructuralLevel`; `FrozenDict` `to_primitive` `content_hash` `aware_timestamp` `clamp` |
-| `execution` | `reality.py` | `ExecutionObservation` `execution_not_evaluated` `PositionSnapshot` `AccountState` |
+| `execution` | `reality.py`, `account.py` | `ExecutionObservation` `execution_not_evaluated` `PositionSnapshot` `AccountState`; (2026-09-16) `AccountSnapshot` `Position` `OrderState` `OrderStatus` `OrderRole` `Fill` `BracketIntent` `BrokerEvent` — what a broker reports and what the executor submits |
 | `eye` | `vocabulary.py` | the lifecycle enums and frozen reason strings the detectors emit |
 | | `entities.py` | one immutable dataclass per market object — swings, structure, BOS, S/R, pools, ranges, manipulations, FVGs, order blocks, entry locations, reacceptance, inventory |
 | | `interaction.py` | `MicroBreakFact` `MicroBOSReference` `PathSequenceStep` `PathSequenceState` `InteractionUpdate` |
@@ -32,7 +32,7 @@ market  ->  execution  ->  eye  ->  brain  ->  decision  ->  risk  ->  research
 | | `belief.py` | **`MarketBelief`** `FrozenThesis` |
 | `decision` | `opportunity.py` | **`OpportunityGeometry`** (entry / stop / target price and reward-to-risk, resolved by code from the objects the LLM named), `OpportunityProposal` (= `Opportunity`), `GeometryError` |
 | | `action.py` | `Action` `ActionUtility` `Decision` — the retired typed vertical's vocabulary, kept for `shares/core/visualization.py` and the shares test helpers |
-| `risk` | `assessment.py` | `VetoCode` `RiskAssessment` — same status as `decision/action.py`; the Risk engine that will attach to `OpportunityGeometry` is a later phase |
+| `risk` | `assessment.py`, `plan.py` | `VetoCode` (with `EXPOSURE` / `WORKING_ORDER` / `POSITION_SIZE` since 2026-09-16), `RiskAssessment` (inert, same status as `decision/action.py`); `ObjectRef` `TradePlan` (aliases + Eye entity ids + geometry, `signature`) `RiskVerdict` — what `risk/core/gate.py` reads and returns |
 | `research` | `snapshot.py` | `EngineSnapshot` `NeutralEngineSnapshot` — same status; consumed by `shares/core/visualization.py` |
 
 `brain/plan.py`, `hypothesis.py`, `context.py` and `belief.py` are the

@@ -18,7 +18,13 @@ from brain.core.brain_entry_sequence import brain_interaction_view
 from brain.core.object_registry import ObjectRegistry
 from brain.core.opportunity_geometry import ObjectGeometry
 from contract.brain.state import EvidenceItem, isoformat_utc
-from contract.eye import LiquidityInventoryLifecycle, MarketEvent, MarketObservation, PathSequenceLifecycle
+from contract.eye import (
+    LiquidityInventoryLifecycle,
+    MarketEvent,
+    MarketObservation,
+    PathSequenceLifecycle,
+    PathSequenceState,
+)
 from contract.market import Timeframe
 from contract.market.primitives import FrozenDict
 
@@ -64,6 +70,21 @@ def visible_liquidity_ids(observation: MarketObservation) -> set[str]:
 
 def _round(value: float | None) -> float | None:
     return None if value is None else round(float(value), 6)
+
+
+# What the LLM reads: where the OBJECT lies relative to price.  ``offset_atr``
+# is signed the same way — positive above price, negative below, zero when the
+# object contains price.  (``price_relation`` below keeps the price's own point
+# of view for the code that computes it.)
+POSITIONS: Mapping[str, str] = FrozenDict({"above": "below_price", "below": "above_price", "inside": "contains_price"})
+
+
+def object_position(close: float, lower: float, upper: float, atr: float | None) -> tuple[str, float | None]:
+    """``(position, offset_atr)`` of the object ``[lower, upper]`` seen from
+    ``close``: ``above_price`` with a positive offset, ``below_price`` with a
+    negative one, ``contains_price`` with zero; ``None`` while the ATR is not warm."""
+    relation, distance = price_relation(close, lower, upper, atr)
+    return POSITIONS[relation], None if distance is None else _round(-distance)
 
 
 def price_relation(
@@ -177,9 +198,10 @@ class EyeContext:
         return {view.alias: view.geometry() for view in self.objects}
 
     def relation_of(self, alias: str) -> str | None:
+        """The object's ``position`` relative to price; None when not visible."""
         for relation in self.price_relations:
             if relation["object_id"] == alias:
-                return str(relation["relation"])
+                return str(relation["position"])
         return None
 
 
@@ -317,27 +339,67 @@ def _session_payload(observation: MarketObservation) -> dict[str, Any]:
     }
 
 
-def _interaction_payload(observation: MarketObservation, registry: ObjectRegistry) -> tuple[dict[str, Any], ...]:
-    view = brain_interaction_view(observation)
+def interaction_rows(
+    paths: tuple[PathSequenceState, ...],
+    *,
+    manipulation_sources: Mapping[str, str],
+    registry: ObjectRegistry,
+    known_at: pd.Timestamp,
+    since: pd.Timestamp | None,
+) -> tuple[dict[str, Any], ...]:
+    """The ACTIVE interaction paths as the Brain reads them.
+
+    A path's ``context_id`` is the interaction tracker's own key, never an
+    Eye object: the object is the first step's source — the zone itself for a
+    ``zone_return``, and for a ``pool_reversal`` the manipulation's source
+    inventory item, looked up through ``manipulation_sources``
+    (manipulation id → inventory item id).  ``stepped_since_last_call`` is
+    what makes an interaction *open* for the sleep gate: a step observed
+    after ``since`` (the previous LLM call), or on this very bar when there
+    was no previous call.  The Eye keeps a path ACTIVE for as long as its
+    context lives — hours, on a held pool reversal — so "any ACTIVE path"
+    would never let the Brain sleep."""
     rows: list[dict[str, Any]] = []
-    for path in view.path_sequences:
-        if path.lifecycle is not PathSequenceLifecycle.ACTIVE:
+    for path in paths:
+        if path.lifecycle is not PathSequenceLifecycle.ACTIVE or not path.steps:
             continue
+        source = path.steps[0].source_entity_id
+        source = manipulation_sources.get(source, source)
+        last = path.steps[-1]
+        stepped = last.observed_at >= known_at if since is None else last.observed_at > since
         rows.append(
             {
                 "context_kind": path.context_kind,
-                "object_id": registry.alias_of(path.context_id),
+                "object_id": registry.alias_of(source),
                 "direction": _direction_value(path.direction),
-                "last_step": path.steps[-1].kind if path.steps else None,
+                "last_step": last.kind,
+                "last_step_at": isoformat_utc(last.observed_at),
                 "steps": len(path.steps),
+                "stepped_since_last_call": bool(stepped),
             }
         )
     return tuple(rows)
 
 
+def _interaction_payload(
+    observation: MarketObservation, registry: ObjectRegistry, *, known_at: pd.Timestamp, since: pd.Timestamp | None
+) -> tuple[dict[str, Any], ...]:
+    view = brain_interaction_view(observation)
+    sources = {item.manipulation_id: item.source_inventory_item_id for item in observation.manipulations}
+    return interaction_rows(
+        tuple(view.path_sequences), manipulation_sources=sources, registry=registry, known_at=known_at, since=since
+    )
+
+
 def build_eye_context(
-    observation: MarketObservation, registry: ObjectRegistry, *, rule: EvidenceRule
+    observation: MarketObservation,
+    registry: ObjectRegistry,
+    *,
+    rule: EvidenceRule,
+    interaction_since: pd.Timestamp | None = None,
 ) -> EyeContext:
+    """``interaction_since`` is the previous LLM call's ``known_at`` (``None``
+    on a wake); an interaction is open when a path stepped after it."""
     snapshot = observation.market_snapshot
     if snapshot is None:
         raise ValueError("observation has no market snapshot")
@@ -391,13 +453,13 @@ def build_eye_context(
     relations = tuple(
         {
             "object_id": view.alias,
-            "relation": relation,
-            "distance_atr": distance,
+            "position": position,
+            "offset_atr": offset,
         }
         for view in objects
-        for relation, distance in (price_relation(close, view.lower, view.upper, atr_1m),)
+        for position, offset in (object_position(close, view.lower, view.upper, atr_1m),)
     )
-    interaction = _interaction_payload(observation, registry)
+    interaction = _interaction_payload(observation, registry, known_at=known_at, since=interaction_since)
     context = EyeContext(
         known_at=known_at,
         close=close,
@@ -409,7 +471,7 @@ def build_eye_context(
         objects=tuple(objects),
         events=tuple(events),
         price_relations=tuple(FrozenDict(row) for row in relations),
-        open_interaction=bool(interaction),
+        open_interaction=any(row["stepped_since_last_call"] for row in interaction),
     )
     assert_causal(
         {
@@ -433,6 +495,8 @@ __all__ = [
     "assert_causal",
     "build_eye_context",
     "evidence_id",
+    "interaction_rows",
+    "object_position",
     "price_relation",
     "visible_liquidity_ids",
 ]

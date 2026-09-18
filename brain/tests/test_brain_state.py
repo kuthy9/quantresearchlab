@@ -12,10 +12,12 @@ from contract.brain.state import (
     Confidence,
     EvidenceItem,
     EvidenceLedger,
+    InvalidationMode,
     LastUpdate,
     Opportunity,
     OpportunityState,
     RegisteredObject,
+    ThesisGrade,
     TradeDirection,
     Verdict,
     WatchItem,
@@ -70,6 +72,10 @@ def test_round_trips_through_json_with_sorted_keys() -> None:
         "entry_object_id": None,
         "invalidation_object_id": None,
         "target_object_id": None,
+        "thesis_id": None,
+        "governing_timeframe": None,
+        "grade": None,
+        "invalidation_mode": None,
     }
     assert payload["object_registry"]["FVG_5m_3"] == {"entity_id": "a" * 24, "kind": "fvg", "timeframe": "5m"}
 
@@ -127,3 +133,25 @@ def test_from_dict_rejects_unknown_keys_and_other_schemas() -> None:
     payload["schema_version"] = 2
     with pytest.raises(ValueError, match="schema"):
         BrainState.from_dict(payload)
+
+
+def test_opportunity_from_dict_defaults_the_thesis_fields_of_an_old_state() -> None:
+    o = Opportunity.from_dict({"state": "ACTIONABLE", "direction": "SHORT", "entry_object_id": "a", "invalidation_object_id": "b", "target_object_id": "c"})
+    assert o.thesis_id is None and o.governing_timeframe is None
+    assert o.grade is ThesisGrade.BASE and o.invalidation_mode is InvalidationMode.TOUCH
+    assert Opportunity.from_dict(o.to_dict()) == o
+    full = Opportunity("ACTIONABLE", "SHORT", "a", "b", "c", thesis_id="T-1", governing_timeframe="4H", grade="A_PLUS", invalidation_mode="CLOSE_BEYOND")
+    assert Opportunity.from_dict(full.to_dict()) == full and full.to_dict()["grade"] == "A_PLUS"
+    assert Opportunity().to_dict()["thesis_id"] is None and Opportunity().to_dict()["grade"] is None
+
+
+@pytest.mark.parametrize("bad", [
+    dict(thesis_id="bad id"), dict(governing_timeframe="1m"), dict(thesis_id="x" * 33),
+])
+def test_opportunity_refuses_bad_thesis_fields(bad) -> None:
+    fields = dict(thesis_id="T1", governing_timeframe="15m")
+    fields.update(bad)
+    with pytest.raises(ValueError):
+        Opportunity("ACTIONABLE", "SHORT", "a", "b", "c", **fields)
+    with pytest.raises(ValueError, match="NONE"):
+        Opportunity("NONE", thesis_id="T1")

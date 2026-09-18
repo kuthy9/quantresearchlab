@@ -18,10 +18,13 @@ import pandas as pd
 
 from contract.market.primitives import FrozenDict, aware_timestamp
 from contract.brain.state import (
+    GOVERNING_TIMEFRAMES,
     ActiveExpectation,
     Confidence,
+    InvalidationMode,
     Opportunity,
     OpportunityState,
+    ThesisGrade,
     TradeDirection,
     Verdict,
     WatchItem,
@@ -48,8 +51,12 @@ _VERDICT_KEYS = frozenset({"evidence_id", "verdict", "note", "resolves_evidence_
 _EXPECTATION_KEYS = frozenset({"thesis", "expected_next", "should_not_happen"})
 _WATCH_KEYS = frozenset({"object_id", "question"})
 _OPPORTUNITY_KEYS = frozenset(
-    {"state", "direction", "entry_object_id", "invalidation_object_id", "target_object_id"}
+    {
+        "state", "direction", "entry_object_id", "invalidation_object_id", "target_object_id",
+        "thesis_id", "governing_timeframe", "grade", "invalidation_mode",
+    }
 )
+_THESIS_KEYS = ("thesis_id", "governing_timeframe", "grade", "invalidation_mode")
 
 
 class MalformedReply(ValueError):
@@ -137,6 +144,10 @@ LLM_UPDATE_EXAMPLE: dict[str, Any] = {
         "entry_object_id": None,
         "invalidation_object_id": None,
         "target_object_id": None,
+        "thesis_id": None,
+        "governing_timeframe": None,
+        "grade": None,
+        "invalidation_mode": None,
     },
     "reasoning_confidence": "LOW",
     "continue_active": True,
@@ -271,8 +282,23 @@ def parse_update(
     for key, alias in ids.items():
         if alias is not None and alias not in known_objects:
             raise _fail(f"opportunity.{key}: {alias!r} is not a published object")
+    thesis: dict[str, Any] = {}
+    if state is OpportunityState.NONE:
+        for key in _THESIS_KEYS:
+            if raw_opportunity[key] is not None:
+                raise _fail(f"opportunity.{key} must be null when the state is NONE")
+    else:
+        thesis["thesis_id"] = _str(raw_opportunity["thesis_id"], name="opportunity.thesis_id")
+        timeframe = _str(raw_opportunity["governing_timeframe"], name="opportunity.governing_timeframe")
+        if timeframe not in GOVERNING_TIMEFRAMES:
+            raise _fail(f"opportunity.governing_timeframe must be one of {list(GOVERNING_TIMEFRAMES)}")
+        thesis["governing_timeframe"] = timeframe
+        thesis["grade"] = _enum(ThesisGrade, raw_opportunity["grade"], name="opportunity.grade")
+        thesis["invalidation_mode"] = _enum(InvalidationMode, raw_opportunity["invalidation_mode"], name="opportunity.invalidation_mode")
     try:
-        opportunity = Opportunity(state, direction, ids["entry_object_id"], ids["invalidation_object_id"], ids["target_object_id"])
+        opportunity = Opportunity(
+            state, direction, ids["entry_object_id"], ids["invalidation_object_id"], ids["target_object_id"], **thesis
+        )
     except ValueError as error:
         raise _fail(f"opportunity: {error}") from None
 

@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "host": "127.0.0.1",
+  "port": 7497,
+  "client_id": 17,
+  "paper_only": true,
+  "poll_timeout_s": 0.2,
+  "contract": {
+    "symbol": "NQ",
+    "exchange": "CME",
+    "currency": "USD",
+    "last_trade_month": "202612"
+  }
+}

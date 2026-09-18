@@ -1,0 +1,4 @@
+{
+  "note": "Rewritten 2026-09-17 for Risk v2 / the thesis lifecycle: the three 2026-09-17 baselines (302c54bb21d9d77e, 04e7302f3cb72bbd, 7ec17f066d232ba4) cannot replay under the new reply schema and gate, and the first Risk v2 day run (72ea13c7fcbc1cff, 2026-09-18) predates the leverage cap that counts open contracts and the simulator's position averaging fix, so its replay diverges from 09:30 UTC. All four journals stay under outputs/brain_journal/ as evidence. The next complete run under the final code is added here.",
+  "runs": []
+}

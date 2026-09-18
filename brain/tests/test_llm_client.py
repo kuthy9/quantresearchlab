@@ -193,8 +193,9 @@ def test_incident_message_is_kept() -> None:
     assert out.incident_message == "slow upstream"
 
 
-def test_missing_key_refuses_construction(monkeypatch) -> None:
+def test_missing_key_refuses_construction(monkeypatch, tmp_path) -> None:
     monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    monkeypatch.setenv("DEEPSEEK_API_KEY_FILE", str(tmp_path / "absent.key"))
     with pytest.raises(LLMClientError, match="DEEPSEEK_API_KEY"):
         DeepSeekClient(model="deepseek-flash", timeout_s=5, max_tokens=100)
 
@@ -219,3 +220,46 @@ def test_recorded_client_answers_by_input_sha() -> None:
     assert client.complete(system="s", user="u").content == "GOOD"
     with pytest.raises(LLMClientError):
         client.complete(system="s", user="other")
+
+
+def test_key_file_is_the_fallback_after_the_environment(monkeypatch, tmp_path) -> None:
+    from brain.core.llm_client import resolve_api_key
+
+    key_file = tmp_path / "deepseek.key"
+    key_file.write_text("  file-key\n", encoding="utf-8")
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    monkeypatch.setenv("DEEPSEEK_API_KEY_FILE", str(key_file))
+    assert resolve_api_key() == "file-key"
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "env-key")
+    assert resolve_api_key() == "env-key"
+    assert resolve_api_key("explicit") == "explicit"
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    monkeypatch.setenv("DEEPSEEK_API_KEY_FILE", str(tmp_path / "absent.key"))
+    with pytest.raises(LLMClientError, match="DEEPSEEK_API_KEY_FILE"):
+        resolve_api_key()
+
+
+@pytest.mark.parametrize("error", [
+    __import__("http.client").client.RemoteDisconnected("Remote end closed connection without response"),
+    ConnectionResetError(54, "Connection reset by peer"),
+    __import__("http.client").client.BadStatusLine("garbage"),
+])
+def test_deepseek_dropped_connection_is_a_retried_server_error(monkeypatch, error) -> None:
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
+
+    def drop(request, timeout, context=None):
+        raise error
+
+    client = DeepSeekClient(model="deepseek-flash", timeout_s=1, max_tokens=10, base_url="http://127.0.0.1:9", opener=drop)
+    with pytest.raises(LLMServerError, match="transport"):
+        client.complete(system="s", user="u")
+    out = call_with_policy(client, system="s", user="u", parse=parse_ok, policy=RetryPolicy(max_retries=2, backoff_base_s=0.0), sleep=lambda s: None)
+    assert out.incident == "LLMServerError" and out.attempts == 3
+
+
+def test_reasoning_effort_is_sent_only_when_configured(monkeypatch) -> None:
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
+    body = DeepSeekClient(model="m", timeout_s=1, max_tokens=1).request_body(system="s", user="u")
+    assert "reasoning_effort" not in body
+    body = DeepSeekClient(model="m", timeout_s=1, max_tokens=1, reasoning_effort="low").request_body(system="s", user="u")
+    assert body["reasoning_effort"] == "low"

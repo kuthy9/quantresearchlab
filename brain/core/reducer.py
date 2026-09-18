@@ -5,7 +5,13 @@ of evidence gets exactly one verdict or lands in ``unresolved``, an abandoned
 understanding must be replaced, an opportunity must name visible objects
 whose geometry is coherent, an open position forbids sleep, and sleep itself
 is granted only when the five exit conditions hold.  Nothing here reads the
-Eye; it reads the ``ReduceContext`` the Main Brain hands it."""
+Eye; it reads the ``ReduceContext`` the Main Brain hands it.
+
+``unresolved`` holds two things: NEUTRAL items (judged — they bear on nothing
+yet, and may be RESOLVEd later) and *pending* items whose ``verdict`` is
+``None`` because an incident bar left them unjudged.  Only pending items
+refuse sleep, and the Main Brain re-offers them in ``new_evidence`` on every
+later call until the LLM verdicts them."""
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
@@ -15,6 +21,7 @@ import pandas as pd
 
 from contract.brain.llm import LLMUpdate
 from contract.brain.state import (
+    GOVERNING_TIMEFRAMES,
     ActiveExpectation,
     BrainState,
     BrainStatus,
@@ -46,6 +53,27 @@ class ReduceContext:
     visible_aliases: frozenset[str]
     registry: Mapping[str, RegisteredObject]
     coherence: Callable[[Opportunity], str | None]
+    # Accepted updates so far in a row that proposed no opportunity and kept
+    # the understanding; with ``idle_archive_after`` set, the update that
+    # makes the run reach it archives the episode (rule 6b).
+    idle_updates: int = 0
+    idle_archive_after: int | None = None
+    # The scale of a visible object (``None`` when unknown: the invalidation
+    # scale rule then does not judge it).
+    timeframe_of: Callable[[str], str | None] = lambda alias: None
+
+
+# The scale ladder: an invalidation object may sit on the governing scale or
+# one step below it (4H → 1H, 1H → 15m, 15m → 5m, 5m → 1m).
+_SCALE_LADDER: tuple[str, ...] = GOVERNING_TIMEFRAMES + ("1m",)
+
+
+def scale_gap(governing: str, invalidation: str) -> int | None:
+    """How many steps below the governing scale the invalidation scale is;
+    negative above it, ``None`` when either scale is not on the ladder."""
+    if governing not in _SCALE_LADDER or invalidation not in _SCALE_LADDER:
+        return None
+    return _SCALE_LADDER.index(invalidation) - _SCALE_LADDER.index(governing)
 
 
 @dataclass(frozen=True)
@@ -54,6 +82,8 @@ class ReduceResult:
     rejections: tuple[str, ...]
     slept: bool
     incident: str | None
+    # Why the episode slept: the LLM's own request, or the idle rule.
+    sleep_reason: str | None = None
 
 
 def _zero_verdicts() -> dict[str, int]:
@@ -87,6 +117,11 @@ def empty_state(
     )
 
 
+def pending_evidence(ledger: EvidenceLedger) -> tuple[EvidenceItem, ...]:
+    """The unjudged items: parked by an incident bar, still awaiting a verdict."""
+    return tuple(item for item in ledger.unresolved if item.verdict is None)
+
+
 def sleep_blockers(
     state: BrainState, *, has_open_position: bool, open_interaction: bool
 ) -> tuple[str, ...]:
@@ -96,7 +131,7 @@ def sleep_blockers(
         failing.append("open_position")
     if open_interaction:
         failing.append("open_interaction")
-    if state.evidence.unresolved:
+    if pending_evidence(state.evidence):
         failing.append("unresolved_evidence")
     if state.watch_next:
         failing.append("watch_next")
@@ -117,7 +152,10 @@ def _carry_forward(
     """A TICK-shaped revision: bookkeeping advances, reasoning does not."""
     unresolved = list(prev.evidence.unresolved)
     known = _ledger_ids(prev.evidence)
+    pending = {item.evidence_id for item in pending_evidence(prev.evidence)}
     for item in evidence:
+        if item.evidence_id in pending:
+            continue  # re-offered and still unjudged: it stays parked, once
         if item.evidence_id in known:
             rejections.append(f"evidence_duplicate:{item.evidence_id}")
             continue
@@ -197,15 +235,25 @@ def apply(
     counts = _zero_verdicts()
     verdicts = {item.evidence_id: item for item in update.evidence_verdicts}
     known = _ledger_ids(prev.evidence) if prev else set()
+    pending = {item.evidence_id for item in pending_evidence(prev.evidence)} if prev else set()
+    resolved_now = {
+        item.resolves_evidence_id for item in update.evidence_verdicts if item.verdict is Verdict.RESOLVE
+    }
     for item in evidence:
-        if item.evidence_id in known:
+        reoffered = item.evidence_id in pending
+        if item.evidence_id in known and not reoffered:
             rejections.append(f"evidence_duplicate:{item.evidence_id}")
             continue
+        if reoffered and item.evidence_id in resolved_now:
+            continue  # a RESOLVE in this same update files it through its carrier
         verdict = verdicts.get(item.evidence_id)
         if verdict is None:
             rejections.append(f"evidence_without_verdict:{item.evidence_id}")
-            unresolved.append(item)
+            if not reoffered:
+                unresolved.append(item)
             continue
+        if reoffered:
+            unresolved = [pending_item for pending_item in unresolved if pending_item.evidence_id != item.evidence_id]
         counts[verdict.verdict.value] += 1
         recorded = EvidenceItem(
             item.evidence_id, item.known_at, item.kind, item.timeframe, item.object_id,
@@ -228,17 +276,32 @@ def apply(
             else:
                 contradicting.append(recorded)
 
-    # Rule 4 — opportunity validation.
+    # Rule 4 — opportunity validation: visible objects, the invalidation on
+    # the thesis's scale (or one below), a thesis id that keeps its
+    # direction, and coherent geometry.
     opportunity = update.opportunity
     if opportunity.state is not OpportunityState.NONE:
         for alias in opportunity.object_ids:
             if alias not in ctx.visible_aliases:
                 rejections.append(f"opportunity_object_not_visible:{alias}")
-        if not any(r.startswith("opportunity_object_not_visible") for r in rejections):
+        invalidation = opportunity.invalidation_object_id or ""
+        scale = ctx.timeframe_of(invalidation)
+        gap = None if scale is None or opportunity.governing_timeframe is None else scale_gap(opportunity.governing_timeframe, scale)
+        if gap is not None and gap > 1:
+            rejections.append(f"opportunity_invalidation_scale:{invalidation}")
+        if (
+            prev is not None
+            and opportunity.thesis_id is not None
+            and prev.opportunity.thesis_id == opportunity.thesis_id
+            and prev.opportunity.direction is not None
+            and prev.opportunity.direction is not opportunity.direction
+        ):
+            rejections.append(f"thesis_direction_changed:{opportunity.thesis_id}")
+        if not any(r.startswith("opportunity_") or r.startswith("thesis_") for r in rejections):
             reason = ctx.coherence(opportunity)
             if reason is not None:
                 rejections.append(f"opportunity_incoherent:{reason}")
-        if any(r.startswith("opportunity_") for r in rejections):
+        if any(r.startswith("opportunity_") or r.startswith("thesis_") for r in rejections):
             opportunity = Opportunity()
 
     registry = _merge_registry(prev.object_registry, ctx.registry) if prev else dict(ctx.registry)
@@ -278,6 +341,7 @@ def apply(
     # Rules 5 and 6 — position and the sleep conditions.
     continue_active = True
     slept = False
+    sleep_reason: str | None = None
     if not update.continue_active:
         blockers = sleep_blockers(
             draft, has_open_position=ctx.has_open_position, open_interaction=ctx.open_interaction
@@ -287,6 +351,24 @@ def apply(
         else:
             continue_active = False
             slept = True
+            sleep_reason = "continue_active=false"
+    # Rule 6b — the idle rule: the LLM keeps a standing watch list forever, so
+    # after ``idle_archive_after`` consecutive updates with no opportunity and
+    # an unchanged understanding the episode is archived regardless of
+    # ``watch_next`` and of the interaction gate.  A position or an unjudged
+    # item still holds it open.
+    if (
+        not slept
+        and ctx.idle_archive_after is not None
+        and update.understanding_holds
+        and opportunity.state is OpportunityState.NONE
+        and ctx.idle_updates + 1 >= ctx.idle_archive_after
+        and not ctx.has_open_position
+        and not pending_evidence(draft.evidence)
+    ):
+        continue_active = False
+        slept = True
+        sleep_reason = "idle"
 
     state = BrainState(
         episode_id=draft.episode_id,
@@ -305,7 +387,7 @@ def apply(
         object_registry=draft.object_registry,
         last_update=draft.last_update,
     )
-    return ReduceResult(state, tuple(rejections), slept, incident)
+    return ReduceResult(state, tuple(rejections), slept, incident, sleep_reason)
 
 
 __all__ = [
@@ -314,5 +396,6 @@ __all__ = [
     "ReduceResult",
     "apply",
     "empty_state",
+    "pending_evidence",
     "sleep_blockers",
 ]

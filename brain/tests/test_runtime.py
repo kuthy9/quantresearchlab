@@ -69,24 +69,38 @@ def test_sleep_wake_update_tick_sleep_cycle(observations, tmp_path: Path) -> Non
 
 
 class NeutralSleeper(EchoClient):
-    """Asks to sleep on every call while leaving every verdict NEUTRAL."""
+    """Leaves every verdict NEUTRAL and asks to sleep from the third call on."""
 
     def complete(self, *, system: str, user: str):
         reply = super().complete(system=system, user=user)
         payload = json.loads(reply.content)
-        payload["continue_active"] = False
+        for verdict in payload["evidence_verdicts"]:
+            verdict["verdict"] = "NEUTRAL"
+        payload["continue_active"] = self.calls < 3
         return LLMReply(json.dumps(payload), None, {}, 1, "neutral-sleeper")
 
 
-def test_no_llm_call_without_evidence_and_unresolved_blocks_sleep(observations) -> None:
+def test_no_llm_call_without_evidence_and_a_neutral_sleeper_sleeps(observations) -> None:
     client = NeutralSleeper()
     results, _ = run(observations, client)
     ticks = [r for r in results if r.decision is Decision.TICK]
     assert ticks and all(not r.llm_called for r in ticks)
     updates = [r for r in results if r.decision is Decision.UPDATE]
     assert updates and all(r.llm_called for r in updates)
-    refused = [r for r in results if "sleep_refused:unresolved_evidence" in r.rejections]
-    assert refused
+    # NEUTRAL is a verdict, not a pending question: it never refuses sleep.
+    assert not any("sleep_refused:unresolved_evidence" in r.rejections for r in results)
+    assert any(r.slept for r in results)
+
+
+def test_evidence_parked_by_an_incident_is_verdicted_later_and_sleep_follows(observations) -> None:
+    results, _ = run(observations, EchoClient(fail_calls=range(2, 6), sleep_after=6))
+    incidents = [i for i, r in enumerate(results) if r.incident]
+    assert incidents, "the scripted timeouts produced no incident"
+    parked = results[incidents[0]]
+    assert parked.status_after is RuntimeStatus.ACTIVE
+    slept = [i for i, r in enumerate(results) if r.slept and r.episode_id == parked.episode_id]
+    assert slept and slept[0] > incidents[0], "the episode that parked evidence never slept"
+    assert not any("sleep_refused:unresolved_evidence" in r.rejections for r in results[slept[0]:])
 
 
 def test_incident_keeps_active_and_is_journaled_with_its_message(observations, tmp_path: Path) -> None:
@@ -135,3 +149,72 @@ def test_episode_ids_number_per_day_and_hook_sees_every_step(observations) -> No
         assert numbers == list(range(1, len(numbers) + 1))
     wake_inputs = [i for r, s, i in seen if r.decision is Decision.WAKE]
     assert wake_inputs and wake_inputs[0].to_dict()["prior_state"] is None
+
+
+def test_idle_episode_is_archived_after_the_configured_updates(observations, tmp_path: Path) -> None:
+    journal = BrainJournal(tmp_path, run_id="idle")
+    results, _ = run(observations, EchoClient(), journal=journal)  # never asks to sleep, never proposes
+    slept = [r for r in results if r.slept]
+    assert slept, "an idle episode never archived"
+    first = slept[0]
+    updates_before = [r for r in results[: results.index(first) + 1] if r.episode_id == first.episode_id and r.decision is Decision.UPDATE]
+    assert len(updates_before) >= CONTROLLER.idle_archive_after_updates
+    reader = JournalReader(tmp_path)
+    sleeps = [r for ep in reader.episode_ids() for r in reader.records(ep) if r.record == "sleep"]
+    assert sleeps and sleeps[0].payload["reason"] == "idle"
+
+
+def test_bookkeeping_evidence_is_deferred_to_the_next_llm_call(observations) -> None:
+    inputs = []
+    ledger = InMemoryPositionLedger()
+    runtime = BrainRuntime(
+        controller=CONTROLLER,
+        brain=MainBrain(client=EchoClient(), config=CONFIG, ledger=ledger, sleep=lambda s: None),
+        journal=None, ledger=ledger, tick=0.25, on_step=lambda r, s, i: inputs.append(i) if i is not None else None,
+    )
+    for obs in observations:
+        runtime.step(obs)
+    late = [
+        (i, e) for i in inputs for e in i.to_dict()["new_evidence"]
+        if e["pending_since"] is None and e["known_at"] < i.to_dict()["known_at"]
+    ]
+    assert late, "no call carried evidence from an earlier TICK bar"
+    assert all(e["kind"] in CONTROLLER.bookkeeping_kinds for _, e in late)
+
+
+def test_step_result_reports_the_llm_latency_and_timings_cover_each_phase(observations, tmp_path: Path) -> None:
+    from shares.core.timing import Timings
+
+    timings = Timings()
+    ledger = InMemoryPositionLedger()
+    runtime = BrainRuntime(
+        controller=CONTROLLER,
+        brain=MainBrain(client=EchoClient(), config=CONFIG, ledger=ledger, sleep=lambda s: None, timings=timings),
+        journal=BrainJournal(tmp_path, run_id="t"), ledger=ledger, tick=0.25, timings=timings,
+    )
+    results = [runtime.step(obs) for obs in observations]
+    called = [r for r in results if r.llm_called]
+    assert called and all(r.llm_latency_ms == 1 for r in called), "EchoClient replies with latency 1 ms"
+    assert all(r.llm_latency_ms is None for r in results if not r.llm_called)
+    summary = timings.summary()
+    assert {"controller", "input", "llm", "reduce", "journal"} <= set(summary)
+    assert summary["controller"]["count"] == len(results) and summary["llm"]["count"] == len(called)
+
+
+def test_a_watched_5m_objects_flip_is_not_an_update_but_a_15m_ones_is() -> None:
+    from types import SimpleNamespace
+
+    from brain.tests.test_brain_state import make_state
+    from contract.brain.state import RegisteredObject, WatchItem
+
+    runtime = BrainRuntime(
+        controller=CONTROLLER, brain=MainBrain(client=EchoClient(), config=CONFIG, ledger=InMemoryPositionLedger(), sleep=lambda s: None),
+        journal=None, ledger=InMemoryPositionLedger(), tick=0.25,
+    )
+    registry = {"FVG_5m_3": RegisteredObject("a" * 24, "fvg", "5m"), "BSL_15m_1": RegisteredObject("b" * 24, "bsl", "15m")}
+    state = make_state(watch_next=(WatchItem("FVG_5m_3", "?"), WatchItem("BSL_15m_1", "?")), destination_candidates=(), object_registry=registry)
+    assert runtime._watched(state) == ("BSL_15m_1",)
+    before = SimpleNamespace(relation_of=lambda alias: "above_price")
+    after = SimpleNamespace(relation_of=lambda alias: "below_price")
+    runtime._remember_relations(state, before)
+    assert runtime._relation_changes(after) == ("BSL_15m_1",), "the 5m object's flip is not remembered, so it cannot trigger"

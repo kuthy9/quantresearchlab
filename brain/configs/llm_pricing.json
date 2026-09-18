@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "currency": "USD",
+  "source": "https://api-docs.deepseek.com/quick_start/pricing, read 2026-09-17",
+  "peak_hours_utc": "01:00-04:00 and 06:00-10:00, Monday to Friday; off-peak is half the peak rate",
+  "per_million_tokens": {
+    "deepseek-flash": {
+      "peak": {"input_cache_hit": 0.006, "input_cache_miss": 0.3, "output": 1.2},
+      "off_peak": {"input_cache_hit": 0.003, "input_cache_miss": 0.15, "output": 0.6}
+    },
+    "deepseek-v4-pro": {
+      "peak": {"input_cache_hit": 0.044, "input_cache_miss": 1.32, "output": 3.96},
+      "off_peak": {"input_cache_hit": 0.022, "input_cache_miss": 0.66, "output": 1.98}
+    }
+  }
+}

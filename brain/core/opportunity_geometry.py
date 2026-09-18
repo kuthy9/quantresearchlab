@@ -8,14 +8,23 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
+import math
 
-from contract.brain.state import Opportunity, OpportunityState, TradeDirection
+from contract.brain.state import InvalidationMode, Opportunity, OpportunityState, TradeDirection
 from contract.decision import GeometryError, OpportunityGeometry
 
 ZONE_KINDS = frozenset({"fvg", "ob"})
 POOL_KINDS = frozenset({"bsl", "ssl"})
 SWING_KINDS = frozenset({"swing_high", "swing_low"})
 RANGE_KINDS = frozenset({"range"})
+# Minutes per scale: the close-beyond buffer scales one 1m ATR by the
+# square root of the invalidation object's bar length — the standard
+# estimate of one bar's range on that scale, the room a wick needs before
+# the bar closes.
+TIMEFRAME_MINUTES: Mapping[str, int] = {"4H": 240, "1H": 60, "15m": 15, "5m": 5, "1m": 1}
+# How many scaled 1m ATRs beyond the object's far edge the hard stop of a
+# CLOSE_BEYOND invalidation sits; a keyword argument of ``resolve_geometry``.
+CLOSE_BEYOND_BUFFER_ATR = 1.0
 
 
 @dataclass(frozen=True)
@@ -60,13 +69,30 @@ def _entry(obj: ObjectGeometry, direction: TradeDirection) -> tuple[float, str]:
     return obj.anchor, "entry.swing.price"
 
 
-def _stop(obj: ObjectGeometry, direction: TradeDirection, tick: float) -> tuple[float, str]:
+def _round_away(price: float, tick: float, direction: TradeDirection) -> float:
+    """Round a stop to the tick on the losing side: down for a LONG, up for a SHORT."""
+    steps = price / tick
+    rounded = math.floor(steps + 1e-9) if direction is TradeDirection.LONG else math.ceil(steps - 1e-9)
+    return round(rounded * tick, 10)
+
+
+def _stop(
+    obj: ObjectGeometry, direction: TradeDirection, tick: float, *, mode: InvalidationMode, atr_1m: float | None, buffer_atr: float
+) -> tuple[float, str]:
     family = _family(obj.kind)
-    if family == "swing":
-        price = obj.anchor - tick if direction is TradeDirection.LONG else obj.anchor + tick
-        return price, "stop.swing.price"
-    price = obj.lower - tick if direction is TradeDirection.LONG else obj.upper + tick
-    return price, f"stop.{family}.far_edge"
+    edge = obj.anchor if family == "swing" else (obj.lower if direction is TradeDirection.LONG else obj.upper)
+    name = "price" if family == "swing" else "far_edge"
+    if mode is InvalidationMode.TOUCH:
+        price = edge - tick if direction is TradeDirection.LONG else edge + tick
+        return price, f"stop.{family}.{name}"
+    if atr_1m is None or atr_1m <= 0.0:
+        raise GeometryError("a CLOSE_BEYOND invalidation needs a positive 1m atr")
+    minutes = TIMEFRAME_MINUTES.get(obj.timeframe)
+    if minutes is None:
+        raise GeometryError(f"object {obj.alias} has no known scale for a CLOSE_BEYOND buffer")
+    buffer = buffer_atr * atr_1m * math.sqrt(minutes)
+    price = edge - buffer if direction is TradeDirection.LONG else edge + buffer
+    return _round_away(price, tick, direction), f"stop.{family}.close_beyond"
 
 
 def _target(obj: ObjectGeometry, direction: TradeDirection) -> tuple[float, str]:
@@ -84,8 +110,11 @@ def resolve_geometry(
     *,
     close: float,
     tick: float,
+    atr_1m: float | None = None,
+    buffer_atr: float = CLOSE_BEYOND_BUFFER_ATR,
 ) -> OpportunityGeometry:
-    """Resolve an opportunity to prices; ``GeometryError`` when it cannot be."""
+    """Resolve an opportunity to prices; ``GeometryError`` when it cannot be.
+    A ``CLOSE_BEYOND`` invalidation needs ``atr_1m`` for its buffer."""
 
     if opportunity.state is OpportunityState.NONE:
         raise GeometryError("opportunity state is NONE")
@@ -105,7 +134,9 @@ def resolve_geometry(
             raise GeometryError(f"{role} object {alias!r} is not a visible object")
         resolved[role] = obj
     entry, entry_rule = _entry(resolved["entry"], direction)
-    stop, stop_rule = _stop(resolved["invalidation"], direction, tick)
+    stop, stop_rule = _stop(
+        resolved["invalidation"], direction, tick, mode=opportunity.invalidation_mode, atr_1m=atr_1m, buffer_atr=buffer_atr
+    )
     target, target_rule = _target(resolved["target"], direction)
     if direction is TradeDirection.LONG and not stop < entry < target:
         raise GeometryError(
@@ -133,19 +164,22 @@ def coherence_error(
     *,
     close: float,
     tick: float,
+    atr_1m: float | None = None,
 ) -> str | None:
     """``None`` when the opportunity resolves (or is NONE), else the reason."""
 
     if opportunity.state is OpportunityState.NONE:
         return None
     try:
-        resolve_geometry(opportunity, objects, close=close, tick=tick)
+        resolve_geometry(opportunity, objects, close=close, tick=tick, atr_1m=atr_1m)
     except GeometryError as error:
         return str(error)
     return None
 
 
 __all__ = [
+    "CLOSE_BEYOND_BUFFER_ATR",
+    "TIMEFRAME_MINUTES",
     "ObjectGeometry",
     "POOL_KINDS",
     "RANGE_KINDS",
