@@ -116,6 +116,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--ibkr-config", default=DEFAULT_IBKR)
     parser.add_argument("--sim-config", default=DEFAULT_SIM)
     parser.add_argument("--sim-equity", type=float, default=None, help="starting cash; defaults to the simulator config's initial_equity")
+    parser.add_argument("--label", default=None, help="enters the run identity: a deliberate re-run on the same Brain inputs (e.g. executor code changed)")
     return parser.parse_args(argv)
 
 
@@ -153,7 +154,7 @@ def main(argv: list[str] | None = None) -> int:
         window=window, model=model_label(args.client, model, config.reasoning_effort), prompt_sha256=config.prompt_sha256,
         controller_sha256=controller.sha256, config_sha256=config.sha256,
         atomic_identity=atomic_identity, scale_registry_id=registry_id,
-        source_sha256=sha256_file(source_path), root=root,
+        source_sha256=sha256_file(source_path), root=root, label=args.label,
     )
     run_dir = root / args.output_root / run_id
     if run_dir.exists() and any(run_dir.iterdir()):

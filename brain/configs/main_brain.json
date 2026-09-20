@@ -10,5 +10,6 @@
   "prior_evidence_limit": 12,
   "note_limit": 160,
   "relation_atr_limit": 4.0,
-  "reasoning_effort": "high"
+  "reasoning_effort": "high",
+  "max_pending_evidence": 32
 }

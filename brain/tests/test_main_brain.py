@@ -122,7 +122,7 @@ def test_opportunity_naming_a_visible_object_survives_reduce(context) -> None:
         "target_object_id": max(pools_above, key=lambda v: v.lower).alias,
         "thesis_id": "T1", "governing_timeframe": "5m", "grade": "BASE", "invalidation_mode": "TOUCH",
     }
-    brain = MainBrain(client=ScriptedClient([good_reply(ctx, opportunity=opportunity)]), config=CONFIG, ledger=InMemoryPositionLedger())
+    brain = MainBrain(client=ScriptedClient([good_reply(ctx, opportunity=opportunity, bias={"direction": "LONG", "scale": "15m", "basis": "scripted"})]), config=CONFIG, ledger=InMemoryPositionLedger())
     step = brain.step(episode_id="EP_1", context=ctx, trigger_kind="WAKE", reasons=[], tape=EMPTY_TAPE, prior=None, registry=registry, tick=0.25)
     assert step.result.state.opportunity.entry_object_id == zone.alias and step.result.rejections == ()
 
@@ -255,3 +255,16 @@ def test_timings_split_input_call_and_reduce(context) -> None:
     brain.step(episode_id="EP_1", context=ctx, trigger_kind="WAKE", reasons=[], tape=EMPTY_TAPE, prior=None, registry=registry, tick=0.25)
     summary = timings.summary()
     assert {"input", "llm", "reduce"} <= set(summary) and all(summary[k]["count"] == 1 for k in ("input", "llm", "reduce"))
+
+
+def test_the_prompt_defines_the_bias_and_how_the_facts_set_it() -> None:
+    text = CONFIG.system_prompt
+    for word in ("## Bias", "`bias`", "active_leg_direction", "forming_leg_atr", "displacement_age_bars", "`reset`", "drift_atr", "contains_price", "live delivery"):
+        assert word in text, word
+    assert "The thesis is judged on its governing scale" not in text
+    assert "judged on the bias scale" in text and "judged on the governing scale" in text
+    assert "stays live" in text and "`bias.scale` ∈ 4H | 1H | 15m;" in text  # run B's amendment: hysteresis, no 5m bias
+
+
+def test_config_carries_the_pending_evidence_bound() -> None:
+    assert CONFIG.max_pending_evidence == 32

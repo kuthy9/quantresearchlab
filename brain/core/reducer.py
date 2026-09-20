@@ -23,6 +23,8 @@ from contract.brain.llm import LLMUpdate
 from contract.brain.state import (
     GOVERNING_TIMEFRAMES,
     ActiveExpectation,
+    Bias,
+    BiasDirection,
     BrainState,
     BrainStatus,
     Confidence,
@@ -61,6 +63,11 @@ class ReduceContext:
     # The scale of a visible object (``None`` when unknown: the invalidation
     # scale rule then does not judge it).
     timeframe_of: Callable[[str], str | None] = lambda alias: None
+    # The ledger keeps at most this many pending (unjudged) items; the oldest
+    # expire (``evidence_expired``).  None = unbounded.  Run X of 2026-09-19:
+    # 25 empty replies in a row re-offered 124 pending items and the input
+    # grew until no reply could come.
+    max_pending: int | None = None
 
 
 # The scale ladder: an invalidation object may sit on the governing scale or
@@ -106,6 +113,7 @@ def empty_state(
         updated_at=known_at,
         market_understanding="",
         active_expectation=ActiveExpectation(),
+        bias=Bias(),
         evidence=EvidenceLedger(),
         watch_next=(),
         destination_candidates=(),
@@ -120,6 +128,21 @@ def empty_state(
 def pending_evidence(ledger: EvidenceLedger) -> tuple[EvidenceItem, ...]:
     """The unjudged items: parked by an incident bar, still awaiting a verdict."""
     return tuple(item for item in ledger.unresolved if item.verdict is None)
+
+
+def _expire_pending(unresolved: list[EvidenceItem], max_pending: int | None, rejections: list[str]) -> list[EvidenceItem]:
+    """Keep the newest ``max_pending`` pending items (ledger order is arrival
+    order); the older ones leave the ledger as ``evidence_expired``."""
+    if max_pending is None:
+        return unresolved
+    pending_ids = [item.evidence_id for item in unresolved if item.verdict is None]
+    excess = set(pending_ids[: max(0, len(pending_ids) - max(0, int(max_pending)))])
+    if not excess:
+        return unresolved
+    for evidence_id in pending_ids:
+        if evidence_id in excess:
+            rejections.append(f"evidence_expired:{evidence_id}")
+    return [item for item in unresolved if item.evidence_id not in excess]
 
 
 def sleep_blockers(
@@ -161,6 +184,7 @@ def _carry_forward(
             continue
         rejections.append(f"evidence_without_verdict:{item.evidence_id}")
         unresolved.append(item)
+    unresolved = _expire_pending(unresolved, ctx.max_pending, rejections)
     return BrainState(
         episode_id=prev.episode_id,
         status=BrainStatus.ACTIVE,
@@ -169,6 +193,7 @@ def _carry_forward(
         updated_at=ctx.known_at,
         market_understanding=prev.market_understanding,
         active_expectation=prev.active_expectation,
+        bias=prev.bias,
         evidence=EvidenceLedger(prev.evidence.supporting, prev.evidence.contradicting, tuple(unresolved)),
         watch_next=prev.watch_next,
         destination_candidates=prev.destination_candidates,
@@ -276,6 +301,8 @@ def apply(
             else:
                 contradicting.append(recorded)
 
+    unresolved = _expire_pending(unresolved, ctx.max_pending, rejections)
+
     # Rule 4 — opportunity validation: visible objects, the invalidation on
     # the thesis's scale (or one below), a thesis id that keeps its
     # direction, and coherent geometry.
@@ -297,6 +324,17 @@ def apply(
             and prev.opportunity.direction is not opportunity.direction
         ):
             rejections.append(f"thesis_direction_changed:{opportunity.thesis_id}")
+        # Rule 4b (2026-09-18) — the opportunity follows the bias: no side
+        # against it, nothing under a NEUTRAL bias, no thesis on a scale
+        # above the bias scale.
+        bias = update.bias
+        if bias.direction is BiasDirection.NEUTRAL:
+            rejections.append("opportunity_against_bias:NEUTRAL")
+        elif opportunity.direction is not None and opportunity.direction.value != bias.direction.value:
+            rejections.append(f"opportunity_against_bias:{opportunity.direction.value}")
+        governing = opportunity.governing_timeframe
+        if governing is not None and _SCALE_LADDER.index(governing) < _SCALE_LADDER.index(bias.scale):
+            rejections.append(f"opportunity_scale_above_bias:{governing}")
         if not any(r.startswith("opportunity_") or r.startswith("thesis_") for r in rejections):
             reason = ctx.coherence(opportunity)
             if reason is not None:
@@ -328,6 +366,7 @@ def apply(
         updated_at=ctx.known_at,
         market_understanding=update.market_understanding,
         active_expectation=update.active_expectation,
+        bias=update.bias,
         evidence=EvidenceLedger(tuple(supporting), tuple(contradicting), tuple(unresolved)),
         watch_next=tuple(watch),
         destination_candidates=tuple(destinations),
@@ -378,6 +417,7 @@ def apply(
         updated_at=draft.updated_at,
         market_understanding=draft.market_understanding,
         active_expectation=draft.active_expectation,
+        bias=draft.bias,
         evidence=draft.evidence,
         watch_next=draft.watch_next,
         destination_candidates=draft.destination_candidates,

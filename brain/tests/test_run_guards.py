@@ -62,3 +62,18 @@ def test_drive_stops_when_asked(tmp_path) -> None:
         on_observation=lambda obs, emitting, bar: emitted.append(emitting) if emitting else None, stop=lambda: len(emitted) >= 2, log=logs.append,
     )
     assert len(emitted) == 2 and seen < 60 and any(log.startswith("stopped after") for log in logs)
+
+
+def test_a_run_label_enters_the_identity_and_its_absence_keeps_the_id() -> None:
+    """Two runs on the same inputs are the same run — unless one is labelled
+    (2026-09-19: run X differed from run B′ only in executor code, which the
+    identity does not hash, and was refused as a duplicate)."""
+    from pathlib import Path as _Path
+    from brain.scripts._run_identity import RunWindow as _RunWindow, run_identity as _run_identity
+    window = _RunWindow(_Path("data/tape.parquet"), "2021-12-27", "2022-01-02T18:00", "2022-01-03T17:00")
+    fields = dict(window=window, model="deepseek:x@high", prompt_sha256="p", controller_sha256="c", config_sha256="m", atomic_identity="a", scale_registry_id="s", source_sha256="t")
+    plain_id, plain = _run_identity(**fields)
+    again_id, _ = _run_identity(**fields, label=None)
+    labelled_id, labelled = _run_identity(**fields, label="execution-layer")
+    assert again_id == plain_id and "label" not in plain
+    assert labelled_id != plain_id and labelled["label"] == "execution-layer"

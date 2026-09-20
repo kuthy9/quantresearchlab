@@ -20,7 +20,8 @@ import random
 import pytest
 
 from contract.eye import EventKind
-from contract.market import Timeframe
+from contract.market import Direction, Timeframe
+from eyes.core.market_state import DeliveryPhase
 from eyes.core.causal import CausalMarketReader
 from eyes.core.displacement import DisplacementProtocol
 from eyes.core.observation import CausalObserver, ObserverConfig
@@ -120,3 +121,51 @@ def test_fair_value_gaps_are_created_on_more_than_the_5m_scale(replay) -> None:
         if frame.fair_value_gaps
     }
     assert Timeframe.M15 in framed
+
+
+def test_the_active_leg_is_the_sign_of_the_excursion_from_the_last_leg(replay) -> None:
+    _, observations = replay
+    checked = 0
+    for observation in observations:
+        for state in observation.market_snapshot.timeframe_states.values():
+            delivery = state.delivery
+            if not state.structural_legs or delivery.last_close is None:
+                continue
+            points = float(delivery.last_close) - float(state.structural_legs[-1].end_price)
+            assert delivery.forming_leg_points == points
+            assert delivery.last_leg_direction is state.structural_legs[-1].direction
+            expected = Direction.LONG if points > 0 else Direction.SHORT if points < 0 else None
+            assert delivery.active_leg_direction is expected
+            if delivery.phase is DeliveryPhase.EXPANSION:
+                assert delivery.active_leg_direction is state.structure.external_direction
+            checked += 1
+    assert checked, "no scale ever carried a confirmed leg"
+
+
+def test_a_displacement_is_dated_and_directed(replay) -> None:
+    _, observations = replay
+    dated = 0
+    for observation in observations:
+        for state in observation.market_snapshot.timeframe_states.values():
+            if state.delivery.displacement_score is None:
+                continue
+            assert state.delivery.displacement_direction is not None
+            assert state.delivery.displacement_at is not None
+            assert state.delivery.displacement_at <= observation.asof
+            dated += 1
+    assert dated
+
+
+def test_a_broken_protection_is_named_until_a_structure_confirms(replay) -> None:
+    _, observations = replay
+    broken = 0
+    for observation in observations:
+        for state in observation.market_snapshot.timeframe_states.values():
+            structure = state.structure
+            if structure.external_direction is None and structure.protected_swing_intact is False:
+                assert structure.protection_broken_direction is not None
+                assert structure.protection_broken_at is not None
+                broken += 1
+            if structure.external_direction is not None:
+                assert structure.protection_broken_direction is None
+    assert broken, "the walk never broke a protected swing; widen the walk before weakening the test"

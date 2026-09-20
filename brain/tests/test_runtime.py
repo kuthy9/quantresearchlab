@@ -214,7 +214,32 @@ def test_a_watched_5m_objects_flip_is_not_an_update_but_a_15m_ones_is() -> None:
     registry = {"FVG_5m_3": RegisteredObject("a" * 24, "fvg", "5m"), "BSL_15m_1": RegisteredObject("b" * 24, "bsl", "15m")}
     state = make_state(watch_next=(WatchItem("FVG_5m_3", "?"), WatchItem("BSL_15m_1", "?")), destination_candidates=(), object_registry=registry)
     assert runtime._watched(state) == ("BSL_15m_1",)
-    before = SimpleNamespace(relation_of=lambda alias: "above_price")
-    after = SimpleNamespace(relation_of=lambda alias: "below_price")
+    t0 = pd.Timestamp("2022-01-04T15:00:00Z")
+    before = SimpleNamespace(relation_of=lambda alias: "above_price", known_at=t0)
+    after = SimpleNamespace(relation_of=lambda alias: "below_price", known_at=t0 + pd.Timedelta(minutes=1))
     runtime._remember_relations(state, before)
     assert runtime._relation_changes(after) == ("BSL_15m_1",), "the 5m object's flip is not remembered, so it cannot trigger"
+
+
+def test_a_relation_flip_of_the_same_alias_triggers_once_per_debounce_window() -> None:
+    from types import SimpleNamespace
+
+    from brain.tests.test_brain_state import make_state
+    from contract.brain.state import RegisteredObject, WatchItem
+
+    runtime = BrainRuntime(
+        controller=CONTROLLER, brain=MainBrain(client=EchoClient(), config=CONFIG, ledger=InMemoryPositionLedger(), sleep=lambda s: None),
+        journal=None, ledger=InMemoryPositionLedger(), tick=0.25,
+    )
+    registry = {"BSL_15m_1": RegisteredObject("b" * 24, "bsl", "15m")}
+    state = make_state(watch_next=(WatchItem("BSL_15m_1", "?"),), destination_candidates=(), object_registry=registry)
+    t0 = pd.Timestamp("2022-01-04T15:00:00Z")
+    above = lambda at: SimpleNamespace(relation_of=lambda alias: "above_price", known_at=at)
+    below = lambda at: SimpleNamespace(relation_of=lambda alias: "below_price", known_at=at)
+    runtime._remember_relations(state, above(t0))
+    first = t0 + pd.Timedelta(minutes=1)
+    assert runtime._relation_changes(below(first)) == ("BSL_15m_1",)
+    runtime._relation_triggered_at(("BSL_15m_1",), first)
+    runtime._remember_relations(state, below(first))
+    assert runtime._relation_changes(above(t0 + pd.Timedelta(minutes=5))) == (), "a second flip within the window does not trigger"
+    assert runtime._relation_changes(above(t0 + pd.Timedelta(minutes=16))) == ("BSL_15m_1",)

@@ -141,6 +141,53 @@ def sharp_move_coverage(bars: Sequence[Bar], *, call_times: Sequence[pd.Timestam
     }
 
 
+def direction_accuracy(
+    readings: Sequence[tuple[pd.Timestamp, str]], bars: Sequence[Bar], *, horizon_minutes: int = 60
+) -> dict[str, Any]:
+    """How often a stated direction (``LONG`` / ``SHORT`` at a bar's end)
+    matched the sign of the close ``horizon_minutes`` later (2026-09-18).
+    Readings without both closes, or with an unchanged close, are not
+    counted."""
+    close_at = {pd.Timestamp(bar.start).tz_convert("UTC") + pd.Timedelta(minutes=1): float(bar.close) for bar in bars}
+    counted = agreed = 0
+    for when, direction in readings:
+        now = pd.Timestamp(when).tz_convert("UTC")
+        first, later = close_at.get(now), close_at.get(now + pd.Timedelta(minutes=horizon_minutes))
+        if first is None or later is None or later == first:
+            continue
+        counted += 1
+        agreed += int((later > first) == (direction == "LONG"))
+    return {"readings": counted, "agreed": agreed, "accuracy": None if not counted else round(agreed / counted, 4)}
+
+
+def missed_trends(expiries: Sequence[Mapping[str, Any]], bars: Sequence[Bar]) -> dict[str, int]:
+    """Expired entries the tape ran away from (2026-09-19): between the
+    submission and the expiry, price never touched the limit and travelled
+    at least one R (the plan's stop distance) in the thesis direction from
+    where it was when the order went in (the first bar's open).  Each
+    expiry is ``{direction, limit_price, stop_price, submitted_at,
+    expired_at}``."""
+    starts = [pd.Timestamp(bar.start).tz_convert("UTC") for bar in bars]
+    missed = 0
+    for expiry in expiries:
+        limit, stop = float(expiry["limit_price"]), float(expiry["stop_price"])
+        first = bisect.bisect_left(starts, pd.Timestamp(expiry["submitted_at"]).tz_convert("UTC"))
+        last = bisect.bisect_right(starts, pd.Timestamp(expiry["expired_at"]).tz_convert("UTC"))
+        window = bars[first:last]
+        if not window:
+            continue
+        origin = float(window[0].open)
+        if expiry["direction"] == "LONG":
+            touched = any(float(bar.low) <= limit for bar in window)
+            travelled = max(float(bar.high) for bar in window) - origin
+        else:
+            touched = any(float(bar.high) >= limit for bar in window)
+            travelled = origin - min(float(bar.low) for bar in window)
+        if not touched and travelled >= abs(limit - stop):
+            missed += 1
+    return {"expired": len(expiries), "missed": missed}
+
+
 # --------------------------------------------------------------- summary
 
 
@@ -189,8 +236,14 @@ def summarize(
     exit_roles: Counter[str] = Counter()
     bars_to_fill: list[float] = []
     closed_trades: list[dict[str, Any]] = []
+    pending_entries: dict[str, dict[str, Any]] = {}  # signature → the submitted entry, for missed_trends
+    expiries: list[dict[str, Any]] = []
     double_entry = positions_over_limit = position_without_fill = 0
     max_positions = int(run.get("max_open_positions", 3) or 3)
+    # The stated direction per state revision (the bias since 2026-09-18,
+    # the opportunity's direction for runs before it), and the bias changes.
+    readings: list[tuple[pd.Timestamp, str]] = []
+    bias_changes = neutral_revisions = 0
 
     for episode_id in episodes:
         records = reader.records(episode_id)
@@ -202,6 +255,7 @@ def summarize(
         awake_bars.append(revisions)
         slept = False
         previous_understanding: str | None = None
+        previous_bias: str | None = None
         wake_kind_by_id: dict[str, str] = {}
         entry_open = False  # an entry order working (WORKING / PARTIAL)
         filled_seen = False
@@ -265,6 +319,21 @@ def summarize(
                 if previous_understanding is not None and understanding != previous_understanding:
                     understanding_changes += 1
                 previous_understanding = understanding
+                bias = state.get("bias") or {}
+                bias_direction = bias.get("direction")
+                if bias_direction is not None:
+                    if previous_bias is not None and bias_direction != previous_bias:
+                        bias_changes += 1
+                    previous_bias = bias_direction
+                    if bias_direction == "NEUTRAL":
+                        neutral_revisions += 1
+                stated = bias_direction if bias_direction in ("LONG", "SHORT") else None
+                if stated is None and bias_direction is None:
+                    opportunity = state.get("opportunity") or {}
+                    if opportunity.get("state") in ("DEVELOPING", "ACTIONABLE"):
+                        stated = opportunity.get("direction")
+                if stated in ("LONG", "SHORT"):
+                    readings.append((record.known_at, stated))
             elif record.record == "opportunity":
                 opportunity = payload.get("opportunity") or {}
                 survived_by_state[str(opportunity.get("state"))] += 1
@@ -296,6 +365,12 @@ def summarize(
                     entry_open, filled_seen = True, False
                     submitted_at = record.known_at
                     intents[str(payload.get("signature"))] = {"direction": str((payload.get("plan") or {}).get("direction")), "entry_price": None, "quantity": 0}
+                    verdict = payload.get("verdict") or {}
+                    if verdict.get("limit_price") is not None and verdict.get("stop_price") is not None:
+                        pending_entries[str(payload.get("signature"))] = {
+                            "direction": str((payload.get("plan") or {}).get("direction")), "limit_price": float(verdict["limit_price"]),
+                            "stop_price": float(verdict["stop_price"]), "submitted_at": record.known_at,
+                        }
                     if (payload.get("account") or {}).get("asof") not in (None, known_at):
                         stale += 1
                 elif kind == "cancel_requested":
@@ -322,6 +397,11 @@ def summarize(
                         entry_open = False
                         if int(order.get("filled_quantity", 0) or 0) == 0:
                             intents.pop(str(payload.get("signature")), None)
+                            pending = pending_entries.pop(str(payload.get("signature")), None)
+                            if kind == "expired" and pending is not None:
+                                expiries.append({**pending, "expired_at": record.known_at})
+                        else:
+                            pending_entries.pop(str(payload.get("signature")), None)
                 elif kind == "position_closed":
                     role = str(payload.get("exit_role"))
                     exit_roles[role] += 1
@@ -391,11 +471,17 @@ def summarize(
             "daily_stop_vetoes": vetoes_by_code.get("daily_stop", 0), "halted": run.get("halted"),
         },
         "orders": {
-            **{kind: order_counts.get(kind, 0) for kind in ("submitted", "working", "partial", "filled", "cancel_requested", "cancelled", "expired", "rejected", "position_opened", "position_closed", "exit_leg_lost", "invalidation_close", "flattened", "halted")},
+            **{kind: order_counts.get(kind, 0) for kind in ("submitted", "working", "partial", "filled", "cancel_requested", "cancelled", "expired", "rejected", "position_opened", "position_closed", "exit_leg_lost", "invalidation_close", "bias_reversed", "flattened", "halted")},
+            "missed_trends": None if bars is None else missed_trends(expiries, bars),
             "cancel_reasons": dict(sorted(cancel_reasons.items())), "replacements": cancel_reasons.get("signature_changed", 0),
             "exit_roles": dict(sorted(exit_roles.items())), "bars_to_fill": {"median": _median(bars_to_fill), "max": max(bars_to_fill) if bars_to_fill else None},
             "closed_trades": closed_trades,
             "realized_points": None if not closed_trades or any(t["pnl_points"] is None for t in closed_trades) else round(sum(t["pnl_points"] for t in closed_trades), 2),
+        },
+        "bias": {
+            "changes": bias_changes, "neutral_revisions": neutral_revisions,
+            "opportunities_against_bias": rejections.get("opportunity_against_bias", 0) + rejections.get("opportunity_scale_above_bias", 0),
+            "direction_accuracy_60m": None if bars is None else direction_accuracy(readings, bars),
         },
         "invariants": {"double_entry": double_entry, "positions_over_limit": positions_over_limit, "position_without_fill": position_without_fill, "stale_snapshots": stale},
         "account": None if account is None else {

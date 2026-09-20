@@ -218,6 +218,41 @@ creation event the promoted boundaries descend from; the contract now
 requires exactly what is emitted: creation, the breaking BAR and the
 Acceptance (`test_event_provenance_contract.py`).
 
+## The active leg is the leg that is forming
+
+Until 2026-09-18 `TimeframeDeliveryState.active_leg_direction` was the last
+*confirmed* structural leg, and a leg is confirmed only when its end swing
+is — `swing_span` bars after the pivot — so the label named the leg price
+had already left. On 2022-01-03 the 4H read `expansion short` for fifteen
+hours while price rose 100 points, and the 1H rolled into `expansion short`
+at the bar its up-leg began (receipt
+[brain/docs/evidence/2026-09-18_direction_root_cause_2022-01-03.md](../../brain/docs/evidence/2026-09-18_direction_root_cause_2022-01-03.md)).
+
+Now `active_leg_direction` is the sign of the excursion from the last
+confirmed leg's end swing to the last close (`forming_leg_points`, with
+`last_close`); the confirmed leg is `last_leg_direction`. Without a
+confirmed leg the active leg is still the internal direction.
+`_delivery_phase` reads the active leg the same way in both producers
+(`reduce_timeframe_state`, the atomic authority, and the publisher's
+projection): `expansion` when it is the external direction, `retracement`
+when it is not and the protected swing is intact, `reversal_attempt` as
+before; with no external direction, `balance` only while the active dealing
+range still *contains* price, else `transition`. `displacement_direction`
+and `displacement_at` are set with the score by `DISPLACEMENT_OBSERVED` (the
+5m live path dates its score at the frame cutoff) so a reader can age a
+displacement instead of taking a score printed sixteen hours ago for live
+delivery. `TimeframeStructureState.protection_broken_direction` /
+`protection_broken_at` name the acceptance that broke the protected swing
+and left the scale without an external direction, and are cleared when a
+structure confirms one. `brain/core/eye_view.py` publishes the derived
+facts (`last_leg_direction`, `forming_leg_atr` in the scale's ATR,
+`displacement_direction`, `displacement_age_bars`, `structure.reset`).
+Tests: `eyes/tests/test_forming_leg.py` (the rule and the reducer path),
+`test_hierarchical_market_state.py` (the projected phase),
+`test_facts_on_every_scale.py` (the invariants over a noisy walk on every
+scale). Design:
+[brain/docs/specs/2026-09-18-direction-eye-brain-execution-design.md](../../brain/docs/specs/2026-09-18-direction-eye-brain-execution-design.md) §1.
+
 ## Bounded candidates, and what still grows
 
 The candidate collection was append-only by design: a sweep disarmed a level

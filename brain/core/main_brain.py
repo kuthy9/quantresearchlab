@@ -53,6 +53,10 @@ class MainBrainConfig:
     relation_atr_limit: float | None = 4.0
     # DeepSeek's reasoning budget (low / high / max); None sends nothing.
     reasoning_effort: str | None = None
+    # At most this many pending (unjudged) evidence items stay in the ledger
+    # and are re-offered; older ones expire (run X, 2026-09-19).  None =
+    # unbounded.
+    max_pending_evidence: int | None = None
 
     @classmethod
     def from_json(cls, path: Path, *, root: Path | None = None) -> "MainBrainConfig":
@@ -82,6 +86,7 @@ class MainBrainConfig:
             note_limit=int(payload["note_limit"]),
             relation_atr_limit=None if payload["relation_atr_limit"] is None else float(payload["relation_atr_limit"]),
             reasoning_effort=None if payload.get("reasoning_effort") is None else str(payload["reasoning_effort"]),
+            max_pending_evidence=None if payload.get("max_pending_evidence") is None else int(payload["max_pending_evidence"]),
         )
 
     @property
@@ -282,6 +287,7 @@ class MainBrain:
             idle_updates=idle_updates,
             idle_archive_after=idle_archive_after,
             timeframe_of=timeframe_of,
+            max_pending=self._config.max_pending_evidence,
         )
         with timed(self._timings, "reduce"):
             result = apply(

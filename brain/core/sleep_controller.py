@@ -20,7 +20,7 @@ from brain.core.eye_view import EvidenceRule, evidence_id
 from contract.eye import MarketEvent
 from contract.market.primitives import FrozenDict
 
-SLEEP_CONTROLLER_SCHEMA_VERSION = 3
+SLEEP_CONTROLLER_SCHEMA_VERSION = 4  # 4 (2026-09-18): relation_change_debounce_bars
 
 
 class Decision(str, Enum):
@@ -39,6 +39,9 @@ class ControllerConfig:
     wake_timeframe_specific: Mapping[str, frozenset[str]]
     # The scales whose watched objects' relation flips trigger an UPDATE.
     relation_change_timeframes: frozenset[str]
+    # A watched alias's relation flip triggers an UPDATE at most once per
+    # this many 1m bars (the runtime keeps the last trigger per alias).
+    relation_change_debounce_bars: int
     evidence: EvidenceRule
     tape_timeframe: str
     tape_reaction_kinds: frozenset[str]
@@ -64,6 +67,7 @@ class ControllerConfig:
                 {tf: frozenset(kinds) for tf, kinds in wake["timeframe_specific_kinds"].items()}
             ),
             relation_change_timeframes=frozenset(str(tf) for tf in payload["relation_change_timeframes"]),
+            relation_change_debounce_bars=max(0, int(payload["relation_change_debounce_bars"])),
             evidence=EvidenceRule(
                 timeframes=frozenset(evidence["timeframes"]),
                 heartbeat_kinds=frozenset(evidence["heartbeat_kinds_excluded"]),

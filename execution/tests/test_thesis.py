@@ -57,7 +57,7 @@ def test_expressions_are_capped_and_a_target_closes_as_achieved() -> None:
         p = plan(target_id=f"swing:{i}")
         assert b.admit(p, i) is None
         b.expressed(p)
-        b.outcome(p, "expired", exit_role=None, bar_index=i + 1)
+        b.outcome(p, "cancelled", exit_role=None, bar_index=i + 1)  # a cancel spends the expression (an expiry would give it back)
     assert b.admit(plan(target_id="swing:z"), 5) == "expressions_exhausted"
     assert b.view(5)["theses"][0]["closed_reason"] == "expressions_exhausted" and b.view(5)["theses"][0]["expressions"] == 2
     q = plan(thesis_id="T2")
@@ -90,3 +90,34 @@ def test_a_plan_without_a_thesis_id_is_admitted_and_never_recorded() -> None:
     b.outcome(p, "position_closed", exit_role="stop", bar_index=3)
     assert b.view(3)["theses"] == [] and b.cooldown_bars_left(4) == 29, "the cooldown still guards the next entry"
     assert isinstance(ThesisRecord("T1", TradeDirection.SHORT, "1H", T0), ThesisRecord)
+
+
+def test_an_expiry_gives_the_expression_back_but_a_cancel_does_not() -> None:
+    b = book()
+    first = plan()
+    assert b.admit(first, 0) is None
+    b.expressed(first)
+    b.outcome(first, "expired", exit_role=None, bar_index=16)
+    second = plan(target_id="swing:d")
+    assert b.admit(second, 17) is None
+    b.expressed(second)
+    b.outcome(second, "expired", exit_role=None, bar_index=33)
+    third = plan(target_id="swing:e")
+    assert b.admit(third, 34) is None, "two expiries spent nothing"
+    b.expressed(third)
+    b.outcome(third, "cancelled", exit_role=None, bar_index=40)
+    fourth = plan(target_id="swing:f")
+    assert b.admit(fourth, 41) is None
+    b.expressed(fourth)
+    b.outcome(fourth, "cancelled", exit_role=None, bar_index=43)
+    assert b.admit(plan(target_id="swing:h"), 44) == "expressions_exhausted", "two cancels are two expressions"
+
+
+def test_a_bias_reversal_closes_the_thesis_without_a_cooldown() -> None:
+    b = book()
+    p = plan()
+    assert b.admit(p, 0) is None
+    b.expressed(p)
+    b.outcome(p, "position_closed", exit_role="bias_reversed", bar_index=10)
+    assert b.view(11)["theses"][0]["closed_reason"] == "bias_reversed" and b.cooldown_bars_left(11) == 0
+    assert b.admit(plan(target_id="swing:d"), 11) == "thesis_closed"

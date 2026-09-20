@@ -114,6 +114,11 @@ Rules:
 
 `sleep_controller.decide(observation, status, state) -> ControllerDecision`.
 
+Amended 2026-09-18 (schema 4): `delivery_phase_entered` / `_exited` are
+bookkeeping kinds, and `relation_change_debounce_bars` (15) lets one
+watched alias's relation flip trigger at most once per that many 1m bars
+(the runtime keeps the last trigger per alias, reset with the episode).
+
 Configuration, `brain/configs/sleep_controller.json`:
 
 ```json
@@ -163,7 +168,12 @@ sleep transition is not its call — the reducer decides it (§ 8).
 ## 6. BrainState
 
 `contract/brain/state.py`. The JSON from the brief, plus four fields the
-machine needs (`schema_version`, `revision`, `object_registry`, `last_update`):
+machine needs (`schema_version`, `revision`, `object_registry`, `last_update`).
+Amended 2026-09-18 (schema 2): `bias` — `{direction: LONG | SHORT |
+NEUTRAL, scale: 4H | 1H | 15m, basis}` (the 5m was admitted until 2026-09-19) — the Brain's direction, kept
+through a carry-forward and read as NEUTRAL on 15m from a schema-1
+journal; design in
+[2026-09-18-direction-eye-brain-execution-design.md](2026-09-18-direction-eye-brain-execution-design.md) §2:
 
 ```json
 {
@@ -243,11 +253,21 @@ against the object; every real run read it the other way round, so every
 stop and target landed on the wrong side and died as
 `opportunity_incoherent` (25 of 25 proposals on the 2022-01-03 RTH day at
 low effort, 11 of 11 in run 3). `prior_state` carries no `object_registry`, its
-evidence lists are bounded (`prior_evidence_limit`, `note_limit`), and it
+evidence lists are bounded (`prior_evidence_limit`, `note_limit`; since
+2026-09-19 the pending items too, `max_pending_evidence`, the oldest
+expiring as `evidence_expired` — reducer `ReduceContext.max_pending`), and it
 gains `execution` — the order machine's view of the last opportunity
 (status, working order, position, last outcome, last Risk veto, as aliases
 and counts) so the LLM knows a veto, an order or a position exists; design
 in [2026-09-17-veto-feedback-week-backtest-design.md](2026-09-17-veto-feedback-week-backtest-design.md).
+
+Amended 2026-09-18 (schema 2): every scale's `delivery` carries
+`active_leg_direction` as the leg price is in *now*, `last_leg_direction`
+(the confirmed leg), `forming_leg_atr`, `displacement_direction` and
+`displacement_age_bars`; `structure` carries `reset` (`{direction,
+bars_ago}` after an acceptance broke the protected swing, until a structure
+confirms); `session` carries `drift_atr`. Design in
+[2026-09-18-direction-eye-brain-execution-design.md](2026-09-18-direction-eye-brain-execution-design.md) §1.
 
 The system prompt (`brain/configs/prompts/main_brain_system.md`) carries the
 14-step framework, the output contract, and the rule that the model reasons
@@ -256,6 +276,10 @@ through the steps it needs rather than filling a form. It contains the word
 is part of the run identity.
 
 ### 7.2 `LLMUpdate` (the reply, strict JSON)
+
+Amended 2026-09-18: the reply carries a required `bias` object
+(`direction`, `scale`, `basis`) beside the opportunity; the example in
+`LLM_UPDATE_EXAMPLE` shows it NEUTRAL on 15m.
 
 ```json
 {
@@ -319,6 +343,12 @@ record (replay).
 `reducer.apply(prev: BrainState | None, evidence: tuple[EvidenceItem, ...],
 update: LLMUpdate | None, *, known_at, ledger, registry) -> ReduceResult
 (state, rejections, slept)`.
+
+Amended 2026-09-18 — rule 4b: an opportunity whose direction is not the
+reply's bias, any opportunity under a NEUTRAL bias, and a thesis whose
+`governing_timeframe` is above the bias scale are dropped
+(`opportunity_against_bias:<side>` / `opportunity_scale_above_bias:<scale>`);
+the bias itself is always kept.
 
 Rules, in order:
 

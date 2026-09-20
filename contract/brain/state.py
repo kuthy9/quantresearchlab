@@ -11,7 +11,7 @@ registry maps aliases to the Eye's entity ids so a state is self-describing."""
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, field, fields
 from enum import Enum
 import re
 import json
@@ -21,7 +21,7 @@ import pandas as pd
 
 from contract.market.primitives import FrozenDict, aware_timestamp
 
-BRAIN_STATE_SCHEMA_VERSION = 1
+BRAIN_STATE_SCHEMA_VERSION = 2  # 2 (2026-09-18): ``bias``
 
 
 class BrainStatus(str, Enum):
@@ -52,7 +52,16 @@ class InvalidationMode(str, Enum):
 
 # The scales a thesis may rest on (the 1m scale is never governing).
 GOVERNING_TIMEFRAMES: tuple[str, ...] = ("4H", "1H", "15m", "5m")
+# The scales that may set the bias: the 5m is an execution scale, never the
+# direction (run B of 2026-09-18 set the bias on the 5m 18 times).
+BIAS_SCALES: tuple[str, ...] = ("4H", "1H", "15m")
 THESIS_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,32}$")
+
+
+class BiasDirection(str, Enum):
+    LONG = "LONG"
+    SHORT = "SHORT"
+    NEUTRAL = "NEUTRAL"
 
 
 class Confidence(str, Enum):
@@ -266,6 +275,30 @@ class Opportunity:
 
 
 @dataclass(frozen=True)
+class Bias:
+    """The Brain's direction (2026-09-18): one side or none, the scale whose
+    live delivery sets it, and the one-sentence basis.  The reducer drops an
+    opportunity that goes against it or rests on a scale above it."""
+
+    direction: BiasDirection = BiasDirection.NEUTRAL
+    scale: str = "15m"
+    basis: str = ""
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "direction", _enum(BiasDirection, self.direction, name="bias.direction"))
+        if self.scale not in BIAS_SCALES:
+            raise ValueError(f"bias.scale must be one of {list(BIAS_SCALES)}")
+        _text(self.basis, name="bias.basis")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"direction": self.direction.value, "scale": self.scale, "basis": self.basis}
+
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, Any]) -> "Bias":
+        return cls(payload["direction"], payload["scale"], payload.get("basis", ""))
+
+
+@dataclass(frozen=True)
 class RegisteredObject:
     entity_id: str
     kind: str
@@ -356,6 +389,7 @@ class BrainState:
     continue_active: bool
     object_registry: Mapping[str, RegisteredObject]
     last_update: LastUpdate
+    bias: Bias = field(default_factory=Bias)
     schema_version: int = BRAIN_STATE_SCHEMA_VERSION
 
     def __post_init__(self) -> None:
@@ -419,6 +453,7 @@ class BrainState:
                 alias: entry.to_dict() for alias, entry in sorted(self.object_registry.items())
             },
             "last_update": self.last_update.to_dict(),
+            "bias": self.bias.to_dict(),
         }
 
     def to_json(self) -> str:
@@ -431,9 +466,11 @@ class BrainState:
         if unknown:
             raise ValueError(f"BrainState payload has unknown keys {sorted(unknown)}")
         missing = expected - set(payload)
+        if payload.get("schema_version") == 1:
+            missing -= {"bias"}  # schema 1 (before 2026-09-18) had no bias
         if missing:
             raise ValueError(f"BrainState payload is missing {sorted(missing)}")
-        if payload["schema_version"] != BRAIN_STATE_SCHEMA_VERSION:
+        if payload["schema_version"] not in (1, BRAIN_STATE_SCHEMA_VERSION):
             raise ValueError(f"unsupported BrainState schema_version {payload['schema_version']!r}")
         return cls(
             episode_id=payload["episode_id"],
@@ -453,7 +490,8 @@ class BrainState:
                 alias: RegisteredObject(**entry) for alias, entry in payload["object_registry"].items()
             },
             last_update=LastUpdate.from_dict(payload["last_update"]),
-            schema_version=payload["schema_version"],
+            bias=Bias.from_dict(payload["bias"]) if "bias" in payload else Bias(),
+            schema_version=BRAIN_STATE_SCHEMA_VERSION,
         )
 
     @classmethod
@@ -464,6 +502,9 @@ class BrainState:
 __all__ = [
     "BRAIN_STATE_SCHEMA_VERSION",
     "ActiveExpectation",
+    "BIAS_SCALES",
+    "Bias",
+    "BiasDirection",
     "BrainState",
     "BrainStatus",
     "Confidence",

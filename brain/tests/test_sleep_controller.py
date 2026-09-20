@@ -70,10 +70,20 @@ def test_relation_changes_count_only_on_the_configured_scales(tmp_path: Path) ->
     import json
 
     assert CFG.relation_change_timeframes == frozenset({"15m", "1H", "4H"})
+    assert CFG.relation_change_debounce_bars == 15  # schema 4 (2026-09-18)
     payload = json.loads((ROOT / "brain" / "configs" / "sleep_controller.json").read_text(encoding="utf-8"))
-    payload["schema_version"] = 2
-    del payload["relation_change_timeframes"]
-    old = tmp_path / "v2.json"
+    payload["schema_version"] = 3
+    del payload["relation_change_debounce_bars"]
+    old = tmp_path / "v3.json"
     old.write_text(json.dumps(payload), encoding="utf-8")
     with pytest.raises(ValueError, match="schema_version"):
         ControllerConfig.from_json(old)
+
+
+def test_phase_transitions_are_bookkeeping_not_reactions() -> None:
+    # A delivery phase is a derived label the scales block already carries
+    # (2026-09-18); its entered/exited events are evidence, never a call.
+    for kind in (EventKind.DELIVERY_PHASE_ENTERED, EventKind.DELIVERY_PHASE_EXITED):
+        for tf in (Timeframe.M5, Timeframe.M15, Timeframe.H1, Timeframe.H4):
+            assert not CFG.is_update_event(ev(kind, tf)), (kind, tf)
+            assert not CFG.is_wake_event(ev(kind, tf)), (kind, tf)

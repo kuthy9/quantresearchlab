@@ -4,8 +4,9 @@
 opportunity into a ``TradePlan`` on the same bar's context, and hands the
 order machine the plan and the bar — together with whether the LLM was
 called on this bar (so a plan the LLM re-proposed after a veto is counted
-as a proposal) and the scales whose bar completed on it (the close-beyond
-exit watches them).  ``halted`` mirrors the machine's drawdown halt so the
+as a proposal), the scales whose bar completed on it (the close-beyond
+exit watches them) and the Brain's bias direction (a position on the other
+side is flattened, 2026-09-19).  ``halted`` mirrors the machine's drawdown halt so the
 runner can stop.  Without a machine it is the Brain alone.  The machine's
 ledger is the Brain's ``PositionLedger``, so the Brain cannot sleep while
 an order works or a position is open, and its ``execution_view`` is what
@@ -13,6 +14,7 @@ the next LLM call reads in ``prior_state.execution``."""
 from __future__ import annotations
 
 from brain.core.runtime import BrainRuntime, StepResult
+from contract.brain.state import BiasDirection
 from contract.eye import EventKind, MarketObservation
 from contract.market.primitives import Bar
 from execution.core.order_fsm import OrderMachine
@@ -53,6 +55,7 @@ class TradingStack:
             self.last_trade_kinds = self.machine.on_bar(
                 observation.asof, bar, plan, episode_id=result.episode_id, visible=lambda alias: alias in visible_aliases,
                 llm_called=result.llm_called, closed_timeframes=self.closed_timeframes(observation),
+                bias_direction=None if state is None or state.bias.direction is BiasDirection.NEUTRAL else state.bias.direction.value,
             )
         return result
 

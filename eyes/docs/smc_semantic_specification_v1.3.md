@@ -123,7 +123,9 @@ identity, naming and reservation only:
   freezes `entered_at`, `age_bars` (real completed M1 bars since entry),
   `origin_event`, `parent_structure_generation` and `previous_phase`; an exit
   names `next_phase`. `DELIVERY_PHASE_UPDATED` is published **only** when a
-  registered phase input (`structure_regime`, `active_leg_direction`,
+  registered phase input (`structure_regime`, `active_leg_direction` —
+  since 2026-09-18 the leg price is in now, see `eyes/docs/README.md`,
+  "The active leg is the leg that is forming" —
   `protected_swing_intact`, range availability) moves while the phase itself
   does not, so a quiet bar publishes nothing and the phase stream stays far
   below one event per bar. `parent_structure_generation` is the event id of the

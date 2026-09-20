@@ -67,6 +67,7 @@ class LongAtTheNearestZone:
         payload["market_understanding"] = "scripted"
         payload["watch_next"] = []
         payload["destination_candidates"] = []
+        payload["bias"] = {"direction": "LONG", "scale": "15m", "basis": "scripted"}  # every proposal below is LONG on the 5m, under a 15m bias
         prior = request.get("prior_state") or {}
         previous = (prior.get("opportunity") or {})
         ids = [previous.get(k) for k in ("entry_object_id", "invalidation_object_id", "target_object_id")]

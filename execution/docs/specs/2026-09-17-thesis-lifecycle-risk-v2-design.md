@@ -160,6 +160,9 @@ a 75-point stop on one contract (the old 0.5 % held 25).
   order (`OrderRole.FLATTEN`) that fills on the next poll at that bar's
   open, before any limit or stop of the bar is matched; it is reported
   `filled` with its fill and moves the account like any fill.
+- Amended 2026-09-19 (direction fix §3): an entry limit through the market
+  (a BUY at or above the bar's open, a SELL at or below) fills at the open
+  rather than at the limit — the fill a marketable limit gets at TWS.
 
 ### 6.2 `IBKRBroker`
 
@@ -187,7 +190,10 @@ also keeps `cooldown_until_bar` (bars since the last stop-out).
 `expressed(plan)` counts an order; `outcome(plan, kind, exit_role)` closes
 the record on a stop (`stopped`) or a target (`achieved`) and starts the
 cooldown on a stop; an expiry or a cancel leaves it open. The book resets
-with the episode. `view()` is what the LLM reads (§7.3).
+with the episode. `view()` is what the LLM reads (§7.3). Amended
+2026-09-19 (direction fix §3): an expiry gives its expression back (the
+entry was never reached), a cancel keeps it; the bias-reversal flatten
+(§6.7) closes the record `bias_reversed` without a cooldown.
 
 Rejected alternative: keying the lifecycle on a code-derived thesis
 (direction + governing scale + destination). The Brain's own id is what
@@ -252,6 +258,18 @@ flatten (`client_ref = "<episode>:<signature>:invalidation"`), journals
 `invalidation_close`, and the flatten's fill closes the position with
 `exit_role: "flatten"`. The hard stop stays at the broker until the cancel
 is confirmed, so a runaway bar is still stopped.
+
+### 6.7 Bias-reversal exit (2026-09-19)
+
+`TradingStack` also passes the machine the Brain's bias direction
+(`state.bias.direction`, `None` when NEUTRAL). A position whose plan
+direction is the other side is flattened at market the same way as §6.6:
+`bias_reversed` journaled with the bias and the position, the stop and
+target cancelled, the flatten's fill closing the position with
+`exit_role: "bias_reversed"`, and the thesis closed `bias_reversed` with no
+cooldown. Reducer rule 4b already refuses a *new* opportunity against the
+bias; this is the same rule applied to the open position (design
+[2026-09-18-direction-eye-brain-execution-design.md](../../../brain/docs/specs/2026-09-18-direction-eye-brain-execution-design.md) §3).
 
 ## 7. Brain
 

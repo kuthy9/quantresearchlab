@@ -10,7 +10,8 @@ from brain.core.journal import BrainJournal, JournalReader
 from brain.core.main_brain import MainBrain, MainBrainConfig
 from brain.core.runtime import BrainRuntime
 from brain.core.sleep_controller import ControllerConfig
-from brain.scripts.summarize_run import cost_usd, load_pricing, main, render, sharp_move_coverage, summarize
+from brain.scripts.summarize_run import cost_usd, direction_accuracy, load_pricing, main, missed_trends, render, sharp_move_coverage, summarize
+from contract.market.primitives import Bar
 from execution.core.order_fsm import OrderMachine
 from execution.core.stack import TradingStack
 from execution.tests.test_stack_e2e import RISK, LongAtTheNearestZone, executor
@@ -161,3 +162,33 @@ def test_until_bounds_the_summary_to_a_common_window(synthetic_run) -> None:
     assert 0 < bounded["llm"]["calls"] == sum(1 for t in calls if t <= cut) < len(calls)
     assert bounded["account"] is None and bounded["timings"] is None and bounded["run"]["until"] == cut.strftime("%Y-%m-%dT%H:%M:%SZ")
     assert main(["--run-dir", str(run_dir), "--no-coverage", "--until", cut.strftime("%Y-%m-%dT%H:%M:%SZ")]) == 0
+
+
+def test_direction_accuracy_reads_the_close_an_hour_later() -> None:
+    start = pd.Timestamp("2022-01-03T14:00:00Z")
+    bars = [Bar(start=start + pd.Timedelta(minutes=i), open=100.0 + i, high=101.0 + i, low=99.0 + i, close=100.0 + i, volume=1.0, symbol="NQ", instrument_id=1) for i in range(130)]
+    readings = [
+        (pd.Timestamp("2022-01-03T14:10:00Z"), "LONG"),   # rising tape: right
+        (pd.Timestamp("2022-01-03T14:20:00Z"), "SHORT"),  # wrong
+        (pd.Timestamp("2022-01-03T15:50:00Z"), "LONG"),   # no bar an hour later: not counted
+    ]
+    assert direction_accuracy(readings, bars) == {"readings": 2, "agreed": 1, "accuracy": 0.5}
+    assert direction_accuracy([], bars) == {"readings": 0, "agreed": 0, "accuracy": None}
+
+
+def test_summary_carries_the_bias_section(synthetic_run) -> None:
+    run_dir, bars, _, _ = synthetic_run
+    summary = summarize(run_dir, pricing=PRICING, bars=bars)
+    bias = summary["bias"]
+    assert set(bias) >= {"changes", "neutral_revisions", "opportunities_against_bias", "direction_accuracy_60m"}
+    assert bias["opportunities_against_bias"] == 0
+
+
+def test_missed_trends_count_expiries_the_tape_ran_away_from() -> None:
+    start = pd.Timestamp("2022-01-03T14:00:00Z")
+    bars = [Bar(start=start + pd.Timedelta(minutes=i), open=16450.0 + i, high=16451.0 + i, low=16449.5 + i, close=16450.5 + i, volume=1.0, symbol="NQ", instrument_id=1) for i in range(40)]
+    expiries = [
+        {"direction": "LONG", "limit_price": 16449.25, "stop_price": 16439.5, "submitted_at": start + pd.Timedelta(minutes=1), "expired_at": start + pd.Timedelta(minutes=16)},   # never touched; from the 16451 open the tape ran +16 pts >= 1 R (9.75)
+        {"direction": "SHORT", "limit_price": 16470.0, "stop_price": 16480.0, "submitted_at": start + pd.Timedelta(minutes=1), "expired_at": start + pd.Timedelta(minutes=16)},  # never touched either; the tape rose towards the limit, not away from it
+    ]
+    assert missed_trends(expiries, bars) == {"expired": 2, "missed": 1}

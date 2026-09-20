@@ -18,7 +18,7 @@ and the journal.  It asserts that
 from __future__ import annotations
 
 from collections import Counter, deque
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any
@@ -123,6 +123,8 @@ class BrainRuntime:
         self._last_archived: BrainState | None = None
         self._registry: ObjectRegistry | None = None
         self._relations: dict[str, str | None] = {}
+        # The last bar a watched alias's relation flip triggered a call (debounce).
+        self._relation_triggered: dict[str, pd.Timestamp] = {}
         self._tape = _Tape(controller.tape_recent_limit)
         self._episode_counter: dict[str, int] = {}
         self._last_known_at: pd.Timestamp | None = None
@@ -172,12 +174,25 @@ class BrainRuntime:
         self._relations = {alias: context.relation_of(alias) for alias in self._watched(state)}
 
     def _relation_changes(self, context: EyeContext) -> tuple[str, ...]:
+        """The watched aliases whose side of price flipped since the last
+        call, less those that triggered within the last
+        ``relation_change_debounce_bars`` minutes (2026-09-18)."""
+        window = pd.Timedelta(minutes=self._controller.relation_change_debounce_bars)
+        now_at = pd.Timestamp(context.known_at)
         changed = []
         for alias, relation in self._relations.items():
             now = context.relation_of(alias)
-            if now is not None and now != relation:
-                changed.append(alias)
+            if now is None or now == relation:
+                continue
+            last = self._relation_triggered.get(alias)
+            if last is not None and now_at - last < window:
+                continue
+            changed.append(alias)
         return tuple(changed)
+
+    def _relation_triggered_at(self, aliases: Sequence[str], known_at: pd.Timestamp) -> None:
+        for alias in aliases:
+            self._relation_triggered[alias] = pd.Timestamp(known_at)
 
     @staticmethod
     def _latency(step: BrainStep) -> int | None:
@@ -257,6 +272,7 @@ class BrainRuntime:
         self._state = None
         self._registry = None
         self._relations = {}
+        self._relation_triggered = {}
         self._last_llm_known_at = None
         self._deferred = []
         self._idle_updates = 0
@@ -348,6 +364,8 @@ class BrainRuntime:
             decision = decide(
                 events, active=True, config=self._controller, relation_changes=self._relation_changes(context)
             )
+        if decision.decision is Decision.UPDATE:
+            self._relation_triggered_at([r for r in decision.reasons if not r.startswith("ev_")], known_at)
         episode_id = prev.episode_id
         if decision.decision is Decision.TICK:
             self._tape.add(events, self._controller, registry)
@@ -359,6 +377,7 @@ class BrainRuntime:
                 visible_aliases=context.visible_aliases(),
                 registry=registry.snapshot(),
                 coherence=lambda opportunity: None,
+                max_pending=self._brain.config.max_pending_evidence,
             )
             result = apply(prev, episode_id=episode_id, evidence=(), update=None, ctx=ctx)
             self._state = result.state

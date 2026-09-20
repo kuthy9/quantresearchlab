@@ -349,9 +349,11 @@ def test_a_thesis_is_capped_at_two_expressions_in_an_episode(tmp_path: Path) -> 
     m, broker, journal = machine(tmp_path)
     for i in range(2):
         p = short_plan(thesis_id="T1", target_id=f"swing:{i}")
-        start = 1 + i * (CONFIG.order_ttl_bars + 2)
-        kinds = quiet_bars(m, p, start, CONFIG.order_ttl_bars + 2)
-        assert "submitted" in kinds and "expired" in kinds
+        start = 1 + i * 3
+        kinds = quiet_bars(m, p, start, 1)
+        assert "submitted" in kinds
+        kinds = quiet_bars(m, None, start + 1, 2)  # the Brain drops the plan: a cancel spends the expression
+        assert "cancel_requested" in kinds and "cancelled" in kinds
     third = short_plan(thesis_id="T1", target_id="swing:z")
     kinds = m.on_bar(at(40), bar(40, 16370.0, 16380.0), third, episode_id=EP, visible=lambda a: True, llm_called=True)
     assert kinds == ("thesis_refused",) and last_trade(tmp_path)["reason"] == "expressions_exhausted"
@@ -400,3 +402,34 @@ def test_the_hard_stop_halts_cancels_and_flattens_everything(tmp_path: Path) -> 
     assert broker.account.positions == {} and broker.snapshot(at(5)).open_orders == ()
     assert quiet_bars(m, short_plan(thesis_id="T3", target_id="swing:e"), 6, 3) == (), "nothing is ever submitted again"
     assert m.ledger.execution_view()["halted"] is True and m.halt_record["positions_flattened"] == 1
+
+
+def test_a_bias_reversal_flattens_the_open_position_and_closes_the_thesis(tmp_path: Path) -> None:
+    m, broker, journal = machine(tmp_path)
+    plan = short_plan(thesis_id="T1")
+    m.on_bar(at(1), bar(1, 16370.0, 16380.0), plan, episode_id=EP, visible=lambda a: True, bias_direction="SHORT")
+    kinds = m.on_bar(at(2), bar(2, 16380.0, 16390.0), plan, episode_id=EP, visible=lambda a: True, bias_direction="SHORT")
+    assert "position_opened" in kinds
+    # NEUTRAL is not a reversal, nor is the Brain dropping the opportunity
+    kinds = m.on_bar(at(3), bar(3, 16380.0, 16390.0), None, episode_id=EP, visible=lambda a: True, bias_direction=None)
+    assert kinds == () and m.state is MachineState.IN_POSITION
+    # LONG against a SHORT position: flattened at market, filled at the next open
+    kinds = m.on_bar(at(4), bar(4, 16380.0, 16390.0), None, episode_id=EP, visible=lambda a: True, bias_direction="LONG")
+    assert "bias_reversed" in kinds and "position_closed" not in kinds
+    kinds = m.on_bar(at(5), bar(5, 16380.0, 16390.0), None, episode_id=EP, visible=lambda a: True, bias_direction="LONG")  # the open is 16385
+    assert "position_closed" in kinds and "flattened" in kinds and m.state is MachineState.IDLE
+    closed = [r for r in JournalReader(tmp_path).records(EP) if r.record == "trade" and r.payload["kind"] == "position_closed"][0]
+    assert closed.payload["exit_role"] == "bias_reversed" and closed.payload["exit_price"] == 16385.0
+    view = m.execution_view()
+    assert view["theses"][0]["closed_reason"] == "bias_reversed" and view["cooldown_bars_left"] == 0
+    JournalReader(tmp_path).verify_chain(EP, run_id="fsm")
+
+
+def test_an_expiry_gives_the_expression_back_in_the_machine(tmp_path: Path) -> None:
+    m, broker, journal = machine(tmp_path)
+    for i in range(3):
+        p = short_plan(thesis_id="T1", target_id=f"swing:{i}")
+        start = 1 + i * (CONFIG.order_ttl_bars + 2)
+        kinds = quiet_bars(m, p, start, CONFIG.order_ttl_bars + 2)
+        assert "submitted" in kinds and "expired" in kinds, f"expiry {i} is not an expression: the third limit is still admitted"
+    assert m.ledger.execution_view()["theses"][0]["expressions"] == 0

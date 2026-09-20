@@ -898,14 +898,29 @@ class TimeframeStructureState:
     # of the same swing for the live one.
     protected_low_event_id: str | None = None
     protected_high_event_id: str | None = None
+    # 2026-09-18: when an exact acceptance beyond the protected swing leaves
+    # the scale without an external direction, the side that broke it and
+    # when — cleared as soon as a structure confirms an external direction.
+    protection_broken_direction: Direction | None = None
+    protection_broken_at: pd.Timestamp | None = None
 
 
 @dataclass(frozen=True)
 class TimeframeDeliveryState:
     phase: DeliveryPhase
+    # The leg price is in *now*: the sign of the excursion from the last
+    # confirmed leg's end swing (2026-09-18; before that, the confirmed leg).
     active_leg_direction: Direction | None
     displacement_score: float | None
     displacement_features: Mapping[str, float] = field(default_factory=dict)
+    # The confirmed leg the forming one left, the signed excursion from its
+    # end swing to the last close, that close, and the last displacement's
+    # direction and time so a reader can age it.
+    last_leg_direction: Direction | None = None
+    forming_leg_points: float | None = None
+    last_close: float | None = None
+    displacement_direction: Direction | None = None
+    displacement_at: pd.Timestamp | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "phase", DeliveryPhase(self.phase))
@@ -918,6 +933,10 @@ class TimeframeDeliveryState:
             and not 0.0 <= float(self.displacement_score) <= 1.0
         ) or any(not math.isfinite(value) for value in features.values()):
             raise ValueError("timeframe delivery features are invalid")
+        for name in ("forming_leg_points", "last_close"):
+            value = getattr(self, name)
+            if value is not None and not math.isfinite(float(value)):
+                raise ValueError(f"timeframe delivery {name} is non-finite")
 
 
 @dataclass(frozen=True)
@@ -1604,6 +1623,21 @@ def _range_at_price(
     )
 
 
+def forming_leg_direction(
+    points: float | None, fallback: Direction | None
+) -> Direction | None:
+    """The leg price is in now: the sign of the excursion from the last
+    confirmed leg's end swing; ``fallback`` (the internal direction) when no
+    leg has been confirmed; ``None`` when the close sits on the swing."""
+    if points is None:
+        return fallback
+    if points > 0.0:
+        return Direction.LONG
+    if points < 0.0:
+        return Direction.SHORT
+    return None
+
+
 def _delivery_phase(
     structure: TimeframeStructureState,
     range_state: TimeframeRangeState,
@@ -1612,9 +1646,16 @@ def _delivery_phase(
     external = structure.external_direction
     internal = structure.internal_direction
     if external is None:
+        # Balance is an active dealing range that still holds price; a range
+        # price has left is a transition, whatever its lifecycle says.
+        inside = (
+            range_state.normalized_location is not None
+            and 0.0 <= float(range_state.normalized_location) <= 1.0
+        )
         return (
             DeliveryPhase.BALANCE
-            if range_state.range_id is not None
+            if inside
+            and range_state.range_id is not None
             and range_state.range_kind == "active_dealing_range"
             and range_state.lifecycle not in {"broken", "invalidated"}
             else DeliveryPhase.TRANSITION
@@ -1630,6 +1671,31 @@ def _delivery_phase(
     if active_leg is not None and structure.protected_swing_intact:
         return DeliveryPhase.RETRACEMENT
     return DeliveryPhase.TRANSITION
+
+
+def _settle_delivery(
+    delivery: TimeframeDeliveryState,
+    structure: TimeframeStructureState,
+    range_state: TimeframeRangeState,
+    legs: Sequence[StructuralLegState],
+) -> TimeframeDeliveryState:
+    """Derive the active (forming) leg and the phase from the last close, the
+    confirmed legs and the structure — the one rule both producers use."""
+    points = (
+        None
+        if not legs or delivery.last_close is None
+        else float(delivery.last_close) - float(legs[-1].end_price)
+    )
+    active = forming_leg_direction(
+        points, None if legs else structure.internal_direction
+    )
+    return replace(
+        delivery,
+        forming_leg_points=points,
+        last_leg_direction=legs[-1].direction if legs else None,
+        active_leg_direction=active,
+        phase=_delivery_phase(structure, range_state, active),
+    )
 
 
 def _live_protected_assignment_direction(
@@ -2442,6 +2508,7 @@ def reduce_timeframe_state(
 
     if event.kind is EventKind.BAR_COMPLETED:
         close = float(event.evidence.get("close", event.price))
+        delivery = replace(delivery, last_close=close)
         price_update_only = _m1_owner_fanout
         if not price_update_only:
             raw_atr = float(event.evidence.get("atr", 0.0))
@@ -2486,6 +2553,8 @@ def reduce_timeframe_state(
                     if structure.protected_swing_intact is False
                     else None
                 ),
+                protection_broken_direction=None,
+                protection_broken_at=None,
             )
         elif event.direction is live_direction:
             # A same-direction generation may reinforce the regime, but only
@@ -2494,6 +2563,8 @@ def reduce_timeframe_state(
                 structure,
                 external_direction=event.direction,
                 internal_direction=event.direction,
+                protection_broken_direction=None,
+                protection_broken_at=None,
             )
         # An opposite generation remains an immutable Eye fact (and may still
         # add hierarchy provenance), but it cannot rewrite the live regime or
@@ -2501,7 +2572,6 @@ def reduce_timeframe_state(
     elif event.kind is EventKind.STRUCTURAL_LEG_CREATED:
         leg = _leg_from_event(event)
         legs = (*legs, leg)[-8:]
-        delivery = replace(delivery, active_leg_direction=leg.direction)
         if structure.internal_direction is None:
             structure = replace(structure, internal_direction=leg.direction)
     elif event.kind is EventKind.QUALIFIED_BOS:
@@ -2516,6 +2586,8 @@ def reduce_timeframe_state(
             internal_direction=event.direction,
             last_bos=event.price,
             last_bos_direction=event.direction,
+            protection_broken_direction=None,
+            protection_broken_at=None,
         )
     elif event.kind is EventKind.PROTECTED_SWING_ASSIGNED:
         live_direction = live_protected_direction
@@ -2617,6 +2689,8 @@ def reduce_timeframe_state(
                 structure,
                 external_direction=None,
                 protected_swing_intact=False,
+                protection_broken_direction=event.direction,
+                protection_broken_at=event.known_at,
             )
         level_id = str(event.evidence.get("level_id", ""))
         liquidity = _liquidity_state(
@@ -2662,6 +2736,8 @@ def reduce_timeframe_state(
             delivery,
             displacement_score=sum(components) / len(components),
             displacement_features=features,
+            displacement_direction=event.direction,
+            displacement_at=event.known_at,
         )
     elif event.kind is EventKind.LIQUIDITY_LEVEL_CREATED:
         if event.price is None or event.side not in {"above", "below"}:
@@ -2901,14 +2977,7 @@ def reduce_timeframe_state(
     # The candidate projections are deliberately absent here: they are read
     # from the published state, so ``_settle_candidate_views`` runs them once
     # per bar in ``_publish_committed_suffix`` instead of once per event.
-    delivery = replace(
-        delivery,
-        phase=_delivery_phase(
-            structure,
-            range_state,
-            delivery.active_leg_direction,
-        ),
-    )
+    delivery = _settle_delivery(delivery, structure, range_state, legs)
     quality = replace(
         state.quality,
         data_complete=data_complete,
@@ -5656,6 +5725,8 @@ class MarketSnapshotPublisher:
                 protected_swing_intact=False,
                 protected_low_event_id=prior.protected_low_event_id,
                 protected_high_event_id=prior.protected_high_event_id,
+                protection_broken_direction=prior.protection_broken_direction,
+                protection_broken_at=prior.protection_broken_at,
             )
         elif prior is None or prior.external_direction is None:
             formal = candidate
@@ -5705,10 +5776,15 @@ class MarketSnapshotPublisher:
                     in event.context_event_ids
                 )
 
-            accepted = any(
-                accepts_exact_protection(event)
-                for event in semantic_events
+            accepting_event = next(
+                (
+                    event
+                    for event in semantic_events
+                    if accepts_exact_protection(event)
+                ),
+                None,
             )
+            accepted = accepting_event is not None
             assigned = assignment_event is not None
             direction_changed = (
                 candidate.external_direction
@@ -5737,6 +5813,16 @@ class MarketSnapshotPublisher:
                     protected_swing_intact=False,
                     protected_low_event_id=prior.protected_low_event_id,
                     protected_high_event_id=prior.protected_high_event_id,
+                    protection_broken_direction=(
+                        None
+                        if candidate.external_direction is not None
+                        else opposite
+                    ),
+                    protection_broken_at=(
+                        None
+                        if candidate.external_direction is not None
+                        else accepting_event.known_at
+                    ),
                 )
             elif direction_changed and requires_acceptance and not accepted:
                 formal = TimeframeStructureState(
@@ -5776,9 +5862,9 @@ class MarketSnapshotPublisher:
     def _displacement(
         timeframe: Timeframe,
         displacement: DisplacementObservation | None,
-    ) -> tuple[float | None, Mapping[str, float]]:
+    ) -> tuple[float | None, Mapping[str, float], Direction | None, pd.Timestamp | None]:
         if timeframe is not Timeframe.M5 or displacement is None or displacement.current_metrics is None:
-            return None, {}
+            return None, {}, None, None
         features = {name: float(value) for name, value in displacement.current_metrics}
         components = (
             clamp(features.get("efficiency", 0.0)),
@@ -5788,7 +5874,12 @@ class MarketSnapshotPublisher:
             clamp(features.get("body_continuity", 0.0)),
             clamp(features.get("mean_directional_clv", 0.0)),
         )
-        return sum(components) / len(components), features
+        return (
+            sum(components) / len(components),
+            features,
+            displacement.current_direction,
+            pd.Timestamp(displacement.asof),
+        )
 
     @staticmethod
     def _range(frame: FrameObservation, price: float) -> TimeframeRangeState:
@@ -5858,11 +5949,15 @@ class MarketSnapshotPublisher:
         structure: TimeframeStructureState,
         range_state: TimeframeRangeState,
         legs: Sequence[StructuralLegState],
+        price: float | None = None,
     ) -> DeliveryPhase:
-        active_leg = (
-            legs[-1].direction
-            if legs
-            else structure.internal_direction
+        points = (
+            None
+            if not legs or price is None
+            else float(price) - float(legs[-1].end_price)
+        )
+        active_leg = forming_leg_direction(
+            points, None if legs else structure.internal_direction
         )
         return _delivery_phase(structure, range_state, active_leg)
 
@@ -5879,7 +5974,14 @@ class MarketSnapshotPublisher:
     ) -> TimeframeState:
         structure = self._structure(frame)
         range_state = self._range(frame, price)
-        score, features = self._displacement(frame.timeframe, displacement)
+        score, features, displacement_direction, displacement_at = self._displacement(
+            frame.timeframe, displacement
+        )
+        forming_points = (
+            None
+            if not frame.structural_legs
+            else float(price) - float(frame.structural_legs[-1].end_price)
+        )
         candidates = sorted(
             (
                 item
@@ -5957,14 +6059,22 @@ class MarketSnapshotPublisher:
             timeframe=frame.timeframe,
             structure=structure,
             delivery=TimeframeDeliveryState(
-                phase=self._phase(structure, range_state, frame.structural_legs),
-                active_leg_direction=(
-                    frame.structural_legs[-1].direction
-                    if frame.structural_legs
-                    else structure.internal_direction
+                phase=self._phase(structure, range_state, frame.structural_legs, price=price),
+                active_leg_direction=forming_leg_direction(
+                    forming_points,
+                    None if frame.structural_legs else structure.internal_direction,
                 ),
                 displacement_score=score,
                 displacement_features=features,
+                last_leg_direction=(
+                    frame.structural_legs[-1].direction
+                    if frame.structural_legs
+                    else None
+                ),
+                forming_leg_points=forming_points,
+                last_close=float(price),
+                displacement_direction=displacement_direction,
+                displacement_at=displacement_at,
             ),
             range=range_state,
             liquidity=liquidity_state,

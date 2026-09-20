@@ -10,6 +10,8 @@ from brain.tests.test_brain_state import T1, make_state
 from contract.brain.llm import EvidenceVerdict, LLMUpdate
 from contract.brain.state import (
     ActiveExpectation,
+    Bias,
+    BiasDirection,
     Confidence,
     EvidenceItem,
     EvidenceLedger,
@@ -45,6 +47,7 @@ def upd(**over) -> LLMUpdate:
         active_expectation=ActiveExpectation("t", (), ()), watch_next=(), destination_candidates=(),
         opportunity=Opportunity(), reasoning_confidence=Confidence.LOW, continue_active=True,
         framework_trace={f"step_{i}": "n/a" for i in range(1, 15)},
+        bias=Bias(BiasDirection.LONG, "4H", "scripted"),  # the tests' opportunities are LONG; 4H admits every governing scale
     )
     base.update(over)
     return LLMUpdate(**base)
@@ -324,16 +327,68 @@ def test_invalidation_more_than_one_scale_below_the_governing_one_is_refused() -
 
 def test_invalidation_on_the_governing_scale_or_one_below_is_accepted() -> None:
     opportunity = Opportunity("ACTIONABLE", "SHORT", "FVG_5m_3", "SSL_5m_2", "BSL_1H_1", thesis_id="T1", governing_timeframe="15m")
-    res = apply(None, episode_id="EP", evidence=(), update=upd(opportunity=opportunity), ctx=ctx(timeframe_of=_scale))
+    short = Bias(BiasDirection.SHORT, "4H", "b")
+    res = apply(None, episode_id="EP", evidence=(), update=upd(opportunity=opportunity, bias=short), ctx=ctx(timeframe_of=_scale))
     assert res.state.opportunity.state is OpportunityState.ACTIONABLE and res.rejections == ()
-    unknown = apply(None, episode_id="EP", evidence=(), update=upd(opportunity=opportunity), ctx=ctx(timeframe_of=lambda alias: None))
+    unknown = apply(None, episode_id="EP", evidence=(), update=upd(opportunity=opportunity, bias=short), ctx=ctx(timeframe_of=lambda alias: None))
     assert unknown.state.opportunity.state is OpportunityState.ACTIONABLE, "an object of unknown scale is not judged"
 
 
 def test_a_thesis_id_that_flips_direction_is_refused() -> None:
-    first = apply(None, episode_id="EP", evidence=(), update=upd(opportunity=Opportunity("DEVELOPING", "SHORT", "FVG_5m_3", "SSL_5m_2", "BSL_1H_1", thesis_id="T1", governing_timeframe="5m")), ctx=ctx())
+    first = apply(None, episode_id="EP", evidence=(), update=upd(opportunity=Opportunity("DEVELOPING", "SHORT", "FVG_5m_3", "SSL_5m_2", "BSL_1H_1", thesis_id="T1", governing_timeframe="5m"), bias=Bias(BiasDirection.SHORT, "4H", "b")), ctx=ctx())
     flipped = Opportunity("ACTIONABLE", "LONG", "BSL_1H_1", "SSL_5m_2", "FVG_5m_3", thesis_id="T1", governing_timeframe="5m")
     res = apply(first.state, episode_id="EP", evidence=(), update=upd(opportunity=flipped), ctx=ctx())
     assert "thesis_direction_changed:T1" in res.rejections and res.state.opportunity.state is OpportunityState.NONE
     renamed = apply(first.state, episode_id="EP", evidence=(), update=upd(opportunity=replace(flipped, thesis_id="T2")), ctx=ctx())
     assert renamed.state.opportunity.state is OpportunityState.ACTIONABLE
+
+
+# ------------------------------------------------------------ rule 4b: the bias (2026-09-18)
+
+def _opp(direction=TradeDirection.LONG, tf="5m"):
+    return Opportunity(OpportunityState.DEVELOPING, direction, "FVG_5m_3", "SSL_5m_2", "BSL_1H_1", thesis_id="T1", governing_timeframe=tf)
+
+
+def test_an_opportunity_against_the_bias_is_dropped_and_the_bias_kept() -> None:
+    result = apply(quiet(), episode_id="EP", evidence=(), update=upd(opportunity=_opp(TradeDirection.SHORT), bias=Bias(BiasDirection.LONG, "15m", "b")), ctx=ctx())
+    assert result.state.opportunity == Opportunity() and result.state.bias.direction is BiasDirection.LONG
+    assert "opportunity_against_bias:SHORT" in result.rejections
+
+
+def test_no_opportunity_under_a_neutral_bias() -> None:
+    result = apply(quiet(), episode_id="EP", evidence=(), update=upd(opportunity=_opp(), bias=Bias()), ctx=ctx())
+    assert result.state.opportunity == Opportunity() and "opportunity_against_bias:NEUTRAL" in result.rejections
+
+
+def test_a_thesis_above_the_bias_scale_is_dropped() -> None:
+    update = upd(opportunity=_opp(tf="1H"), bias=Bias(BiasDirection.LONG, "15m", "b"))
+    result = apply(quiet(), episode_id="EP", evidence=(), update=update, ctx=ctx())
+    assert result.state.opportunity == Opportunity() and "opportunity_scale_above_bias:1H" in result.rejections
+    update = upd(opportunity=_opp(tf="5m"), bias=Bias(BiasDirection.LONG, "15m", "b"))
+    assert apply(quiet(), episode_id="EP", evidence=(), update=update, ctx=ctx()).state.opportunity.state is OpportunityState.DEVELOPING
+
+
+def test_a_carried_forward_state_keeps_its_bias() -> None:
+    prev = quiet(bias=Bias(BiasDirection.SHORT, "1H", "b"))
+    result = apply(prev, episode_id="EP", evidence=(), update=None, ctx=ctx())
+    assert result.state.bias == prev.bias
+
+
+def test_pending_evidence_is_bounded_and_the_oldest_expires() -> None:
+    """Run X (2026-09-19): 25 empty replies in a row re-offered 124 pending
+    items and the input grew until no reply could come.  The ledger keeps
+    the newest ``max_pending`` pending items; the rest expire, journaled."""
+    old = tuple(item(f"ev_p{i}", "level_reached") for i in range(3))
+    prev = quiet(evidence=EvidenceLedger(unresolved=old))
+    # an incident bar (no update) carries forward and files one more unjudged item
+    r = apply(prev, episode_id="EP_1", evidence=[item("ev_new")], update=None, ctx=ctx(max_pending=2))
+    pending = [e.evidence_id for e in r.state.evidence.unresolved if e.verdict is None]
+    assert pending == ["ev_p2", "ev_new"]
+    assert "evidence_expired:ev_p0" in r.rejections and "evidence_expired:ev_p1" in r.rejections
+    # an update that leaves them unjudged is bounded the same way
+    r2 = apply(r.state, episode_id="EP_1", evidence=[item("ev_p2"), item("ev_new"), item("ev_later")], update=upd(evidence_verdicts=()), ctx=ctx(max_pending=2))
+    pending = [e.evidence_id for e in r2.state.evidence.unresolved if e.verdict is None]
+    assert pending == ["ev_new", "ev_later"] and "evidence_expired:ev_p2" in r2.rejections
+    # unbounded by default
+    r3 = apply(prev, episode_id="EP_1", evidence=[item("ev_new")], update=None, ctx=ctx())
+    assert len([e for e in r3.state.evidence.unresolved if e.verdict is None]) == 4

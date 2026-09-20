@@ -1,5 +1,5 @@
 {
-  "schema_version": 3,
+  "schema_version": 4,
   "bookkeeping_kinds": [
     "swing_confirmed",
     "structural_leg_created",
@@ -17,7 +17,9 @@
     "fvg_partially_filled",
     "fvg_fully_filled",
     "fvg_midpoint_touched",
-    "dealing_range_replaced"
+    "dealing_range_replaced",
+    "delivery_phase_entered",
+    "delivery_phase_exited"
   ],
   "wake": {
     "timeframes_any_reaction": [
@@ -39,6 +41,7 @@
     "1H",
     "4H"
   ],
+  "relation_change_debounce_bars": 15,
   "idle_archive_after_updates": 6,
   "evidence": {
     "timeframes": [

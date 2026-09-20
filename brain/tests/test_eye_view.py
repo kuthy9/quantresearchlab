@@ -185,3 +185,31 @@ def test_interaction_rows_alias_their_source_object_and_say_when_they_last_stepp
     assert [row["stepped_since_last_call"] for row in rows] == [False, False]
     rows = interaction_rows((zone_path,), manipulation_sources={}, registry=registry, known_at=known_at, since=None)
     assert rows[0]["stepped_since_last_call"] is True
+
+
+def test_scales_publish_the_forming_leg_the_displacement_age_and_the_reset(synthetic_observations) -> None:
+    registry = ObjectRegistry()
+    seen_forming = False
+    for observation in synthetic_observations:
+        context = build_eye_context(observation, registry, rule=RULE)
+        for name, scale in context.scales.items():
+            delivery = scale["delivery"]
+            for key in ("phase", "active_leg_direction", "last_leg_direction", "forming_leg_atr", "displacement_score", "displacement_direction", "displacement_age_bars"):
+                assert key in delivery, (name, key)
+            assert "reset" in scale["structure"]
+            if delivery["forming_leg_atr"] not in (None, 0):
+                seen_forming = True
+                assert (delivery["forming_leg_atr"] > 0) == (delivery["active_leg_direction"] == "long")
+            if delivery["displacement_age_bars"] is not None:
+                assert delivery["displacement_age_bars"] >= 0 and delivery["displacement_direction"] in ("long", "short")
+    assert seen_forming
+
+
+def test_session_drift_is_the_close_against_the_session_open_in_1m_atrs(synthetic_observations) -> None:
+    observation = synthetic_observations[-1]
+    context = build_eye_context(observation, ObjectRegistry(), rule=RULE)
+    drift = context.session["drift_atr"]
+    if context.atr_1m is None or context.session["session_open"] is None:
+        assert drift is None
+    else:
+        assert drift == round((context.close - context.session["session_open"]) / context.atr_1m, 6)

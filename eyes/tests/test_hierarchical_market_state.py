@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pandas as pd
 
 from eyes.core.event_store import EventStore, event_order_key
@@ -30,8 +32,10 @@ from contract.eye import (
     EventOrigin,
     FrameObservation,
     MarketEvent,
+    StructuralLegState,
     SwingLifecycle,
     SwingPoint,
+    SwingRank,
     SwingRelation,
     SwingSide,
 )
@@ -292,6 +296,26 @@ def test_delivery_phase_uses_one_rule_for_invalidated_active_range() -> None:
         )
         is DeliveryPhase.TRANSITION
     )
+
+
+def _leg_state(direction: Direction, *, start_price: float, end_price: float) -> StructuralLegState:
+    start = _clock("2025-01-06 09:30")
+    end = start + pd.Timedelta(hours=4)
+    return StructuralLegState(
+        leg_id="leg:test", timeframe=Timeframe.H1, direction=direction, start_swing_id="a", end_swing_id="b",
+        start_event_time=start, end_event_time=end, known_at=end, start_price=start_price, end_price=end_price,
+        start_close=start_price, end_close=end_price, amplitude_points=abs(end_price - start_price),
+        amplitude_atr=1.0, duration_bars=4, duration_minutes=240, efficiency=0.8, max_retracement_points=0.5,
+        max_retracement_atr=0.25, path_class=SwingRank.EXTERNAL, source_swing_ids=("a", "b"),
+    )
+
+
+def test_the_projected_phase_reads_the_forming_leg_against_price() -> None:
+    short = _empty_state(Timeframe.H1, direction=Direction.SHORT, internal=Direction.SHORT)
+    structure = replace(short.structure, protected_high=110.0, protected_high_id="protected-high", protected_swing_intact=True)
+    leg = _leg_state(Direction.SHORT, start_price=108.0, end_price=100.0)
+    assert MarketSnapshotPublisher._phase(structure, short.range, (leg,), price=103.0) is DeliveryPhase.RETRACEMENT
+    assert MarketSnapshotPublisher._phase(structure, short.range, (leg,), price=97.0) is DeliveryPhase.EXPANSION
 
 
 def test_stale_opposed_mss_does_not_warn_after_child_realigns() -> None:

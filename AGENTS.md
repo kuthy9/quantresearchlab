@@ -94,7 +94,9 @@ none|sim|ibkr` adds the Risk gate and the order machine) and
 `brain/scripts/replay_journal.py` proves a journal reproduces from the Eye
 alone (a `sim` run's trade records included); `brain/scripts/summarize_run.py`
 reads a journal into one `summary.json` (calls, tokens, cost, sleeps, vetoes
-and their repeats, the order lifecycle, the account, timings). The Eye-to-Brain link on the real tape is
+and their repeats, the order lifecycle, the account, timings);
+`brain/scripts/audit_scales.py` prints the change points of the per-scale
+facts the Brain reads over a window, Eye only. The Eye-to-Brain link on the real tape is
 `brain/tests/test_eye_link_real_tape.py` (`research_orchestration`), and the
 frozen week backtest of 2026-09-17 is `brain/tests/test_regression_baseline.py`
 (`research_orchestration`: replays the baseline journals named in

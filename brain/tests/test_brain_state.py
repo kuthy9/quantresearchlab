@@ -7,6 +7,8 @@ import pytest
 
 from contract.brain.state import (
     ActiveExpectation,
+    Bias,
+    BiasDirection,
     BrainState,
     BrainStatus,
     Confidence,
@@ -130,7 +132,7 @@ def test_from_dict_rejects_unknown_keys_and_other_schemas() -> None:
     with pytest.raises(ValueError, match="unknown"):
         BrainState.from_dict(payload)
     payload = make_state().to_dict()
-    payload["schema_version"] = 2
+    payload["schema_version"] = 3
     with pytest.raises(ValueError, match="schema"):
         BrainState.from_dict(payload)
 
@@ -155,3 +157,21 @@ def test_opportunity_refuses_bad_thesis_fields(bad) -> None:
         Opportunity("ACTIONABLE", "SHORT", "a", "b", "c", **fields)
     with pytest.raises(ValueError, match="NONE"):
         Opportunity("NONE", thesis_id="T1")
+
+
+def test_bias_round_trips_and_a_schema_1_state_reads_as_neutral() -> None:
+    state = make_state(bias=Bias(BiasDirection.LONG, "15m", "15m active leg long past one ATR after the MSS"))
+    again = BrainState.from_json(state.to_json())
+    assert again.bias == state.bias and again.schema_version == 2
+    payload = json.loads(state.to_json())
+    del payload["bias"]
+    payload["schema_version"] = 1
+    old = BrainState.from_dict(payload)
+    assert old.bias == Bias() and old.schema_version == 2
+
+
+@pytest.mark.parametrize("bad", [dict(scale="1m"), dict(scale="5m"), dict(scale="4h"), dict(direction="UP")])
+def test_bias_refuses_a_bad_scale_or_direction(bad) -> None:
+    """The 5m is an execution scale, never the bias scale (run B set it 18 times)."""
+    with pytest.raises(ValueError):
+        Bias(**{"direction": BiasDirection.LONG, "scale": "15m", "basis": "", **bad})

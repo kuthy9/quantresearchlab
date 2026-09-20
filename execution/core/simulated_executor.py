@@ -352,7 +352,10 @@ class SimulatedExecutor:
             if entry.is_open and asof > bracket.entry_live_from and self._touched(bar, float(entry.limit_price), entry.side):
                 per_bar = self.config.max_fill_per_bar
                 quantity = entry.remaining if per_bar is None else min(entry.remaining, per_bar)
-                filled, fill = self._fill(entry, quantity, float(entry.limit_price), asof)
+                limit = float(entry.limit_price)
+                # a limit through the market (BUY at or above the open, SELL at or below) fills at the open
+                price = min(limit, float(bar.open)) if entry.side == "BUY" else max(limit, float(bar.open))
+                filled, fill = self._fill(entry, quantity, price, asof)
                 entry = self._set(bracket, "entry", filled)
                 if bracket.first_fill_at is None:
                     bracket.first_fill_at = asof

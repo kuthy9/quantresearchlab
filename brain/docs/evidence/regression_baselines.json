@@ -1,4 +1,689 @@
 {
-  "note": "Rewritten 2026-09-17 for Risk v2 / the thesis lifecycle: the three 2026-09-17 baselines (302c54bb21d9d77e, 04e7302f3cb72bbd, 7ec17f066d232ba4) cannot replay under the new reply schema and gate, and the first Risk v2 day run (72ea13c7fcbc1cff, 2026-09-18) predates the leverage cap that counts open contracts and the simulator's position averaging fix, so its replay diverges from 09:30 UTC. All four journals stay under outputs/brain_journal/ as evidence. The next complete run under the final code is added here.",
-  "runs": []
+  "schema_version": 1,
+  "note": "Rewritten 2026-09-17 for Risk v2 / the thesis lifecycle: the three 2026-09-17 baselines (302c54bb21d9d77e, 04e7302f3cb72bbd, 7ec17f066d232ba4) cannot replay under the new reply schema and gate, and the first Risk v2 day run (72ea13c7fcbc1cff, 2026-09-18) predates the leverage cap that counts open contracts and the simulator's position averaging fix, so its replay diverges from 09:30 UTC. All four journals stay under outputs/brain_journal/ as evidence. Frozen 2026-09-20 after the direction fix (Eye forming leg, Brain bias, execution exits): run X ab572b09d59bc4d7 on 2022-01-03 and the guard run 5cfe65bcc480a032 on 2022-01-04, both replayed from the Eye alone; each entry is {run_id, label, frozen_on, summary} with the summary computed without bars (coverage and direction_accuracy_60m are None there; the test compares the deterministic fields).",
+  "runs": [
+    {
+      "run_id": "ab572b09d59bc4d7",
+      "label": "run X, 2022-01-03 (direction fix, all three layers)",
+      "frozen_on": "2026-09-20",
+      "summary": {
+        "run": {
+          "run_id": "ab572b09d59bc4d7",
+          "window": {
+            "emit_start": "2022-01-02T18:00",
+            "end": "2022-01-03T17:00",
+            "source": "data/processed/nq_1m_previous_session_front_v2_3_2017_2026.parquet",
+            "warmup_start": "2021-12-27"
+          },
+          "model": "deepseek:deepseek-flash@high",
+          "reasoning_effort": "high",
+          "broker": "sim",
+          "client": "deepseek",
+          "started_at": "2026-09-20T03:08:51Z",
+          "finished_at": "2026-09-20T09:56:21Z",
+          "minutes": 407.49,
+          "bars_emitted": 1380,
+          "max_llm_calls": 1000,
+          "system_prompt_sha256": "0e95cd17c679c799576a9137e110366088f40c90eff4208d0d1d1474a8850bbf",
+          "sleep_controller_sha256": "a65debce70f486fd11bb7e464c1ca37c894f4f03dcfc6ebaaf639bebf6ef9562",
+          "main_brain_config_sha256": "25b3c4a1054752baed39da50431fd680be6b54a315c2cb669103a0fbdabb665f",
+          "risk_config_sha256": "e79fa6346d543b099837ba4505a0582ef68a0ef174157fcd729b987e931f05e7",
+          "simulator_config_sha256": "c8e38bdda3e880b7160c7e369f00576cd184c0c4b0cc3c7091c5691002eefeff",
+          "git_revision": "1271ace0aca060f4d23b3e0536ec5d7cb9605c13",
+          "until": null
+        },
+        "llm": {
+          "calls": 290,
+          "replies": 286,
+          "incidents": 5,
+          "incidents_by_kind": {
+            "MalformedReply": 5
+          },
+          "repairs": 30,
+          "prompt_tokens": 3736753,
+          "cache_hit_tokens": 1837438,
+          "cache_miss_tokens": 1899315,
+          "completion_tokens": 4440689,
+          "cost_usd_peak": 5.909646,
+          "cost_usd_off_peak": 2.954823,
+          "latency_ms": {
+            "p50": 59280.0,
+            "p95": 125003.0,
+            "max": 140667.0
+          },
+          "input_chars_median": 24125.5,
+          "calls_by_trigger": {
+            "UPDATE": 279,
+            "WAKE": 11
+          },
+          "trigger_reasons": {
+            "acceptance_confirmed": 74,
+            "dealing_range_created": 8,
+            "dealing_range_invalidated": 8,
+            "displacement_observed": 176,
+            "fvg_first_retest": 60,
+            "level_reached": 117,
+            "mss_core_confirmed": 20,
+            "origin_zone_mitigated": 1,
+            "qualified_bos": 6,
+            "qualified_origin_zone_created": 2,
+            "relation_change": 58,
+            "structure_break": 37,
+            "structure_direction_confirmed": 19,
+            "sweep_confirmed": 36
+          },
+          "wake_kinds": {
+            "acceptance_confirmed": 6,
+            "dealing_range_created": 2,
+            "dealing_range_invalidated": 1,
+            "displacement_observed": 13,
+            "fvg_first_retest": 1,
+            "level_reached": 3,
+            "mss_core_confirmed": 3,
+            "structure_break": 2,
+            "sweep_confirmed": 3
+          },
+          "unchanged_calls": 44,
+          "confidence": {
+            "LOW": 39,
+            "MEDIUM": 247
+          }
+        },
+        "controller": {
+          "decisions": {
+            "STAY_ASLEEP": 43,
+            "TICK": 1047,
+            "UPDATE": 279,
+            "WAKE": 11
+          },
+          "episodes": 11,
+          "sleeps_by_reason": {
+            "continue_active=false": 5,
+            "idle": 6
+          },
+          "active_at_end": 0,
+          "awake_bars_total": 1337,
+          "awake_bars_median": 45.0,
+          "calls_per_awake_bar": 0.217
+        },
+        "coverage": null,
+        "brain": {
+          "proposed_by_state": {
+            "ACTIONABLE": 46,
+            "DEVELOPING": 86,
+            "NONE": 154
+          },
+          "survived_by_state": {
+            "ACTIONABLE": 26,
+            "DEVELOPING": 37
+          },
+          "distinct_opportunities": 49,
+          "geometry_errors": 0,
+          "rejections_by_kind": {
+            "evidence_without_verdict": 36,
+            "opportunity_incoherent": 8,
+            "opportunity_object_not_visible": 3
+          },
+          "understanding_changes": 275
+        },
+        "risk": {
+          "vetoes": 14,
+          "veto_signatures": 14,
+          "reproposals_after_veto": 0,
+          "veto_repeat_rate": 0.0,
+          "vetoes_by_code": {
+            "daily_stop": 1,
+            "reward_risk": 13
+          },
+          "calls_with_veto_feedback": 65,
+          "kept_after_veto": 0,
+          "reanalysed_after_veto": 63,
+          "veto_bars": 81,
+          "stale_snapshots": 0,
+          "thesis_refused": 4,
+          "refusals_by_reason": {
+            "thesis_engaged": 4
+          },
+          "daily_stop_vetoes": 1,
+          "halted": null
+        },
+        "orders": {
+          "submitted": 9,
+          "working": 9,
+          "partial": 0,
+          "filled": 7,
+          "cancel_requested": 6,
+          "cancelled": 1,
+          "expired": 1,
+          "rejected": 0,
+          "position_opened": 7,
+          "position_closed": 7,
+          "exit_leg_lost": 0,
+          "invalidation_close": 1,
+          "bias_reversed": 1,
+          "flattened": 2,
+          "halted": 0,
+          "missed_trends": null,
+          "cancel_reasons": {
+            "bias_reversed": 2,
+            "invalidation": 2,
+            "signature_changed": 1,
+            "ttl": 1
+          },
+          "replacements": 1,
+          "exit_roles": {
+            "bias_reversed": 1,
+            "invalidation": 1,
+            "stop": 5
+          },
+          "bars_to_fill": {
+            "median": 2.0,
+            "max": 6.0
+          },
+          "closed_trades": [
+            {
+              "episode_id": "EP_20220102_001",
+              "direction": "SHORT",
+              "quantity": 2,
+              "entry_price": 16389.5,
+              "exit_price": 16397.5,
+              "exit_role": "stop",
+              "closed_at": "2022-01-02T23:03:00Z",
+              "pnl_points": -16.0,
+              "thesis_id": "T1"
+            },
+            {
+              "episode_id": "EP_20220102_001",
+              "direction": "SHORT",
+              "quantity": 2,
+              "entry_price": 16389.5,
+              "exit_price": 16405.75,
+              "exit_role": "stop",
+              "closed_at": "2022-01-03T00:31:00Z",
+              "pnl_points": -32.5,
+              "thesis_id": "T2"
+            },
+            {
+              "episode_id": "EP_20220102_001",
+              "direction": "LONG",
+              "quantity": 2,
+              "entry_price": 16402.5,
+              "exit_price": 16393.0,
+              "exit_role": "stop",
+              "closed_at": "2022-01-03T06:12:00Z",
+              "pnl_points": -19.0,
+              "thesis_id": "T3"
+            },
+            {
+              "episode_id": "EP_20220102_001",
+              "direction": "SHORT",
+              "quantity": 2,
+              "entry_price": 16404.0,
+              "exit_price": 16407.75,
+              "exit_role": "invalidation",
+              "closed_at": "2022-01-03T08:26:00Z",
+              "pnl_points": -7.5,
+              "thesis_id": "T4"
+            },
+            {
+              "episode_id": "EP_20220102_001",
+              "direction": "SHORT",
+              "quantity": 2,
+              "entry_price": 16409.5,
+              "exit_price": 16412.0,
+              "exit_role": "bias_reversed",
+              "closed_at": "2022-01-03T10:01:00Z",
+              "pnl_points": -5.0,
+              "thesis_id": "T5"
+            },
+            {
+              "episode_id": "EP_20220103_001",
+              "direction": "LONG",
+              "quantity": 2,
+              "entry_price": 16438.75,
+              "exit_price": 16422.0,
+              "exit_role": "stop",
+              "closed_at": "2022-01-03T13:34:00Z",
+              "pnl_points": -33.5,
+              "thesis_id": "T1"
+            },
+            {
+              "episode_id": "EP_20220103_002",
+              "direction": "LONG",
+              "quantity": 2,
+              "entry_price": 16413.5,
+              "exit_price": 16397.0,
+              "exit_role": "stop",
+              "closed_at": "2022-01-03T14:48:00Z",
+              "pnl_points": -33.0,
+              "thesis_id": "T2"
+            }
+          ],
+          "realized_points": -146.5
+        },
+        "bias": {
+          "changes": 21,
+          "neutral_revisions": 46,
+          "opportunities_against_bias": 0,
+          "direction_accuracy_60m": null
+        },
+        "invariants": {
+          "double_entry": 0,
+          "positions_over_limit": 0,
+          "position_without_fill": 0,
+          "stale_snapshots": 0
+        },
+        "account": {
+          "cash": 97070.0,
+          "realized_pnl": -2930.0,
+          "positions": [],
+          "unrealized_pnl": null,
+          "orders": {
+            "cancelled": 15,
+            "filled": 14,
+            "pending": 0,
+            "rejected": 0
+          },
+          "fills": 14
+        },
+        "timings": {
+          "bar": {
+            "count": 1380,
+            "max_ms": 979362.808,
+            "mean_ms": 17606.616,
+            "p50_ms": 1.735,
+            "p95_ms": 98375.081,
+            "total_s": 24297.13062
+          },
+          "controller": {
+            "count": 1380,
+            "max_ms": 0.122,
+            "mean_ms": 0.017,
+            "p50_ms": 0.015,
+            "p95_ms": 0.029,
+            "total_s": 0.023143
+          },
+          "eye": {
+            "count": 7920,
+            "max_ms": 1335.527,
+            "mean_ms": 19.01,
+            "p50_ms": 16.039,
+            "p95_ms": 35.569,
+            "total_s": 150.555785
+          },
+          "input": {
+            "count": 290,
+            "max_ms": 176.627,
+            "mean_ms": 2.622,
+            "p50_ms": 1.726,
+            "p95_ms": 3.946,
+            "total_s": 0.760242
+          },
+          "journal": {
+            "count": 1337,
+            "max_ms": 280.427,
+            "mean_ms": 6.756,
+            "p50_ms": 0.192,
+            "p95_ms": 39.311,
+            "total_s": 9.032946
+          },
+          "llm": {
+            "count": 290,
+            "max_ms": 979331.65,
+            "mean_ms": 83738.83,
+            "p50_ms": 62326.861,
+            "p95_ms": 235261.65,
+            "total_s": 24284.2608
+          },
+          "machine": {
+            "count": 1380,
+            "max_ms": 5.986,
+            "mean_ms": 0.109,
+            "p50_ms": 0.04,
+            "p95_ms": 0.433,
+            "total_s": 0.149774
+          },
+          "plan": {
+            "count": 1380,
+            "max_ms": 0.297,
+            "mean_ms": 0.018,
+            "p50_ms": 0.001,
+            "p95_ms": 0.105,
+            "total_s": 0.024626
+          },
+          "reduce": {
+            "count": 290,
+            "max_ms": 9.899,
+            "mean_ms": 1.5,
+            "p50_ms": 1.203,
+            "p95_ms": 3.487,
+            "total_s": 0.434992
+          }
+        }
+      }
+    },
+    {
+      "run_id": "5cfe65bcc480a032",
+      "label": "the 2022-01-04 guard run, same code",
+      "frozen_on": "2026-09-20",
+      "summary": {
+        "run": {
+          "run_id": "5cfe65bcc480a032",
+          "window": {
+            "emit_start": "2022-01-03T18:00",
+            "end": "2022-01-04T17:00",
+            "source": "data/processed/nq_1m_previous_session_front_v2_3_2017_2026.parquet",
+            "warmup_start": "2021-12-28"
+          },
+          "model": "deepseek:deepseek-flash@high",
+          "reasoning_effort": "high",
+          "broker": "sim",
+          "client": "deepseek",
+          "started_at": "2026-09-19T20:33:34Z",
+          "finished_at": "2026-09-20T02:42:24Z",
+          "minutes": 368.82,
+          "bars_emitted": 1380,
+          "max_llm_calls": 1000,
+          "system_prompt_sha256": "0e95cd17c679c799576a9137e110366088f40c90eff4208d0d1d1474a8850bbf",
+          "sleep_controller_sha256": "a65debce70f486fd11bb7e464c1ca37c894f4f03dcfc6ebaaf639bebf6ef9562",
+          "main_brain_config_sha256": "255546847344a94f0c220608efb9d8c02b9d12db40e1c4ef934ff1130b6987e8",
+          "risk_config_sha256": "e79fa6346d543b099837ba4505a0582ef68a0ef174157fcd729b987e931f05e7",
+          "simulator_config_sha256": "c8e38bdda3e880b7160c7e369f00576cd184c0c4b0cc3c7091c5691002eefeff",
+          "git_revision": "1271ace0aca060f4d23b3e0536ec5d7cb9605c13",
+          "until": null
+        },
+        "llm": {
+          "calls": 246,
+          "replies": 245,
+          "incidents": 2,
+          "incidents_by_kind": {
+            "MalformedReply": 2
+          },
+          "repairs": 23,
+          "prompt_tokens": 3303736,
+          "cache_hit_tokens": 1425791,
+          "cache_miss_tokens": 1877945,
+          "completion_tokens": 4373001,
+          "cost_usd_peak": 5.819539,
+          "cost_usd_off_peak": 2.90977,
+          "latency_ms": {
+            "p50": 71088.0,
+            "p95": 127427.0,
+            "max": 147954.0
+          },
+          "input_chars_median": 25437.5,
+          "calls_by_trigger": {
+            "UPDATE": 241,
+            "WAKE": 5
+          },
+          "trigger_reasons": {
+            "acceptance_confirmed": 68,
+            "dealing_range_created": 7,
+            "dealing_range_invalidated": 7,
+            "displacement_observed": 147,
+            "fvg_first_retest": 63,
+            "level_reached": 79,
+            "mss_core_confirmed": 15,
+            "origin_zone_mitigated": 1,
+            "protected_swing_assigned": 2,
+            "qualified_bos": 6,
+            "relation_change": 62,
+            "structure_break": 28,
+            "structure_direction_confirmed": 12,
+            "sweep_confirmed": 15
+          },
+          "wake_kinds": {
+            "acceptance_confirmed": 1,
+            "displacement_observed": 4,
+            "level_reached": 2,
+            "structure_direction_confirmed": 1
+          },
+          "unchanged_calls": 41,
+          "confidence": {
+            "LOW": 29,
+            "MEDIUM": 216
+          }
+        },
+        "controller": {
+          "decisions": {
+            "STAY_ASLEEP": 15,
+            "TICK": 1119,
+            "UPDATE": 241,
+            "WAKE": 5
+          },
+          "episodes": 5,
+          "sleeps_by_reason": {
+            "continue_active=false": 1,
+            "idle": 3
+          },
+          "active_at_end": 1,
+          "awake_bars_total": 1365,
+          "awake_bars_median": 391.0,
+          "calls_per_awake_bar": 0.18
+        },
+        "coverage": null,
+        "brain": {
+          "proposed_by_state": {
+            "ACTIONABLE": 50,
+            "DEVELOPING": 114,
+            "NONE": 81
+          },
+          "survived_by_state": {
+            "ACTIONABLE": 28,
+            "DEVELOPING": 46
+          },
+          "distinct_opportunities": 54,
+          "geometry_errors": 0,
+          "rejections_by_kind": {
+            "evidence_without_verdict": 24,
+            "opportunity_incoherent": 3,
+            "opportunity_object_not_visible": 1
+          },
+          "understanding_changes": 239
+        },
+        "risk": {
+          "vetoes": 14,
+          "veto_signatures": 14,
+          "reproposals_after_veto": 0,
+          "veto_repeat_rate": 0.0,
+          "vetoes_by_code": {
+            "reward_risk": 14
+          },
+          "calls_with_veto_feedback": 91,
+          "kept_after_veto": 0,
+          "reanalysed_after_veto": 90,
+          "veto_bars": 100,
+          "stale_snapshots": 0,
+          "thesis_refused": 5,
+          "refusals_by_reason": {
+            "expressions_exhausted": 2,
+            "thesis_closed": 2,
+            "thesis_engaged": 1
+          },
+          "daily_stop_vetoes": 0,
+          "halted": null
+        },
+        "orders": {
+          "submitted": 11,
+          "working": 11,
+          "partial": 0,
+          "filled": 4,
+          "cancel_requested": 9,
+          "cancelled": 5,
+          "expired": 2,
+          "rejected": 0,
+          "position_opened": 4,
+          "position_closed": 4,
+          "exit_leg_lost": 0,
+          "invalidation_close": 1,
+          "bias_reversed": 0,
+          "flattened": 1,
+          "halted": 0,
+          "missed_trends": null,
+          "cancel_reasons": {
+            "invalidation": 2,
+            "plan_dropped": 3,
+            "signature_changed": 2,
+            "ttl": 2
+          },
+          "replacements": 2,
+          "exit_roles": {
+            "invalidation": 1,
+            "stop": 2,
+            "target": 1
+          },
+          "bars_to_fill": {
+            "median": 1.5,
+            "max": 8.0
+          },
+          "closed_trades": [
+            {
+              "episode_id": "EP_20220103_003",
+              "direction": "LONG",
+              "quantity": 2,
+              "entry_price": 16533.0,
+              "exit_price": 16522.25,
+              "exit_role": "invalidation",
+              "closed_at": "2022-01-04T07:11:00Z",
+              "pnl_points": -21.5,
+              "thesis_id": "T2"
+            },
+            {
+              "episode_id": "EP_20220104_001",
+              "direction": "LONG",
+              "quantity": 2,
+              "entry_price": 16503.5,
+              "exit_price": 16474.75,
+              "exit_role": "stop",
+              "closed_at": "2022-01-04T14:32:00Z",
+              "pnl_points": -57.5,
+              "thesis_id": "T4"
+            },
+            {
+              "episode_id": "EP_20220104_002",
+              "direction": "SHORT",
+              "quantity": 2,
+              "entry_price": 16229.0,
+              "exit_price": 16162.5,
+              "exit_role": "target",
+              "closed_at": "2022-01-04T18:31:00Z",
+              "pnl_points": 133.0,
+              "thesis_id": "T2"
+            },
+            {
+              "episode_id": "EP_20220104_002",
+              "direction": "SHORT",
+              "quantity": 2,
+              "entry_price": 16222.25,
+              "exit_price": 16251.0,
+              "exit_role": "stop",
+              "closed_at": "2022-01-04T20:11:00Z",
+              "pnl_points": -57.5,
+              "thesis_id": "T3"
+            }
+          ],
+          "realized_points": -3.5
+        },
+        "bias": {
+          "changes": 6,
+          "neutral_revisions": 14,
+          "opportunities_against_bias": 0,
+          "direction_accuracy_60m": null
+        },
+        "invariants": {
+          "double_entry": 0,
+          "positions_over_limit": 0,
+          "position_without_fill": 0,
+          "stale_snapshots": 0
+        },
+        "account": {
+          "cash": 99930.0,
+          "realized_pnl": -70.0,
+          "positions": [],
+          "unrealized_pnl": null,
+          "orders": {
+            "cancelled": 26,
+            "filled": 8,
+            "pending": 0,
+            "rejected": 0
+          },
+          "fills": 8
+        },
+        "timings": {
+          "bar": {
+            "count": 1380,
+            "max_ms": 281033.879,
+            "mean_ms": 15928.766,
+            "p50_ms": 1.708,
+            "p95_ms": 108992.261,
+            "total_s": 21981.697559
+          },
+          "controller": {
+            "count": 1380,
+            "max_ms": 0.062,
+            "mean_ms": 0.016,
+            "p50_ms": 0.015,
+            "p95_ms": 0.026,
+            "total_s": 0.022218
+          },
+          "eye": {
+            "count": 7920,
+            "max_ms": 576.018,
+            "mean_ms": 18.453,
+            "p50_ms": 15.901,
+            "p95_ms": 33.499,
+            "total_s": 146.149236
+          },
+          "input": {
+            "count": 246,
+            "max_ms": 3.49,
+            "mean_ms": 1.831,
+            "p50_ms": 1.837,
+            "p95_ms": 3.052,
+            "total_s": 0.450315
+          },
+          "journal": {
+            "count": 1365,
+            "max_ms": 101.693,
+            "mean_ms": 5.49,
+            "p50_ms": 0.181,
+            "p95_ms": 36.11,
+            "total_s": 7.493512
+          },
+          "llm": {
+            "count": 246,
+            "max_ms": 281000.488,
+            "mean_ms": 89312.166,
+            "p50_ms": 75500.555,
+            "p95_ms": 210493.477,
+            "total_s": 21970.792729
+          },
+          "machine": {
+            "count": 1380,
+            "max_ms": 2.387,
+            "mean_ms": 0.091,
+            "p50_ms": 0.036,
+            "p95_ms": 0.407,
+            "total_s": 0.125298
+          },
+          "plan": {
+            "count": 1380,
+            "max_ms": 0.287,
+            "mean_ms": 0.021,
+            "p50_ms": 0.001,
+            "p95_ms": 0.099,
+            "total_s": 0.02908
+          },
+          "reduce": {
+            "count": 246,
+            "max_ms": 13.653,
+            "mean_ms": 1.521,
+            "p50_ms": 1.167,
+            "p95_ms": 3.635,
+            "total_s": 0.374172
+          }
+        }
+      }
+    }
+  ]
 }

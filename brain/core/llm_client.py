@@ -206,15 +206,23 @@ class DeepSeekClient:
             raise MalformedReply("DeepSeek response has no choices[0].message") from None
         finish_reason = choice.get("finish_reason") if isinstance(choice, Mapping) else None
         content = message.get("content") if isinstance(message, Mapping) else None
-        if not isinstance(content, str) or not content.strip():
-            raise MalformedReply("DeepSeek reply content is empty")
-        if finish_reason == "length":
-            # Reasoning tokens count against max_tokens; a cut reply is never valid JSON.
-            raise MalformedReply(
-                f"DeepSeek reply truncated at max_tokens={self.max_tokens} (finish_reason=length)"
-            )
-        reasoning = message.get("reasoning_content")
+        reasoning = message.get("reasoning_content") if isinstance(message, Mapping) else None
         usage_raw = payload.get("usage") or {}
+        reasoning_chars = len(reasoning) if isinstance(reasoning, str) else 0
+        if finish_reason == "length":
+            # Reasoning tokens count against max_tokens; a cut reply is never
+            # valid JSON, and reasoning that used the whole budget leaves the
+            # content empty (run X, 2026-09-19).
+            raise MalformedReply(
+                f"DeepSeek reply truncated at max_tokens={self.max_tokens} (finish_reason=length, "
+                f"content_chars={len(content) if isinstance(content, str) else 0}, reasoning_chars={reasoning_chars})"
+            )
+        if not isinstance(content, str) or not content.strip():
+            completion = usage_raw.get("completion_tokens") if isinstance(usage_raw, Mapping) else None
+            raise MalformedReply(
+                f"DeepSeek reply content is empty (finish_reason={finish_reason}, "
+                f"completion_tokens={completion}, reasoning_chars={reasoning_chars})"
+            )
         usage = {
             str(key): int(value)
             for key, value in usage_raw.items()

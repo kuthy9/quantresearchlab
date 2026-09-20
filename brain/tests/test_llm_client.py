@@ -263,3 +263,17 @@ def test_reasoning_effort_is_sent_only_when_configured(monkeypatch) -> None:
     assert "reasoning_effort" not in body
     body = DeepSeekClient(model="m", timeout_s=1, max_tokens=1, reasoning_effort="low").request_body(system="s", user="u")
     assert body["reasoning_effort"] == "low"
+
+
+def test_deepseek_empty_content_says_why(server, monkeypatch) -> None:
+    """Run X (2026-09-19): every reply from 10:15 came back 'content is empty'
+    with nothing else; the reasoning had run to max_tokens.  The incident
+    names the finish reason, the completion tokens and the reasoning size."""
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
+    _Handler.scenario = [(200, {}, {"choices": [{"finish_reason": "length", "message": {"content": "", "reasoning_content": "x" * 50}}], "usage": {"completion_tokens": 100}})]
+    client = DeepSeekClient(model="deepseek-flash", timeout_s=5, max_tokens=100, base_url=server)
+    with pytest.raises(MalformedReply, match="max_tokens=100"):
+        client.complete(system="s", user="u")
+    _Handler.scenario = [(200, {}, {"choices": [{"finish_reason": "stop", "message": {"content": "", "reasoning_content": "x" * 50}}], "usage": {"completion_tokens": 42}})]
+    with pytest.raises(MalformedReply, match="content is empty .*finish_reason=stop.*completion_tokens=42.*reasoning_chars=50"):
+        client.complete(system="s", user="u")

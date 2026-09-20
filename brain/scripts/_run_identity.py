@@ -1,8 +1,9 @@
 """What a Brain run is made of, and how the Eye is driven over its window.
 
 ``run_identity`` hashes everything a journal's meaning depends on — the tape,
-the window, the model, the prompt, the two configs and the Eye's identities —
-into a ``run_id``; ``drive`` feeds the registered Eye every completed bar of
+the window, the model, the prompt, the two configs and the Eye's identities,
+plus an optional ``label`` for a deliberate re-run on the same inputs (the
+executor code is not hashed) — into a ``run_id``; ``drive`` feeds the registered Eye every completed bar of
 the window (warm-up included) and hands each published observation to a
 callback, flagging whether it falls inside the emit window."""
 from __future__ import annotations
@@ -82,6 +83,7 @@ def run_identity(
     scale_registry_id: str,
     source_sha256: str,
     root: Path = ROOT,
+    label: str | None = None,
 ) -> tuple[str, dict]:
     identity = {
         "window": window.to_dict(),
@@ -93,6 +95,10 @@ def run_identity(
         "atomic_definition_identity": atomic_identity,
         "scale_registry_id": scale_registry_id,
     }
+    if label:
+        # A deliberate re-run on the same inputs (2026-09-19: executor code
+        # is not hashed, so run X would have been refused as run B′).
+        identity["label"] = str(label)
     run_id = hashlib.sha256(
         json.dumps(identity, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()[:16]

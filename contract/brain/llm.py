@@ -9,7 +9,7 @@ could be read as a price exists in the schema at all."""
 from __future__ import annotations
 
 from collections.abc import Collection, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import hashlib
 import json
 from typing import Any
@@ -20,6 +20,8 @@ from contract.market.primitives import FrozenDict, aware_timestamp
 from contract.brain.state import (
     GOVERNING_TIMEFRAMES,
     ActiveExpectation,
+    Bias,
+    BiasDirection,
     Confidence,
     InvalidationMode,
     Opportunity,
@@ -31,7 +33,7 @@ from contract.brain.state import (
     isoformat_utc,
 )
 
-LLM_INPUT_SCHEMA_VERSION = 1
+LLM_INPUT_SCHEMA_VERSION = 2
 FRAMEWORK_STEPS: tuple[str, ...] = tuple(f"step_{i}" for i in range(1, 15))
 LLM_UPDATE_REQUIRED_KEYS: frozenset[str] = frozenset(
     {
@@ -42,6 +44,7 @@ LLM_UPDATE_REQUIRED_KEYS: frozenset[str] = frozenset(
         "watch_next",
         "destination_candidates",
         "opportunity",
+        "bias",
         "reasoning_confidence",
         "continue_active",
         "framework_trace",
@@ -57,6 +60,7 @@ _OPPORTUNITY_KEYS = frozenset(
     }
 )
 _THESIS_KEYS = ("thesis_id", "governing_timeframe", "grade", "invalidation_mode")
+_BIAS_KEYS = frozenset({"direction", "scale", "basis"})
 
 
 class MalformedReply(ValueError):
@@ -97,6 +101,7 @@ class LLMUpdate:
     reasoning_confidence: Confidence
     continue_active: bool
     framework_trace: Mapping[str, str]
+    bias: Bias = field(default_factory=Bias)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "evidence_verdicts", tuple(self.evidence_verdicts))
@@ -113,6 +118,7 @@ class LLMUpdate:
             "watch_next": [item.to_dict() for item in self.watch_next],
             "destination_candidates": list(self.destination_candidates),
             "opportunity": self.opportunity.to_dict(),
+            "bias": self.bias.to_dict(),
             "reasoning_confidence": self.reasoning_confidence.value,
             "continue_active": self.continue_active,
             "framework_trace": dict(self.framework_trace),
@@ -149,6 +155,7 @@ LLM_UPDATE_EXAMPLE: dict[str, Any] = {
         "grade": None,
         "invalidation_mode": None,
     },
+    "bias": {"direction": "NEUTRAL", "scale": "15m", "basis": "one sentence: the live delivery that sets the bias, or why no scale is live"},
     "reasoning_confidence": "LOW",
     "continue_active": True,
     "framework_trace": {step: "one sentence, or n/a" for step in FRAMEWORK_STEPS},
@@ -302,6 +309,16 @@ def parse_update(
     except ValueError as error:
         raise _fail(f"opportunity: {error}") from None
 
+    raw_bias = _require_keys(payload["bias"], _BIAS_KEYS, name="bias")
+    try:
+        bias = Bias(
+            _enum(BiasDirection, raw_bias["direction"], name="bias.direction"),
+            _str(raw_bias["scale"], name="bias.scale"),
+            _str(raw_bias["basis"], name="bias.basis"),
+        )
+    except ValueError as error:
+        raise _fail(f"bias: {error}") from None
+
     confidence = _enum(Confidence, payload["reasoning_confidence"], name="reasoning_confidence")
     continue_active = _bool(payload["continue_active"], name="continue_active")
 
@@ -318,6 +335,7 @@ def parse_update(
         watch_next=tuple(watch),
         destination_candidates=destinations,
         opportunity=opportunity,
+        bias=bias,
         reasoning_confidence=confidence,
         continue_active=continue_active,
         framework_trace=trace,

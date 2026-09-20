@@ -6,7 +6,7 @@ import pandas as pd
 import pytest
 
 from contract.brain.llm import LLM_UPDATE_EXAMPLE, LLMInput, MalformedReply, parse_update
-from contract.brain.state import InvalidationMode, OpportunityState, ThesisGrade, Verdict
+from contract.brain.state import Bias, BiasDirection, InvalidationMode, OpportunityState, ThesisGrade, Verdict
 
 EVIDENCE = {"ev_1", "ev_2"}
 OBJECTS = {"FVG_5m_3", "SSL_5m_2", "BSL_1H_1"}
@@ -96,7 +96,7 @@ def test_llm_input_hashes_canonically() -> None:
     )
     assert a.input_sha == b.input_sha
     assert json.loads(a.to_json())["known_at"] == "2022-01-04T14:41:00Z"
-    assert json.loads(a.to_json())["schema_version"] == 1
+    assert json.loads(a.to_json())["schema_version"] == 2
 
 
 def test_actionable_opportunity_carries_thesis_scale_grade_and_mode() -> None:
@@ -112,3 +112,17 @@ def test_example_none_opportunity_carries_null_thesis_fields() -> None:
         "state": "NONE", "direction": None, "entry_object_id": None, "invalidation_object_id": None, "target_object_id": None,
         "thesis_id": None, "governing_timeframe": None, "grade": None, "invalidation_mode": None,
     }
+
+
+def test_the_example_carries_a_bias_and_a_reply_without_one_is_refused() -> None:
+    assert LLM_UPDATE_EXAMPLE["bias"]["direction"] == "NEUTRAL" and LLM_UPDATE_EXAMPLE["bias"]["scale"] == "15m"
+    payload = json.loads(_reply())
+    del payload["bias"]
+    with pytest.raises(MalformedReply):
+        parse_update(json.dumps(payload), evidence_ids=EVIDENCE, object_ids=OBJECTS)
+    update = parse_update(_reply(bias={"direction": "SHORT", "scale": "1H", "basis": "1H MSS short with the active leg short"}), evidence_ids=EVIDENCE, object_ids=OBJECTS)
+    assert update.bias == Bias(BiasDirection.SHORT, "1H", "1H MSS short with the active leg short")
+    with pytest.raises(MalformedReply):
+        parse_update(_reply(bias={"direction": "SHORT", "scale": "1m", "basis": ""}), evidence_ids=EVIDENCE, object_ids=OBJECTS)
+    with pytest.raises(MalformedReply):
+        parse_update(_reply(bias={"direction": "SHORT", "scale": "5m", "basis": "the 5m never sets the bias"}), evidence_ids=EVIDENCE, object_ids=OBJECTS)

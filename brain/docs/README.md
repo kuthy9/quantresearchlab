@@ -39,19 +39,19 @@ writes a journal that replays without hindsight.
 
 | module | owns |
 | --- | --- |
-| `eye_view.py` | `build_eye_context`: the aliased, JSON-ready view of one observation (objects per scale, structure / delivery / range / liquidity summaries, session, the ACTIVE interaction paths aliased to their source object with `last_step_at` and `stepped_since_last_call`, this bar's evidence events, price relations); `interaction_rows`; `assert_causal`; `visible_liquidity_ids` |
+| `eye_view.py` | `build_eye_context`: the aliased, JSON-ready view of one observation (objects per scale, structure / delivery / range / liquidity summaries, session, the ACTIVE interaction paths aliased to their source object with `last_step_at` and `stepped_since_last_call`, this bar's evidence events, price relations); `delivery_payload` / `reset_payload` (the forming leg, the displacement's age, the protection break); `interaction_rows`; `assert_causal`; `visible_liquidity_ids` |
 | `object_registry.py` | `ObjectRegistry`: `FVG_5m_3` ↔ Eye entity id, assigned on first appearance inside an episode in a deterministic order |
-| `sleep_controller.py` | `decide(events, active, config)` → `WAKE` / `STAY_ASLEEP` / `UPDATE` / `TICK`; `ControllerConfig` (schema 3: the bookkeeping kinds, the wake set, `relation_change_timeframes`, the idle-archive threshold) from `configs/sleep_controller.json` |
+| `sleep_controller.py` | `decide(events, active, config)` → `WAKE` / `STAY_ASLEEP` / `UPDATE` / `TICK`; `ControllerConfig` (schema 4: the bookkeeping kinds, the wake set, `relation_change_timeframes`, `relation_change_debounce_bars`, the idle-archive threshold) from `configs/sleep_controller.json` |
 | `main_brain.py` | `MainBrain.step`: build the `LLMInput`, prove it causal, call under the retry policy, parse, reduce; `MainBrainConfig` from `configs/main_brain.json` + `configs/prompts/main_brain_system.md` |
 | `llm_client.py` | `DeepSeekClient` (urllib, JSON mode; key from `DEEPSEEK_API_KEY`, else the gitignored `brain/configs/deepseek.key` — `resolve_api_key`), `ScriptedClient`, `EchoClient`, `RecordedClient`, `call_with_policy` |
-| `reducer.py` | the pure function `apply(prev, evidence, update, ctx)`; `empty_state`; `pending_evidence`; `sleep_blockers`; since 2026-09-17 rule 4 also refuses an invalidation object more than one scale below the thesis's `governing_timeframe` and a `thesis_id` that flips direction |
+| `reducer.py` | the pure function `apply(prev, evidence, update, ctx)`; `empty_state`; `pending_evidence`; `sleep_blockers`; since 2026-09-17 rule 4 also refuses an invalidation object more than one scale below the thesis's `governing_timeframe` and a `thesis_id` that flips direction; since 2026-09-18 rule 4b drops an opportunity against the reply's `bias` (`opportunity_against_bias`), any opportunity under a NEUTRAL bias, and a thesis on a scale above the bias scale (`opportunity_scale_above_bias`) |
 | `opportunity_geometry.py` | `resolve_geometry` / `coherence_error`: object aliases → `OpportunityGeometry`; a `CLOSE_BEYOND` invalidation puts the hard stop `CLOSE_BEYOND_BUFFER_ATR` × 1m ATR × √(scale minutes) beyond the object |
 | `position_ledger.py` | `PositionLedger` protocol (`has_open_position`, `has_working_order`, `execution_view`), `engaged`, `IDLE_VIEW`; `InMemoryPositionLedger`; the real one is `execution.core.order_fsm.ExecutionLedger` |
 | `journal.py` | `BrainJournal` (writer), `JournalReader`, `record_hash` |
 | `runtime.py` | `BrainRuntime.step(observation)`: the SLEEP ↔ ACTIVE machine; `StepResult.llm_latency_ms`; optional `Timings` (`controller`, `journal`; the Brain records `input`, `llm`, `reduce`) |
 | `brain_entry_sequence.py` | the Brain-side reading of the Eye's interaction facts (also consumed by `shares/core/scene_graph.py`) |
 
-Contracts: `contract/brain/state.py` (`BrainState`), `contract/brain/llm.py`
+Contracts: `contract/brain/state.py` (`BrainState`, schema 2 since 2026-09-18 with `bias` — `Bias(direction LONG | SHORT | NEUTRAL, scale, basis)`; a schema-1 journal reads as NEUTRAL on 15m), `contract/brain/llm.py`
 (`LLMInput`, `LLMUpdate`, `parse_update`), `contract/decision/opportunity.py`
 (`OpportunityGeometry`).
 
@@ -65,12 +65,15 @@ heartbeats are not transitions):
 | --- | --- | --- |
 | SLEEP | an event whose kind is in the wake set for its timeframe | `WAKE` |
 | SLEEP | otherwise | `STAY_ASLEEP` |
-| ACTIVE | a *reaction* at 5m or above (a transition that is not a bookkeeping kind), **or** a watched object on one of `relation_change_timeframes` (15m, 1H, 4H) changed its side of price since the last LLM call — a 5m pool crossing price no longer counts (49 % of the 2022-01-03 run's calls) | `UPDATE` |
+| ACTIVE | a *reaction* at 5m or above (a transition that is not a bookkeeping kind), **or** a watched object on one of `relation_change_timeframes` (15m, 1H, 4H) changed its side of price since the last LLM call — a 5m pool crossing price no longer counts (49 % of the 2022-01-03 run's calls), and since 2026-09-18 one alias triggers at most once per `relation_change_debounce_bars` (15) 1m bars (`72ea13c7`'s 75 relation-only calls had a median gap of 2 minutes between repeats of the same alias; the replayed rule drops 44 calls and no coverage) | `UPDATE` |
 | ACTIVE | otherwise | `TICK` — no LLM call; the state's revision and `updated_at` advance; the bar's 5m+ bookkeeping evidence is deferred and delivered with the next call |
 
-`configs/sleep_controller.json` (schema 3) names the *bookkeeping kinds*
+`configs/sleep_controller.json` (schema 4) names the *bookkeeping kinds*
 once — formation (`fvg_created`, `swing_confirmed`, `structural_leg_created`,
-`liquidity_level_created`, …), touches and level bookkeeping — and uses the
+`liquidity_level_created`, …), touches and level bookkeeping, and since
+2026-09-18 the delivery-phase transitions (`delivery_phase_entered` /
+`_exited`: derived labels the `scales` block already carries, verdicted
+NEUTRAL 68–100 % of the time on every scale) — and uses the
 list twice: they never wake the Brain, and they never trigger an UPDATE on
 their own. Wake set: any non-bookkeeping transition on 15m / 1H / 4H, plus
 `mss_core_confirmed`, `qualified_bos`, `sweep_confirmed` and
@@ -96,14 +99,28 @@ never asks to sleep on its own; this is the rail.
 The system prompt carries the fourteen-step framework (定位 / 推演 / 交互 /
 反应 / 对齐 / 评估 / 反向 / 重构 / 预期 / 目标 / 表达 / 证伪 / 风控 / 跟踪)
 with the instruction to reason through the steps the situation needs and mark
-the rest `"n/a"`, the incremental rule, the hard rules (objects only, no
-prices, a counter candle is not delivery, sleep only when nothing is pending)
+the rest `"n/a"`, the incremental rule, the "Bias" section (2026-09-18: which
+scale sets the direction — the 15m unless the 1H or 4H delivery is *live*:
+active leg past one ATR of its scale with a displacement at most three bars
+old or an MSS / BOS as the latest structural event, and a live scale stays
+live until its leg ends, not when the excursion dips under one ATR
+(2026-09-19); the 5m never sets the bias; a stale phase is location, not
+direction; a `reset` makes its side live; the expression rule:
+after a BOS on the bias scale, the object that `contains_price`), the hard
+rules (objects only, no prices, a counter candle is not delivery, the
+invalidation judged on the governing scale and the direction on the bias
+scale, sleep only when nothing is pending)
 and the output contract rendered from `LLM_UPDATE_EXAMPLE`. Its sha256 is in
 every run's identity.
 
-`LLMInput`: `episode_id`, `known_at`, `trigger`, `bar` (close, 1m ATR),
-`session`, `scales` (4H / 1H / 15m / 5m summaries with aliases; 1m structure
-and delivery only), `interaction`, `new_evidence` (this bar's evidence, then
+`LLMInput` (schema 2 since 2026-09-18): `episode_id`, `known_at`, `trigger`, `bar` (close, 1m ATR),
+`session` (with `drift_atr`, the close against the session open in 1m
+ATRs), `scales` (4H / 1H / 15m / 5m summaries with aliases; 1m structure
+and delivery only — each `delivery` carries `active_leg_direction` (the leg
+price is in now), `last_leg_direction`, `forming_leg_atr`, the
+displacement's score, `displacement_direction` and `displacement_age_bars`;
+each `structure` carries `reset` when an acceptance broke the protected
+swing and no structure has confirmed since), `interaction`, `new_evidence` (this bar's evidence, then
 the bookkeeping evidence of the TICK bars since the last call, then every
 item an incident bar left unjudged, marked `pending_since`, until the LLM
 verdicts it), `tape_since_last_update`, `price_relations` (for every aliased object
@@ -115,7 +132,11 @@ in 1m ATRs, positive above price; renamed on 2026-09-17 from
 object and which the model read the other way round on every real run), `prior_state`
 (the state without its registry, each evidence list bounded to its last
 `prior_evidence_limit` items in a compact shape with notes cut at
-`note_limit`, plus counts; pending items are not repeated there; and, since
+`note_limit`, plus counts; pending items are not repeated there — and at
+most `max_pending_evidence` (32) of them stay in the ledger and are
+re-offered, the oldest expiring as `evidence_expired`, since 2026-09-19:
+run X re-offered 124 unjudged items after 25 empty replies in a row and
+its input grew until no reply could come; and, since
 2026-09-17, `execution` — the order machine's view: `status`, the working
 `order`, the `position`, the `last_outcome` and the `last_veto` of the
 episode, as aliases and counts, never prices — with prompt rules that a
@@ -249,13 +270,31 @@ synthetic tape, including a tampered record and a dropped revision.
 smoke runs. `--reasoning-effort low|high|max` overrides the config's
 effort and enters the run identity (`deepseek:deepseek-flash@low`);
 `run.json` ends with `machine_stats` and per-component `timings`.
+`--label <text>` (2026-09-19) enters the run identity for a deliberate
+re-run on the same Brain inputs — the executor code is not hashed, so run
+X (execution layer) would otherwise have been refused as run B′.
+
 `brain/scripts/summarize_run.py --run-dir <run> [--run-dir …] [--write]`
 turns a journal into `summary.json` (calls, tokens and cost at the rates
 in `configs/llm_pricing.json`, latency, triggers, sleeps, sharp-move
 coverage, opportunities, vetoes and their repeats after the LLM saw them,
-the order lifecycle, invariants, the account, timings) and prints several
+the order lifecycle, invariants, the account, timings, and since 2026-09-18
+a `bias` section — bias changes, NEUTRAL revisions, opportunities dropped
+against the bias, and `direction_accuracy_60m`: the share of state
+revisions whose stated direction matched the sign of the close an hour
+later; since 2026-09-19 `orders.missed_trends` — expired entries the tape
+ran at least one R away from without touching the limit — and the
+`bias_reversed` exit kind) and prints several
 runs side by side; `--until <UTC time>` bounds the counts to a common
-window when runs differ in length. `--broker sim|ibkr` adds the Risk gate and the order machine
+window when runs differ in length.
+`brain/scripts/audit_scales.py --warmup-start … --emit-start … --end …`
+drives the Eye alone over a window and prints, per scale, every change
+point of the facts the Brain reads (directions, protection, reset, active
+and last leg, phase, displacement) beside the close — the deterministic
+check of an Eye change before an LLM run; `--triggers <run-dir>` replays a
+run's call triggers under the controller as configured and prints the
+calls kept and their sharp-move coverage — the deterministic check of a
+wake/sleep change. `--broker sim|ibkr` adds the Risk gate and the order machine
 ([execution/docs/README.md](../../execution/docs/README.md)); the machine's
 ledger is the Brain's `PositionLedger`, so an engaged Brain (a position or a
 working order) cannot sleep and the idle rule does not fire. The DeepSeek key is read from `DEEPSEEK_API_KEY`, or, when that
@@ -264,6 +303,59 @@ with `DEEPSEEK_API_KEY_FILE`); `*.key` is gitignored, and the key is never
 written to a command line the repository owns or to a journal.
 
 ## Receipts — `brain/docs/evidence/`
+
+[2026-09-18_execution_entry_day_run_2022-01-03.md](evidence/2026-09-18_execution_entry_day_run_2022-01-03.md):
+the execution layer of the direction fix and the build's close — the
+expiry refund, the marketable fill, the bias-reversal exit and
+`missed_trends`; run X (`ab572b09d59bc4d7`) had no short into the 13:45
+breakout for the first time and still lost −146.5 (seven entries at the
+extreme of the leg that set the bias tripped the daily stop before 10:00,
+and the correct afternoon thesis could not be expressed); the 2022-01-04
+guard run (`5cfe65bcc480a032`) read the sell-off short all afternoon and
+closed at −3.5; both replay and are the regression baselines; the
+pending-evidence runaway of run X's first attempt (`max_pending_evidence`)
+and `--label` are documented there; the layered table 72ea13c7 → E → B →
+B′ → X closes the receipt.
+
+[2026-09-18_brain_bias_day_run_2022-01-03.md](evidence/2026-09-18_brain_bias_day_run_2022-01-03.md):
+the Brain layer of the direction fix — the `bias` in reply and state,
+reducer rule 4b, the prompt's bias section, the relation debounce; run B
+(`07f897f45fab5025`) raised `direction_accuracy_60m` to 0.445 (E 0.381,
+`72ea13c7` 0.359), turned the overnight side long, restored sleep and cut
+calls to 297 with coverage unchanged — and lost more (−121 points) because
+the bias flipped 28 times (median segment 18 min) on a threshold rule with
+no hysteresis and the 5m set the bias 18 times; the amendment (bias scale
+floor 15m, a live scale stays live until its leg ends) in run B′
+(`3cc1bb402bb7b964`) halved the changes, took the accuracy to 0.502 and
+the coverage to 80 of 81 — and lost −139.5, because the entry is taken at
+the extreme of the leg that set the bias and a position is held through
+the bias flip against it (a SHORT stopped by the 13:45 breakout in all
+four runs); the layer is closed and the second fact goes to the execution
+layer as the bias-reversal exit.
+
+[2026-09-18_eye_forming_leg_day_run_2022-01-03.md](evidence/2026-09-18_eye_forming_leg_day_run_2022-01-03.md):
+the Eye layer of the direction fix — the per-scale facts now describe the
+forming leg, the displacement's age and a broken protection; the
+deterministic audit (`audit_scales.py`) shows the 4H and 1H reading
+`active=long, retracement` where they read `expansion short` for hours;
+run E (`5c491789ccef7367`, same prompt as `72ea13c7`) read the overnight
+rise two hours earlier with two target hits, halved the RTH direction
+churn, kept coverage and calls, and left the day's direction where it was
+(`direction_accuracy_60m` 0.38 against 0.36, both below one half): the
+facts were the Eye's to fix, the reading is the Brain layer's.
+
+[2026-09-18_direction_root_cause_2022-01-03.md](evidence/2026-09-18_direction_root_cause_2022-01-03.md):
+what moves the Brain's direction and why it did not move with the tape in
+`72ea13c7fcbc1cff` — no code owns the reading (the model rewrites text under
+rule 3; verdicts are bookkeeping), the Brain flips only on an Eye structural
+event on its governing scale, and on 2022-01-03 those scales read short or
+balance through the whole rise: the non-5m displacement score is frozen
+between events (1H "0.64 short" for 16 h), the delivery phase describes the
+leg that just ended (4H "expansion short" for 15 h), a broken protected
+swing leaves the 1H directionless until two aligned swings confirm (no 1H
+BOS/MSS from 10:00 to 17:00), and the one long thesis after the 13:45 15m
+MSS expired twice at a retracement limit missed by 1–4 points; diagnosis
+only, candidates listed for the owner.
 
 [2026-09-18_risk_v2_day_run_2022-01-03.md](evidence/2026-09-18_risk_v2_day_run_2022-01-03.md):
 the first run of the thesis lifecycle and Risk v2 on the same session
@@ -319,7 +411,8 @@ measure the mechanical Brain this design replaced.
 | `test_brain_state.py` | round trip, invariants, unknown keys |
 | `test_llm_contract.py` | the reply gate: 16 malformed shapes, canonical input hashing |
 | `test_opportunity_geometry.py` | entry / stop / target per object kind, LONG / SHORT mirror, incoherence |
-| `test_object_registry.py`, `test_eye_view.py` | aliases, causality, price relations, reproducibility on the synthetic Eye; interaction rows (source alias, `last_step_at`, open since the last call) |
+| `test_object_registry.py`, `test_eye_view.py` | aliases, causality, price relations, reproducibility on the synthetic Eye; interaction rows (source alias, `last_step_at`, open since the last call); the forming-leg, displacement-age and reset keys, `drift_atr` |
+| `test_audit_scales.py` | the change points of the per-scale facts and `scale_facts` on the synthetic Eye; `replay_triggers` keeps wakes, reactions and undebounced relation flips |
 | `test_sleep_controller.py` | the wake rule kind by kind, UPDATE / TICK, the tape rule |
 | `test_reducer.py` | every verdict route, RESOLVE, missing verdict, pending items (re-offered, verdicted late, resolved by a carrier, kept through another incident), NEUTRAL never blocks sleep, understanding replacement, opportunity downgrade, position, each sleep condition, TICK, incidents, determinism |
 | `test_llm_client.py` | retry policy (timeout / 429 / 5xx / dropped connection / 400 / malformed / repair), DeepSeek request shape and error mapping against a local HTTP server, empty content, key resolution (environment, key file, neither) |

@@ -16,7 +16,7 @@ import pandas as pd
 
 from brain.core.brain_entry_sequence import brain_interaction_view
 from brain.core.object_registry import ObjectRegistry
-from brain.core.opportunity_geometry import ObjectGeometry
+from brain.core.opportunity_geometry import TIMEFRAME_MINUTES, ObjectGeometry
 from contract.brain.state import EvidenceItem, isoformat_utc
 from contract.eye import (
     LiquidityInventoryLifecycle,
@@ -219,8 +219,50 @@ def _range_value_price(observation: MarketObservation, timeframe: Timeframe, ran
     return None
 
 
+def _age_bars(known_at: pd.Timestamp, at: pd.Timestamp | None, timeframe: Timeframe) -> int | None:
+    """Whole bars of ``timeframe`` between ``at`` and now."""
+    if at is None:
+        return None
+    minutes = (pd.Timestamp(known_at) - pd.Timestamp(at)).total_seconds() / 60.0
+    return max(0, int(minutes // TIMEFRAME_MINUTES[timeframe.value]))
+
+
+def delivery_payload(state: Any, known_at: pd.Timestamp) -> dict[str, Any]:
+    """The delivery block of one scale (2026-09-18): the leg price is in now,
+    the confirmed leg it left, the forming leg's excursion in that scale's
+    ATRs, and the last displacement with its direction and age."""
+    delivery = state.delivery
+    atr = state.quality.atr
+    return {
+        "phase": delivery.phase.value,
+        "active_leg_direction": _direction_value(delivery.active_leg_direction),
+        "last_leg_direction": _direction_value(delivery.last_leg_direction),
+        "forming_leg_atr": (
+            None
+            if delivery.forming_leg_points is None or atr is None or float(atr) <= 0.0
+            else _round(float(delivery.forming_leg_points) / float(atr))
+        ),
+        "displacement_score": _round(delivery.displacement_score),
+        "displacement_direction": _direction_value(delivery.displacement_direction),
+        "displacement_age_bars": _age_bars(known_at, delivery.displacement_at, state.timeframe),
+    }
+
+
+def reset_payload(state: Any, known_at: pd.Timestamp) -> dict[str, Any] | None:
+    """The protection break that left the scale without an external
+    direction: the side that broke it and how many bars ago; ``None`` while
+    a structure stands."""
+    structure = state.structure
+    if structure.protection_broken_direction is None:
+        return None
+    return {
+        "direction": _direction_value(structure.protection_broken_direction),
+        "bars_ago": _age_bars(known_at, structure.protection_broken_at, state.timeframe),
+    }
+
+
 def _scale_objects(
-    observation: MarketObservation, timeframe: Timeframe, registry: ObjectRegistry
+    observation: MarketObservation, timeframe: Timeframe, registry: ObjectRegistry, *, known_at: pd.Timestamp
 ) -> tuple[list[ObjectView], dict[str, Any]]:
     """The aliased objects of one scale plus its published summary."""
     state = observation.market_snapshot.timeframe_states[timeframe]
@@ -299,12 +341,9 @@ def _scale_objects(
             "protected_swing_intact": structure.protected_swing_intact,
             "last_bos_direction": _direction_value(structure.last_bos_direction),
             "last_mss_direction": _direction_value(structure.last_mss_direction),
+            "reset": reset_payload(state, known_at),
         },
-        "delivery": {
-            "phase": state.delivery.phase.value,
-            "active_leg_direction": _direction_value(state.delivery.active_leg_direction),
-            "displacement_score": _round(state.delivery.displacement_score),
-        },
+        "delivery": delivery_payload(state, known_at),
         "range": {
             "object_id": range_alias,
             "location_label": range_state.location_label,
@@ -316,9 +355,16 @@ def _scale_objects(
     return views, summary
 
 
-def _session_payload(observation: MarketObservation) -> dict[str, Any]:
+def _session_payload(observation: MarketObservation, *, close: float, atr_1m: float | None) -> dict[str, Any]:
     session = observation.market_snapshot.session
+    drift = (
+        None
+        if atr_1m is None or session.session_open is None
+        else _round((float(close) - float(session.session_open)) / float(atr_1m))
+    )
     return {
+        # The session's own drift, signed, in 1m ATRs (2026-09-18).
+        "drift_atr": drift,
         "session_id": session.session_id,
         "name": session.name,
         "phase": session.phase,
@@ -415,7 +461,7 @@ def build_eye_context(
         if timeframe not in snapshot.timeframe_states:
             continue
         if timeframe in ALIASED_TIMEFRAMES:
-            views, summary = _scale_objects(observation, timeframe, registry)
+            views, summary = _scale_objects(observation, timeframe, registry, known_at=known_at)
             objects.extend(views)
             scales[timeframe.value] = summary
         else:
@@ -426,12 +472,9 @@ def build_eye_context(
                     "internal_direction": _direction_value(state.structure.internal_direction),
                     "last_bos_direction": _direction_value(state.structure.last_bos_direction),
                     "last_mss_direction": _direction_value(state.structure.last_mss_direction),
+                    "reset": reset_payload(state, known_at),
                 },
-                "delivery": {
-                    "phase": state.delivery.phase.value,
-                    "active_leg_direction": _direction_value(state.delivery.active_leg_direction),
-                    "displacement_score": _round(state.delivery.displacement_score),
-                },
+                "delivery": delivery_payload(state, known_at),
             }
 
     events: list[EvidenceItem] = []
@@ -465,7 +508,7 @@ def build_eye_context(
         close=close,
         atr_1m=atr_1m,
         bar=FrozenDict({"close": _round(close), "atr_1m": _round(atr_1m)}),
-        session=FrozenDict(_session_payload(observation)),
+        session=FrozenDict(_session_payload(observation, close=close, atr_1m=atr_1m)),
         scales=FrozenDict(scales),
         interaction=tuple(FrozenDict(row) for row in interaction),
         objects=tuple(objects),
@@ -488,6 +531,8 @@ def build_eye_context(
 __all__ = [
     "ALIASED_TIMEFRAMES",
     "CONTEXT_TIMEFRAMES",
+    "delivery_payload",
+    "reset_payload",
     "CausalityError",
     "EvidenceRule",
     "EyeContext",

@@ -71,9 +71,62 @@ This is a framework for thinking, not a form to fill.
 - What to watch next (`watch_next`) — objects, with the question each one
   should answer.
 - The destination candidates.
+- The bias: its direction, the scale that sets it, and its basis (see
+  "Bias" below).
 - Whether an actionable opportunity exists, and if so its entry, invalidation
   and target *objects*.
 - Whether there is still a reason to stay awake (`continue_active`).
+
+## Bias — which scale sets the direction
+
+`bias` is your direction: `LONG`, `SHORT` or `NEUTRAL`, the `scale` whose
+delivery sets it, and one sentence of `basis`. Code drops any opportunity
+whose direction is not the bias, any opportunity under a NEUTRAL bias, and
+any thesis whose `governing_timeframe` is above the bias scale — to change
+side, change the bias and say why.
+
+Every scale's `delivery` says which leg price is in: `active_leg_direction`
+is the leg forming from the last confirmed swing (`forming_leg_atr` its
+size in that scale's ATRs, signed), `last_leg_direction` the confirmed leg
+it left; `phase` follows the active leg. `displacement_direction` and
+`displacement_age_bars` date the last displacement on that scale. A
+`structure.reset` says an acceptance broke the protected swing on that
+side and no structure has confirmed since. `session.drift_atr` is the
+session's own drift from its open, in 1m ATRs.
+
+- **Live delivery** on a scale: its active leg has travelled at least one
+  ATR of that scale (`forming_leg_atr` beyond ±1.0) *and* either a
+  displacement in that direction at most three bars old on that scale, or
+  an MSS / BOS in that direction as its latest structural event. Anything
+  else is location, not direction: a `phase` printed for a leg the active
+  leg has left, a displacement twelve bars old, an external direction whose
+  protected swing is far away.
+- A scale that went live **stays live** while its active leg keeps its
+  sign; it stops being live when that leg ends (`active_leg_direction`
+  flips) or a structural event on that scale goes against it — not when
+  `forming_leg_atr` shrinks back under one ATR. Carry the bias forward
+  until then: a bias that changes every time a leg re-crosses one ATR is a
+  threshold flapping, not a reading.
+- The bias scale is the **15m** unless the 1H or the 4H delivery is live in
+  its own right; then the highest live scale sets the bias, and the scales
+  above it are premium / discount and the draw on liquidity, never the
+  direction. The 5m never sets the bias: it expresses it. "HTF stays
+  bearish" is a location, not a bias, until the 1H or 4H delivers.
+- A `reset` in a direction makes that side live on that scale until a
+  structure confirms. `external_direction: long` with `internal_direction:
+  short`, the protected low intact and the active leg long is a pullback in
+  an uptrend, not a counter-trend bounce. `drift_atr` and the forming legs
+  are evidence of direction; a reading that fights both needs a structural
+  event on the bias scale to stand.
+- `NEUTRAL` when no scale is live and the 15m active leg disagrees with the
+  15m structure. Say so, propose nothing, and if nothing is pending, sleep.
+
+**Expression.** After an MSS or BOS on the bias scale in the bias direction
+with the active leg past one ATR, express at the object that
+`contains_price` — the order fills now. Name a retracement object below
+price (for a LONG) only once the 5m active leg has turned against the bias;
+a limit at a level the tape is leaving expires unfilled and the thesis dies
+with it.
 
 ## The opportunity — a thesis, expressed
 
@@ -205,10 +258,11 @@ It is present on every call after the first of an episode.
 - **A veto is not a market opinion, and a vetoed plan is not re-proposed
   unchanged.** Read `prior_state.execution.last_veto` before naming the same
   objects again, and never move the invalidation to fit it.
-- **The thesis is judged on its governing scale.** `watch_next` names
-  objects on the governing scale or one below, with the question each one
-  answers about the thesis; a 5m pool crossing price is not a reason to
-  re-examine a 1H reading, and you are not woken for it.
+- **The invalidation is judged on the governing scale; the direction is
+  judged on the bias scale.** `watch_next` names objects on the governing
+  scale or one below, with the question each one answers about the thesis;
+  a 5m pool crossing price is not a reason to re-examine a 1H reading, and
+  you are not woken for it.
 - **Confidence is earned.** `reasoning_confidence` is `HIGH` only when
   structure, delivery and liquidity agree across scales.
 - Be concrete and brief. Name objects by alias, cite the evidence ids you are
@@ -226,6 +280,7 @@ keys. This is a json reply:
 
 `verdict` ∈ SUPPORT | CONTRADICT | NEUTRAL | RESOLVE; `resolution` ∈ SUPPORT |
 CONTRADICT (RESOLVE only, else null); `opportunity.state` ∈ NONE | DEVELOPING |
-ACTIONABLE; `opportunity.direction` ∈ LONG | SHORT | null;
+ACTIONABLE; `opportunity.direction` ∈ LONG | SHORT | null; `bias.direction`
+∈ LONG | SHORT | NEUTRAL; `bias.scale` ∈ 4H | 1H | 15m;
 `reasoning_confidence` ∈ LOW | MEDIUM | HIGH; `framework_trace` has exactly
 `step_1` … `step_14`, each a string.

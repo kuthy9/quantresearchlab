@@ -223,3 +223,16 @@ def test_adding_to_a_position_averages_the_entry_price_so_each_exit_realizes_its
     ex.poll(at(3), bar(3, 16410.0, 16425.0, close=16420.0))   # both stops at 16420
     assert ex.snapshot(at(3)).positions == ()
     assert ex.account.cash == 100_000.0 + ((16400.0 - 16420.0) * 2 + (16410.0 - 16420.0) * 2) * 20.0  # −1 200, not −1 600
+
+
+def test_a_limit_through_the_market_fills_at_the_open() -> None:
+    ex = executor()
+    intent = BracketIntent("EP_1:sig", "NQ", "BUY", 1, 16360.0, 16330.0, 16400.0, "sig")  # limit above the next open
+    events = run(ex, intent, [bar(1, 16352.0, 16358.0, close=16355.0)])
+    fills = [e for e in events if e.kind == "filled"]
+    assert fills and fills[0].fill.price == 16355.0, "a BUY limit above the open fills at the open, not at the limit"
+    ex = executor()
+    intent = BracketIntent("EP_1:sig", "NQ", "SELL", 1, 16350.0, 16380.0, 16300.0, "sig")  # limit below the next open
+    events = run(ex, intent, [bar(1, 16352.0, 16358.0, close=16355.0)])
+    fills = [e for e in events if e.kind == "filled"]
+    assert fills and fills[0].fill.price == 16355.0
