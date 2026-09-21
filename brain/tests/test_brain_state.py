@@ -175,3 +175,12 @@ def test_bias_refuses_a_bad_scale_or_direction(bad) -> None:
     """The 5m is an execution scale, never the bias scale (run B set it 18 times)."""
     with pytest.raises(ValueError):
         Bias(**{"direction": BiasDirection.LONG, "scale": "15m", "basis": "", **bad})
+
+
+def test_last_update_carries_the_rejections_and_old_journals_read_as_none() -> None:
+    state = make_state(last_update=LastUpdate(T1, True, {}, None, rejections=("opportunity_incoherent:x",)))
+    payload = state.to_dict()
+    assert payload["last_update"]["rejections"] == ["opportunity_incoherent:x"]
+    assert BrainState.from_dict(payload).last_update.rejections == ("opportunity_incoherent:x",)
+    del payload["last_update"]["rejections"]
+    assert BrainState.from_dict(payload).last_update.rejections == ()

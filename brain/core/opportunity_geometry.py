@@ -58,15 +58,40 @@ def _family(kind: str) -> str:
     raise GeometryError(f"object kind {kind!r} has no geometry rule")
 
 
-def _entry(obj: ObjectGeometry, direction: TradeDirection) -> tuple[float, str]:
+def _entry(obj: ObjectGeometry, direction: TradeDirection, close: float) -> tuple[float, str]:
+    """The limit a trade rests at on the object.  A zone below price (LONG)
+    is entered at its near edge; a zone that *contains* price at its
+    midpoint when that is on the resting side of the close, else at its far
+    edge (2026-09-20) — the near edge of a containing zone is above the
+    market for a LONG, and a limit there is a buy at the market.  A range
+    has no entry level: its value price lies wherever the profile puts it."""
     family = _family(obj.kind)
+    long = direction is TradeDirection.LONG
     if family == "zone":
-        return (obj.upper if direction is TradeDirection.LONG else obj.lower), "entry.zone.near_edge"
+        if obj.lower <= close <= obj.upper:
+            midpoint = (obj.lower + obj.upper) / 2.0
+            if (midpoint <= close) if long else (midpoint >= close):
+                return midpoint, "entry.zone.inside_midpoint"
+            return (obj.lower if long else obj.upper), "entry.zone.inside_far_edge"
+        return (obj.upper if long else obj.lower), "entry.zone.near_edge"
     if family == "range":
-        return obj.anchor, "entry.range.value"
+        raise GeometryError(f"a range is not an entry object ({obj.alias}); name the zone, pool or swing inside it")
     if family == "pool":
         return obj.anchor, "entry.pool.midpoint"
     return obj.anchor, "entry.swing.price"
+
+
+def entry_side_error(direction: TradeDirection, entry: float, close: float) -> str | None:
+    """``None`` when a limit at ``entry`` rests — at or below the close for
+    a LONG, at or above it for a SHORT — else why it would fill at the
+    market (2026-09-20).  Judged when an opportunity is proposed and when an
+    order is submitted, never on the bars in between: a working limit the
+    tape crosses must fill, not be cancelled."""
+    if direction is TradeDirection.LONG and entry > close:
+        return f"LONG entry {entry} lies above price {close} — a trade is expressed on a pullback, not at the market"
+    if direction is TradeDirection.SHORT and entry < close:
+        return f"SHORT entry {entry} lies below price {close} — a trade is expressed on a pullback, not at the market"
+    return None
 
 
 def _round_away(price: float, tick: float, direction: TradeDirection) -> float:
@@ -133,7 +158,7 @@ def resolve_geometry(
         if obj is None:
             raise GeometryError(f"{role} object {alias!r} is not a visible object")
         resolved[role] = obj
-    entry, entry_rule = _entry(resolved["entry"], direction)
+    entry, entry_rule = _entry(resolved["entry"], direction, close)
     stop, stop_rule = _stop(
         resolved["invalidation"], direction, tick, mode=opportunity.invalidation_mode, atr_1m=atr_1m, buffer_atr=buffer_atr
     )
@@ -166,15 +191,17 @@ def coherence_error(
     tick: float,
     atr_1m: float | None = None,
 ) -> str | None:
-    """``None`` when the opportunity resolves (or is NONE), else the reason."""
+    """``None`` when the opportunity resolves (or is NONE) and its limit
+    rests on the right side of ``close``, else the reason."""
 
     if opportunity.state is OpportunityState.NONE:
         return None
     try:
-        resolve_geometry(opportunity, objects, close=close, tick=tick, atr_1m=atr_1m)
+        geometry = resolve_geometry(opportunity, objects, close=close, tick=tick, atr_1m=atr_1m)
     except GeometryError as error:
         return str(error)
-    return None
+    assert opportunity.direction is not None
+    return entry_side_error(opportunity.direction, geometry.entry_price, close)
 
 
 __all__ = [
@@ -186,5 +213,6 @@ __all__ = [
     "SWING_KINDS",
     "ZONE_KINDS",
     "coherence_error",
+    "entry_side_error",
     "resolve_geometry",
 ]

@@ -9,8 +9,9 @@ closes it (``direction_changed``), a flatten because the Brain's bias
 turned against the position closes it (``bias_reversed``, no cooldown),
 and every stop-out — whatever the thesis — holds every new expression for
 ``stop_cooldown_bars`` 1m bars.  An expiry or a cancel leaves the thesis
-open (the entry was never reached); an expiry also gives its expression
-back, a cancel does not (2026-09-19).
+open (the entry was never reached); an expiry gives its expression back
+(2026-09-19), and so does a cancel that replaced the entry object or lost
+it to the Eye (2026-09-20); a dropped plan spends it.
 The book resets with the episode; ``view`` is what the LLM reads in
 ``prior_state.execution``."""
 from __future__ import annotations
@@ -24,7 +25,10 @@ from contract.brain.state import TradeDirection
 from contract.risk import TradePlan
 from risk.core.gate import ThesisConfig
 
-REFUSALS: tuple[str, ...] = ("direction_changed", "thesis_closed", "expressions_exhausted", "stop_cooldown", "thesis_engaged")
+REFUSALS: tuple[str, ...] = ("direction_changed", "thesis_closed", "expressions_exhausted", "stop_cooldown", "thesis_engaged", "entry_marketable")
+# Cancel reasons that replace an expression rather than spend it (2026-09-20): the Brain moved the entry to
+# another object, or the Eye retired the object.  A dropped plan (``plan_dropped``) is the churn the cap counts.
+REPLACEMENT_REASONS: frozenset[str] = frozenset({"signature_changed", "entry_object_not_visible"})
 
 
 @dataclass
@@ -113,19 +117,20 @@ class ThesisBook:
         if not engaged:
             self._engaged.pop(signature, None)
 
-    def outcome(self, plan: TradePlan, kind: str, *, exit_role: str | None, bar_index: int) -> None:
+    def outcome(self, plan: TradePlan, kind: str, *, exit_role: str | None, bar_index: int, reason: str | None = None) -> None:
         """A terminal event of an expression: a stop (or the close-beyond
         ``invalidation`` exit) closes the thesis and starts the cooldown, a
         target closes it as achieved, the bias-reversal flatten closes it
         without a cooldown, anything else (expired, cancelled, rejected, the
         halt's flatten) leaves it open.  An expiry gives its expression back
-        (the entry was never reached); a cancel keeps it (the Brain changed
-        its mind)."""
+        (the entry was never reached), and so does a cancel whose ``reason``
+        is a replacement (``REPLACEMENT_REASONS``); a dropped plan keeps it
+        (the Brain changed its mind)."""
         self._engaged.pop(plan.signature, None)
         record = self._records.get(plan.thesis_id) if plan.thesis_id else None
         if record is not None:
             record.last_outcome = kind if exit_role is None else f"{kind}:{exit_role}"
-            if kind == "expired":
+            if kind == "expired" or (kind == "cancelled" and reason in REPLACEMENT_REASONS):
                 record.expressions = max(0, record.expressions - 1)
         if exit_role in ("stop", "invalidation"):
             self._last_stop_bar = bar_index
@@ -145,4 +150,4 @@ class ThesisBook:
         }
 
 
-__all__ = ["REFUSALS", "ThesisBook", "ThesisRecord"]
+__all__ = ["REFUSALS", "REPLACEMENT_REASONS", "ThesisBook", "ThesisRecord"]

@@ -271,6 +271,16 @@ cooldown. Reducer rule 4b already refuses a *new* opportunity against the
 bias; this is the same rule applied to the open position (design
 [2026-09-18-direction-eye-brain-execution-design.md](../../../brain/docs/specs/2026-09-18-direction-eye-brain-execution-design.md) §3).
 
+### 6.8 The entry model (2026-09-20)
+
+Amended by [brain/docs/specs/2026-09-20-entry-model-design.md](../../../brain/docs/specs/2026-09-20-entry-model-design.md):
+`order_ttl_bars` counts bars of the entry object's own scale (`risk.json`
+schema 3; the machine converts to 1m bars and reports that figure as
+`ttl_bars`); a cancel that replaced the entry object (`signature_changed`)
+or lost it to the Eye (`entry_object_not_visible`) gives the thesis its
+expression back like an expiry; a plan whose limit the market is already
+past is held with `thesis_refused` reason `entry_marketable`.
+
 ## 7. Brain
 
 ### 7.1 Sleep Controller (`brain/configs/sleep_controller.json` schema 3)

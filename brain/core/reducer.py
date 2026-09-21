@@ -201,7 +201,7 @@ def _carry_forward(
         reasoning_confidence=prev.reasoning_confidence,
         continue_active=True,
         object_registry=_merge_registry(prev.object_registry, ctx.registry),
-        last_update=LastUpdate(ctx.known_at, llm_called, _zero_verdicts(), incident),
+        last_update=LastUpdate(ctx.known_at, llm_called, _zero_verdicts(), incident, rejections=tuple(rejections)),
     )
 
 
@@ -425,7 +425,8 @@ def apply(
         reasoning_confidence=draft.reasoning_confidence,
         continue_active=continue_active,
         object_registry=draft.object_registry,
-        last_update=draft.last_update,
+        # The rejections travel with the state (2026-09-20): the next call reads them in prior_state.last_update.
+        last_update=LastUpdate(ctx.known_at, True, draft.last_update.verdicts, incident, rejections=tuple(rejections)),
     )
     return ReduceResult(state, tuple(rejections), slept, incident, sleep_reason)
 

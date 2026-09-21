@@ -33,7 +33,7 @@ from contract.brain.state import (
     isoformat_utc,
 )
 
-LLM_INPUT_SCHEMA_VERSION = 2
+LLM_INPUT_SCHEMA_VERSION = 3  # 3 (2026-09-20): prior_state.last_update.rejections
 FRAMEWORK_STEPS: tuple[str, ...] = tuple(f"step_{i}" for i in range(1, 15))
 LLM_UPDATE_REQUIRED_KEYS: frozenset[str] = frozenset(
     {

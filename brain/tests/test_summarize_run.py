@@ -10,7 +10,7 @@ from brain.core.journal import BrainJournal, JournalReader
 from brain.core.main_brain import MainBrain, MainBrainConfig
 from brain.core.runtime import BrainRuntime
 from brain.core.sleep_controller import ControllerConfig
-from brain.scripts.summarize_run import cost_usd, direction_accuracy, load_pricing, main, missed_trends, render, sharp_move_coverage, summarize
+from brain.scripts.summarize_run import cost_usd, direction_accuracy, entry_quality, load_pricing, main, missed_trends, render, sharp_move_coverage, summarize
 from contract.market.primitives import Bar
 from execution.core.order_fsm import OrderMachine
 from execution.core.stack import TradingStack
@@ -192,3 +192,19 @@ def test_missed_trends_count_expiries_the_tape_ran_away_from() -> None:
         {"direction": "SHORT", "limit_price": 16470.0, "stop_price": 16480.0, "submitted_at": start + pd.Timedelta(minutes=1), "expired_at": start + pd.Timedelta(minutes=16)},  # never touched either; the tape rose towards the limit, not away from it
     ]
     assert missed_trends(expiries, bars) == {"expired": 2, "missed": 1}
+
+
+def test_entry_quality_reads_location_wait_and_excursions_from_the_tape() -> None:
+    start = pd.Timestamp("2022-01-03T14:00:00Z")
+    # a tape rising one point a minute: a LONG filled at minute 60 bought the top of the hour and of the four hours
+    bars = [Bar(start=start + pd.Timedelta(minutes=i), open=16400.0 + i, high=16401.0 + i, low=16399.0 + i, close=16400.5 + i, volume=1.0, symbol="NQ", instrument_id=1) for i in range(400)]
+    fills = [{"direction": "LONG", "fill_price": 16460.0, "limit_price": 16460.0, "stop_price": 16450.0, "submitted_at": start + pd.Timedelta(minutes=55), "filled_at": start + pd.Timedelta(minutes=60)}]
+    q = entry_quality(fills, bars, submitted=2)
+    assert q["fills"] == 1 and q["fill_rate"] == 0.5 and q["median_wait_minutes"] == 5.0
+    assert q["median_location_60m"] == pytest.approx(1.0, abs=0.05) and q["median_location_240m"] == pytest.approx(1.0, abs=0.05) and q["chased"] == 1
+    assert q["right_60m"] == 1 and q["median_mfe_r"] == pytest.approx(6.1, abs=0.2) and q["median_mae_r"] == pytest.approx(0.1, abs=0.1)
+    # a SHORT sold at the same bar sits at the best price of both windows and is wrong an hour later
+    short = [{"direction": "SHORT", "fill_price": 16460.0, "limit_price": 16460.0, "stop_price": 16470.0, "submitted_at": start + pd.Timedelta(minutes=59), "filled_at": start + pd.Timedelta(minutes=60)}]
+    q = entry_quality(short, bars, submitted=1)
+    assert q["median_location_60m"] == pytest.approx(0.0, abs=0.05) and q["chased"] == 0 and q["right_60m"] == 0 and q["median_mae_r"] == pytest.approx(6.1, abs=0.2)
+    assert entry_quality([], bars, submitted=0) == {"fills": 0, "fill_rate": None, "median_wait_minutes": None, "median_location_60m": None, "median_location_240m": None, "chased": 0, "right_60m": 0, "median_mfe_r": None, "median_mae_r": None}

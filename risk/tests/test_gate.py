@@ -215,3 +215,10 @@ def test_leverage_counts_the_contracts_already_open() -> None:
     assert verdict.vetoes == (VetoCode.LEVERAGE,) and "already open" in verdict.reasons[0]
     one_held = account(positions=(Position("NQ", -1, 16380.0),))
     assert gate.assess(tight, one_held, asof=T, positions=positions(1)).quantity == 1
+
+
+def test_the_config_is_schema_3_and_the_ttl_is_fifteen_bars_of_the_entry_scale() -> None:
+    from risk.core.gate import RISK_SCHEMA_VERSION
+
+    assert RISK_SCHEMA_VERSION == 3
+    assert RiskConfig.from_json(Path(__file__).resolve().parents[2] / "risk" / "configs" / "risk.json").order_ttl_bars == 15

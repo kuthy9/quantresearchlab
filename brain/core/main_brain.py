@@ -19,7 +19,7 @@ from typing import Any
 from brain.core.eye_view import EyeContext, assert_causal
 from brain.core.llm_client import CallOutcome, LLMClient, RetryPolicy, call_with_policy
 from brain.core.object_registry import ObjectRegistry
-from brain.core.opportunity_geometry import coherence_error
+from brain.core.opportunity_geometry import POOL_KINDS, coherence_error
 from brain.core.position_ledger import PositionLedger, engaged
 from brain.core.reducer import ReduceContext, ReduceResult, apply, pending_evidence
 from contract.brain.llm import LLM_UPDATE_EXAMPLE, LLMInput, parse_update
@@ -176,7 +176,11 @@ class MainBrain:
 
     def _relations_view(self, context: EyeContext, prior: BrainState | None) -> tuple[Mapping[str, Any], ...]:
         """``price_relations`` bounded to the objects near price, plus every
-        object the prior state names (watched, destination, opportunity)."""
+        object the prior state names (watched, destination, opportunity),
+        plus every liquidity pool whatever its distance (2026-09-20): pools
+        are where a trade goes, and a pool the LLM cannot see the side of
+        was named as a target on the wrong side of the entry in seven of
+        the twelve incoherent proposals of the entry-model benchmark."""
         limit = self._config.relation_atr_limit
         if limit is None:
             return context.price_relations
@@ -185,9 +189,10 @@ class MainBrain:
             named.update(item.object_id for item in prior.watch_next)
             named.update(prior.destination_candidates)
             named.update(prior.opportunity.object_ids)
+        pools = {alias for alias, view in context.object_map().items() if view.kind in POOL_KINDS}
         return tuple(
             row for row in context.price_relations
-            if row["object_id"] in named or row["offset_atr"] is None or abs(row["offset_atr"]) <= limit
+            if row["object_id"] in named or row["object_id"] in pools or row["offset_atr"] is None or abs(row["offset_atr"]) <= limit
         )
 
     def _prior_view(self, prior: BrainState) -> dict[str, Any]:

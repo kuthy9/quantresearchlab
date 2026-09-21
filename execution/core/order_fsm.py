@@ -52,6 +52,7 @@ from typing import Any
 import pandas as pd
 
 from brain.core.journal import BrainJournal
+from brain.core.opportunity_geometry import TIMEFRAME_MINUTES, entry_side_error
 from brain.core.position_ledger import IDLE_VIEW, PositionRecord
 from contract.brain.state import InvalidationMode, TradeDirection, isoformat_utc
 from contract.execution import BracketIntent, BrokerEvent, OrderRole, OrderState
@@ -227,7 +228,7 @@ class OrderMachine:
                 "bars_working": working.bars_since_submit,
                 "quantity": working.entry.quantity,
                 "filled_quantity": working.entry.filled_quantity,
-                "ttl_bars": self._gate.config.order_ttl_bars,
+                "ttl_bars": self._ttl_bars(plan),
             }
         positions = [
             {
@@ -252,6 +253,13 @@ class OrderMachine:
             "last_outcome": None if self._last_outcome is None else dict(self._last_outcome),
             "last_veto": None if self._veto is None else self._veto.to_dict(),
         }
+
+    def _ttl_bars(self, plan: TradePlan) -> int:
+        """How many 1m bars an entry at this plan's object may work:
+        ``order_ttl_bars`` bars of the entry object's own scale (2026-09-20) —
+        a 5m object's limit waits 75 bars, a 15m object's 225.  An unknown
+        scale counts 1m bars."""
+        return self._gate.config.order_ttl_bars * TIMEFRAME_MINUTES.get(plan.entry.timeframe, 1)
 
     def _start_episode(self, episode_id: str | None) -> None:
         if episode_id == self._episode:
@@ -316,7 +324,7 @@ class OrderMachine:
                     self._outcome(kind, asof, reason=intent.cancel_reason, thesis_id=intent.plan.thesis_id)
                     if kind in ("expired", "rejected"):
                         self._blocked.add((intent.plan.episode_id, intent.plan.signature))
-                    self._book.outcome(intent.plan, kind, exit_role=None, bar_index=self._bar_index)
+                    self._book.outcome(intent.plan, kind, exit_role=None, bar_index=self._bar_index, reason=intent.cancel_reason)
                     del self._intents[intent.plan.signature]
             return
         if order.role is OrderRole.FLATTEN:
@@ -473,7 +481,7 @@ class OrderMachine:
                     reason = "signature_changed"
                 elif not visible(working.plan.entry.alias):
                     reason = "entry_object_not_visible"
-                elif working.bars_since_submit >= self._gate.config.order_ttl_bars:
+                elif working.bars_since_submit >= self._ttl_bars(working.plan):
                     reason = "ttl"
                 if reason is not None:
                     working.cancel_reason = reason
@@ -490,6 +498,12 @@ class OrderMachine:
         if (plan.episode_id, plan.signature) in self._blocked:
             return tuple(kinds)
         if not visible(plan.entry.alias):
+            return tuple(kinds)
+        # A limit the market is already past would fill at the open — a chase, not an expression (2026-09-20).
+        # The reducer refused it at proposal; here a plan reaching submission on a later bar (after a cooldown or
+        # a refusal) is held until the tape comes back or the Brain names another object.
+        if entry_side_error(plan.direction, plan.geometry.entry_price, plan.close) is not None:
+            self._refuse(plan, "entry_marketable", kinds, episode_id, asof, llm_called=llm_called)
             return tuple(kinds)
         refusal = self._book.admit(plan, self._bar_index)
         if refusal is not None:

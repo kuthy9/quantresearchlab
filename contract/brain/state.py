@@ -347,10 +347,17 @@ _VERDICT_KEYS = tuple(item.value for item in Verdict)
 
 @dataclass(frozen=True)
 class LastUpdate:
+    """What the last reduction did: when, whether the LLM was called, the
+    verdict counts, an incident, and (2026-09-20) the reducer's rejections
+    of that update — shown to the LLM as ``prior_state.last_update
+    .rejections`` so a dropped opportunity comes back with its reason.
+    Journals before the field read back with none."""
+
     known_at: pd.Timestamp
     llm_called: bool
     verdicts: Mapping[str, int]
     incident: str | None = None
+    rejections: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "known_at", aware_timestamp(self.known_at, name="last_update.known_at"))
@@ -358,6 +365,7 @@ class LastUpdate:
             raise ValueError("last_update.llm_called must be a bool")
         counts = {key: int(self.verdicts.get(key, 0)) for key in _VERDICT_KEYS}
         object.__setattr__(self, "verdicts", FrozenDict(counts))
+        object.__setattr__(self, "rejections", _texts(self.rejections, name="last_update.rejections"))
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -365,11 +373,15 @@ class LastUpdate:
             "llm_called": self.llm_called,
             "verdicts": dict(self.verdicts),
             "incident": self.incident,
+            "rejections": list(self.rejections),
         }
 
     @classmethod
     def from_dict(cls, payload: Mapping[str, Any]) -> "LastUpdate":
-        return cls(parse_utc(payload["known_at"]), payload["llm_called"], payload["verdicts"], payload.get("incident"))
+        return cls(
+            parse_utc(payload["known_at"]), payload["llm_called"], payload["verdicts"], payload.get("incident"),
+            rejections=tuple(payload.get("rejections", ())),
+        )
 
 
 @dataclass(frozen=True)

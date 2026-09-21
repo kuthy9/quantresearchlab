@@ -188,6 +188,64 @@ def missed_trends(expiries: Sequence[Mapping[str, Any]], bars: Sequence[Bar]) ->
     return {"expired": len(expiries), "missed": missed}
 
 
+def _location(price: float, window: Sequence[Bar], direction: str) -> float | None:
+    """Where ``price`` sits in the window's range, seen from the trade: 0 is
+    the best price of the window (its low for a LONG, its high for a SHORT),
+    1 its worst or beyond."""
+    if not window:
+        return None
+    high, low = max(float(bar.high) for bar in window), min(float(bar.low) for bar in window)
+    if high <= low:
+        return None
+    raw = (price - low) / (high - low) if direction == "LONG" else (high - price) / (high - low)
+    return min(1.0, max(0.0, raw))
+
+
+def entry_quality(fills: Sequence[Mapping[str, Any]], bars: Sequence[Bar], *, submitted: int) -> dict[str, Any]:
+    """The entries as the tape saw them (2026-09-20): each fill's location in
+    the range of the 60 and the 240 one-minute bars before its bar (0 = the
+    window's best price for the trade, 1 = its worst), its wait from
+    submission in minutes, its maximum favourable and adverse excursions
+    over the next 60 bars in R (the plan's stop distance), and whether the
+    close 60 minutes later was on its side.  Each fill is ``{direction,
+    fill_price, limit_price, stop_price, submitted_at, filled_at}``;
+    ``chased`` counts fills at or past 0.8 of the 240-bar window."""
+    starts = [pd.Timestamp(bar.start).tz_convert("UTC") for bar in bars]
+    close_at = {start + pd.Timedelta(minutes=1): float(bar.close) for start, bar in zip(starts, bars)}
+    waits: list[float] = []
+    loc_60: list[float] = []
+    loc_240: list[float] = []
+    mfe: list[float] = []
+    mae: list[float] = []
+    chased = right = 0
+    for fill in fills:
+        direction = str(fill["direction"])
+        price = float(fill["fill_price"])
+        filled_at = pd.Timestamp(fill["filled_at"]).tz_convert("UTC")
+        waits.append((filled_at - pd.Timestamp(fill["submitted_at"]).tz_convert("UTC")).total_seconds() / 60.0)
+        index = max(0, bisect.bisect_left(starts, filled_at) - 1)  # the bar that ends at the fill's known_at
+        for horizon, sink in ((60, loc_60), (240, loc_240)):
+            location = _location(price, bars[max(0, index - horizon):index], direction)
+            if location is not None:
+                sink.append(location)
+                if horizon == 240 and location >= 0.8:
+                    chased += 1
+        risk = abs(float(fill["limit_price"]) - float(fill["stop_price"]))
+        after = bars[index + 1:index + 61]
+        if after and risk > 0.0:
+            high, low = max(float(bar.high) for bar in after), min(float(bar.low) for bar in after)
+            mfe.append(((high - price) if direction == "LONG" else (price - low)) / risk)
+            mae.append(((price - low) if direction == "LONG" else (high - price)) / risk)
+        later = close_at.get(filled_at + pd.Timedelta(minutes=60))
+        if later is not None and later != price:
+            right += int((later > price) == (direction == "LONG"))
+    return {
+        "fills": len(fills), "fill_rate": None if not submitted else round(len(fills) / submitted, 4),
+        "median_wait_minutes": _median(waits), "median_location_60m": _median(loc_60), "median_location_240m": _median(loc_240),
+        "chased": chased, "right_60m": right, "median_mfe_r": _median(mfe), "median_mae_r": _median(mae),
+    }
+
+
 # --------------------------------------------------------------- summary
 
 
@@ -238,6 +296,8 @@ def summarize(
     closed_trades: list[dict[str, Any]] = []
     pending_entries: dict[str, dict[str, Any]] = {}  # signature → the submitted entry, for missed_trends
     expiries: list[dict[str, Any]] = []
+    fills: list[dict[str, Any]] = []  # every entry fill with its submission, for entry_quality
+    actionable_readings: list[tuple[pd.Timestamp, str]] = []  # the ACTIONABLE replies' direction at their call
     double_entry = positions_over_limit = position_without_fill = 0
     max_positions = int(run.get("max_open_positions", 3) or 3)
     # The stated direction per state revision (the bias since 2026-09-18,
@@ -295,6 +355,8 @@ def summarize(
                     confidence[str(parsed.get("reasoning_confidence"))] += 1
                     proposed = parsed.get("opportunity") or {}
                     proposed_by_state[str(proposed.get("state"))] += 1
+                    if proposed.get("state") == "ACTIONABLE" and proposed.get("direction") in ("LONG", "SHORT"):
+                        actionable_readings.append((record.known_at, str(proposed["direction"])))
                     if prior is not None:
                         same_opportunity = _opportunity_key(proposed) == _opportunity_key(prior.get("opportunity"))
                         same_watch = [w.get("object_id") for w in parsed.get("watch_next", ())] == [w.get("object_id") for w in prior.get("watch_next", ())]
@@ -388,6 +450,9 @@ def summarize(
                     intent["quantity"] = int(order.get("filled_quantity", 0) or 0)
                     if kind == "filled":
                         entry_open = False
+                        pending = pending_entries.get(str(payload.get("signature")))
+                        if pending is not None and fill.get("price") is not None:
+                            fills.append({**pending, "fill_price": float(fill["price"]), "filled_at": record.known_at})
                 elif kind == "position_opened":
                     if not filled_seen:
                         position_without_fill += 1
@@ -461,6 +526,7 @@ def summarize(
             "proposed_by_state": dict(sorted(proposed_by_state.items())), "survived_by_state": dict(sorted(survived_by_state.items())),
             "distinct_opportunities": len(distinct_opportunities), "geometry_errors": geometry_errors,
             "rejections_by_kind": dict(sorted(rejections.items())), "understanding_changes": understanding_changes,
+            "actionable_direction_accuracy_60m": None if bars is None else direction_accuracy(actionable_readings, bars),
         },
         "risk": {
             "vetoes": vetoes, "veto_signatures": len(veto_signatures), "reproposals_after_veto": reproposals,
@@ -473,6 +539,7 @@ def summarize(
         "orders": {
             **{kind: order_counts.get(kind, 0) for kind in ("submitted", "working", "partial", "filled", "cancel_requested", "cancelled", "expired", "rejected", "position_opened", "position_closed", "exit_leg_lost", "invalidation_close", "bias_reversed", "flattened", "halted")},
             "missed_trends": None if bars is None else missed_trends(expiries, bars),
+            "entry_quality": None if bars is None else entry_quality(fills, bars, submitted=order_counts.get("submitted", 0)),
             "cancel_reasons": dict(sorted(cancel_reasons.items())), "replacements": cancel_reasons.get("signature_changed", 0),
             "exit_roles": dict(sorted(exit_roles.items())), "bars_to_fill": {"median": _median(bars_to_fill), "max": max(bars_to_fill) if bars_to_fill else None},
             "closed_trades": closed_trades,

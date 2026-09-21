@@ -173,6 +173,8 @@ def replay_run(
         if observations is not None:
             paired = zip(observations, bars if bars is not None else [None] * len(observations))
             for observation, bar in paired:
+                if stack.halted:
+                    break  # the runner stops at the drawdown halt; so does the replay (2026-09-21)
                 step(observation, bar)
         else:
             window = RunWindow(Path(run["window"]["source"]), run["window"]["warmup_start"], run["window"]["emit_start"], run["window"]["end"])
@@ -181,7 +183,7 @@ def replay_run(
             drive(
                 window, model_path=model_path or ROOT / DEFAULT_MODEL, root=ROOT,
                 on_observation=lambda observation, emitting, bar: step(observation, bar) if emitting else None,
-                progress_every=2000, log=log,
+                progress_every=2000, log=log, stop=lambda: stack.halted,
             )
     except _ReplayDiverged as error:
         mismatches.append(str(error))

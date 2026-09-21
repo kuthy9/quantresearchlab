@@ -1,5 +1,5 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "risk_fraction": {"BASE": 0.015, "A_PLUS": 0.02},
   "max_open_positions": 3,
   "min_reward_risk": 2.0,

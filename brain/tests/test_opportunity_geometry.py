@@ -4,7 +4,7 @@ import pytest
 
 from dataclasses import replace
 
-from brain.core.opportunity_geometry import CLOSE_BEYOND_BUFFER_ATR, ObjectGeometry, coherence_error, resolve_geometry
+from brain.core.opportunity_geometry import CLOSE_BEYOND_BUFFER_ATR, ObjectGeometry, coherence_error, entry_side_error, resolve_geometry
 from contract.brain.state import Opportunity, OpportunityState, TradeDirection
 from contract.decision import GeometryError
 
@@ -37,13 +37,44 @@ def test_short_mirrors() -> None:
     assert g.rule_ids == ("entry.zone.near_edge", "stop.pool.far_edge", "target.pool.midpoint")
 
 
-def test_swing_stop_and_range_entry() -> None:
+def test_swing_stop() -> None:
     g = resolve_geometry(
-        Opportunity(OpportunityState.DEVELOPING, TradeDirection.LONG, "DR_15m_1", "SWING_L_5m_1", "BSL_1H_1"),
+        Opportunity(OpportunityState.DEVELOPING, TradeDirection.LONG, "FVG_5m_3", "SWING_L_5m_1", "BSL_1H_1"),
         OBJ, close=103.0, tick=0.25,
     )
-    assert (g.entry_price, g.stop_price, g.target_price) == (104.0, 98.75, 110.0)
-    assert g.rule_ids == ("entry.range.value", "stop.swing.price", "target.pool.midpoint")
+    assert (g.entry_price, g.stop_price, g.target_price) == (102.0, 98.75, 110.0)
+    assert g.rule_ids == ("entry.zone.near_edge", "stop.swing.price", "target.pool.midpoint")
+
+
+def test_a_zone_that_contains_price_is_entered_at_its_midpoint_or_far_edge() -> None:
+    # FVG_5m_3 is 100–102, midpoint 101: the limit rests inside the zone, never above price for a LONG
+    long_inside = Opportunity(OpportunityState.ACTIONABLE, TradeDirection.LONG, "FVG_5m_3", "SSL_5m_2", "BSL_1H_1")
+    g = resolve_geometry(long_inside, OBJ, close=101.5, tick=0.25)
+    assert g.entry_price == 101.0 and g.rule_ids[0] == "entry.zone.inside_midpoint"
+    g = resolve_geometry(long_inside, OBJ, close=100.5, tick=0.25)  # price already under the midpoint
+    assert g.entry_price == 100.0 and g.rule_ids[0] == "entry.zone.inside_far_edge"
+    short_inside = Opportunity(OpportunityState.ACTIONABLE, TradeDirection.SHORT, "OB_15m_1", "BSL_1H_1", "SSL_5m_2")  # OB 104–106
+    g = resolve_geometry(short_inside, OBJ, close=104.5, tick=0.25)
+    assert g.entry_price == 105.0 and g.rule_ids[0] == "entry.zone.inside_midpoint"
+    g = resolve_geometry(short_inside, OBJ, close=105.5, tick=0.25)
+    assert g.entry_price == 106.0 and g.rule_ids[0] == "entry.zone.inside_far_edge"
+
+
+def test_a_range_is_not_an_entry_object() -> None:
+    with pytest.raises(GeometryError, match="range is not an entry"):
+        resolve_geometry(
+            Opportunity(OpportunityState.DEVELOPING, TradeDirection.LONG, "DR_15m_1", "SWING_L_5m_1", "BSL_1H_1"), OBJ, close=103.0, tick=0.25
+        )
+
+
+def test_an_entry_the_market_is_past_is_incoherent_at_proposal_but_still_resolves() -> None:
+    long_above = Opportunity(OpportunityState.ACTIONABLE, TradeDirection.LONG, "OB_15m_1", "SSL_5m_2", "BSL_1H_1")  # OB 104–106 above a 103 close
+    assert resolve_geometry(long_above, OBJ, close=103.0, tick=0.25).entry_price == 106.0  # a working order's plan is re-resolved every bar
+    reason = coherence_error(long_above, OBJ, close=103.0, tick=0.25)
+    assert reason is not None and "above price" in reason and "pullback" in reason
+    assert coherence_error(long_above, OBJ, close=106.0, tick=0.25) is None
+    assert entry_side_error(TradeDirection.SHORT, 98.0, 103.0) is not None
+    assert entry_side_error(TradeDirection.SHORT, 103.0, 103.0) is None and entry_side_error(TradeDirection.LONG, 103.0, 103.0) is None
 
 
 def test_incoherent_direction_fails() -> None:

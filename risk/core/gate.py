@@ -35,7 +35,7 @@ from contract.brain.state import ThesisGrade, TradeDirection, isoformat_utc
 from contract.execution import AccountSnapshot
 from contract.risk import RiskVerdict, TradePlan, VetoCode
 
-RISK_SCHEMA_VERSION = 2
+RISK_SCHEMA_VERSION = 3  # 3 (2026-09-20): order_ttl_bars counts bars of the entry object's scale
 SESSION_TIMEZONE = "America/New_York"
 # A CME futures session opens at 18:00 New York the evening before its date.
 SESSION_OFFSET = pd.Timedelta(hours=6)
@@ -69,7 +69,7 @@ class RiskConfig:
     max_drawdown_fraction: float  # from the equity peak; the run halts and flattens at it
     max_leverage: float  # open notional over equity, counting the contracts already open
     max_quantity: int
-    order_ttl_bars: int
+    order_ttl_bars: int  # bars of the entry object's own scale (2026-09-20); the machine converts to 1m bars
     account_max_age_s: float
     # The initial margin one contract holds (an approximation of the
     # exchange's); the available funds cap the quantity at it.

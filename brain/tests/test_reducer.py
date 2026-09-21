@@ -392,3 +392,13 @@ def test_pending_evidence_is_bounded_and_the_oldest_expires() -> None:
     # unbounded by default
     r3 = apply(prev, episode_id="EP_1", evidence=[item("ev_new")], update=None, ctx=ctx())
     assert len([e for e in r3.state.evidence.unresolved if e.verdict is None]) == 4
+
+
+def test_the_state_records_why_the_opportunity_was_dropped() -> None:
+    prev = quiet()
+    bad = Opportunity(OpportunityState.ACTIONABLE, TradeDirection.LONG, "FVG_5m_3", "SSL_5m_2", "BSL_1H_1", thesis_id="T1", governing_timeframe="5m")
+    r = apply(prev, episode_id=prev.episode_id, evidence=[], update=upd(opportunity=bad), ctx=ctx(coherence=lambda o: "LONG entry 105 lies above price 103"))
+    assert r.state.opportunity.state is OpportunityState.NONE
+    assert r.state.last_update.rejections == ("opportunity_incoherent:LONG entry 105 lies above price 103",) == r.rejections
+    clean = apply(r.state, episode_id=prev.episode_id, evidence=[], update=upd(), ctx=ctx())
+    assert clean.state.last_update.rejections == ()

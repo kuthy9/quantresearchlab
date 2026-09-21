@@ -47,7 +47,7 @@ margin)`, `limit_price`, `stop_price` and `target_price` rounded to the tick,
 `risk_amount = quantity × |entry − stop| × point_value`, `reward_risk`,
 `equity`.
 
-## `risk/configs/risk.json` (schema 2)
+## `risk/configs/risk.json` (schema 3)
 
 | field | default | meaning |
 | --- | --- | --- |
@@ -59,7 +59,7 @@ margin)`, `limit_price`, `stop_price` and `target_price` rounded to the tick,
 | `max_drawdown_fraction` | 0.065 | from the equity peak; the run halts and flattens |
 | `max_leverage` | 8.0 | open notional over equity, counting the contracts already open (100 000 USD holds two NQ at 16 400 in total) |
 | `max_quantity` | 5 | contracts |
-| `order_ttl_bars` | 15 | 1m bars an unfilled entry may work (read by the order machine) |
+| `order_ttl_bars` | 15 | bars of the entry object's *own scale* an unfilled entry may work (schema 3, 2026-09-20; the order machine converts — 75 1m bars for a 5m object, 225 for a 15m one — and reports the 1m figure as `ttl_bars`) |
 | `account_max_age_s` | 120 | staleness of the account snapshot |
 | `margin_per_contract` | 20 000 | held per contract; the available funds cap the quantity at it |
 | `thesis.max_expressions` | 2 | orders one thesis may place in an episode (the `ThesisBook`) |

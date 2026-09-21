@@ -96,7 +96,7 @@ def test_llm_input_hashes_canonically() -> None:
     )
     assert a.input_sha == b.input_sha
     assert json.loads(a.to_json())["known_at"] == "2022-01-04T14:41:00Z"
-    assert json.loads(a.to_json())["schema_version"] == 2
+    assert json.loads(a.to_json())["schema_version"] == 3
 
 
 def test_actionable_opportunity_carries_thesis_scale_grade_and_mode() -> None:

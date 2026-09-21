@@ -121,3 +121,13 @@ def test_a_bias_reversal_closes_the_thesis_without_a_cooldown() -> None:
     b.outcome(p, "position_closed", exit_role="bias_reversed", bar_index=10)
     assert b.view(11)["theses"][0]["closed_reason"] == "bias_reversed" and b.cooldown_bars_left(11) == 0
     assert b.admit(plan(target_id="swing:d"), 11) == "thesis_closed"
+
+
+def test_a_replacement_gives_the_expression_back_but_a_dropped_plan_does_not() -> None:
+    for reason, left in (("signature_changed", 0), ("entry_object_not_visible", 0), ("plan_dropped", 1)):
+        b = book()
+        p = plan()
+        assert b.admit(p, 0) is None
+        b.expressed(p)
+        b.outcome(p, "cancelled", exit_role=None, bar_index=1, reason=reason)
+        assert b.view(1)["theses"][0]["expressions"] == left, reason

@@ -44,14 +44,14 @@ writes a journal that replays without hindsight.
 | `sleep_controller.py` | `decide(events, active, config)` → `WAKE` / `STAY_ASLEEP` / `UPDATE` / `TICK`; `ControllerConfig` (schema 4: the bookkeeping kinds, the wake set, `relation_change_timeframes`, `relation_change_debounce_bars`, the idle-archive threshold) from `configs/sleep_controller.json` |
 | `main_brain.py` | `MainBrain.step`: build the `LLMInput`, prove it causal, call under the retry policy, parse, reduce; `MainBrainConfig` from `configs/main_brain.json` + `configs/prompts/main_brain_system.md` |
 | `llm_client.py` | `DeepSeekClient` (urllib, JSON mode; key from `DEEPSEEK_API_KEY`, else the gitignored `brain/configs/deepseek.key` — `resolve_api_key`), `ScriptedClient`, `EchoClient`, `RecordedClient`, `call_with_policy` |
-| `reducer.py` | the pure function `apply(prev, evidence, update, ctx)`; `empty_state`; `pending_evidence`; `sleep_blockers`; since 2026-09-17 rule 4 also refuses an invalidation object more than one scale below the thesis's `governing_timeframe` and a `thesis_id` that flips direction; since 2026-09-18 rule 4b drops an opportunity against the reply's `bias` (`opportunity_against_bias`), any opportunity under a NEUTRAL bias, and a thesis on a scale above the bias scale (`opportunity_scale_above_bias`) |
-| `opportunity_geometry.py` | `resolve_geometry` / `coherence_error`: object aliases → `OpportunityGeometry`; a `CLOSE_BEYOND` invalidation puts the hard stop `CLOSE_BEYOND_BUFFER_ATR` × 1m ATR × √(scale minutes) beyond the object |
+| `reducer.py` | the pure function `apply(prev, evidence, update, ctx)`; `empty_state`; `pending_evidence`; `sleep_blockers`; since 2026-09-17 rule 4 also refuses an invalidation object more than one scale below the thesis's `governing_timeframe` and a `thesis_id` that flips direction; since 2026-09-18 rule 4b drops an opportunity against the reply's `bias` (`opportunity_against_bias`), any opportunity under a NEUTRAL bias, and a thesis on a scale above the bias scale (`opportunity_scale_above_bias`); since 2026-09-20 rule 4 also refuses an entry the market is already past (`coherence_error` → `entry_side_error`: a LONG entry above the close, a SHORT below it), and every rejection of an update travels in the state's `last_update.rejections` — what the next call reads as `prior_state.last_update.rejections` |
+| `opportunity_geometry.py` | `resolve_geometry` / `coherence_error`: object aliases → `OpportunityGeometry`; a `CLOSE_BEYOND` invalidation puts the hard stop `CLOSE_BEYOND_BUFFER_ATR` × 1m ATR × √(scale minutes) beyond the object; since 2026-09-20 a zone that *contains* price is entered at its midpoint, or at its far edge when price is already past the midpoint (`entry.zone.inside_midpoint` / `entry.zone.inside_far_edge` — the near edge of a containing zone is a buy at the market), a range is refused as an entry object, and `entry_side_error` judges which side of the close a limit rests on — at proposal (`coherence_error`) and at submission (the order machine), never on the bars between, where a working limit the tape crosses must fill |
 | `position_ledger.py` | `PositionLedger` protocol (`has_open_position`, `has_working_order`, `execution_view`), `engaged`, `IDLE_VIEW`; `InMemoryPositionLedger`; the real one is `execution.core.order_fsm.ExecutionLedger` |
 | `journal.py` | `BrainJournal` (writer), `JournalReader`, `record_hash` |
 | `runtime.py` | `BrainRuntime.step(observation)`: the SLEEP ↔ ACTIVE machine; `StepResult.llm_latency_ms`; optional `Timings` (`controller`, `journal`; the Brain records `input`, `llm`, `reduce`) |
 | `brain_entry_sequence.py` | the Brain-side reading of the Eye's interaction facts (also consumed by `shares/core/scene_graph.py`) |
 
-Contracts: `contract/brain/state.py` (`BrainState`, schema 2 since 2026-09-18 with `bias` — `Bias(direction LONG | SHORT | NEUTRAL, scale, basis)`; a schema-1 journal reads as NEUTRAL on 15m), `contract/brain/llm.py`
+Contracts: `contract/brain/state.py` (`BrainState`, schema 2 since 2026-09-18 with `bias` — `Bias(direction LONG | SHORT | NEUTRAL, scale, basis)`; a schema-1 journal reads as NEUTRAL on 15m; `LastUpdate.rejections` since 2026-09-20, empty for older journals), `contract/brain/llm.py`
 (`LLMInput`, `LLMUpdate`, `parse_update`), `contract/decision/opportunity.py`
 (`OpportunityGeometry`).
 
@@ -105,15 +105,20 @@ active leg past one ATR of its scale with a displacement at most three bars
 old or an MSS / BOS as the latest structural event, and a live scale stays
 live until its leg ends, not when the excursion dips under one ATR
 (2026-09-19); the 5m never sets the bias; a stale phase is location, not
-direction; a `reset` makes its side live; the expression rule:
-after a BOS on the bias scale, the object that `contains_price`), the hard
+direction; a `reset` makes its side live), the "Expression" section
+(2026-09-20: the bias picks the side and fires nothing; the trade is a
+resting limit at a retracement object on the scale below the bias scale —
+nearest first, follow the leg, the wait is fifteen bars of the object's
+scale, `prior_state.last_update.rejections` says what code refused and
+why; it replaced the 2026-09-18 rule "after a BOS on the bias scale, the
+object that `contains_price` — the order fills now"), the hard
 rules (objects only, no prices, a counter candle is not delivery, the
 invalidation judged on the governing scale and the direction on the bias
 scale, sleep only when nothing is pending)
 and the output contract rendered from `LLM_UPDATE_EXAMPLE`. Its sha256 is in
 every run's identity.
 
-`LLMInput` (schema 2 since 2026-09-18): `episode_id`, `known_at`, `trigger`, `bar` (close, 1m ATR),
+`LLMInput` (schema 3 since 2026-09-20 — `prior_state.last_update.rejections`; schema 2 since 2026-09-18): `episode_id`, `known_at`, `trigger`, `bar` (close, 1m ATR),
 `session` (with `drift_atr`, the close against the session open in 1m
 ATRs), `scales` (4H / 1H / 15m / 5m summaries with aliases; 1m structure
 and delivery only — each `delivery` carries `active_leg_direction` (the leg
@@ -127,7 +132,10 @@ verdicts it), `tape_since_last_update`, `price_relations` (for every aliased obj
 within `relation_atr_limit` ATRs of the close, plus every object the prior
 state names: `position` — where the *object* lies, `above_price` /
 `below_price` / `contains_price` — and `offset_atr`, its signed distance
-in 1m ATRs, positive above price; renamed on 2026-09-17 from
+in 1m ATRs, positive above price; since 2026-09-20 every liquidity pool
+is placed whatever its distance — a pool the LLM could not see the side
+of was named as a target on the wrong side in seven of the twelve
+incoherent proposals of the entry-model benchmark; renamed on 2026-09-17 from
 `relation` / `distance_atr`, which described price's place against the
 object and which the model read the other way round on every real run), `prior_state`
 (the state without its registry, each evidence list bounded to its last
@@ -191,7 +199,10 @@ visible aliases, registry, geometry coherence):
 3. an abandoned understanding must be replaced, else the whole update is
    refused (`understanding_not_replaced`);
 4. an opportunity must name three distinct, currently visible aliases whose
-   geometry is coherent for its direction, else it downgrades to `NONE`;
+   geometry is coherent for its direction — since 2026-09-20 including a
+   limit on the resting side of the close — else it downgrades to `NONE`;
+   the update's rejections are carried in `last_update.rejections` for the
+   next call to read;
 5. an open position forces `continue_active`;
 6. sleep is granted only when all five exit conditions hold — no open
    position, no *open* interaction path (one that stepped since the last LLM
@@ -255,7 +266,9 @@ increases. `brain/scripts/replay_journal.py --run-dir <run>` re-drives the
 Eye over the run's window, rebuilds every `LLMInput`, compares its sha with
 the journal's, feeds the recorded replies (and incidents) back through the
 reducer, and requires every state and tick revision to match — exit 0 only
-when every episode reproduces. `brain/tests/test_replay.py` proves it on a
+when every episode reproduces; since 2026-09-21 it stops at the gate's
+drawdown halt as the runner does (the 2022-10-13 benchmark window halted
+at 08:32 and replayed with extra revisions until then). `brain/tests/test_replay.py` proves it on a
 synthetic tape, including a tampered record and a dropped revision.
 
 ## Running
@@ -274,6 +287,13 @@ effort and enters the run identity (`deepseek:deepseek-flash@low`);
 re-run on the same Brain inputs — the executor code is not hashed, so run
 X (execution layer) would otherwise have been refused as run B′.
 
+`brain/scripts/run_benchmark.py --client deepseek --broker sim --reasoning-effort high --label <text> --parallel 3 [--only <text>] [--dry-run]`
+(2026-09-20) runs one `run_llm_brain` per window of
+`configs/benchmark_windows.json` (ten 2022 windows across regimes, market
+time, the Eye warmed `warmup_days` before each), `--parallel` at a time,
+logs under `outputs/brain_journal/benchmark_logs/`; `--dry-run` prints
+the commands.
+
 `brain/scripts/summarize_run.py --run-dir <run> [--run-dir …] [--write]`
 turns a journal into `summary.json` (calls, tokens and cost at the rates
 in `configs/llm_pricing.json`, latency, triggers, sleeps, sharp-move
@@ -284,7 +304,12 @@ against the bias, and `direction_accuracy_60m`: the share of state
 revisions whose stated direction matched the sign of the close an hour
 later; since 2026-09-19 `orders.missed_trends` — expired entries the tape
 ran at least one R away from without touching the limit — and the
-`bias_reversed` exit kind) and prints several
+`bias_reversed` exit kind; since 2026-09-20 `orders.entry_quality` — each
+fill's location in the range of the 60 and 240 bars before it (0 the
+window's best price for the trade, 1 its worst; `chased` counts fills at
+or past 0.8 of the 240-bar window), its wait, its excursions over the next
+hour in R and whether the close an hour later was on its side, plus
+`fill_rate` — and `brain.actionable_direction_accuracy_60m`) and prints several
 runs side by side; `--until <UTC time>` bounds the counts to a common
 window when runs differ in length.
 `brain/scripts/audit_scales.py --warmup-start … --emit-start … --end …`
@@ -303,6 +328,24 @@ with `DEEPSEEK_API_KEY_FILE`); `*.key` is gitignored, and the key is never
 written to a command line the repository owns or to a journal.
 
 ## Receipts — `brain/docs/evidence/`
+
+[2026-09-20_entry_model_benchmark_2022.md](evidence/2026-09-20_entry_model_benchmark_2022.md):
+the entry model over ten 2022 windows across regimes — no chase anywhere
+(2 of 20 fills past 0.8 of the four-hour range), resting limits that fill,
+the direction right on the trend days and wrong on every reversal, the
+right thesis expressed on one trend day of four (pools the model could not
+place — spec §1.7 — and stops sized by a 5m object blocked the others);
+the second pass under the pool fix was cut by HTTP 402 (the API balance)
+and is recorded, not read.
+
+[2026-09-20_entry_model_frozen_window_2022-01-03.md](evidence/2026-09-20_entry_model_frozen_window_2022-01-03.md):
+the frozen window under the entry model (`b8870c30ec04d5df`): no fill at
+the market (waits 80/15/5/4/1/1 minutes, two chases refused), the code-made
+`opportunity_incoherent` gone, ACTIONABLE accuracy 0.41 (0.32), the wait
+and the replacement at work, and still −167 — six stops decided by the
+direction at the open and a 2.87 R winner with no way to keep it; replays;
+§7 the same window under the pool fix (`2710e0b78a707e99`, −141.5, the
+day's reading in a 0.44–0.50 band run to run).
 
 [2026-09-18_execution_entry_day_run_2022-01-03.md](evidence/2026-09-18_execution_entry_day_run_2022-01-03.md):
 the execution layer of the direction fix and the build's close — the
@@ -410,17 +453,18 @@ measure the mechanical Brain this design replaced.
 | --- | --- |
 | `test_brain_state.py` | round trip, invariants, unknown keys |
 | `test_llm_contract.py` | the reply gate: 16 malformed shapes, canonical input hashing |
-| `test_opportunity_geometry.py` | entry / stop / target per object kind, LONG / SHORT mirror, incoherence |
+| `test_opportunity_geometry.py` | entry / stop / target per object kind, LONG / SHORT mirror, incoherence; a containing zone's midpoint / far edge, a range refused as entry, the side rule at proposal only |
 | `test_object_registry.py`, `test_eye_view.py` | aliases, causality, price relations, reproducibility on the synthetic Eye; interaction rows (source alias, `last_step_at`, open since the last call); the forming-leg, displacement-age and reset keys, `drift_atr` |
 | `test_audit_scales.py` | the change points of the per-scale facts and `scale_facts` on the synthetic Eye; `replay_triggers` keeps wakes, reactions and undebounced relation flips |
 | `test_sleep_controller.py` | the wake rule kind by kind, UPDATE / TICK, the tape rule |
 | `test_reducer.py` | every verdict route, RESOLVE, missing verdict, pending items (re-offered, verdicted late, resolved by a carrier, kept through another incident), NEUTRAL never blocks sleep, understanding replacement, opportunity downgrade, position, each sleep condition, TICK, incidents, determinism |
 | `test_llm_client.py` | retry policy (timeout / 429 / 5xx / dropped connection / 400 / malformed / repair), DeepSeek request shape and error mapping against a local HTTP server, empty content, key resolution (environment, key file, neither) |
 | `test_journal.py` | hash chain, tampering, monotone `known_at`, revision gaps, the ledger |
-| `test_main_brain.py` | prompt loading, input shape, wake / update / incident steps, bounded prior evidence, pending items re-offered and filed by their late verdict |
+| `test_main_brain.py` | prompt loading (the bias and the Expression sections' words), input shape, wake / update / incident steps, bounded prior evidence, pending items re-offered and filed by their late verdict, the prior view's `last_update.rejections` |
 | `test_runtime.py` | SLEEP → WAKE → UPDATE → TICK → sleep on the synthetic Eye, a NEUTRAL-only sleeper sleeps, evidence parked by an incident is verdicted later and sleep follows, incident keeps ACTIVE, open position, `known_at` monotone, episode numbering |
 | `test_replay.py` | a journal replays to identical states; tampering and a dropped revision are detected |
-| `test_summarize_run.py` | the summary of a stack run on the synthetic tape, the cost arithmetic, the veto metrics on a hand-built journal, sharp-move coverage, rendering |
+| `test_summarize_run.py` | the summary of a stack run on the synthetic tape, the cost arithmetic, the veto metrics on a hand-built journal, sharp-move coverage, rendering, `missed_trends`, `entry_quality` |
+| `test_run_benchmark.py` | the windows file, one command per window with the warmup, a dry run launches nothing |
 | `test_run_guards.py` | `tape_is_current` for `--broker ibkr`, the effort label, `drive` timings |
 | `test_regression_baseline.py` | `research_orchestration`: the frozen week backtest replays and summarizes identically ([evidence/regression_baselines.json](evidence/regression_baselines.json)) |
 | `test_eye_link_real_tape.py` | `research_orchestration`: the real Eye on 2022-01-04 wakes the controller, never on 1m alone |

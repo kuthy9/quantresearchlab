@@ -21,6 +21,8 @@ ROOT = Path(__file__).resolve().parents[2]
 # one contract is one contract; sizing is the gate's tests' business.
 CONFIG = replace(RiskConfig.from_json(ROOT / "risk" / "configs" / "risk.json"), risk_fraction={"BASE": 0.005, "A_PLUS": 0.005}, max_leverage=1_000.0)
 SIM = SimulatorConfig.from_json(ROOT / "execution" / "configs" / "simulated_executor.json")
+# The fixture's entry object is a 5m zone: its limit works order_ttl_bars bars of the 5m (2026-09-20).
+TTL = CONFIG.order_ttl_bars * 5
 T0 = pd.Timestamp("2022-01-03T14:12:00Z")
 EP = "EP_20220103_001"
 
@@ -33,12 +35,12 @@ def bar(minute: int, low: float, high: float) -> Bar:
     return Bar(start=at(minute) - pd.Timedelta(minutes=1), open=(low + high) / 2, high=high, low=low, close=(low + high) / 2, volume=1.0, symbol="NQ", instrument_id=1)
 
 
-def short_plan(entry=16387.5, stop=16411.5, target=16330.0, target_id="swing:c", thesis_id="", direction=TradeDirection.SHORT, **fields) -> TradePlan:
-    """A SHORT with a 24-point stop and a 57.5-point target (2.4 R); ``fields`` reach the plan (mode, level, ...)."""
+def short_plan(entry=16387.5, stop=16411.5, target=16330.0, target_id="swing:c", thesis_id="", direction=TradeDirection.SHORT, close=16385.0, **fields) -> TradePlan:
+    """A SHORT with a 24-point stop and a 57.5-point target (2.4 R), resting 2.5 points over the close; ``fields`` reach the plan (mode, level, ...)."""
     return TradePlan(
         EP, 12, T0, direction,
         ObjectRef("FVG_5m_10", "fvg:a", "fvg", "5m"), ObjectRef("BSL_5m_3", "swing:b", "bsl", "5m"), ObjectRef("SSL_4H_2", target_id, "ssl", "4H"),
-        OpportunityGeometry(entry, stop, target, abs(target - entry) / abs(entry - stop), ("e", "s", "t")), close=16390.0,
+        OpportunityGeometry(entry, stop, target, abs(target - entry) / abs(entry - stop), ("e", "s", "t")), close=close,
         thesis_id=thesis_id, governing_timeframe="15m", **fields,
     )
 
@@ -99,11 +101,11 @@ def test_fill_opens_a_position_and_the_stop_closes_it(tmp_path: Path) -> None:
 
 def test_ttl_cancels_and_blocks_the_same_signature_until_it_changes(tmp_path: Path) -> None:
     m, broker, journal = machine(tmp_path)
-    kinds = quiet_bars(m, short_plan(), 1, CONFIG.order_ttl_bars + 2)
+    kinds = quiet_bars(m, short_plan(), 1, TTL + 2)
     assert "cancel_requested" in kinds and "expired" in kinds and m.state is MachineState.IDLE
-    kinds = quiet_bars(m, short_plan(), CONFIG.order_ttl_bars + 3, 3)
+    kinds = quiet_bars(m, short_plan(), TTL + 3, 3)
     assert "submitted" not in kinds, "an expired signature is not resubmitted while the plan is unchanged"
-    kinds = quiet_bars(m, short_plan(target_id="swing:d"), CONFIG.order_ttl_bars + 6, 1)
+    kinds = quiet_bars(m, short_plan(target_id="swing:d"), TTL + 6, 1)
     assert kinds == ("submitted",)
 
 
@@ -160,9 +162,9 @@ def test_a_rejected_entry_blocks_the_signature_until_the_plan_changes(tmp_path: 
 
 def test_an_expired_signature_is_tradeable_again_in_a_new_episode(tmp_path: Path) -> None:
     m, broker, journal = machine(tmp_path)
-    kinds = quiet_bars(m, short_plan(), 1, CONFIG.order_ttl_bars + 2)
+    kinds = quiet_bars(m, short_plan(), 1, TTL + 2)
     assert "expired" in kinds and m.state is MachineState.IDLE
-    assert quiet_bars(m, short_plan(), CONFIG.order_ttl_bars + 3, 1) == ()
+    assert quiet_bars(m, short_plan(), TTL + 3, 1) == ()
     episode_2 = "EP_20220103_002"
     journal.open_episode(episode_2, at(30))
     plan_2 = replace(short_plan(), episode_id=episode_2)
@@ -205,7 +207,7 @@ def test_execution_view_follows_the_intent(tmp_path: Path) -> None:
     assert view["status"] == "WORKING" and view["positions"] == [] and view["last_outcome"] is None and view["last_veto"] is None
     assert view["order"] == {
         "direction": "SHORT", "entry_object_id": "FVG_5m_10", "invalidation_object_id": "BSL_5m_3", "target_object_id": "SSL_4H_2", "thesis_id": "",
-        "submitted_at": "2022-01-03T14:13:00Z", "bars_working": 0, "quantity": 1, "filled_quantity": 0, "ttl_bars": CONFIG.order_ttl_bars,
+        "submitted_at": "2022-01-03T14:13:00Z", "bars_working": 0, "quantity": 1, "filled_quantity": 0, "ttl_bars": TTL,
     }
     assert view["theses"] == [] and view["cooldown_bars_left"] == 0 and view["daily_stop"] is False and view["halted"] is False
     m.on_bar(at(2), bar(2, 16380.0, 16390.0), short_plan(), episode_id=EP, visible=lambda a: True)
@@ -222,7 +224,7 @@ def test_bars_working_counts_toward_the_ttl_and_an_expiry_is_the_last_outcome(tm
     m, broker, journal = machine(tmp_path)
     quiet_bars(m, short_plan(), 1, 4)
     assert m.ledger.execution_view()["order"]["bars_working"] == 3
-    quiet_bars(m, short_plan(), 5, CONFIG.order_ttl_bars)
+    quiet_bars(m, short_plan(), 5, TTL)
     view = m.ledger.execution_view()
     assert view["status"] == "IDLE" and view["last_outcome"]["kind"] == "expired" and view["last_outcome"]["reason"] == "ttl"
 
@@ -429,7 +431,35 @@ def test_an_expiry_gives_the_expression_back_in_the_machine(tmp_path: Path) -> N
     m, broker, journal = machine(tmp_path)
     for i in range(3):
         p = short_plan(thesis_id="T1", target_id=f"swing:{i}")
-        start = 1 + i * (CONFIG.order_ttl_bars + 2)
-        kinds = quiet_bars(m, p, start, CONFIG.order_ttl_bars + 2)
+        start = 1 + i * (TTL + 2)
+        kinds = quiet_bars(m, p, start, TTL + 2)
         assert "submitted" in kinds and "expired" in kinds, f"expiry {i} is not an expression: the third limit is still admitted"
     assert m.ledger.execution_view()["theses"][0]["expressions"] == 0
+
+
+def test_the_ttl_counts_bars_of_the_entry_objects_scale(tmp_path: Path) -> None:
+    # the plan's entry is a 5m object: fifteen 5m bars are seventy-five 1m bars
+    m, broker, journal = machine(tmp_path)
+    kinds = quiet_bars(m, short_plan(), 1, CONFIG.order_ttl_bars + 2)
+    assert "expired" not in kinds and m.state is MachineState.WORKING
+    assert m.execution_view()["order"]["ttl_bars"] == CONFIG.order_ttl_bars * 5 == TTL
+    kinds = quiet_bars(m, short_plan(), CONFIG.order_ttl_bars + 3, TTL)
+    assert "expired" in kinds and m.state is MachineState.IDLE
+    m2, _, _ = machine(tmp_path / "m2")
+    hourly = replace(short_plan(), entry=ObjectRef("FVG_1H_1", "fvg:h", "fvg", "1H"))
+    m2.on_bar(at(1), bar(1, 16370.0, 16380.0), hourly, episode_id=EP, visible=lambda a: True)
+    assert m2.execution_view()["order"]["ttl_bars"] == CONFIG.order_ttl_bars * 60
+
+
+def test_a_marketable_entry_is_refused_not_chased(tmp_path: Path) -> None:
+    m, broker, journal = machine(tmp_path)
+    chase = short_plan(close=16390.0)  # a SELL limit at 16387.5 under a 16390 market would fill at the open
+    kinds = m.on_bar(at(1), bar(1, 16385.0, 16395.0), chase, episode_id=EP, visible=lambda a: True, llm_called=True)
+    assert kinds == ("thesis_refused",) and last_trade(tmp_path, "thesis_refused")["reason"] == "entry_marketable"
+    assert not m.ledger.has_working_order() and m.state is MachineState.IDLE
+    # the same refusal is not journaled again until the Brain speaks; a resting limit then goes in
+    assert quiet_bars(m, chase, 2, 2, low=16385.0, high=16395.0) == ()
+    kinds = m.on_bar(at(4), bar(4, 16385.0, 16395.0), short_plan(close=16390.0, target_id="swing:d"), episode_id=EP, visible=lambda a: True, llm_called=True)
+    assert kinds == ("thesis_refused",)
+    kinds = m.on_bar(at(5), bar(5, 16370.0, 16380.0), short_plan(), episode_id=EP, visible=lambda a: True, llm_called=True)
+    assert kinds == ("submitted",)

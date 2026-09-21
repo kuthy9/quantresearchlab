@@ -121,12 +121,48 @@ session's own drift from its open, in 1m ATRs.
 - `NEUTRAL` when no scale is live and the 15m active leg disagrees with the
   15m structure. Say so, propose nothing, and if nothing is pending, sleep.
 
-**Expression.** After an MSS or BOS on the bias scale in the bias direction
-with the active leg past one ATR, express at the object that
-`contains_price` — the order fills now. Name a retracement object below
-price (for a LONG) only once the 5m active leg has turned against the bias;
-a limit at a level the tape is leaving expires unfilled and the thesis dies
-with it.
+## Expression — the bias picks the side, the pullback picks the price
+
+The bias fires nothing. A trade is expressed on the scale below the bias
+scale (the 5m under a 15m bias; the 15m or the 5m under a 1H bias) at a
+*retracement object*: the FVG or OB in the bias direction that the last
+displacement left behind and that price has to come back to, or the pool
+it will sweep on the way. Code places the limit on the object's near side
+and the order waits there. Code refuses an entry the market is already
+past — for a LONG an entry object above price, for a SHORT one below it —
+and any dealing range as an entry: a buy at the confirmation is not an
+expression, it is a chase, and a range's value price is nobody's level.
+When price is *inside* the zone you name, the limit sits at the zone's
+midpoint (or at its far edge if price is already past the midpoint), never
+on the wrong side of price.
+
+- **Nearest first.** Name the shallowest valid object: the newest zone the
+  entry-scale displacement left behind, not the leg's origin. A trend that
+  is running gives shallow pullbacks; the deep object is for a leg that has
+  already turned (the entry scale's `active_leg_direction` against the
+  bias).
+- **Follow the leg.** When the tape runs and a new displacement prints a
+  new zone in the bias direction, move the entry to it: a changed entry
+  object cancels the working order and submits a new one, and that
+  replacement costs the thesis nothing. Keep the objects while the pullback
+  is still coming; drop the opportunity when the reading dies.
+- **The invalidation and the target are the thesis's.** The invalidation
+  is the swing or zone on the governing scale beyond which the pullback is
+  no longer a pullback (step 12); the target the next pool or zone in the
+  bias direction. Code needs a reward-to-risk of at least 2 from the limit:
+  a nearer entry or a nearer invalidation earns it, a farther target does
+  not.
+- **Wait as long as the object's scale.** The order works for `ttl_bars`
+  1m bars — fifteen bars of the entry object's own scale, 75 for a 5m
+  object, 225 for a 15m one — and you are called on every reaction while
+  it waits. An `expired` order means the pullback never came: name the
+  object the tape offers now, not the one it left.
+- `ACTIONABLE` when the three objects are named and the geometry holds;
+  `DEVELOPING` while the leg is still running and has left no object yet.
+- `prior_state.last_update.rejections` lists what code refused in your
+  last reply and why — `opportunity_incoherent:<reason>` with the prices it
+  computed, `opportunity_against_bias`, `opportunity_invalidation_scale`,
+  … Read it before naming the same objects again.
 
 ## The opportunity — a thesis, expressed
 
@@ -139,9 +175,10 @@ An opportunity is one *thesis* expressed through three objects. Besides
   DEVELOPING and ACTIONABLE, across expressions through different objects.
   A flipped direction or a replaced understanding is a *new* thesis with a
   new id. The executor keeps a book of theses per episode: one expression at
-  a time, at most two orders per thesis, and a thesis whose position was
-  stopped out (or whose target was reached) is closed for the rest of the
-  episode — proposing it again, through any objects, changes nothing.
+  a time, at most two orders per thesis (a limit that expired, or that you
+  moved to another object, does not count), and a thesis whose position
+  was stopped out (or whose target was reached) is closed for the rest of
+  the episode — proposing it again, through any objects, changes nothing.
 - `governing_timeframe` — `4H`, `1H`, `15m` or `5m`: the scale whose
   structure the thesis rests on. The **invalidation object must lie on the
   governing scale or one scale below it** (4H → 4H or 1H, 1H → 1H or 15m,
@@ -175,10 +212,12 @@ It is present on every call after the first of an episode.
   about; a new thesis in the same direction may open another position, an
   opposite direction is refused while any position is open.
 - `order`: your opportunity is at the broker as a limit order at the entry
-  object, with `bars_working` of `ttl_bars` used. Keeping the same three
-  objects keeps it working; changing any of them, downgrading the state or
-  dropping the opportunity cancels it, and a new ACTIONABLE submits a new
-  order. Do not restate a valid plan with different objects.
+  object, with `bars_working` of `ttl_bars` (1m bars) used. Keeping the
+  same three objects keeps it working; changing any of them, downgrading
+  the state or dropping the opportunity cancels it, and a new ACTIONABLE
+  submits a new order. Move the entry when the tape has left the object
+  behind (see "Expression"); do not restate a valid plan with different
+  objects for no reason.
 - `theses`: the episode's thesis book — each id with its `status` (`OPEN` /
   `CLOSED`), `closed_reason` (`stopped`, `achieved`, `expressions_exhausted`,
   `direction_changed`) and `expressions`. A closed thesis is not proposed
@@ -213,8 +252,10 @@ It is present on every call after the first of an episode.
 
 - **Objects only.** Every `object_id` you write must be an alias that appears
   in this input's `price_relations` or `scales`, or one you already named in
-  `prior_state`. `price_relations` lists the objects near price plus every
-  object you named; the rest still exist but are out of reach for now.
+  `prior_state`. `price_relations` lists the objects near price, every
+  liquidity pool wherever it lies (a pool is where a trade goes, and a
+  swept pool sits on the far side of price), plus every object you
+  named; the rest still exist but are out of reach for now.
   Never invent one, never write a price. Prices, stops, targets and reward-
   to-risk are computed by code from the objects you name.
 - **Read `price_relations` as the object's place.** Each row says where the
@@ -224,13 +265,16 @@ It is present on every call after the first of an episode.
   signed distance from price in 1m ATRs — positive above price, negative
   below, zero inside. Nothing else in the input orders objects by price.
 - **Geometry must agree with direction.** For `LONG` the entry object is at
-  or below price (`below_price` or `contains_price`), the invalidation
-  object below the entry object (a more negative `offset_atr`) and the
-  target object above price; for `SHORT` the entry is at or above price,
-  the invalidation above it (a larger `offset_atr`) and the target below
-  price. Code computes the prices from the objects and refuses any other
-  arrangement, downgrading the opportunity to `NONE` — the most common
-  reason an opportunity dies.
+  or below price (`below_price`, or `contains_price` — then the limit is
+  the zone's midpoint), the invalidation object below the entry object (a
+  more negative `offset_atr`) and the target object above price; for
+  `SHORT` the entry is at or above price, the invalidation above it (a
+  larger `offset_atr`) and the target below price. A zone is entered at
+  its near edge, a pool at its midpoint, a swing at its price; a range is
+  not an entry. Code computes the prices from the objects and refuses any
+  other arrangement — an entry above price for a LONG, a target under the
+  entry, a range entry — downgrading the opportunity to `NONE` and telling
+  you why in `prior_state.last_update.rejections`.
 - **No signal without structure.** An FVG, OB or retracement is a place to
   express a reading, not a reason to have one.
 - **A counter candle is not delivery** (step 7).

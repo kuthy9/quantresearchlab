@@ -60,7 +60,8 @@ def test_input_carries_prior_state_and_every_alias(context) -> None:
     assert payload["prior_state"] is None and payload["trigger"] == {"kind": "WAKE", "reasons": ["ev_x"]}
     listed = {rel["object_id"] for rel in payload["price_relations"]}
     assert listed <= ctx.visible_aliases() and listed
-    assert all(rel["offset_atr"] is None or abs(rel["offset_atr"]) <= CONFIG.relation_atr_limit for rel in payload["price_relations"])
+    kinds = {alias: view.kind for alias, view in ctx.object_map().items()}
+    assert all(rel["offset_atr"] is None or kinds[rel["object_id"]] in ("bsl", "ssl") or abs(rel["offset_atr"]) <= CONFIG.relation_atr_limit for rel in payload["price_relations"])
     assert "close" in payload["bar"] and payload["known_at"] == llm_input.known_at.strftime("%Y-%m-%dT%H:%M:%SZ")
     assert payload["tape_since_last_update"] == EMPTY_TAPE
 
@@ -195,7 +196,7 @@ def test_prior_notes_are_truncated_and_relations_are_bounded_by_atr_distance(con
     kept = {r["object_id"]: r for r in payload["price_relations"]}
     assert far["object_id"] in kept, "a watched object is kept whatever its distance"
     for alias, rel in kept.items():
-        assert alias == far["object_id"] or rel["offset_atr"] is None or abs(rel["offset_atr"]) <= 0.25
+        assert alias == far["object_id"] or ctx.object_map()[alias].kind in ("bsl", "ssl") or rel["offset_atr"] is None or abs(rel["offset_atr"]) <= 0.25  # pools are placed at any distance (2026-09-20)
     assert len(kept) < len(ctx.price_relations)
 
 
@@ -268,3 +269,39 @@ def test_the_prompt_defines_the_bias_and_how_the_facts_set_it() -> None:
 
 def test_config_carries_the_pending_evidence_bound() -> None:
     assert CONFIG.max_pending_evidence == 32
+
+
+def test_the_prior_view_shows_the_last_rejections_and_the_input_schema_is_3() -> None:
+    from brain.tests.test_brain_state import T1, make_state
+    from contract.brain.llm import LLM_INPUT_SCHEMA_VERSION
+    from contract.brain.state import LastUpdate
+
+    brain = MainBrain(client=ScriptedClient([]), config=CONFIG, ledger=InMemoryPositionLedger())
+    state = make_state(last_update=LastUpdate(T1, True, {}, None, rejections=("opportunity_incoherent:LONG entry 105 lies above price 103",)))
+    assert brain._prior_view(state)["last_update"]["rejections"] == ["opportunity_incoherent:LONG entry 105 lies above price 103"]
+    assert LLM_INPUT_SCHEMA_VERSION == 3
+
+
+def test_the_prompt_separates_the_bias_from_the_entry() -> None:
+    text = CONFIG.system_prompt
+    for word in ("## Expression", "the pullback picks the price", "Nearest first", "Follow the leg", "last_update.rejections", "ttl_bars", "midpoint", "not an entry"):
+        assert word in text, word
+    assert "the order fills now" not in text and "entry.range" not in text
+
+
+def test_every_pool_is_placed_whatever_its_distance_and_zones_stay_near(context) -> None:
+    # 2026-09-20: pools are where trades go, so the LLM must see which side of price each one lies on;
+    # zones and swings are where trades are entered and stay bounded by relation_atr_limit.
+    ctx, registry = context
+    from dataclasses import replace
+
+    config = replace(CONFIG, relation_atr_limit=0.25)
+    brain = MainBrain(client=ScriptedClient([]), config=config, ledger=InMemoryPositionLedger())
+    rows = {row["object_id"]: row for row in brain._relations_view(ctx, None)}
+    kinds = {alias: view.kind for alias, view in ctx.object_map().items()}
+    offsets = {row["object_id"]: row["offset_atr"] for row in ctx.price_relations}
+    far_pools = [a for a, k in kinds.items() if k in ("bsl", "ssl") and offsets.get(a) is not None and abs(offsets[a]) > 0.25]
+    far_zones = [a for a, k in kinds.items() if k in ("fvg", "ob", "swing_high", "swing_low", "range") and offsets.get(a) is not None and abs(offsets[a]) > 0.25]
+    assert far_pools and far_zones, "the synthetic tape should have pools and zones beyond a quarter ATR"
+    assert all(a in rows for a in far_pools)
+    assert not any(a in rows for a in far_zones)

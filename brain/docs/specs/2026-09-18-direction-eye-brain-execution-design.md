@@ -316,4 +316,5 @@ expression.
   not raised here.
 - Entries are taken at the extreme of the leg that set the bias (receipt
   §8). Not addressed in this design: the expression rule is the Brain's
-  and a change to it needs a day other than the 3rd.
+  and a change to it needs a day other than the 3rd. Addressed 2026-09-20
+  in [2026-09-20-entry-model-design.md](2026-09-20-entry-model-design.md).
