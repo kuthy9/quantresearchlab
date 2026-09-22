@@ -1,0 +1,51 @@
+# Source: https://www.bls.gov/schedule/news_release/bls.ics ("BLS.gov Economic News Release Schedule"), fetched 2026-09-21.
+# The feed's VEVENTs for the two releases the event filter sleeps for, 2025-01 -> 2026-12; the BLS site refuses scripted
+# downloads, so the feed was read in a browser and its varying fields kept here. Every block in the feed has the same
+# shape (SEQUENCE:1, CLASS:PUBLIC, DURATION:PT0M, LOCATION:Washington\, DC, TRANSP:TRANSPARENT, CATEGORIES:IMPORTANT, BLS)
+# and the build script emits it back in that shape. Columns: UID, DTSTART (TZID=US-Eastern), SUMMARY.
+3a09855e-d5c6-45b2-a74f-2429f44d0418	20250110T083000	Employment Situation
+6f82e6b8-8b66-4da2-a29c-72643b3440bb	20250115T083000	Consumer Price Index
+68643498-d873-4647-bff9-98b3c842680e	20250207T083000	Employment Situation
+b3b35b41-7a08-4a33-bbd0-a79a75b3292e	20250212T083000	Consumer Price Index
+1b23034a-2da3-4cc0-8261-64285cc182fc	20250307T083000	Employment Situation
+59d48516-e044-4386-a612-07c202004c88	20250312T083000	Consumer Price Index
+3cad2249-ae83-47cd-8836-baa56252e778	20250404T083000	Employment Situation
+d2e7e7b6-3f62-4182-a62c-0af2f3e1914d	20250410T083000	Consumer Price Index
+b0ce221a-4647-4e7e-8508-9f12efc6bef9	20250502T083000	Employment Situation
+8ec23e31-a77d-4528-842a-b784c502e71f	20250513T083000	Consumer Price Index
+fb505fcf-ca7d-4794-b90d-c09285750652	20250606T083000	Employment Situation
+f73a23b1-d725-4051-93a8-5b19541438ad	20250611T083000	Consumer Price Index
+7d36662a-e652-4966-a432-df5d287cac50	20250703T083000	Employment Situation
+d30c34fd-1203-40c0-9ab0-6597c73e283c	20250715T083000	Consumer Price Index
+34502125-7780-406b-8369-c6441f68badb	20250801T083000	Employment Situation
+52433b48-f897-4a25-885e-376c7a5e1386	20250812T083000	Consumer Price Index
+d67c2415-34d2-4e5e-93da-f04ab30617ee	20250905T083000	Employment Situation
+326a2990-4c7a-4947-b653-32c918ad25f5	20250911T083000	Consumer Price Index
+f5666a27-db34-45bc-80f0-420ce7683f2b	20251024T083000	Consumer Price Index
+d28f58dd-2c0c-4d91-b4e3-c8872772e752	20251120T083000	Employment Situation
+1727e92c-71a0-4a7a-b9bc-a678910d4c88	20251216T083000	Employment Situation
+0fb89422-f12f-4629-ab3d-f8ef1a267b6d	20251218T083000	Consumer Price Index
+7c88ae35-a2f2-4df6-ae5e-33e6bab7c345	20260109T083000	Employment Situation
+8acd8658-384d-41ac-81d2-f16dc4347c7f	20260113T083000	Consumer Price Index
+2768ae00-e2fe-4f34-8eda-0482d4af9e6d	20260211T083000	Employment Situation
+02d8c219-091c-480a-bf87-b9a2a74d09e1	20260213T083000	Consumer Price Index
+71859a51-9240-4810-80c4-12e385df6ce0	20260306T083000	Employment Situation
+e1950ecd-7e6d-4050-a502-8084a0638aa0	20260311T083000	Consumer Price Index
+ac22d520-b0cf-4082-8cd5-990dde53bac0	20260403T083000	Employment Situation
+8ebeaa71-d848-4dac-868b-3b08578d899c	20260410T083000	Consumer Price Index
+d4f979a0-0e2d-4ac7-95ff-5170682edb7b	20260508T083000	Employment Situation
+137c0a1d-69e3-4289-bfe3-21ba9d6eefe8	20260512T083000	Consumer Price Index
+bbcefc9f-7fa8-45a3-8451-916c05df07c3	20260605T083000	Employment Situation
+c266ea61-636b-480f-9f14-fbd48a7045cd	20260610T083000	Consumer Price Index
+e61f0232-37b0-4648-942f-e42538849ac3	20260702T083000	Employment Situation
+853efc0c-066d-47fd-9a56-398567d76ab1	20260714T083000	Consumer Price Index
+93d74a64-1477-4579-b110-b4981fb17f32	20260807T083000	Employment Situation
+a15b416d-318d-4e0e-a703-0651044bba29	20260812T083000	Consumer Price Index
+1c7576d6-e1c9-43d1-8b9b-b77055fb9e82	20260904T083000	Employment Situation
+fe9a4ba6-c2ef-44bc-b859-985ffee9a2d8	20260911T083000	Consumer Price Index
+4438aaee-63df-49b2-982c-b687e048bdd9	20261002T083000	Employment Situation
+7d17bd53-87ad-4c74-a328-528f5e2b1e82	20261014T083000	Consumer Price Index
+92fcedab-204a-46b6-904a-70cb46bafdb2	20261106T083000	Employment Situation
+c26d524f-228b-46e9-b00e-fdbec26d68af	20261110T083000	Consumer Price Index
+06c28939-7346-46f0-872e-afa00ccadc5d	20261204T083000	Employment Situation
+a434d240-87cd-4fcc-afb4-2c923808b7c1	20261210T083000	Consumer Price Index

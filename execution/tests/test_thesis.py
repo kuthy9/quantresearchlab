@@ -131,3 +131,20 @@ def test_a_replacement_gives_the_expression_back_but_a_dropped_plan_does_not() -
         b.expressed(p)
         b.outcome(p, "cancelled", exit_role=None, bar_index=1, reason=reason)
         assert b.view(1)["theses"][0]["expressions"] == left, reason
+
+
+def test_an_event_sleep_refunds_a_cancelled_entry_and_closes_a_flattened_thesis_without_a_cooldown() -> None:
+    from execution.core.thesis import REPLACEMENT_REASONS
+
+    assert "event_sleep" in REPLACEMENT_REASONS
+    b = book()
+    p = plan("T1")
+    assert b.admit(p, 1) is None
+    b.expressed(p)
+    b.outcome(p, "cancelled", exit_role=None, bar_index=2, reason="event_sleep")
+    assert b.view(2)["theses"][0]["expressions"] == 0 and b.view(2)["theses"][0]["status"] == "OPEN"
+    b.expressed(p)
+    b.outcome(p, "position_closed", exit_role="event_sleep", bar_index=3)
+    record = b.view(3)["theses"][0]
+    assert record["closed_reason"] == "event_sleep" and record["last_outcome"] == "position_closed:event_sleep"
+    assert b.view(3)["cooldown_bars_left"] == 0 and b.admit(p, 4) == "thesis_closed"

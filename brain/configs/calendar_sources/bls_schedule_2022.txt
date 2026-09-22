@@ -1,0 +1,27 @@
+# Source: https://www.bls.gov/schedule/2022/home.htm ("Schedule of Selected Releases 2022", list view), read 2026-09-21.
+# The BLS calendar feed (bls.ics) reaches back to 2025-01 only; these are the 2022 rows of the two releases the
+# event filter sleeps for, as the page lists them: date | time (US-Eastern) | release.
+January 07, 2022 | 08:30 AM | Employment Situation for December 2021
+January 12, 2022 | 08:30 AM | Consumer Price Index for December 2021
+February 04, 2022 | 08:30 AM | Employment Situation for January 2022
+February 10, 2022 | 08:30 AM | Consumer Price Index for January 2022
+March 4, 2022 | 08:30 AM | Employment Situation for February 2022
+March 10, 2022 | 08:30 AM | Consumer Price Index for February 2022
+April 1, 2022 | 08:30 AM | Employment Situation for March 2022
+April 12, 2022 | 08:30 AM | Consumer Price Index for March 2022
+May 06, 2022 | 08:30 AM | Employment Situation for April 2022
+May 11, 2022 | 08:30 AM | Consumer Price Index for April 2022
+June 3, 2022 | 08:30 AM | Employment Situation for May 2022
+June 10, 2022 | 08:30 AM | Consumer Price Index for May 2022
+July 8, 2022 | 08:30 AM | Employment Situation for June 2022
+July 13, 2022 | 08:30 AM | Consumer Price Index for June 2022
+August 05, 2022 | 08:30 AM | Employment Situation for July 2022
+August 10, 2022 | 08:30 AM | Consumer Price Index for July 2022
+September 02, 2022 | 08:30 AM | Employment Situation for August 2022
+September 13, 2022 | 08:30 AM | Consumer Price Index for August 2022
+October 07, 2022 | 08:30 AM | Employment Situation for September 2022
+October 13, 2022 | 08:30 AM | Consumer Price Index for September 2022
+November 04, 2022 | 08:30 AM | Employment Situation for October 2022
+November 10, 2022 | 08:30 AM | Consumer Price Index for October 2022
+December 02, 2022 | 08:30 AM | Employment Situation for November 2022
+December 13, 2022 | 08:30 AM | Consumer Price Index for November 2022

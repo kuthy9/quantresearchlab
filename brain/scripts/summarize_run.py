@@ -207,8 +207,10 @@ def entry_quality(fills: Sequence[Mapping[str, Any]], bars: Sequence[Bar], *, su
     window's best price for the trade, 1 = its worst), its wait from
     submission in minutes, its maximum favourable and adverse excursions
     over the next 60 bars in R (the plan's stop distance), and whether the
-    close 60 minutes later was on its side.  Each fill is ``{direction,
-    fill_price, limit_price, stop_price, submitted_at, filled_at}``;
+    close 60 minutes later was on its side; since 2026-09-21 also the
+    median stop distance in points (the distance the gate sized on) and
+    the median contracts.  Each fill is ``{direction, fill_price,
+    limit_price, stop_price, quantity, submitted_at, filled_at}``;
     ``chased`` counts fills at or past 0.8 of the 240-bar window."""
     starts = [pd.Timestamp(bar.start).tz_convert("UTC") for bar in bars]
     close_at = {start + pd.Timedelta(minutes=1): float(bar.close) for start, bar in zip(starts, bars)}
@@ -217,6 +219,8 @@ def entry_quality(fills: Sequence[Mapping[str, Any]], bars: Sequence[Bar], *, su
     loc_240: list[float] = []
     mfe: list[float] = []
     mae: list[float] = []
+    risks: list[float] = []
+    quantities: list[float] = []
     chased = right = 0
     for fill in fills:
         direction = str(fill["direction"])
@@ -231,6 +235,9 @@ def entry_quality(fills: Sequence[Mapping[str, Any]], bars: Sequence[Bar], *, su
                 if horizon == 240 and location >= 0.8:
                     chased += 1
         risk = abs(float(fill["limit_price"]) - float(fill["stop_price"]))
+        risks.append(risk)
+        if fill.get("quantity") is not None:
+            quantities.append(float(fill["quantity"]))
         after = bars[index + 1:index + 61]
         if after and risk > 0.0:
             high, low = max(float(bar.high) for bar in after), min(float(bar.low) for bar in after)
@@ -243,6 +250,7 @@ def entry_quality(fills: Sequence[Mapping[str, Any]], bars: Sequence[Bar], *, su
         "fills": len(fills), "fill_rate": None if not submitted else round(len(fills) / submitted, 4),
         "median_wait_minutes": _median(waits), "median_location_60m": _median(loc_60), "median_location_240m": _median(loc_240),
         "chased": chased, "right_60m": right, "median_mfe_r": _median(mfe), "median_mae_r": _median(mae),
+        "median_risk_points": _median(risks), "median_quantity": _median(quantities),
     }
 
 
@@ -431,7 +439,7 @@ def summarize(
                     if verdict.get("limit_price") is not None and verdict.get("stop_price") is not None:
                         pending_entries[str(payload.get("signature"))] = {
                             "direction": str((payload.get("plan") or {}).get("direction")), "limit_price": float(verdict["limit_price"]),
-                            "stop_price": float(verdict["stop_price"]), "submitted_at": record.known_at,
+                            "stop_price": float(verdict["stop_price"]), "quantity": int(verdict.get("quantity") or 0), "submitted_at": record.known_at,
                         }
                     if (payload.get("account") or {}).get("asof") not in (None, known_at):
                         stale += 1
@@ -537,7 +545,7 @@ def summarize(
             "daily_stop_vetoes": vetoes_by_code.get("daily_stop", 0), "halted": run.get("halted"),
         },
         "orders": {
-            **{kind: order_counts.get(kind, 0) for kind in ("submitted", "working", "partial", "filled", "cancel_requested", "cancelled", "expired", "rejected", "position_opened", "position_closed", "exit_leg_lost", "invalidation_close", "bias_reversed", "flattened", "halted")},
+            **{kind: order_counts.get(kind, 0) for kind in ("submitted", "working", "partial", "filled", "cancel_requested", "cancelled", "expired", "rejected", "position_opened", "position_closed", "exit_leg_lost", "invalidation_close", "bias_reversed", "event_sleep", "flattened", "halted")},
             "missed_trends": None if bars is None else missed_trends(expiries, bars),
             "entry_quality": None if bars is None else entry_quality(fills, bars, submitted=order_counts.get("submitted", 0)),
             "cancel_reasons": dict(sorted(cancel_reasons.items())), "replacements": cancel_reasons.get("signature_changed", 0),

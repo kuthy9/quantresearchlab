@@ -5,6 +5,8 @@ SLEEP  ──wake event──►  ACTIVE  (new episode; LLM reasons from nothing
 ACTIVE ──new evidence──► LLM update → reduce ──five exit conditions hold──► archive → SLEEP
 ACTIVE ──no evidence──►  TICK (no LLM; bookkeeping only)
 ACTIVE ──LLM failure──►  incident, state carried forward, still ACTIVE
+ACTIVE ──release window──► EVENT_SLEEP: archive without a call → SLEEP (2026-09-21)
+SLEEP  ──window ends──►  WAKE on the first bar after it, Eye event or not
 ```
 
 The runtime owns the episode's ``ObjectRegistry``, the 1m tape accumulated
@@ -58,6 +60,9 @@ class StepResult:
     rejections: tuple[str, ...]
     # The LLM's own reply latency when this step called it and got a reply.
     llm_latency_ms: int | None = None
+    # The release window that put the episode to sleep on this bar
+    # (``event:<kind>:<release>``), for the executor to withdraw every expression.
+    event: str | None = None
 
 
 StepHook = Callable[[StepResult, BrainState | None, LLMInput | None], None]
@@ -302,12 +307,13 @@ class BrainRuntime:
             raise ValueError(
                 f"known_at {isoformat_utc(known_at)} does not advance past {isoformat_utc(self._last_known_at)}"
             )
+        previous_known_at = self._last_known_at
         self._last_known_at = known_at
         events = observation.events_this_update
 
         if self._status is RuntimeStatus.SLEEP:
             with timed(self._timings, "controller"):
-                decision = decide(events, active=False, config=self._controller)
+                decision = decide(events, active=False, config=self._controller, known_at=known_at, previous_known_at=previous_known_at)
             if decision.decision is Decision.STAY_ASLEEP:
                 self._last_context = None
                 return self._finish(
@@ -362,11 +368,21 @@ class BrainRuntime:
         self._last_context = context
         with timed(self._timings, "controller"):
             decision = decide(
-                events, active=True, config=self._controller, relation_changes=self._relation_changes(context)
+                events, active=True, config=self._controller, relation_changes=self._relation_changes(context),
+                known_at=known_at, previous_known_at=previous_known_at,
             )
         if decision.decision is Decision.UPDATE:
             self._relation_triggered_at([r for r in decision.reasons if not r.startswith("ev_")], known_at)
         episode_id = prev.episode_id
+        if decision.decision is Decision.EVENT_SLEEP:
+            # A scheduled release: the episode ends here, without a call, and
+            # the executor withdraws every expression on this same bar.
+            reason = decision.reasons[0]
+            self._archive(episode_id, known_at, reason)
+            return self._finish(
+                StepResult(known_at, Decision.EVENT_SLEEP, RuntimeStatus.SLEEP, episode_id, prev.revision, False, None, True, (), event=reason),
+                None, None,
+            )
         if decision.decision is Decision.TICK:
             self._tape.add(events, self._controller, registry)
             self._deferred.extend(context.events)

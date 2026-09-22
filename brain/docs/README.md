@@ -13,7 +13,7 @@ Market Data ─► Trading Eye (unchanged) ─► MarketObservation
                                              │
                      eye_view.py             EyeContext: aliased objects, events, price relations
                                              │
-                     sleep_controller.py     WAKE / STAY_ASLEEP / UPDATE / TICK
+                     sleep_controller.py     WAKE / STAY_ASLEEP / UPDATE / TICK / EVENT_SLEEP
                                              │
                      runtime.py ─────────────┤ SLEEP ↔ ACTIVE
                           ├─ main_brain.py   LLMInput → DeepSeek → LLMUpdate
@@ -41,14 +41,15 @@ writes a journal that replays without hindsight.
 | --- | --- |
 | `eye_view.py` | `build_eye_context`: the aliased, JSON-ready view of one observation (objects per scale, structure / delivery / range / liquidity summaries, session, the ACTIVE interaction paths aliased to their source object with `last_step_at` and `stepped_since_last_call`, this bar's evidence events, price relations); `delivery_payload` / `reset_payload` (the forming leg, the displacement's age, the protection break); `interaction_rows`; `assert_causal`; `visible_liquidity_ids` |
 | `object_registry.py` | `ObjectRegistry`: `FVG_5m_3` ↔ Eye entity id, assigned on first appearance inside an episode in a deterministic order |
-| `sleep_controller.py` | `decide(events, active, config)` → `WAKE` / `STAY_ASLEEP` / `UPDATE` / `TICK`; `ControllerConfig` (schema 4: the bookkeeping kinds, the wake set, `relation_change_timeframes`, `relation_change_debounce_bars`, the idle-archive threshold) from `configs/sleep_controller.json` |
+| `sleep_controller.py` | `decide(events, active, config, relation_changes, known_at, previous_known_at)` → `WAKE` / `STAY_ASLEEP` / `UPDATE` / `TICK` / `EVENT_SLEEP`; `ControllerConfig` (schema 5: the bookkeeping kinds, the wake set, `relation_change_timeframes`, `relation_change_debounce_bars`, the idle-archive threshold, and since 2026-09-21 `events` — the calendar and the sleep window per release kind; the `sha256` covers the config and the calendar) from `configs/sleep_controller.json` |
+| `event_calendar.py` | (2026-09-21) `parse_ics` (RFC 5545 unfolding, `TZID` / Zulu / floating times, all-day events skipped), `EventRule`, `ScheduledEvent`, `EventFilter` (`active(known_at)`, `ended_between(previous, known_at)`, `from_config`); the data is `configs/economic_calendar.ics`, built by `scripts/build_event_calendar.py` from `configs/calendar_sources/` (the BLS feed's CPI and Employment Situation events, the 2022 BLS schedule, the Fed's FOMC calendar page) |
 | `main_brain.py` | `MainBrain.step`: build the `LLMInput`, prove it causal, call under the retry policy, parse, reduce; `MainBrainConfig` from `configs/main_brain.json` + `configs/prompts/main_brain_system.md` |
 | `llm_client.py` | `DeepSeekClient` (urllib, JSON mode; key from `DEEPSEEK_API_KEY`, else the gitignored `brain/configs/deepseek.key` — `resolve_api_key`), `ScriptedClient`, `EchoClient`, `RecordedClient`, `call_with_policy` |
 | `reducer.py` | the pure function `apply(prev, evidence, update, ctx)`; `empty_state`; `pending_evidence`; `sleep_blockers`; since 2026-09-17 rule 4 also refuses an invalidation object more than one scale below the thesis's `governing_timeframe` and a `thesis_id` that flips direction; since 2026-09-18 rule 4b drops an opportunity against the reply's `bias` (`opportunity_against_bias`), any opportunity under a NEUTRAL bias, and a thesis on a scale above the bias scale (`opportunity_scale_above_bias`); since 2026-09-20 rule 4 also refuses an entry the market is already past (`coherence_error` → `entry_side_error`: a LONG entry above the close, a SHORT below it), and every rejection of an update travels in the state's `last_update.rejections` — what the next call reads as `prior_state.last_update.rejections` |
-| `opportunity_geometry.py` | `resolve_geometry` / `coherence_error`: object aliases → `OpportunityGeometry`; a `CLOSE_BEYOND` invalidation puts the hard stop `CLOSE_BEYOND_BUFFER_ATR` × 1m ATR × √(scale minutes) beyond the object; since 2026-09-20 a zone that *contains* price is entered at its midpoint, or at its far edge when price is already past the midpoint (`entry.zone.inside_midpoint` / `entry.zone.inside_far_edge` — the near edge of a containing zone is a buy at the market), a range is refused as an entry object, and `entry_side_error` judges which side of the close a limit rests on — at proposal (`coherence_error`) and at submission (the order machine), never on the bars between, where a working limit the tape crosses must fill |
+| `opportunity_geometry.py` | `resolve_geometry` / `coherence_error`: object aliases → `OpportunityGeometry`; a `CLOSE_BEYOND` invalidation puts the hard stop `CLOSE_BEYOND_BUFFER_ATR` × 1m ATR × √(scale minutes) beyond the object; since 2026-09-20 a zone that *contains* price is entered at its midpoint, or at its far edge when price is already past the midpoint (`entry.zone.inside_midpoint` / `entry.zone.inside_far_edge` — the near edge of a containing zone is a buy at the market), a range is refused as an entry object, and `entry_side_error` judges which side of the close a limit rests on — at proposal (`coherence_error`) and at submission (the order machine), never on the bars between, where a working limit the tape crosses must fill; since 2026-09-21 the hard stop is never nearer the entry than `STOP_FLOOR_GOVERNING_BARS` (1.0) bars of the thesis's `governing_timeframe` — 1m ATR × √minutes — and a stop the floor moved carries the rule id `stop.floor.governing_bar` (an opportunity with a governing scale needs `atr_1m`) |
 | `position_ledger.py` | `PositionLedger` protocol (`has_open_position`, `has_working_order`, `execution_view`), `engaged`, `IDLE_VIEW`; `InMemoryPositionLedger`; the real one is `execution.core.order_fsm.ExecutionLedger` |
 | `journal.py` | `BrainJournal` (writer), `JournalReader`, `record_hash` |
-| `runtime.py` | `BrainRuntime.step(observation)`: the SLEEP ↔ ACTIVE machine; `StepResult.llm_latency_ms`; optional `Timings` (`controller`, `journal`; the Brain records `input`, `llm`, `reduce`) |
+| `runtime.py` | `BrainRuntime.step(observation)`: the SLEEP ↔ ACTIVE machine; on `EVENT_SLEEP` the episode is archived without a call (journal `sleep` with reason `event:<kind>:<release>`, `StepResult.event` for the executor); `StepResult.llm_latency_ms`; optional `Timings` (`controller`, `journal`; the Brain records `input`, `llm`, `reduce`) |
 | `brain_entry_sequence.py` | the Brain-side reading of the Eye's interaction facts (also consumed by `shares/core/scene_graph.py`) |
 
 Contracts: `contract/brain/state.py` (`BrainState`, schema 2 since 2026-09-18 with `bias` — `Bias(direction LONG | SHORT | NEUTRAL, scale, basis)`; a schema-1 journal reads as NEUTRAL on 15m; `LastUpdate.rejections` since 2026-09-20, empty for older journals), `contract/brain/llm.py`
@@ -63,12 +64,14 @@ heartbeats are not transitions):
 
 | runtime status | condition | decision |
 | --- | --- | --- |
+| any | the bar lies inside a scheduled release's window (`events` in the config, 2026-09-21: CPI and NFP from 60 minutes before to 30 after the 08:30 print, an FOMC statement from 60 before to 90 after 14:00, New York) | asleep: `STAY_ASLEEP`; active: `EVENT_SLEEP` — the episode is archived without a call and the executor withdraws every expression (reason `event:<kind>:<release>`) |
+| SLEEP | the first bar at or after a window's end | `WAKE` with reason `event_ended:<kind>:<release>`, Eye event or not — a new episode reads the post-release market from nothing |
 | SLEEP | an event whose kind is in the wake set for its timeframe | `WAKE` |
 | SLEEP | otherwise | `STAY_ASLEEP` |
 | ACTIVE | a *reaction* at 5m or above (a transition that is not a bookkeeping kind), **or** a watched object on one of `relation_change_timeframes` (15m, 1H, 4H) changed its side of price since the last LLM call — a 5m pool crossing price no longer counts (49 % of the 2022-01-03 run's calls), and since 2026-09-18 one alias triggers at most once per `relation_change_debounce_bars` (15) 1m bars (`72ea13c7`'s 75 relation-only calls had a median gap of 2 minutes between repeats of the same alias; the replayed rule drops 44 calls and no coverage) | `UPDATE` |
 | ACTIVE | otherwise | `TICK` — no LLM call; the state's revision and `updated_at` advance; the bar's 5m+ bookkeeping evidence is deferred and delivered with the next call |
 
-`configs/sleep_controller.json` (schema 4) names the *bookkeeping kinds*
+`configs/sleep_controller.json` (schema 5) names the *bookkeeping kinds*
 once — formation (`fvg_created`, `swing_confirmed`, `structural_leg_created`,
 `liquidity_level_created`, …), touches and level bookkeeping, and since
 2026-09-18 the delivery-phase transitions (`delivery_phase_entered` /
@@ -93,6 +96,19 @@ understanding; the update that reaches the threshold archives the episode
 regardless of `watch_next` and of the interaction gate (a position or an
 unjudged item still holds it open). The 2022-01-03 real run showed the model
 never asks to sleep on its own; this is the rail.
+
+**Event windows** (`events`, schema 5, 2026-09-21): `calendar` is an
+`.ics` file (`configs/economic_calendar.ics`) and each rule names a
+release kind, the full-match regex on the event's `SUMMARY`, and the
+minutes slept before and after it. The calendar is data, not code: it is
+built by `scripts/build_event_calendar.py` from `configs/calendar_sources/`
+(the BLS feed's CPI and Employment Situation blocks, the BLS 2022 schedule
+page's rows, the Federal Reserve's FOMC calendar page — a statement at
+14:00 New York on the last day of every scheduled two-day meeting); each
+source file's header names its URL and fetch date, and a test checks the
+committed calendar equals the script's output. Rebuild it when the BLS
+feed moves a release or a year runs out. The calendar's bytes are part of
+the controller's `sha256`, so a run's identity changes with it.
 
 ## The Main Brain
 
@@ -224,6 +240,8 @@ SLEEP  ──WAKE──►  ACTIVE  (new episode EP_<YYYYMMDD>_<NNN>, new regist
 ACTIVE ──UPDATE──► LLM → reduce ──slept──► archive (status ARCHIVED, journal `sleep` with its reason) → SLEEP
 ACTIVE ──TICK──►  revision + 1, no LLM; 5m+ bookkeeping evidence deferred to the next call
 ACTIVE ──incident──► state carried forward, still ACTIVE
+ACTIVE ──EVENT_SLEEP──► archive without a call (journal `sleep`, reason `event:<kind>:<release>`) → SLEEP; the executor cancels the working entry and flattens every position on the same bar
+SLEEP  ──window ends──► WAKE on the first bar after it (reason `event_ended:…`), a new episode from nothing
 ```
 
 A wake whose first reasoning already satisfies the exit conditions archives
@@ -294,6 +312,10 @@ time, the Eye warmed `warmup_days` before each), `--parallel` at a time,
 logs under `outputs/brain_journal/benchmark_logs/`; `--dry-run` prints
 the commands.
 
+`brain/scripts/build_event_calendar.py [--output <path>]` (2026-09-21)
+rebuilds `configs/economic_calendar.ics` from `configs/calendar_sources/`;
+the committed calendar must equal its output (`test_build_event_calendar.py`).
+
 `brain/scripts/summarize_run.py --run-dir <run> [--run-dir …] [--write]`
 turns a journal into `summary.json` (calls, tokens and cost at the rates
 in `configs/llm_pricing.json`, latency, triggers, sleeps, sharp-move
@@ -328,6 +350,24 @@ with `DEEPSEEK_API_KEY_FILE`); `*.key` is gitignored, and the key is never
 written to a command line the repository owns or to a journal.
 
 ## Receipts — `brain/docs/evidence/`
+
+[2026-09-21_stop_floor_event_sleep_benchmark_2022.md](evidence/2026-09-21_stop_floor_event_sleep_benchmark_2022.md):
+the stop floor and the event sleep over the ten 2022 windows, paired with
+the entry model's third pass — no stop inside 2.2 one-minute ATRs (median
+3.9, was 1.6), one contract instead of three, no order resting through a
+release (10-13: −67.5 for −1 055 and a halt), the calendar wake on the
+first bar after each window; −286.5 in all with six fills, all stopped,
+none on a trend day: the floored stop prices a 15m thesis at 1 900–2 300
+USD a contract on a 25–40 ATR tape, more than 1.5 % of 100 000 buys, the
+model lowers the governing scale to 5m to fit it, and targets stay the
+next 5m pool (ratios 1.1–1.7 vetoed).
+
+[2026-09-21_stop_floor_event_sleep_frozen_window_2022-01-03.md](evidence/2026-09-21_stop_floor_event_sleep_frozen_window_2022-01-03.md):
+the frozen window under the stop floor (`f4f6998a6ed59eb8`, −77.25 for
+−141.5): nine fills at the limit (waits up to 101 minutes), stops of 3.9
+ATRs and more, one stop-out instead of three and no daily stop; seven of
+eight exits are the bias's own flips (average −4 points), which now set
+the P&L; nine reasoning-budget truncations recorded; replays.
 
 [2026-09-20_entry_model_benchmark_2022.md](evidence/2026-09-20_entry_model_benchmark_2022.md):
 the entry model over ten 2022 windows across regimes — no chase anywhere
@@ -453,17 +493,19 @@ measure the mechanical Brain this design replaced.
 | --- | --- |
 | `test_brain_state.py` | round trip, invariants, unknown keys |
 | `test_llm_contract.py` | the reply gate: 16 malformed shapes, canonical input hashing |
-| `test_opportunity_geometry.py` | entry / stop / target per object kind, LONG / SHORT mirror, incoherence; a containing zone's midpoint / far edge, a range refused as entry, the side rule at proposal only |
+| `test_opportunity_geometry.py` | entry / stop / target per object kind, LONG / SHORT mirror, incoherence; a containing zone's midpoint / far edge, a range refused as entry, the side rule at proposal only; the stop floor (one governing bar, both sides, composed with the close-beyond buffer, needs the ATR, none without a governing scale) |
 | `test_object_registry.py`, `test_eye_view.py` | aliases, causality, price relations, reproducibility on the synthetic Eye; interaction rows (source alias, `last_step_at`, open since the last call); the forming-leg, displacement-age and reset keys, `drift_atr` |
 | `test_audit_scales.py` | the change points of the per-scale facts and `scale_facts` on the synthetic Eye; `replay_triggers` keeps wakes, reactions and undebounced relation flips |
-| `test_sleep_controller.py` | the wake rule kind by kind, UPDATE / TICK, the tape rule |
+| `test_sleep_controller.py` | the wake rule kind by kind, UPDATE / TICK, the tape rule; schema 5's event filter (the calendar in the hash, CPI / NFP / FOMC windows), `EVENT_SLEEP` inside a window, the calendar wake at its end |
+| `test_event_calendar.py` | `parse_ics` (TZID under EST and EDT, Zulu, folded lines, floating times, all-day skipped), rules → windows, `active` / `ended_between` boundaries, `from_config` and its hash |
+| `test_build_event_calendar.py` | the FOMC page parser (`Month d-d`, `Mon/Mon d-d`, projection meetings, unscheduled rows skipped; eight 2022 statements from the real page), the built calendar's 2022 and 2025–2026 events, the committed file equals the script's output |
 | `test_reducer.py` | every verdict route, RESOLVE, missing verdict, pending items (re-offered, verdicted late, resolved by a carrier, kept through another incident), NEUTRAL never blocks sleep, understanding replacement, opportunity downgrade, position, each sleep condition, TICK, incidents, determinism |
 | `test_llm_client.py` | retry policy (timeout / 429 / 5xx / dropped connection / 400 / malformed / repair), DeepSeek request shape and error mapping against a local HTTP server, empty content, key resolution (environment, key file, neither) |
 | `test_journal.py` | hash chain, tampering, monotone `known_at`, revision gaps, the ledger |
 | `test_main_brain.py` | prompt loading (the bias and the Expression sections' words), input shape, wake / update / incident steps, bounded prior evidence, pending items re-offered and filed by their late verdict, the prior view's `last_update.rejections` |
-| `test_runtime.py` | SLEEP → WAKE → UPDATE → TICK → sleep on the synthetic Eye, a NEUTRAL-only sleeper sleeps, evidence parked by an incident is verdicted later and sleep follows, incident keeps ACTIVE, open position, `known_at` monotone, episode numbering |
+| `test_runtime.py` | SLEEP → WAKE → UPDATE → TICK → sleep on the synthetic Eye, a NEUTRAL-only sleeper sleeps, evidence parked by an incident is verdicted later and sleep follows, incident keeps ACTIVE, open position, `known_at` monotone, episode numbering; an event window archives the episode without a call and the window's end wakes a fresh one |
 | `test_replay.py` | a journal replays to identical states; tampering and a dropped revision are detected |
-| `test_summarize_run.py` | the summary of a stack run on the synthetic tape, the cost arithmetic, the veto metrics on a hand-built journal, sharp-move coverage, rendering, `missed_trends`, `entry_quality` |
+| `test_summarize_run.py` | the summary of a stack run on the synthetic tape, the cost arithmetic, the veto metrics on a hand-built journal, sharp-move coverage, rendering, `missed_trends`, `entry_quality` (with the sized distance and the contracts since 2026-09-21) |
 | `test_run_benchmark.py` | the windows file, one command per window with the warmup, a dry run launches nothing |
 | `test_run_guards.py` | `tape_is_current` for `--broker ibkr`, the effort label, `drive` timings |
 | `test_regression_baseline.py` | `research_orchestration`: the frozen week backtest replays and summarizes identically ([evidence/regression_baselines.json](evidence/regression_baselines.json)) |

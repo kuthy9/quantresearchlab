@@ -1,14 +1,14 @@
 {
   "schema_version": 1,
-  "note": "Rewritten 2026-09-17 for Risk v2 / the thesis lifecycle; frozen 2026-09-20 on the direction fix (run X ab572b09d59bc4d7 and the 2022-01-04 guard 5cfe65bcc480a032); re-frozen 2026-09-21 on the entry model with every pool placed (spec 2026-09-20-entry-model-design.md §1.7, label entry-model-pools-2): the earlier journals were recorded under input schema 2 and a 4-ATR price_relations window and cannot replay under the amended input. The ten benchmark windows and the frozen 2022-01-03 window; the 2022-10-13 window (d1cce1796256ee9e) halted at 08:32 on a 21 % drawdown, and the replay stops at the halt like the runner since 2026-09-21 (evidence/2026-09-20_entry_model_benchmark_2022.md §3). Each entry is {run_id, label, frozen_on, summary} with the summary computed without bars (coverage, direction accuracies and entry_quality are None there; the test compares the deterministic fields).",
+  "note": "Rewritten 2026-09-17 for Risk v2 / the thesis lifecycle; frozen 2026-09-20 on the direction fix; re-frozen 2026-09-21 on the entry model with every pool placed (label entry-model-pools-2); re-frozen again 2026-09-21 on the stop floor and the event sleep (spec 2026-09-21-stop-floor-event-sleep-design.md, label stop-floor-events): the earlier journals were recorded under controller schema 4 (no event calendar in the identity or the decisions) and the unfloored geometry, and cannot replay. The ten benchmark windows (four of them start inside a release window and wake on the calendar) and the frozen 2022-01-03 window. Each entry is {run_id, label, frozen_on, summary} with the summary computed without bars (coverage, direction accuracies and entry_quality are None there; the test compares the deterministic fields).",
   "runs": [
     {
-      "run_id": "4496569b4eca5709",
-      "label": "benchmark 2022-01-24 12:00–16:00 (extreme reversal), entry-model-pools-2",
+      "run_id": "d372d3c2f239cdda",
+      "label": "benchmark 2022-01-24 12:00–16:00 (extreme reversal), stop-floor-events",
       "frozen_on": "2026-09-21",
       "summary": {
         "run": {
-          "run_id": "4496569b4eca5709",
+          "run_id": "d372d3c2f239cdda",
           "window": {
             "emit_start": "2022-01-24T12:00",
             "end": "2022-01-24T16:00",
@@ -19,48 +19,50 @@
           "reasoning_effort": "high",
           "broker": "sim",
           "client": "deepseek",
-          "started_at": "2026-09-21T04:33:28Z",
-          "finished_at": "2026-09-21T05:36:46Z",
-          "minutes": 63.31,
+          "started_at": "2026-09-21T18:12:17Z",
+          "finished_at": "2026-09-21T19:46:43Z",
+          "minutes": 94.43,
           "bars_emitted": 241,
           "max_llm_calls": 400,
-          "system_prompt_sha256": "7bf4db7c9c72e17bb956911e402aa77757463289861963646d863cc17e2d9aea",
-          "sleep_controller_sha256": "a65debce70f486fd11bb7e464c1ca37c894f4f03dcfc6ebaaf639bebf6ef9562",
+          "system_prompt_sha256": "8d1ebdfa8092a6cfc55bd7d57e7b25ad100adf41c6f23ea1dd24316a586f3ab8",
+          "sleep_controller_sha256": "a5e63b06abc05bbc21e15cc4a11f9f5e65c4d3986f444a6349bcfa6bb4bc2133",
           "main_brain_config_sha256": "25b3c4a1054752baed39da50431fd680be6b54a315c2cb669103a0fbdabb665f",
           "risk_config_sha256": "f4ea17d92ccacc28a4077243f10ff669cbabce17dfafd80346a3ba0d48e70e88",
           "simulator_config_sha256": "c8e38bdda3e880b7160c7e369f00576cd184c0c4b0cc3c7091c5691002eefeff",
-          "git_revision": "e0581ed41727da3c82e37c124fb1935ff41c202f",
+          "git_revision": "444993b1ab898aab32d431619bc88842daba2d8e",
           "until": null
         },
         "llm": {
           "calls": 54,
-          "replies": 54,
-          "incidents": 0,
-          "incidents_by_kind": {},
-          "repairs": 2,
-          "prompt_tokens": 829184,
-          "cache_hit_tokens": 393344,
-          "cache_miss_tokens": 435840,
-          "completion_tokens": 838996,
-          "cost_usd_peak": 1.139907,
-          "cost_usd_off_peak": 0.569954,
-          "latency_ms": {
-            "p50": 60468.0,
-            "p95": 115209.0,
-            "max": 130115.0
+          "replies": 52,
+          "incidents": 5,
+          "incidents_by_kind": {
+            "MalformedReply": 5
           },
-          "input_chars_median": 27136.5,
+          "repairs": 11,
+          "prompt_tokens": 850480,
+          "cache_hit_tokens": 416896,
+          "cache_miss_tokens": 433584,
+          "completion_tokens": 981689,
+          "cost_usd_peak": 1.310603,
+          "cost_usd_off_peak": 0.655302,
+          "latency_ms": {
+            "p50": 74411.0,
+            "p95": 109368.0,
+            "max": 124850.0
+          },
+          "input_chars_median": 27252.5,
           "calls_by_trigger": {
-            "UPDATE": 52,
-            "WAKE": 2
+            "UPDATE": 53,
+            "WAKE": 1
           },
           "trigger_reasons": {
-            "acceptance_confirmed": 11,
+            "acceptance_confirmed": 12,
             "dealing_range_created": 3,
             "dealing_range_invalidated": 1,
             "displacement_observed": 31,
             "fvg_first_retest": 31,
-            "level_reached": 16,
+            "level_reached": 17,
             "mss_core_confirmed": 2,
             "origin_zone_mitigated": 1,
             "qualified_bos": 2,
@@ -72,119 +74,95 @@
           },
           "wake_kinds": {
             "acceptance_confirmed": 1,
-            "displacement_observed": 3,
-            "level_reached": 1
+            "displacement_observed": 3
           },
-          "unchanged_calls": 20,
+          "unchanged_calls": 11,
           "confidence": {
-            "MEDIUM": 54
+            "MEDIUM": 52
           }
         },
         "controller": {
           "decisions": {
-            "STAY_ASLEEP": 5,
-            "TICK": 182,
-            "UPDATE": 52,
-            "WAKE": 2
+            "EVENT_SLEEP": 0,
+            "STAY_ASLEEP": 0,
+            "TICK": 187,
+            "UPDATE": 53,
+            "WAKE": 1
           },
-          "episodes": 2,
-          "sleeps_by_reason": {
-            "idle": 1
-          },
+          "episodes": 1,
+          "sleeps_by_reason": {},
           "active_at_end": 1,
-          "awake_bars_total": 236,
-          "awake_bars_median": 118.0,
-          "calls_per_awake_bar": 0.229
+          "awake_bars_total": 241,
+          "awake_bars_median": 241.0,
+          "calls_per_awake_bar": 0.224
         },
         "coverage": null,
         "brain": {
           "proposed_by_state": {
-            "ACTIONABLE": 36,
-            "DEVELOPING": 5,
-            "NONE": 13
+            "ACTIONABLE": 11,
+            "DEVELOPING": 22,
+            "NONE": 19
           },
           "survived_by_state": {
-            "ACTIONABLE": 6,
-            "DEVELOPING": 3
+            "ACTIONABLE": 8,
+            "DEVELOPING": 9
           },
-          "distinct_opportunities": 8,
+          "distinct_opportunities": 11,
           "geometry_errors": 0,
-          "rejections_by_kind": {},
-          "understanding_changes": 52,
+          "rejections_by_kind": {
+            "evidence_without_verdict": 43
+          },
+          "understanding_changes": 48,
           "actionable_direction_accuracy_60m": null
         },
         "risk": {
-          "vetoes": 1,
-          "veto_signatures": 1,
-          "reproposals_after_veto": 0,
-          "veto_repeat_rate": 0.0,
+          "vetoes": 11,
+          "veto_signatures": 7,
+          "reproposals_after_veto": 4,
+          "veto_repeat_rate": 0.3636,
           "vetoes_by_code": {
-            "position_size": 1
+            "position_size": 11
           },
-          "calls_with_veto_feedback": 1,
-          "kept_after_veto": 0,
-          "reanalysed_after_veto": 1,
-          "veto_bars": 5,
+          "calls_with_veto_feedback": 47,
+          "kept_after_veto": 3,
+          "reanalysed_after_veto": 42,
+          "veto_bars": 46,
           "stale_snapshots": 0,
-          "thesis_refused": 9,
+          "thesis_refused": 1,
           "refusals_by_reason": {
-            "thesis_engaged": 9
+            "entry_marketable": 1
           },
           "daily_stop_vetoes": 0,
           "halted": null
         },
         "orders": {
-          "submitted": 3,
-          "working": 3,
+          "submitted": 0,
+          "working": 0,
           "partial": 0,
-          "filled": 3,
+          "filled": 0,
           "cancel_requested": 0,
           "cancelled": 0,
           "expired": 0,
           "rejected": 0,
-          "position_opened": 3,
-          "position_closed": 2,
+          "position_opened": 0,
+          "position_closed": 0,
           "exit_leg_lost": 0,
           "invalidation_close": 0,
           "bias_reversed": 0,
+          "event_sleep": 0,
           "flattened": 0,
           "halted": 0,
           "missed_trends": null,
           "entry_quality": null,
           "cancel_reasons": {},
           "replacements": 0,
-          "exit_roles": {
-            "stop": 2
-          },
+          "exit_roles": {},
           "bars_to_fill": {
-            "median": 13.0,
-            "max": 31.0
+            "median": null,
+            "max": null
           },
-          "closed_trades": [
-            {
-              "episode_id": "EP_20220124_001",
-              "direction": "SHORT",
-              "quantity": 1,
-              "entry_price": 13838.5,
-              "exit_price": 13889.25,
-              "exit_role": "stop",
-              "closed_at": "2022-01-24T17:48:00Z",
-              "pnl_points": -50.75,
-              "thesis_id": "T1"
-            },
-            {
-              "episode_id": "EP_20220124_001",
-              "direction": "SHORT",
-              "quantity": 1,
-              "entry_price": 14200.0,
-              "exit_price": 14263.75,
-              "exit_role": "stop",
-              "closed_at": "2022-01-24T20:16:00Z",
-              "pnl_points": -63.75,
-              "thesis_id": "T3"
-            }
-          ],
-          "realized_points": -114.5
+          "closed_trades": [],
+          "realized_points": null
         },
         "bias": {
           "changes": 0,
@@ -199,107 +177,101 @@
           "stale_snapshots": 0
         },
         "account": {
-          "cash": 97710.0,
-          "realized_pnl": -2290.0,
-          "positions": [
-            {
-              "average_price": 14335.75,
-              "quantity": 1,
-              "symbol": "NQ"
-            }
-          ],
+          "cash": 100000.0,
+          "realized_pnl": 0.0,
+          "positions": [],
           "unrealized_pnl": null,
           "orders": {
-            "cancelled": 2,
-            "filled": 5,
-            "pending": 2,
+            "cancelled": 0,
+            "filled": 0,
+            "pending": 0,
             "rejected": 0
           },
-          "fills": 5
+          "fills": 0
         },
         "timings": {
           "bar": {
             "count": 241,
-            "max_ms": 200354.151,
-            "mean_ms": 14882.808,
-            "p50_ms": 1.734,
-            "p95_ms": 88695.472,
-            "total_s": 3586.756757
+            "max_ms": 275807.048,
+            "mean_ms": 22658.302,
+            "p50_ms": 1.736,
+            "p95_ms": 108947.008,
+            "total_s": 5460.650835
           },
           "controller": {
             "count": 241,
-            "max_ms": 0.048,
-            "mean_ms": 0.017,
-            "p50_ms": 0.016,
-            "p95_ms": 0.027,
-            "total_s": 0.004042
+            "max_ms": 0.054,
+            "mean_ms": 0.028,
+            "p50_ms": 0.027,
+            "p95_ms": 0.042,
+            "total_s": 0.006835
           },
           "eye": {
             "count": 7620,
-            "max_ms": 676.25,
-            "mean_ms": 27.453,
-            "p50_ms": 24.017,
-            "p95_ms": 48.065,
-            "total_s": 209.191619
+            "max_ms": 834.339,
+            "mean_ms": 26.689,
+            "p50_ms": 23.277,
+            "p95_ms": 47.774,
+            "total_s": 203.373921
           },
           "input": {
             "count": 54,
-            "max_ms": 2.514,
-            "mean_ms": 1.722,
-            "p50_ms": 1.757,
-            "p95_ms": 2.502,
-            "total_s": 0.092989
+            "max_ms": 2.553,
+            "mean_ms": 1.906,
+            "p50_ms": 1.879,
+            "p95_ms": 2.449,
+            "total_s": 0.102936
           },
           "journal": {
-            "count": 236,
-            "max_ms": 221.914,
-            "mean_ms": 8.685,
-            "p50_ms": 0.195,
-            "p95_ms": 45.742,
-            "total_s": 2.049637
+            "count": 241,
+            "max_ms": 126.339,
+            "mean_ms": 7.064,
+            "p50_ms": 0.199,
+            "p95_ms": 36.754,
+            "total_s": 1.70251
           },
           "llm": {
             "count": 54,
-            "max_ms": 200294.306,
-            "mean_ms": 66369.173,
-            "p50_ms": 61290.41,
-            "p95_ms": 120650.68,
-            "total_s": 3583.935317
+            "max_ms": 275765.258,
+            "mean_ms": 101079.387,
+            "p50_ms": 95202.863,
+            "p95_ms": 241594.248,
+            "total_s": 5458.286892
           },
           "machine": {
             "count": 241,
-            "max_ms": 3.633,
-            "mean_ms": 0.163,
-            "p50_ms": 0.039,
-            "p95_ms": 0.646,
-            "total_s": 0.039262
+            "max_ms": 0.75,
+            "mean_ms": 0.088,
+            "p50_ms": 0.036,
+            "p95_ms": 0.443,
+            "total_s": 0.021269
           },
           "plan": {
             "count": 241,
-            "max_ms": 0.35,
-            "mean_ms": 0.096,
-            "p50_ms": 0.112,
-            "p95_ms": 0.287,
-            "total_s": 0.023217
+            "max_ms": 0.235,
+            "mean_ms": 0.034,
+            "p50_ms": 0.001,
+            "p95_ms": 0.142,
+            "total_s": 0.008222
           },
           "reduce": {
             "count": 54,
-            "max_ms": 5.634,
-            "mean_ms": 1.827,
-            "p50_ms": 1.398,
-            "p95_ms": 3.285,
-            "total_s": 0.09864
+            "max_ms": 3.565,
+            "mean_ms": 1.237,
+            "p50_ms": 1.156,
+            "p95_ms": 2.912,
+            "total_s": 0.066787
           }
         }
       }
     },
     {
-      "run_id": "14afbbb0c1caaadf",
-      "label": "benchmark 2022-02-24 08:30–12:30 (V reversal), entry-model-pools-2",
+      "run_id": "eae1ed05146d3fa3",
+      "label": "benchmark 2022-02-24 08:30–12:30 (V reversal), stop-floor-events",
       "frozen_on": "2026-09-21",
       "summary": {
         "run": {
-          "run_id": "14afbbb0c1caaadf",
+          "run_id": "eae1ed05146d3fa3",
           "window": {
             "emit_start": "2022-02-24T08:30",
             "end": "2022-02-24T12:30",
@@ -310,41 +282,41 @@
           "reasoning_effort": "high",
           "broker": "sim",
           "client": "deepseek",
-          "started_at": "2026-09-21T04:33:28Z",
-          "finished_at": "2026-09-21T06:39:24Z",
-          "minutes": 125.93,
+          "started_at": "2026-09-21T18:12:17Z",
+          "finished_at": "2026-09-21T19:50:44Z",
+          "minutes": 98.46,
           "bars_emitted": 241,
           "max_llm_calls": 400,
-          "system_prompt_sha256": "7bf4db7c9c72e17bb956911e402aa77757463289861963646d863cc17e2d9aea",
-          "sleep_controller_sha256": "a65debce70f486fd11bb7e464c1ca37c894f4f03dcfc6ebaaf639bebf6ef9562",
+          "system_prompt_sha256": "8d1ebdfa8092a6cfc55bd7d57e7b25ad100adf41c6f23ea1dd24316a586f3ab8",
+          "sleep_controller_sha256": "a5e63b06abc05bbc21e15cc4a11f9f5e65c4d3986f444a6349bcfa6bb4bc2133",
           "main_brain_config_sha256": "25b3c4a1054752baed39da50431fd680be6b54a315c2cb669103a0fbdabb665f",
           "risk_config_sha256": "f4ea17d92ccacc28a4077243f10ff669cbabce17dfafd80346a3ba0d48e70e88",
           "simulator_config_sha256": "c8e38bdda3e880b7160c7e369f00576cd184c0c4b0cc3c7091c5691002eefeff",
-          "git_revision": "e0581ed41727da3c82e37c124fb1935ff41c202f",
+          "git_revision": "444993b1ab898aab32d431619bc88842daba2d8e",
           "until": null
         },
         "llm": {
-          "calls": 52,
-          "replies": 51,
-          "incidents": 2,
+          "calls": 54,
+          "replies": 54,
+          "incidents": 1,
           "incidents_by_kind": {
-            "MalformedReply": 2
+            "MalformedReply": 1
           },
-          "repairs": 19,
-          "prompt_tokens": 855409,
-          "cache_hit_tokens": 551808,
-          "cache_miss_tokens": 303601,
-          "completion_tokens": 1110448,
-          "cost_usd_peak": 1.426929,
-          "cost_usd_off_peak": 0.713464,
+          "repairs": 8,
+          "prompt_tokens": 867427,
+          "cache_hit_tokens": 407168,
+          "cache_miss_tokens": 460259,
+          "completion_tokens": 1142522,
+          "cost_usd_peak": 1.511547,
+          "cost_usd_off_peak": 0.755774,
           "latency_ms": {
-            "p50": 85724.0,
-            "p95": 136444.0,
-            "max": 140083.0
+            "p50": 82264.0,
+            "p95": 133293.0,
+            "max": 145460.0
           },
-          "input_chars_median": 28829.5,
+          "input_chars_median": 28222.0,
           "calls_by_trigger": {
-            "UPDATE": 51,
+            "UPDATE": 53,
             "WAKE": 1
           },
           "trigger_reasons": {
@@ -357,7 +329,7 @@
             "mss_core_confirmed": 4,
             "origin_zone_invalidated": 1,
             "qualified_origin_zone_created": 1,
-            "relation_change": 12,
+            "relation_change": 10,
             "structure_break": 7,
             "structure_direction_confirmed": 4,
             "sweep_confirmed": 9
@@ -365,16 +337,17 @@
           "wake_kinds": {
             "displacement_observed": 1
           },
-          "unchanged_calls": 11,
+          "unchanged_calls": 18,
           "confidence": {
-            "MEDIUM": 51
+            "MEDIUM": 54
           }
         },
         "controller": {
           "decisions": {
+            "EVENT_SLEEP": 0,
             "STAY_ASLEEP": 10,
-            "TICK": 179,
-            "UPDATE": 51,
+            "TICK": 177,
+            "UPDATE": 53,
             "WAKE": 1
           },
           "episodes": 1,
@@ -382,44 +355,44 @@
           "active_at_end": 1,
           "awake_bars_total": 231,
           "awake_bars_median": 231.0,
-          "calls_per_awake_bar": 0.225
+          "calls_per_awake_bar": 0.234
         },
         "coverage": null,
         "brain": {
           "proposed_by_state": {
-            "ACTIONABLE": 15,
-            "DEVELOPING": 24,
-            "NONE": 12
+            "ACTIONABLE": 20,
+            "DEVELOPING": 28,
+            "NONE": 6
           },
           "survived_by_state": {
             "ACTIONABLE": 10,
-            "DEVELOPING": 10
+            "DEVELOPING": 7
           },
-          "distinct_opportunities": 13,
+          "distinct_opportunities": 12,
           "geometry_errors": 0,
-          "rejections_by_kind": {
-            "evidence_without_verdict": 11,
-            "opportunity_incoherent": 1
-          },
-          "understanding_changes": 49,
+          "rejections_by_kind": {},
+          "understanding_changes": 53,
           "actionable_direction_accuracy_60m": null
         },
         "risk": {
-          "vetoes": 14,
-          "veto_signatures": 8,
-          "reproposals_after_veto": 6,
-          "veto_repeat_rate": 0.4286,
+          "vetoes": 5,
+          "veto_signatures": 4,
+          "reproposals_after_veto": 1,
+          "veto_repeat_rate": 0.2,
           "vetoes_by_code": {
-            "position_size": 8,
-            "reward_risk": 6
+            "position_size": 3,
+            "reward_risk": 2
           },
-          "calls_with_veto_feedback": 42,
-          "kept_after_veto": 5,
-          "reanalysed_after_veto": 36,
-          "veto_bars": 42,
+          "calls_with_veto_feedback": 28,
+          "kept_after_veto": 1,
+          "reanalysed_after_veto": 27,
+          "veto_bars": 13,
           "stale_snapshots": 0,
-          "thesis_refused": 0,
-          "refusals_by_reason": {},
+          "thesis_refused": 11,
+          "refusals_by_reason": {
+            "entry_marketable": 1,
+            "thesis_engaged": 10
+          },
           "daily_stop_vetoes": 0,
           "halted": null
         },
@@ -437,6 +410,284 @@
           "exit_leg_lost": 0,
           "invalidation_close": 0,
           "bias_reversed": 0,
+          "event_sleep": 0,
+          "flattened": 0,
+          "halted": 0,
+          "missed_trends": null,
+          "entry_quality": null,
+          "cancel_reasons": {},
+          "replacements": 0,
+          "exit_roles": {
+            "stop": 1
+          },
+          "bars_to_fill": {
+            "median": 7.0,
+            "max": 7.0
+          },
+          "closed_trades": [
+            {
+              "episode_id": "EP_20220224_001",
+              "direction": "SHORT",
+              "quantity": 2,
+              "entry_price": 13140.25,
+              "exit_price": 13173.0,
+              "exit_role": "stop",
+              "closed_at": "2022-02-24T14:33:00Z",
+              "pnl_points": -65.5,
+              "thesis_id": "T1"
+            }
+          ],
+          "realized_points": -65.5
+        },
+        "bias": {
+          "changes": 1,
+          "neutral_revisions": 1,
+          "opportunities_against_bias": 0,
+          "direction_accuracy_60m": null
+        },
+        "invariants": {
+          "double_entry": 0,
+          "positions_over_limit": 0,
+          "position_without_fill": 0,
+          "stale_snapshots": 0
+        },
+        "account": {
+          "cash": 98690.0,
+          "realized_pnl": -1310.0,
+          "positions": [],
+          "unrealized_pnl": null,
+          "orders": {
+            "cancelled": 1,
+            "filled": 2,
+            "pending": 0,
+            "rejected": 0
+          },
+          "fills": 2
+        },
+        "timings": {
+          "bar": {
+            "count": 241,
+            "max_ms": 243192.662,
+            "mean_ms": 23677.09,
+            "p50_ms": 1.845,
+            "p95_ms": 132529.684,
+            "total_s": 5706.178579
+          },
+          "controller": {
+            "count": 241,
+            "max_ms": 0.068,
+            "mean_ms": 0.03,
+            "p50_ms": 0.028,
+            "p95_ms": 0.045,
+            "total_s": 0.007257
+          },
+          "eye": {
+            "count": 7410,
+            "max_ms": 377.542,
+            "mean_ms": 26.882,
+            "p50_ms": 23.457,
+            "p95_ms": 48.479,
+            "total_s": 199.19862
+          },
+          "input": {
+            "count": 54,
+            "max_ms": 2.887,
+            "mean_ms": 2.054,
+            "p50_ms": 2.105,
+            "p95_ms": 2.78,
+            "total_s": 0.110926
+          },
+          "journal": {
+            "count": 231,
+            "max_ms": 251.659,
+            "mean_ms": 8.173,
+            "p50_ms": 0.193,
+            "p95_ms": 39.846,
+            "total_s": 1.887998
+          },
+          "llm": {
+            "count": 54,
+            "max_ms": 242930.838,
+            "mean_ms": 105622.677,
+            "p50_ms": 90300.618,
+            "p95_ms": 239591.969,
+            "total_s": 5703.62454
+          },
+          "machine": {
+            "count": 241,
+            "max_ms": 1.076,
+            "mean_ms": 0.092,
+            "p50_ms": 0.038,
+            "p95_ms": 0.409,
+            "total_s": 0.022077
+          },
+          "plan": {
+            "count": 241,
+            "max_ms": 0.274,
+            "mean_ms": 0.039,
+            "p50_ms": 0.001,
+            "p95_ms": 0.165,
+            "total_s": 0.009451
+          },
+          "reduce": {
+            "count": 54,
+            "max_ms": 4.04,
+            "mean_ms": 1.225,
+            "p50_ms": 1.241,
+            "p95_ms": 2.326,
+            "total_s": 0.066127
+          }
+        }
+      }
+    },
+    {
+      "run_id": "d0304a4ab8f4b8f9",
+      "label": "benchmark 2022-05-10 09:30–13:00 (two-sided chop), stop-floor-events",
+      "frozen_on": "2026-09-21",
+      "summary": {
+        "run": {
+          "run_id": "d0304a4ab8f4b8f9",
+          "window": {
+            "emit_start": "2022-05-10T09:30",
+            "end": "2022-05-10T13:00",
+            "source": "data/processed/nq_1m_previous_session_front_v2_3_2017_2026.parquet",
+            "warmup_start": "2022-05-03"
+          },
+          "model": "deepseek:deepseek-flash@high",
+          "reasoning_effort": "high",
+          "broker": "sim",
+          "client": "deepseek",
+          "started_at": "2026-09-21T18:12:17Z",
+          "finished_at": "2026-09-21T20:07:33Z",
+          "minutes": 115.27,
+          "bars_emitted": 211,
+          "max_llm_calls": 400,
+          "system_prompt_sha256": "8d1ebdfa8092a6cfc55bd7d57e7b25ad100adf41c6f23ea1dd24316a586f3ab8",
+          "sleep_controller_sha256": "a5e63b06abc05bbc21e15cc4a11f9f5e65c4d3986f444a6349bcfa6bb4bc2133",
+          "main_brain_config_sha256": "25b3c4a1054752baed39da50431fd680be6b54a315c2cb669103a0fbdabb665f",
+          "risk_config_sha256": "f4ea17d92ccacc28a4077243f10ff669cbabce17dfafd80346a3ba0d48e70e88",
+          "simulator_config_sha256": "c8e38bdda3e880b7160c7e369f00576cd184c0c4b0cc3c7091c5691002eefeff",
+          "git_revision": "444993b1ab898aab32d431619bc88842daba2d8e",
+          "until": null
+        },
+        "llm": {
+          "calls": 50,
+          "replies": 50,
+          "incidents": 1,
+          "incidents_by_kind": {
+            "MalformedReply": 1
+          },
+          "repairs": 18,
+          "prompt_tokens": 789117,
+          "cache_hit_tokens": 480128,
+          "cache_miss_tokens": 308989,
+          "completion_tokens": 1035972,
+          "cost_usd_peak": 1.338744,
+          "cost_usd_off_peak": 0.669372,
+          "latency_ms": {
+            "p50": 85552.0,
+            "p95": 126929.0,
+            "max": 129865.0
+          },
+          "input_chars_median": 27244.5,
+          "calls_by_trigger": {
+            "UPDATE": 49,
+            "WAKE": 1
+          },
+          "trigger_reasons": {
+            "acceptance_confirmed": 11,
+            "dealing_range_created": 1,
+            "dealing_range_invalidated": 1,
+            "displacement_observed": 28,
+            "fvg_first_retest": 25,
+            "level_reached": 18,
+            "mss_core_confirmed": 4,
+            "relation_change": 8,
+            "structure_break": 6,
+            "structure_direction_confirmed": 5,
+            "sweep_confirmed": 4
+          },
+          "wake_kinds": {
+            "displacement_observed": 1
+          },
+          "unchanged_calls": 10,
+          "confidence": {
+            "LOW": 1,
+            "MEDIUM": 49
+          }
+        },
+        "controller": {
+          "decisions": {
+            "EVENT_SLEEP": 0,
+            "STAY_ASLEEP": 0,
+            "TICK": 161,
+            "UPDATE": 49,
+            "WAKE": 1
+          },
+          "episodes": 1,
+          "sleeps_by_reason": {},
+          "active_at_end": 1,
+          "awake_bars_total": 211,
+          "awake_bars_median": 211.0,
+          "calls_per_awake_bar": 0.237
+        },
+        "coverage": null,
+        "brain": {
+          "proposed_by_state": {
+            "ACTIONABLE": 15,
+            "DEVELOPING": 27,
+            "NONE": 8
+          },
+          "survived_by_state": {
+            "ACTIONABLE": 8,
+            "DEVELOPING": 9
+          },
+          "distinct_opportunities": 12,
+          "geometry_errors": 0,
+          "rejections_by_kind": {
+            "evidence_without_verdict": 9,
+            "opportunity_object_not_visible": 2
+          },
+          "understanding_changes": 48,
+          "actionable_direction_accuracy_60m": null
+        },
+        "risk": {
+          "vetoes": 12,
+          "veto_signatures": 3,
+          "reproposals_after_veto": 9,
+          "veto_repeat_rate": 0.75,
+          "vetoes_by_code": {
+            "position_size": 10,
+            "reward_risk": 2
+          },
+          "calls_with_veto_feedback": 38,
+          "kept_after_veto": 8,
+          "reanalysed_after_veto": 30,
+          "veto_bars": 45,
+          "stale_snapshots": 0,
+          "thesis_refused": 2,
+          "refusals_by_reason": {
+            "entry_marketable": 1,
+            "thesis_engaged": 1
+          },
+          "daily_stop_vetoes": 0,
+          "halted": null
+        },
+        "orders": {
+          "submitted": 1,
+          "working": 1,
+          "partial": 0,
+          "filled": 1,
+          "cancel_requested": 0,
+          "cancelled": 0,
+          "expired": 0,
+          "rejected": 0,
+          "position_opened": 1,
+          "position_closed": 1,
+          "exit_leg_lost": 0,
+          "invalidation_close": 0,
+          "bias_reversed": 0,
+          "event_sleep": 0,
           "flattened": 0,
           "halted": 0,
           "missed_trends": null,
@@ -452,22 +703,22 @@
           },
           "closed_trades": [
             {
-              "episode_id": "EP_20220224_001",
-              "direction": "SHORT",
-              "quantity": 3,
-              "entry_price": 13109.25,
-              "exit_price": 13125.25,
+              "episode_id": "EP_20220510_001",
+              "direction": "LONG",
+              "quantity": 1,
+              "entry_price": 12487.0,
+              "exit_price": 12436.75,
               "exit_role": "stop",
-              "closed_at": "2022-02-24T14:32:00Z",
-              "pnl_points": -48.0,
+              "closed_at": "2022-05-10T13:37:00Z",
+              "pnl_points": -50.25,
               "thesis_id": "T1"
             }
           ],
-          "realized_points": -48.0
+          "realized_points": -50.25
         },
         "bias": {
-          "changes": 0,
-          "neutral_revisions": 0,
+          "changes": 2,
+          "neutral_revisions": 6,
           "opportunities_against_bias": 0,
           "direction_accuracy_60m": null
         },
@@ -478,8 +729,8 @@
           "stale_snapshots": 0
         },
         "account": {
-          "cash": 99040.0,
-          "realized_pnl": -960.0,
+          "cash": 98995.0,
+          "realized_pnl": -1005.0,
           "positions": [],
           "unrealized_pnl": null,
           "orders": {
@@ -492,348 +743,87 @@
         },
         "timings": {
           "bar": {
-            "count": 241,
-            "max_ms": 308986.216,
-            "mean_ms": 30486.056,
-            "p50_ms": 1.716,
-            "p95_ms": 218056.471,
-            "total_s": 7347.139472
-          },
-          "controller": {
-            "count": 241,
-            "max_ms": 0.273,
-            "mean_ms": 0.022,
-            "p50_ms": 0.019,
-            "p95_ms": 0.036,
-            "total_s": 0.005305
-          },
-          "eye": {
-            "count": 7410,
-            "max_ms": 422.007,
-            "mean_ms": 27.832,
-            "p50_ms": 24.266,
-            "p95_ms": 48.61,
-            "total_s": 206.233665
-          },
-          "input": {
-            "count": 52,
-            "max_ms": 2.794,
-            "mean_ms": 2.05,
-            "p50_ms": 2.088,
-            "p95_ms": 2.67,
-            "total_s": 0.106579
-          },
-          "journal": {
-            "count": 231,
-            "max_ms": 69.24,
-            "mean_ms": 8.546,
-            "p50_ms": 0.183,
-            "p95_ms": 43.834,
-            "total_s": 1.974162
-          },
-          "llm": {
-            "count": 52,
-            "max_ms": 308942.664,
-            "mean_ms": 141238.563,
-            "p50_ms": 115379.664,
-            "p95_ms": 268304.385,
-            "total_s": 7344.405297
-          },
-          "machine": {
-            "count": 241,
-            "max_ms": 3.922,
-            "mean_ms": 0.14,
-            "p50_ms": 0.036,
-            "p95_ms": 0.657,
-            "total_s": 0.033709
-          },
-          "plan": {
-            "count": 241,
-            "max_ms": 0.339,
-            "mean_ms": 0.029,
-            "p50_ms": 0.001,
-            "p95_ms": 0.149,
-            "total_s": 0.007073
-          },
-          "reduce": {
-            "count": 52,
-            "max_ms": 6.079,
-            "mean_ms": 1.905,
-            "p50_ms": 1.642,
-            "p95_ms": 3.607,
-            "total_s": 0.099084
-          }
-        }
-      }
-    },
-    {
-      "run_id": "69aa3b612fd33c99",
-      "label": "benchmark 2022-05-10 09:30–13:00 (two-sided chop), entry-model-pools-2",
-      "frozen_on": "2026-09-21",
-      "summary": {
-        "run": {
-          "run_id": "69aa3b612fd33c99",
-          "window": {
-            "emit_start": "2022-05-10T09:30",
-            "end": "2022-05-10T13:00",
-            "source": "data/processed/nq_1m_previous_session_front_v2_3_2017_2026.parquet",
-            "warmup_start": "2022-05-03"
-          },
-          "model": "deepseek:deepseek-flash@high",
-          "reasoning_effort": "high",
-          "broker": "sim",
-          "client": "deepseek",
-          "started_at": "2026-09-21T04:33:28Z",
-          "finished_at": "2026-09-21T05:58:52Z",
-          "minutes": 85.41,
-          "bars_emitted": 211,
-          "max_llm_calls": 400,
-          "system_prompt_sha256": "7bf4db7c9c72e17bb956911e402aa77757463289861963646d863cc17e2d9aea",
-          "sleep_controller_sha256": "a65debce70f486fd11bb7e464c1ca37c894f4f03dcfc6ebaaf639bebf6ef9562",
-          "main_brain_config_sha256": "25b3c4a1054752baed39da50431fd680be6b54a315c2cb669103a0fbdabb665f",
-          "risk_config_sha256": "f4ea17d92ccacc28a4077243f10ff669cbabce17dfafd80346a3ba0d48e70e88",
-          "simulator_config_sha256": "c8e38bdda3e880b7160c7e369f00576cd184c0c4b0cc3c7091c5691002eefeff",
-          "git_revision": "e0581ed41727da3c82e37c124fb1935ff41c202f",
-          "until": null
-        },
-        "llm": {
-          "calls": 49,
-          "replies": 49,
-          "incidents": 0,
-          "incidents_by_kind": {},
-          "repairs": 11,
-          "prompt_tokens": 776966,
-          "cache_hit_tokens": 491008,
-          "cache_miss_tokens": 285958,
-          "completion_tokens": 886625,
-          "cost_usd_peak": 1.152683,
-          "cost_usd_off_peak": 0.576342,
-          "latency_ms": {
-            "p50": 74935.0,
-            "p95": 124343.0,
-            "max": 135564.0
-          },
-          "input_chars_median": 27546.0,
-          "calls_by_trigger": {
-            "UPDATE": 48,
-            "WAKE": 1
-          },
-          "trigger_reasons": {
-            "acceptance_confirmed": 11,
-            "dealing_range_created": 1,
-            "dealing_range_invalidated": 1,
-            "displacement_observed": 28,
-            "fvg_first_retest": 25,
-            "level_reached": 18,
-            "mss_core_confirmed": 4,
-            "relation_change": 6,
-            "structure_break": 6,
-            "structure_direction_confirmed": 5,
-            "sweep_confirmed": 4
-          },
-          "wake_kinds": {
-            "displacement_observed": 1
-          },
-          "unchanged_calls": 14,
-          "confidence": {
-            "LOW": 5,
-            "MEDIUM": 44
-          }
-        },
-        "controller": {
-          "decisions": {
-            "STAY_ASLEEP": 0,
-            "TICK": 162,
-            "UPDATE": 48,
-            "WAKE": 1
-          },
-          "episodes": 1,
-          "sleeps_by_reason": {},
-          "active_at_end": 1,
-          "awake_bars_total": 211,
-          "awake_bars_median": 211.0,
-          "calls_per_awake_bar": 0.232
-        },
-        "coverage": null,
-        "brain": {
-          "proposed_by_state": {
-            "ACTIONABLE": 38,
-            "DEVELOPING": 4,
-            "NONE": 7
-          },
-          "survived_by_state": {
-            "ACTIONABLE": 12,
-            "DEVELOPING": 3
-          },
-          "distinct_opportunities": 12,
-          "geometry_errors": 0,
-          "rejections_by_kind": {},
-          "understanding_changes": 48,
-          "actionable_direction_accuracy_60m": null
-        },
-        "risk": {
-          "vetoes": 12,
-          "veto_signatures": 11,
-          "reproposals_after_veto": 1,
-          "veto_repeat_rate": 0.0833,
-          "vetoes_by_code": {
-            "position_size": 5,
-            "reward_risk": 7
-          },
-          "calls_with_veto_feedback": 23,
-          "kept_after_veto": 1,
-          "reanalysed_after_veto": 22,
-          "veto_bars": 52,
-          "stale_snapshots": 0,
-          "thesis_refused": 1,
-          "refusals_by_reason": {
-            "entry_marketable": 1
-          },
-          "daily_stop_vetoes": 0,
-          "halted": null
-        },
-        "orders": {
-          "submitted": 1,
-          "working": 1,
-          "partial": 0,
-          "filled": 1,
-          "cancel_requested": 0,
-          "cancelled": 0,
-          "expired": 0,
-          "rejected": 0,
-          "position_opened": 1,
-          "position_closed": 0,
-          "exit_leg_lost": 0,
-          "invalidation_close": 0,
-          "bias_reversed": 0,
-          "flattened": 0,
-          "halted": 0,
-          "missed_trends": null,
-          "entry_quality": null,
-          "cancel_reasons": {},
-          "replacements": 0,
-          "exit_roles": {},
-          "bars_to_fill": {
-            "median": 65.0,
-            "max": 65.0
-          },
-          "closed_trades": [],
-          "realized_points": null
-        },
-        "bias": {
-          "changes": 2,
-          "neutral_revisions": 5,
-          "opportunities_against_bias": 0,
-          "direction_accuracy_60m": null
-        },
-        "invariants": {
-          "double_entry": 0,
-          "positions_over_limit": 0,
-          "position_without_fill": 0,
-          "stale_snapshots": 0
-        },
-        "account": {
-          "cash": 100000.0,
-          "realized_pnl": 0.0,
-          "positions": [
-            {
-              "average_price": 12315.5,
-              "quantity": -3,
-              "symbol": "NQ"
-            }
-          ],
-          "unrealized_pnl": null,
-          "orders": {
-            "cancelled": 0,
-            "filled": 1,
-            "pending": 2,
-            "rejected": 0
-          },
-          "fills": 1
-        },
-        "timings": {
-          "bar": {
             "count": 211,
-            "max_ms": 273827.219,
-            "mean_ms": 23295.98,
-            "p50_ms": 1.671,
-            "p95_ms": 123310.176,
-            "total_s": 4915.451745
+            "max_ms": 336616.245,
+            "mean_ms": 31815.088,
+            "p50_ms": 1.727,
+            "p95_ms": 213382.792,
+            "total_s": 6712.983496
           },
           "controller": {
             "count": 211,
-            "max_ms": 0.04,
-            "mean_ms": 0.019,
-            "p50_ms": 0.017,
-            "p95_ms": 0.03,
-            "total_s": 0.003907
+            "max_ms": 0.061,
+            "mean_ms": 0.032,
+            "p50_ms": 0.03,
+            "p95_ms": 0.051,
+            "total_s": 0.006789
           },
           "eye": {
             "count": 7680,
-            "max_ms": 746.333,
-            "mean_ms": 26.925,
-            "p50_ms": 23.566,
-            "p95_ms": 47.4,
-            "total_s": 206.786343
+            "max_ms": 716.072,
+            "mean_ms": 26.2,
+            "p50_ms": 22.827,
+            "p95_ms": 46.755,
+            "total_s": 201.215549
           },
           "input": {
-            "count": 49,
-            "max_ms": 2.45,
-            "mean_ms": 1.803,
-            "p50_ms": 1.866,
-            "p95_ms": 2.253,
-            "total_s": 0.088347
+            "count": 50,
+            "max_ms": 2.668,
+            "mean_ms": 1.923,
+            "p50_ms": 2.005,
+            "p95_ms": 2.476,
+            "total_s": 0.096142
           },
           "journal": {
             "count": 211,
-            "max_ms": 47.496,
-            "mean_ms": 7.222,
-            "p50_ms": 0.202,
-            "p95_ms": 34.567,
-            "total_s": 1.523825
+            "max_ms": 232.714,
+            "mean_ms": 7.922,
+            "p50_ms": 0.219,
+            "p95_ms": 34.644,
+            "total_s": 1.671437
           },
           "llm": {
-            "count": 49,
-            "max_ms": 273788.488,
-            "mean_ms": 100271.207,
-            "p50_ms": 87283.845,
-            "p95_ms": 258400.216,
-            "total_s": 4913.289124
+            "count": 50,
+            "max_ms": 336583.64,
+            "mean_ms": 134214.749,
+            "p50_ms": 113421.639,
+            "p95_ms": 258407.375,
+            "total_s": 6710.737455
           },
           "machine": {
             "count": 211,
-            "max_ms": 2.943,
-            "mean_ms": 0.152,
-            "p50_ms": 0.042,
-            "p95_ms": 0.944,
-            "total_s": 0.032034
+            "max_ms": 1.672,
+            "mean_ms": 0.117,
+            "p50_ms": 0.039,
+            "p95_ms": 0.538,
+            "total_s": 0.02469
           },
           "plan": {
             "count": 211,
-            "max_ms": 0.447,
-            "mean_ms": 0.111,
-            "p50_ms": 0.106,
-            "p95_ms": 0.238,
-            "total_s": 0.023486
+            "max_ms": 0.296,
+            "mean_ms": 0.043,
+            "p50_ms": 0.002,
+            "p95_ms": 0.156,
+            "total_s": 0.009026
           },
           "reduce": {
-            "count": 49,
-            "max_ms": 6.822,
-            "mean_ms": 1.637,
-            "p50_ms": 1.39,
-            "p95_ms": 2.865,
-            "total_s": 0.080228
+            "count": 50,
+            "max_ms": 3.747,
+            "mean_ms": 1.115,
+            "p50_ms": 1.051,
+            "p95_ms": 2.796,
+            "total_s": 0.055733
           }
         }
       }
     },
     {
-      "run_id": "156861c9f767ed41",
-      "label": "benchmark 2022-06-27 09:30–13:00 (low conviction), entry-model-pools-2",
+      "run_id": "901c12d4f088f9bf",
+      "label": "benchmark 2022-06-27 09:30–13:00 (low conviction), stop-floor-events",
       "frozen_on": "2026-09-21",
       "summary": {
         "run": {
-          "run_id": "156861c9f767ed41",
+          "run_id": "901c12d4f088f9bf",
           "window": {
             "emit_start": "2022-06-27T09:30",
             "end": "2022-06-27T13:00",
@@ -844,41 +834,39 @@
           "reasoning_effort": "high",
           "broker": "sim",
           "client": "deepseek",
-          "started_at": "2026-09-21T05:36:47Z",
-          "finished_at": "2026-09-21T07:01:30Z",
-          "minutes": 84.71,
+          "started_at": "2026-09-21T19:46:44Z",
+          "finished_at": "2026-09-21T21:10:18Z",
+          "minutes": 83.57,
           "bars_emitted": 211,
           "max_llm_calls": 400,
-          "system_prompt_sha256": "7bf4db7c9c72e17bb956911e402aa77757463289861963646d863cc17e2d9aea",
-          "sleep_controller_sha256": "a65debce70f486fd11bb7e464c1ca37c894f4f03dcfc6ebaaf639bebf6ef9562",
+          "system_prompt_sha256": "8d1ebdfa8092a6cfc55bd7d57e7b25ad100adf41c6f23ea1dd24316a586f3ab8",
+          "sleep_controller_sha256": "a5e63b06abc05bbc21e15cc4a11f9f5e65c4d3986f444a6349bcfa6bb4bc2133",
           "main_brain_config_sha256": "25b3c4a1054752baed39da50431fd680be6b54a315c2cb669103a0fbdabb665f",
           "risk_config_sha256": "f4ea17d92ccacc28a4077243f10ff669cbabce17dfafd80346a3ba0d48e70e88",
           "simulator_config_sha256": "c8e38bdda3e880b7160c7e369f00576cd184c0c4b0cc3c7091c5691002eefeff",
-          "git_revision": "e0581ed41727da3c82e37c124fb1935ff41c202f",
+          "git_revision": "444993b1ab898aab32d431619bc88842daba2d8e",
           "until": null
         },
         "llm": {
-          "calls": 42,
-          "replies": 41,
-          "incidents": 1,
-          "incidents_by_kind": {
-            "MalformedReply": 1
-          },
+          "calls": 44,
+          "replies": 44,
+          "incidents": 0,
+          "incidents_by_kind": {},
           "repairs": 8,
-          "prompt_tokens": 632405,
-          "cache_hit_tokens": 327296,
-          "cache_miss_tokens": 305109,
-          "completion_tokens": 847895,
-          "cost_usd_peak": 1.11097,
-          "cost_usd_off_peak": 0.555485,
+          "prompt_tokens": 679570,
+          "cache_hit_tokens": 336640,
+          "cache_miss_tokens": 342930,
+          "completion_tokens": 899793,
+          "cost_usd_peak": 1.18465,
+          "cost_usd_off_peak": 0.592325,
           "latency_ms": {
-            "p50": 93261.0,
-            "p95": 132575.0,
-            "max": 134566.0
+            "p50": 81992.0,
+            "p95": 130053.0,
+            "max": 132094.0
           },
-          "input_chars_median": 27474.0,
+          "input_chars_median": 28004.5,
           "calls_by_trigger": {
-            "UPDATE": 41,
+            "UPDATE": 43,
             "WAKE": 1
           },
           "trigger_reasons": {
@@ -901,16 +889,18 @@
             "displacement_observed": 1,
             "fvg_first_retest": 1
           },
-          "unchanged_calls": 5,
+          "unchanged_calls": 14,
           "confidence": {
-            "MEDIUM": 41
+            "LOW": 2,
+            "MEDIUM": 42
           }
         },
         "controller": {
           "decisions": {
+            "EVENT_SLEEP": 0,
             "STAY_ASLEEP": 0,
-            "TICK": 169,
-            "UPDATE": 41,
+            "TICK": 167,
+            "UPDATE": 43,
             "WAKE": 1
           },
           "episodes": 1,
@@ -918,51 +908,51 @@
           "active_at_end": 1,
           "awake_bars_total": 211,
           "awake_bars_median": 211.0,
-          "calls_per_awake_bar": 0.199
+          "calls_per_awake_bar": 0.209
         },
         "coverage": null,
         "brain": {
           "proposed_by_state": {
-            "ACTIONABLE": 27,
-            "DEVELOPING": 14
+            "ACTIONABLE": 12,
+            "DEVELOPING": 31,
+            "NONE": 1
           },
           "survived_by_state": {
-            "ACTIONABLE": 11,
-            "DEVELOPING": 10
+            "ACTIONABLE": 8,
+            "DEVELOPING": 9
           },
-          "distinct_opportunities": 13,
+          "distinct_opportunities": 11,
           "geometry_errors": 0,
           "rejections_by_kind": {
-            "evidence_expired": 6,
-            "evidence_without_verdict": 38
+            "opportunity_incoherent": 1
           },
-          "understanding_changes": 40,
+          "understanding_changes": 43,
           "actionable_direction_accuracy_60m": null
         },
         "risk": {
-          "vetoes": 8,
-          "veto_signatures": 7,
-          "reproposals_after_veto": 1,
-          "veto_repeat_rate": 0.125,
+          "vetoes": 4,
+          "veto_signatures": 4,
+          "reproposals_after_veto": 0,
+          "veto_repeat_rate": 0.0,
           "vetoes_by_code": {
-            "position_size": 4,
-            "reward_risk": 4
+            "position_size": 1,
+            "reward_risk": 3
           },
-          "calls_with_veto_feedback": 19,
-          "kept_after_veto": 1,
-          "reanalysed_after_veto": 17,
-          "veto_bars": 46,
+          "calls_with_veto_feedback": 24,
+          "kept_after_veto": 0,
+          "reanalysed_after_veto": 24,
+          "veto_bars": 25,
           "stale_snapshots": 0,
-          "thesis_refused": 14,
+          "thesis_refused": 1,
           "refusals_by_reason": {
-            "thesis_engaged": 14
+            "thesis_engaged": 1
           },
           "daily_stop_vetoes": 0,
           "halted": null
         },
         "orders": {
-          "submitted": 2,
-          "working": 2,
+          "submitted": 3,
+          "working": 3,
           "partial": 0,
           "filled": 1,
           "cancel_requested": 1,
@@ -974,6 +964,7 @@
           "exit_leg_lost": 0,
           "invalidation_close": 0,
           "bias_reversed": 0,
+          "event_sleep": 0,
           "flattened": 0,
           "halted": 0,
           "missed_trends": null,
@@ -986,23 +977,23 @@
             "stop": 1
           },
           "bars_to_fill": {
-            "median": 10.0,
-            "max": 10.0
+            "median": 1.0,
+            "max": 1.0
           },
           "closed_trades": [
             {
               "episode_id": "EP_20220627_001",
               "direction": "LONG",
               "quantity": 1,
-              "entry_price": 12105.25,
-              "exit_price": 12059.5,
+              "entry_price": 12166.0,
+              "exit_price": 12120.0,
               "exit_role": "stop",
-              "closed_at": "2022-06-27T16:26:00Z",
-              "pnl_points": -45.75,
-              "thesis_id": "T2"
+              "closed_at": "2022-06-27T13:35:00Z",
+              "pnl_points": -46.0,
+              "thesis_id": "T1"
             }
           ],
-          "realized_points": -45.75
+          "realized_points": -46.0
         },
         "bias": {
           "changes": 0,
@@ -1017,14 +1008,14 @@
           "stale_snapshots": 0
         },
         "account": {
-          "cash": 99085.0,
-          "realized_pnl": -915.0,
+          "cash": 99080.0,
+          "realized_pnl": -920.0,
           "positions": [],
           "unrealized_pnl": null,
           "orders": {
             "cancelled": 4,
             "filled": 2,
-            "pending": 0,
+            "pending": 3,
             "rejected": 0
           },
           "fills": 2
@@ -1032,86 +1023,86 @@
         "timings": {
           "bar": {
             "count": 211,
-            "max_ms": 289371.088,
-            "mean_ms": 23430.503,
-            "p50_ms": 1.77,
-            "p95_ms": 130630.43,
-            "total_s": 4943.836207
+            "max_ms": 338781.596,
+            "mean_ms": 23094.937,
+            "p50_ms": 1.771,
+            "p95_ms": 127681.186,
+            "total_s": 4873.031789
           },
           "controller": {
             "count": 211,
-            "max_ms": 0.047,
-            "mean_ms": 0.018,
-            "p50_ms": 0.017,
-            "p95_ms": 0.029,
-            "total_s": 0.003802
+            "max_ms": 0.071,
+            "mean_ms": 0.029,
+            "p50_ms": 0.027,
+            "p95_ms": 0.042,
+            "total_s": 0.006038
           },
           "eye": {
             "count": 7440,
-            "max_ms": 605.742,
-            "mean_ms": 18.469,
-            "p50_ms": 16.15,
-            "p95_ms": 32.293,
-            "total_s": 137.412806
+            "max_ms": 619.607,
+            "mean_ms": 18.775,
+            "p50_ms": 16.401,
+            "p95_ms": 32.683,
+            "total_s": 139.683428
           },
           "input": {
-            "count": 42,
-            "max_ms": 2.605,
-            "mean_ms": 1.917,
-            "p50_ms": 2.009,
-            "p95_ms": 2.367,
-            "total_s": 0.080528
+            "count": 44,
+            "max_ms": 2.651,
+            "mean_ms": 1.942,
+            "p50_ms": 2.022,
+            "p95_ms": 2.471,
+            "total_s": 0.085429
           },
           "journal": {
             "count": 211,
-            "max_ms": 43.195,
-            "mean_ms": 5.969,
-            "p50_ms": 0.178,
-            "p95_ms": 34.486,
-            "total_s": 1.259555
+            "max_ms": 43.046,
+            "mean_ms": 5.546,
+            "p50_ms": 0.175,
+            "p95_ms": 34.383,
+            "total_s": 1.170302
           },
           "llm": {
-            "count": 42,
-            "max_ms": 289341.779,
-            "mean_ms": 117666.572,
-            "p50_ms": 96769.68,
-            "p95_ms": 277397.486,
-            "total_s": 4941.996018
+            "count": 44,
+            "max_ms": 338725.587,
+            "mean_ms": 110711.037,
+            "p50_ms": 86317.247,
+            "p95_ms": 261251.669,
+            "total_s": 4871.28565
           },
           "machine": {
             "count": 211,
-            "max_ms": 1.385,
-            "mean_ms": 0.127,
-            "p50_ms": 0.041,
-            "p95_ms": 0.624,
-            "total_s": 0.026849
+            "max_ms": 2.628,
+            "mean_ms": 0.104,
+            "p50_ms": 0.036,
+            "p95_ms": 0.516,
+            "total_s": 0.022009
           },
           "plan": {
             "count": 211,
-            "max_ms": 0.326,
-            "mean_ms": 0.086,
-            "p50_ms": 0.1,
-            "p95_ms": 0.216,
-            "total_s": 0.018224
+            "max_ms": 0.317,
+            "mean_ms": 0.035,
+            "p50_ms": 0.001,
+            "p95_ms": 0.145,
+            "total_s": 0.007355
           },
           "reduce": {
-            "count": 42,
-            "max_ms": 3.316,
-            "mean_ms": 1.465,
-            "p50_ms": 1.269,
-            "p95_ms": 2.833,
-            "total_s": 0.06152
+            "count": 44,
+            "max_ms": 3.467,
+            "mean_ms": 1.253,
+            "p50_ms": 1.108,
+            "p95_ms": 2.512,
+            "total_s": 0.055111
           }
         }
       }
     },
     {
-      "run_id": "613f5d9ee00a96d3",
-      "label": "benchmark 2022-07-27 13:30–16:00 (FOMC, strong long), entry-model-pools-2",
+      "run_id": "3e92f4ac87242abc",
+      "label": "benchmark 2022-07-27 13:30–16:00 (FOMC, strong long; asleep until 15:30), stop-floor-events",
       "frozen_on": "2026-09-21",
       "summary": {
         "run": {
-          "run_id": "613f5d9ee00a96d3",
+          "run_id": "3e92f4ac87242abc",
           "window": {
             "emit_start": "2022-07-27T13:30",
             "end": "2022-07-27T16:00",
@@ -1122,113 +1113,102 @@
           "reasoning_effort": "high",
           "broker": "sim",
           "client": "deepseek",
-          "started_at": "2026-09-21T05:58:53Z",
-          "finished_at": "2026-09-21T07:04:14Z",
-          "minutes": 65.34,
+          "started_at": "2026-09-21T19:50:45Z",
+          "finished_at": "2026-09-21T20:06:20Z",
+          "minutes": 15.59,
           "bars_emitted": 151,
           "max_llm_calls": 400,
-          "system_prompt_sha256": "7bf4db7c9c72e17bb956911e402aa77757463289861963646d863cc17e2d9aea",
-          "sleep_controller_sha256": "a65debce70f486fd11bb7e464c1ca37c894f4f03dcfc6ebaaf639bebf6ef9562",
+          "system_prompt_sha256": "8d1ebdfa8092a6cfc55bd7d57e7b25ad100adf41c6f23ea1dd24316a586f3ab8",
+          "sleep_controller_sha256": "a5e63b06abc05bbc21e15cc4a11f9f5e65c4d3986f444a6349bcfa6bb4bc2133",
           "main_brain_config_sha256": "25b3c4a1054752baed39da50431fd680be6b54a315c2cb669103a0fbdabb665f",
           "risk_config_sha256": "f4ea17d92ccacc28a4077243f10ff669cbabce17dfafd80346a3ba0d48e70e88",
           "simulator_config_sha256": "c8e38bdda3e880b7160c7e369f00576cd184c0c4b0cc3c7091c5691002eefeff",
-          "git_revision": "e0581ed41727da3c82e37c124fb1935ff41c202f",
+          "git_revision": "444993b1ab898aab32d431619bc88842daba2d8e",
           "until": null
         },
         "llm": {
-          "calls": 36,
-          "replies": 36,
+          "calls": 6,
+          "replies": 6,
           "incidents": 0,
           "incidents_by_kind": {},
-          "repairs": 7,
-          "prompt_tokens": 592694,
-          "cache_hit_tokens": 294784,
-          "cache_miss_tokens": 297910,
-          "completion_tokens": 694555,
-          "cost_usd_peak": 0.924608,
-          "cost_usd_off_peak": 0.462304,
+          "repairs": 1,
+          "prompt_tokens": 81881,
+          "cache_hit_tokens": 41984,
+          "cache_miss_tokens": 39897,
+          "completion_tokens": 151861,
+          "cost_usd_peak": 0.194454,
+          "cost_usd_off_peak": 0.097227,
           "latency_ms": {
-            "p50": 79326.0,
-            "p95": 136195.0,
-            "max": 137386.0
+            "p50": 116747.0,
+            "p95": 136783.0,
+            "max": 136783.0
           },
-          "input_chars_median": 28386.0,
+          "input_chars_median": 22722.5,
           "calls_by_trigger": {
-            "UPDATE": 34,
-            "WAKE": 2
+            "UPDATE": 5,
+            "WAKE": 1
           },
           "trigger_reasons": {
-            "acceptance_confirmed": 9,
-            "dealing_range_created": 4,
-            "dealing_range_invalidated": 3,
-            "displacement_observed": 29,
-            "fvg_first_retest": 10,
-            "level_reached": 14,
-            "mss_core_confirmed": 1,
-            "qualified_bos": 1,
-            "relation_change": 11,
-            "structure_break": 4,
-            "structure_direction_confirmed": 2,
-            "sweep_confirmed": 4
+            "acceptance_confirmed": 3,
+            "dealing_range_created": 2,
+            "displacement_observed": 3,
+            "fvg_first_retest": 3,
+            "relation_change": 2
           },
           "wake_kinds": {
-            "dealing_range_invalidated": 1,
-            "displacement_observed": 3,
-            "fvg_first_retest": 1
+            "?": 1
           },
-          "unchanged_calls": 3,
+          "unchanged_calls": 0,
           "confidence": {
-            "MEDIUM": 36
+            "MEDIUM": 6
           }
         },
         "controller": {
           "decisions": {
-            "STAY_ASLEEP": 4,
-            "TICK": 111,
-            "UPDATE": 34,
-            "WAKE": 2
+            "EVENT_SLEEP": 0,
+            "STAY_ASLEEP": 120,
+            "TICK": 25,
+            "UPDATE": 5,
+            "WAKE": 1
           },
-          "episodes": 2,
-          "sleeps_by_reason": {
-            "idle": 1
-          },
+          "episodes": 1,
+          "sleeps_by_reason": {},
           "active_at_end": 1,
-          "awake_bars_total": 147,
-          "awake_bars_median": 73.5,
-          "calls_per_awake_bar": 0.245
+          "awake_bars_total": 31,
+          "awake_bars_median": 31.0,
+          "calls_per_awake_bar": 0.194
         },
         "coverage": null,
         "brain": {
           "proposed_by_state": {
-            "ACTIONABLE": 20,
-            "DEVELOPING": 14,
-            "NONE": 2
+            "ACTIONABLE": 2,
+            "DEVELOPING": 3,
+            "NONE": 1
           },
           "survived_by_state": {
-            "ACTIONABLE": 7,
-            "DEVELOPING": 6
+            "ACTIONABLE": 2,
+            "DEVELOPING": 2
           },
-          "distinct_opportunities": 11,
+          "distinct_opportunities": 3,
           "geometry_errors": 0,
           "rejections_by_kind": {
-            "opportunity_incoherent": 1,
-            "opportunity_object_not_visible": 6
+            "opportunity_object_not_visible": 1
           },
-          "understanding_changes": 34,
+          "understanding_changes": 5,
           "actionable_direction_accuracy_60m": null
         },
         "risk": {
-          "vetoes": 3,
-          "veto_signatures": 3,
+          "vetoes": 2,
+          "veto_signatures": 2,
           "reproposals_after_veto": 0,
           "veto_repeat_rate": 0.0,
           "vetoes_by_code": {
-            "reward_risk": 3
+            "reward_risk": 2
           },
-          "calls_with_veto_feedback": 11,
+          "calls_with_veto_feedback": 3,
           "kept_after_veto": 0,
-          "reanalysed_after_veto": 11,
-          "veto_bars": 15,
+          "reanalysed_after_veto": 3,
+          "veto_bars": 6,
           "stale_snapshots": 0,
           "thesis_refused": 0,
           "refusals_by_reason": {},
@@ -1236,48 +1216,33 @@
           "halted": null
         },
         "orders": {
-          "submitted": 4,
-          "working": 4,
+          "submitted": 0,
+          "working": 0,
           "partial": 0,
-          "filled": 1,
-          "cancel_requested": 3,
-          "cancelled": 3,
+          "filled": 0,
+          "cancel_requested": 0,
+          "cancelled": 0,
           "expired": 0,
           "rejected": 0,
-          "position_opened": 1,
-          "position_closed": 1,
+          "position_opened": 0,
+          "position_closed": 0,
           "exit_leg_lost": 0,
           "invalidation_close": 0,
           "bias_reversed": 0,
+          "event_sleep": 0,
           "flattened": 0,
           "halted": 0,
           "missed_trends": null,
           "entry_quality": null,
-          "cancel_reasons": {
-            "signature_changed": 3
-          },
-          "replacements": 3,
-          "exit_roles": {
-            "stop": 1
-          },
+          "cancel_reasons": {},
+          "replacements": 0,
+          "exit_roles": {},
           "bars_to_fill": {
-            "median": 2.0,
-            "max": 2.0
+            "median": null,
+            "max": null
           },
-          "closed_trades": [
-            {
-              "episode_id": "EP_20220727_001",
-              "direction": "LONG",
-              "quantity": 3,
-              "entry_price": 12420.0,
-              "exit_price": 12405.5,
-              "exit_role": "stop",
-              "closed_at": "2022-07-27T18:09:00Z",
-              "pnl_points": -43.5,
-              "thesis_id": "T1"
-            }
-          ],
-          "realized_points": -43.5
+          "closed_trades": [],
+          "realized_points": null
         },
         "bias": {
           "changes": 0,
@@ -1292,101 +1257,101 @@
           "stale_snapshots": 0
         },
         "account": {
-          "cash": 99130.0,
-          "realized_pnl": -870.0,
+          "cash": 100000.0,
+          "realized_pnl": 0.0,
           "positions": [],
           "unrealized_pnl": null,
           "orders": {
-            "cancelled": 10,
-            "filled": 2,
+            "cancelled": 0,
+            "filled": 0,
             "pending": 0,
             "rejected": 0
           },
-          "fills": 2
+          "fills": 0
         },
         "timings": {
           "bar": {
             "count": 151,
-            "max_ms": 275654.336,
-            "mean_ms": 25013.144,
-            "p50_ms": 1.614,
-            "p95_ms": 129220.534,
-            "total_s": 3776.984695
+            "max_ms": 217147.57,
+            "mean_ms": 5231.726,
+            "p50_ms": 0.047,
+            "p95_ms": 2.075,
+            "total_s": 789.990692
           },
           "controller": {
             "count": 151,
-            "max_ms": 0.046,
-            "mean_ms": 0.019,
-            "p50_ms": 0.017,
-            "p95_ms": 0.032,
-            "total_s": 0.002802
+            "max_ms": 0.045,
+            "mean_ms": 0.016,
+            "p50_ms": 0.013,
+            "p95_ms": 0.031,
+            "total_s": 0.002376
           },
           "eye": {
             "count": 7860,
-            "max_ms": 530.051,
-            "mean_ms": 18.09,
-            "p50_ms": 15.717,
-            "p95_ms": 32.022,
-            "total_s": 142.18557
+            "max_ms": 521.815,
+            "mean_ms": 18.294,
+            "p50_ms": 15.947,
+            "p95_ms": 31.875,
+            "total_s": 143.79014
           },
           "input": {
-            "count": 36,
-            "max_ms": 2.029,
-            "mean_ms": 1.583,
-            "p50_ms": 1.668,
-            "p95_ms": 2.01,
-            "total_s": 0.05697
+            "count": 6,
+            "max_ms": 1.358,
+            "mean_ms": 1.221,
+            "p50_ms": 1.275,
+            "p95_ms": 1.358,
+            "total_s": 0.007328
           },
           "journal": {
-            "count": 147,
-            "max_ms": 39.799,
-            "mean_ms": 5.725,
-            "p50_ms": 0.189,
-            "p95_ms": 28.699,
-            "total_s": 0.841569
+            "count": 31,
+            "max_ms": 20.459,
+            "mean_ms": 3.088,
+            "p50_ms": 0.182,
+            "p95_ms": 18.406,
+            "total_s": 0.095722
           },
           "llm": {
-            "count": 36,
-            "max_ms": 275597.705,
-            "mean_ms": 104881.478,
-            "p50_ms": 88048.279,
-            "p95_ms": 227463.142,
-            "total_s": 3775.733219
+            "count": 6,
+            "max_ms": 217128.664,
+            "mean_ms": 131635.857,
+            "p50_ms": 120805.238,
+            "p95_ms": 217128.664,
+            "total_s": 789.81514
           },
           "machine": {
             "count": 151,
-            "max_ms": 1.347,
-            "mean_ms": 0.143,
-            "p50_ms": 0.038,
-            "p95_ms": 0.762,
-            "total_s": 0.021636
+            "max_ms": 1.796,
+            "mean_ms": 0.049,
+            "p50_ms": 0.023,
+            "p95_ms": 0.055,
+            "total_s": 0.007407
           },
           "plan": {
             "count": 151,
-            "max_ms": 0.297,
-            "mean_ms": 0.061,
-            "p50_ms": 0.01,
-            "p95_ms": 0.242,
-            "total_s": 0.009248
+            "max_ms": 0.298,
+            "mean_ms": 0.008,
+            "p50_ms": 0.0,
+            "p95_ms": 0.037,
+            "total_s": 0.001193
           },
           "reduce": {
-            "count": 36,
-            "max_ms": 7.272,
-            "mean_ms": 1.376,
-            "p50_ms": 1.08,
-            "p95_ms": 2.788,
-            "total_s": 0.049539
+            "count": 6,
+            "max_ms": 1.215,
+            "mean_ms": 0.939,
+            "p50_ms": 0.936,
+            "p95_ms": 1.215,
+            "total_s": 0.005637
           }
         }
       }
     },
     {
-      "run_id": "e7c4c845e13913c0",
-      "label": "benchmark 2022-08-26 09:45–13:00 (strong short trend), entry-model-pools-2",
+      "run_id": "902762c7c41f6a67",
+      "label": "benchmark 2022-08-26 09:45–13:00 (strong short trend), stop-floor-events",
       "frozen_on": "2026-09-21",
       "summary": {
         "run": {
-          "run_id": "e7c4c845e13913c0",
+          "run_id": "902762c7c41f6a67",
           "window": {
             "emit_start": "2022-08-26T09:45",
             "end": "2022-08-26T13:00",
@@ -1397,42 +1362,42 @@
           "reasoning_effort": "high",
           "broker": "sim",
           "client": "deepseek",
-          "started_at": "2026-09-21T06:39:25Z",
-          "finished_at": "2026-09-21T08:02:43Z",
-          "minutes": 83.3,
+          "started_at": "2026-09-21T20:06:21Z",
+          "finished_at": "2026-09-21T21:26:55Z",
+          "minutes": 80.57,
           "bars_emitted": 196,
           "max_llm_calls": 400,
-          "system_prompt_sha256": "7bf4db7c9c72e17bb956911e402aa77757463289861963646d863cc17e2d9aea",
-          "sleep_controller_sha256": "a65debce70f486fd11bb7e464c1ca37c894f4f03dcfc6ebaaf639bebf6ef9562",
+          "system_prompt_sha256": "8d1ebdfa8092a6cfc55bd7d57e7b25ad100adf41c6f23ea1dd24316a586f3ab8",
+          "sleep_controller_sha256": "a5e63b06abc05bbc21e15cc4a11f9f5e65c4d3986f444a6349bcfa6bb4bc2133",
           "main_brain_config_sha256": "25b3c4a1054752baed39da50431fd680be6b54a315c2cb669103a0fbdabb665f",
           "risk_config_sha256": "f4ea17d92ccacc28a4077243f10ff669cbabce17dfafd80346a3ba0d48e70e88",
           "simulator_config_sha256": "c8e38bdda3e880b7160c7e369f00576cd184c0c4b0cc3c7091c5691002eefeff",
-          "git_revision": "e0581ed41727da3c82e37c124fb1935ff41c202f",
+          "git_revision": "444993b1ab898aab32d431619bc88842daba2d8e",
           "until": null
         },
         "llm": {
           "calls": 50,
-          "replies": 49,
+          "replies": 48,
           "incidents": 2,
           "incidents_by_kind": {
             "MalformedReply": 2
           },
-          "repairs": 10,
-          "prompt_tokens": 721131,
-          "cache_hit_tokens": 376192,
-          "cache_miss_tokens": 344939,
-          "completion_tokens": 854709,
-          "cost_usd_peak": 1.13139,
-          "cost_usd_off_peak": 0.565695,
+          "repairs": 7,
+          "prompt_tokens": 673207,
+          "cache_hit_tokens": 328192,
+          "cache_miss_tokens": 345015,
+          "completion_tokens": 804640,
+          "cost_usd_peak": 1.071042,
+          "cost_usd_off_peak": 0.535521,
           "latency_ms": {
-            "p50": 63144.0,
-            "p95": 130734.0,
-            "max": 139591.0
+            "p50": 70126.0,
+            "p95": 114126.0,
+            "max": 127310.0
           },
-          "input_chars_median": 23841.5,
+          "input_chars_median": 24534.5,
           "calls_by_trigger": {
-            "UPDATE": 47,
-            "WAKE": 3
+            "UPDATE": 48,
+            "WAKE": 2
           },
           "trigger_reasons": {
             "acceptance_confirmed": 36,
@@ -1453,297 +1418,20 @@
           },
           "wake_kinds": {
             "dealing_range_created": 1,
-            "displacement_observed": 2,
-            "level_reached": 1
+            "displacement_observed": 2
           },
-          "unchanged_calls": 3,
+          "unchanged_calls": 9,
           "confidence": {
-            "HIGH": 1,
-            "LOW": 9,
-            "MEDIUM": 39
+            "LOW": 4,
+            "MEDIUM": 44
           }
         },
         "controller": {
           "decisions": {
-            "STAY_ASLEEP": 9,
-            "TICK": 137,
-            "UPDATE": 47,
-            "WAKE": 3
-          },
-          "episodes": 3,
-          "sleeps_by_reason": {
-            "continue_active=false": 1,
-            "idle": 1
-          },
-          "active_at_end": 1,
-          "awake_bars_total": 187,
-          "awake_bars_median": 81.0,
-          "calls_per_awake_bar": 0.267
-        },
-        "coverage": null,
-        "brain": {
-          "proposed_by_state": {
-            "ACTIONABLE": 27,
-            "DEVELOPING": 2,
-            "NONE": 20
-          },
-          "survived_by_state": {
-            "ACTIONABLE": 8,
-            "DEVELOPING": 1
-          },
-          "distinct_opportunities": 8,
-          "geometry_errors": 0,
-          "rejections_by_kind": {
-            "evidence_without_verdict": 15,
-            "opportunity_incoherent": 1,
-            "opportunity_object_not_visible": 1
-          },
-          "understanding_changes": 45,
-          "actionable_direction_accuracy_60m": null
-        },
-        "risk": {
-          "vetoes": 3,
-          "veto_signatures": 3,
-          "reproposals_after_veto": 0,
-          "veto_repeat_rate": 0.0,
-          "vetoes_by_code": {
-            "reward_risk": 3
-          },
-          "calls_with_veto_feedback": 11,
-          "kept_after_veto": 0,
-          "reanalysed_after_veto": 10,
-          "veto_bars": 9,
-          "stale_snapshots": 0,
-          "thesis_refused": 0,
-          "refusals_by_reason": {},
-          "daily_stop_vetoes": 0,
-          "halted": null
-        },
-        "orders": {
-          "submitted": 4,
-          "working": 4,
-          "partial": 0,
-          "filled": 1,
-          "cancel_requested": 2,
-          "cancelled": 2,
-          "expired": 0,
-          "rejected": 0,
-          "position_opened": 1,
-          "position_closed": 1,
-          "exit_leg_lost": 0,
-          "invalidation_close": 0,
-          "bias_reversed": 0,
-          "flattened": 0,
-          "halted": 0,
-          "missed_trends": null,
-          "entry_quality": null,
-          "cancel_reasons": {
-            "plan_dropped": 2
-          },
-          "replacements": 0,
-          "exit_roles": {
-            "target": 1
-          },
-          "bars_to_fill": {
-            "median": 1.0,
-            "max": 1.0
-          },
-          "closed_trades": [
-            {
-              "episode_id": "EP_20220826_002",
-              "direction": "SHORT",
-              "quantity": 3,
-              "entry_price": 12980.5,
-              "exit_price": 12925.5,
-              "exit_role": "target",
-              "closed_at": "2022-08-26T14:32:00Z",
-              "pnl_points": 165.0,
-              "thesis_id": "T2"
-            }
-          ],
-          "realized_points": 165.0
-        },
-        "bias": {
-          "changes": 2,
-          "neutral_revisions": 11,
-          "opportunities_against_bias": 0,
-          "direction_accuracy_60m": null
-        },
-        "invariants": {
-          "double_entry": 0,
-          "positions_over_limit": 0,
-          "position_without_fill": 0,
-          "stale_snapshots": 0
-        },
-        "account": {
-          "cash": 103300.0,
-          "realized_pnl": 3300.0,
-          "positions": [],
-          "unrealized_pnl": null,
-          "orders": {
-            "cancelled": 7,
-            "filled": 2,
-            "pending": 3,
-            "rejected": 0
-          },
-          "fills": 2
-        },
-        "timings": {
-          "bar": {
-            "count": 196,
-            "max_ms": 292041.583,
-            "mean_ms": 24747.067,
-            "p50_ms": 1.432,
-            "p95_ms": 138485.014,
-            "total_s": 4850.425043
-          },
-          "controller": {
-            "count": 196,
-            "max_ms": 0.037,
-            "mean_ms": 0.016,
-            "p50_ms": 0.015,
-            "p95_ms": 0.028,
-            "total_s": 0.003189
-          },
-          "eye": {
-            "count": 7680,
-            "max_ms": 238.035,
-            "mean_ms": 19.026,
-            "p50_ms": 16.465,
-            "p95_ms": 34.455,
-            "total_s": 146.116978
-          },
-          "input": {
-            "count": 50,
-            "max_ms": 2.127,
-            "mean_ms": 1.46,
-            "p50_ms": 1.461,
-            "p95_ms": 1.959,
-            "total_s": 0.073022
-          },
-          "journal": {
-            "count": 187,
-            "max_ms": 52.656,
-            "mean_ms": 6.071,
-            "p50_ms": 0.197,
-            "p95_ms": 29.443,
-            "total_s": 1.13519
-          },
-          "llm": {
-            "count": 50,
-            "max_ms": 292009.086,
-            "mean_ms": 96976.176,
-            "p50_ms": 72585.453,
-            "p95_ms": 248947.942,
-            "total_s": 4848.808798
-          },
-          "machine": {
-            "count": 196,
-            "max_ms": 1.846,
-            "mean_ms": 0.14,
-            "p50_ms": 0.037,
-            "p95_ms": 0.732,
-            "total_s": 0.027475
-          },
-          "plan": {
-            "count": 196,
-            "max_ms": 0.286,
-            "mean_ms": 0.055,
-            "p50_ms": 0.011,
-            "p95_ms": 0.214,
-            "total_s": 0.010854
-          },
-          "reduce": {
-            "count": 50,
-            "max_ms": 5.02,
-            "mean_ms": 1.064,
-            "p50_ms": 0.91,
-            "p95_ms": 2.009,
-            "total_s": 0.053188
-          }
-        }
-      }
-    },
-    {
-      "run_id": "53d8562d97822804",
-      "label": "benchmark 2022-09-13 08:15–11:30 (CPI, one-way down), entry-model-pools-2",
-      "frozen_on": "2026-09-21",
-      "summary": {
-        "run": {
-          "run_id": "53d8562d97822804",
-          "window": {
-            "emit_start": "2022-09-13T08:15",
-            "end": "2022-09-13T11:30",
-            "source": "data/processed/nq_1m_previous_session_front_v2_3_2017_2026.parquet",
-            "warmup_start": "2022-09-06"
-          },
-          "model": "deepseek:deepseek-flash@high",
-          "reasoning_effort": "high",
-          "broker": "sim",
-          "client": "deepseek",
-          "started_at": "2026-09-21T07:01:31Z",
-          "finished_at": "2026-09-21T07:52:18Z",
-          "minutes": 50.79,
-          "bars_emitted": 196,
-          "max_llm_calls": 400,
-          "system_prompt_sha256": "7bf4db7c9c72e17bb956911e402aa77757463289861963646d863cc17e2d9aea",
-          "sleep_controller_sha256": "a65debce70f486fd11bb7e464c1ca37c894f4f03dcfc6ebaaf639bebf6ef9562",
-          "main_brain_config_sha256": "25b3c4a1054752baed39da50431fd680be6b54a315c2cb669103a0fbdabb665f",
-          "risk_config_sha256": "f4ea17d92ccacc28a4077243f10ff669cbabce17dfafd80346a3ba0d48e70e88",
-          "simulator_config_sha256": "c8e38bdda3e880b7160c7e369f00576cd184c0c4b0cc3c7091c5691002eefeff",
-          "git_revision": "e0581ed41727da3c82e37c124fb1935ff41c202f",
-          "until": null
-        },
-        "llm": {
-          "calls": 37,
-          "replies": 37,
-          "incidents": 0,
-          "incidents_by_kind": {},
-          "repairs": 3,
-          "prompt_tokens": 454183,
-          "cache_hit_tokens": 237056,
-          "cache_miss_tokens": 217127,
-          "completion_tokens": 646228,
-          "cost_usd_peak": 0.842034,
-          "cost_usd_off_peak": 0.421017,
-          "latency_ms": {
-            "p50": 65453.0,
-            "p95": 128861.0,
-            "max": 144719.0
-          },
-          "input_chars_median": 18622.0,
-          "calls_by_trigger": {
-            "UPDATE": 35,
-            "WAKE": 2
-          },
-          "trigger_reasons": {
-            "acceptance_confirmed": 15,
-            "displacement_observed": 25,
-            "fvg_first_retest": 20,
-            "level_reached": 17,
-            "mss_core_confirmed": 2,
-            "protected_swing_assigned": 3,
-            "qualified_bos": 3,
-            "relation_change": 4,
-            "structure_break": 6,
-            "structure_direction_confirmed": 1,
-            "sweep_confirmed": 2
-          },
-          "wake_kinds": {
-            "displacement_observed": 2,
-            "sweep_confirmed": 1
-          },
-          "unchanged_calls": 5,
-          "confidence": {
-            "LOW": 2,
-            "MEDIUM": 35
-          }
-        },
-        "controller": {
-          "decisions": {
-            "STAY_ASLEEP": 9,
-            "TICK": 150,
-            "UPDATE": 35,
+            "EVENT_SLEEP": 0,
+            "STAY_ASLEEP": 5,
+            "TICK": 141,
+            "UPDATE": 48,
             "WAKE": 2
           },
           "episodes": 2,
@@ -1751,41 +1439,44 @@
             "idle": 1
           },
           "active_at_end": 1,
-          "awake_bars_total": 187,
-          "awake_bars_median": 93.5,
-          "calls_per_awake_bar": 0.198
+          "awake_bars_total": 191,
+          "awake_bars_median": 95.5,
+          "calls_per_awake_bar": 0.262
         },
         "coverage": null,
         "brain": {
           "proposed_by_state": {
-            "ACTIONABLE": 7,
-            "DEVELOPING": 3,
-            "NONE": 27
+            "ACTIONABLE": 18,
+            "DEVELOPING": 7,
+            "NONE": 23
           },
           "survived_by_state": {
-            "ACTIONABLE": 5,
-            "DEVELOPING": 3
+            "ACTIONABLE": 6,
+            "DEVELOPING": 5
           },
           "distinct_opportunities": 8,
           "geometry_errors": 0,
           "rejections_by_kind": {
-            "opportunity_incoherent": 1
+            "evidence_expired": 2,
+            "evidence_without_verdict": 34,
+            "opportunity_object_not_visible": 1
           },
-          "understanding_changes": 35,
+          "understanding_changes": 47,
           "actionable_direction_accuracy_60m": null
         },
         "risk": {
-          "vetoes": 3,
+          "vetoes": 4,
           "veto_signatures": 3,
-          "reproposals_after_veto": 0,
-          "veto_repeat_rate": 0.0,
+          "reproposals_after_veto": 1,
+          "veto_repeat_rate": 0.25,
           "vetoes_by_code": {
-            "reward_risk": 3
+            "position_size": 2,
+            "reward_risk": 2
           },
-          "calls_with_veto_feedback": 10,
-          "kept_after_veto": 0,
-          "reanalysed_after_veto": 10,
-          "veto_bars": 7,
+          "calls_with_veto_feedback": 14,
+          "kept_after_veto": 2,
+          "reanalysed_after_veto": 11,
+          "veto_bars": 11,
           "stale_snapshots": 0,
           "thesis_refused": 0,
           "refusals_by_reason": {},
@@ -1796,49 +1487,37 @@
           "submitted": 3,
           "working": 3,
           "partial": 0,
-          "filled": 1,
-          "cancel_requested": 2,
-          "cancelled": 2,
+          "filled": 0,
+          "cancel_requested": 3,
+          "cancelled": 3,
           "expired": 0,
           "rejected": 0,
-          "position_opened": 1,
-          "position_closed": 1,
+          "position_opened": 0,
+          "position_closed": 0,
           "exit_leg_lost": 0,
           "invalidation_close": 0,
           "bias_reversed": 0,
+          "event_sleep": 0,
           "flattened": 0,
           "halted": 0,
           "missed_trends": null,
           "entry_quality": null,
           "cancel_reasons": {
-            "plan_dropped": 2
+            "plan_dropped": 2,
+            "signature_changed": 1
           },
-          "replacements": 0,
-          "exit_roles": {
-            "stop": 1
-          },
+          "replacements": 1,
+          "exit_roles": {},
           "bars_to_fill": {
-            "median": 4.0,
-            "max": 4.0
+            "median": null,
+            "max": null
           },
-          "closed_trades": [
-            {
-              "episode_id": "EP_20220913_002",
-              "direction": "SHORT",
-              "quantity": 3,
-              "entry_price": 12397.5,
-              "exit_price": 12403.75,
-              "exit_role": "stop",
-              "closed_at": "2022-09-13T14:20:00Z",
-              "pnl_points": -18.75,
-              "thesis_id": "T1"
-            }
-          ],
-          "realized_points": -18.75
+          "closed_trades": [],
+          "realized_points": null
         },
         "bias": {
-          "changes": 1,
-          "neutral_revisions": 0,
+          "changes": 3,
+          "neutral_revisions": 10,
           "opportunities_against_bias": 0,
           "direction_accuracy_60m": null
         },
@@ -1849,531 +1528,245 @@
           "stale_snapshots": 0
         },
         "account": {
-          "cash": 99625.0,
-          "realized_pnl": -375.0,
+          "cash": 100000.0,
+          "realized_pnl": 0.0,
           "positions": [],
           "unrealized_pnl": null,
           "orders": {
-            "cancelled": 7,
-            "filled": 2,
+            "cancelled": 9,
+            "filled": 0,
             "pending": 0,
             "rejected": 0
           },
-          "fills": 2
+          "fills": 0
         },
         "timings": {
           "bar": {
             "count": 196,
-            "max_ms": 148885.664,
-            "mean_ms": 14888.061,
-            "p50_ms": 0.723,
-            "p95_ms": 89819.603,
-            "total_s": 2918.059983
+            "max_ms": 277174.21,
+            "mean_ms": 23856.257,
+            "p50_ms": 1.496,
+            "p95_ms": 114157.63,
+            "total_s": 4675.826294
           },
           "controller": {
             "count": 196,
-            "max_ms": 0.069,
-            "mean_ms": 0.013,
-            "p50_ms": 0.012,
-            "p95_ms": 0.025,
-            "total_s": 0.002604
+            "max_ms": 0.053,
+            "mean_ms": 0.027,
+            "p50_ms": 0.025,
+            "p95_ms": 0.044,
+            "total_s": 0.005291
           },
           "eye": {
-            "count": 7590,
-            "max_ms": 590.928,
-            "mean_ms": 16.898,
-            "p50_ms": 14.781,
-            "p95_ms": 29.898,
-            "total_s": 128.257131
+            "count": 7680,
+            "max_ms": 225.822,
+            "mean_ms": 20.426,
+            "p50_ms": 17.678,
+            "p95_ms": 36.646,
+            "total_s": 156.871023
           },
           "input": {
-            "count": 37,
-            "max_ms": 1.504,
-            "mean_ms": 0.982,
-            "p50_ms": 0.992,
-            "p95_ms": 1.352,
-            "total_s": 0.036338
+            "count": 50,
+            "max_ms": 2.549,
+            "mean_ms": 1.551,
+            "p50_ms": 1.522,
+            "p95_ms": 2.193,
+            "total_s": 0.077547
           },
           "journal": {
-            "count": 187,
-            "max_ms": 31.584,
-            "mean_ms": 3.313,
-            "p50_ms": 0.167,
-            "p95_ms": 19.08,
-            "total_s": 0.619541
+            "count": 191,
+            "max_ms": 231.918,
+            "mean_ms": 6.401,
+            "p50_ms": 0.182,
+            "p95_ms": 25.951,
+            "total_s": 1.222677
           },
           "llm": {
-            "count": 37,
-            "max_ms": 148851.663,
-            "mean_ms": 78843.571,
-            "p50_ms": 70585.164,
-            "p95_ms": 144722.108,
-            "total_s": 2917.212126
+            "count": 50,
+            "max_ms": 277150.306,
+            "mean_ms": 93482.168,
+            "p50_ms": 78682.206,
+            "p95_ms": 265714.054,
+            "total_s": 4674.108417
           },
           "machine": {
             "count": 196,
-            "max_ms": 1.164,
-            "mean_ms": 0.107,
-            "p50_ms": 0.032,
-            "p95_ms": 0.539,
-            "total_s": 0.020979
+            "max_ms": 1.238,
+            "mean_ms": 0.122,
+            "p50_ms": 0.037,
+            "p95_ms": 0.591,
+            "total_s": 0.02397
           },
           "plan": {
             "count": 196,
-            "max_ms": 0.167,
-            "mean_ms": 0.01,
+            "max_ms": 0.258,
+            "mean_ms": 0.033,
             "p50_ms": 0.001,
-            "p95_ms": 0.055,
-            "total_s": 0.002012
+            "p95_ms": 0.169,
+            "total_s": 0.006553
           },
           "reduce": {
-            "count": 37,
-            "max_ms": 2.374,
-            "mean_ms": 0.802,
-            "p50_ms": 0.638,
-            "p95_ms": 2.34,
-            "total_s": 0.029663
+            "count": 50,
+            "max_ms": 3.086,
+            "mean_ms": 1.182,
+            "p50_ms": 1.079,
+            "p95_ms": 2.299,
+            "total_s": 0.05912
           }
         }
       }
     },
     {
-      "run_id": "d1cce1796256ee9e",
-      "label": "benchmark 2022-10-13 08:15–12:30 (CPI, huge reversal), entry-model-pools-2; halted at 08:32 on a 21 % drawdown",
+      "run_id": "fa587b3d45ca81de",
+      "label": "benchmark 2022-09-13 08:15–11:30 (CPI, one-way down; asleep until 09:00), stop-floor-events",
       "frozen_on": "2026-09-21",
       "summary": {
         "run": {
-          "run_id": "d1cce1796256ee9e",
+          "run_id": "fa587b3d45ca81de",
           "window": {
-            "emit_start": "2022-10-13T08:15",
-            "end": "2022-10-13T12:30",
+            "emit_start": "2022-09-13T08:15",
+            "end": "2022-09-13T11:30",
             "source": "data/processed/nq_1m_previous_session_front_v2_3_2017_2026.parquet",
-            "warmup_start": "2022-10-06"
+            "warmup_start": "2022-09-06"
           },
           "model": "deepseek:deepseek-flash@high",
           "reasoning_effort": "high",
           "broker": "sim",
           "client": "deepseek",
-          "started_at": "2026-09-21T07:04:15Z",
-          "finished_at": "2026-09-21T07:20:24Z",
-          "minutes": 16.15,
-          "bars_emitted": 18,
+          "started_at": "2026-09-21T20:07:34Z",
+          "finished_at": "2026-09-21T20:36:32Z",
+          "minutes": 28.96,
+          "bars_emitted": 196,
           "max_llm_calls": 400,
-          "system_prompt_sha256": "7bf4db7c9c72e17bb956911e402aa77757463289861963646d863cc17e2d9aea",
-          "sleep_controller_sha256": "a65debce70f486fd11bb7e464c1ca37c894f4f03dcfc6ebaaf639bebf6ef9562",
+          "system_prompt_sha256": "8d1ebdfa8092a6cfc55bd7d57e7b25ad100adf41c6f23ea1dd24316a586f3ab8",
+          "sleep_controller_sha256": "a5e63b06abc05bbc21e15cc4a11f9f5e65c4d3986f444a6349bcfa6bb4bc2133",
           "main_brain_config_sha256": "25b3c4a1054752baed39da50431fd680be6b54a315c2cb669103a0fbdabb665f",
           "risk_config_sha256": "f4ea17d92ccacc28a4077243f10ff669cbabce17dfafd80346a3ba0d48e70e88",
           "simulator_config_sha256": "c8e38bdda3e880b7160c7e369f00576cd184c0c4b0cc3c7091c5691002eefeff",
-          "git_revision": "e0581ed41727da3c82e37c124fb1935ff41c202f",
+          "git_revision": "444993b1ab898aab32d431619bc88842daba2d8e",
           "until": null
         },
         "llm": {
-          "calls": 7,
-          "replies": 7,
+          "calls": 24,
+          "replies": 24,
           "incidents": 0,
           "incidents_by_kind": {},
-          "repairs": 2,
-          "prompt_tokens": 125633,
-          "cache_hit_tokens": 67840,
-          "cache_miss_tokens": 57793,
-          "completion_tokens": 191533,
-          "cost_usd_peak": 0.247585,
-          "cost_usd_off_peak": 0.123792,
+          "repairs": 1,
+          "prompt_tokens": 264160,
+          "cache_hit_tokens": 149248,
+          "cache_miss_tokens": 114912,
+          "completion_tokens": 371468,
+          "cost_usd_peak": 0.481131,
+          "cost_usd_off_peak": 0.240565,
           "latency_ms": {
-            "p50": 94405.0,
-            "p95": 134923.0,
-            "max": 134923.0
+            "p50": 56309.0,
+            "p95": 99607.0,
+            "max": 109374.0
           },
-          "input_chars_median": 21663.0,
+          "input_chars_median": 14151.5,
           "calls_by_trigger": {
-            "UPDATE": 6,
-            "WAKE": 1
+            "UPDATE": 21,
+            "WAKE": 3
           },
           "trigger_reasons": {
-            "acceptance_confirmed": 2,
-            "displacement_observed": 4,
-            "level_reached": 26,
-            "relation_change": 4
+            "acceptance_confirmed": 3,
+            "displacement_observed": 16,
+            "fvg_first_retest": 6,
+            "level_reached": 4,
+            "protected_swing_assigned": 3,
+            "qualified_bos": 3,
+            "relation_change": 3,
+            "structure_break": 4,
+            "structure_direction_confirmed": 1,
+            "sweep_confirmed": 1
           },
           "wake_kinds": {
-            "displacement_observed": 1
+            "?": 1,
+            "displacement_observed": 2,
+            "fvg_first_retest": 1
           },
-          "unchanged_calls": 2,
+          "unchanged_calls": 3,
           "confidence": {
-            "MEDIUM": 7
+            "MEDIUM": 24
           }
         },
         "controller": {
           "decisions": {
-            "STAY_ASLEEP": 0,
-            "TICK": 11,
-            "UPDATE": 6,
-            "WAKE": 1
+            "EVENT_SLEEP": 0,
+            "STAY_ASLEEP": 73,
+            "TICK": 99,
+            "UPDATE": 21,
+            "WAKE": 3
           },
-          "episodes": 1,
-          "sleeps_by_reason": {},
-          "active_at_end": 1,
-          "awake_bars_total": 18,
-          "awake_bars_median": 18.0,
-          "calls_per_awake_bar": 0.389
+          "episodes": 3,
+          "sleeps_by_reason": {
+            "continue_active=false": 2,
+            "idle": 1
+          },
+          "active_at_end": 0,
+          "awake_bars_total": 123,
+          "awake_bars_median": 46.0,
+          "calls_per_awake_bar": 0.195
         },
         "coverage": null,
         "brain": {
           "proposed_by_state": {
-            "ACTIONABLE": 6,
-            "NONE": 1
+            "DEVELOPING": 4,
+            "NONE": 20
           },
           "survived_by_state": {
-            "ACTIONABLE": 4
+            "DEVELOPING": 2
           },
-          "distinct_opportunities": 3,
+          "distinct_opportunities": 2,
           "geometry_errors": 0,
           "rejections_by_kind": {},
-          "understanding_changes": 6,
+          "understanding_changes": 21,
           "actionable_direction_accuracy_60m": null
         },
         "risk": {
-          "vetoes": 1,
-          "veto_signatures": 1,
+          "vetoes": 0,
+          "veto_signatures": 0,
           "reproposals_after_veto": 0,
-          "veto_repeat_rate": 0.0,
-          "vetoes_by_code": {
-            "reward_risk": 1
-          },
-          "calls_with_veto_feedback": 1,
+          "veto_repeat_rate": null,
+          "vetoes_by_code": {},
+          "calls_with_veto_feedback": 0,
           "kept_after_veto": 0,
-          "reanalysed_after_veto": 1,
-          "veto_bars": 1,
+          "reanalysed_after_veto": 0,
+          "veto_bars": 0,
           "stale_snapshots": 0,
           "thesis_refused": 0,
           "refusals_by_reason": {},
           "daily_stop_vetoes": 0,
-          "halted": {
-            "at": "2022-10-13T12:32:00Z",
-            "drawdown": 0.21105,
-            "equity": 78895.0,
-            "peak": 100000.0,
-            "positions_flattened": 0
-          }
-        },
-        "orders": {
-          "submitted": 2,
-          "working": 2,
-          "partial": 0,
-          "filled": 1,
-          "cancel_requested": 3,
-          "cancelled": 1,
-          "expired": 0,
-          "rejected": 0,
-          "position_opened": 1,
-          "position_closed": 1,
-          "exit_leg_lost": 0,
-          "invalidation_close": 0,
-          "bias_reversed": 1,
-          "flattened": 1,
-          "halted": 1,
-          "missed_trends": null,
-          "entry_quality": null,
-          "cancel_reasons": {
-            "bias_reversed": 2,
-            "signature_changed": 1
-          },
-          "replacements": 1,
-          "exit_roles": {
-            "bias_reversed": 1
-          },
-          "bars_to_fill": {
-            "median": 1.0,
-            "max": 1.0
-          },
-          "closed_trades": [
-            {
-              "episode_id": "EP_20221013_001",
-              "direction": "LONG",
-              "quantity": 3,
-              "entry_price": 10903.25,
-              "exit_price": 10551.5,
-              "exit_role": "bias_reversed",
-              "closed_at": "2022-10-13T12:32:00Z",
-              "pnl_points": -1055.25,
-              "thesis_id": "T1"
-            }
-          ],
-          "realized_points": -1055.25
-        },
-        "bias": {
-          "changes": 1,
-          "neutral_revisions": 0,
-          "opportunities_against_bias": 0,
-          "direction_accuracy_60m": null
-        },
-        "invariants": {
-          "double_entry": 0,
-          "positions_over_limit": 0,
-          "position_without_fill": 0,
-          "stale_snapshots": 0
-        },
-        "account": {
-          "cash": 78895.0,
-          "realized_pnl": -21105.0,
-          "positions": [],
-          "unrealized_pnl": null,
-          "orders": {
-            "cancelled": 5,
-            "filled": 2,
-            "pending": 0,
-            "rejected": 0
-          },
-          "fills": 2
-        },
-        "timings": {
-          "bar": {
-            "count": 18,
-            "max_ms": 232958.577,
-            "mean_ms": 46365.673,
-            "p50_ms": 2.238,
-            "p95_ms": 232958.577,
-            "total_s": 834.582106
-          },
-          "controller": {
-            "count": 18,
-            "max_ms": 0.1,
-            "mean_ms": 0.029,
-            "p50_ms": 0.022,
-            "p95_ms": 0.1,
-            "total_s": 0.000528
-          },
-          "eye": {
-            "count": 7412,
-            "max_ms": 231.31,
-            "mean_ms": 17.955,
-            "p50_ms": 15.774,
-            "p95_ms": 31.742,
-            "total_s": 133.085545
-          },
-          "input": {
-            "count": 7,
-            "max_ms": 1.459,
-            "mean_ms": 1.261,
-            "p50_ms": 1.312,
-            "p95_ms": 1.459,
-            "total_s": 0.008828
-          },
-          "journal": {
-            "count": 18,
-            "max_ms": 29.011,
-            "mean_ms": 7.931,
-            "p50_ms": 0.206,
-            "p95_ms": 29.011,
-            "total_s": 0.142759
-          },
-          "llm": {
-            "count": 7,
-            "max_ms": 232922.066,
-            "mean_ms": 119195.103,
-            "p50_ms": 109612.185,
-            "p95_ms": 232922.066,
-            "total_s": 834.365724
-          },
-          "machine": {
-            "count": 18,
-            "max_ms": 2.422,
-            "mean_ms": 0.446,
-            "p50_ms": 0.19,
-            "p95_ms": 2.422,
-            "total_s": 0.008037
-          },
-          "plan": {
-            "count": 18,
-            "max_ms": 0.396,
-            "mean_ms": 0.168,
-            "p50_ms": 0.128,
-            "p95_ms": 0.396,
-            "total_s": 0.003031
-          },
-          "reduce": {
-            "count": 7,
-            "max_ms": 1.513,
-            "mean_ms": 1.102,
-            "p50_ms": 1.043,
-            "p95_ms": 1.513,
-            "total_s": 0.007715
-          }
-        }
-      }
-    },
-    {
-      "run_id": "f600fa660070fa2a",
-      "label": "benchmark 2022-10-19 09:30–12:30 (mixed, unclean trend), entry-model-pools-2",
-      "frozen_on": "2026-09-21",
-      "summary": {
-        "run": {
-          "run_id": "f600fa660070fa2a",
-          "window": {
-            "emit_start": "2022-10-19T09:30",
-            "end": "2022-10-19T12:30",
-            "source": "data/processed/nq_1m_previous_session_front_v2_3_2017_2026.parquet",
-            "warmup_start": "2022-10-12"
-          },
-          "model": "deepseek:deepseek-flash@high",
-          "reasoning_effort": "high",
-          "broker": "sim",
-          "client": "deepseek",
-          "started_at": "2026-09-21T07:20:24Z",
-          "finished_at": "2026-09-21T08:27:37Z",
-          "minutes": 67.21,
-          "bars_emitted": 181,
-          "max_llm_calls": 400,
-          "system_prompt_sha256": "7bf4db7c9c72e17bb956911e402aa77757463289861963646d863cc17e2d9aea",
-          "sleep_controller_sha256": "a65debce70f486fd11bb7e464c1ca37c894f4f03dcfc6ebaaf639bebf6ef9562",
-          "main_brain_config_sha256": "25b3c4a1054752baed39da50431fd680be6b54a315c2cb669103a0fbdabb665f",
-          "risk_config_sha256": "f4ea17d92ccacc28a4077243f10ff669cbabce17dfafd80346a3ba0d48e70e88",
-          "simulator_config_sha256": "c8e38bdda3e880b7160c7e369f00576cd184c0c4b0cc3c7091c5691002eefeff",
-          "git_revision": "e0581ed41727da3c82e37c124fb1935ff41c202f",
-          "until": null
-        },
-        "llm": {
-          "calls": 43,
-          "replies": 42,
-          "incidents": 1,
-          "incidents_by_kind": {
-            "MalformedReply": 1
-          },
-          "repairs": 5,
-          "prompt_tokens": 674067,
-          "cache_hit_tokens": 275200,
-          "cache_miss_tokens": 398867,
-          "completion_tokens": 721544,
-          "cost_usd_peak": 0.987164,
-          "cost_usd_off_peak": 0.493582,
-          "latency_ms": {
-            "p50": 72251.0,
-            "p95": 125267.0,
-            "max": 145652.0
-          },
-          "input_chars_median": 30098.0,
-          "calls_by_trigger": {
-            "UPDATE": 42,
-            "WAKE": 1
-          },
-          "trigger_reasons": {
-            "acceptance_confirmed": 6,
-            "displacement_observed": 32,
-            "fvg_first_retest": 12,
-            "level_reached": 10,
-            "mss_core_confirmed": 2,
-            "origin_zone_mitigated": 1,
-            "protected_swing_assigned": 1,
-            "qualified_bos": 1,
-            "relation_change": 6,
-            "structure_break": 4,
-            "structure_direction_confirmed": 2,
-            "sweep_confirmed": 1
-          },
-          "wake_kinds": {
-            "displacement_observed": 1
-          },
-          "unchanged_calls": 12,
-          "confidence": {
-            "MEDIUM": 42
-          }
-        },
-        "controller": {
-          "decisions": {
-            "STAY_ASLEEP": 0,
-            "TICK": 138,
-            "UPDATE": 42,
-            "WAKE": 1
-          },
-          "episodes": 1,
-          "sleeps_by_reason": {},
-          "active_at_end": 1,
-          "awake_bars_total": 181,
-          "awake_bars_median": 181.0,
-          "calls_per_awake_bar": 0.238
-        },
-        "coverage": null,
-        "brain": {
-          "proposed_by_state": {
-            "ACTIONABLE": 21,
-            "DEVELOPING": 9,
-            "NONE": 12
-          },
-          "survived_by_state": {
-            "ACTIONABLE": 5,
-            "DEVELOPING": 6
-          },
-          "distinct_opportunities": 8,
-          "geometry_errors": 0,
-          "rejections_by_kind": {
-            "evidence_without_verdict": 6,
-            "opportunity_incoherent": 1,
-            "opportunity_object_not_visible": 7
-          },
-          "understanding_changes": 41,
-          "actionable_direction_accuracy_60m": null
-        },
-        "risk": {
-          "vetoes": 3,
-          "veto_signatures": 2,
-          "reproposals_after_veto": 1,
-          "veto_repeat_rate": 0.3333,
-          "vetoes_by_code": {
-            "reward_risk": 3
-          },
-          "calls_with_veto_feedback": 6,
-          "kept_after_veto": 0,
-          "reanalysed_after_veto": 5,
-          "veto_bars": 10,
-          "stale_snapshots": 0,
-          "thesis_refused": 8,
-          "refusals_by_reason": {
-            "thesis_engaged": 8
-          },
-          "daily_stop_vetoes": 0,
           "halted": null
         },
         "orders": {
-          "submitted": 2,
-          "working": 2,
+          "submitted": 0,
+          "working": 0,
           "partial": 0,
-          "filled": 2,
+          "filled": 0,
           "cancel_requested": 0,
           "cancelled": 0,
           "expired": 0,
           "rejected": 0,
-          "position_opened": 2,
-          "position_closed": 1,
+          "position_opened": 0,
+          "position_closed": 0,
           "exit_leg_lost": 0,
           "invalidation_close": 0,
           "bias_reversed": 0,
+          "event_sleep": 0,
           "flattened": 0,
           "halted": 0,
           "missed_trends": null,
           "entry_quality": null,
           "cancel_reasons": {},
           "replacements": 0,
-          "exit_roles": {
-            "stop": 1
-          },
+          "exit_roles": {},
           "bars_to_fill": {
-            "median": 1.0,
-            "max": 1.0
+            "median": null,
+            "max": null
           },
-          "closed_trades": [
-            {
-              "episode_id": "EP_20221019_001",
-              "direction": "SHORT",
-              "quantity": 3,
-              "entry_price": 11153.75,
-              "exit_price": 11174.25,
-              "exit_role": "stop",
-              "closed_at": "2022-10-19T13:34:00Z",
-              "pnl_points": -61.5,
-              "thesis_id": "T1"
-            }
-          ],
-          "realized_points": -61.5
+          "closed_trades": [],
+          "realized_points": null
         },
         "bias": {
           "changes": 0,
@@ -2388,184 +1781,182 @@
           "stale_snapshots": 0
         },
         "account": {
-          "cash": 98770.0,
-          "realized_pnl": -1230.0,
-          "positions": [
-            {
-              "average_price": 11260.5,
-              "quantity": -1,
-              "symbol": "NQ"
-            }
-          ],
+          "cash": 100000.0,
+          "realized_pnl": 0.0,
+          "positions": [],
           "unrealized_pnl": null,
           "orders": {
-            "cancelled": 1,
-            "filled": 3,
-            "pending": 2,
+            "cancelled": 0,
+            "filled": 0,
+            "pending": 0,
             "rejected": 0
           },
-          "fills": 3
+          "fills": 0
         },
         "timings": {
           "bar": {
-            "count": 181,
-            "max_ms": 295979.126,
-            "mean_ms": 21511.984,
-            "p50_ms": 1.983,
-            "p95_ms": 113958.273,
-            "total_s": 3893.669063
+            "count": 196,
+            "max_ms": 177678.961,
+            "mean_ms": 8156.488,
+            "p50_ms": 0.607,
+            "p95_ms": 61886.145,
+            "total_s": 1598.67173
           },
           "controller": {
-            "count": 181,
-            "max_ms": 0.057,
-            "mean_ms": 0.02,
-            "p50_ms": 0.019,
-            "p95_ms": 0.03,
-            "total_s": 0.003682
+            "count": 196,
+            "max_ms": 0.049,
+            "mean_ms": 0.021,
+            "p50_ms": 0.02,
+            "p95_ms": 0.036,
+            "total_s": 0.004132
           },
           "eye": {
-            "count": 7650,
-            "max_ms": 534.067,
-            "mean_ms": 17.961,
-            "p50_ms": 15.662,
-            "p95_ms": 31.898,
-            "total_s": 137.398249
+            "count": 7590,
+            "max_ms": 687.27,
+            "mean_ms": 18.147,
+            "p50_ms": 15.792,
+            "p95_ms": 31.871,
+            "total_s": 137.738514
           },
           "input": {
-            "count": 43,
-            "max_ms": 2.23,
-            "mean_ms": 1.731,
-            "p50_ms": 1.762,
-            "p95_ms": 2.092,
-            "total_s": 0.074414
+            "count": 24,
+            "max_ms": 1.083,
+            "mean_ms": 0.768,
+            "p50_ms": 0.765,
+            "p95_ms": 1.062,
+            "total_s": 0.018429
           },
           "journal": {
-            "count": 181,
-            "max_ms": 49.537,
-            "mean_ms": 6.305,
-            "p50_ms": 0.187,
-            "p95_ms": 30.292,
-            "total_s": 1.141224
+            "count": 123,
+            "max_ms": 17.306,
+            "mean_ms": 2.439,
+            "p50_ms": 0.168,
+            "p95_ms": 13.445,
+            "total_s": 0.299999
           },
           "llm": {
-            "count": 43,
-            "max_ms": 295919.066,
-            "mean_ms": 90511.349,
-            "p50_ms": 74256.83,
-            "p95_ms": 180075.951,
-            "total_s": 3891.988003
+            "count": 24,
+            "max_ms": 177658.091,
+            "mean_ms": 66592.787,
+            "p50_ms": 56312.044,
+            "p95_ms": 109377.171,
+            "total_s": 1598.226891
           },
           "machine": {
-            "count": 181,
-            "max_ms": 1.862,
-            "mean_ms": 0.133,
-            "p50_ms": 0.041,
-            "p95_ms": 0.626,
-            "total_s": 0.024097
+            "count": 196,
+            "max_ms": 0.907,
+            "mean_ms": 0.061,
+            "p50_ms": 0.027,
+            "p95_ms": 0.261,
+            "total_s": 0.011999
           },
           "plan": {
-            "count": 181,
-            "max_ms": 0.302,
-            "mean_ms": 0.045,
+            "count": 196,
+            "max_ms": 0.061,
+            "mean_ms": 0.002,
             "p50_ms": 0.001,
-            "p95_ms": 0.223,
-            "total_s": 0.008216
+            "p95_ms": 0.005,
+            "total_s": 0.000329
           },
           "reduce": {
-            "count": 43,
-            "max_ms": 2.377,
-            "mean_ms": 1.089,
-            "p50_ms": 0.941,
-            "p95_ms": 2.147,
-            "total_s": 0.046822
+            "count": 24,
+            "max_ms": 1.455,
+            "mean_ms": 0.656,
+            "p50_ms": 0.541,
+            "p95_ms": 1.214,
+            "total_s": 0.015735
           }
         }
       }
     },
     {
-      "run_id": "375ed016339ffe3c",
-      "label": "benchmark 2022-11-10 08:15–11:30 (CPI, strong long trend), entry-model-pools-2",
+      "run_id": "3bc4b4181f7b48ed",
+      "label": "benchmark 2022-10-13 08:15–12:30 (CPI, huge reversal; asleep until 09:00), stop-floor-events",
       "frozen_on": "2026-09-21",
       "summary": {
         "run": {
-          "run_id": "375ed016339ffe3c",
+          "run_id": "3bc4b4181f7b48ed",
           "window": {
-            "emit_start": "2022-11-10T08:15",
-            "end": "2022-11-10T11:30",
+            "emit_start": "2022-10-13T08:15",
+            "end": "2022-10-13T12:30",
             "source": "data/processed/nq_1m_previous_session_front_v2_3_2017_2026.parquet",
-            "warmup_start": "2022-11-03"
+            "warmup_start": "2022-10-06"
           },
           "model": "deepseek:deepseek-flash@high",
           "reasoning_effort": "high",
           "broker": "sim",
           "client": "deepseek",
-          "started_at": "2026-09-21T07:52:19Z",
-          "finished_at": "2026-09-21T09:08:14Z",
-          "minutes": 75.92,
-          "bars_emitted": 196,
+          "started_at": "2026-09-21T20:36:33Z",
+          "finished_at": "2026-09-21T22:09:12Z",
+          "minutes": 92.66,
+          "bars_emitted": 256,
           "max_llm_calls": 400,
-          "system_prompt_sha256": "7bf4db7c9c72e17bb956911e402aa77757463289861963646d863cc17e2d9aea",
-          "sleep_controller_sha256": "a65debce70f486fd11bb7e464c1ca37c894f4f03dcfc6ebaaf639bebf6ef9562",
+          "system_prompt_sha256": "8d1ebdfa8092a6cfc55bd7d57e7b25ad100adf41c6f23ea1dd24316a586f3ab8",
+          "sleep_controller_sha256": "a5e63b06abc05bbc21e15cc4a11f9f5e65c4d3986f444a6349bcfa6bb4bc2133",
           "main_brain_config_sha256": "25b3c4a1054752baed39da50431fd680be6b54a315c2cb669103a0fbdabb665f",
           "risk_config_sha256": "f4ea17d92ccacc28a4077243f10ff669cbabce17dfafd80346a3ba0d48e70e88",
           "simulator_config_sha256": "c8e38bdda3e880b7160c7e369f00576cd184c0c4b0cc3c7091c5691002eefeff",
-          "git_revision": "e0581ed41727da3c82e37c124fb1935ff41c202f",
+          "git_revision": "444993b1ab898aab32d431619bc88842daba2d8e",
           "until": null
         },
         "llm": {
-          "calls": 38,
-          "replies": 37,
-          "incidents": 1,
+          "calls": 39,
+          "replies": 33,
+          "incidents": 7,
           "incidents_by_kind": {
-            "MalformedReply": 1
+            "MalformedReply": 7
           },
-          "repairs": 13,
-          "prompt_tokens": 570143,
-          "cache_hit_tokens": 339456,
-          "cache_miss_tokens": 230687,
-          "completion_tokens": 750062,
-          "cost_usd_peak": 0.971317,
-          "cost_usd_off_peak": 0.485659,
+          "repairs": 14,
+          "prompt_tokens": 511849,
+          "cache_hit_tokens": 279168,
+          "cache_miss_tokens": 232681,
+          "completion_tokens": 712477,
+          "cost_usd_peak": 0.926452,
+          "cost_usd_off_peak": 0.463226,
           "latency_ms": {
-            "p50": 72228.0,
-            "p95": 138094.0,
-            "max": 138446.0
+            "p50": 78959.0,
+            "p95": 135366.0,
+            "max": 137266.0
           },
-          "input_chars_median": 21817.0,
+          "input_chars_median": 24199.0,
           "calls_by_trigger": {
-            "UPDATE": 36,
+            "UPDATE": 37,
             "WAKE": 2
           },
           "trigger_reasons": {
-            "acceptance_confirmed": 36,
-            "dealing_range_created": 1,
-            "dealing_range_invalidated": 3,
-            "displacement_observed": 24,
-            "fvg_first_retest": 21,
-            "level_reached": 38,
-            "mss_core_confirmed": 2,
-            "protected_swing_assigned": 1,
-            "qualified_bos": 1,
+            "acceptance_confirmed": 21,
+            "dealing_range_created": 3,
+            "dealing_range_invalidated": 2,
+            "displacement_observed": 27,
+            "fvg_first_retest": 6,
+            "level_reached": 16,
+            "mss_core_confirmed": 3,
+            "protected_swing_assigned": 3,
+            "qualified_bos": 3,
             "qualified_origin_zone_created": 1,
-            "relation_change": 6,
+            "relation_change": 10,
             "structure_break": 7,
-            "structure_direction_confirmed": 3,
-            "sweep_confirmed": 1
+            "structure_direction_confirmed": 3
           },
           "wake_kinds": {
-            "displacement_observed": 4
+            "?": 1,
+            "acceptance_confirmed": 5,
+            "dealing_range_invalidated": 1,
+            "protected_swing_assigned": 1,
+            "qualified_bos": 1,
+            "structure_break": 1
           },
-          "unchanged_calls": 6,
+          "unchanged_calls": 7,
           "confidence": {
-            "LOW": 2,
-            "MEDIUM": 35
+            "MEDIUM": 33
           }
         },
         "controller": {
           "decisions": {
-            "STAY_ASLEEP": 19,
-            "TICK": 139,
-            "UPDATE": 36,
+            "EVENT_SLEEP": 0,
+            "STAY_ASLEEP": 54,
+            "TICK": 163,
+            "UPDATE": 37,
             "WAKE": 2
           },
           "episodes": 2,
@@ -2573,65 +1964,64 @@
             "idle": 1
           },
           "active_at_end": 1,
-          "awake_bars_total": 177,
-          "awake_bars_median": 88.5,
-          "calls_per_awake_bar": 0.215
+          "awake_bars_total": 202,
+          "awake_bars_median": 101.0,
+          "calls_per_awake_bar": 0.193
         },
         "coverage": null,
         "brain": {
           "proposed_by_state": {
-            "ACTIONABLE": 11,
-            "DEVELOPING": 14,
-            "NONE": 12
+            "ACTIONABLE": 4,
+            "DEVELOPING": 18,
+            "NONE": 11
           },
           "survived_by_state": {
-            "ACTIONABLE": 7,
-            "DEVELOPING": 6
+            "ACTIONABLE": 2,
+            "DEVELOPING": 7
           },
-          "distinct_opportunities": 11,
+          "distinct_opportunities": 7,
           "geometry_errors": 0,
           "rejections_by_kind": {
-            "evidence_expired": 23,
-            "evidence_without_verdict": 55,
+            "evidence_expired": 29,
+            "evidence_without_verdict": 68,
             "opportunity_incoherent": 1
           },
-          "understanding_changes": 35,
+          "understanding_changes": 30,
           "actionable_direction_accuracy_60m": null
         },
         "risk": {
-          "vetoes": 4,
-          "veto_signatures": 4,
+          "vetoes": 1,
+          "veto_signatures": 1,
           "reproposals_after_veto": 0,
           "veto_repeat_rate": 0.0,
           "vetoes_by_code": {
-            "reward_risk": 4
+            "position_size": 1
           },
-          "calls_with_veto_feedback": 9,
+          "calls_with_veto_feedback": 10,
           "kept_after_veto": 0,
-          "reanalysed_after_veto": 9,
-          "veto_bars": 17,
+          "reanalysed_after_veto": 4,
+          "veto_bars": 1,
           "stale_snapshots": 0,
-          "thesis_refused": 1,
-          "refusals_by_reason": {
-            "thesis_engaged": 1
-          },
+          "thesis_refused": 0,
+          "refusals_by_reason": {},
           "daily_stop_vetoes": 0,
           "halted": null
         },
         "orders": {
-          "submitted": 3,
-          "working": 3,
+          "submitted": 1,
+          "working": 1,
           "partial": 0,
-          "filled": 2,
+          "filled": 1,
           "cancel_requested": 0,
           "cancelled": 0,
           "expired": 0,
           "rejected": 0,
-          "position_opened": 2,
-          "position_closed": 2,
+          "position_opened": 1,
+          "position_closed": 1,
           "exit_leg_lost": 0,
           "invalidation_close": 0,
           "bias_reversed": 0,
+          "event_sleep": 0,
           "flattened": 0,
           "halted": 0,
           "missed_trends": null,
@@ -2639,37 +2029,26 @@
           "cancel_reasons": {},
           "replacements": 0,
           "exit_roles": {
-            "stop": 2
+            "stop": 1
           },
           "bars_to_fill": {
-            "median": 10.0,
-            "max": 16.0
+            "median": 5.0,
+            "max": 5.0
           },
           "closed_trades": [
             {
-              "episode_id": "EP_20221110_001",
+              "episode_id": "EP_20221013_002",
               "direction": "SHORT",
-              "quantity": 3,
-              "entry_price": 10904.75,
-              "exit_price": 10921.25,
+              "quantity": 1,
+              "entry_price": 10629.75,
+              "exit_price": 10697.25,
               "exit_role": "stop",
-              "closed_at": "2022-11-10T13:32:00Z",
-              "pnl_points": -49.5,
-              "thesis_id": "T1"
-            },
-            {
-              "episode_id": "EP_20221110_002",
-              "direction": "LONG",
-              "quantity": 3,
-              "entry_price": 11413.0,
-              "exit_price": 11394.5,
-              "exit_role": "stop",
-              "closed_at": "2022-11-10T15:32:00Z",
-              "pnl_points": -55.5,
+              "closed_at": "2022-10-13T14:57:00Z",
+              "pnl_points": -67.5,
               "thesis_id": "T1"
             }
           ],
-          "realized_points": -105.0
+          "realized_points": -67.5
         },
         "bias": {
           "changes": 1,
@@ -2684,318 +2063,270 @@
           "stale_snapshots": 0
         },
         "account": {
-          "cash": 97900.0,
-          "realized_pnl": -2100.0,
+          "cash": 98650.0,
+          "realized_pnl": -1350.0,
           "positions": [],
           "unrealized_pnl": null,
           "orders": {
-            "cancelled": 2,
-            "filled": 4,
-            "pending": 3,
+            "cancelled": 1,
+            "filled": 2,
+            "pending": 0,
             "rejected": 0
           },
-          "fills": 4
+          "fills": 2
         },
         "timings": {
           "bar": {
-            "count": 196,
-            "max_ms": 293315.288,
-            "mean_ms": 22550.859,
-            "p50_ms": 1.176,
-            "p95_ms": 174662.729,
-            "total_s": 4419.968373
+            "count": 256,
+            "max_ms": 280052.788,
+            "mean_ms": 21161.215,
+            "p50_ms": 1.335,
+            "p95_ms": 178008.223,
+            "total_s": 5417.270971
           },
           "controller": {
-            "count": 196,
-            "max_ms": 0.122,
-            "mean_ms": 0.015,
-            "p50_ms": 0.013,
-            "p95_ms": 0.025,
-            "total_s": 0.002987
+            "count": 256,
+            "max_ms": 0.058,
+            "mean_ms": 0.025,
+            "p50_ms": 0.024,
+            "p95_ms": 0.042,
+            "total_s": 0.00646
           },
           "eye": {
-            "count": 7590,
-            "max_ms": 244.441,
-            "mean_ms": 17.615,
-            "p50_ms": 15.451,
-            "p95_ms": 31.235,
-            "total_s": 133.699608
+            "count": 7650,
+            "max_ms": 250.084,
+            "mean_ms": 18.427,
+            "p50_ms": 16.082,
+            "p95_ms": 32.488,
+            "total_s": 140.96716
           },
           "input": {
-            "count": 38,
-            "max_ms": 2.56,
-            "mean_ms": 1.398,
-            "p50_ms": 1.399,
-            "p95_ms": 2.19,
-            "total_s": 0.053141
+            "count": 39,
+            "max_ms": 2.621,
+            "mean_ms": 1.571,
+            "p50_ms": 1.372,
+            "p95_ms": 2.53,
+            "total_s": 0.061263
           },
           "journal": {
-            "count": 177,
-            "max_ms": 40.786,
-            "mean_ms": 4.287,
-            "p50_ms": 0.171,
-            "p95_ms": 24.449,
-            "total_s": 0.75886
+            "count": 202,
+            "max_ms": 64.019,
+            "mean_ms": 4.686,
+            "p50_ms": 0.183,
+            "p95_ms": 29.453,
+            "total_s": 0.946629
           },
           "llm": {
-            "count": 38,
-            "max_ms": 293276.857,
-            "mean_ms": 116285.163,
-            "p50_ms": 81368.991,
-            "p95_ms": 253094.676,
-            "total_s": 4418.83619
+            "count": 39,
+            "max_ms": 280009.39,
+            "mean_ms": 138868.459,
+            "p50_ms": 116001.323,
+            "p95_ms": 276162.736,
+            "total_s": 5415.869916
           },
           "machine": {
-            "count": 196,
-            "max_ms": 1.791,
-            "mean_ms": 0.111,
+            "count": 256,
+            "max_ms": 3.432,
+            "mean_ms": 0.084,
             "p50_ms": 0.033,
-            "p95_ms": 0.433,
-            "total_s": 0.021679
+            "p95_ms": 0.337,
+            "total_s": 0.021385
           },
           "plan": {
-            "count": 196,
-            "max_ms": 0.404,
-            "mean_ms": 0.029,
+            "count": 256,
+            "max_ms": 0.211,
+            "mean_ms": 0.009,
             "p50_ms": 0.001,
-            "p95_ms": 0.149,
-            "total_s": 0.00578
+            "p95_ms": 0.094,
+            "total_s": 0.002221
           },
           "reduce": {
-            "count": 38,
-            "max_ms": 20.348,
-            "mean_ms": 1.51,
-            "p50_ms": 0.951,
-            "p95_ms": 3.587,
-            "total_s": 0.057365
+            "count": 39,
+            "max_ms": 4.117,
+            "mean_ms": 1.032,
+            "p50_ms": 0.903,
+            "p95_ms": 2.461,
+            "total_s": 0.04023
           }
         }
       }
     },
     {
-      "run_id": "2710e0b78a707e99",
-      "label": "the frozen window 2022-01-02 18:00 → 2022-01-03 17:00, entry-model-pools-2",
+      "run_id": "9c18fc7e40fb4520",
+      "label": "benchmark 2022-10-19 09:30–12:30 (mixed, unclean trend), stop-floor-events",
       "frozen_on": "2026-09-21",
       "summary": {
         "run": {
-          "run_id": "2710e0b78a707e99",
+          "run_id": "9c18fc7e40fb4520",
           "window": {
-            "emit_start": "2022-01-02T18:00",
-            "end": "2022-01-03T17:00",
+            "emit_start": "2022-10-19T09:30",
+            "end": "2022-10-19T12:30",
             "source": "data/processed/nq_1m_previous_session_front_v2_3_2017_2026.parquet",
-            "warmup_start": "2021-12-27"
+            "warmup_start": "2022-10-12"
           },
           "model": "deepseek:deepseek-flash@high",
           "reasoning_effort": "high",
           "broker": "sim",
           "client": "deepseek",
-          "started_at": "2026-09-21T04:32:58Z",
-          "finished_at": "2026-09-21T10:44:38Z",
-          "minutes": 371.67,
-          "bars_emitted": 1380,
-          "max_llm_calls": 1000,
-          "system_prompt_sha256": "7bf4db7c9c72e17bb956911e402aa77757463289861963646d863cc17e2d9aea",
-          "sleep_controller_sha256": "a65debce70f486fd11bb7e464c1ca37c894f4f03dcfc6ebaaf639bebf6ef9562",
+          "started_at": "2026-09-21T21:10:19Z",
+          "finished_at": "2026-09-21T22:15:33Z",
+          "minutes": 65.22,
+          "bars_emitted": 181,
+          "max_llm_calls": 400,
+          "system_prompt_sha256": "8d1ebdfa8092a6cfc55bd7d57e7b25ad100adf41c6f23ea1dd24316a586f3ab8",
+          "sleep_controller_sha256": "a5e63b06abc05bbc21e15cc4a11f9f5e65c4d3986f444a6349bcfa6bb4bc2133",
           "main_brain_config_sha256": "25b3c4a1054752baed39da50431fd680be6b54a315c2cb669103a0fbdabb665f",
           "risk_config_sha256": "f4ea17d92ccacc28a4077243f10ff669cbabce17dfafd80346a3ba0d48e70e88",
           "simulator_config_sha256": "c8e38bdda3e880b7160c7e369f00576cd184c0c4b0cc3c7091c5691002eefeff",
-          "git_revision": "e0581ed41727da3c82e37c124fb1935ff41c202f",
+          "git_revision": "444993b1ab898aab32d431619bc88842daba2d8e",
           "until": null
         },
         "llm": {
-          "calls": 278,
-          "replies": 276,
-          "incidents": 3,
+          "calls": 42,
+          "replies": 41,
+          "incidents": 1,
           "incidents_by_kind": {
-            "MalformedReply": 3
+            "MalformedReply": 1
           },
-          "repairs": 30,
-          "prompt_tokens": 4313202,
-          "cache_hit_tokens": 1882624,
-          "cache_miss_tokens": 2430578,
-          "completion_tokens": 4285774,
-          "cost_usd_peak": 5.883398,
-          "cost_usd_off_peak": 2.941699,
+          "repairs": 6,
+          "prompt_tokens": 671734,
+          "cache_hit_tokens": 294272,
+          "cache_miss_tokens": 377462,
+          "completion_tokens": 686484,
+          "cost_usd_peak": 0.938785,
+          "cost_usd_off_peak": 0.469393,
           "latency_ms": {
-            "p50": 57686.0,
-            "p95": 129631.0,
-            "max": 144817.0
+            "p50": 71140.0,
+            "p95": 98582.0,
+            "max": 132209.0
           },
-          "input_chars_median": 28189.5,
+          "input_chars_median": 30211.0,
           "calls_by_trigger": {
-            "UPDATE": 273,
-            "WAKE": 5
+            "UPDATE": 41,
+            "WAKE": 1
           },
           "trigger_reasons": {
-            "acceptance_confirmed": 76,
-            "dealing_range_created": 8,
-            "dealing_range_invalidated": 8,
-            "displacement_observed": 176,
-            "fvg_first_retest": 60,
-            "level_reached": 115,
-            "mss_core_confirmed": 20,
-            "origin_zone_mitigated": 2,
-            "qualified_bos": 6,
-            "qualified_origin_zone_created": 2,
-            "relation_change": 38,
-            "structure_break": 37,
-            "structure_direction_confirmed": 21,
-            "sweep_confirmed": 36
+            "acceptance_confirmed": 6,
+            "displacement_observed": 32,
+            "fvg_first_retest": 12,
+            "level_reached": 10,
+            "mss_core_confirmed": 2,
+            "origin_zone_mitigated": 1,
+            "protected_swing_assigned": 1,
+            "qualified_bos": 1,
+            "relation_change": 1,
+            "structure_break": 4,
+            "structure_direction_confirmed": 2,
+            "sweep_confirmed": 1
           },
           "wake_kinds": {
-            "displacement_observed": 5,
-            "level_reached": 3,
-            "mss_core_confirmed": 1,
-            "sweep_confirmed": 4
+            "displacement_observed": 1
           },
-          "unchanged_calls": 75,
+          "unchanged_calls": 12,
           "confidence": {
-            "LOW": 33,
-            "MEDIUM": 243
+            "MEDIUM": 41
           }
         },
         "controller": {
           "decisions": {
-            "STAY_ASLEEP": 29,
-            "TICK": 1073,
-            "UPDATE": 273,
-            "WAKE": 5
+            "EVENT_SLEEP": 0,
+            "STAY_ASLEEP": 0,
+            "TICK": 139,
+            "UPDATE": 41,
+            "WAKE": 1
           },
-          "episodes": 5,
-          "sleeps_by_reason": {
-            "continue_active=false": 1,
-            "idle": 3
-          },
+          "episodes": 1,
+          "sleeps_by_reason": {},
           "active_at_end": 1,
-          "awake_bars_total": 1351,
-          "awake_bars_median": 140.0,
-          "calls_per_awake_bar": 0.206
+          "awake_bars_total": 181,
+          "awake_bars_median": 181.0,
+          "calls_per_awake_bar": 0.232
         },
         "coverage": null,
         "brain": {
           "proposed_by_state": {
-            "ACTIONABLE": 104,
-            "DEVELOPING": 71,
-            "NONE": 101
+            "ACTIONABLE": 28,
+            "DEVELOPING": 6,
+            "NONE": 7
           },
           "survived_by_state": {
-            "ACTIONABLE": 32,
-            "DEVELOPING": 18
+            "ACTIONABLE": 4,
+            "DEVELOPING": 2
           },
-          "distinct_opportunities": 42,
+          "distinct_opportunities": 5,
           "geometry_errors": 0,
           "rejections_by_kind": {
-            "evidence_without_verdict": 25,
-            "opportunity_incoherent": 6,
-            "opportunity_object_not_visible": 6
+            "opportunity_object_not_visible": 3
           },
-          "understanding_changes": 270,
+          "understanding_changes": 41,
           "actionable_direction_accuracy_60m": null
         },
         "risk": {
-          "vetoes": 8,
-          "veto_signatures": 8,
+          "vetoes": 0,
+          "veto_signatures": 0,
           "reproposals_after_veto": 0,
-          "veto_repeat_rate": 0.0,
-          "vetoes_by_code": {
-            "daily_stop": 2,
-            "reward_risk": 6
-          },
-          "calls_with_veto_feedback": 101,
+          "veto_repeat_rate": null,
+          "vetoes_by_code": {},
+          "calls_with_veto_feedback": 0,
           "kept_after_veto": 0,
-          "reanalysed_after_veto": 101,
-          "veto_bars": 26,
+          "reanalysed_after_veto": 0,
+          "veto_bars": 0,
           "stale_snapshots": 0,
-          "thesis_refused": 61,
+          "thesis_refused": 4,
           "refusals_by_reason": {
-            "entry_marketable": 2,
-            "thesis_engaged": 59
+            "thesis_engaged": 4
           },
-          "daily_stop_vetoes": 2,
+          "daily_stop_vetoes": 0,
           "halted": null
         },
         "orders": {
-          "submitted": 9,
-          "working": 9,
+          "submitted": 3,
+          "working": 3,
           "partial": 0,
-          "filled": 4,
-          "cancel_requested": 7,
-          "cancelled": 5,
+          "filled": 2,
+          "cancel_requested": 1,
+          "cancelled": 1,
           "expired": 0,
           "rejected": 0,
-          "position_opened": 4,
-          "position_closed": 4,
+          "position_opened": 2,
+          "position_closed": 1,
           "exit_leg_lost": 0,
           "invalidation_close": 0,
-          "bias_reversed": 1,
-          "flattened": 1,
+          "bias_reversed": 0,
+          "event_sleep": 0,
+          "flattened": 0,
           "halted": 0,
           "missed_trends": null,
           "entry_quality": null,
           "cancel_reasons": {
-            "bias_reversed": 2,
-            "signature_changed": 5
+            "signature_changed": 1
           },
-          "replacements": 5,
+          "replacements": 1,
           "exit_roles": {
-            "bias_reversed": 1,
-            "stop": 3
+            "stop": 1
           },
           "bars_to_fill": {
-            "median": 1.0,
-            "max": 2.0
+            "median": 3.0,
+            "max": 4.0
           },
           "closed_trades": [
             {
-              "episode_id": "EP_20220102_001",
+              "episode_id": "EP_20221019_001",
               "direction": "SHORT",
-              "quantity": 2,
-              "entry_price": 16389.5,
-              "exit_price": 16405.75,
-              "exit_role": "stop",
-              "closed_at": "2022-01-03T00:31:00Z",
-              "pnl_points": -32.5,
-              "thesis_id": "T1"
-            },
-            {
-              "episode_id": "EP_20220102_003",
-              "direction": "LONG",
-              "quantity": 2,
-              "entry_price": 16404.5,
-              "exit_price": 16396.25,
-              "exit_role": "stop",
-              "closed_at": "2022-01-03T06:12:00Z",
-              "pnl_points": -16.5,
-              "thesis_id": "T1"
-            },
-            {
-              "episode_id": "EP_20220102_003",
-              "direction": "SHORT",
-              "quantity": 2,
-              "entry_price": 16390.5,
-              "exit_price": 16412.0,
-              "exit_role": "bias_reversed",
-              "closed_at": "2022-01-03T10:01:00Z",
-              "pnl_points": -43.0,
-              "thesis_id": "T2"
-            },
-            {
-              "episode_id": "EP_20220102_003",
-              "direction": "LONG",
               "quantity": 1,
-              "entry_price": 16441.0,
-              "exit_price": 16391.5,
+              "entry_price": 11180.0,
+              "exit_price": 11237.25,
               "exit_role": "stop",
-              "closed_at": "2022-01-03T13:59:00Z",
-              "pnl_points": -49.5,
-              "thesis_id": "T3"
+              "closed_at": "2022-10-19T14:16:00Z",
+              "pnl_points": -57.25,
+              "thesis_id": "T1"
             }
           ],
-          "realized_points": -141.5
+          "realized_points": -57.25
         },
         "bias": {
-          "changes": 16,
-          "neutral_revisions": 34,
+          "changes": 1,
+          "neutral_revisions": 1,
           "opportunities_against_bias": 0,
           "direction_accuracy_60m": null
         },
@@ -3006,90 +2337,731 @@
           "stale_snapshots": 0
         },
         "account": {
-          "cash": 97170.0,
-          "realized_pnl": -2830.0,
+          "cash": 98855.0,
+          "realized_pnl": -1145.0,
+          "positions": [
+            {
+              "average_price": 11202.5,
+              "quantity": -1,
+              "symbol": "NQ"
+            }
+          ],
+          "unrealized_pnl": null,
+          "orders": {
+            "cancelled": 4,
+            "filled": 3,
+            "pending": 2,
+            "rejected": 0
+          },
+          "fills": 3
+        },
+        "timings": {
+          "bar": {
+            "count": 181,
+            "max_ms": 278758.078,
+            "mean_ms": 20838.995,
+            "p50_ms": 2.075,
+            "p95_ms": 97915.543,
+            "total_s": 3771.858163
+          },
+          "controller": {
+            "count": 181,
+            "max_ms": 0.069,
+            "mean_ms": 0.03,
+            "p50_ms": 0.028,
+            "p95_ms": 0.045,
+            "total_s": 0.005365
+          },
+          "eye": {
+            "count": 7650,
+            "max_ms": 565.833,
+            "mean_ms": 18.326,
+            "p50_ms": 15.991,
+            "p95_ms": 32.527,
+            "total_s": 140.191969
+          },
+          "input": {
+            "count": 42,
+            "max_ms": 2.227,
+            "mean_ms": 1.743,
+            "p50_ms": 1.826,
+            "p95_ms": 2.078,
+            "total_s": 0.073216
+          },
+          "journal": {
+            "count": 181,
+            "max_ms": 33.814,
+            "mean_ms": 5.366,
+            "p50_ms": 0.199,
+            "p95_ms": 28.716,
+            "total_s": 0.971179
+          },
+          "llm": {
+            "count": 42,
+            "max_ms": 278734.442,
+            "mean_ms": 89769.754,
+            "p50_ms": 76954.514,
+            "p95_ms": 219060.507,
+            "total_s": 3770.329647
+          },
+          "machine": {
+            "count": 181,
+            "max_ms": 1.647,
+            "mean_ms": 0.114,
+            "p50_ms": 0.039,
+            "p95_ms": 0.541,
+            "total_s": 0.020676
+          },
+          "plan": {
+            "count": 181,
+            "max_ms": 0.371,
+            "mean_ms": 0.087,
+            "p50_ms": 0.107,
+            "p95_ms": 0.26,
+            "total_s": 0.015774
+          },
+          "reduce": {
+            "count": 42,
+            "max_ms": 2.497,
+            "mean_ms": 1.073,
+            "p50_ms": 1.026,
+            "p95_ms": 1.73,
+            "total_s": 0.045046
+          }
+        }
+      }
+    },
+    {
+      "run_id": "b858c9529dd3e4c1",
+      "label": "benchmark 2022-11-10 08:15–11:30 (CPI, strong long trend; asleep until 09:00), stop-floor-events",
+      "frozen_on": "2026-09-21",
+      "summary": {
+        "run": {
+          "run_id": "b858c9529dd3e4c1",
+          "window": {
+            "emit_start": "2022-11-10T08:15",
+            "end": "2022-11-10T11:30",
+            "source": "data/processed/nq_1m_previous_session_front_v2_3_2017_2026.parquet",
+            "warmup_start": "2022-11-03"
+          },
+          "model": "deepseek:deepseek-flash@high",
+          "reasoning_effort": "high",
+          "broker": "sim",
+          "client": "deepseek",
+          "started_at": "2026-09-21T21:26:56Z",
+          "finished_at": "2026-09-21T22:12:39Z",
+          "minutes": 45.71,
+          "bars_emitted": 196,
+          "max_llm_calls": 400,
+          "system_prompt_sha256": "8d1ebdfa8092a6cfc55bd7d57e7b25ad100adf41c6f23ea1dd24316a586f3ab8",
+          "sleep_controller_sha256": "a5e63b06abc05bbc21e15cc4a11f9f5e65c4d3986f444a6349bcfa6bb4bc2133",
+          "main_brain_config_sha256": "25b3c4a1054752baed39da50431fd680be6b54a315c2cb669103a0fbdabb665f",
+          "risk_config_sha256": "f4ea17d92ccacc28a4077243f10ff669cbabce17dfafd80346a3ba0d48e70e88",
+          "simulator_config_sha256": "c8e38bdda3e880b7160c7e369f00576cd184c0c4b0cc3c7091c5691002eefeff",
+          "git_revision": "444993b1ab898aab32d431619bc88842daba2d8e",
+          "until": null
+        },
+        "llm": {
+          "calls": 28,
+          "replies": 27,
+          "incidents": 2,
+          "incidents_by_kind": {
+            "MalformedReply": 2
+          },
+          "repairs": 5,
+          "prompt_tokens": 379574,
+          "cache_hit_tokens": 201600,
+          "cache_miss_tokens": 177974,
+          "completion_tokens": 513868,
+          "cost_usd_peak": 0.671243,
+          "cost_usd_off_peak": 0.335622,
+          "latency_ms": {
+            "p50": 62802.0,
+            "p95": 128689.0,
+            "max": 130359.0
+          },
+          "input_chars_median": 20733.5,
+          "calls_by_trigger": {
+            "UPDATE": 26,
+            "WAKE": 2
+          },
+          "trigger_reasons": {
+            "acceptance_confirmed": 8,
+            "dealing_range_created": 1,
+            "dealing_range_invalidated": 1,
+            "displacement_observed": 18,
+            "fvg_first_retest": 9,
+            "level_reached": 4,
+            "mss_core_confirmed": 1,
+            "relation_change": 1,
+            "structure_break": 4,
+            "structure_direction_confirmed": 2
+          },
+          "wake_kinds": {
+            "?": 1,
+            "displacement_observed": 1
+          },
+          "unchanged_calls": 3,
+          "confidence": {
+            "MEDIUM": 27
+          }
+        },
+        "controller": {
+          "decisions": {
+            "EVENT_SLEEP": 0,
+            "STAY_ASLEEP": 59,
+            "TICK": 109,
+            "UPDATE": 26,
+            "WAKE": 2
+          },
+          "episodes": 2,
+          "sleeps_by_reason": {
+            "continue_active=false": 1
+          },
+          "active_at_end": 1,
+          "awake_bars_total": 137,
+          "awake_bars_median": 68.5,
+          "calls_per_awake_bar": 0.204
+        },
+        "coverage": null,
+        "brain": {
+          "proposed_by_state": {
+            "ACTIONABLE": 7,
+            "DEVELOPING": 6,
+            "NONE": 14
+          },
+          "survived_by_state": {
+            "ACTIONABLE": 2,
+            "DEVELOPING": 3
+          },
+          "distinct_opportunities": 4,
+          "geometry_errors": 0,
+          "rejections_by_kind": {
+            "evidence_without_verdict": 12
+          },
+          "understanding_changes": 24,
+          "actionable_direction_accuracy_60m": null
+        },
+        "risk": {
+          "vetoes": 2,
+          "veto_signatures": 1,
+          "reproposals_after_veto": 1,
+          "veto_repeat_rate": 0.5,
+          "vetoes_by_code": {
+            "reward_risk": 2
+          },
+          "calls_with_veto_feedback": 7,
+          "kept_after_veto": 1,
+          "reanalysed_after_veto": 6,
+          "veto_bars": 5,
+          "stale_snapshots": 0,
+          "thesis_refused": 0,
+          "refusals_by_reason": {},
+          "daily_stop_vetoes": 0,
+          "halted": null
+        },
+        "orders": {
+          "submitted": 1,
+          "working": 1,
+          "partial": 0,
+          "filled": 0,
+          "cancel_requested": 0,
+          "cancelled": 0,
+          "expired": 0,
+          "rejected": 0,
+          "position_opened": 0,
+          "position_closed": 0,
+          "exit_leg_lost": 0,
+          "invalidation_close": 0,
+          "bias_reversed": 0,
+          "event_sleep": 0,
+          "flattened": 0,
+          "halted": 0,
+          "missed_trends": null,
+          "entry_quality": null,
+          "cancel_reasons": {},
+          "replacements": 0,
+          "exit_roles": {},
+          "bars_to_fill": {
+            "median": null,
+            "max": null
+          },
+          "closed_trades": [],
+          "realized_points": null
+        },
+        "bias": {
+          "changes": 0,
+          "neutral_revisions": 0,
+          "opportunities_against_bias": 0,
+          "direction_accuracy_60m": null
+        },
+        "invariants": {
+          "double_entry": 0,
+          "positions_over_limit": 0,
+          "position_without_fill": 0,
+          "stale_snapshots": 0
+        },
+        "account": {
+          "cash": 100000.0,
+          "realized_pnl": 0.0,
           "positions": [],
           "unrealized_pnl": null,
           "orders": {
-            "cancelled": 20,
-            "filled": 8,
-            "pending": 0,
+            "cancelled": 0,
+            "filled": 0,
+            "pending": 3,
             "rejected": 0
           },
-          "fills": 8
+          "fills": 0
+        },
+        "timings": {
+          "bar": {
+            "count": 196,
+            "max_ms": 254141.6,
+            "mean_ms": 13293.841,
+            "p50_ms": 1.055,
+            "p95_ms": 111063.159,
+            "total_s": 2605.592892
+          },
+          "controller": {
+            "count": 196,
+            "max_ms": 0.104,
+            "mean_ms": 0.022,
+            "p50_ms": 0.02,
+            "p95_ms": 0.036,
+            "total_s": 0.004257
+          },
+          "eye": {
+            "count": 7590,
+            "max_ms": 258.534,
+            "mean_ms": 17.858,
+            "p50_ms": 15.74,
+            "p95_ms": 31.47,
+            "total_s": 135.544906
+          },
+          "input": {
+            "count": 28,
+            "max_ms": 1.628,
+            "mean_ms": 1.177,
+            "p50_ms": 1.159,
+            "p95_ms": 1.543,
+            "total_s": 0.032959
+          },
+          "journal": {
+            "count": 137,
+            "max_ms": 217.338,
+            "mean_ms": 5.201,
+            "p50_ms": 0.172,
+            "p95_ms": 21.604,
+            "total_s": 0.712602
+          },
+          "llm": {
+            "count": 28,
+            "max_ms": 254110.077,
+            "mean_ms": 93022.481,
+            "p50_ms": 63845.537,
+            "p95_ms": 210992.173,
+            "total_s": 2604.629463
+          },
+          "machine": {
+            "count": 196,
+            "max_ms": 1.79,
+            "mean_ms": 0.071,
+            "p50_ms": 0.03,
+            "p95_ms": 0.292,
+            "total_s": 0.013931
+          },
+          "plan": {
+            "count": 196,
+            "max_ms": 0.208,
+            "mean_ms": 0.017,
+            "p50_ms": 0.001,
+            "p95_ms": 0.087,
+            "total_s": 0.003235
+          },
+          "reduce": {
+            "count": 28,
+            "max_ms": 1.629,
+            "mean_ms": 0.862,
+            "p50_ms": 0.789,
+            "p95_ms": 1.528,
+            "total_s": 0.024147
+          }
+        }
+      }
+    },
+    {
+      "run_id": "f4f6998a6ed59eb8",
+      "label": "the frozen window 2022-01-02 18:00 → 2022-01-03 17:00, stop-floor-events",
+      "frozen_on": "2026-09-21",
+      "summary": {
+        "run": {
+          "run_id": "f4f6998a6ed59eb8",
+          "window": {
+            "emit_start": "2022-01-02T18:00",
+            "end": "2022-01-03T17:00",
+            "source": "data/processed/nq_1m_previous_session_front_v2_3_2017_2026.parquet",
+            "warmup_start": "2021-12-27"
+          },
+          "model": "deepseek:deepseek-flash@high",
+          "reasoning_effort": "high",
+          "broker": "sim",
+          "client": "deepseek",
+          "started_at": "2026-09-21T18:12:16Z",
+          "finished_at": "2026-09-22T01:32:38Z",
+          "minutes": 440.36,
+          "bars_emitted": 1380,
+          "max_llm_calls": 1000,
+          "system_prompt_sha256": "8d1ebdfa8092a6cfc55bd7d57e7b25ad100adf41c6f23ea1dd24316a586f3ab8",
+          "sleep_controller_sha256": "a5e63b06abc05bbc21e15cc4a11f9f5e65c4d3986f444a6349bcfa6bb4bc2133",
+          "main_brain_config_sha256": "25b3c4a1054752baed39da50431fd680be6b54a315c2cb669103a0fbdabb665f",
+          "risk_config_sha256": "f4ea17d92ccacc28a4077243f10ff669cbabce17dfafd80346a3ba0d48e70e88",
+          "simulator_config_sha256": "c8e38bdda3e880b7160c7e369f00576cd184c0c4b0cc3c7091c5691002eefeff",
+          "git_revision": "444993b1ab898aab32d431619bc88842daba2d8e",
+          "until": null
+        },
+        "llm": {
+          "calls": 279,
+          "replies": 270,
+          "incidents": 14,
+          "incidents_by_kind": {
+            "MalformedReply": 14
+          },
+          "repairs": 43,
+          "prompt_tokens": 4328855,
+          "cache_hit_tokens": 1951744,
+          "cache_miss_tokens": 2377111,
+          "completion_tokens": 4596620,
+          "cost_usd_peak": 6.240788,
+          "cost_usd_off_peak": 3.120394,
+          "latency_ms": {
+            "p50": 63745.0,
+            "p95": 127584.0,
+            "max": 139977.0
+          },
+          "input_chars_median": 28627.0,
+          "calls_by_trigger": {
+            "UPDATE": 277,
+            "WAKE": 2
+          },
+          "trigger_reasons": {
+            "acceptance_confirmed": 80,
+            "dealing_range_created": 8,
+            "dealing_range_invalidated": 8,
+            "displacement_observed": 176,
+            "fvg_first_retest": 62,
+            "level_reached": 117,
+            "mss_core_confirmed": 20,
+            "origin_zone_mitigated": 2,
+            "qualified_bos": 6,
+            "qualified_origin_zone_created": 2,
+            "relation_change": 30,
+            "structure_break": 38,
+            "structure_direction_confirmed": 21,
+            "sweep_confirmed": 36
+          },
+          "wake_kinds": {
+            "displacement_observed": 3,
+            "level_reached": 3
+          },
+          "unchanged_calls": 79,
+          "confidence": {
+            "LOW": 13,
+            "MEDIUM": 257
+          }
+        },
+        "controller": {
+          "decisions": {
+            "EVENT_SLEEP": 0,
+            "STAY_ASLEEP": 4,
+            "TICK": 1097,
+            "UPDATE": 277,
+            "WAKE": 2
+          },
+          "episodes": 2,
+          "sleeps_by_reason": {
+            "idle": 1
+          },
+          "active_at_end": 1,
+          "awake_bars_total": 1376,
+          "awake_bars_median": 688.0,
+          "calls_per_awake_bar": 0.203
+        },
+        "coverage": null,
+        "brain": {
+          "proposed_by_state": {
+            "ACTIONABLE": 207,
+            "DEVELOPING": 21,
+            "NONE": 42
+          },
+          "survived_by_state": {
+            "ACTIONABLE": 45,
+            "DEVELOPING": 7
+          },
+          "distinct_opportunities": 47,
+          "geometry_errors": 0,
+          "rejections_by_kind": {
+            "evidence_expired": 2,
+            "evidence_without_verdict": 113,
+            "opportunity_incoherent": 5,
+            "opportunity_object_not_visible": 10
+          },
+          "understanding_changes": 264,
+          "actionable_direction_accuracy_60m": null
+        },
+        "risk": {
+          "vetoes": 9,
+          "veto_signatures": 9,
+          "reproposals_after_veto": 0,
+          "veto_repeat_rate": 0.0,
+          "vetoes_by_code": {
+            "exposure": 2,
+            "leverage": 1,
+            "position_size": 3,
+            "reward_risk": 3
+          },
+          "calls_with_veto_feedback": 22,
+          "kept_after_veto": 1,
+          "reanalysed_after_veto": 20,
+          "veto_bars": 25,
+          "stale_snapshots": 0,
+          "thesis_refused": 99,
+          "refusals_by_reason": {
+            "entry_marketable": 3,
+            "thesis_engaged": 96
+          },
+          "daily_stop_vetoes": 0,
+          "halted": null
+        },
+        "orders": {
+          "submitted": 16,
+          "working": 16,
+          "partial": 0,
+          "filled": 9,
+          "cancel_requested": 21,
+          "cancelled": 6,
+          "expired": 1,
+          "rejected": 0,
+          "position_opened": 9,
+          "position_closed": 8,
+          "exit_leg_lost": 0,
+          "invalidation_close": 0,
+          "bias_reversed": 7,
+          "event_sleep": 0,
+          "flattened": 7,
+          "halted": 0,
+          "missed_trends": null,
+          "entry_quality": null,
+          "cancel_reasons": {
+            "bias_reversed": 14,
+            "plan_dropped": 2,
+            "signature_changed": 4,
+            "ttl": 1
+          },
+          "replacements": 4,
+          "exit_roles": {
+            "bias_reversed": 7,
+            "stop": 1
+          },
+          "bars_to_fill": {
+            "median": 15.0,
+            "max": 101.0
+          },
+          "closed_trades": [
+            {
+              "episode_id": "EP_20220102_002",
+              "direction": "LONG",
+              "quantity": 2,
+              "entry_price": 16404.0,
+              "exit_price": 16397.0,
+              "exit_role": "bias_reversed",
+              "closed_at": "2022-01-03T06:16:00Z",
+              "pnl_points": -14.0,
+              "thesis_id": "T1"
+            },
+            {
+              "episode_id": "EP_20220102_002",
+              "direction": "SHORT",
+              "quantity": 2,
+              "entry_price": 16399.25,
+              "exit_price": 16399.75,
+              "exit_role": "bias_reversed",
+              "closed_at": "2022-01-03T08:01:00Z",
+              "pnl_points": -1.0,
+              "thesis_id": "T2"
+            },
+            {
+              "episode_id": "EP_20220102_002",
+              "direction": "LONG",
+              "quantity": 2,
+              "entry_price": 16393.25,
+              "exit_price": 16387.75,
+              "exit_role": "bias_reversed",
+              "closed_at": "2022-01-03T09:01:00Z",
+              "pnl_points": -11.0,
+              "thesis_id": "T3"
+            },
+            {
+              "episode_id": "EP_20220102_002",
+              "direction": "SHORT",
+              "quantity": 2,
+              "entry_price": 16397.25,
+              "exit_price": 16399.5,
+              "exit_role": "bias_reversed",
+              "closed_at": "2022-01-03T09:46:00Z",
+              "pnl_points": -4.5,
+              "thesis_id": "T4"
+            },
+            {
+              "episode_id": "EP_20220102_002",
+              "direction": "LONG",
+              "quantity": 2,
+              "entry_price": 16409.25,
+              "exit_price": 16384.75,
+              "exit_role": "stop",
+              "closed_at": "2022-01-03T14:00:00Z",
+              "pnl_points": -49.0,
+              "thesis_id": "T6"
+            },
+            {
+              "episode_id": "EP_20220102_002",
+              "direction": "SHORT",
+              "quantity": 1,
+              "entry_price": 16452.5,
+              "exit_price": 16465.25,
+              "exit_role": "bias_reversed",
+              "closed_at": "2022-01-03T14:41:00Z",
+              "pnl_points": -12.75,
+              "thesis_id": "T5"
+            },
+            {
+              "episode_id": "EP_20220102_002",
+              "direction": "LONG",
+              "quantity": 1,
+              "entry_price": 16386.75,
+              "exit_price": 16405.0,
+              "exit_role": "bias_reversed",
+              "closed_at": "2022-01-03T16:46:00Z",
+              "pnl_points": 18.25,
+              "thesis_id": "T7"
+            },
+            {
+              "episode_id": "EP_20220102_002",
+              "direction": "SHORT",
+              "quantity": 1,
+              "entry_price": 16452.5,
+              "exit_price": 16455.75,
+              "exit_role": "bias_reversed",
+              "closed_at": "2022-01-03T18:44:00Z",
+              "pnl_points": -3.25,
+              "thesis_id": "T8"
+            }
+          ],
+          "realized_points": -77.25
+        },
+        "bias": {
+          "changes": 17,
+          "neutral_revisions": 24,
+          "opportunities_against_bias": 0,
+          "direction_accuracy_60m": null
+        },
+        "invariants": {
+          "double_entry": 0,
+          "positions_over_limit": 0,
+          "position_without_fill": 0,
+          "stale_snapshots": 0
+        },
+        "account": {
+          "cash": 98455.0,
+          "realized_pnl": -1545.0,
+          "positions": [
+            {
+              "average_price": 16449.25,
+              "quantity": 1,
+              "symbol": "NQ"
+            }
+          ],
+          "unrealized_pnl": null,
+          "orders": {
+            "cancelled": 36,
+            "filled": 17,
+            "pending": 2,
+            "rejected": 0
+          },
+          "fills": 17
         },
         "timings": {
           "bar": {
             "count": 1380,
-            "max_ms": 304223.392,
-            "mean_ms": 16009.522,
-            "p50_ms": 1.694,
-            "p95_ms": 97697.771,
-            "total_s": 22093.140697
+            "max_ms": 320204.651,
+            "mean_ms": 19000.925,
+            "p50_ms": 1.812,
+            "p95_ms": 111265.652,
+            "total_s": 26221.275995
           },
           "controller": {
             "count": 1380,
-            "max_ms": 0.086,
-            "mean_ms": 0.017,
-            "p50_ms": 0.016,
-            "p95_ms": 0.028,
-            "total_s": 0.023978
+            "max_ms": 1.065,
+            "mean_ms": 0.028,
+            "p50_ms": 0.026,
+            "p95_ms": 0.043,
+            "total_s": 0.039164
           },
           "eye": {
             "count": 7920,
-            "max_ms": 750.582,
-            "mean_ms": 25.814,
-            "p50_ms": 21.96,
-            "p95_ms": 48.151,
-            "total_s": 204.447634
+            "max_ms": 1018.353,
+            "mean_ms": 24.976,
+            "p50_ms": 21.689,
+            "p95_ms": 45.356,
+            "total_s": 197.808118
           },
           "input": {
-            "count": 278,
-            "max_ms": 4.647,
-            "mean_ms": 2.436,
-            "p50_ms": 2.468,
-            "p95_ms": 3.957,
-            "total_s": 0.677244
+            "count": 279,
+            "max_ms": 188.614,
+            "mean_ms": 5.503,
+            "p50_ms": 3.505,
+            "p95_ms": 6.349,
+            "total_s": 1.53529
           },
           "journal": {
-            "count": 1351,
-            "max_ms": 220.351,
-            "mean_ms": 7.454,
-            "p50_ms": 0.182,
-            "p95_ms": 42.544,
-            "total_s": 10.070678
+            "count": 1376,
+            "max_ms": 259.445,
+            "mean_ms": 10.017,
+            "p50_ms": 0.177,
+            "p95_ms": 62.438,
+            "total_s": 13.782712
           },
           "llm": {
-            "count": 278,
-            "max_ms": 304135.998,
-            "mean_ms": 79421.977,
-            "p50_ms": 62503.705,
-            "p95_ms": 201752.741,
-            "total_s": 22079.309672
+            "count": 279,
+            "max_ms": 320115.225,
+            "mean_ms": 93915.953,
+            "p50_ms": 68180.128,
+            "p95_ms": 264225.667,
+            "total_s": 26202.550965
           },
           "machine": {
             "count": 1380,
-            "max_ms": 8.539,
-            "mean_ms": 0.113,
-            "p50_ms": 0.04,
-            "p95_ms": 0.473,
-            "total_s": 0.155653
+            "max_ms": 6.096,
+            "mean_ms": 0.115,
+            "p50_ms": 0.043,
+            "p95_ms": 0.422,
+            "total_s": 0.159348
           },
           "plan": {
             "count": 1380,
-            "max_ms": 0.393,
-            "mean_ms": 0.041,
-            "p50_ms": 0.002,
-            "p95_ms": 0.138,
-            "total_s": 0.05602
+            "max_ms": 0.323,
+            "mean_ms": 0.08,
+            "p50_ms": 0.095,
+            "p95_ms": 0.15,
+            "total_s": 0.110939
           },
           "reduce": {
-            "count": 278,
-            "max_ms": 12.92,
-            "mean_ms": 1.486,
-            "p50_ms": 1.34,
-            "p95_ms": 2.877,
-            "total_s": 0.413141
+            "count": 279,
+            "max_ms": 15.807,
+            "mean_ms": 2.255,
+            "p50_ms": 1.717,
+            "p95_ms": 6.276,
+            "total_s": 0.629175
           }
         }
       }

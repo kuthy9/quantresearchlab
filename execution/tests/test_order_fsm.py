@@ -463,3 +463,37 @@ def test_a_marketable_entry_is_refused_not_chased(tmp_path: Path) -> None:
     assert kinds == ("thesis_refused",)
     kinds = m.on_bar(at(5), bar(5, 16370.0, 16380.0), short_plan(), episode_id=EP, visible=lambda a: True, llm_called=True)
     assert kinds == ("submitted",)
+
+
+def test_an_event_sleep_cancels_the_working_entry_and_gives_the_expression_back(tmp_path: Path) -> None:
+    # 2026-09-21: the Brain sleeps through a scheduled release; nothing of its expression waits through the print
+    m, broker, journal = machine(tmp_path)
+    plan = short_plan(thesis_id="T1")
+    m.on_bar(at(1), bar(1, 16370.0, 16380.0), plan, episode_id=EP, visible=lambda a: True)
+    kinds = m.on_bar(at(2), bar(2, 16370.0, 16380.0), None, episode_id=EP, visible=lambda a: True, event_sleep="event:CPI:2022-01-03T14:14:00Z")
+    assert kinds == ("working", "cancel_requested") and last_trade(tmp_path, "cancel_requested")["reason"] == "event_sleep"
+    kinds = m.on_bar(at(3), bar(3, 16370.0, 16380.0), None, episode_id=EP, visible=lambda a: True, event_sleep="event:CPI:2022-01-03T14:14:00Z")
+    assert kinds == ("cancelled",) and m.state is MachineState.IDLE and last_trade(tmp_path, "cancelled")["reason"] == "event_sleep"
+    view = m.execution_view()
+    assert view["theses"][0]["expressions"] == 0 and view["theses"][0]["status"] == "OPEN"  # the entry was never reached
+    assert view["last_outcome"]["kind"] == "cancelled" and view["last_outcome"]["reason"] == "event_sleep"
+
+
+def test_an_event_sleep_flattens_the_open_position_and_closes_the_thesis_without_a_cooldown(tmp_path: Path) -> None:
+    m, broker, journal = machine(tmp_path)
+    plan = short_plan(thesis_id="T1")
+    m.on_bar(at(1), bar(1, 16370.0, 16380.0), plan, episode_id=EP, visible=lambda a: True, bias_direction="SHORT")
+    kinds = m.on_bar(at(2), bar(2, 16380.0, 16390.0), plan, episode_id=EP, visible=lambda a: True, bias_direction="SHORT")
+    assert "position_opened" in kinds
+    kinds = m.on_bar(at(3), bar(3, 16380.0, 16390.0), None, episode_id=EP, visible=lambda a: True, bias_direction=None, event_sleep="event:FOMC:2022-01-03T15:00:00Z")
+    assert "event_sleep" in kinds and kinds.count("cancel_requested") == 2 and "position_closed" not in kinds
+    assert last_trade(tmp_path, "event_sleep")["event"] == "event:FOMC:2022-01-03T15:00:00Z" and m.stats["event_sleep"] == 1
+    kinds = m.on_bar(at(4), bar(4, 16380.0, 16390.0), None, episode_id=EP, visible=lambda a: True, bias_direction=None)  # the open is 16385
+    assert "position_closed" in kinds and "flattened" in kinds and m.state is MachineState.IDLE
+    closed = last_trade(tmp_path, "position_closed")
+    assert closed["exit_role"] == "event_sleep" and closed["exit_price"] == 16385.0 and last_trade(tmp_path, "flattened")["reason"] == "event_sleep"
+    view = m.execution_view()
+    assert view["theses"][0]["closed_reason"] == "event_sleep" and view["cooldown_bars_left"] == 0
+    # the same bar's event flag on an idle machine changes nothing
+    assert m.on_bar(at(5), bar(5, 16380.0, 16390.0), None, episode_id=EP, visible=lambda a: True, event_sleep="event:FOMC:x") == ()
+    JournalReader(tmp_path).verify_chain(EP, run_id="fsm")

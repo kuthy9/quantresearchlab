@@ -243,3 +243,44 @@ def test_a_relation_flip_of_the_same_alias_triggers_once_per_debounce_window() -
     runtime._remember_relations(state, below(first))
     assert runtime._relation_changes(above(t0 + pd.Timedelta(minutes=5))) == (), "a second flip within the window does not trigger"
     assert runtime._relation_changes(above(t0 + pd.Timedelta(minutes=16))) == ("BSL_15m_1",)
+
+
+def test_an_event_window_archives_the_episode_flat_and_wakes_it_fresh_when_the_window_ends(observations, tmp_path: Path) -> None:
+    # 2026-09-21: a scheduled release puts an active episode to sleep without a call; the first bar after the window wakes a new one
+    import dataclasses
+
+    from brain.core.event_calendar import CalendarEvent, EventFilter, EventRule
+
+    plain, _ = run(observations, EchoClient())
+    active = [i for i, r in enumerate(plain) if r.status_after is RuntimeStatus.ACTIVE and i + 200 < len(plain)]
+    assert active, "the echo run never stays active with 200 bars to spare"
+    k = active[0] + 1  # an active episode on the bar before the window opens
+    start = pd.Timestamp(observations[k].asof).tz_convert("UTC")
+    release = start + pd.Timedelta(minutes=60)
+    events = EventFilter.from_events(
+        [CalendarEvent("cpi", "Consumer Price Index", release, ("BLS",))], (EventRule("CPI", "Consumer Price Index", 60, 30),), sha256="test",
+    )
+    window = events.events[0]
+    controller = dataclasses.replace(CONTROLLER, events=events)
+    journal = BrainJournal(tmp_path, run_id="event")
+    ledger = InMemoryPositionLedger()
+    runtime = BrainRuntime(
+        controller=controller, brain=MainBrain(client=EchoClient(), config=CONFIG, ledger=ledger, sleep=lambda s: None),
+        journal=journal, ledger=ledger, tick=0.25,
+    )
+    results = [runtime.step(obs) for obs in observations]
+    slept = results[k]
+    assert slept.decision is Decision.EVENT_SLEEP and slept.slept and slept.status_after is RuntimeStatus.SLEEP and not slept.llm_called
+    assert slept.event == f"event:CPI:{release.strftime('%Y-%m-%dT%H:%M:%SZ')}" and slept.episode_id == plain[k - 1].episode_id
+    inside = [r for r in results if window.start <= r.known_at < window.end]
+    assert inside and all(r.decision is Decision.STAY_ASLEEP for r in inside[1:]) and all(r.status_after is RuntimeStatus.SLEEP for r in inside)
+    woken = next(r for r in results if r.known_at >= window.end)
+    assert woken.decision is Decision.WAKE and woken.llm_called and woken.episode_id != slept.episode_id and woken.revision == 0
+    reader = JournalReader(tmp_path)
+    sleeps = {ep: r.payload for ep in reader.episode_ids() for r in reader.records(ep) if r.record == "sleep"}
+    assert sleeps[slept.episode_id]["reason"] == slept.event
+    wake = next(r.payload for r in reader.records(woken.episode_id) if r.record == "wake")
+    assert list(wake["reasons"]) == [f"event_ended:CPI:{release.strftime('%Y-%m-%dT%H:%M:%SZ')}"]
+    for ep in reader.episode_ids():
+        reader.verify_chain(ep, run_id="event")
+    assert CONTROLLER.events.active(start) is None, "the repository calendar has no release on the synthetic tape's dates"

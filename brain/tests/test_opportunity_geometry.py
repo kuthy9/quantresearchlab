@@ -4,7 +4,9 @@ import pytest
 
 from dataclasses import replace
 
-from brain.core.opportunity_geometry import CLOSE_BEYOND_BUFFER_ATR, ObjectGeometry, coherence_error, entry_side_error, resolve_geometry
+from brain.core.opportunity_geometry import (
+    CLOSE_BEYOND_BUFFER_ATR, STOP_FLOOR_GOVERNING_BARS, ObjectGeometry, coherence_error, entry_side_error, resolve_geometry,
+)
 from contract.brain.state import Opportunity, OpportunityState, TradeDirection
 from contract.decision import GeometryError
 
@@ -105,14 +107,48 @@ def test_close_beyond_puts_the_hard_stop_one_scaled_atr_past_the_edge_rounded_aw
     }
     opp = Opportunity("ACTIONABLE", "SHORT", "FVG_15m_1", "BSL_15m_1", "SSL_5m_1", thesis_id="T1", governing_timeframe="1H", invalidation_mode="CLOSE_BEYOND")
     assert CLOSE_BEYOND_BUFFER_ATR == 1.0
-    g = resolve_geometry(opp, objects, close=99.0, tick=0.25, atr_1m=2.0)
+    g = resolve_geometry(opp, objects, close=99.0, tick=0.25, atr_1m=2.0, floor_bars=0.0)
     assert g.stop_price == 111.75  # 104 + 1.0 × 2.0 × √15 = 111.746, rounded away from the entry
     assert g.rule_ids[1] == "stop.pool.close_beyond" and g.reward_risk == pytest.approx((100.0 - 80.0) / (111.75 - 100.0))
-    touch = resolve_geometry(replace(opp, invalidation_mode="TOUCH"), objects, close=99.0, tick=0.25, atr_1m=2.0)
+    touch = resolve_geometry(replace(opp, invalidation_mode="TOUCH"), objects, close=99.0, tick=0.25, atr_1m=2.0, floor_bars=0.0)
     assert touch.stop_price == 104.25 and touch.rule_ids[1] == "stop.pool.far_edge"
+    # with the floor (2026-09-21) the 1H thesis's noise is 2.0 × √60 = 15.49 from the 100 entry: farther than the buffer, so it wins
+    floored = resolve_geometry(opp, objects, close=99.0, tick=0.25, atr_1m=2.0)
+    assert floored.stop_price == 115.5 and floored.rule_ids[1] == "stop.floor.governing_bar"
     long_ = Opportunity("ACTIONABLE", "LONG", "SSL_5m_1", "FVG_15m_1", "BSL_15m_1", thesis_id="T1", governing_timeframe="15m", invalidation_mode="CLOSE_BEYOND")
     g = resolve_geometry(long_, {**objects, "SSL_5m_1": ObjectGeometry("SSL_5m_1", "ssl", "5m", 103.0, 103.0, 103.0)}, close=103.5, tick=0.25, atr_1m=1.0)
     assert g.stop_price == 96.0 and g.rule_ids[1] == "stop.zone.close_beyond"  # 100 − 1.0 × 1.0 × √15 = 96.127, floored away to 96.0
     with pytest.raises(GeometryError, match="atr"):
         resolve_geometry(opp, objects, close=99.0, tick=0.25, atr_1m=None)
     assert coherence_error(opp, objects, close=99.0, tick=0.25, atr_1m=None) is not None
+
+
+def test_the_stop_is_never_nearer_the_entry_than_one_governing_bar() -> None:
+    # 2026-09-21: a 15m thesis with a 5m swing stop 3.25 under a 102 entry; one 15m bar is 2.0 × √15 = 7.746 on this tape
+    assert STOP_FLOOR_GOVERNING_BARS == 1.0
+    long_ = Opportunity(OpportunityState.ACTIONABLE, TradeDirection.LONG, "FVG_5m_3", "SWING_L_5m_1", "BSL_1H_1", thesis_id="T1", governing_timeframe="15m")
+    g = resolve_geometry(long_, OBJ, close=103.0, tick=0.25, atr_1m=2.0)
+    assert g.stop_price == 94.25  # 102 − 7.746 = 94.254, floored to the tick away from the entry
+    assert g.rule_ids == ("entry.zone.near_edge", "stop.floor.governing_bar", "target.pool.midpoint")
+    assert g.reward_risk == pytest.approx(8.0 / 7.75)
+    # a stop the object already puts beyond the floor keeps its own rule
+    quiet = resolve_geometry(long_, OBJ, close=103.0, tick=0.25, atr_1m=0.5)  # floor 1.94 < 3.25
+    assert quiet.stop_price == 98.75 and quiet.rule_ids[1] == "stop.swing.price"
+    short = Opportunity(OpportunityState.ACTIONABLE, TradeDirection.SHORT, "OB_15m_1", "BSL_1H_1", "SSL_5m_2", thesis_id="T2", governing_timeframe="15m")
+    g = resolve_geometry(short, OBJ, close=103.0, tick=0.25, atr_1m=2.0)
+    assert g.stop_price == 111.75 and g.rule_ids[1] == "stop.floor.governing_bar"  # 104 + 7.746, ceiled away; the pool's 110.5 was nearer
+    assert g.reward_risk == pytest.approx(6.0 / 7.75)
+    # the floor is the thesis's: a 1H thesis on the same tape needs 2.0 × √60 = 15.49
+    g = resolve_geometry(replace(long_, governing_timeframe="1H"), OBJ, close=103.0, tick=0.25, atr_1m=2.0)
+    assert g.stop_price == 86.5
+
+
+def test_the_floor_needs_the_atr_and_an_opportunity_without_a_governing_scale_has_none() -> None:
+    long_ = Opportunity(OpportunityState.ACTIONABLE, TradeDirection.LONG, "FVG_5m_3", "SWING_L_5m_1", "BSL_1H_1", thesis_id="T1", governing_timeframe="15m")
+    with pytest.raises(GeometryError, match="atr"):
+        resolve_geometry(long_, OBJ, close=103.0, tick=0.25, atr_1m=None)
+    reason = coherence_error(long_, OBJ, close=103.0, tick=0.25, atr_1m=None)
+    assert reason is not None and "atr" in reason
+    legacy = Opportunity(OpportunityState.ACTIONABLE, TradeDirection.LONG, "FVG_5m_3", "SWING_L_5m_1", "BSL_1H_1")
+    assert resolve_geometry(legacy, OBJ, close=103.0, tick=0.25, atr_1m=None).stop_price == 98.75
+    assert resolve_geometry(legacy, OBJ, close=103.0, tick=0.25, atr_1m=2.0).stop_price == 98.75

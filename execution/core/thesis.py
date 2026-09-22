@@ -6,12 +6,14 @@ expression (a working entry or an open position) at a time; at most
 ``max_expressions`` orders in the episode; a stop-out or a reached target
 closes it for the episode (``stopped`` / ``achieved``), a flipped direction
 closes it (``direction_changed``), a flatten because the Brain's bias
-turned against the position closes it (``bias_reversed``, no cooldown),
+turned against the position closes it (``bias_reversed``, no cooldown), so
+does the flatten of an event sleep (``event_sleep``, 2026-09-21, no cooldown),
 and every stop-out — whatever the thesis — holds every new expression for
 ``stop_cooldown_bars`` 1m bars.  An expiry or a cancel leaves the thesis
 open (the entry was never reached); an expiry gives its expression back
 (2026-09-19), and so does a cancel that replaced the entry object or lost
-it to the Eye (2026-09-20); a dropped plan spends it.
+it to the Eye (2026-09-20) or withdrew it for a release window
+(``event_sleep``, 2026-09-21); a dropped plan spends it.
 The book resets with the episode; ``view`` is what the LLM reads in
 ``prior_state.execution``."""
 from __future__ import annotations
@@ -27,8 +29,9 @@ from risk.core.gate import ThesisConfig
 
 REFUSALS: tuple[str, ...] = ("direction_changed", "thesis_closed", "expressions_exhausted", "stop_cooldown", "thesis_engaged", "entry_marketable")
 # Cancel reasons that replace an expression rather than spend it (2026-09-20): the Brain moved the entry to
-# another object, or the Eye retired the object.  A dropped plan (``plan_dropped``) is the churn the cap counts.
-REPLACEMENT_REASONS: frozenset[str] = frozenset({"signature_changed", "entry_object_not_visible"})
+# another object, the Eye retired the object, or the Brain was put to sleep for a scheduled release (2026-09-21).
+# A dropped plan (``plan_dropped``) is the churn the cap counts.
+REPLACEMENT_REASONS: frozenset[str] = frozenset({"signature_changed", "entry_object_not_visible", "event_sleep"})
 
 
 @dataclass
@@ -120,8 +123,8 @@ class ThesisBook:
     def outcome(self, plan: TradePlan, kind: str, *, exit_role: str | None, bar_index: int, reason: str | None = None) -> None:
         """A terminal event of an expression: a stop (or the close-beyond
         ``invalidation`` exit) closes the thesis and starts the cooldown, a
-        target closes it as achieved, the bias-reversal flatten closes it
-        without a cooldown, anything else (expired, cancelled, rejected, the
+        target closes it as achieved, the bias-reversal and event-sleep
+        flattens close it without a cooldown, anything else (expired, cancelled, rejected, the
         halt's flatten) leaves it open.  An expiry gives its expression back
         (the entry was never reached), and so does a cancel whose ``reason``
         is a replacement (``REPLACEMENT_REASONS``); a dropped plan keeps it
@@ -138,8 +141,8 @@ class ThesisBook:
                 record.closed_reason = "stopped"
         elif exit_role == "target" and record is not None and record.closed_reason is None:
             record.closed_reason = "achieved"
-        elif exit_role == "bias_reversed" and record is not None and record.closed_reason is None:
-            record.closed_reason = "bias_reversed"
+        elif exit_role in ("bias_reversed", "event_sleep") and record is not None and record.closed_reason is None:
+            record.closed_reason = exit_role
 
     # ------------------------------------------------------------ the view
 

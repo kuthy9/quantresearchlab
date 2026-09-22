@@ -72,9 +72,9 @@ def test_relation_changes_count_only_on_the_configured_scales(tmp_path: Path) ->
     assert CFG.relation_change_timeframes == frozenset({"15m", "1H", "4H"})
     assert CFG.relation_change_debounce_bars == 15  # schema 4 (2026-09-18)
     payload = json.loads((ROOT / "brain" / "configs" / "sleep_controller.json").read_text(encoding="utf-8"))
-    payload["schema_version"] = 3
-    del payload["relation_change_debounce_bars"]
-    old = tmp_path / "v3.json"
+    payload["schema_version"] = 4
+    del payload["events"]
+    old = tmp_path / "v4.json"
     old.write_text(json.dumps(payload), encoding="utf-8")
     with pytest.raises(ValueError, match="schema_version"):
         ControllerConfig.from_json(old)
@@ -87,3 +87,43 @@ def test_phase_transitions_are_bookkeeping_not_reactions() -> None:
         for tf in (Timeframe.M5, Timeframe.M15, Timeframe.H1, Timeframe.H4):
             assert not CFG.is_update_event(ev(kind, tf)), (kind, tf)
             assert not CFG.is_wake_event(ev(kind, tf)), (kind, tf)
+
+
+def test_schema_5_carries_the_event_filter_and_the_calendar_enters_the_hash() -> None:
+    import hashlib
+
+    raw = (ROOT / "brain" / "configs" / "sleep_controller.json").read_bytes()
+    assert CFG.sha256 != hashlib.sha256(raw).hexdigest()  # the calendar bytes are part of the identity
+    kinds = {event.kind for event in CFG.events.events}
+    assert kinds == {"CPI", "NFP", "FOMC"}
+    cpi = CFG.events.active(pd.Timestamp("2022-10-13T12:31:00Z"))
+    assert cpi is not None and cpi.kind == "CPI" and cpi.start == pd.Timestamp("2022-10-13T11:30:00Z") and cpi.end == pd.Timestamp("2022-10-13T13:00:00Z")
+    fomc = CFG.events.active(pd.Timestamp("2022-07-27T17:00:00Z"))
+    assert fomc is not None and fomc.kind == "FOMC" and fomc.end == pd.Timestamp("2022-07-27T19:30:00Z")
+    nfp = CFG.events.active(pd.Timestamp("2022-01-07T12:45:00Z"))
+    assert nfp is not None and nfp.kind == "NFP"
+    assert CFG.events.active(pd.Timestamp("2022-01-03T14:30:00Z")) is None  # the frozen window has no release
+
+
+def test_inside_an_event_window_the_brain_stays_or_goes_to_sleep_and_wakes_when_it_ends() -> None:
+    inside = pd.Timestamp("2022-10-13T12:31:00Z")  # 08:31 New York, one minute after the CPI print
+    wake = [ev(EventKind.DISPLACEMENT_OBSERVED, Timeframe.M15)]
+    asleep = decide(wake, active=False, config=CFG, known_at=inside, previous_known_at=inside - pd.Timedelta(minutes=1))
+    assert asleep.decision is Decision.STAY_ASLEEP and asleep.reasons == ("event:CPI:2022-10-13T12:30:00Z",)
+    active = decide(wake, active=True, config=CFG, known_at=inside, previous_known_at=inside - pd.Timedelta(minutes=1))
+    assert active.decision is Decision.EVENT_SLEEP and active.reasons == ("event:CPI:2022-10-13T12:30:00Z",)
+    # the window's first bar puts an active episode to sleep even without an Eye event
+    first = pd.Timestamp("2022-10-13T11:30:00Z")
+    assert decide([], active=True, config=CFG, known_at=first, previous_known_at=first - pd.Timedelta(minutes=1)).decision is Decision.EVENT_SLEEP
+    # the first bar at the window's end wakes the Brain, Eye event or not
+    end = pd.Timestamp("2022-10-13T13:00:00Z")
+    woken = decide([], active=False, config=CFG, known_at=end, previous_known_at=end - pd.Timedelta(minutes=1))
+    assert woken.decision is Decision.WAKE and woken.reasons == ("event_ended:CPI:2022-10-13T12:30:00Z",)
+    later = decide([], active=False, config=CFG, known_at=end + pd.Timedelta(minutes=1), previous_known_at=end)
+    assert later.decision is Decision.STAY_ASLEEP
+    # outside any window the calendar changes nothing, and callers without a clock get the old rule
+    outside = pd.Timestamp("2022-10-13T15:00:00Z")
+    assert decide(wake, active=False, config=CFG, known_at=outside, previous_known_at=outside - pd.Timedelta(minutes=1)).decision is Decision.WAKE
+    assert decide(wake, active=True, config=CFG, known_at=outside, previous_known_at=outside - pd.Timedelta(minutes=1)).decision is Decision.UPDATE
+    assert decide(wake, active=False, config=CFG).decision is Decision.WAKE
+    assert decide(wake, active=True, config=CFG, known_at=inside).decision is Decision.EVENT_SLEEP  # no previous bar needed to sleep

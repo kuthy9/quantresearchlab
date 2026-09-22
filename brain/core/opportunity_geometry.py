@@ -25,6 +25,12 @@ TIMEFRAME_MINUTES: Mapping[str, int] = {"4H": 240, "1H": 60, "15m": 15, "5m": 5,
 # How many scaled 1m ATRs beyond the object's far edge the hard stop of a
 # CLOSE_BEYOND invalidation sits; a keyword argument of ``resolve_geometry``.
 CLOSE_BEYOND_BUFFER_ATR = 1.0
+# The stop floor (2026-09-21): the hard stop is never nearer the entry than
+# this many bars of the thesis's governing scale — one bar's range being
+# ``atr_1m × √minutes`` as above.  Forty-four benchmark fills had a median
+# stop of 1.5 one-minute ATRs on 15m theses whose one bar spans 3.9; 70 %
+# went 1R against within the hour, 17 of them before a 2R run.
+STOP_FLOOR_GOVERNING_BARS = 1.0
 
 
 @dataclass(frozen=True)
@@ -120,6 +126,25 @@ def _stop(
     return _round_away(price, tick, direction), f"stop.{family}.close_beyond"
 
 
+def _floor_stop(
+    entry: float, stop: float, rule: str, direction: TradeDirection, *, governing: str | None, atr_1m: float | None, tick: float, floor_bars: float
+) -> tuple[float, str]:
+    """The stop, no nearer the entry than ``floor_bars`` bars of the
+    governing scale; the object's own rule when it already lies beyond."""
+    if governing is None or floor_bars <= 0.0:
+        return stop, rule
+    if atr_1m is None or atr_1m <= 0.0:
+        raise GeometryError("a stop floor needs a positive 1m atr")
+    minutes = TIMEFRAME_MINUTES.get(governing)
+    if minutes is None:
+        raise GeometryError(f"governing scale {governing!r} has no known bar length for the stop floor")
+    floor = floor_bars * atr_1m * math.sqrt(minutes)
+    if abs(entry - stop) >= floor:
+        return stop, rule
+    price = entry - floor if direction is TradeDirection.LONG else entry + floor
+    return _round_away(price, tick, direction), "stop.floor.governing_bar"
+
+
 def _target(obj: ObjectGeometry, direction: TradeDirection) -> tuple[float, str]:
     family = _family(obj.kind)
     if family in ("zone", "range"):
@@ -137,9 +162,13 @@ def resolve_geometry(
     tick: float,
     atr_1m: float | None = None,
     buffer_atr: float = CLOSE_BEYOND_BUFFER_ATR,
+    floor_bars: float = STOP_FLOOR_GOVERNING_BARS,
 ) -> OpportunityGeometry:
     """Resolve an opportunity to prices; ``GeometryError`` when it cannot be.
-    A ``CLOSE_BEYOND`` invalidation needs ``atr_1m`` for its buffer."""
+    A ``CLOSE_BEYOND`` invalidation needs ``atr_1m`` for its buffer, and so
+    does the stop floor of any opportunity with a ``governing_timeframe``
+    (2026-09-21): the stop sits at the object's rule or ``floor_bars``
+    governing bars from the entry, whichever is farther."""
 
     if opportunity.state is OpportunityState.NONE:
         raise GeometryError("opportunity state is NONE")
@@ -161,6 +190,9 @@ def resolve_geometry(
     entry, entry_rule = _entry(resolved["entry"], direction, close)
     stop, stop_rule = _stop(
         resolved["invalidation"], direction, tick, mode=opportunity.invalidation_mode, atr_1m=atr_1m, buffer_atr=buffer_atr
+    )
+    stop, stop_rule = _floor_stop(
+        entry, stop, stop_rule, direction, governing=opportunity.governing_timeframe, atr_1m=atr_1m, tick=tick, floor_bars=floor_bars
     )
     target, target_rule = _target(resolved["target"], direction)
     if direction is TradeDirection.LONG and not stop < entry < target:
@@ -206,6 +238,7 @@ def coherence_error(
 
 __all__ = [
     "CLOSE_BEYOND_BUFFER_ATR",
+    "STOP_FLOOR_GOVERNING_BARS",
     "TIMEFRAME_MINUTES",
     "ObjectGeometry",
     "POOL_KINDS",

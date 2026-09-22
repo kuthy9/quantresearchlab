@@ -1,5 +1,5 @@
 {
-  "schema_version": 4,
+  "schema_version": 5,
   "bookkeeping_kinds": [
     "swing_confirmed",
     "structural_leg_created",
@@ -65,5 +65,28 @@
       "market_epoch_reset"
     ],
     "state_republication_suffix": "_state"
+  },
+  "events": {
+    "calendar": "brain/configs/economic_calendar.ics",
+    "rules": [
+      {
+        "kind": "CPI",
+        "summary_pattern": "Consumer Price Index",
+        "sleep_before_minutes": 60,
+        "sleep_after_minutes": 30
+      },
+      {
+        "kind": "NFP",
+        "summary_pattern": "Employment Situation",
+        "sleep_before_minutes": 60,
+        "sleep_after_minutes": 30
+      },
+      {
+        "kind": "FOMC",
+        "summary_pattern": "FOMC Statement",
+        "sleep_before_minutes": 60,
+        "sleep_after_minutes": 90
+      }
+    ]
   }
 }

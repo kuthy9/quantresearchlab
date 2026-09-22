@@ -305,3 +305,10 @@ def test_every_pool_is_placed_whatever_its_distance_and_zones_stay_near(context)
     assert far_pools and far_zones, "the synthetic tape should have pools and zones beyond a quarter ATR"
     assert all(a in rows for a in far_pools)
     assert not any(a in rows for a in far_zones)
+
+
+def test_the_prompt_names_the_stop_floor_and_the_governing_scale_target() -> None:
+    # 2026-09-21: the stop never sits nearer the entry than one bar of the governing scale, so the target is named on that scale
+    text = CONFIG.system_prompt
+    for word in ("never nearer the entry than one bar", "governing scale", "two governing bars", "stop.floor.governing_bar"):
+        assert word in text, word

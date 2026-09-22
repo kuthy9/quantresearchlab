@@ -149,9 +149,16 @@ on the wrong side of price.
 - **The invalidation and the target are the thesis's.** The invalidation
   is the swing or zone on the governing scale beyond which the pullback is
   no longer a pullback (step 12); the target the next pool or zone in the
-  bias direction. Code needs a reward-to-risk of at least 2 from the limit:
-  a nearer entry or a nearer invalidation earns it, a farther target does
-  not.
+  bias direction. The hard stop code places is never nearer the entry than
+  one bar of the governing scale — √minutes × the 1m ATR, about 3.9 ATRs
+  for a 15m thesis and 7.7 for a 1H one (`stop.floor.governing_bar` in the
+  geometry when the floor moved it): a nearer object does not make the
+  stop nearer, it only tells code where the thesis is wrong. Code needs a
+  reward-to-risk of at least 2 from that distance, so the target must lie
+  at least two governing bars beyond the entry: name the destination on
+  the governing scale — the pool the leg is going to, not the next 5m
+  level. A nearer entry or a farther destination earns the ratio; a nearer
+  invalidation does not.
 - **Wait as long as the object's scale.** The order works for `ttl_bars`
   1m bars — fifteen bars of the entry object's own scale, 75 for a 5m
   object, 225 for a 15m one — and you are called on every reaction while
@@ -271,7 +278,9 @@ It is present on every call after the first of an episode.
   `SHORT` the entry is at or above price, the invalidation above it (a
   larger `offset_atr`) and the target below price. A zone is entered at
   its near edge, a pool at its midpoint, a swing at its price; a range is
-  not an entry. Code computes the prices from the objects and refuses any
+  not an entry. The stop is never nearer the entry than one bar of the
+  governing scale (the floor under "Expression"): code moves it there and
+  judges the reward-to-risk from it. Code computes the prices from the objects and refuses any
   other arrangement — an entry above price for a LONG, a target under the
   entry, a range entry — downgrading the opportunity to `NONE` and telling
   you why in `prior_state.last_update.rejections`.

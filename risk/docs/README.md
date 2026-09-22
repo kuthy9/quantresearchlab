@@ -47,6 +47,16 @@ margin)`, `limit_price`, `stop_price` and `target_price` rounded to the tick,
 `risk_amount = quantity × |entry − stop| × point_value`, `reward_risk`,
 `equity`.
 
+Since 2026-09-21 the `|entry − stop|` the gate sizes on is the geometry's
+*floored* distance: `brain/core/opportunity_geometry` never puts the hard
+stop nearer the entry than one bar of the thesis's governing scale
+(`STOP_FLOOR_GOVERNING_BARS` × 1m ATR × √minutes — about 3.9 ATRs for a
+15m thesis, 7.7 for a 1H one), so the budget buys fewer contracts as
+volatility grows and a 1H thesis on a CPI-day tape can buy none at 1.5 % of
+100 000 with NQ's 20 USD point (`POSITION_SIZE`). No value in
+`risk.json` changed; the forty-four benchmark fills that motivated it are
+in [brain/docs/specs/2026-09-21-stop-floor-event-sleep-design.md](../../brain/docs/specs/2026-09-21-stop-floor-event-sleep-design.md).
+
 ## `risk/configs/risk.json` (schema 3)
 
 | field | default | meaning |

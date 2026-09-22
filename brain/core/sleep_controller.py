@@ -5,8 +5,13 @@ events alone — is there something worth the Main Brain's reasoning?  Asleep,
 it wakes on the configured reaction kinds; awake, it asks for an update when
 new evidence arrived or a watched object on one of ``relation_change_timeframes``
 changed its side of price (since 2026-09-17: a 5m pool crossing price is
-no longer a reason to reason), and ticks otherwise.  It carries no weights, no direction and no price threshold, and
-the decision to go back to sleep is the reducer's, not its own."""
+no longer a reason to reason), and ticks otherwise.  Since 2026-09-21 it
+also reads the clock against the event calendar: inside a scheduled
+release's window (CPI, NFP, FOMC statement — ``events`` in the config) an
+asleep Brain stays asleep and an active one is put to sleep
+(``EVENT_SLEEP``), and the first bar after the window wakes it whatever the
+Eye says.  It carries no weights, no direction and no price threshold, and
+the decision to go back to sleep is otherwise the reducer's, not its own."""
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
@@ -16,11 +21,14 @@ import hashlib
 import json
 from pathlib import Path
 
+import pandas as pd
+
+from brain.core.event_calendar import EventFilter
 from brain.core.eye_view import EvidenceRule, evidence_id
 from contract.eye import MarketEvent
 from contract.market.primitives import FrozenDict
 
-SLEEP_CONTROLLER_SCHEMA_VERSION = 4  # 4 (2026-09-18): relation_change_debounce_bars
+SLEEP_CONTROLLER_SCHEMA_VERSION = 5  # 5 (2026-09-21): events (the calendar and its sleep windows)
 
 
 class Decision(str, Enum):
@@ -28,6 +36,8 @@ class Decision(str, Enum):
     STAY_ASLEEP = "STAY_ASLEEP"
     UPDATE = "UPDATE"
     TICK = "TICK"
+    # An active episode put to sleep by a scheduled release's window (2026-09-21).
+    EVENT_SLEEP = "EVENT_SLEEP"
 
 
 @dataclass(frozen=True)
@@ -49,17 +59,26 @@ class ControllerConfig:
     # Consecutive accepted updates with no opportunity and an unchanged
     # understanding after which the episode is archived; None disables it.
     idle_archive_after_updates: int | None
+    # The scheduled releases and their sleep windows (schema 5).
+    events: EventFilter
+    # Over the config bytes and the calendar bytes: a run's identity changes
+    # with either.
     sha256: str
 
     @classmethod
-    def from_json(cls, path: Path) -> "ControllerConfig":
-        raw_bytes = Path(path).read_bytes()
+    def from_json(cls, path: Path, *, root: Path | None = None) -> "ControllerConfig":
+        """``root`` resolves the calendar path; by default the repository
+        root two levels above the config's directory."""
+        path = Path(path)
+        raw_bytes = path.read_bytes()
         payload = json.loads(raw_bytes.decode("utf-8"))
         if payload.get("schema_version") != SLEEP_CONTROLLER_SCHEMA_VERSION:
             raise ValueError("unsupported sleep_controller schema_version")
         wake = payload["wake"]
         evidence = payload["evidence"]
         idle = payload["idle_archive_after_updates"]
+        base = Path(root) if root is not None else path.resolve().parents[2]
+        events = EventFilter.from_config(payload["events"], root=base)
         return cls(
             wake_timeframes_any_reaction=frozenset(wake["timeframes_any_reaction"]),
             bookkeeping_kinds=frozenset(payload["bookkeeping_kinds"]),
@@ -77,7 +96,8 @@ class ControllerConfig:
             tape_reaction_kinds=frozenset(evidence["tape_reaction_kinds"]),
             tape_recent_limit=int(evidence["tape_recent_limit"]),
             idle_archive_after_updates=None if idle is None else int(idle),
-            sha256=hashlib.sha256(raw_bytes).hexdigest(),
+            events=events,
+            sha256=hashlib.sha256(raw_bytes + events.sha256.encode("ascii")).hexdigest(),
         )
 
     def is_wake_event(self, event: MarketEvent) -> bool:
@@ -113,7 +133,20 @@ def decide(
     active: bool,
     config: ControllerConfig,
     relation_changes: Sequence[str] = (),
+    known_at: pd.Timestamp | None = None,
+    previous_known_at: pd.Timestamp | None = None,
 ) -> ControllerDecision:
+    """``known_at`` is this bar's clock and ``previous_known_at`` the last
+    bar's; without a clock the calendar is not consulted."""
+    if known_at is not None:
+        window = config.events.active(known_at)
+        if window is not None:
+            reason = f"event:{config.events.reason(window)}"
+            return ControllerDecision(Decision.EVENT_SLEEP if active else Decision.STAY_ASLEEP, (reason,))
+        if not active:
+            ended = config.events.ended_between(previous_known_at, known_at)
+            if ended is not None:
+                return ControllerDecision(Decision.WAKE, (f"event_ended:{config.events.reason(ended)}",))
     if not active:
         reasons = tuple(evidence_id(event) for event in events if config.is_wake_event(event))
         if reasons:
