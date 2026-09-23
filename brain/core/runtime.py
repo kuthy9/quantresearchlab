@@ -339,6 +339,7 @@ class BrainRuntime:
             step = self._brain.step(
                 episode_id=episode_id, context=context, trigger_kind="WAKE", reasons=decision.reasons,
                 tape=self._tape.payload(), prior=None, registry=registry, tick=self._tick,
+                carried_bias=None if self._last_archived is None else self._last_archived.bias,
             )
             with timed(self._timings, "journal"):
                 self._journal_llm(episode_id, context, step)

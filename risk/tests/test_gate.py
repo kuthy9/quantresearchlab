@@ -43,10 +43,11 @@ def positions(count: int, direction=TradeDirection.SHORT) -> tuple[PositionRecor
     return tuple(PositionRecord(f"p{i}", direction, T, "FVG_5m_1", thesis_id=f"T{i}") for i in range(count))
 
 
-def test_config_loads_the_v2_defaults_and_hashes() -> None:
-    assert CONFIG.risk_fraction == {"BASE": 0.015, "A_PLUS": 0.02} and CONFIG.max_open_positions == 3
+def test_config_loads_the_v4_budget_and_hashes() -> None:
+    # 2026-09-22: BASE is the 75th-percentile floored stop (117 points, 2 332 USD) over the sim account, to the half percent
+    assert CONFIG.risk_fraction == {"BASE": 0.025, "A_PLUS": 0.03} and CONFIG.max_open_positions == 2
     assert CONFIG.min_reward_risk == 2.0 and CONFIG.preferred_reward_risk == 3.0
-    assert CONFIG.daily_loss_fraction == 0.025 and CONFIG.max_drawdown_fraction == 0.065 and CONFIG.max_leverage == 8.0
+    assert CONFIG.daily_loss_fraction == 0.05 and CONFIG.max_drawdown_fraction == 0.10 and CONFIG.max_leverage == 8.0
     assert CONFIG.max_quantity == 5 and CONFIG.order_ttl_bars == 15 and CONFIG.account_max_age_s == 120 and CONFIG.margin_per_contract == 20_000.0
     assert CONFIG.thesis.max_expressions == 2 and CONFIG.thesis.stop_cooldown_bars == 30
     assert CONFIG.contract.symbol == "NQ" and CONFIG.contract.point_value == 20.0 and CONFIG.contract.tick_size == 0.25
@@ -64,26 +65,27 @@ def test_v1_config_is_refused(tmp_path: Path) -> None:
         RiskConfig.from_json(old)
 
 
-def test_base_grade_risks_one_and_a_half_percent() -> None:
+def test_base_grade_risks_two_and_a_half_percent() -> None:
     gate = RiskGate(CONFIG)
-    # 24 points × 20 USD = 480 USD a contract; 1.5 % of 100 000 = 1 500 → 3, and the leverage cap (800 000 / 327 750) → 2
+    # 24 points × 20 USD = 480 USD a contract; 2.5 % of 100 000 = 2 500 → 5, and the leverage cap (800 000 / 327 750) → 2
     verdict = gate.assess(plan(), account(100_000.0), asof=T)
     assert verdict.passed and verdict.quantity == 2 and verdict.risk_amount == 960.0
-    assert verdict.grade_applied == "BASE" and verdict.risk_fraction == 0.015
+    assert verdict.grade_applied == "BASE" and verdict.risk_fraction == 0.025
     assert (verdict.limit_price, verdict.stop_price, verdict.target_price) == (16387.5, 16411.5, 16330.0)
     assert verdict.reward_risk == pytest.approx(57.5 / 24) and verdict.equity == 100_000.0
-    # a 50-point stop (1 000 USD a contract): 1 500 → 1 contract
-    assert gate.assess(plan(stop=16437.5, target=16287.5), account(100_000.0), asof=T).quantity == 1
-    # the cap: 10 M of equity and a 50-point stop would buy 150; max_quantity 5
+    # a 120-point stop (2 400 USD a contract): 2 500 → 1 contract
+    assert gate.assess(plan(stop=16507.5, target=16147.5), account(100_000.0), asof=T).quantity == 1
+    # the cap: 10 M of equity and a 50-point stop would buy 250; max_quantity 5
     assert gate.assess(plan(stop=16437.5, target=16287.5), account(10_000_000.0), asof=T).quantity == CONFIG.max_quantity
 
 
-def test_a_plus_sizes_two_percent_only_at_the_preferred_ratio() -> None:
+def test_a_plus_sizes_three_percent_only_at_the_preferred_ratio() -> None:
     gate = RiskGate(CONFIG)
-    demoted = gate.assess(plan(stop=16437.5, target=16287.5, grade="A_PLUS"), account(), asof=T)  # 2 R < preferred 3
-    assert demoted.passed and demoted.grade_applied == "BASE" and demoted.risk_fraction == 0.015 and demoted.quantity == 1
-    a_plus = gate.assess(plan(stop=16437.5, target=16237.5, grade="A_PLUS"), account(), asof=T)  # 3 R
-    assert a_plus.passed and a_plus.grade_applied == "A_PLUS" and a_plus.risk_fraction == 0.02 and a_plus.quantity == 2  # 2 000 / 1 000
+    # a 100-point stop (2 000 USD a contract) on 200 000: BASE 5 000 → 2, A_PLUS 6 000 → 3; the leverage cap is 4
+    demoted = gate.assess(plan(stop=16487.5, target=16187.5, grade="A_PLUS"), account(200_000.0), asof=T)  # 2 R < preferred 3
+    assert demoted.passed and demoted.grade_applied == "BASE" and demoted.risk_fraction == 0.025 and demoted.quantity == 2
+    a_plus = gate.assess(plan(stop=16487.5, target=16087.5, grade="A_PLUS"), account(200_000.0), asof=T)  # 3 R
+    assert a_plus.passed and a_plus.grade_applied == "A_PLUS" and a_plus.risk_fraction == 0.03 and a_plus.quantity == 3
 
 
 def test_reward_risk_below_two_is_vetoed() -> None:
@@ -99,7 +101,7 @@ def test_leverage_caps_the_contracts_by_notional() -> None:
 
 
 def test_position_size_reason_says_the_contract_is_too_large_for_this_stop() -> None:
-    verdict = RiskGate(CONFIG).assess(plan(stop=16487.5, target=16187.5), account(), asof=T)  # 100 points = 2 000 > 1 500
+    verdict = RiskGate(CONFIG).assess(plan(stop=16517.5, target=16127.5), account(), asof=T)  # 130 points = 2 600 > 2 500
     assert verdict.vetoes == (VetoCode.POSITION_SIZE,) and "too large for this stop" in verdict.reasons[0]
     assert "nearer" not in verdict.reasons[0]
 
@@ -147,8 +149,8 @@ def test_each_veto(case, veto) -> None:
 
 def test_exposure_counts_the_machines_positions_and_refuses_the_opposite_direction() -> None:
     gate = RiskGate(CONFIG)
-    assert gate.assess(plan(), account(), asof=T, positions=positions(3)).vetoes == (VetoCode.EXPOSURE,)
-    assert gate.assess(plan(), account(), asof=T, positions=positions(2)).passed
+    assert gate.assess(plan(), account(), asof=T, positions=positions(2)).vetoes == (VetoCode.EXPOSURE,)
+    assert gate.assess(plan(), account(), asof=T, positions=positions(1)).passed
     opposite = gate.assess(plan(TradeDirection.LONG), account(), asof=T, positions=positions(1))
     assert opposite.vetoes == (VetoCode.EXPOSURE,) and "opposite" in opposite.reasons[0]
     # the account's net position is only counted as foreign when none of the positions is ours
@@ -183,25 +185,25 @@ def test_daily_stop_latches_for_the_session_date_and_resets_at_the_next() -> Non
     assert gate.session_date(monday_open).isoformat() == "2022-01-03"
     gate.observe(account(100_000.0, asof=monday_open), monday_open)
     later = monday_open + pd.Timedelta(hours=12)
-    gate.observe(account(97_400.0, asof=later), later)
+    gate.observe(account(94_900.0, asof=later), later)  # 5.1 % below the session's open
     assert gate.daily_stopped(later)
-    assert gate.assess(plan(), account(97_400.0, asof=later), asof=later).vetoes == (VetoCode.DAILY_STOP,)
+    assert gate.assess(plan(), account(94_900.0, asof=later), asof=later).vetoes == (VetoCode.DAILY_STOP,)
     recovered = later + pd.Timedelta(hours=1)
     gate.observe(account(99_000.0, asof=recovered), recovered)
     assert gate.daily_stopped(recovered), "the daily stop holds for the rest of the session even if equity recovers"
     tuesday = pd.Timestamp("2022-01-03T23:30:00Z")
-    gate.observe(account(97_400.0, asof=tuesday), tuesday)
-    assert not gate.daily_stopped(tuesday) and gate.assess(plan(), account(97_400.0, asof=tuesday), asof=tuesday).passed
+    gate.observe(account(94_900.0, asof=tuesday), tuesday)
+    assert not gate.daily_stopped(tuesday) and gate.assess(plan(), account(94_900.0, asof=tuesday), asof=tuesday).passed
 
 
 def test_drawdown_from_the_peak_halts_and_stays_halted() -> None:
     gate = RiskGate(CONFIG)
-    for i, equity in enumerate((100_000.0, 104_000.0, 98_000.0, 97_240.0, 120_000.0)):
+    for i, equity in enumerate((100_000.0, 104_000.0, 95_000.0, 93_600.0, 120_000.0)):
         at = T + pd.Timedelta(minutes=i)
         gate.observe(account(equity, asof=at), at)
-        if equity == 98_000.0:
-            assert not gate.halted  # 5.8 % below the 104 000 peak
-    assert gate.halted and gate.halt_record == {"at": "2022-01-03T14:15:00Z", "equity": 97_240.0, "peak": 104_000.0, "drawdown": 0.065}
+        if equity == 95_000.0:
+            assert not gate.halted  # 8.7 % below the 104 000 peak
+    assert gate.halted and gate.halt_record == {"at": "2022-01-03T14:15:00Z", "equity": 93_600.0, "peak": 104_000.0, "drawdown": 0.1}
     at = T + pd.Timedelta(minutes=5)
     assert gate.assess(plan(), account(120_000.0, asof=at), asof=at).vetoes == (VetoCode.HALTED,)
 
@@ -217,8 +219,42 @@ def test_leverage_counts_the_contracts_already_open() -> None:
     assert gate.assess(tight, one_held, asof=T, positions=positions(1)).quantity == 1
 
 
-def test_the_config_is_schema_3_and_the_ttl_is_fifteen_bars_of_the_entry_scale() -> None:
+def test_the_config_is_schema_4_and_the_ttl_is_fifteen_bars_of_the_entry_scale() -> None:
     from risk.core.gate import RISK_SCHEMA_VERSION
 
-    assert RISK_SCHEMA_VERSION == 3
+    assert RISK_SCHEMA_VERSION == 4
     assert RiskConfig.from_json(Path(__file__).resolve().parents[2] / "risk" / "configs" / "risk.json").order_ttl_bars == 15
+
+
+def _policy(tmp_path: Path, **over) -> Path:
+    import json
+
+    payload = json.loads((ROOT / "risk" / "configs" / "risk.json").read_text(encoding="utf-8"))
+    payload.update(over)
+    path = tmp_path / "risk.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    return path
+
+
+def test_the_policy_checks_bind_the_three_limits(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="risk policy"):
+        RiskConfig.from_json(_policy(tmp_path, max_open_positions=3))  # 3 × 0.025 > 0.05
+    with pytest.raises(ValueError, match="risk policy"):
+        RiskConfig.from_json(_policy(tmp_path, max_drawdown_fraction=0.09))  # 2 × 0.05 > 0.09
+    assert RiskConfig.from_json(_policy(tmp_path)).max_open_positions == 2
+
+
+def test_open_risk_is_held_to_the_sessions_remaining_budget() -> None:
+    gate = RiskGate(CONFIG)
+    gate.observe(account(100_000.0), T)  # the session opens at 100 000: a 5 000 budget
+    verdict = gate.assess(plan(), account(100_000.0), asof=T, positions=positions(1), open_risk=2_500.0)
+    assert verdict.passed and verdict.risk_amount == 960.0  # 2 500 + 960 ≤ 5 000
+    verdict = gate.assess(plan(), account(100_000.0), asof=T, positions=positions(1), open_risk=4_100.0)
+    assert not verdict.passed and verdict.vetoes == (VetoCode.ACCOUNT_RISK,)
+    assert verdict.reasons[0] == "open risk 4100.00 + 960.00 exceeds the session's remaining loss budget 5000.00"
+    later = T + pd.Timedelta(minutes=5)
+    gate.observe(account(98_000.0, asof=later), later)  # 2 000 lost: 3 000 left
+    assert gate.session_budget_left(98_000.0) == 3_000.0
+    verdict = gate.assess(plan(), account(98_000.0, asof=later), asof=later, open_risk=2_100.0)
+    assert not verdict.passed and verdict.vetoes == (VetoCode.ACCOUNT_RISK,)
+    assert gate.assess(plan(), account(98_000.0, asof=later), asof=later, open_risk=2_000.0).passed

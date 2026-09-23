@@ -6,6 +6,11 @@ import pandas as pd
 import pytest
 
 from contract.brain.state import (
+    BIAS_DECAY_EVENTS,
+    BIAS_DECAY_SCALES,
+    REVERSAL_EVIDENCE_KINDS,
+    STRUCTURAL_EVIDENCE_KINDS,
+    THESIS_SCALE_OF_BIAS,
     ActiveExpectation,
     Bias,
     BiasDirection,
@@ -132,7 +137,7 @@ def test_from_dict_rejects_unknown_keys_and_other_schemas() -> None:
     with pytest.raises(ValueError, match="unknown"):
         BrainState.from_dict(payload)
     payload = make_state().to_dict()
-    payload["schema_version"] = 3
+    payload["schema_version"] = 4
     with pytest.raises(ValueError, match="schema"):
         BrainState.from_dict(payload)
 
@@ -162,12 +167,34 @@ def test_opportunity_refuses_bad_thesis_fields(bad) -> None:
 def test_bias_round_trips_and_a_schema_1_state_reads_as_neutral() -> None:
     state = make_state(bias=Bias(BiasDirection.LONG, "15m", "15m active leg long past one ATR after the MSS"))
     again = BrainState.from_json(state.to_json())
-    assert again.bias == state.bias and again.schema_version == 2
+    assert again.bias == state.bias and again.schema_version == 3
     payload = json.loads(state.to_json())
     del payload["bias"]
     payload["schema_version"] = 1
     old = BrainState.from_dict(payload)
-    assert old.bias == Bias() and old.schema_version == 2
+    assert old.bias == Bias() and old.schema_version == 3
+
+
+def test_bias_since_and_decayed_round_trip_and_a_schema_2_state_reads_them_unset() -> None:
+    bias = Bias(BiasDirection.SHORT, "4H", "4H leg short", since=T1, decayed=None)
+    state = make_state(bias=bias)
+    again = BrainState.from_json(state.to_json())
+    assert again.bias == bias and again.bias.pair == "SHORT@4H" and again.schema_version == 3
+    decayed = Bias(BiasDirection.NEUTRAL, "4H", "code: 2 events", since=T1, decayed="SHORT@4H", decayed_at=T1)
+    assert Bias.from_dict(decayed.to_dict()) == decayed and decayed.to_dict()["since"] == "2022-01-04T14:41:00Z" and decayed.to_dict()["decayed_at"] == "2022-01-04T14:41:00Z"
+    assert Bias().to_dict() == {"direction": "NEUTRAL", "scale": "15m", "basis": "", "since": None, "decayed": None, "decayed_at": None}
+    payload = state.to_dict()
+    payload["schema_version"] = 2
+    payload["bias"] = {"direction": "LONG", "scale": "15m", "basis": "old"}
+    old = BrainState.from_dict(payload)
+    assert old.bias == Bias(BiasDirection.LONG, "15m", "old") and old.bias.since is None and old.bias.decayed is None and old.bias.decayed_at is None
+
+
+def test_the_thesis_scale_and_the_decay_scales_of_each_bias_scale() -> None:
+    assert THESIS_SCALE_OF_BIAS == {"4H": "1H", "1H": "15m", "15m": "15m"}
+    assert BIAS_DECAY_SCALES == {"4H": ("4H", "1H", "15m"), "1H": ("1H", "15m"), "15m": ("15m", "5m")} and BIAS_DECAY_EVENTS == 2
+    assert STRUCTURAL_EVIDENCE_KINDS == {"mss_core_confirmed", "qualified_bos", "displacement_observed"}
+    assert REVERSAL_EVIDENCE_KINDS == {"mss_core_confirmed", "qualified_bos"}
 
 
 @pytest.mark.parametrize("bad", [dict(scale="1m"), dict(scale="5m"), dict(scale="4h"), dict(direction="UP")])

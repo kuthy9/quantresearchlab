@@ -284,3 +284,39 @@ def test_an_event_window_archives_the_episode_flat_and_wakes_it_fresh_when_the_w
     for ep in reader.episode_ids():
         reader.verify_chain(ep, run_id="event")
     assert CONTROLLER.events.active(start) is None, "the repository calendar has no release on the synthetic tape's dates"
+
+
+class LongBiasSleeper(EchoClient):
+    """Asserts LONG on the 15m on every call and asks to sleep from the third call of an episode on."""
+
+    def complete(self, *, system: str, user: str):
+        reply = super().complete(system=system, user=user)
+        payload = json.loads(reply.content)
+        payload["bias"] = {"direction": "LONG", "scale": "15m", "basis": "scripted"}
+        return LLMReply(json.dumps(payload), None, {}, 1, "long-bias-sleeper")
+
+
+def test_a_wake_carries_the_archived_bias_and_its_decay_memory(observations, tmp_path: Path) -> None:
+    """2026-09-22: the bias memory (since, decayed) survives the archive: the next episode's first state
+    continues it — the same pair keeps its since, a decayed pair re-asserted without structure is refused."""
+    journal = BrainJournal(tmp_path, run_id="test")
+    run(observations, LongBiasSleeper(sleep_after=3), journal=journal)
+    reader = JournalReader(tmp_path)
+    episodes = reader.episode_ids()
+    assert len(episodes) >= 2, "the synthetic tape should wake more than one episode"
+    firsts, lasts, refused, decayed = [], [], 0, 0
+    for ep in episodes:
+        states = [r.payload for r in reader.records(ep) if r.record == "state"]
+        firsts.append(states[0]); lasts.append(states[-1])
+        for s in states:
+            refused += sum(1 for x in s.get("rejections", ()) if str(x).startswith("bias_reassert_refused"))
+            decayed += sum(1 for x in s.get("rejections", ()) if str(x).startswith("bias_decayed"))
+    for previous, first in zip(lasts, firsts[1:]):
+        decayed_at_wake = any(str(x).startswith("bias_decayed") for x in first.get("rejections", ()))
+        if decayed_at_wake:
+            # the carried LONG@15m decayed on the wake's own evidence: the memory starts there
+            assert first["state"]["bias"]["direction"] == "NEUTRAL" and first["state"]["bias"]["decayed"] == "LONG@15m"
+            continue
+        assert first["state"]["bias"]["since"] == previous["state"]["bias"]["since"], "the wake continues the archived bias"
+        assert first["state"]["bias"]["decayed"] == previous["state"]["bias"]["decayed"]
+    assert decayed == 0 or refused >= 1, "a decayed LONG@15m re-asserted on the next wake must be refused"

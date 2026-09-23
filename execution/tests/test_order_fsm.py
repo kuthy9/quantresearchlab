@@ -262,8 +262,8 @@ def test_veto_memory_is_per_episode_and_cleared_by_a_submission(tmp_path: Path) 
     assert m2.ledger.execution_view()["last_veto"] is None
     m3, broker3, journal3 = machine(tmp_path / "c", equity=5_000.0)
     assert quiet_bars(m3, short_plan(), 1, 1) == ("veto",)
-    broker3.account.cash = 100_000.0  # the account grows: the same plan now passes
-    assert quiet_bars(m3, short_plan(), 2, 1) == ("submitted",)
+    broker3.account.cash = 100_000.0  # the account grows: the same plan passes in the next session (the budget is the session's opening equity's)
+    assert quiet_bars(m3, short_plan(), 24 * 60 + 2, 1) == ("submitted",)
     assert m3.ledger.execution_view()["last_veto"] is None and m3.stats["submitted"] == 1
 
 
@@ -299,21 +299,21 @@ def test_after_a_close_nothing_is_submitted_until_the_brain_has_been_called(tmp_
 # ----------------------------------------------------------------- v2: several positions, the thesis book, the exits at market
 
 
-def test_three_same_direction_theses_open_three_positions_and_a_fourth_is_vetoed(tmp_path: Path) -> None:
+def test_two_same_direction_theses_open_two_positions_and_a_third_is_vetoed(tmp_path: Path) -> None:
     m, broker, journal = machine(tmp_path)
-    for i in range(3):
+    for i in range(2):
         p = short_plan(target_id=f"swing:{i}", thesis_id=f"T{i}")
         assert "submitted" in m.on_bar(at(2 * i + 1), bar(2 * i + 1, 16370.0, 16380.0), p, episode_id=EP, visible=lambda a: True)
         assert "position_opened" in m.on_bar(at(2 * i + 2), bar(2 * i + 2, 16380.0, 16390.0), p, episode_id=EP, visible=lambda a: True)
-    assert len(m.positions()) == 3 and m.state is MachineState.IN_POSITION and m.ledger.has_open_position()
-    assert broker.snapshot(at(6)).net_position("NQ") == -3 and len(broker.snapshot(at(6)).open_orders) == 6
-    kinds = m.on_bar(at(7), bar(7, 16370.0, 16380.0), short_plan(target_id="swing:x", thesis_id="T9"), episode_id=EP, visible=lambda a: True)
+    assert len(m.positions()) == 2 and m.state is MachineState.IN_POSITION and m.ledger.has_open_position()
+    assert broker.snapshot(at(4)).net_position("NQ") == -2 and len(broker.snapshot(at(4)).open_orders) == 4
+    kinds = m.on_bar(at(5), bar(5, 16370.0, 16380.0), short_plan(target_id="swing:x", thesis_id="T9"), episode_id=EP, visible=lambda a: True)
     assert kinds == ("veto",) and list(last_trade(tmp_path)["verdict"]["vetoes"]) == ["exposure"]
     view = m.ledger.execution_view()
-    assert [p["thesis_id"] for p in view["positions"]] == ["T0", "T1", "T2"] and [t["status"] for t in view["theses"]] == ["OPEN"] * 3 + ["OPEN"]
+    assert [p["thesis_id"] for p in view["positions"]] == ["T0", "T1"] and [t["status"] for t in view["theses"]] == ["OPEN"] * 2 + ["OPEN"]
     # one target closes one position; the others live on
-    kinds = m.on_bar(at(8), bar(8, 16320.0, 16340.0), None, episode_id=EP, visible=lambda a: True)
-    assert kinds.count("position_closed") == 3, "one bar reaching the target closes all three (same prices)"
+    kinds = m.on_bar(at(6), bar(6, 16320.0, 16340.0), None, episode_id=EP, visible=lambda a: True)
+    assert kinds.count("position_closed") == 2, "one bar reaching the target closes both (same prices)"
 
 
 def test_an_opposite_direction_plan_is_vetoed_while_a_position_is_open(tmp_path: Path) -> None:
@@ -393,11 +393,11 @@ def test_the_hard_stop_halts_cancels_and_flattens_everything(tmp_path: Path) -> 
     second = short_plan(stop=16430.0, target=16290.0, thesis_id="T2", target_id="swing:d")
     assert m.on_bar(at(3), bar(3, 16380.0, 16390.0), second, episode_id=EP, visible=lambda a: True) == ("submitted",)
     assert m.state is MachineState.WORKING and len(m.positions()) == 1
-    broker.account.cash = 232_500.0  # the account marks 7 % below its 250 000 peak
+    broker.account.cash = 223_750.0  # the account marks 10.5 % below its 250 000 peak
     kinds = m.on_bar(at(4), bar(4, 16370.0, 16385.0), second, episode_id=EP, visible=lambda a: True)  # the second entry is not touched
     assert kinds.count("cancel_requested") == 3 and kinds[-1] == "halted" and m.halted
     halted = last_trade(tmp_path, "halted")
-    assert halted["peak"] >= 250_000.0 and halted["drawdown"] >= 0.065 and halted["positions_flattened"] == 1  # the peak was marked with the open position
+    assert halted["peak"] >= 250_000.0 and halted["drawdown"] >= 0.10 and halted["positions_flattened"] == 1  # the peak was marked with the open position
     kinds = m.on_bar(at(5), bar(5, 16385.0, 16395.0), second, episode_id=EP, visible=lambda a: True)
     assert "cancelled" in kinds and "position_closed" in kinds and "flattened" in kinds
     assert last_trade(tmp_path, "position_closed")["exit_role"] == "flatten" and m.state is MachineState.IDLE
@@ -406,25 +406,50 @@ def test_the_hard_stop_halts_cancels_and_flattens_everything(tmp_path: Path) -> 
     assert m.ledger.execution_view()["halted"] is True and m.halt_record["positions_flattened"] == 1
 
 
-def test_a_bias_reversal_flattens_the_open_position_and_closes_the_thesis(tmp_path: Path) -> None:
+def test_a_structural_reversal_on_the_thesis_scale_flattens_the_position_and_closes_the_thesis(tmp_path: Path) -> None:
+    """2026-09-22: the Brain's bias no longer touches a position; an MSS / BOS against it on its thesis scale does."""
     m, broker, journal = machine(tmp_path)
-    plan = short_plan(thesis_id="T1")
-    m.on_bar(at(1), bar(1, 16370.0, 16380.0), plan, episode_id=EP, visible=lambda a: True, bias_direction="SHORT")
-    kinds = m.on_bar(at(2), bar(2, 16380.0, 16390.0), plan, episode_id=EP, visible=lambda a: True, bias_direction="SHORT")
+    plan = short_plan(thesis_id="T1")  # a 15m thesis
+    m.on_bar(at(1), bar(1, 16370.0, 16380.0), plan, episode_id=EP, visible=lambda a: True)
+    kinds = m.on_bar(at(2), bar(2, 16380.0, 16390.0), plan, episode_id=EP, visible=lambda a: True)
     assert "position_opened" in kinds
-    # NEUTRAL is not a reversal, nor is the Brain dropping the opportunity
-    kinds = m.on_bar(at(3), bar(3, 16380.0, 16390.0), None, episode_id=EP, visible=lambda a: True, bias_direction=None)
+    # a 5m MSS long, a 15m MSS short and a 1H MSS long change nothing; nor does the Brain dropping the opportunity
+    kinds = m.on_bar(at(3), bar(3, 16380.0, 16390.0), None, episode_id=EP, visible=lambda a: True,
+                     structure_events=frozenset({("5m", "LONG"), ("15m", "SHORT"), ("1H", "LONG")}))
     assert kinds == () and m.state is MachineState.IN_POSITION
-    # LONG against a SHORT position: flattened at market, filled at the next open
-    kinds = m.on_bar(at(4), bar(4, 16380.0, 16390.0), None, episode_id=EP, visible=lambda a: True, bias_direction="LONG")
-    assert "bias_reversed" in kinds and "position_closed" not in kinds
-    kinds = m.on_bar(at(5), bar(5, 16380.0, 16390.0), None, episode_id=EP, visible=lambda a: True, bias_direction="LONG")  # the open is 16385
+    # a 15m MSS long against the SHORT: flattened at market, filled at the next open
+    kinds = m.on_bar(at(4), bar(4, 16380.0, 16390.0), None, episode_id=EP, visible=lambda a: True, structure_events=frozenset({("15m", "LONG")}))
+    assert "structure_reversed" in kinds and "position_closed" not in kinds
+    kinds = m.on_bar(at(5), bar(5, 16380.0, 16390.0), None, episode_id=EP, visible=lambda a: True)  # the open is 16385
     assert "position_closed" in kinds and "flattened" in kinds and m.state is MachineState.IDLE
-    closed = [r for r in JournalReader(tmp_path).records(EP) if r.record == "trade" and r.payload["kind"] == "position_closed"][0]
-    assert closed.payload["exit_role"] == "bias_reversed" and closed.payload["exit_price"] == 16385.0
+    records = [r.payload for r in JournalReader(tmp_path).records(EP) if r.record == "trade"]
+    reversed_ = next(r for r in records if r["kind"] == "structure_reversed")
+    assert reversed_["timeframe"] == "15m" and reversed_["direction"] == "LONG" and reversed_["thesis_id"] == "T1"
+    closed = next(r for r in records if r["kind"] == "position_closed")
+    assert closed["exit_role"] == "structure_reversed" and closed["exit_price"] == 16385.0 and closed["reason"] == "structure_reversed"
     view = m.execution_view()
-    assert view["theses"][0]["closed_reason"] == "bias_reversed" and view["cooldown_bars_left"] == 0
+    assert view["theses"][0]["closed_reason"] == "structure_reversed" and view["cooldown_bars_left"] == 0
+    assert view["last_outcome"]["exit_role"] == "structure_reversed"
     JournalReader(tmp_path).verify_chain(EP, run_id="fsm")
+
+
+def test_the_machine_passes_the_open_risk_to_the_gate(tmp_path: Path) -> None:
+    journal = BrainJournal(tmp_path, run_id="fsm")
+    journal.open_episode(EP, T0)
+    broker = executor()
+    # a session budget of 600 USD: one 480-USD position fits, a second does not
+    m = OrderMachine(broker, RiskGate(replace(CONFIG, daily_loss_fraction=0.006, max_drawdown_fraction=0.012)), journal=journal)
+    first = short_plan(thesis_id="T1")
+    assert m.open_risk(None) == 0.0
+    m.on_bar(at(1), bar(1, 16370.0, 16380.0), first, episode_id=EP, visible=lambda a: True)
+    assert m.open_risk(16375.0) == 0.0  # a working entry is not risk yet
+    m.on_bar(at(2), bar(2, 16380.0, 16390.0), first, episode_id=EP, visible=lambda a: True)
+    # the risk from here, marked at the bar's close: the stop 16 411.5 is 26.5 points from 16 385 on one filled contract (2026-09-22)
+    assert m.state is MachineState.IN_POSITION and m.open_risk(16385.0) == 530.0 and m.open_risk(None) == 480.0
+    assert m.open_risk(16420.0) == 0.0, "a position past its stop carries no further risk"
+    second = short_plan(thesis_id="T2", target_id="swing:d")
+    kinds = m.on_bar(at(3), bar(3, 16380.0, 16390.0), second, episode_id=EP, visible=lambda a: True)
+    assert kinds == ("veto",) and list(last_trade(tmp_path, "veto")["verdict"]["vetoes"]) == ["account_risk"]  # 530 + 480 > 600
 
 
 def test_an_expiry_gives_the_expression_back_in_the_machine(tmp_path: Path) -> None:
@@ -482,13 +507,13 @@ def test_an_event_sleep_cancels_the_working_entry_and_gives_the_expression_back(
 def test_an_event_sleep_flattens_the_open_position_and_closes_the_thesis_without_a_cooldown(tmp_path: Path) -> None:
     m, broker, journal = machine(tmp_path)
     plan = short_plan(thesis_id="T1")
-    m.on_bar(at(1), bar(1, 16370.0, 16380.0), plan, episode_id=EP, visible=lambda a: True, bias_direction="SHORT")
-    kinds = m.on_bar(at(2), bar(2, 16380.0, 16390.0), plan, episode_id=EP, visible=lambda a: True, bias_direction="SHORT")
+    m.on_bar(at(1), bar(1, 16370.0, 16380.0), plan, episode_id=EP, visible=lambda a: True)
+    kinds = m.on_bar(at(2), bar(2, 16380.0, 16390.0), plan, episode_id=EP, visible=lambda a: True)
     assert "position_opened" in kinds
-    kinds = m.on_bar(at(3), bar(3, 16380.0, 16390.0), None, episode_id=EP, visible=lambda a: True, bias_direction=None, event_sleep="event:FOMC:2022-01-03T15:00:00Z")
+    kinds = m.on_bar(at(3), bar(3, 16380.0, 16390.0), None, episode_id=EP, visible=lambda a: True, event_sleep="event:FOMC:2022-01-03T15:00:00Z")
     assert "event_sleep" in kinds and kinds.count("cancel_requested") == 2 and "position_closed" not in kinds
     assert last_trade(tmp_path, "event_sleep")["event"] == "event:FOMC:2022-01-03T15:00:00Z" and m.stats["event_sleep"] == 1
-    kinds = m.on_bar(at(4), bar(4, 16380.0, 16390.0), None, episode_id=EP, visible=lambda a: True, bias_direction=None)  # the open is 16385
+    kinds = m.on_bar(at(4), bar(4, 16380.0, 16390.0), None, episode_id=EP, visible=lambda a: True)  # the open is 16385
     assert "position_closed" in kinds and "flattened" in kinds and m.state is MachineState.IDLE
     closed = last_trade(tmp_path, "position_closed")
     assert closed["exit_role"] == "event_sleep" and closed["exit_price"] == 16385.0 and last_trade(tmp_path, "flattened")["reason"] == "event_sleep"
@@ -497,3 +522,25 @@ def test_an_event_sleep_flattens_the_open_position_and_closes_the_thesis_without
     # the same bar's event flag on an idle machine changes nothing
     assert m.on_bar(at(5), bar(5, 16380.0, 16390.0), None, episode_id=EP, visible=lambda a: True, event_sleep="event:FOMC:x") == ()
     JournalReader(tmp_path).verify_chain(EP, run_id="fsm")
+
+
+def test_a_structural_reversal_cancels_the_working_entry_on_that_scale_and_holds_a_same_bar_plan(tmp_path: Path) -> None:
+    """2026-09-22 (review): a limit resting for a 15m SHORT thesis is withdrawn when the 15m prints an MSS long, the thesis
+    closes structure_reversed, and a plan against that bar's reversal is refused rather than submitted into it."""
+    m, broker, journal = machine(tmp_path)
+    plan = short_plan(thesis_id="T1")
+    assert m.on_bar(at(1), bar(1, 16370.0, 16380.0), plan, episode_id=EP, visible=lambda a: True) == ("submitted",)
+    kinds = m.on_bar(at(2), bar(2, 16370.0, 16380.0), plan, episode_id=EP, visible=lambda a: True, structure_events=frozenset({("5m", "LONG")}))
+    assert "cancel_requested" not in kinds and m.state is MachineState.WORKING, "a 5m MSS is not the thesis scale"
+    kinds = m.on_bar(at(3), bar(3, 16370.0, 16380.0), plan, episode_id=EP, visible=lambda a: True, structure_events=frozenset({("15m", "LONG")}))
+    assert "structure_reversed" in kinds and "cancel_requested" in kinds
+    assert last_trade(tmp_path, "cancel_requested")["reason"] == "structure_reversed"
+    kinds = m.on_bar(at(4), bar(4, 16370.0, 16380.0), plan, episode_id=EP, visible=lambda a: True)
+    assert "cancelled" in kinds and m.state is MachineState.IDLE
+    view = m.execution_view()
+    assert view["theses"][0]["closed_reason"] == "structure_reversed" and view["cooldown_bars_left"] == 0
+    # a fresh SHORT thesis proposed on the bar of a 15m MSS long is held, not submitted into the reversal
+    other = short_plan(thesis_id="T2", target_id="swing:d")
+    kinds = m.on_bar(at(5), bar(5, 16370.0, 16380.0), other, episode_id=EP, visible=lambda a: True, structure_events=frozenset({("15m", "LONG")}))
+    assert kinds == ("thesis_refused",) and last_trade(tmp_path, "thesis_refused")["reason"] == "structure_reversed"
+    assert m.on_bar(at(6), bar(6, 16370.0, 16380.0), other, episode_id=EP, visible=lambda a: True) == ("submitted",)

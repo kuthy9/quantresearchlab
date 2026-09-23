@@ -31,10 +31,12 @@ Four exits happen at market through ``Broker.flatten``: the close-beyond
 exit (a position whose plan is ``CLOSE_BEYOND`` when a bar of the
 invalidation object's scale closes beyond the object's far edge;
 ``invalidation_close``, then ``position_closed`` with ``exit_role``
-``invalidation``), the bias reversal (the Brain's bias is the other side
-of an open position — the thesis has lost its direction; ``bias_reversed``,
-then ``position_closed`` with ``exit_role`` ``bias_reversed``; 2026-09-19)
-and the halt (the gate's drawdown stop: every working entry and every exit
+``invalidation``), the structural reversal (an MSS or qualified BOS on
+the position's thesis scale against its direction — the thesis's structure
+has turned; ``structure_reversed``, then ``position_closed`` with
+``exit_role`` ``structure_reversed``; 2026-09-22, replacing the
+bias-reversal exit of 2026-09-19: the Brain's bias no longer touches a
+position) and the halt (the gate's drawdown stop: every working entry and every exit
 leg cancelled, every position flattened, ``halted`` journaled, nothing ever
 submitted again).  A stop or target the broker
 cancels or rejects on its own is journaled ``exit_leg_lost``.
@@ -64,10 +66,10 @@ from risk.core.gate import RiskGate
 
 STAT_KINDS: tuple[str, ...] = (
     "veto_bars", "veto", "thesis_refused", "submitted", "working", "partial", "filled", "position_opened", "position_closed",
-    "cancel_requested", "cancelled", "expired", "rejected", "exit_leg_lost", "invalidation_close", "bias_reversed", "event_sleep", "flattened", "halted",
+    "cancel_requested", "cancelled", "expired", "rejected", "exit_leg_lost", "invalidation_close", "structure_reversed", "event_sleep", "flattened", "halted",
 )
 EXIT_INVALIDATION = "invalidation"
-EXIT_BIAS = "bias_reversed"
+EXIT_STRUCTURE = "structure_reversed"
 EXIT_EVENT = "event_sleep"
 EXIT_HALT = "flatten"
 
@@ -205,6 +207,25 @@ class OrderMachine:
     def positions(self) -> tuple[PositionRecord, ...]:
         return tuple(intent.position for intent in self._intents.values() if intent.position is not None)
 
+    def open_risk(self, close: float | None) -> float:
+        """The risk the open positions still carry, from here to their stops
+        on the *filled* contracts (2026-09-22): ``(close − stop)`` marked at the
+        bar's close — the base the gate's session budget is measured on — or
+        the entry-to-stop distance when there is no bar.  A position already
+        past its stop carries none."""
+        point_value = self._gate.config.contract.point_value
+        total = 0.0
+        for intent in self._intents.values():
+            if intent.position is None or intent.open_quantity < 1:
+                continue
+            stop = float(intent.verdict.stop_price or 0.0)
+            if close is None:
+                points = abs(float(intent.verdict.limit_price or 0.0) - stop)
+            else:
+                points = max(0.0, (float(close) - stop) if intent.plan.direction is TradeDirection.LONG else (stop - float(close)))
+            total += points * intent.open_quantity * point_value
+        return round(total, 2)
+
     # ------------------------------------------------------------ the view
 
     def execution_view(self) -> Mapping[str, Any]:
@@ -330,7 +351,7 @@ class OrderMachine:
             return
         if order.role is OrderRole.FLATTEN:
             if event.kind == "filled":
-                exit_role = intent.exit_requested if intent.exit_requested in (EXIT_INVALIDATION, EXIT_BIAS, EXIT_EVENT) else EXIT_HALT
+                exit_role = intent.exit_requested if intent.exit_requested in (EXIT_INVALIDATION, EXIT_STRUCTURE, EXIT_EVENT) else EXIT_HALT
                 self._close(intent, order, event, kinds, episode_id, asof, exit_role=exit_role, base=base)
                 self._record(kinds, "flattened", episode_id, asof, {**base, "reason": intent.exit_requested})
             return
@@ -419,18 +440,34 @@ class OrderMachine:
             })
             self._flatten(intent, asof, EXIT_INVALIDATION, kinds, episode_id)
 
-    def _bias_reversed(self, bias_direction: str, asof: pd.Timestamp, kinds: list[str], episode_id: str | None) -> None:
-        """The Brain's bias is the opposite side of an open position: the
-        thesis has lost its direction (rule 4b would refuse it as a new
-        opportunity), so the position is flattened at market."""
+    def _structure_reversed(self, events: frozenset[tuple[str, str]], asof: pd.Timestamp, kinds: list[str], episode_id: str | None) -> None:
+        """An MSS or qualified BOS on a thesis's scale against its direction:
+        the structure the thesis rests on has turned, so its position is
+        flattened at market and its working entry withdrawn (reason
+        ``structure_reversed``; the thesis closes either way, 2026-09-22).
+        Events on other scales — the 5m under a 15m thesis, the 1H above it
+        — change nothing."""
         for intent in list(self._intents.values()):
-            if intent.position is None or intent.exit_requested is not None or intent.plan.direction.value == bias_direction:
+            plan = intent.plan
+            against = [direction for timeframe, direction in sorted(events) if timeframe == plan.governing_timeframe and direction != plan.direction.value]
+            if not against:
                 continue
-            self._record(kinds, "bias_reversed", episode_id, asof, {
-                "signature": intent.plan.signature, "thesis_id": intent.plan.thesis_id, "bias": bias_direction,
-                "position": intent.position.to_dict(),
-            })
-            self._flatten(intent, asof, EXIT_BIAS, kinds, episode_id)
+            if intent.position is not None:
+                if intent.exit_requested is not None:
+                    continue
+                self._record(kinds, "structure_reversed", episode_id, asof, {
+                    "signature": plan.signature, "thesis_id": plan.thesis_id, "timeframe": plan.governing_timeframe, "direction": against[0],
+                    "position": intent.position.to_dict(),
+                })
+                self._flatten(intent, asof, EXIT_STRUCTURE, kinds, episode_id)
+            elif intent.working and intent.cancel_reason is None:
+                self._record(kinds, "structure_reversed", episode_id, asof, {
+                    "signature": plan.signature, "thesis_id": plan.thesis_id, "timeframe": plan.governing_timeframe, "direction": against[0],
+                    "position": None, "order_id": intent.entry.order_id,
+                })
+                intent.cancel_reason = EXIT_STRUCTURE
+                self._broker.cancel(intent.entry.order_id, asof)
+                self._record(kinds, "cancel_requested", episode_id, asof, {"signature": plan.signature, "reason": EXIT_STRUCTURE, "order_id": intent.entry.order_id})
 
     def _event_sleep(self, event: str, asof: pd.Timestamp, kinds: list[str], episode_id: str | None) -> None:
         """The Brain was put to sleep for a scheduled release: nothing of its
@@ -461,7 +498,7 @@ class OrderMachine:
         visible: Callable[[str], bool],
         llm_called: bool = False,
         closed_timeframes: frozenset[str] = frozenset(),
-        bias_direction: str | None = None,
+        structure_events: frozenset[tuple[str, str]] = frozenset(),
         event_sleep: str | None = None,
     ) -> tuple[str, ...]:
         asof = pd.Timestamp(asof).tz_convert("UTC")
@@ -510,8 +547,8 @@ class OrderMachine:
                     self._record(kinds, "cancel_requested", episode_id, asof, {"signature": working.plan.signature, "reason": reason, "order_id": working.entry.order_id})
         if bar is not None and closed_timeframes:
             self._close_beyond(bar, closed_timeframes, asof, kinds, episode_id)
-        if bias_direction in ("LONG", "SHORT"):
-            self._bias_reversed(bias_direction, asof, kinds, episode_id)
+        if structure_events:
+            self._structure_reversed(structure_events, asof, kinds, episode_id)
         if working is not None and working.working:
             return tuple(kinds)
         if plan is None or self._await_brain or plan.signature in self._intents:
@@ -526,11 +563,15 @@ class OrderMachine:
         if entry_side_error(plan.direction, plan.geometry.entry_price, plan.close) is not None:
             self._refuse(plan, "entry_marketable", kinds, episode_id, asof, llm_called=llm_called)
             return tuple(kinds)
+        # A plan on the scale that printed structure against it this bar is not submitted into the reversal (2026-09-22).
+        if any(timeframe == plan.governing_timeframe and direction != plan.direction.value for timeframe, direction in structure_events):
+            self._refuse(plan, EXIT_STRUCTURE, kinds, episode_id, asof, llm_called=llm_called)
+            return tuple(kinds)
         refusal = self._book.admit(plan, self._bar_index)
         if refusal is not None:
             self._refuse(plan, refusal, kinds, episode_id, asof, llm_called=llm_called)
             return tuple(kinds)
-        verdict = self._gate.assess(plan, account, asof=asof, positions=self.positions())
+        verdict = self._gate.assess(plan, account, asof=asof, positions=self.positions(), open_risk=self.open_risk(None if bar is None else float(bar.close)))
         if not verdict.passed:
             self._veto_bar(plan, verdict, kinds, episode_id, asof, account_asof=account.asof, llm_called=llm_called)
             return tuple(kinds)
@@ -589,4 +630,4 @@ class OrderMachine:
         })
 
 
-__all__ = ["EXIT_BIAS", "EXIT_EVENT", "EXIT_HALT", "EXIT_INVALIDATION", "STAT_KINDS", "ExecutionLedger", "MachineState", "OrderMachine"]
+__all__ = ["EXIT_EVENT", "EXIT_HALT", "EXIT_INVALIDATION", "EXIT_STRUCTURE", "STAT_KINDS", "ExecutionLedger", "MachineState", "OrderMachine"]

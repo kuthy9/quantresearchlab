@@ -35,7 +35,11 @@ from contract.brain.state import ThesisGrade, TradeDirection, isoformat_utc
 from contract.execution import AccountSnapshot
 from contract.risk import RiskVerdict, TradePlan, VetoCode
 
-RISK_SCHEMA_VERSION = 3  # 3 (2026-09-20): order_ttl_bars counts bars of the entry object's scale
+# 3 (2026-09-20): order_ttl_bars counts bars of the entry object's scale.  4 (2026-09-22): the
+# budget derived from the floored stops (BASE 2.5 % — the 75th-percentile stop of the stop-floor
+# pass, 117 points, over the sim account), two open positions, a 5 % daily stop, a 10 % halt,
+# and the policy checks below that bind the three.
+RISK_SCHEMA_VERSION = 4
 SESSION_TIMEZONE = "America/New_York"
 # A CME futures session opens at 18:00 New York the evening before its date.
 SESSION_OFFSET = pd.Timedelta(hours=6)
@@ -116,6 +120,13 @@ class RiskConfig:
             or config.thesis.max_expressions < 1 or config.thesis.stop_cooldown_bars < 0
         ):
             raise ValueError("risk config values out of range")
+        # The policy (2026-09-22): the open positions' risk at BASE fits the day's budget, and the
+        # halt holds two daily stops — the three limits are one decision.
+        base = config.risk_fraction[ThesisGrade.BASE.value]
+        if config.max_open_positions * base > config.daily_loss_fraction + 1e-12:
+            raise ValueError("risk policy: max_open_positions × risk_fraction.BASE must not exceed daily_loss_fraction")
+        if 2.0 * config.daily_loss_fraction > config.max_drawdown_fraction + 1e-12:
+            raise ValueError("risk policy: max_drawdown_fraction must hold two daily stops")
         return config
 
 
@@ -156,6 +167,13 @@ class RiskGate:
     def daily_stopped(self, asof: pd.Timestamp) -> bool:
         return self._daily_stop_session is not None and self._daily_stop_session == self.session_date(asof)
 
+    def session_budget_left(self, equity: float) -> float:
+        """What the session may still lose before its daily stop (2026-09-22):
+        the opening equity's ``daily_loss_fraction`` less what it has lost so
+        far.  Before the first ``observe`` the equity given is the opening."""
+        opening = float(equity) if self._session_open_equity is None else self._session_open_equity
+        return round(opening * self._config.daily_loss_fraction - max(0.0, opening - float(equity)), 2)
+
     def observe(self, account: AccountSnapshot, asof: pd.Timestamp) -> None:
         """Read the account's equity once per bar: the session's opening
         equity, the daily stop, the peak and the drawdown halt."""
@@ -178,8 +196,12 @@ class RiskGate:
     # ------------------------------------------------------------ the plan
 
     def assess(
-        self, plan: TradePlan | None, account: AccountSnapshot, *, asof: pd.Timestamp, positions: Sequence[PositionRecord] = ()
+        self, plan: TradePlan | None, account: AccountSnapshot, *, asof: pd.Timestamp, positions: Sequence[PositionRecord] = (),
+        open_risk: float = 0.0,
     ) -> RiskVerdict:
+        """``open_risk`` is the risk the open positions already carry (the sum
+        of their verdicts' ``risk_amount``); with the new trade's it must fit
+        the session's remaining budget (``ACCOUNT_RISK``, 2026-09-22)."""
         cfg = self._config
         contract = cfg.contract
         if plan is None:
@@ -259,6 +281,12 @@ class RiskGate:
                 f"available funds {account.available_funds:.2f} hold no contract at margin {cfg.margin_per_contract:.2f}",
             ))
         quantity = min(by_budget, cfg.max_quantity, by_leverage, by_margin)
+        new_risk = quantity * per_contract
+        left = self.session_budget_left(account.equity)
+        if float(open_risk) + new_risk > left + 1e-9:
+            return RiskVerdict(False, (VetoCode.ACCOUNT_RISK,), (
+                f"open risk {float(open_risk):.2f} + {new_risk:.2f} exceeds the session's remaining loss budget {left:.2f}",
+            ))
         return RiskVerdict(
             True, (), (),
             quantity=quantity, limit_price=limit_price, stop_price=stop_price, target_price=target_price,

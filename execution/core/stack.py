@@ -5,9 +5,11 @@ opportunity into a ``TradePlan`` on the same bar's context, and hands the
 order machine the plan and the bar — together with whether the LLM was
 called on this bar (so a plan the LLM re-proposed after a veto is counted
 as a proposal), the scales whose bar completed on it (the close-beyond
-exit watches them), the Brain's bias direction (a position on the other
-side is flattened, 2026-09-19) and the release window that put the Brain to
-sleep on this bar (every expression is withdrawn, 2026-09-21).  ``halted`` mirrors the machine's drawdown halt so the
+exit watches them), the (scale, direction) of this bar's MSS / qualified-BOS
+events (a position whose thesis scale printed one against it is flattened,
+2026-09-22 — the Brain's bias no longer touches a position) and the release
+window that put the Brain to sleep on this bar (every expression is
+withdrawn, 2026-09-21).  ``halted`` mirrors the machine's drawdown halt so the
 runner can stop.  Without a machine it is the Brain alone.  The machine's
 ledger is the Brain's ``PositionLedger``, so the Brain cannot sleep while
 an order works or a position is open, and its ``execution_view`` is what
@@ -15,7 +17,7 @@ the next LLM call reads in ``prior_state.execution``."""
 from __future__ import annotations
 
 from brain.core.runtime import BrainRuntime, StepResult
-from contract.brain.state import BiasDirection
+from contract.brain.state import REVERSAL_EVIDENCE_KINDS
 from contract.eye import EventKind, MarketObservation
 from contract.market.primitives import Bar
 from execution.core.order_fsm import OrderMachine
@@ -42,6 +44,17 @@ class TradingStack:
             event.timeframe.value for event in observation.events_this_update if event.kind is EventKind.BAR_COMPLETED
         )
 
+    @staticmethod
+    def structure_events(observation: MarketObservation) -> frozenset[tuple[str, str]]:
+        """The (scale, direction) of this bar's MSS / qualified-BOS events
+        (``REVERSAL_EVIDENCE_KINDS``); events without a direction are not
+        structure to reverse against."""
+        return frozenset(
+            (event.timeframe.value, event.direction.value.upper())
+            for event in observation.events_this_update
+            if event.kind.value in REVERSAL_EVIDENCE_KINDS and event.direction is not None
+        )
+
     def step(self, observation: MarketObservation, bar: Bar | None) -> StepResult:
         result = self.runtime.step(observation)
         self.last_trade_kinds = ()
@@ -56,8 +69,7 @@ class TradingStack:
             self.last_trade_kinds = self.machine.on_bar(
                 observation.asof, bar, plan, episode_id=result.episode_id, visible=lambda alias: alias in visible_aliases,
                 llm_called=result.llm_called, closed_timeframes=self.closed_timeframes(observation),
-                bias_direction=None if state is None or state.bias.direction is BiasDirection.NEUTRAL else state.bias.direction.value,
-                event_sleep=result.event,
+                structure_events=self.structure_events(observation), event_sleep=result.event,
             )
         return result
 

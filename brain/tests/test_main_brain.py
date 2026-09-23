@@ -121,7 +121,7 @@ def test_opportunity_naming_a_visible_object_survives_reduce(context) -> None:
         "state": "DEVELOPING", "direction": "LONG", "entry_object_id": zone.alias,
         "invalidation_object_id": min(pools_below, key=lambda v: v.upper).alias,
         "target_object_id": max(pools_above, key=lambda v: v.lower).alias,
-        "thesis_id": "T1", "governing_timeframe": "5m", "grade": "BASE", "invalidation_mode": "TOUCH",
+        "thesis_id": "T1", "grade": "BASE", "invalidation_mode": "TOUCH",
     }
     brain = MainBrain(client=ScriptedClient([good_reply(ctx, opportunity=opportunity, bias={"direction": "LONG", "scale": "15m", "basis": "scripted"})]), config=CONFIG, ledger=InMemoryPositionLedger())
     step = brain.step(episode_id="EP_1", context=ctx, trigger_kind="WAKE", reasons=[], tape=EMPTY_TAPE, prior=None, registry=registry, tick=0.25)
@@ -263,7 +263,7 @@ def test_the_prompt_defines_the_bias_and_how_the_facts_set_it() -> None:
     for word in ("## Bias", "`bias`", "active_leg_direction", "forming_leg_atr", "displacement_age_bars", "`reset`", "drift_atr", "contains_price", "live delivery"):
         assert word in text, word
     assert "The thesis is judged on its governing scale" not in text
-    assert "judged on the bias scale" in text and "judged on the governing scale" in text
+    assert "judged on the bias scale" in text and "judged on the thesis scale" in text
     assert "stays live" in text and "`bias.scale` ∈ 4H | 1H | 15m;" in text  # run B's amendment: hysteresis, no 5m bias
 
 
@@ -312,3 +312,17 @@ def test_the_prompt_names_the_stop_floor_and_the_governing_scale_target() -> Non
     text = CONFIG.system_prompt
     for word in ("never nearer the entry than one bar", "governing scale", "two governing bars", "stop.floor.governing_bar"):
         assert word in text, word
+
+
+def test_the_prompt_names_the_thesis_scale_the_bias_decay_and_the_structural_exit() -> None:
+    # 2026-09-22: the thesis scale is code's (one below the bias scale, never below the 15m), the target lies on it,
+    # a bias decays on the scales below it and comes back on structure only, and a position leaves on its own scale's reversal
+    text = CONFIG.system_prompt
+    for word in (
+        "thesis scale", "one scale below the bias scale", "never below the 15m", "opportunity_target_scale", "bias_decayed",
+        "bias_reassert_refused", "structure_reversed", "`since`", "`decayed`", "`decayed_at`", "No trade in a balance", "survives sleep", "`account_risk`", "all three are `null`",
+    ):
+        assert word in text, word
+    for gone in ("bias_reversed", "`governing_timeframe` — `4H`, `1H`, `15m` or `5m`", "up to three", "opportunity_scale_above_bias"):
+        assert gone not in text, gone
+    assert "governing_timeframe" not in json.dumps(LLM_UPDATE_EXAMPLE), "the reply no longer names the thesis scale"

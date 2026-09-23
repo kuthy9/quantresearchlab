@@ -4,6 +4,7 @@ import dataclasses
 import json
 from pathlib import Path
 
+import pandas as pd
 import pytest
 
 from brain.core.journal import BrainJournal, JournalReader
@@ -43,8 +44,8 @@ def tape():
     return pairs
 
 
-# The scripted Brain's thesis fields: one thesis on the 5m scale, base grade, touch stop.
-THESIS = {"thesis_id": "T1", "governing_timeframe": "5m", "grade": "BASE", "invalidation_mode": "TOUCH"}
+# The scripted Brain's thesis fields: base grade, touch stop; the thesis scale is code's (the 15m under the scripted 15m bias, 2026-09-22).
+THESIS = {"thesis_id": "T1", "grade": "BASE", "invalidation_mode": "TOUCH"}
 
 
 class LongAtTheNearestZone:
@@ -67,8 +68,16 @@ class LongAtTheNearestZone:
         payload["market_understanding"] = "scripted"
         payload["watch_next"] = []
         payload["destination_candidates"] = []
-        payload["bias"] = {"direction": "LONG", "scale": "15m", "basis": "scripted"}  # every proposal below is LONG on the 5m, under a 15m bias
+        # every proposal below is LONG, under a 15m bias; after code decays LONG@15m the script does what the prompt tells the
+        # model — re-read from the 15m up and take another scale (LONG@1H) — and says NEUTRAL once that pair decayed too (2026-09-22)
         prior = request.get("prior_state") or {}
+        decayed = ((prior.get("bias") or {}).get("decayed")) if prior else None
+        if decayed == "LONG@1H":
+            payload["bias"] = {"direction": "NEUTRAL", "scale": "15m", "basis": "scripted: both scales decayed"}
+        elif decayed == "LONG@15m":
+            payload["bias"] = {"direction": "LONG", "scale": "1H", "basis": "scripted: the 15m decayed, the 1H sets it"}
+        else:
+            payload["bias"] = {"direction": "LONG", "scale": "15m", "basis": "scripted"}
         previous = (prior.get("opportunity") or {})
         ids = [previous.get(k) for k in ("entry_object_id", "invalidation_object_id", "target_object_id")]
         if previous.get("state") == "ACTIONABLE" and all(alias in relations for alias in ids):
@@ -113,9 +122,11 @@ def test_a_signal_becomes_a_bracket_a_fill_and_a_closed_position_and_replays(tap
         assert "position_opened" in kinds
         opened = kinds.index("position_opened")
         engaged_bars = [r for r in results if "sleep_refused:open_position" in r.rejections]
-        # while engaged the Brain's idle rule and its own sleep requests are refused on the position
-        assert stack.machine.state in (MachineState.IDLE, MachineState.IN_POSITION)
-        assert kinds.count("position_opened") == kinds.count("submitted") - kinds.count("cancelled") - kinds.count("expired")
+        # while engaged the Brain's idle rule and its own sleep requests are refused on the position; the tape may
+        # end with an entry still working (its cancel requested on the last bar, confirmed by the broker on the next)
+        still_working = 1 if stack.machine.state is MachineState.WORKING else 0
+        assert stack.machine.state in (MachineState.IDLE, MachineState.IN_POSITION, MachineState.WORKING)
+        assert kinds.count("position_opened") == kinds.count("submitted") - kinds.count("cancelled") - kinds.count("expired") - still_working
         assert "position_closed" in kinds or stack.machine.state is MachineState.IN_POSITION
     else:
         assert "cancelled" in kinds or "expired" in kinds or stack.machine.state is MachineState.WORKING
@@ -147,3 +158,26 @@ def test_the_same_signature_never_places_a_second_order(tape, tmp_path: Path) ->
     for obs, bar in tape:
         stack.step(obs, bar)
         assert len(broker.snapshot(obs.asof).open_entry_orders()) <= 1
+
+
+def test_structure_events_are_the_bars_mss_and_bos_with_their_direction() -> None:
+    """2026-09-22: the stack hands the machine the (scale, direction) of this bar's MSS / qualified-BOS events."""
+    from types import SimpleNamespace
+
+    from contract.eye import EventKind, MarketEvent
+    from contract.market import Direction, Timeframe
+
+    at = pd.Timestamp("2022-01-04T15:00:00Z")
+
+    def ev(kind: EventKind, tf: Timeframe, direction: Direction | None) -> MarketEvent:
+        return MarketEvent(event_id=f"{kind.value}:{tf.value}", kind=kind, observed_at=at, timeframe=tf, side=None, price=None, strength=0.5, direction=direction)
+
+    observation = SimpleNamespace(events_this_update=(
+        ev(EventKind.MSS_CORE_CONFIRMED, Timeframe.M15, Direction.LONG),
+        ev(EventKind.QUALIFIED_BOS, Timeframe.H1, Direction.SHORT),
+        ev(EventKind.DISPLACEMENT_OBSERVED, Timeframe.M15, Direction.SHORT),  # a candle, not structure
+        ev(EventKind.MSS_CORE_CONFIRMED, Timeframe.M5, None),  # no direction: nothing to reverse against
+        ev(EventKind.BAR_COMPLETED, Timeframe.M5, None),
+    ))
+    assert TradingStack.structure_events(observation) == frozenset({("15m", "LONG"), ("1H", "SHORT")})
+    assert TradingStack.structure_events(SimpleNamespace(events_this_update=())) == frozenset()

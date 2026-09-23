@@ -180,8 +180,11 @@ def test_summary_carries_the_bias_section(synthetic_run) -> None:
     run_dir, bars, _, _ = synthetic_run
     summary = summarize(run_dir, pricing=PRICING, bars=bars)
     bias = summary["bias"]
-    assert set(bias) >= {"changes", "neutral_revisions", "opportunities_against_bias", "direction_accuracy_60m"}
-    assert bias["opportunities_against_bias"] == 0
+    assert set(bias) >= {"changes", "neutral_revisions", "opportunities_against_bias", "direction_accuracy_60m", "decays", "reasserts_refused"}
+    # the scripted Brain asserts LONG@15m on every call and never prints a 15m MSS / BOS: code decays the bias on the
+    # synthetic tape's counter-displacements, refuses the re-assertion, and drops the opportunities under it (2026-09-22)
+    assert bias["decays"] >= 1 and bias["reasserts_refused"] >= 1 and bias["opportunities_against_bias"] >= 1
+    assert "structure_reversed" in summary["orders"] and summary["orders"]["bias_reversed"] == 0  # both kinds counted: old receipts keep their column
 
 
 def test_missed_trends_count_expiries_the_tape_ran_away_from() -> None:

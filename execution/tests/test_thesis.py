@@ -113,13 +113,19 @@ def test_an_expiry_gives_the_expression_back_but_a_cancel_does_not() -> None:
     assert b.admit(plan(target_id="swing:h"), 44) == "expressions_exhausted", "two cancels are two expressions"
 
 
-def test_a_bias_reversal_closes_the_thesis_without_a_cooldown() -> None:
+def test_a_structural_reversal_closes_the_thesis_without_a_cooldown() -> None:
     b = book()
     p = plan()
     assert b.admit(p, 0) is None
     b.expressed(p)
-    b.outcome(p, "position_closed", exit_role="bias_reversed", bar_index=10)
-    assert b.view(11)["theses"][0]["closed_reason"] == "bias_reversed" and b.cooldown_bars_left(11) == 0
+    b.outcome(p, "position_closed", exit_role="structure_reversed", bar_index=10)
+    assert b.view(11)["theses"][0]["closed_reason"] == "structure_reversed" and b.cooldown_bars_left(11) == 0
+    c = book()
+    q = plan(thesis_id="T9")
+    assert c.admit(q, 0) is None
+    c.expressed(q)
+    c.outcome(q, "cancelled", exit_role=None, bar_index=5, reason="structure_reversed")  # the working entry withdrawn on the reversal
+    assert c.view(6)["theses"][0]["closed_reason"] == "structure_reversed" and c.admit(plan(thesis_id="T9", target_id="swing:d"), 6) == "thesis_closed"
     assert b.admit(plan(target_id="swing:d"), 11) == "thesis_closed"
 
 

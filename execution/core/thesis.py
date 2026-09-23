@@ -5,9 +5,10 @@ A thesis (the Brain's ``thesis_id``) is OPEN from its first proposal.  One
 expression (a working entry or an open position) at a time; at most
 ``max_expressions`` orders in the episode; a stop-out or a reached target
 closes it for the episode (``stopped`` / ``achieved``), a flipped direction
-closes it (``direction_changed``), a flatten because the Brain's bias
-turned against the position closes it (``bias_reversed``, no cooldown), so
-does the flatten of an event sleep (``event_sleep``, 2026-09-21, no cooldown),
+closes it (``direction_changed``), a flatten because the thesis scale
+printed structure against the position closes it (``structure_reversed``,
+2026-09-22, no cooldown — a reversal is a new reading, not a loss to sit
+out), so does the flatten of an event sleep (``event_sleep``, 2026-09-21, no cooldown),
 and every stop-out — whatever the thesis — holds every new expression for
 ``stop_cooldown_bars`` 1m bars.  An expiry or a cancel leaves the thesis
 open (the entry was never reached); an expiry gives its expression back
@@ -27,7 +28,7 @@ from contract.brain.state import TradeDirection
 from contract.risk import TradePlan
 from risk.core.gate import ThesisConfig
 
-REFUSALS: tuple[str, ...] = ("direction_changed", "thesis_closed", "expressions_exhausted", "stop_cooldown", "thesis_engaged", "entry_marketable")
+REFUSALS: tuple[str, ...] = ("direction_changed", "thesis_closed", "expressions_exhausted", "stop_cooldown", "thesis_engaged", "entry_marketable", "structure_reversed")
 # Cancel reasons that replace an expression rather than spend it (2026-09-20): the Brain moved the entry to
 # another object, the Eye retired the object, or the Brain was put to sleep for a scheduled release (2026-09-21).
 # A dropped plan (``plan_dropped``) is the churn the cap counts.
@@ -123,7 +124,7 @@ class ThesisBook:
     def outcome(self, plan: TradePlan, kind: str, *, exit_role: str | None, bar_index: int, reason: str | None = None) -> None:
         """A terminal event of an expression: a stop (or the close-beyond
         ``invalidation`` exit) closes the thesis and starts the cooldown, a
-        target closes it as achieved, the bias-reversal and event-sleep
+        target closes it as achieved, the structural-reversal and event-sleep
         flattens close it without a cooldown, anything else (expired, cancelled, rejected, the
         halt's flatten) leaves it open.  An expiry gives its expression back
         (the entry was never reached), and so does a cancel whose ``reason``
@@ -135,13 +136,15 @@ class ThesisBook:
             record.last_outcome = kind if exit_role is None else f"{kind}:{exit_role}"
             if kind == "expired" or (kind == "cancelled" and reason in REPLACEMENT_REASONS):
                 record.expressions = max(0, record.expressions - 1)
+        if kind == "cancelled" and reason == "structure_reversed" and record is not None and record.closed_reason is None:
+            record.closed_reason = "structure_reversed"  # the working entry withdrawn on the thesis scale's reversal (2026-09-22)
         if exit_role in ("stop", "invalidation"):
             self._last_stop_bar = bar_index
             if record is not None and record.closed_reason is None:
                 record.closed_reason = "stopped"
         elif exit_role == "target" and record is not None and record.closed_reason is None:
             record.closed_reason = "achieved"
-        elif exit_role in ("bias_reversed", "event_sleep") and record is not None and record.closed_reason is None:
+        elif exit_role in ("structure_reversed", "event_sleep") and record is not None and record.closed_reason is None:
             record.closed_reason = exit_role
 
     # ------------------------------------------------------------ the view

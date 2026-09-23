@@ -19,9 +19,12 @@ for the rest of that session once equity is `daily_loss_fraction` below the
 opening, tracks the equity peak and latches `halted` for good once equity is
 `max_drawdown_fraction` below it (`halt_record`: at, equity, peak, drawdown).
 
-`RiskGate(config).assess(plan, account, *, asof, positions) -> RiskVerdict`
+`RiskGate(config).assess(plan, account, *, asof, positions, open_risk) -> RiskVerdict`
 — `positions` are the executor's own open positions (the account nets
-contracts per symbol, so it cannot count brackets) — in order, stopping at
+contracts per symbol, so it cannot count brackets), `open_risk` the risk
+they still carry — the order machine's `open_risk(close)`: from the bar's close
+to each stop on the filled contracts, the same mark-to-market base the
+session's opening equity is measured on (2026-09-22) — in order, stopping at
 the first group that fails:
 
 | check | veto |
@@ -38,6 +41,7 @@ the first group that fails:
 | `floor(equity × fraction ÷ (|entry − stop| × point_value)) < 1` | `POSITION_SIZE` ("the contract is too large for this stop") |
 | `floor(equity × max_leverage ÷ (entry × point_value)) − contracts already open < 1` | `LEVERAGE` |
 | `floor(available_funds ÷ margin_per_contract) < 1` | `POSITION_SIZE` |
+| `open_risk + quantity × |entry − stop| × point_value` > `session_budget_left(equity)` — the session's opening equity × `daily_loss_fraction` less what the session has lost (2026-09-22) | `ACCOUNT_RISK` |
 
 `fraction` is `risk_fraction["A_PLUS"]` when the plan's grade is `A_PLUS`
 and the reward-to-risk is at or above `preferred_reward_risk`, else
@@ -52,21 +56,30 @@ Since 2026-09-21 the `|entry − stop|` the gate sizes on is the geometry's
 stop nearer the entry than one bar of the thesis's governing scale
 (`STOP_FLOOR_GOVERNING_BARS` × 1m ATR × √minutes — about 3.9 ATRs for a
 15m thesis, 7.7 for a 1H one), so the budget buys fewer contracts as
-volatility grows and a 1H thesis on a CPI-day tape can buy none at 1.5 % of
-100 000 with NQ's 20 USD point (`POSITION_SIZE`). No value in
-`risk.json` changed; the forty-four benchmark fills that motivated it are
-in [brain/docs/specs/2026-09-21-stop-floor-event-sleep-design.md](../../brain/docs/specs/2026-09-21-stop-floor-event-sleep-design.md).
+volatility grows and a 1H thesis on a CPI-day tape can buy none with NQ's
+20 USD point (`POSITION_SIZE`). The forty-four benchmark fills that
+motivated it are in [brain/docs/specs/2026-09-21-stop-floor-event-sleep-design.md](../../brain/docs/specs/2026-09-21-stop-floor-event-sleep-design.md).
 
-## `risk/configs/risk.json` (schema 3)
+Since 2026-09-22 (schema 4) the budget is *derived* from the floored stops:
+the 75th-percentile stop of the stop-floor pass (117 points, 2 332 USD a
+contract) over the sim account's 100 000 USD, to the half percent — BASE
+2.5 %, A_PLUS 3 % — with the day's stop two BASE losses (5 %), the halt two
+daily stops (10 %) and two open positions (2 × BASE ≤ the day). `from_json`
+refuses a config that breaks either relation (`risk policy: …`), and the
+gate holds the open positions' risk plus the new trade's to the session's
+remaining budget (`ACCOUNT_RISK`). The derivation is in
+[brain/docs/specs/2026-09-22-scale-exit-bias-design.md](../../brain/docs/specs/2026-09-22-scale-exit-bias-design.md) §1.1.
+
+## `risk/configs/risk.json` (schema 4)
 
 | field | default | meaning |
 | --- | --- | --- |
-| `risk_fraction` | `{"BASE": 0.015, "A_PLUS": 0.02}` | equity fraction at risk per trade, by thesis grade |
-| `max_open_positions` | 3 | the executor's positions, all in one direction |
+| `risk_fraction` | `{"BASE": 0.025, "A_PLUS": 0.03}` | equity fraction at risk per trade, by thesis grade (schema 4, 2026-09-22: the 75th-percentile floored stop over the sim account) |
+| `max_open_positions` | 2 | the executor's positions, all in one direction; `× risk_fraction.BASE ≤ daily_loss_fraction` |
 | `min_reward_risk` | 2.0 | |
 | `preferred_reward_risk` | 3.0 | the ratio at which an `A_PLUS` thesis earns its larger fraction |
-| `daily_loss_fraction` | 0.025 | of the session's opening equity; no new entries below it for the session |
-| `max_drawdown_fraction` | 0.065 | from the equity peak; the run halts and flattens |
+| `daily_loss_fraction` | 0.05 | of the session's opening equity; no new entries below it for the session (two BASE losses) |
+| `max_drawdown_fraction` | 0.10 | from the equity peak; the run halts and flattens; `≥ 2 × daily_loss_fraction` |
 | `max_leverage` | 8.0 | open notional over equity, counting the contracts already open (100 000 USD holds two NQ at 16 400 in total) |
 | `max_quantity` | 5 | contracts |
 | `order_ttl_bars` | 15 | bars of the entry object's *own scale* an unfilled entry may work (schema 3, 2026-09-20; the order machine converts — 75 1m bars for a 5m object, 225 for a 15m one — and reports the 1m figure as `ttl_bars`) |
@@ -77,8 +90,9 @@ in [brain/docs/specs/2026-09-21-stop-floor-event-sleep-design.md](../../brain/do
 | `contract` | NQ / CME / USD, point value 20, tick 0.25 | |
 
 The file's sha256 is written to a run's `run.json` (`risk_config_sha256`);
-schema 1 is refused. With 100 000 USD the BASE budget (1 500 USD) holds a
-75-point stop on one NQ contract; the 0.5 % of schema 1 held 25.
+schemas 1–3 are refused. With 100 000 USD the BASE budget (2 500 USD) holds a
+125-point stop on one NQ contract; the 1.5 % of schema 3 held 75, the 0.5 %
+of schema 1 25.
 
 ## Tests — `risk/tests/`
 
@@ -86,4 +100,5 @@ schema 1 is refused. With 100 000 USD the BASE budget (1 500 USD) holds a
 thesis fields, round trips, verdict invariants) and `test_gate.py` (grade
 sizing and the preferred ratio, the leverage cap, tick rounding, every veto,
 positions and the opposite direction, the daily stop by session date, the
-drawdown halt, the LONG mirror, a config override).
+drawdown halt, the LONG mirror, a config override, the two policy checks and
+the open-risk veto against the session's remaining budget).

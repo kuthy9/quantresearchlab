@@ -23,7 +23,7 @@ from brain.core.opportunity_geometry import POOL_KINDS, coherence_error
 from brain.core.position_ledger import PositionLedger, engaged
 from brain.core.reducer import ReduceContext, ReduceResult, apply, pending_evidence
 from contract.brain.llm import LLM_UPDATE_EXAMPLE, LLMInput, parse_update
-from contract.brain.state import BrainState, EvidenceItem, Opportunity, isoformat_utc
+from contract.brain.state import Bias, BrainState, EvidenceItem, Opportunity, isoformat_utc
 from shares.core.timing import NO_TIMINGS, Timings, timed
 
 MAIN_BRAIN_SCHEMA_VERSION = 1
@@ -249,6 +249,7 @@ class MainBrain:
         deferred: Sequence[EvidenceItem] = (),
         idle_updates: int = 0,
         idle_archive_after: int | None = None,
+        carried_bias: Bias | None = None,
     ) -> BrainStep:
         with timed(self._timings, "input"):
             llm_input = self.build_input(
@@ -293,6 +294,7 @@ class MainBrain:
             idle_archive_after=idle_archive_after,
             timeframe_of=timeframe_of,
             max_pending=self._config.max_pending_evidence,
+            carried_bias=carried_bias,
         )
         with timed(self._timings, "reduce"):
             result = apply(

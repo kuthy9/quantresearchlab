@@ -45,14 +45,14 @@ writes a journal that replays without hindsight.
 | `event_calendar.py` | (2026-09-21) `parse_ics` (RFC 5545 unfolding, `TZID` / Zulu / floating times, all-day events skipped), `EventRule`, `ScheduledEvent`, `EventFilter` (`active(known_at)`, `ended_between(previous, known_at)`, `from_config`); the data is `configs/economic_calendar.ics`, built by `scripts/build_event_calendar.py` from `configs/calendar_sources/` (the BLS feed's CPI and Employment Situation events, the 2022 BLS schedule, the Fed's FOMC calendar page) |
 | `main_brain.py` | `MainBrain.step`: build the `LLMInput`, prove it causal, call under the retry policy, parse, reduce; `MainBrainConfig` from `configs/main_brain.json` + `configs/prompts/main_brain_system.md` |
 | `llm_client.py` | `DeepSeekClient` (urllib, JSON mode; key from `DEEPSEEK_API_KEY`, else the gitignored `brain/configs/deepseek.key` — `resolve_api_key`), `ScriptedClient`, `EchoClient`, `RecordedClient`, `call_with_policy` |
-| `reducer.py` | the pure function `apply(prev, evidence, update, ctx)`; `empty_state`; `pending_evidence`; `sleep_blockers`; since 2026-09-17 rule 4 also refuses an invalidation object more than one scale below the thesis's `governing_timeframe` and a `thesis_id` that flips direction; since 2026-09-18 rule 4b drops an opportunity against the reply's `bias` (`opportunity_against_bias`), any opportunity under a NEUTRAL bias, and a thesis on a scale above the bias scale (`opportunity_scale_above_bias`); since 2026-09-20 rule 4 also refuses an entry the market is already past (`coherence_error` → `entry_side_error`: a LONG entry above the close, a SHORT below it), and every rejection of an update travels in the state's `last_update.rejections` — what the next call reads as `prior_state.last_update.rejections` |
+| `reducer.py` | the pure function `apply(prev, evidence, update, ctx)`; `empty_state`; `pending_evidence`; `sleep_blockers`; since 2026-09-17 rule 4 also refuses an invalidation object more than one scale below the thesis's `governing_timeframe` and a `thesis_id` that flips direction; since 2026-09-18 rule 4b drops an opportunity against the reply's `bias` (`opportunity_against_bias`), any opportunity under a NEUTRAL bias, and a thesis on a scale above the bias scale (`opportunity_scale_above_bias`); since 2026-09-20 rule 4 also refuses an entry the market is already past (`coherence_error` → `entry_side_error`: a LONG entry above the close, a SHORT below it), and every rejection of an update travels in the state's `last_update.rejections` — what the next call reads as `prior_state.last_update.rejections`; since 2026-09-22 the thesis scale is the reducer's (`THESIS_SCALE_OF_BIAS`: one below the bias scale, never below the 15m — the reply's `governing_timeframe` is gone and `opportunity_scale_above_bias` with it), rule 4c refuses a target below it (`opportunity_target_scale`), and rule 4d (`effective_bias`) carries the bias with its `since` (keyed on the direction, so a scale change does not restart the count), keeps the decay memory (`decayed` / `decayed_at`) through NEUTRAL and other pairs until its scale prints an MSS / BOS, refuses the decayed pair re-asserted without one (`bias_reassert_refused`) and decays a bias to NEUTRAL when the scales below it print `BIAS_DECAY_EVENTS` structural events against it (`bias_decayed:<PAIR>:<n>`; a same-direction event resets — first on its bar —, an MSS / BOS on the bias scale ends it at once); a wake carries the archived bias in (`ReduceContext.carried_bias`, kept even when the wake call is an incident); a RESOLVE files the resolved item under its resolution rather than erasing it, so the decay still reads it |
 | `opportunity_geometry.py` | `resolve_geometry` / `coherence_error`: object aliases → `OpportunityGeometry`; a `CLOSE_BEYOND` invalidation puts the hard stop `CLOSE_BEYOND_BUFFER_ATR` × 1m ATR × √(scale minutes) beyond the object; since 2026-09-20 a zone that *contains* price is entered at its midpoint, or at its far edge when price is already past the midpoint (`entry.zone.inside_midpoint` / `entry.zone.inside_far_edge` — the near edge of a containing zone is a buy at the market), a range is refused as an entry object, and `entry_side_error` judges which side of the close a limit rests on — at proposal (`coherence_error`) and at submission (the order machine), never on the bars between, where a working limit the tape crosses must fill; since 2026-09-21 the hard stop is never nearer the entry than `STOP_FLOOR_GOVERNING_BARS` (1.0) bars of the thesis's `governing_timeframe` — 1m ATR × √minutes — and a stop the floor moved carries the rule id `stop.floor.governing_bar` (an opportunity with a governing scale needs `atr_1m`) |
 | `position_ledger.py` | `PositionLedger` protocol (`has_open_position`, `has_working_order`, `execution_view`), `engaged`, `IDLE_VIEW`; `InMemoryPositionLedger`; the real one is `execution.core.order_fsm.ExecutionLedger` |
 | `journal.py` | `BrainJournal` (writer), `JournalReader`, `record_hash` |
 | `runtime.py` | `BrainRuntime.step(observation)`: the SLEEP ↔ ACTIVE machine; on `EVENT_SLEEP` the episode is archived without a call (journal `sleep` with reason `event:<kind>:<release>`, `StepResult.event` for the executor); `StepResult.llm_latency_ms`; optional `Timings` (`controller`, `journal`; the Brain records `input`, `llm`, `reduce`) |
 | `brain_entry_sequence.py` | the Brain-side reading of the Eye's interaction facts (also consumed by `shares/core/scene_graph.py`) |
 
-Contracts: `contract/brain/state.py` (`BrainState`, schema 2 since 2026-09-18 with `bias` — `Bias(direction LONG | SHORT | NEUTRAL, scale, basis)`; a schema-1 journal reads as NEUTRAL on 15m; `LastUpdate.rejections` since 2026-09-20, empty for older journals), `contract/brain/llm.py`
+Contracts: `contract/brain/state.py` (`BrainState`, schema 3 since 2026-09-22 — `Bias(direction LONG | SHORT | NEUTRAL, scale, basis, since, decayed, decayed_at)`, the last three reducer-owned and shown to the LLM in `prior_state.bias`; schema 2 (2026-09-18) added `bias`; a schema-1 journal reads as NEUTRAL on 15m, a schema-2 one with `since` / `decayed` unset; `THESIS_SCALE_OF_BIAS`, `BIAS_DECAY_SCALES`, `BIAS_DECAY_EVENTS`, the structural / reversal evidence kinds; `LastUpdate.rejections` since 2026-09-20, empty for older journals), `contract/brain/llm.py` (the reply; since 2026-09-22 its `opportunity` carries no `governing_timeframe` — the thesis scale is the reducer's)
 (`LLMInput`, `LLMUpdate`, `parse_update`), `contract/decision/opportunity.py`
 (`OpportunityGeometry`).
 
@@ -129,8 +129,12 @@ scale, `prior_state.last_update.rejections` says what code refused and
 why; it replaced the 2026-09-18 rule "after a BOS on the bias scale, the
 object that `contains_price` — the order fills now"), the hard
 rules (objects only, no prices, a counter candle is not delivery, the
-invalidation judged on the governing scale and the direction on the bias
-scale, sleep only when nothing is pending)
+invalidation judged on the thesis scale and the direction on the bias
+scale, sleep only when nothing is pending; since 2026-09-22 the Bias
+section carries the decay rule — code ends a bias the scales below it
+deliver against, re-sets it on structure only, and says NEUTRAL in a
+balance — the thesis scale is code's and the target lies on it, and a
+position leaves on a structural reversal, never on a bias flip)
 and the output contract rendered from `LLM_UPDATE_EXAMPLE`. Its sha256 is in
 every run's identity.
 
@@ -326,7 +330,7 @@ against the bias, and `direction_accuracy_60m`: the share of state
 revisions whose stated direction matched the sign of the close an hour
 later; since 2026-09-19 `orders.missed_trends` — expired entries the tape
 ran at least one R away from without touching the limit — and the
-`bias_reversed` exit kind; since 2026-09-20 `orders.entry_quality` — each
+`bias_reversed` exit kind (since 2026-09-22 `structure_reversed` in its place, and the bias block's `decays` / `reasserts_refused`); since 2026-09-20 `orders.entry_quality` — each
 fill's location in the range of the 60 and 240 bars before it (0 the
 window's best price for the trade, 1 its worst; `chased` counts fills at
 or past 0.8 of the 240-bar window), its wait, its excursions over the next
@@ -350,6 +354,31 @@ with `DEEPSEEK_API_KEY_FILE`); `*.key` is gitignored, and the key is never
 written to a command line the repository owns or to a journal.
 
 ## Receipts — `brain/docs/evidence/`
+
+[2026-09-22_scale_exit_bias_frozen_window_2022-01-03.md](evidence/2026-09-22_scale_exit_bias_frozen_window_2022-01-03.md):
+the frozen window under the thesis scale, the structural exit and the
+bias decay (`2cd6fd64acccccfa`, −125.75 closed and +49.25 with the open
+LONG marked, for −77.25 / −30.75): the 4H short of 19:00 decayed at 22:30
+instead of being read through the night and the day, five decays and no
+refusal, the bias NEUTRAL in 128 revisions (24), 85 ACTIONABLE proposals
+(207) and 16 distinct opportunities (47); no bias-flip exit (seven
+before), one structural flatten at 07:01, the 11:12 LONG held through two
+decays to +87.5 a contract at the close; no size veto, eight leverage
+vetoes (the 8× cap holds two NQ); replay OK.
+
+[2026-09-22_scale_exit_bias_benchmark_2022.md](evidence/2026-09-22_scale_exit_bias_benchmark_2022.md):
+the thesis scale, the structural exit and the bias decay over the ten 2022
+windows (label `scale-exit-bias-2`), paired with the stop floor's pass —
+no 5m thesis (was 10 of 41 plans) and no 5m target (was 4), the fills'
+stops 3.9–4.6 ATRs, `bias_reversed` gone and one `structure_reversed`,
+five decays and two re-asserts refused on the reversal and chop days
+(01-24 NEUTRAL 57 minutes after the low, 10-13 within the hour), the
+memory carried across sleeps and episodes; −299.25 on seven fills (−137.0
+per contract, +103.5 open at the window ends, one right) against −286.5:
+the three stops were the two- and three-contract fills at 35–50-point
+stops, the reversal days' correct theses were 130–290-point stops one
+contract cannot fund at 2.5 % of 100 000 USD, and the trend days still
+fill nothing (entries paused).
 
 [2026-09-21_stop_floor_event_sleep_benchmark_2022.md](evidence/2026-09-21_stop_floor_event_sleep_benchmark_2022.md):
 the stop floor and the event sleep over the ten 2022 windows, paired with
@@ -491,21 +520,21 @@ measure the mechanical Brain this design replaced.
 
 | file | covers |
 | --- | --- |
-| `test_brain_state.py` | round trip, invariants, unknown keys |
-| `test_llm_contract.py` | the reply gate: 16 malformed shapes, canonical input hashing |
+| `test_brain_state.py` | round trip, invariants, unknown keys; `Bias.since` / `decayed` round trip, a schema-2 state reads them unset, the thesis-scale and decay constants (2026-09-22) |
+| `test_llm_contract.py` | the reply gate: 16 malformed shapes, a reply naming `governing_timeframe` refused (2026-09-22), canonical input hashing |
 | `test_opportunity_geometry.py` | entry / stop / target per object kind, LONG / SHORT mirror, incoherence; a containing zone's midpoint / far edge, a range refused as entry, the side rule at proposal only; the stop floor (one governing bar, both sides, composed with the close-beyond buffer, needs the ATR, none without a governing scale) |
 | `test_object_registry.py`, `test_eye_view.py` | aliases, causality, price relations, reproducibility on the synthetic Eye; interaction rows (source alias, `last_step_at`, open since the last call); the forming-leg, displacement-age and reset keys, `drift_atr` |
 | `test_audit_scales.py` | the change points of the per-scale facts and `scale_facts` on the synthetic Eye; `replay_triggers` keeps wakes, reactions and undebounced relation flips |
 | `test_sleep_controller.py` | the wake rule kind by kind, UPDATE / TICK, the tape rule; schema 5's event filter (the calendar in the hash, CPI / NFP / FOMC windows), `EVENT_SLEEP` inside a window, the calendar wake at its end |
 | `test_event_calendar.py` | `parse_ics` (TZID under EST and EDT, Zulu, folded lines, floating times, all-day skipped), rules → windows, `active` / `ended_between` boundaries, `from_config` and its hash |
 | `test_build_event_calendar.py` | the FOMC page parser (`Month d-d`, `Mon/Mon d-d`, projection meetings, unscheduled rows skipped; eight 2022 statements from the real page), the built calendar's 2022 and 2025–2026 events, the committed file equals the script's output |
-| `test_reducer.py` | every verdict route, RESOLVE, missing verdict, pending items (re-offered, verdicted late, resolved by a carrier, kept through another incident), NEUTRAL never blocks sleep, understanding replacement, opportunity downgrade, position, each sleep condition, TICK, incidents, determinism |
+| `test_reducer.py` | every verdict route, RESOLVE, missing verdict, pending items (re-offered, verdicted late, resolved by a carrier, kept through another incident), NEUTRAL never blocks sleep, understanding replacement, opportunity downgrade, position, each sleep condition, TICK, incidents, determinism; the thesis scale from the bias, the target scale, the bias decay (continuity of `since`, two events against, the same-direction reset, the 5m counting under a 15m bias only, an MSS on the bias scale, the re-assertion refused until structure, the opportunity dropped under a decayed bias) |
 | `test_llm_client.py` | retry policy (timeout / 429 / 5xx / dropped connection / 400 / malformed / repair), DeepSeek request shape and error mapping against a local HTTP server, empty content, key resolution (environment, key file, neither) |
 | `test_journal.py` | hash chain, tampering, monotone `known_at`, revision gaps, the ledger |
-| `test_main_brain.py` | prompt loading (the bias and the Expression sections' words), input shape, wake / update / incident steps, bounded prior evidence, pending items re-offered and filed by their late verdict, the prior view's `last_update.rejections` |
+| `test_main_brain.py` | prompt loading (the bias, decay, thesis-scale, structural-exit and Expression sections' words), input shape, wake / update / incident steps, bounded prior evidence, pending items re-offered and filed by their late verdict, the prior view's `last_update.rejections` |
 | `test_runtime.py` | SLEEP → WAKE → UPDATE → TICK → sleep on the synthetic Eye, a NEUTRAL-only sleeper sleeps, evidence parked by an incident is verdicted later and sleep follows, incident keeps ACTIVE, open position, `known_at` monotone, episode numbering; an event window archives the episode without a call and the window's end wakes a fresh one |
 | `test_replay.py` | a journal replays to identical states; tampering and a dropped revision are detected |
-| `test_summarize_run.py` | the summary of a stack run on the synthetic tape, the cost arithmetic, the veto metrics on a hand-built journal, sharp-move coverage, rendering, `missed_trends`, `entry_quality` (with the sized distance and the contracts since 2026-09-21) |
+| `test_summarize_run.py` | the summary of a stack run on the synthetic tape, the cost arithmetic, the veto metrics on a hand-built journal, sharp-move coverage, rendering, `missed_trends`, `entry_quality` (with the sized distance and the contracts since 2026-09-21), the bias block's `decays` / `reasserts_refused` and the `structure_reversed` count (2026-09-22) |
 | `test_run_benchmark.py` | the windows file, one command per window with the warmup, a dry run launches nothing |
 | `test_run_guards.py` | `tape_is_current` for `--broker ibkr`, the effort label, `drive` timings |
 | `test_regression_baseline.py` | `research_orchestration`: the frozen week backtest replays and summarizes identically ([evidence/regression_baselines.json](evidence/regression_baselines.json)) |

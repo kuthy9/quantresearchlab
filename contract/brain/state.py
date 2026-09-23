@@ -21,7 +21,7 @@ import pandas as pd
 
 from contract.market.primitives import FrozenDict, aware_timestamp
 
-BRAIN_STATE_SCHEMA_VERSION = 2  # 2 (2026-09-18): ``bias``
+BRAIN_STATE_SCHEMA_VERSION = 3  # 2 (2026-09-18): ``bias``; 3 (2026-09-22): ``bias.since`` / ``bias.decayed``
 
 
 class BrainStatus(str, Enum):
@@ -55,6 +55,23 @@ GOVERNING_TIMEFRAMES: tuple[str, ...] = ("4H", "1H", "15m", "5m")
 # The scales that may set the bias: the 5m is an execution scale, never the
 # direction (run B of 2026-09-18 set the bias on the 5m 18 times).
 BIAS_SCALES: tuple[str, ...] = ("4H", "1H", "15m")
+# The thesis scale (2026-09-22): set by the reducer from the bias, never by
+# the reply — one scale below the bias scale, never below the 15m.  The
+# invalidation lies on it or one below, the target on it or above, the stop
+# floor is one of its bars.
+THESIS_SCALE_OF_BIAS: Mapping[str, str] = {"4H": "1H", "1H": "15m", "15m": "15m"}
+# The bias decay (2026-09-22): the scales whose structural events count
+# against a bias on each bias scale — the bias scale, the bias scales below
+# it, and the 5m only under a 15m bias (the expression scale of the lowest
+# bias scale) — and how many events against it, without one in its
+# direction between them, end it.
+BIAS_DECAY_SCALES: Mapping[str, tuple[str, ...]] = {"4H": ("4H", "1H", "15m"), "1H": ("1H", "15m"), "15m": ("15m", "5m")}
+BIAS_DECAY_EVENTS = 2
+# The Eye's structural event kinds the decay reads, and the two that are
+# structure (an MSS / BOS against the bias on its own scale ends it at once;
+# only they re-set a decayed bias; the machine flattens on them).
+STRUCTURAL_EVIDENCE_KINDS: frozenset[str] = frozenset({"mss_core_confirmed", "qualified_bos", "displacement_observed"})
+REVERSAL_EVIDENCE_KINDS: frozenset[str] = frozenset({"mss_core_confirmed", "qualified_bos"})
 THESIS_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,32}$")
 
 
@@ -196,9 +213,10 @@ class Opportunity:
     """The trade the Brain proposes: three objects, and since 2026-09-17 the
     thesis it expresses (``thesis_id``, stable while the reading holds), the
     scale the thesis rests on, the Brain's grade and how the invalidation
-    object falsifies it.  ``thesis_id`` and ``governing_timeframe`` are
-    ``None`` only when the state is NONE; the grade and the mode default for
-    states journaled before they existed."""
+    object falsifies it.  ``thesis_id`` is ``None`` only when the state is
+    NONE; ``governing_timeframe`` is set by the reducer from the bias since
+    2026-09-22 (``THESIS_SCALE_OF_BIAS``) and is ``None`` in a reply; the
+    grade and the mode default for states journaled before they existed."""
 
     state: OpportunityState = OpportunityState.NONE
     direction: TradeDirection | None = None
@@ -283,19 +301,46 @@ class Bias:
     direction: BiasDirection = BiasDirection.NEUTRAL
     scale: str = "15m"
     basis: str = ""
+    # Reducer-owned (2026-09-22): when this direction was set (``since``), and
+    # the ``DIRECTION@scale`` pair code last decayed with the time it did
+    # (``decayed`` / ``decayed_at``) — kept through every later reply, NEUTRAL
+    # or another pair, until that scale prints an MSS / BOS in that direction.
+    since: pd.Timestamp | None = None
+    decayed: str | None = None
+    decayed_at: pd.Timestamp | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "direction", _enum(BiasDirection, self.direction, name="bias.direction"))
         if self.scale not in BIAS_SCALES:
             raise ValueError(f"bias.scale must be one of {list(BIAS_SCALES)}")
         _text(self.basis, name="bias.basis")
+        if self.since is not None:
+            object.__setattr__(self, "since", aware_timestamp(self.since, name="bias.since"))
+        if self.decayed is not None:
+            _text(self.decayed, name="bias.decayed")
+        if self.decayed_at is not None:
+            object.__setattr__(self, "decayed_at", aware_timestamp(self.decayed_at, name="bias.decayed_at"))
+
+    @property
+    def pair(self) -> str:
+        return f"{self.direction.value}@{self.scale}"
 
     def to_dict(self) -> dict[str, Any]:
-        return {"direction": self.direction.value, "scale": self.scale, "basis": self.basis}
+        return {
+            "direction": self.direction.value, "scale": self.scale, "basis": self.basis,
+            "since": None if self.since is None else isoformat_utc(self.since), "decayed": self.decayed,
+            "decayed_at": None if self.decayed_at is None else isoformat_utc(self.decayed_at),
+        }
 
     @classmethod
     def from_dict(cls, payload: Mapping[str, Any]) -> "Bias":
-        return cls(payload["direction"], payload["scale"], payload.get("basis", ""))
+        since = payload.get("since")
+        decayed_at = payload.get("decayed_at")
+        return cls(
+            payload["direction"], payload["scale"], payload.get("basis", ""),
+            since=None if since is None else parse_utc(since), decayed=payload.get("decayed"),
+            decayed_at=None if decayed_at is None else parse_utc(decayed_at),
+        )
 
 
 @dataclass(frozen=True)
@@ -482,7 +527,7 @@ class BrainState:
             missing -= {"bias"}  # schema 1 (before 2026-09-18) had no bias
         if missing:
             raise ValueError(f"BrainState payload is missing {sorted(missing)}")
-        if payload["schema_version"] not in (1, BRAIN_STATE_SCHEMA_VERSION):
+        if payload["schema_version"] not in (1, 2, BRAIN_STATE_SCHEMA_VERSION):
             raise ValueError(f"unsupported BrainState schema_version {payload['schema_version']!r}")
         return cls(
             episode_id=payload["episode_id"],

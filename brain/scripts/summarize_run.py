@@ -545,7 +545,7 @@ def summarize(
             "daily_stop_vetoes": vetoes_by_code.get("daily_stop", 0), "halted": run.get("halted"),
         },
         "orders": {
-            **{kind: order_counts.get(kind, 0) for kind in ("submitted", "working", "partial", "filled", "cancel_requested", "cancelled", "expired", "rejected", "position_opened", "position_closed", "exit_leg_lost", "invalidation_close", "bias_reversed", "event_sleep", "flattened", "halted")},
+            **{kind: order_counts.get(kind, 0) for kind in ("submitted", "working", "partial", "filled", "cancel_requested", "cancelled", "expired", "rejected", "position_opened", "position_closed", "exit_leg_lost", "invalidation_close", "structure_reversed", "bias_reversed", "event_sleep", "flattened", "halted")},
             "missed_trends": None if bars is None else missed_trends(expiries, bars),
             "entry_quality": None if bars is None else entry_quality(fills, bars, submitted=order_counts.get("submitted", 0)),
             "cancel_reasons": dict(sorted(cancel_reasons.items())), "replacements": cancel_reasons.get("signature_changed", 0),
@@ -556,6 +556,8 @@ def summarize(
         "bias": {
             "changes": bias_changes, "neutral_revisions": neutral_revisions,
             "opportunities_against_bias": rejections.get("opportunity_against_bias", 0) + rejections.get("opportunity_scale_above_bias", 0),
+            # 2026-09-22: the biases code ended on the scales below them, and the re-assertions it refused
+            "decays": rejections.get("bias_decayed", 0), "reasserts_refused": rejections.get("bias_reassert_refused", 0),
             "direction_accuracy_60m": None if bars is None else direction_accuracy(readings, bars),
         },
         "invariants": {"double_entry": double_entry, "positions_over_limit": positions_over_limit, "position_without_fill": position_without_fill, "stale_snapshots": stale},

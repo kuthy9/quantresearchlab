@@ -18,7 +18,6 @@ import pandas as pd
 
 from contract.market.primitives import FrozenDict, aware_timestamp
 from contract.brain.state import (
-    GOVERNING_TIMEFRAMES,
     ActiveExpectation,
     Bias,
     BiasDirection,
@@ -56,10 +55,12 @@ _WATCH_KEYS = frozenset({"object_id", "question"})
 _OPPORTUNITY_KEYS = frozenset(
     {
         "state", "direction", "entry_object_id", "invalidation_object_id", "target_object_id",
-        "thesis_id", "governing_timeframe", "grade", "invalidation_mode",
+        "thesis_id", "grade", "invalidation_mode",
     }
 )
-_THESIS_KEYS = ("thesis_id", "governing_timeframe", "grade", "invalidation_mode")
+# Since 2026-09-22 the reply carries no ``governing_timeframe``: the reducer
+# sets the thesis scale from the bias (``THESIS_SCALE_OF_BIAS``).
+_THESIS_KEYS = ("thesis_id", "grade", "invalidation_mode")
 _BIAS_KEYS = frozenset({"direction", "scale", "basis"})
 
 
@@ -151,7 +152,6 @@ LLM_UPDATE_EXAMPLE: dict[str, Any] = {
         "invalidation_object_id": None,
         "target_object_id": None,
         "thesis_id": None,
-        "governing_timeframe": None,
         "grade": None,
         "invalidation_mode": None,
     },
@@ -296,10 +296,6 @@ def parse_update(
                 raise _fail(f"opportunity.{key} must be null when the state is NONE")
     else:
         thesis["thesis_id"] = _str(raw_opportunity["thesis_id"], name="opportunity.thesis_id")
-        timeframe = _str(raw_opportunity["governing_timeframe"], name="opportunity.governing_timeframe")
-        if timeframe not in GOVERNING_TIMEFRAMES:
-            raise _fail(f"opportunity.governing_timeframe must be one of {list(GOVERNING_TIMEFRAMES)}")
-        thesis["governing_timeframe"] = timeframe
         thesis["grade"] = _enum(ThesisGrade, raw_opportunity["grade"], name="opportunity.grade")
         thesis["invalidation_mode"] = _enum(InvalidationMode, raw_opportunity["invalidation_mode"], name="opportunity.invalidation_mode")
     try:

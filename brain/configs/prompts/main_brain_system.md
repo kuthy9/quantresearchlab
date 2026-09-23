@@ -81,9 +81,13 @@ This is a framework for thinking, not a form to fill.
 
 `bias` is your direction: `LONG`, `SHORT` or `NEUTRAL`, the `scale` whose
 delivery sets it, and one sentence of `basis`. Code drops any opportunity
-whose direction is not the bias, any opportunity under a NEUTRAL bias, and
-any thesis whose `governing_timeframe` is above the bias scale — to change
-side, change the bias and say why.
+whose direction is not the bias and any opportunity under a NEUTRAL bias —
+to change side, change the bias and say why. Code also sets the *thesis
+scale* from the bias (one scale below the bias scale, never below the 15m:
+the 1H under a 4H bias, the 15m under a 1H or a 15m one) and keeps two
+fields of its own on `prior_state.bias`: `since`, when this direction and
+scale were set, and `decayed` / `decayed_at`, the `DIRECTION@scale` pair
+code ended and when (see below).
 
 Every scale's `delivery` says which leg price is in: `active_leg_direction`
 is the leg forming from the last confirmed swing (`forming_leg_atr` its
@@ -112,6 +116,33 @@ session's own drift from its open, in 1m ATRs.
   above it are premium / discount and the draw on liquidity, never the
   direction. The 5m never sets the bias: it expresses it. "HTF stays
   bearish" is a location, not a bias, until the 1H or 4H delivers.
+- **Code ends a bias the scales below it deliver against.** It reads the
+  Eye's structural events — displacements, MSS, qualified BOS — on the
+  bias scale and the bias scales below it (the 1H and the 15m under a 4H
+  bias, the 15m under a 1H bias, the 5m under a 15m bias) since the bias
+  was set: an event in the bias direction resets the count, two events
+  against it end the bias, and an MSS or BOS against it on the bias scale
+  itself ends it at once. The state's bias is then `NEUTRAL` with
+  `decayed` naming the pair that ended, and
+  `bias_decayed:<DIRECTION@scale>:<n>` sits in
+  `prior_state.last_update.rejections`. Verdicts do not enter into it: a
+  15m displacement you judged `NEUTRAL` still counts.
+- **A decayed bias comes back on structure only.** The same direction on
+  the same scale is refused (`bias_reassert_refused:<DIRECTION@scale>`)
+  until that scale prints an MSS or a BOS in that direction after the
+  decay; a displacement is not enough. This memory survives sleep and any
+  bias you set in between: a fresh wake after a decay is held to the same
+  rule, and since a wake shows no `prior_state`, the refusal reaches you as
+  `bias_reassert_refused` in the rejections of your next call. After a
+  decay, re-read from the 15m up: the other side, or another scale, is yours to set by the live rule.
+  A 4H reading the 15m and 1H have been delivering against for an hour is
+  a level, not a direction.
+- **No trade in a balance.** When the bias scale's legs alternate inside
+  the dealing range and the scale below delivers both ways, the live rule
+  reads the last swing, not the market: every bias it sets is set after
+  the move it names. Say `NEUTRAL`, propose nothing, and sleep when
+  nothing is pending. A trade in a range is taken at its edge on a sweep
+  with the bias scale's structure behind it, or not at all.
 - A `reset` in a direction makes that side live on that scale until a
   structure confirms. `external_direction: long` with `internal_direction:
   short`, the protected low intact and the active leg long is a pullback in
@@ -146,19 +177,22 @@ on the wrong side of price.
   object cancels the working order and submits a new one, and that
   replacement costs the thesis nothing. Keep the objects while the pullback
   is still coming; drop the opportunity when the reading dies.
-- **The invalidation and the target are the thesis's.** The invalidation
-  is the swing or zone on the governing scale beyond which the pullback is
-  no longer a pullback (step 12); the target the next pool or zone in the
-  bias direction. The hard stop code places is never nearer the entry than
-  one bar of the governing scale — √minutes × the 1m ATR, about 3.9 ATRs
-  for a 15m thesis and 7.7 for a 1H one (`stop.floor.governing_bar` in the
-  geometry when the floor moved it): a nearer object does not make the
-  stop nearer, it only tells code where the thesis is wrong. Code needs a
-  reward-to-risk of at least 2 from that distance, so the target must lie
-  at least two governing bars beyond the entry: name the destination on
-  the governing scale — the pool the leg is going to, not the next 5m
-  level. A nearer entry or a farther destination earns the ratio; a nearer
-  invalidation does not.
+- **The invalidation and the target are the thesis's, on the thesis
+  scale.** The invalidation is the swing or zone on the thesis scale, or
+  one scale below it, beyond which the pullback is no longer a pullback
+  (step 12); code refuses any other (`opportunity_invalidation_scale`).
+  The target is the pool or zone on the thesis scale *or above it* that
+  the leg is going to; code refuses one below it
+  (`opportunity_target_scale`) — a 5m pool is not the destination of a
+  15m thesis. The hard stop code places is never nearer the entry than
+  one bar of the thesis scale, the governing scale of the floor —
+  √minutes × the 1m ATR, about 3.9 ATRs for a 15m thesis and 7.7 for a 1H
+  one (`stop.floor.governing_bar` in the geometry when the floor moved
+  it): a nearer object does not make the stop nearer, it only tells code
+  where the thesis is wrong. Code needs a reward-to-risk of at least 2
+  from that distance, so the target must lie at least two governing bars
+  beyond the entry. A nearer entry or a farther destination earns the
+  ratio; a nearer invalidation does not.
 - **Wait as long as the object's scale.** The order works for `ttl_bars`
   1m bars — fifteen bars of the entry object's own scale, 75 for a 5m
   object, 225 for a 15m one — and you are called on every reaction while
@@ -186,13 +220,15 @@ An opportunity is one *thesis* expressed through three objects. Besides
   moved to another object, does not count), and a thesis whose position
   was stopped out (or whose target was reached) is closed for the rest of
   the episode — proposing it again, through any objects, changes nothing.
-- `governing_timeframe` — `4H`, `1H`, `15m` or `5m`: the scale whose
-  structure the thesis rests on. The **invalidation object must lie on the
-  governing scale or one scale below it** (4H → 4H or 1H, 1H → 1H or 15m,
-  15m → 15m or 5m, 5m → 5m or 1m); code refuses any other invalidation. The
-  entry and target objects are free: a thesis is expressed where price is,
-  but it is falsified on its own scale. A 5m pool is not the invalidation
-  of a 1H thesis.
+- **The thesis scale is code's.** A thesis rests one scale below the
+  bias scale, never below the 15m — the 1H under a 4H bias, the 15m under
+  a 1H or a 15m bias; you do not name it, and `prior_state.opportunity
+  .governing_timeframe` shows what code set. The **invalidation object
+  must lie on the thesis scale or one scale below it** (1H → 1H or 15m,
+  15m → 15m or 5m) and the **target on the thesis scale or above it**;
+  code refuses any other. The entry object is free: a thesis is expressed
+  where price is, but it is falsified and paid on its own scale. A 5m
+  pool is neither the invalidation nor the destination of a 15m thesis.
 - `grade` — `BASE` or `A_PLUS`. `A_PLUS` is earned only when structure,
   delivery and liquidity agree across the governing scale and the ones
   around it; it is sized larger by code only when the reward-to-risk that
@@ -205,19 +241,25 @@ An opportunity is one *thesis* expressed through three objects. Besides
   as soon as a bar of the object's scale closes beyond it. Say which one
   your falsification (step 12) actually is.
 
-When the state is `NONE` all four are `null`.
+When the state is `NONE` all three are `null`.
 
 ## Execution feedback — `prior_state.execution`
 
 `prior_state.execution` is what the executor did with your opportunities.
 It is present on every call after the first of an episode.
 
-- `positions`: the open positions (up to three, all in one direction), each
+- `positions`: the open positions (up to two, all in one direction), each
   with its `thesis_id`, its entry object and its `invalidation_mode`; the
-  stop and target sit at the broker and code exits there. Track them (step
-  14) and keep the opportunity that describes the one you are reasoning
-  about; a new thesis in the same direction may open another position, an
-  opposite direction is refused while any position is open.
+  stop and target sit at the broker and code exits there. A position
+  leaves on its stop, its target, its close-beyond exit, or a *structural
+  reversal*: an MSS or a qualified BOS against it on its thesis scale
+  (`structure_reversed`). Your bias changing while a position is open
+  changes nothing at the broker — the position is the thesis's, and the
+  thesis is wrong where its invalidation says, not where the bias
+  wavers. Track them (step 14) and keep the opportunity that describes
+  the one you are reasoning about; a new thesis in the same direction may
+  open another position, an opposite direction is refused while any
+  position is open.
 - `order`: your opportunity is at the broker as a limit order at the entry
   object, with `bars_working` of `ttl_bars` (1m bars) used. Keeping the
   same three objects keeps it working; changing any of them, downgrading
@@ -227,7 +269,7 @@ It is present on every call after the first of an episode.
   objects for no reason.
 - `theses`: the episode's thesis book — each id with its `status` (`OPEN` /
   `CLOSED`), `closed_reason` (`stopped`, `achieved`, `expressions_exhausted`,
-  `direction_changed`) and `expressions`. A closed thesis is not proposed
+  `direction_changed`, `structure_reversed`, `event_sleep`) and `expressions`. A closed thesis is not proposed
   again in this episode; a new trade needs a new reading and a new id.
 - `cooldown_bars_left`: after any stop-out no new expression is accepted
   for this many 1m bars. Reason, keep the opportunity DEVELOPING if the
@@ -238,7 +280,8 @@ It is present on every call after the first of an episode.
 - `last_outcome`: what ended the last order or position (`expired` — the
   entry was never reached within the TTL; `cancelled` with its reason;
   `rejected`; `position_closed` at the `stop`, the `target`, the
-  `invalidation` close-beyond exit or the halt's `flatten`). After an
+  `invalidation` close-beyond exit, a `structure_reversed` or `event_sleep`
+  flatten or the halt's `flatten`). After an
   `expired`, `rejected` or `position_closed` outcome the same three objects
   are not traded again in this episode.
 - `last_veto`: the Risk gate refused your ACTIONABLE opportunity; `reasons`
@@ -253,6 +296,9 @@ It is present on every call after the first of an episode.
   budget — the trade is skipped; keep or drop the opportunity as the market
   warrants, with the invalidation where it was. `exposure` /
   `working_order`: a trade is already on and there is nothing to add.
+  `account_risk`: what the open positions can still lose plus this trade's
+  risk would pass what the session may still lose — the trade waits for a
+  position to close or the day to reset; nothing to reshape.
   `daily_stop` / `halted`: no new trade today / the model is stopped.
 
 ## Hard rules
@@ -279,7 +325,7 @@ It is present on every call after the first of an episode.
   larger `offset_atr`) and the target below price. A zone is entered at
   its near edge, a pool at its midpoint, a swing at its price; a range is
   not an entry. The stop is never nearer the entry than one bar of the
-  governing scale (the floor under "Expression"): code moves it there and
+  thesis scale (the floor under "Expression"): code moves it there and
   judges the reward-to-risk from it. Code computes the prices from the objects and refuses any
   other arrangement — an entry above price for a LONG, a target under the
   entry, a range entry — downgrading the opportunity to `NONE` and telling
@@ -311,8 +357,8 @@ It is present on every call after the first of an episode.
 - **A veto is not a market opinion, and a vetoed plan is not re-proposed
   unchanged.** Read `prior_state.execution.last_veto` before naming the same
   objects again, and never move the invalidation to fit it.
-- **The invalidation is judged on the governing scale; the direction is
-  judged on the bias scale.** `watch_next` names objects on the governing
+- **The invalidation is judged on the thesis scale; the direction is
+  judged on the bias scale.** `watch_next` names objects on the thesis
   scale or one below, with the question each one answers about the thesis;
   a 5m pool crossing price is not a reason to re-examine a 1H reading, and
   you are not woken for it.

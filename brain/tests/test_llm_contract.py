@@ -25,10 +25,18 @@ def _reply(**overrides) -> str:
 def _actionable(**over) -> dict:
     payload = {
         "state": "ACTIONABLE", "direction": "LONG", "entry_object_id": "FVG_5m_3", "invalidation_object_id": "SSL_5m_2",
-        "target_object_id": "BSL_1H_1", "thesis_id": "T1", "governing_timeframe": "15m", "grade": "BASE", "invalidation_mode": "TOUCH",
+        "target_object_id": "BSL_1H_1", "thesis_id": "T1", "grade": "BASE", "invalidation_mode": "TOUCH",
     }
     payload.update(over)
     return payload
+
+
+def test_a_reply_naming_a_governing_timeframe_is_refused() -> None:
+    """Since 2026-09-22 the thesis scale is code's, from the bias; a reply that names one is malformed."""
+    with pytest.raises(MalformedReply, match="governing_timeframe"):
+        parse_update(_reply(opportunity={**_actionable(), "governing_timeframe": "15m"}), evidence_ids=EVIDENCE, object_ids=OBJECTS)
+    with pytest.raises(MalformedReply, match="governing_timeframe"):
+        parse_update(_reply(opportunity={**LLM_UPDATE_EXAMPLE["opportunity"], "governing_timeframe": None}), evidence_ids=EVIDENCE, object_ids=OBJECTS)
 
 
 def test_example_reply_parses() -> None:
@@ -60,7 +68,6 @@ def test_resolve_verdict_carries_its_resolution() -> None:
     _reply(opportunity=_actionable(thesis_id=None)),
     _reply(opportunity=_actionable(thesis_id="has space")),
     _reply(opportunity=_actionable(thesis_id="x" * 33)),
-    _reply(opportunity=_actionable(governing_timeframe="1m")),
     _reply(opportunity=_actionable(grade="A+")),
     _reply(opportunity=_actionable(invalidation_mode="CLOSE")),
     _reply(opportunity={**_actionable(), "state": "NONE", "direction": None, "entry_object_id": None, "invalidation_object_id": None, "target_object_id": None}),
@@ -102,7 +109,7 @@ def test_llm_input_hashes_canonically() -> None:
 def test_actionable_opportunity_carries_thesis_scale_grade_and_mode() -> None:
     update = parse_update(_reply(opportunity=_actionable(grade="A_PLUS", invalidation_mode="CLOSE_BEYOND")), evidence_ids=EVIDENCE, object_ids=OBJECTS)
     o = update.opportunity
-    assert o.thesis_id == "T1" and o.governing_timeframe == "15m"
+    assert o.thesis_id == "T1" and o.governing_timeframe is None  # the reducer sets the thesis scale from the bias
     assert o.grade is ThesisGrade.A_PLUS and o.invalidation_mode is InvalidationMode.CLOSE_BEYOND
     assert update.to_dict()["opportunity"]["invalidation_mode"] == "CLOSE_BEYOND"
 
@@ -110,7 +117,7 @@ def test_actionable_opportunity_carries_thesis_scale_grade_and_mode() -> None:
 def test_example_none_opportunity_carries_null_thesis_fields() -> None:
     assert LLM_UPDATE_EXAMPLE["opportunity"] == {
         "state": "NONE", "direction": None, "entry_object_id": None, "invalidation_object_id": None, "target_object_id": None,
-        "thesis_id": None, "governing_timeframe": None, "grade": None, "invalidation_mode": None,
+        "thesis_id": None, "grade": None, "invalidation_mode": None,
     }
 
 
