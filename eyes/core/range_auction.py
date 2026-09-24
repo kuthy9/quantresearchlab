@@ -2123,6 +2123,12 @@ class CausalRangeAuctionTracker:
         ):
             raise ValueError("duplicate or out-of-order Group 4 1m candle")
         self._last_m1_raw_end = candle.end
+        # A synthetic minute still advances the observation's clock, so a
+        # terminal manipulation whose source left must be compacted here too.
+        self._compact_terminal_manipulations_without_sources(
+            pools,
+            current_end=candle.end,
+        )
         if not candle.real_completed:
             range_transitions, range_funnel = self._apply_completed_native(
                 completed_native,
@@ -2132,10 +2138,6 @@ class CausalRangeAuctionTracker:
                 range_transitions=range_transitions,
                 range_funnel=range_funnel,
             )
-        self._compact_terminal_manipulations_without_sources(
-            pools,
-            current_end=candle.end,
-        )
         prior_close = self._prior_m1_close
         prior_atr = (
             sum(self._m1_true_ranges) / len(self._m1_true_ranges)

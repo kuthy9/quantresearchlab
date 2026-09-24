@@ -753,19 +753,19 @@ def test_pool_source_must_exist_before_bar_then_reentry_must_hold() -> None:
             manipulations=(resolved,),
         )
 
-    synthetic_output = tracker.on_completed_update(
-        _m1(19, synthetic=True),
-        prior_inventory=(),
-        liquidity_pools=(),
-    )
-    assert synthetic_output.manipulations == (resolved,)
-
     retained = tracker.on_completed_update(
-        _m1(20),
+        _m1(19),
         prior_inventory=(consumed,),
         liquidity_pools=(pool,),
     )
     assert retained.manipulations == (resolved,)
+
+    synthetic_output = tracker.on_completed_update(
+        _m1(20, synthetic=True),
+        prior_inventory=(),
+        liquidity_pools=(),
+    )
+    assert synthetic_output.manipulations == ()
 
     compacted = tracker.on_completed_update(
         _m1(21),
@@ -773,6 +773,67 @@ def test_pool_source_must_exist_before_bar_then_reentry_must_hold() -> None:
         liquidity_pools=(),
     )
     assert compacted.manipulations == ()
+
+
+def test_a_synthetic_bar_compacts_a_terminal_manipulation_whose_source_left() -> None:
+    """A no-trade minute still owes the observation contract its compaction.
+
+    The pool leaves on the bar the manipulation is re-accepted; when the next
+    minute is synthetic the tracker must not carry the terminal state into an
+    observation whose clock no longer excuses its missing source.
+    """
+
+    tracker = CausalRangeAuctionTracker(_protocol())
+    _warm_m1(tracker)
+    pool, inventory = _pool(
+        "above",
+        confirmed_at=_m1(15).end,
+        identity="synthetic-compaction",
+    )
+    tracker.on_completed_update(
+        _m1(15, close=100.0, high=100.5, low=99.75),
+        prior_inventory=(inventory,),
+        liquidity_pools=(pool,),
+    )
+    sweep = _m1(16, close=100.0, high=101.25, low=99.75)
+    tracker.on_completed_update(
+        sweep,
+        prior_inventory=(inventory,),
+        liquidity_pools=(pool,),
+    )
+    consumed = replace(
+        inventory,
+        lifecycle=LiquidityInventoryLifecycle.CONSUMED,
+        consumed_at=sweep.end,
+        lifecycle_reason="pool_swept",
+    )
+    tracker.on_completed_update(
+        _m1(17, close=100.0, high=101.5, low=99.75),
+        prior_inventory=(consumed,),
+        liquidity_pools=(),
+    )
+    held = _m1(18, close=100.0, high=100.5, low=99.75)
+    resolved = tracker.on_completed_update(
+        held,
+        prior_inventory=(consumed,),
+        liquidity_pools=(),
+    ).manipulations[-1]
+    assert resolved.lifecycle is ManipulationLifecycle.REACCEPTED
+
+    synthetic = _m1(19, synthetic=True)
+    output = tracker.on_completed_update(
+        synthetic,
+        prior_inventory=(),
+        liquidity_pools=(),
+    )
+
+    assert output.manipulations == ()
+    assert tracker.snapshot().manipulations == ()
+    observation = replace(
+        market_observation(asof=synthetic.end),
+        manipulations=output.manipulations,
+    )
+    assert observation.manipulations == ()
 
 
 def test_pool_outside_acceptance_requires_two_consecutive_closes() -> None:
