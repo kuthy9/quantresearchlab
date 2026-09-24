@@ -14,7 +14,12 @@ imports `brain`, `execution`, or the orchestration half of `shares`, and
   the additive Foundation projection (`smc_semantic_foundation_v2.1`), which
   declares v1.3 as its parent. This pairing is not a unified full-stack v2.
 - [evidence/](evidence/) — bounded-study receipts for the v1.3 reading, the
-  balance-range candidate hypotheses and the structural range-width strata.
+  balance-range candidate hypotheses, the structural range-width strata and
+  the 2023 event-edge study
+  ([evidence/2026-09-23_event_edge_2023.md](evidence/2026-09-23_event_edge_2023.md))
+  and the definition audit of every SMC concept against spec, registry, code
+  and the 2023 journal
+  ([evidence/2026-09-23_eye_definition_audit.md](evidence/2026-09-23_eye_definition_audit.md)).
 
 ## Where the Eye's own inputs live
 
@@ -520,5 +525,10 @@ and writes one JSON under `outputs/eye_coverage/` counting what each 2026-09
 repair changed (range coverage per scale, same-fact duplicates, formation
 lag, target outcomes, the two event channels, per-scale state availability,
 seconds per block and state sizes) — its 2022-02 reading is
-`docs/evidence/eye_coverage_2022-02_2026-09-14.md`. Throwaway probes belong
-here too.
+`docs/evidence/eye_coverage_2022-02_2026-09-14.md`.
+`scan_sparse_events.py` records the Eye's sparse structural events and bar
+closes with their snapshot context over a window, checkpointing as it goes
+(`--resume` continues a pass that died); `event_edge_study.py` measures the
+outcomes after those events — the 2023 reading is
+`docs/evidence/2026-09-23_event_edge_2023.md`. Throwaway probes belong here
+too.
